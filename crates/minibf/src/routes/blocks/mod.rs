@@ -137,7 +137,6 @@ where
     builder.into_model()
 }
 
-/// The full `BlockContent` of one block, with the genesis link applied.
 async fn single_block_content<D>(
     domain: &Facade<D>,
     block: &BlockBody,
@@ -154,7 +153,6 @@ where
     Ok(model)
 }
 
-/// The txs of a block mapped to `T`, ordered and paged.
 fn paged_block_txs<T>(block: &BlockBody, pagination: &Pagination) -> Result<Vec<T>, StatusCode>
 where
     T: serde::Serialize,

@@ -42,9 +42,7 @@ impl<'a> BlockModelBuilder<'a> {
         self.block.txs()
     }
 
-    /// Collect the addresses each tx touches by asking `collect` for every tx
-    /// of the block, in block order. The builder drives the walk itself, so
-    /// the sets cannot fall out of sync with the txs they describe.
+    /// Calls `collect` for every tx in block order.
     pub fn collect_touched_addresses_with<F>(mut self, mut collect: F) -> Result<Self, StatusCode>
     where
         F: FnMut(&MultiEraTx<'_>) -> Result<BTreeSet<String>, StatusCode>,
@@ -324,23 +322,14 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
     }
 }
 
-// HACK: This is the mapping to return the tx hashes for a block. For some
-// reason, the openspi type BlockContentAddressesInnerTransactionsInner is being
-// serialized as an object instead of a the expected strings. As a workaround,
-// we return a Vec<String> instead.
+// `/blocks/{hash}/txs` is a plain list of tx hashes.
 impl<'a> IntoModel<Vec<String>> for BlockModelBuilder<'a> {
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<String>, StatusCode> {
         let block = &self.block;
 
-        let txs = block
-            .txs()
-            .iter()
-            .map(|tx| tx.hash().to_string())
-            //.sorted()
-            //.map(|tx| BlockContentAddressesInnerTransactionsInner { tx_hash: tx })
-            .collect();
+        let txs = block.txs().iter().map(|tx| tx.hash().to_string()).collect();
 
         Ok(txs)
     }
@@ -374,9 +363,7 @@ impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-        // BTreeMap keeps entries sorted alphabetically by address, matching
-        // Blockfrost. Tx hashes are appended in block order and deduped per
-        // address because each tx's touched addresses arrive as a set.
+        // sorted by address like Blockfrost; hashes stay in block order
         let mut by_address: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         for (tx_hash, touched_by_tx) in touched_addresses {

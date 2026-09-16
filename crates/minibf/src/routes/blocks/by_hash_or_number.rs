@@ -84,7 +84,7 @@ where
             .get_range(None, Some(curr_slot))
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-        // Skip past pages we don't need using key-only traversal (no block data read).
+        // key-only skip, no block data read
         iter.skip_backward(from);
 
         iter.rev()
@@ -153,7 +153,7 @@ where
             .get_range(None, None)
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-        // Skip past pages we don't need using key-only traversal (no block data read).
+        // key-only skip, no block data read
         iterator.skip_forward(pagination.from());
 
         iterator
@@ -171,10 +171,8 @@ where
                 .get_range(Some(curr.slot()), None)
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-            // Discard first block (the reference block itself).
+            // drop the reference block itself, then key-only skip
             iterator.skip_forward(1);
-
-            // Skip past pages we don't need using key-only traversal (no block data read).
             iterator.skip_forward(pagination.from());
 
             iterator

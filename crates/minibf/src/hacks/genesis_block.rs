@@ -1,6 +1,5 @@
-//! Blockfrost exposes the genesis block of each network as a synthetic
-//! `BlockContent` with no height, slot or epoch. Dolos stores no such block,
-//! so the blocks routes fabricate it here from the genesis config.
+//! Blockfrost serves a synthetic genesis block per network. Dolos stores none,
+//! so it is built here from the genesis config.
 
 use axum::http::StatusCode;
 use blockfrost_openapi::models::block_content::BlockContent;
@@ -57,7 +56,7 @@ pub fn is_genesis_hash<D: Domain>(domain: &Facade<D>, hash: &[u8]) -> Result<boo
     Ok(hash == genesis_hash.as_slice())
 }
 
-/// The synthetic genesis block, or `None` on a network without a known one.
+/// `None` on a network without a known genesis block.
 pub fn genesis_block<D: Domain>(domain: &Facade<D>) -> Result<Option<BlockContent>, StatusCode> {
     let Some(genesis) = genesis_for_domain(domain) else {
         return Ok(None);

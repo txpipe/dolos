@@ -30,13 +30,8 @@ where
     Ok(Json(model))
 }
 
-/// `GET /blocks/epoch/{epoch_number}/slot/{slot_number}`: the block at an
-/// epoch-relative slot.
-///
-/// Blockfrost matches the pair against the epoch and epoch-slot columns it
-/// stores per block. Dolos stores blocks by absolute slot, so the handler
-/// turns the pair into an absolute slot with the chain summary and looks
-/// that up.
+/// Dolos stores blocks by absolute slot, so the epoch-relative pair is
+/// converted with the chain summary first.
 pub async fn by_epoch_slot<D>(
     Path((epoch_number, slot_number)): Path<(String, String)>,
     State(domain): State<Facade<D>>,
@@ -44,8 +39,7 @@ pub async fn by_epoch_slot<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    // Blockfrost bounds both numbers to a positive signed 32-bit range and
-    // rejects anything else as a bad request.
+    // Blockfrost accepts both numbers only in the positive i32 range
     let in_range =
         |raw: &str| -> Option<u64> { raw.parse::<u64>().ok().filter(|x| *x <= i32::MAX as u64) };
 
@@ -54,8 +48,7 @@ where
 
     let chain = domain.get_chain_summary()?;
 
-    // A slot past the end of the epoch names no block; without this guard
-    // the absolute slot would land in a later epoch.
+    // a slot past the epoch end must not roll into the next epoch
     let epoch_length = chain.epoch_start(epoch + 1) - chain.epoch_start(epoch);
     if slot >= epoch_length {
         return Err(StatusCode::NOT_FOUND);
@@ -80,8 +73,7 @@ mod tests {
     use crate::routes::blocks::testing::assert_status;
     use crate::test_support::{TestApp, TestFault};
 
-    /// The block behind `/blocks/{hash}`, which carries its own epoch and
-    /// epoch-slot fields — the pair the endpoint under test resolves.
+    /// `/blocks/{hash}` gives the epoch and epoch-slot the test resolves.
     async fn block_by_hash(app: &TestApp, hash: &str) -> BlockContent {
         let (status, bytes) = app.get_bytes(&format!("/blocks/{hash}")).await;
         assert_eq!(status, StatusCode::OK);
@@ -110,15 +102,15 @@ mod tests {
         let block = block_by_hash(&app, &app.vectors().block_hash).await;
         let epoch = block.epoch.expect("block has no epoch");
 
-        // an empty slot inside the epoch
+        // empty slot inside the epoch
         let path = format!("/blocks/epoch/{epoch}/slot/80000");
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
 
-        // a slot past the end of the epoch must not roll into the next one
+        // slot past the epoch end
         let path = format!("/blocks/epoch/{epoch}/slot/2000000000");
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
 
-        // an epoch with no blocks
+        // epoch with no blocks
         let path = "/blocks/epoch/500/slot/0";
         assert_status(&app, path, StatusCode::NOT_FOUND).await;
     }
@@ -132,7 +124,7 @@ mod tests {
             ("2", "x"),
             ("-1", "0"),
             ("2", "-5"),
-            // past the positive signed 32-bit range Blockfrost accepts
+            // past i32::MAX
             ("2147483648", "0"),
             ("2", "2147483648"),
         ] {

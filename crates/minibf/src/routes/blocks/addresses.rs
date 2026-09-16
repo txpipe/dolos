@@ -39,16 +39,10 @@ where
         deps.prepare(&domain, txs.iter()).await?
     };
 
-    // Collect the addresses each tx touches: its produced outputs plus the
-    // source outputs of its inputs. Inputs whose source tx is missing from
-    // the archive (possible on nodes without full history) are skipped,
-    // omitting their addresses from the response — the same graceful
-    // degradation as /txs/{hash}/utxos.
-    //
-    // Phase-2-failed txs are deliberately NOT skipped, diverging from
-    // Blockfrost: their collateral inputs and collateral-return outputs move
-    // funds, so those addresses are affected in ledger terms - considered a
-    // bug in BF, not behavior worth reproducing
+    // Addresses of each tx's outputs plus the outputs it spends. Inputs
+    // missing from the archive are skipped, like /txs/{hash}/utxos.
+    // Phase-2-failed txs stay in: their collateral moves funds. Blockfrost
+    // drops them, which we treat as a BF bug.
     let builder = builder.collect_touched_addresses_with(|tx| {
         let mut addresses = BTreeSet::new();
 
@@ -67,8 +61,7 @@ where
 
     let addresses: Vec<BlockContentAddressesInner> = builder.into_model()?;
 
-    // Blockfrost sorts this endpoint alphabetically by address and ignores
-    // the `order` param; only count/page apply.
+    // sorted by address; Blockfrost ignores `order` here
     Ok(Json(
         addresses
             .into_iter()
@@ -105,15 +98,13 @@ mod tests {
         let path = format!("/blocks/{}/addresses", block.block_hash);
         let addresses = get_addresses(&app, &path).await;
 
-        // entries are sorted alphabetically by address
+        // sorted by address
         let sorted: Vec<_> = addresses.iter().map(|a| a.address.clone()).collect();
         let mut expected = sorted.clone();
         expected.sort();
         assert_eq!(sorted, expected, "addresses must be sorted alphabetically");
 
-        // the first tx of each fixture block pays the fixture address; its
-        // entry must reference that tx exactly once even though the address
-        // can appear in multiple outputs of it (dedup per address per tx)
+        // the first tx pays the fixture address in several outputs; one entry
         let entry = addresses
             .iter()
             .find(|a| a.address == address)
@@ -126,7 +117,7 @@ mod tests {
             .collect();
         assert_eq!(tx_hashes, vec![block.tx_hashes[0].clone()]);
 
-        // every tx must contribute at least its own output address
+        // every tx contributes at least one address
         assert!(addresses.len() >= block.tx_hashes.len());
     }
 
@@ -146,7 +137,7 @@ mod tests {
         )
         .await;
 
-        // Blockfrost sorts alphabetically regardless of the order param
+        // `order` has no effect
         assert_eq!(asc, desc);
     }
 
@@ -181,9 +172,7 @@ mod tests {
         );
     }
 
-    /// Feeds the builder one set of touched addresses per tx and checks the
-    /// grouping: a fake address touched only by the second tx must come back
-    /// listed under exactly that tx.
+    /// An address touched only by the second tx lands under that tx.
     #[test]
     fn block_addresses_attribute_touched_addresses() {
         use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
@@ -194,12 +183,10 @@ mod tests {
 
         let block = MultiEraBlock::decode(raw).expect("failed to decode block");
         let txs = block.txs();
-        // the second tx, so attribution can't pass by "always the first tx"
         let spender = txs.get(1).expect("fixture needs a second tx");
         let spender_hash = spender.hash().to_string();
 
-        // an address only reachable through input resolution, never produced
-        // by any tx of the block
+        // never produced by the block, only reachable via inputs
         let input_side_address = "addr_input_side_only";
 
         let builder = BlockModelBuilder::new(raw).expect("failed to build block model");
@@ -231,8 +218,7 @@ mod tests {
         assert_eq!(tx_hashes, vec![spender_hash]);
     }
 
-    /// Mapping to the addresses model without collecting touched addresses
-    /// first must be a 500, not a silently empty response.
+    /// Mapping before collecting touched addresses is a 500, not an empty list.
     #[test]
     fn block_addresses_require_touched_addresses() {
         use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
