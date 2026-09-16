@@ -10,6 +10,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
+    drep_metadata::DrepMetadata,
     proposal::{self, Proposal},
     proposal_metadata::ProposalMetadata,
     proposal_metadata_v2::ProposalMetadataV2,
@@ -49,14 +50,19 @@ fn parse_drep_id(drep_id: &str) -> Result<(String, Vec<u8>, bool, bool), StatusC
         "drep_always_abstain" => Ok((drep_id.to_string(), vec![0], false, true)),
         "drep_always_no_confidence" => Ok((drep_id.to_string(), vec![1], false, true)),
         drep_id => {
+            // Blockfrost decodes a DRep id as bech32 and does no other check.
+            // As a result, a hex id is a 400, not a lookup. This rule keeps
+            // the same behavior as Blockfrost.
             let (hrp, payload) = bech32::decode(drep_id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
             match (hrp.as_str(), payload.len()) {
                 ("drep", 29) => {
-                    let header_byte = payload.first().ok_or(StatusCode::BAD_REQUEST)?;
+                    let header_byte = *payload.first().ok_or(StatusCode::BAD_REQUEST)?;
 
-                    // first 4 bits need to be equal to 0010
-                    if header_byte & 0b11110000 != 0b00100000 {
+                    // A CIP-129 DRep header is the key prefix or the script prefix.
+                    if header_byte != pallas_extras::DREP_KEY_PREFIX
+                        && header_byte != pallas_extras::DREP_SCRIPT_PREFIX
+                    {
                         return Err(StatusCode::BAD_REQUEST);
                     }
 
@@ -252,6 +258,69 @@ where
     };
 
     model.into_response()
+}
+
+/// `GET /governance/dreps/{drep_id}/metadata`: the registered anchor of the
+/// DRep, and the off-chain metadata for that anchor.
+///
+/// db-sync returns the latest registration or update that still has an
+/// anchor. Its query uses an inner join to `voting_anchor`. Then it takes
+/// the newest row. Dolos obeys the ledger rules and clears the anchor on a
+/// registration or update that has no anchor. As a result, Blockfrost keeps
+/// the older anchor, but Dolos answers 404.
+///
+/// A DRep with no current anchor is a 404, not an empty body. The two
+/// special DReps have no registration, so they are also a 404.
+///
+/// If the fetch fails, Dolos keeps the anchor and puts the cause in `error`,
+/// like the proposal metadata endpoints. The hex and the DRep id use the
+/// same CIP-129 or legacy form as `drep_by_id`.
+pub async fn drep_metadata<D: Domain>(
+    Path(drep): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<DrepMetadata>, StatusCode>
+where
+    Option<DRepState>: From<D::Entity>,
+{
+    let (drep_id, drep_bytes, is_legacy, is_special_case) = parse_drep_id(&drep)?;
+
+    // The special DReps have no registration, so they have no anchor.
+    if is_special_case {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let state = domain
+        .read_cardano_entity::<DRepState>(drep_bytes.clone())?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+
+    let hex = if is_legacy {
+        hex::encode(&drep_bytes[1..])
+    } else {
+        hex::encode(&drep_bytes)
+    };
+
+    let hash = hex::encode(anchor.content_hash);
+
+    let gateways = domain.config.ipfs_gateways();
+    let (metadata, error) =
+        anchor_offchain_metadata(&anchor.url, anchor.content_hash.as_ref(), &gateways).await;
+
+    let (json_metadata, bytes) = match metadata {
+        Some(AnchorMetadata { json, bytes }) => (Some(json), Some(bytes)),
+        None => (None, None),
+    };
+
+    Ok(Json(DrepMetadata {
+        drep_id,
+        hex,
+        url: anchor.url.clone(),
+        hash,
+        json_metadata,
+        bytes,
+        error: error.map(Box::new),
+    }))
 }
 
 struct ProposalRow {
@@ -1143,6 +1212,133 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// This function gives the synthetic DRep an anchor that Dolos can never
+    /// fetch. `example.invalid` does not resolve (RFC 6761), so the fetch
+    /// always stops with a connection error. The endpoint still returns the
+    /// anchor fields. This function uses the same entity key that the
+    /// endpoint reads. The synthetic chain imported a registration with no
+    /// anchor, and this function replaces it.
+    fn seed_drep_anchor(domain: &ToyDomain, drep_bytes: Vec<u8>) {
+        use pallas::ledger::primitives::conway::{Anchor, DRep};
+
+        // This code builds the identifier from the same bytes as the entity
+        // key. If the keyhash of the synthetic vector changes, the identifier
+        // and the key still agree.
+        let keyhash: [u8; 28] = drep_bytes[1..]
+            .try_into()
+            .expect("drep bytes carry a 28-byte hash");
+
+        let mut state = DRepState::new(DRep::Key(Hash::from(keyhash)));
+        state.anchor = Some(Anchor {
+            url: "https://example.invalid/drep".to_string(),
+            content_hash: Hash::from([9u8; 32]),
+        });
+
+        let writer = domain
+            .state()
+            .start_writer()
+            .expect("failed to start writer");
+        writer
+            .write_entity_typed(&dolos_core::EntityKey::from(drep_bytes), &state)
+            .expect("failed to write drep state");
+        writer.commit().expect("failed to commit drep state");
+    }
+
+    #[tokio::test]
+    async fn governance_drep_metadata_returns_anchor_error() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let (_, drep_bytes, _, _) =
+                parse_drep_id(&vectors.drep_id).expect("failed to parse drep id");
+            seed_drep_anchor(domain, drep_bytes);
+        });
+
+        let drep = &app.vectors().drep_id;
+        let path = format!("/governance/dreps/{drep}/metadata");
+        let (status, body) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: DrepMetadata =
+            serde_json::from_slice(&body).expect("failed to parse drep metadata");
+
+        assert_eq!(&model.drep_id, drep);
+        // the drep id in the vectors is the 29-byte CIP-129 form, so the hex keeps the
+        // header
+        assert_eq!(model.hex, hex::encode([vec![0x22], vec![7u8; 28]].concat()));
+        assert_eq!(model.url, "https://example.invalid/drep");
+        assert_eq!(model.hash, hex::encode([9u8; 32]));
+        assert!(model.json_metadata.is_none());
+        assert!(model.bytes.is_none());
+        assert_eq!(
+            model.error.expect("the fetch error is absent").code,
+            blockfrost_openapi::models::dreps_inner_metadata_error::Code::ConnectionError
+        );
+    }
+
+    #[test]
+    fn parse_drep_id_rejects_hex_id() {
+        // Blockfrost decodes a DRep id as bech32 and does no other check.
+        // As a result, both the CIP-129 and the legacy hex forms are a 400,
+        // never a lookup.
+        let cip129 = [vec![pallas_extras::DREP_KEY_PREFIX], vec![7u8; 28]].concat();
+        assert_eq!(
+            parse_drep_id(&hex::encode(&cip129)),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            parse_drep_id(&hex::encode([7u8; 28])),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn parse_drep_id_rejects_invalid_cip129_header() {
+        // 0x20 has the DRep high nibble. 0x20 is not a DRep key or script header.
+        let mut payload = vec![0x20u8];
+        payload.extend_from_slice(&[7u8; 28]);
+
+        let bech32_id = bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
+            .expect("failed to encode drep id");
+
+        assert_eq!(parse_drep_id(&bech32_id), Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[tokio::test]
+    async fn governance_drep_metadata_without_anchor_returns_404() {
+        // the default synthetic drep registers with no anchor
+        let app = TestApp::new();
+        let drep = &app.vectors().drep_id;
+        let path = format!("/governance/dreps/{drep}/metadata");
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_metadata_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/governance/dreps/{}/metadata", invalid_drep());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_metadata_not_found() {
+        let app = TestApp::new();
+        let missing = missing_drep();
+        let path = format!("/governance/dreps/{missing}/metadata");
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_metadata_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let drep = &app.vectors().drep_id;
+        let path = format!("/governance/dreps/{drep}/metadata");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
