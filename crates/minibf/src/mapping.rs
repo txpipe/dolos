@@ -3433,6 +3433,23 @@ impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
     }
 }
 
+/// Turns a Plutus integer into a JSON number without wrapping it.
+///
+/// Anything within the `i64`/`u64` range is exact. Wider magnitudes only fit
+/// a JSON number as a float here, so they fall back to the closest `f64`.
+fn plutus_int_to_json(value: &BigInt) -> Result<serde_json::Number, StatusCode> {
+    if let Some(i) = value.to_i64() {
+        return Ok(i.into());
+    }
+
+    if let Some(u) = value.to_u64() {
+        return Ok(u.into());
+    }
+
+    let approx = value.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    serde_json::Number::from_f64(approx).ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 pub struct PlutusDataWrapper(pub PlutusData);
 impl PlutusDataWrapper {
     fn as_value(&self) -> Result<serde_json::Value, StatusCode> {
@@ -3484,37 +3501,27 @@ impl PlutusDataWrapper {
                 )])))
             }
 
-            PlutusData::BigInt(x) => match x {
-                pallas::ledger::primitives::BigInt::Int(int) => {
-                    let i = Into::<i128>::into(*int);
-                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                        "int".to_string(),
-                        serde_json::Value::Number((i as i64).into()),
-                    )])))
-                }
-                pallas::ledger::primitives::BigInt::BigUInt(bounded_bytes) => {
-                    let bigint = num_bigint::BigUint::from_bytes_be(bounded_bytes.as_slice());
-                    let number = serde_json::Number::from_f64(
-                        bigint.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
-                    )
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                        "int".to_string(),
-                        serde_json::Value::Number(number),
-                    )])))
-                }
-                pallas::ledger::primitives::BigInt::BigNInt(bounded_bytes) => {
-                    let bigint = num_bigint::BigInt::from_signed_bytes_be(bounded_bytes.as_slice());
-                    let number = serde_json::Number::from_f64(
-                        bigint.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
-                    )
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                        "int".to_string(),
-                        serde_json::Value::Number(number),
-                    )])))
-                }
-            },
+            PlutusData::BigInt(x) => {
+                let bigint = match x {
+                    pallas::ledger::primitives::BigInt::Int(int) => {
+                        BigInt::from(Into::<i128>::into(*int))
+                    }
+                    pallas::ledger::primitives::BigInt::BigUInt(bounded_bytes) => {
+                        BigInt::from(num_bigint::BigUint::from_bytes_be(bounded_bytes.as_slice()))
+                    }
+                    pallas::ledger::primitives::BigInt::BigNInt(bounded_bytes) => {
+                        // CBOR encodes a negative bignum as -1 - n, with n the
+                        // unsigned magnitude
+                        let n = num_bigint::BigUint::from_bytes_be(bounded_bytes.as_slice());
+                        BigInt::from(-1) - BigInt::from(n)
+                    }
+                };
+
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                    "int".to_string(),
+                    serde_json::Value::Number(plutus_int_to_json(&bigint)?),
+                )])))
+            }
 
             PlutusData::BoundedBytes(x) => {
                 Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
@@ -3531,5 +3538,99 @@ impl IntoModel<HashMap<String, serde_json::Value>> for PlutusDataWrapper {
     fn into_model(self) -> Result<HashMap<String, serde_json::Value>, StatusCode> {
         let value = self.as_value()?;
         serde_json::from_value(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+#[cfg(test)]
+mod plutus_int_tests {
+    use super::*;
+    use pallas::codec::utils::MaybeIndefArray;
+
+    fn datum_json(datum: PlutusData) -> serde_json::Value {
+        PlutusDataWrapper(datum).as_value().unwrap()
+    }
+
+    fn int(value: i128) -> PlutusData {
+        PlutusData::BigInt(pallas::ledger::primitives::BigInt::Int(
+            pallas::codec::utils::Int::try_from(value).unwrap(),
+        ))
+    }
+
+    fn big_uint(bytes: &[u8]) -> PlutusData {
+        PlutusData::BigInt(pallas::ledger::primitives::BigInt::BigUInt(
+            bytes.to_vec().into(),
+        ))
+    }
+
+    fn big_nint(bytes: &[u8]) -> PlutusData {
+        PlutusData::BigInt(pallas::ledger::primitives::BigInt::BigNInt(
+            bytes.to_vec().into(),
+        ))
+    }
+
+    /// Integers past `i64::MAX` used to wrap negative; they must come out as
+    /// exact unsigned JSON numbers instead.
+    #[test]
+    fn int_above_i64_max_is_exact() {
+        let value = i64::MAX as i128 + 1;
+        assert_eq!(
+            datum_json(int(value)),
+            serde_json::json!({ "int": 9223372036854775808u64 })
+        );
+        assert_eq!(
+            datum_json(int(u64::MAX as i128)),
+            serde_json::json!({ "int": u64::MAX })
+        );
+    }
+
+    #[test]
+    fn int_bounds_of_i64_are_exact() {
+        assert_eq!(
+            datum_json(int(i64::MIN as i128)),
+            serde_json::json!({ "int": i64::MIN })
+        );
+        assert_eq!(
+            datum_json(int(i64::MAX as i128)),
+            serde_json::json!({ "int": i64::MAX })
+        );
+        assert_eq!(datum_json(int(-1)), serde_json::json!({ "int": -1 }));
+    }
+
+    /// Bignums that still fit `u64` / `i64` keep every digit.
+    #[test]
+    fn bignum_within_u64_is_exact() {
+        // 2^64 - 1 as a CBOR bignum
+        assert_eq!(
+            datum_json(big_uint(&[0xff; 8])),
+            serde_json::json!({ "int": u64::MAX })
+        );
+        // -1 - 0x7fff_ffff_ffff_ffff == i64::MIN
+        assert_eq!(
+            datum_json(big_nint(&i64::MAX.to_be_bytes())),
+            serde_json::json!({ "int": i64::MIN })
+        );
+    }
+
+    /// Beyond `u64` the JSON number can only be a float; make sure it is the
+    /// nearest one rather than an error.
+    #[test]
+    fn bignum_beyond_u64_is_a_float_approximation() {
+        // 2^64
+        let mut bytes = vec![0x01];
+        bytes.extend([0x00; 8]);
+        assert_eq!(
+            datum_json(big_uint(&bytes)),
+            serde_json::json!({ "int": 18446744073709551616.0 })
+        );
+    }
+
+    /// Nested structures get the same exact conversion.
+    #[test]
+    fn nested_ints_are_exact() {
+        let datum = PlutusData::Array(MaybeIndefArray::Def(vec![int(u64::MAX as i128)]));
+        assert_eq!(
+            datum_json(datum),
+            serde_json::json!({ "list": [{ "int": u64::MAX }] })
+        );
     }
 }

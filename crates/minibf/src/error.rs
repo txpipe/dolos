@@ -28,7 +28,6 @@ pub enum Error {
     /// runs out at the same point: it is the page that has to shrink, not the
     /// node that has to recover.
     ScanBudgetExceeded,
-    LiveUtxoSetTooLarge,
     InvalidCertIndex,
     InvalidGovActionId,
 }
@@ -174,15 +173,6 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "The requested page needs more archive blocks than this node is willing to scan, reduce page number or count.",
-                )),
-            )
-                .into_response(),
-            Error::LiveUtxoSetTooLarge => (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody::new(
-                    400,
-                    "Bad Request",
-                    "The asset has more live UTxOs than this node is willing to scan.",
                 )),
             )
                 .into_response(),

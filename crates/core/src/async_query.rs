@@ -310,6 +310,25 @@ where
         .await
     }
 
+    /// The slot each tx was included in, from the archive index alone. No
+    /// block body is read, so this is the cheap way to order many txs by
+    /// chain position; a tx the archive no longer knows maps to `None`.
+    pub async fn slots_by_tx_hashes(
+        &self,
+        tx_hashes: Vec<TxHash>,
+    ) -> Result<Vec<(TxHash, Option<BlockSlot>)>, DomainError> {
+        self.run_blocking(move |domain| {
+            tx_hashes
+                .into_iter()
+                .map(|tx_hash| {
+                    let slot = domain.archive().slot_by_tx_hash(tx_hash.as_slice())?;
+                    Ok((tx_hash, slot))
+                })
+                .collect::<Result<Vec<_>, DomainError>>()
+        })
+        .await
+    }
+
     /// Resolve transaction metadata while reading and decoding each selected
     /// archive body at most once.
     ///
@@ -321,18 +340,21 @@ where
         &self,
         tx_hashes: Vec<TxHash>,
     ) -> Result<(Vec<(TxHash, Option<BlockRefMeta>)>, usize), DomainError> {
-        let requested = tx_hashes.clone();
-        let located = self
-            .run_blocking(move |domain| {
-                tx_hashes
-                    .into_iter()
-                    .map(|tx_hash| {
-                        let slot = domain.archive().slot_by_tx_hash(tx_hash.as_slice())?;
-                        Ok((tx_hash, slot))
-                    })
-                    .collect::<Result<Vec<_>, DomainError>>()
-            })
-            .await?;
+        let located = self.slots_by_tx_hashes(tx_hashes).await?;
+        self.block_meta_by_located(located).await
+    }
+
+    /// Block metadata for txs whose slot is already known, so a caller that
+    /// located them with [`Self::slots_by_tx_hashes`] does not pay the index
+    /// lookup twice. Each distinct slot has its block read and decoded once;
+    /// a tx with no slot, or one missing from its block, maps to `None`.
+    ///
+    /// The second value is the number of block bodies read.
+    pub async fn block_meta_by_located(
+        &self,
+        located: Vec<(TxHash, Option<BlockSlot>)>,
+    ) -> Result<(Vec<(TxHash, Option<BlockRefMeta>)>, usize), DomainError> {
+        let requested: Vec<TxHash> = located.iter().map(|(hash, _)| *hash).collect();
 
         let mut fetched = HashMap::new();
         let mut groups: HashMap<BlockSlot, Vec<TxHash>> = HashMap::new();

@@ -720,13 +720,6 @@ where
         .utxos_by_asset(&asset)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // there is no ordered index over an asset's live UTxOs, so every page has
-    // to position the whole set first. cap that work with the same budget the
-    // other scan endpoints use.
-    if refs.len() as u64 > domain.config.max_scan_items() {
-        return Err(Error::LiveUtxoSetTooLarge);
-    }
-
     let utxos = super::utxos::load_utxo_models_in_height_range(&domain, refs, pagination).await?;
 
     Ok(Json(utxos))
@@ -1283,17 +1276,78 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn assets_by_subject_utxos_over_scan_budget() {
+    /// The two blocks the archive no longer holds after pruning, so a pruned
+    /// height can be named. The synthetic chain has five blocks in five
+    /// consecutive slots; keeping a two-slot window drops the first two.
+    fn pruned_app() -> TestApp {
+        use dolos_core::ArchiveStore as _;
+
         let cfg = SyntheticBlockConfig {
             block_count: 5,
             txs_per_block: 3,
             ..Default::default()
         };
-        let app = TestApp::new_with_scan_limit(cfg, 1);
-        let asset = app.vectors().asset_unit.as_str();
-        let path = format!("/assets/{asset}/utxos?count=1");
-        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+
+        TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
+            domain
+                .archive()
+                .prune_history(2, None)
+                .expect("failed to prune the synthetic archive");
+        })
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_utxos_pruned_history() {
+        let full = TestApp::new();
+        let asset = full.vectors().asset_unit.clone();
+
+        let (status, bytes) = full.get_bytes(&format!("/assets/{asset}/utxos")).await;
+        assert_eq!(status, StatusCode::OK);
+        let all = parse_utxos(&bytes);
+
+        let pruned = pruned_app();
+        let first_retained = pruned.vectors().blocks[2].block_number as i32;
+        let pruned_height = pruned.vectors().blocks[0].block_number;
+
+        // rows of pruned blocks are gone, the rest keeps its order
+        let (status, bytes) = pruned.get_bytes(&format!("/assets/{asset}/utxos")).await;
+        assert_eq!(status, StatusCode::OK);
+        let retained = parse_utxos(&bytes);
+        let expected: Vec<_> = all
+            .iter()
+            .filter(|x| x.block_height >= first_retained)
+            .cloned()
+            .collect();
+        assert!(!expected.is_empty(), "fixture needs retained rows");
+        assert_eq!(retained, expected);
+
+        // a pruned lower bound is no bound: everything held is newer
+        let (status, bytes) = pruned
+            .get_bytes(&format!("/assets/{asset}/utxos?from={pruned_height}"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parse_utxos(&bytes), expected);
+
+        // a pruned upper bound excludes everything held
+        let (status, bytes) = pruned
+            .get_bytes(&format!("/assets/{asset}/utxos?to={pruned_height}"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(parse_utxos(&bytes).is_empty());
+
+        // an upper bound past the tip is no bound
+        let (status, bytes) = pruned
+            .get_bytes(&format!("/assets/{asset}/utxos?to=99999999"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parse_utxos(&bytes), expected);
+
+        // pages stay aligned: page 1 of size 1 is the first retained row
+        let (status, bytes) = pruned
+            .get_bytes(&format!("/assets/{asset}/utxos?count=1&page=1"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parse_utxos(&bytes), vec![expected[0].clone()]);
     }
 
     #[tokio::test]
