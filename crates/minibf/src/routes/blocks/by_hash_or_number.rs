@@ -249,4 +249,216 @@ mod tests {
         let path = "/blocks/1".to_string();
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
+
+    /// Preview genesis hash, the network the test domain runs on.
+    const GENESIS_HASH: &str = crate::hacks::GENESIS_HASH_PREVIEW;
+
+    async fn get_blocks(app: &TestApp, path: &str) -> Vec<BlockContent> {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        serde_json::from_slice(&bytes).expect("failed to parse blocks")
+    }
+
+    fn hashes(blocks: &[BlockContent]) -> Vec<&str> {
+        blocks.iter().map(|b| b.hash.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_genesis() {
+        let app = TestApp::new();
+        let first = app.vectors().blocks.first().expect("missing block vectors");
+
+        for path in ["/blocks/0".to_string(), format!("/blocks/{GENESIS_HASH}")] {
+            let (status, bytes) = app.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let genesis: BlockContent =
+                serde_json::from_slice(&bytes).expect("failed to parse genesis block");
+            assert_eq!(genesis.hash, GENESIS_HASH);
+            assert_eq!(genesis.height, None);
+            assert_eq!(genesis.previous_block, None);
+        }
+
+        // the first real block links back to genesis
+        let block = get_blocks(&app, &format!("/blocks/{}/next", GENESIS_HASH)).await;
+        assert_eq!(block[0].hash, first.block_hash);
+        assert_eq!(block[0].previous_block.as_deref(), Some(GENESIS_HASH));
+    }
+
+    #[tokio::test]
+    async fn blocks_previous_happy_path() {
+        let app = TestApp::new();
+        let vectors = &app.vectors().blocks;
+        let last = vectors.last().expect("missing block vectors");
+
+        let blocks = get_blocks(&app, &format!("/blocks/{}/previous", last.block_hash)).await;
+
+        // genesis first, then every block before the current one, ascending
+        let mut expected = vec![GENESIS_HASH];
+        expected.extend(
+            vectors[..vectors.len() - 1]
+                .iter()
+                .map(|b| b.block_hash.as_str()),
+        );
+        assert_eq!(hashes(&blocks), expected);
+    }
+
+    #[tokio::test]
+    async fn blocks_previous_order_desc() {
+        let app = TestApp::new();
+        let vectors = &app.vectors().blocks;
+        let last = vectors.last().expect("missing block vectors");
+
+        let asc = get_blocks(&app, &format!("/blocks/{}/previous", last.block_hash)).await;
+        let desc = get_blocks(
+            &app,
+            &format!("/blocks/{}/previous?order=desc", last.block_hash),
+        )
+        .await;
+
+        let mut reversed = asc;
+        reversed.reverse();
+        assert_eq!(desc, reversed);
+    }
+
+    #[tokio::test]
+    async fn blocks_previous_paginated() {
+        let app = TestApp::new();
+        let vectors = &app.vectors().blocks;
+        let last = vectors.last().expect("missing block vectors");
+
+        // page 2 of size 1 is the block two before the current one
+        let page = get_blocks(
+            &app,
+            &format!("/blocks/{}/previous?count=1&page=2", last.block_hash),
+        )
+        .await;
+        assert_eq!(
+            hashes(&page),
+            vec![vectors[vectors.len() - 3].block_hash.as_str()]
+        );
+    }
+
+    #[tokio::test]
+    async fn blocks_previous_of_first_block_is_genesis() {
+        let app = TestApp::new();
+        let first = app.vectors().blocks.first().expect("missing block vectors");
+
+        let blocks = get_blocks(&app, &format!("/blocks/{}/previous", first.block_hash)).await;
+        assert_eq!(hashes(&blocks), vec![GENESIS_HASH]);
+    }
+
+    #[tokio::test]
+    async fn blocks_previous_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/blocks/{}/previous", invalid_block());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn blocks_previous_not_found() {
+        let app = TestApp::new();
+        let path = format!("/blocks/{}/previous", missing_block());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn blocks_previous_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        assert_status(
+            &app,
+            "/blocks/1/previous",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn blocks_next_happy_path() {
+        let app = TestApp::new();
+        let vectors = &app.vectors().blocks;
+        let first = vectors.first().expect("missing block vectors");
+
+        let blocks = get_blocks(&app, &format!("/blocks/{}/next", first.block_hash)).await;
+
+        let expected: Vec<&str> = vectors[1..].iter().map(|b| b.block_hash.as_str()).collect();
+        assert_eq!(hashes(&blocks), expected);
+    }
+
+    #[tokio::test]
+    async fn blocks_next_order_desc() {
+        let app = TestApp::new();
+        let first = app.vectors().blocks.first().expect("missing block vectors");
+
+        let asc = get_blocks(&app, &format!("/blocks/{}/next", first.block_hash)).await;
+        let desc = get_blocks(
+            &app,
+            &format!("/blocks/{}/next?order=desc", first.block_hash),
+        )
+        .await;
+
+        let mut reversed = asc;
+        reversed.reverse();
+        assert_eq!(desc, reversed);
+    }
+
+    #[tokio::test]
+    async fn blocks_next_paginated() {
+        let app = TestApp::new();
+        let vectors = &app.vectors().blocks;
+        let first = vectors.first().expect("missing block vectors");
+
+        let page = get_blocks(
+            &app,
+            &format!("/blocks/{}/next?count=1&page=2", first.block_hash),
+        )
+        .await;
+        assert_eq!(hashes(&page), vec![vectors[2].block_hash.as_str()]);
+    }
+
+    #[tokio::test]
+    async fn blocks_next_of_genesis_starts_at_first_block() {
+        let app = TestApp::new();
+        let vectors = &app.vectors().blocks;
+
+        let blocks = get_blocks(&app, &format!("/blocks/{GENESIS_HASH}/next")).await;
+
+        let expected: Vec<&str> = vectors.iter().map(|b| b.block_hash.as_str()).collect();
+        assert_eq!(hashes(&blocks), expected);
+    }
+
+    #[tokio::test]
+    async fn blocks_next_of_tip_is_empty() {
+        let app = TestApp::new();
+        let last = app.vectors().blocks.last().expect("missing block vectors");
+
+        let blocks = get_blocks(&app, &format!("/blocks/{}/next", last.block_hash)).await;
+        assert!(blocks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn blocks_next_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/blocks/{}/next", invalid_block());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn blocks_next_not_found() {
+        let app = TestApp::new();
+        let path = format!("/blocks/{}/next", missing_block());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn blocks_next_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        assert_status(&app, "/blocks/1/next", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
 }
