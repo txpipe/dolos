@@ -459,4 +459,48 @@ mod tests {
         // Shelley address produces 3 tags: full, payment, stake
         assert_eq!(delta.archive[0].tags.len(), 3);
     }
+
+    /// Runs a raw preprod block from `test_data/preprod/blocks` through
+    /// `index_block` with no resolved inputs, returning the archive delta.
+    fn index_preprod_block(hash: &str) -> ArchiveIndexDelta {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test_data/preprod/blocks")
+            .join(format!("{hash}.cbor"));
+
+        let cbor = std::fs::read(path).unwrap();
+        let block = pallas::ledger::traverse::MultiEraBlock::decode(&cbor).unwrap();
+        assert_eq!(block.hash().to_string(), hash);
+
+        let mut builder = CardanoIndexDeltaBuilder::new(ChainPoint::Origin);
+        builder.index_block(&block, &Default::default());
+
+        builder.build().archive.pop().unwrap()
+    }
+
+    // Two preprod blocks from epoch 313 crafted to trip native script decoding
+    // (pallas < 1.2 aborted with a stack overflow on the first and failed with
+    // `expected u32` on the second). Both must be accepted since the Haskell
+    // node accepts them; the witness script hash has to land in the index.
+
+    #[test]
+    fn indexes_block_with_deeply_nested_native_script() {
+        // preprod block 5183974, slot 133883340: one native script nested
+        // 5384 levels deep in the witness set, tx f90dce57
+        let delta =
+            index_preprod_block("bac1660208e7a8f63fc7caf97cfefcd3066a517d3ca4d971e1b316d1e43708e5");
+
+        assert_eq!(delta.slot, 133883340);
+        assert!(delta.tags.iter().any(|t| t.dimension == archive::SCRIPT));
+    }
+
+    #[test]
+    fn indexes_block_with_negative_native_script_threshold() {
+        // preprod block 5184855, slot 133902219: N-of-K native script with
+        // N = -1 (`[3, -1, [pubkey, pubkey]]`), tx b1db2a41
+        let delta =
+            index_preprod_block("8ddb2e9618495b11dc5bf2820d177ec38453faaf81afbfdb02ab99a7ebc9e2f8");
+
+        assert_eq!(delta.slot, 133902219);
+        assert!(delta.tags.iter().any(|t| t.dimension == archive::SCRIPT));
+    }
 }
