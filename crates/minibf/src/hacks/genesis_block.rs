@@ -13,10 +13,10 @@ use crate::Facade;
 
 use super::{GENESIS_HASH_MAINNET, GENESIS_HASH_PREPROD, GENESIS_HASH_PREVIEW};
 
-struct GenesisBlock {
-    hash: &'static str,
-    time: i32,
-    next_block: &'static str,
+pub struct GenesisBlock {
+    pub hash: &'static str,
+    pub time: i32,
+    pub next_block: &'static str,
 }
 
 const PREPROD: GenesisBlock = GenesisBlock {
@@ -37,7 +37,7 @@ const MAINNET: GenesisBlock = GenesisBlock {
     next_block: "89d9b5a5b8ddc8d7e5a6795e9774d97faf1efea59b2caf7eaf9f8c5b32059df4",
 };
 
-fn genesis_for_domain<D: Domain>(domain: &Facade<D>) -> Option<&'static GenesisBlock> {
+pub fn genesis_for_domain<D: Domain>(domain: &Facade<D>) -> Option<&'static GenesisBlock> {
     match domain.genesis().shelley.network_magic {
         Some(1) => Some(&PREPROD),
         Some(2) => Some(&PREVIEW),

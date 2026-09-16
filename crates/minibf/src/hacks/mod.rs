@@ -15,17 +15,14 @@ use crate::Facade;
 
 pub mod genesis_block;
 
+use genesis_block::GenesisBlock;
+
 pub const GENESIS_HASH_PREVIEW: &str =
     "83de1d7302569ad56cf9139a41e2e11346d4cb4a31c00142557b6ab3fa550761";
 pub const GENESIS_HASH_PREPROD: &str =
     "d4b8de7a11d929a323373cbab6c1a9bdc931beffff11db111cf9d57356ee1937";
 pub const GENESIS_HASH_MAINNET: &str =
     "5f20df933584822601f9e3f8c024eb5eb252fe8cefb24d1317dc3d432e940ebb";
-
-pub struct GenesisBlockMetadata {
-    pub hash: &'static str,
-    pub time: i32,
-}
 
 enum GenesisOutputBody<'a> {
     Byron(byron_primitives::TxOut),
@@ -53,29 +50,9 @@ impl<'a> GenesisTxOutput<'a> {
 }
 
 struct GenesisTxModel<'a> {
-    block: GenesisBlockMetadata,
+    block: &'static GenesisBlock,
     output: GenesisTxOutput<'a>,
     consumed_by: Option<Hash<32>>,
-}
-
-pub fn genesis_block_metadata_for_domain<D: Domain>(
-    domain: &Facade<D>,
-) -> Option<GenesisBlockMetadata> {
-    match domain.genesis().shelley.network_magic {
-        Some(1) => Some(GenesisBlockMetadata {
-            hash: GENESIS_HASH_PREPROD,
-            time: 1654041600,
-        }),
-        Some(2) => Some(GenesisBlockMetadata {
-            hash: GENESIS_HASH_PREVIEW,
-            time: 1666656000,
-        }),
-        Some(764824073) => Some(GenesisBlockMetadata {
-            hash: GENESIS_HASH_MAINNET,
-            time: 1506203091,
-        }),
-        _ => None,
-    }
 }
 
 fn genesis_tx_output_by_hash<D: Domain>(
@@ -119,7 +96,7 @@ fn genesis_tx_output_by_hash<D: Domain>(
 }
 
 impl<'a> GenesisTxModel<'a> {
-    fn new(block: GenesisBlockMetadata, output: GenesisTxOutput<'a>) -> Self {
+    fn new(block: &'static GenesisBlock, output: GenesisTxOutput<'a>) -> Self {
         Self {
             block,
             output,
@@ -195,7 +172,7 @@ pub fn genesis_tx_content_for_hash<D: Domain>(
     domain: &Facade<D>,
     hash: &[u8],
 ) -> Result<TxContent, StatusCode> {
-    let Some(block_meta) = genesis_block_metadata_for_domain(domain) else {
+    let Some(block_meta) = genesis_block::genesis_for_domain(domain) else {
         return Err(StatusCode::NOT_FOUND);
     };
 
@@ -213,7 +190,7 @@ pub async fn genesis_tx_utxos_for_hash<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let Some(block_meta) = genesis_block_metadata_for_domain(domain) else {
+    let Some(block_meta) = genesis_block::genesis_for_domain(domain) else {
         return Err(StatusCode::NOT_FOUND);
     };
 

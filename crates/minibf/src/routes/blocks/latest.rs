@@ -13,7 +13,7 @@ where
     let tip = tip_block(&domain)?;
     let chain = domain.get_chain_summary()?;
 
-    let model = single_block_content(&domain, &tip, &chain).await?;
+    let model = single_block_content(&domain, &tip, &tip, &chain).await?;
 
     Ok(Json(model))
 }

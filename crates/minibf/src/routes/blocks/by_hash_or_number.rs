@@ -9,7 +9,9 @@ use itertools::Either;
 
 use crate::{error::Error, Facade};
 
-use super::{genesis, load_block_by_hash_or_number, parse_hash_or_number, single_block_content};
+use super::{
+    genesis, load_block_by_hash_or_number, parse_hash_or_number, single_block_content, tip_block,
+};
 
 pub async fn by_hash_or_number<D>(
     Path(hash_or_number): Path<String>,
@@ -44,7 +46,8 @@ where
 
     let chain = domain.get_chain_summary()?;
 
-    let model = single_block_content(&domain, &block, &chain).await?;
+    let tip = tip_block(&domain)?;
+    let model = single_block_content(&domain, &block, &tip, &chain).await?;
 
     Ok(Json(model))
 }

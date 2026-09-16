@@ -8,7 +8,7 @@ use dolos_core::{ArchiveStore as _, Domain};
 
 use crate::Facade;
 
-use super::single_block_content;
+use super::{single_block_content, tip_block};
 
 /// Dolos stores blocks by absolute slot, so the epoch-relative pair is
 /// converted with the chain summary first.
@@ -42,7 +42,8 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let model = single_block_content(&domain, &block, &chain).await?;
+    let tip = tip_block(&domain)?;
+    let model = single_block_content(&domain, &block, &tip, &chain).await?;
 
     Ok(Json(model))
 }

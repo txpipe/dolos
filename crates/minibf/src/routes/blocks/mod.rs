@@ -150,14 +150,13 @@ where
 async fn single_block_content<D>(
     domain: &Facade<D>,
     block: &BlockBody,
+    tip: &BlockBody,
     chain: &ChainSummary,
 ) -> Result<BlockContent, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let tip = tip_block(domain)?;
-
-    let mut model = build_block_model(domain, block, &tip, chain).await?;
+    let mut model = build_block_model(domain, block, tip, chain).await?;
     genesis::set_genesis_previous_block(domain, &mut model);
 
     Ok(model)
