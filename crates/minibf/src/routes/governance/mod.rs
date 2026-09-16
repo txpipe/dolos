@@ -420,6 +420,17 @@ fn committee_members(
 /// dissolved committee has `is_dissolved` true, an empty member list, and a
 /// zero quorum. Blockfrost is different. It still returns the historical
 /// members.
+///
+/// The `is_dissolved` flag depends on evidence of a committee lineage action,
+/// not on governance activation. A previous committee action on record makes a
+/// null committee a dissolution. A null committee with no such action is not a
+/// dissolution.
+///
+/// A store migrated across the in-place upgrade gap has an unknown enact-state:
+/// a null committee with no lineage root. The endpoint does not report this
+/// state as a dissolution. A fresh sync recovers the true state. If governance
+/// is not active (`active_since` unset), no committee exists. The endpoint then
+/// returns 404 instead of an empty committee.
 pub async fn committee<D>(State(domain): State<Facade<D>>) -> Result<Json<Committee>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
@@ -427,6 +438,7 @@ where
 {
     let gov = domain
         .read_cardano_entity::<GovState>(GovState::singleton_key())?
+        .filter(|gov| gov.active_since.is_some())
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let (gov_action_id, proposal_tx_hash, proposal_index) =
@@ -454,7 +466,7 @@ where
         gov_action_id,
         proposal_tx_hash,
         proposal_index,
-        is_dissolved: gov.committee.is_none() && gov.active_since.is_some(),
+        is_dissolved: gov.committee.is_none() && gov.prev_gov_action_ids.committee.is_some(),
         quorum: Box::new(quorum),
         members,
     }))
@@ -2850,27 +2862,8 @@ mod tests {
         StakeCredential::ScriptHash(Hash::from([byte; 28]))
     }
 
-    /// This function writes a committee, its per-member authorization history,
-    /// and its action root to the governance singleton. The endpoint reads
-    /// this data. The `seed_drep_anchor` helper writes equivalent data for a
-    /// DRep registration.
-    fn seed_committee(
-        domain: &ToyDomain,
-        committee: Option<dolos_cardano::model::gov::Committee>,
-        auths: BTreeMap<StakeCredential, Vec<(BlockSlot, CommitteeAuthorization)>>,
-        seating_action: Option<GovActionId>,
-    ) {
-        let state = GovState {
-            committee,
-            committee_auths: auths,
-            prev_gov_action_ids: dolos_cardano::model::gov::GovRoots {
-                committee: seating_action,
-                ..Default::default()
-            },
-            active_since: Some(0),
-            ..Default::default()
-        };
-
+    /// This function overwrites the governance singleton with the given state.
+    fn seed_gov(domain: &ToyDomain, state: GovState) {
         let writer = domain
             .state()
             .start_writer()
@@ -2881,6 +2874,31 @@ mod tests {
         writer
             .commit()
             .expect("The state writer cannot commit the governance state.");
+    }
+
+    /// This function writes an active-governance committee, its per-member
+    /// authorization history, and its action root to the governance singleton.
+    /// The endpoint reads this data. The `seed_drep_anchor` helper writes
+    /// equivalent data for a DRep registration.
+    fn seed_committee(
+        domain: &ToyDomain,
+        committee: Option<dolos_cardano::model::gov::Committee>,
+        auths: BTreeMap<StakeCredential, Vec<(BlockSlot, CommitteeAuthorization)>>,
+        seating_action: Option<GovActionId>,
+    ) {
+        seed_gov(
+            domain,
+            GovState {
+                committee,
+                committee_auths: auths,
+                prev_gov_action_ids: dolos_cardano::model::gov::GovRoots {
+                    committee: seating_action,
+                    ..Default::default()
+                },
+                active_since: Some(0),
+                ..Default::default()
+            },
+        );
     }
 
     #[test]
@@ -3039,6 +3057,65 @@ mod tests {
         assert!(!model.is_dissolved);
         assert_eq!(model.members.len(), 1);
         assert_eq!(model.members[0].status, Status::NotAuthorized);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_migration_gap_is_not_dissolved() {
+        // A store migrated across the in-place upgrade gap has an unknown
+        // enact-state: a null committee with no lineage root. This state is not
+        // a dissolution. The endpoint reports `is_dissolved` false and does not
+        // read the null committee as no-confidence.
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                seed_committee(domain, None, BTreeMap::new(), None);
+            });
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        assert!(!model.is_dissolved);
+        assert!(model.members.is_empty());
+        assert_eq!(model.quorum.numerator, 0);
+        assert_eq!(model.quorum.denominator, 0);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_no_confidence_is_dissolved() {
+        // A NoConfidence enactment clears the committee and writes the committee
+        // lineage root. These two changes are the evidence of a dissolution.
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                let action = GovActionId {
+                    transaction_id: Hash::from([9u8; 32]),
+                    action_index: 1,
+                };
+                seed_committee(domain, None, BTreeMap::new(), Some(action));
+            });
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        assert!(model.is_dissolved);
+        assert!(model.members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_committee_pre_conway_returns_not_found() {
+        // Before governance activates, the singleton exists but `active_since`
+        // is unset. No committee exists, so the endpoint returns 404 instead of
+        // an empty committee.
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                seed_gov(domain, GovState::default());
+            });
+
+        assert_status(&app, "/governance/committee", StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]
