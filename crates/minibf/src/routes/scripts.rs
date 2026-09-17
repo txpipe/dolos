@@ -1,5 +1,7 @@
 use axum::{
     extract::{Path, Query, State},
+    http::header,
+    response::{IntoResponse, Response},
     Json,
 };
 use blockfrost_openapi::models::{
@@ -7,7 +9,6 @@ use blockfrost_openapi::models::{
     script_cbor::ScriptCbor,
     script_datum::ScriptDatum,
     script_datum_cbor::ScriptDatumCbor,
-    script_json::ScriptJson,
     script_utxos_inner::ScriptUtxosInner,
 };
 use dolos_cardano::indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, ScriptLanguage};
@@ -79,7 +80,7 @@ where
 pub async fn by_hash_json<D>(
     Path(script_hash): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<ScriptJson>, Error>
+) -> Result<Response, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -90,17 +91,21 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    // Rendered straight to text instead of through `ScriptJson`: a native
+    // script can nest as deep as a transaction has bytes, and a
+    // `serde_json::Value` of that depth overflows the worker stack when
+    // serialized or dropped (see pallas #806).
     let json = match script.language {
         ScriptLanguage::Native => {
             let native: NativeScript =
                 minicbor::decode(&script.script).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            // Some(native_script_json(&native)?)
-            Some(native.to_json())
+            native.to_json_string()
         }
-        _ => None,
+        _ => "null".to_string(),
     };
 
-    Ok(Json(ScriptJson { json }))
+    let body = format!(r#"{{"json":{json}}}"#);
+    Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
 }
 
 pub async fn by_hash_cbor<D>(
@@ -202,6 +207,7 @@ where
 mod tests {
     use super::*;
     use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::script_json::ScriptJson;
 
     fn fixture_app() -> TestApp {
         TestApp::new()
@@ -286,6 +292,23 @@ mod tests {
 
         let item: ScriptJson = serde_json::from_slice(&bytes).expect("failed to parse script json");
         assert!(item.json.is_some());
+    }
+
+    #[tokio::test]
+    async fn scripts_by_hash_json_null_for_plutus_script() {
+        let app = fixture_app();
+        let script_hash = app.vectors().plutus_script_hash.as_str();
+        let path = format!("/scripts/{script_hash}/json");
+        let (status, headers, bytes) = app.get_with_headers(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).map(|x| x.as_bytes()),
+            Some(b"application/json".as_slice())
+        );
+
+        let item: ScriptJson = serde_json::from_slice(&bytes).expect("failed to parse script json");
+        assert!(item.json.is_none());
     }
 
     #[tokio::test]
