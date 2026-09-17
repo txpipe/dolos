@@ -2508,9 +2508,9 @@ mod tests {
     }
 
     /// CIP-129: the id is the proposing tx hash with the action index
-    /// trailing it. The first two vectors come from the Blockfrost spec kept
-    /// in `crates/minibf/openapi.yaml`; the last one pins the minimal
-    /// big-endian rule Blockfrost encodes the index with.
+    /// trailing it. The first two vectors come from the upstream Blockfrost
+    /// OpenAPI spec (see the crate README for the pinned link); the last one
+    /// pins the minimal big-endian rule Blockfrost encodes the index with.
     #[test]
     fn gov_action_id_follows_cip129() {
         let tx = Hash::<32>::from([0x11u8; 32]);
