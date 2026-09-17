@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    http::{Method, Request, StatusCode},
+    http::{HeaderMap, Method, Request, StatusCode},
     Router,
 };
 use dolos_core::{
@@ -133,6 +133,11 @@ impl TestApp {
     }
 
     pub async fn get_bytes(&self, path: &str) -> (StatusCode, Vec<u8>) {
+        let (status, _, bytes) = self.get_with_headers(path).await;
+        (status, bytes)
+    }
+
+    pub async fn get_with_headers(&self, path: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
         let req = Request::builder()
             .method(Method::GET)
             .uri(path)
@@ -147,13 +152,14 @@ impl TestApp {
             .expect("request failed");
 
         let status = res.status();
+        let headers = res.headers().clone();
         let bytes = res
             .into_body()
             .collect()
             .await
             .expect("failed to read response body")
             .to_bytes();
-        (status, bytes.to_vec())
+        (status, headers, bytes.to_vec())
     }
 
     pub async fn post_bytes(
