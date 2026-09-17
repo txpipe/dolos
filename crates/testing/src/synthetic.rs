@@ -23,7 +23,7 @@ use pallas::{
         primitives::{
             alonzo,
             conway::{
-                Anchor, Certificate, DRep, DatumOption, GovAction, PlutusData,
+                Anchor, Certificate, DRep, DatumOption, GovAction, PlutusData, PlutusScript,
                 PostAlonzoTransactionOutput, ProposalProcedure, ScriptRef, TransactionBody,
                 TransactionOutput, Value, WitnessSet,
             },
@@ -146,6 +146,7 @@ pub struct SyntheticVectors {
     pub datum_cbor_hex: String,
     pub script_hash: String,
     pub script_cbor_hex: String,
+    pub plutus_script_hash: String,
     pub blocks: Vec<BlockVectors>,
     pub account_addresses: Vec<String>,
     pub account_address_blocks: Vec<(String, u64)>,
@@ -193,6 +194,8 @@ struct SyntheticFixtureExtras {
     script: pallas::ledger::primitives::alonzo::NativeScript,
     script_hash: Hash<28>,
     script_cbor: Vec<u8>,
+    plutus_script: PlutusScript<2>,
+    plutus_script_hash: Hash<28>,
 }
 
 struct SyntheticTxSpec {
@@ -506,6 +509,10 @@ pub fn build_synthetic_blocks(
             .as_ref()
             .map(|x| hex::encode(&x.script_cbor))
             .unwrap_or_default(),
+        plutus_script_hash: fixture_extras
+            .as_ref()
+            .map(|x| x.plutus_script_hash.to_string())
+            .unwrap_or_default(),
         blocks: block_vectors,
         account_addresses,
         account_address_blocks,
@@ -528,6 +535,10 @@ fn build_datum_and_script_fixture() -> SyntheticFixtureExtras {
     let script_hash = script.compute_hash();
     let script_cbor = minicbor::to_vec(&script).expect("failed to encode synthetic script");
 
+    // Any bytes hash as a script; the fixture never evaluates it.
+    let plutus_script = PlutusScript::<2>(Bytes::from(vec![0x4d, 0x01, 0x00, 0x00, 0x22]));
+    let plutus_script_hash = plutus_script.compute_hash();
+
     SyntheticFixtureExtras {
         datum,
         datum_hash,
@@ -535,6 +546,8 @@ fn build_datum_and_script_fixture() -> SyntheticFixtureExtras {
         script,
         script_hash,
         script_cbor,
+        plutus_script,
+        plutus_script_hash,
     }
 }
 
@@ -830,7 +843,10 @@ fn sample_transaction(
             )
         }),
         redeemer: None,
-        plutus_v2_script: None,
+        plutus_v2_script: extras.map(|extras| {
+            NonEmptySet::try_from(vec![extras.plutus_script.clone()])
+                .expect("non-empty plutus script set")
+        }),
         plutus_v3_script: None,
     };
 
