@@ -295,6 +295,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scripts_by_hash_json_null_for_plutus_script() {
+        let app = fixture_app();
+        let script_hash = app.vectors().plutus_script_hash.as_str();
+        let path = format!("/scripts/{script_hash}/json");
+        let (status, headers, bytes) = app.get_with_headers(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).map(|x| x.as_bytes()),
+            Some(b"application/json".as_slice())
+        );
+
+        let item: ScriptJson = serde_json::from_slice(&bytes).expect("failed to parse script json");
+        assert!(item.json.is_none());
+    }
+
+    #[tokio::test]
     async fn scripts_by_hash_json_not_found_for_invalid_hash() {
         let app = fixture_app();
         let path = format!("/scripts/{}/json", invalid_script_hash());
