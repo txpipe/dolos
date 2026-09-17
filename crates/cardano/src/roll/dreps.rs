@@ -16,7 +16,7 @@ use crate::{
     pallas_extras::{self, stake_cred_to_drep},
     roll::BlockVisitor,
     DRepActivity, DRepAnchorUpdate, DRepDormancyRelease, DRepExpiryUpdate, DRepRegistration,
-    DRepUnRegistration, GovDormancyReset, PParamsSet,
+    DRepSeen, DRepUnRegistration, GovDormancyReset, PParamsSet,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -228,9 +228,18 @@ impl BlockVisitor for DRepStateVisitor {
             ));
         }
 
+        // Sightings mirror db-sync's `drep_hash` rows, which db-sync only
+        // writes for certs of valid txs; the crawl above already gates the
+        // certificate fan-out on `tx.is_valid()`.
+        if let Some(cert) = pallas_extras::cert_as_vote_delegation(cert) {
+            deltas.add_for_entity(DRepSeen::new(cert.drep, block.slot(), *order));
+        }
+
         let Some(drep) = cert_drep(cert) else {
             return Ok(());
         };
+
+        deltas.add_for_entity(DRepSeen::new(drep.clone(), block.slot(), *order));
 
         if let MultiEraCert::Conway(conway) = &cert {
             match conway.deref().deref() {

@@ -633,6 +633,7 @@ where
         .route("/pools/retired", get(routes::pools::all_retired::<D>))
         .route("/pools", get(routes::pools::all::<D>))
         .route("/pools/{id}", get(routes::pools::by_id::<D>))
+        .route("/governance/dreps", get(routes::governance::all_dreps::<D>))
         .route(
             "/governance/committee",
             get(routes::governance::committee::<D>),
