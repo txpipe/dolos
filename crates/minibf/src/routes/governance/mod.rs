@@ -2,7 +2,7 @@ mod dreps;
 mod mapping;
 mod metadata;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use self::mapping::description_json;
 
@@ -12,6 +12,9 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
+    committee::Committee,
+    committee_members_inner::{CommitteeMembersInner, Status},
+    committee_quorum::CommitteeQuorum,
     drep_metadata::DrepMetadata,
     proposal::{self, Proposal},
     proposal_metadata::ProposalMetadata,
@@ -24,7 +27,10 @@ use blockfrost_openapi::models::{
     DrepsInnerMetadataError,
 };
 use dolos_cardano::{
-    model::{DRepState, FixedNamespace as _, ProposalAction, ProposalState},
+    model::{
+        gov::{CommitteeAuthorization, GovState},
+        DRepState, FixedNamespace as _, ProposalAction, ProposalState, SingletonEntity as _,
+    },
     ChainSummary, PParamsSet,
 };
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
@@ -44,8 +50,9 @@ use serde::Deserialize;
 use crate::{
     error::Error,
     mapping::{
-        anchor_offchain_metadata, bech32_gov_action, i32_or_500, parse_gov_action_id,
-        rational_to_f64_unrounded, stake_cred_to_address, AnchorMetadata, IntoModel, Unrounded,
+        anchor_offchain_metadata, bech32_committee_cold, bech32_committee_hot, bech32_gov_action,
+        i32_or_500, parse_gov_action_id, rational_to_f64_unrounded, stake_cred_to_address,
+        AnchorMetadata, IntoModel, Unrounded,
     },
     pagination::{Order, Pagination, PaginationParameters},
     routes::epochs::mapping::{map_cost_models_raw, protocol_params_model},
@@ -289,6 +296,148 @@ where
         json_metadata,
         bytes,
         error: error.map(Box::new),
+    }))
+}
+
+/// This function returns the 28-byte credential hash as hex and a script flag.
+/// Blockfrost serves this pair (`cc_*_hex` and `cc_*_has_script`) beside each
+/// CIP-129 committee ID.
+fn committee_credential_parts(cred: &StakeCredential) -> (String, bool) {
+    match cred {
+        StakeCredential::AddrKeyhash(key) => (hex::encode(key), false),
+        StakeCredential::ScriptHash(key) => (hex::encode(key), true),
+    }
+}
+
+/// This function resolves one committee member against its hot-key
+/// authorization history.
+///
+/// The code uses the last event in the authorization history to select the
+/// status. There are three possible events:
+///
+/// - No event: the member never authorized a hot key (`not_authorized`).
+/// - A resignation: the hot key is gone (`resigned`).
+/// - A hot credential: the member can vote now (`authorized`).
+///
+/// The `cc_hot_*` fields carry the hot credential only for the `authorized`
+/// status. For the other two statuses, these fields are null. This behavior is
+/// the same as Blockfrost.
+fn committee_member(
+    gov: &GovState,
+    cold: &StakeCredential,
+    expiry: Epoch,
+) -> Result<CommitteeMembersInner, StatusCode> {
+    let (cc_cold_hex, cc_cold_has_script) = committee_credential_parts(cold);
+
+    let (status, hot) = match gov.committee_auth(cold) {
+        None => (Status::NotAuthorized, None),
+        Some(CommitteeAuthorization::Resigned(_)) => (Status::Resigned, None),
+        Some(CommitteeAuthorization::HotCredential(hot)) => (Status::Authorized, Some(hot)),
+    };
+
+    let (cc_hot_id, cc_hot_hex, cc_hot_has_script) = match hot {
+        Some(hot) => {
+            let (hex, is_script) = committee_credential_parts(hot);
+            (Some(bech32_committee_hot(hot)?), Some(hex), Some(is_script))
+        }
+        None => (None, None, None),
+    };
+
+    Ok(CommitteeMembersInner {
+        cc_cold_id: bech32_committee_cold(cold)?,
+        cc_cold_hex,
+        cc_cold_has_script,
+        cc_hot_id,
+        cc_hot_hex,
+        cc_hot_has_script,
+        status,
+        expiration_epoch: i32_or_500(expiry)?,
+    })
+}
+
+/// This function resolves all committee members against their authorization
+/// history. It orders the members by the raw cold-hash hex, as Blockfrost does.
+fn committee_members(
+    gov: &GovState,
+    members: &BTreeMap<StakeCredential, Epoch>,
+) -> Result<Vec<CommitteeMembersInner>, StatusCode> {
+    let mut rows = members
+        .iter()
+        .map(|(cold, expiry)| committee_member(gov, cold, *expiry))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    rows.sort_by(|a, b| a.cc_cold_hex.cmp(&b.cc_cold_hex));
+
+    Ok(rows)
+}
+
+/// The `GET /governance/committee` endpoint returns the constitutional
+/// committee in force. The response gives the members, the hot-key
+/// authorization status of each member, the vote threshold, and the
+/// `NewCommittee` action that seated the committee.
+///
+/// Dolos keeps three items in the governance singleton: the enacted
+/// committee, the per-member authorization history, and the root of the
+/// previous committee action. This is the same data that Blockfrost
+/// reconstructs from the db-sync tables `committee`, `committee_member`, and
+/// `committee_registration` or `_de_registration`. The Conway-genesis
+/// committee has no seating action. Its `gov_action_id`, `proposal_tx_hash`,
+/// and `proposal_index` are null.
+///
+/// A `NoConfidence` enactment dissolves the committee. Dolos does not keep the
+/// last-seated members. It sets the committee value to null. As a result, a
+/// dissolved committee has `is_dissolved` true, an empty member list, and a
+/// zero quorum. Blockfrost is different. It still returns the historical
+/// members.
+///
+/// The `is_dissolved` flag depends on evidence of a committee lineage action,
+/// not on governance activation. A previous committee action on record makes a
+/// null committee a dissolution. A null committee with no such action is not a
+/// dissolution.
+///
+/// A store migrated across the in-place upgrade gap has an unknown enact-state:
+/// a null committee with no lineage root. The endpoint does not report this
+/// state as a dissolution. A fresh sync recovers the true state. If governance
+/// is not active (`active_since` unset), no committee exists. The endpoint then
+/// returns 404 instead of an empty committee.
+pub async fn committee<D>(State(domain): State<Facade<D>>) -> Result<Json<Committee>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<GovState>: From<D::Entity>,
+{
+    let gov = domain
+        .read_cardano_entity::<GovState>(GovState::singleton_key())?
+        .filter(|gov| gov.active_since.is_some())
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let (gov_action_id, proposal_tx_hash, proposal_index) =
+        match gov.prev_gov_action_ids.committee.as_ref() {
+            Some(id) => (
+                Some(bech32_gov_action(&id.transaction_id, id.action_index)?),
+                Some(hex::encode(id.transaction_id)),
+                Some(i32_or_500(id.action_index)?),
+            ),
+            None => (None, None, None),
+        };
+
+    let (quorum, members) = match gov.committee.as_ref() {
+        Some(committee) => (
+            CommitteeQuorum {
+                numerator: i32_or_500(committee.threshold.numerator)?,
+                denominator: i32_or_500(committee.threshold.denominator)?,
+            },
+            committee_members(&gov, &committee.members)?,
+        ),
+        None => (CommitteeQuorum::default(), Vec::new()),
+    };
+
+    Ok(Json(Committee {
+        gov_action_id,
+        proposal_tx_hash,
+        proposal_index,
+        is_dissolved: gov.committee.is_none() && gov.prev_gov_action_ids.committee.is_some(),
+        quorum: Box::new(quorum),
+        members,
     }))
 }
 
@@ -2696,9 +2845,9 @@ mod tests {
     }
 
     /// CIP-129: the id is the proposing tx hash with the action index
-    /// trailing it. The first two vectors come from the Blockfrost spec kept
-    /// in `crates/minibf/openapi.yaml`; the last one pins the minimal
-    /// big-endian rule Blockfrost encodes the index with.
+    /// trailing it. The first two vectors come from the upstream Blockfrost
+    /// OpenAPI spec (see the crate README for the pinned link); the last one
+    /// pins the minimal big-endian rule Blockfrost encodes the index with.
     #[test]
     fn gov_action_id_follows_cip129() {
         let tx = Hash::<32>::from([0x11u8; 32]);
@@ -3040,5 +3189,280 @@ mod tests {
         let id = bech32_gov_action(&proposal_tx(), 0).expect("failed to encode gov action id");
         let path = format!("/governance/proposals/{id}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    fn cc_cold_key(byte: u8) -> StakeCredential {
+        StakeCredential::AddrKeyhash(Hash::from([byte; 28]))
+    }
+
+    fn cc_cold_script(byte: u8) -> StakeCredential {
+        StakeCredential::ScriptHash(Hash::from([byte; 28]))
+    }
+
+    /// This function overwrites the governance singleton with the given state.
+    fn seed_gov(domain: &ToyDomain, state: GovState) {
+        let writer = domain
+            .state()
+            .start_writer()
+            .expect("The state store cannot start a writer.");
+        writer
+            .write_entity_typed(&GovState::singleton_key(), &state)
+            .expect("The state writer cannot write the governance state.");
+        writer
+            .commit()
+            .expect("The state writer cannot commit the governance state.");
+    }
+
+    /// This function writes an active-governance committee, its per-member
+    /// authorization history, and its action root to the governance singleton.
+    /// The endpoint reads this data. The `seed_drep_anchor` helper writes
+    /// equivalent data for a DRep registration.
+    fn seed_committee(
+        domain: &ToyDomain,
+        committee: Option<dolos_cardano::model::gov::Committee>,
+        auths: BTreeMap<StakeCredential, Vec<(BlockSlot, CommitteeAuthorization)>>,
+        seating_action: Option<GovActionId>,
+    ) {
+        seed_gov(
+            domain,
+            GovState {
+                committee,
+                committee_auths: auths,
+                prev_gov_action_ids: dolos_cardano::model::gov::GovRoots {
+                    committee: seating_action,
+                    ..Default::default()
+                },
+                active_since: Some(0),
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn committee_credential_ids_follow_cip0129() {
+        // For a cold key, the high nibble is 0x1 (cold), and the low nibble is 0x2
+        // (key).
+        let cold =
+            bech32_committee_cold(&cc_cold_key(1)).expect("The encoder cannot encode the cold ID.");
+        let (hrp, payload) = bech32::decode(&cold).expect("The decoder cannot decode the cold ID.");
+        assert_eq!(hrp.as_str(), "cc_cold");
+        assert_eq!(payload[0], 0x12);
+        assert_eq!(&payload[1..], &[1u8; 28]);
+
+        // For a cold script, the low nibble is 0x3 (script).
+        let cold_script = bech32_committee_cold(&cc_cold_script(3))
+            .expect("The encoder cannot encode the cold-script ID.");
+        let (_, payload) =
+            bech32::decode(&cold_script).expect("The decoder cannot decode the cold-script ID.");
+        assert_eq!(payload[0], 0x13);
+
+        // For a hot key, the high nibble is 0x0 (hot), and the low nibble is 0x2 (key).
+        let hot =
+            bech32_committee_hot(&cc_cold_key(11)).expect("The encoder cannot encode the hot ID.");
+        let (hrp, payload) = bech32::decode(&hot).expect("The decoder cannot decode the hot ID.");
+        assert_eq!(hrp.as_str(), "cc_hot");
+        assert_eq!(payload[0], 0x02);
+
+        // For a hot script, the low nibble is 0x3 (script).
+        let hot_script = bech32_committee_hot(&cc_cold_script(9))
+            .expect("The encoder cannot encode the hot-script ID.");
+        let (_, payload) =
+            bech32::decode(&hot_script).expect("The decoder cannot decode the hot-script ID.");
+        assert_eq!(payload[0], 0x03);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_happy_path() {
+        let seating = GovActionId {
+            transaction_id: Hash::from([7u8; 32]),
+            action_index: 3,
+        };
+        let seating_for_setup = seating.clone();
+
+        let app = TestApp::new_with_cfg_and_setup(
+            SyntheticBlockConfig::default(),
+            move |domain, _vectors| {
+                let committee = dolos_cardano::model::gov::Committee {
+                    members: BTreeMap::from([
+                        (cc_cold_key(1), 100),
+                        (cc_cold_key(2), 200),
+                        (cc_cold_script(3), 300),
+                    ]),
+                    threshold: RationalNumber {
+                        numerator: 2,
+                        denominator: 3,
+                    },
+                };
+
+                let auths = BTreeMap::from([
+                    (
+                        cc_cold_key(1),
+                        vec![(10, CommitteeAuthorization::HotCredential(cc_cold_key(11)))],
+                    ),
+                    (
+                        cc_cold_script(3),
+                        vec![(20, CommitteeAuthorization::Resigned(None))],
+                    ),
+                ]);
+
+                seed_committee(domain, Some(committee), auths, Some(seating_for_setup));
+            },
+        );
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        assert_eq!(
+            model.gov_action_id,
+            Some(bech32_gov_action(&seating.transaction_id, seating.action_index).unwrap())
+        );
+        assert_eq!(model.proposal_tx_hash, Some(hex::encode([7u8; 32])));
+        assert_eq!(model.proposal_index, Some(3));
+        assert!(!model.is_dissolved);
+        assert_eq!(model.quorum.numerator, 2);
+        assert_eq!(model.quorum.denominator, 3);
+        assert_eq!(model.members.len(), 3);
+
+        // The endpoint orders the members by the raw cold-hash hex.
+        let hexes: Vec<_> = model
+            .members
+            .iter()
+            .map(|m| m.cc_cold_hex.clone())
+            .collect();
+        let mut sorted = hexes.clone();
+        sorted.sort();
+        assert_eq!(hexes, sorted);
+
+        let authorized = &model.members[0];
+        assert_eq!(authorized.cc_cold_hex, hex::encode([1u8; 28]));
+        assert!(!authorized.cc_cold_has_script);
+        assert!(authorized.cc_cold_id.starts_with("cc_cold1"));
+        assert_eq!(authorized.status, Status::Authorized);
+        assert_eq!(authorized.cc_hot_hex, Some(hex::encode([11u8; 28])));
+        assert_eq!(authorized.cc_hot_has_script, Some(false));
+        assert!(authorized
+            .cc_hot_id
+            .as_ref()
+            .expect("The authorized member has no hot ID.")
+            .starts_with("cc_hot1"));
+        assert_eq!(authorized.expiration_epoch, 100);
+
+        let unauthorized = &model.members[1];
+        assert_eq!(unauthorized.status, Status::NotAuthorized);
+        assert!(unauthorized.cc_hot_id.is_none());
+        assert!(unauthorized.cc_hot_hex.is_none());
+        assert!(unauthorized.cc_hot_has_script.is_none());
+        assert_eq!(unauthorized.expiration_epoch, 200);
+
+        let resigned = &model.members[2];
+        assert_eq!(resigned.status, Status::Resigned);
+        assert!(resigned.cc_cold_has_script);
+        assert!(resigned.cc_hot_id.is_none());
+        assert!(resigned.cc_hot_hex.is_none());
+        assert!(resigned.cc_hot_has_script.is_none());
+        assert_eq!(resigned.expiration_epoch, 300);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_genesis_has_no_seating_action() {
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                let committee = dolos_cardano::model::gov::Committee {
+                    members: BTreeMap::from([(cc_cold_key(1), 100)]),
+                    threshold: RationalNumber {
+                        numerator: 1,
+                        denominator: 2,
+                    },
+                };
+
+                seed_committee(domain, Some(committee), BTreeMap::new(), None);
+            });
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        // The Conway-genesis committee has no seating action.
+        assert!(model.gov_action_id.is_none());
+        assert!(model.proposal_tx_hash.is_none());
+        assert!(model.proposal_index.is_none());
+        assert!(!model.is_dissolved);
+        assert_eq!(model.members.len(), 1);
+        assert_eq!(model.members[0].status, Status::NotAuthorized);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_migration_gap_is_not_dissolved() {
+        // A store migrated across the in-place upgrade gap has an unknown
+        // enact-state: a null committee with no lineage root. This state is not
+        // a dissolution. The endpoint reports `is_dissolved` false and does not
+        // read the null committee as no-confidence.
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                seed_committee(domain, None, BTreeMap::new(), None);
+            });
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        assert!(!model.is_dissolved);
+        assert!(model.members.is_empty());
+        assert_eq!(model.quorum.numerator, 0);
+        assert_eq!(model.quorum.denominator, 0);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_no_confidence_is_dissolved() {
+        // A NoConfidence enactment clears the committee and writes the committee
+        // lineage root. These two changes are the evidence of a dissolution.
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                let action = GovActionId {
+                    transaction_id: Hash::from([9u8; 32]),
+                    action_index: 1,
+                };
+                seed_committee(domain, None, BTreeMap::new(), Some(action));
+            });
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        assert!(model.is_dissolved);
+        assert!(model.members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_committee_pre_conway_returns_not_found() {
+        // Before governance activates, the singleton exists but `active_since`
+        // is unset. No committee exists, so the endpoint returns 404 instead of
+        // an empty committee.
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                seed_gov(domain, GovState::default());
+            });
+
+        assert_status(&app, "/governance/committee", StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn governance_committee_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(
+            &app,
+            "/governance/committee",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
     }
 }

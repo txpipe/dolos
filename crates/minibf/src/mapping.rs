@@ -142,6 +142,8 @@ const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 const ASSET_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("asset");
 const CALIDUS_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("calidus");
 const GOV_ACTION_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("gov_action");
+const CC_COLD_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("cc_cold");
+const CC_HOT_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("cc_hot");
 
 #[inline]
 pub fn bech32(hrp: bech32::Hrp, key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
@@ -169,6 +171,36 @@ pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
     };
 
     bech32(DREP_HRP, payload)
+}
+
+/// CIP-129 credential ID for the constitutional committee.
+///
+/// The header byte contains the role in the high nibble (cold `0x1`, hot
+/// `0x0`). It contains the credential kind in the low nibble (key `0x2`, script
+/// `0x3`). The 28-byte hash follows the header byte. The `cc_cold` or `cc_hot`
+/// bech32 payload contains this header. The `..._hex` field that Blockfrost
+/// returns is the bare hash.
+fn bech32_committee(
+    hrp: bech32::Hrp,
+    role_nibble: u8,
+    cred: &StakeCredential,
+) -> Result<String, StatusCode> {
+    let (hash, is_script): (&[u8], bool) = match cred {
+        StakeCredential::AddrKeyhash(key) => (key.as_ref(), false),
+        StakeCredential::ScriptHash(key) => (key.as_ref(), true),
+    };
+
+    let header = (role_nibble << 4) | if is_script { 0x3 } else { 0x2 };
+
+    bech32(hrp, [&[header], hash].concat())
+}
+
+pub fn bech32_committee_cold(cred: &StakeCredential) -> Result<String, StatusCode> {
+    bech32_committee(CC_COLD_HRP, 0x1, cred)
+}
+
+pub fn bech32_committee_hot(cred: &StakeCredential) -> Result<String, StatusCode> {
+    bech32_committee(CC_HOT_HRP, 0x0, cred)
 }
 
 pub fn bech32_pool(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
