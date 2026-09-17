@@ -30,6 +30,9 @@ pub enum Error {
     ScanBudgetExceeded,
     InvalidCertIndex,
     InvalidGovActionId,
+    /// The path matched no route. Blockfrost answers those with a global
+    /// `400`, not a `404`.
+    InvalidPath,
 }
 
 #[derive(Serialize)]
@@ -191,6 +194,15 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "Invalid or malformed gov action id.",
+                )),
+            )
+                .into_response(),
+            Error::InvalidPath => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Invalid path.",
                 )),
             )
                 .into_response(),

@@ -19,6 +19,7 @@ use std::{
     collections::HashMap,
     ops::{Deref, Range},
 };
+use tower::Layer;
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
@@ -681,6 +682,7 @@ where
             "/governance/proposals/{gov_action_id}/parameters",
             get(routes::governance::proposal_parameters_by_gov_action::<D>),
         )
+        .fallback(routes::invalid_path)
         .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()
@@ -713,7 +715,13 @@ where
         } else {
             CorsLayer::new()
         });
-    app.layer(NormalizePathLayer::trim_trailing_slash())
+    // Added via `Router::layer`, NormalizePathLayer runs *after* route matching
+    // and never trims before routing (`/blocks/latest/` would miss its route).
+    // Wrap the router with it and nest that behind an outer `Router` via
+    // `fallback_service`, so trimming happens before routing while the public
+    // return type stays `Router` (the wrapped type is an implementation detail).
+    let normalized = NormalizePathLayer::trim_trailing_slash().layer(app);
+    Router::new().fallback_service(normalized)
 }
 
 impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver
@@ -742,5 +750,68 @@ where
             .map_err(ServeError::ShutdownError)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use serde_json::{json, Value};
+
+    use crate::test_support::TestApp;
+
+    /// Paths measured against Blockfrost on the issue that match no route:
+    /// unknown endpoints and missing segments.
+    const UNMATCHED_PATHS: &[&str] = &[
+        "/nonexistent",
+        "/foo/bar/baz",
+        "/txs",
+        "/blocks/latest/nope",
+        "/blocks/epoch/2/slot",
+    ];
+
+    #[tokio::test]
+    async fn unmatched_paths_answer_with_blockfrost_invalid_path() {
+        let app = TestApp::new();
+
+        for path in UNMATCHED_PATHS {
+            let (status, bytes) = app.get_bytes(path).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "unexpected status {status} for {path} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+
+            let body: Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| panic!("no json body for {path}"));
+            assert_eq!(
+                body,
+                json!({
+                    "status_code": 400,
+                    "error": "Bad Request",
+                    "message": "Invalid path.",
+                }),
+                "unexpected body for {path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_is_trimmed_before_routing() {
+        let app = TestApp::new();
+
+        // `/blocks/latest/` normalizes to `/blocks/latest` and resolves, the
+        // same 200 Blockfrost returns — a regression guard for the layer order.
+        let (status, _) = app.get_bytes("/blocks/latest/").await;
+        assert_eq!(status, StatusCode::OK);
+
+        // `/blocks/slot/` normalizes to `/blocks/slot`, which the
+        // `/blocks/{hash_or_number}` route rejects as a malformed hash (the
+        // same 400 Blockfrost returns), not the invalid-path fallback.
+        let (status, bytes) = app.get_bytes("/blocks/slot/").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body: Value = serde_json::from_slice(&bytes).expect("json body for /blocks/slot/");
+        assert_eq!(body["message"], json!("Missing or malformed block hash."));
     }
 }
