@@ -26,6 +26,9 @@ use crate::{
     Facade,
 };
 
+mod all;
+pub use all::all;
+
 fn parse_script_hash(script_hash: &str) -> Result<Hash<28>, StatusCode> {
     if script_hash.len() != 56 {
         return Err(StatusCode::NOT_FOUND);
