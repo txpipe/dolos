@@ -853,14 +853,68 @@ fn settle_casts<D: Domain>(
     Ok(())
 }
 
+/// This function resolves archive data and selects a vote page.
+///
+/// Rows without archived cast data do not affect page offsets. The function
+/// resolves each slot group before it counts rows.
+fn page_resolved_votes<D: Domain>(
+    domain: &D,
+    voter: &Voter,
+    rows: Vec<VoteRow>,
+    pagination: &Pagination,
+) -> Result<Vec<VoteRow>, Error> {
+    let mut groups: Vec<Vec<VoteRow>> = Vec::new();
+
+    for row in rows {
+        match groups.last_mut() {
+            Some(group) if group[0].slot == row.slot => group.push(row),
+            _ => groups.push(vec![row]),
+        }
+    }
+
+    let descending = matches!(pagination.order, Order::Desc);
+
+    if descending {
+        groups.reverse();
+    }
+
+    let from = pagination.from();
+    let mut skipped = 0;
+    let mut out = Vec::with_capacity(pagination.count);
+
+    for mut group in groups {
+        settle_casts(domain, voter, group[0].slot, &mut group)?;
+        group.retain(|row| row.cast.is_some());
+
+        if descending {
+            group.reverse();
+        }
+
+        for row in group {
+            if skipped < from {
+                skipped += 1;
+                continue;
+            }
+
+            out.push(row);
+
+            if out.len() == pagination.count {
+                return Ok(out);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
 /// This function reads DRep votes from state and adds archive data to the
 /// page.
 ///
 /// The proposal that receives a vote stores that vote. Thus, this function
 /// scans the proposal namespace for the voter. The namespace contains one row
 /// for each submitted governance action. Every action requires a deposit.
-/// `/governance/proposals` scans the same namespace. Archive reads remain
-/// limited by the page size.
+/// `/governance/proposals` scans the same namespace. This function reads no
+/// more archive blocks after it fills the requested page.
 fn vote_page<D: Domain>(
     domain: &D,
     voter: &StakeCredential,
@@ -897,16 +951,12 @@ fn vote_page<D: Domain>(
 
     let voter = drep_voter(voter);
 
-    let page = page_slot_groups(
-        rows,
-        |row| row.slot,
-        pagination,
-        |slot, group| settle_casts(domain, &voter, slot, group),
-    )?;
+    let page = page_resolved_votes(domain, &voter, rows, pagination)?;
 
     page.into_iter()
-        .filter_map(|row| row.cast.map(|cast| (cast, row)))
-        .map(|((tx, cert_index), row)| {
+        .map(|row| {
+            let (tx, cert_index) = row.cast.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
             Ok(DrepVotesInner {
                 tx_hash: hex::encode(tx),
                 cert_index: i32_or_500(cert_index)?,
@@ -1777,11 +1827,11 @@ mod tests {
     /// proposes one action. Two transactions in block 1 cast votes on all
     /// three actions. Block 2 changes the first vote. A script DRep also votes
     /// in block 1. Thus, one chain covers both CIP-129 credential variants.
-    fn drep_votes_app() -> TestApp {
+    fn drep_votes_config() -> SyntheticBlockConfig {
         let key_voter = Voter::DRepKey(Hash::from([7u8; 28]));
         let script_voter = Voter::DRepScript(Hash::from([8u8; 28]));
 
-        TestApp::new_with_cfg(SyntheticBlockConfig {
+        SyntheticBlockConfig {
             block_count: 3,
             txs_per_block: 2,
             gov_actions_by_block: vec![
@@ -1806,7 +1856,11 @@ mod tests {
                 vec![vec![synthetic_vote(key_voter, 0, 0, 0, Vote::No)]],
             ],
             ..Default::default()
-        })
+        }
+    }
+
+    fn drep_votes_app() -> TestApp {
+        TestApp::new_with_cfg(drep_votes_config())
     }
 
     async fn get_drep_votes(app: &TestApp, drep: &str, query: &str) -> Vec<DrepVotesInner> {
@@ -1891,6 +1945,27 @@ mod tests {
         );
 
         assert!(get_drep_votes(&app, drep, "?page=9").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_excludes_pruned_rows_before_pagination() {
+        let app = TestApp::new_with_cfg_and_setup(drep_votes_config(), |domain, _| {
+            domain
+                .archive()
+                .prune_history(0, None)
+                .expect("The archive did not prune its history.");
+        });
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "?count=1").await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, app.vectors().blocks[2].tx_hashes[0]);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::No);
+
+        assert!(
+            get_drep_votes(&app, &app.vectors().drep_id, "?count=1&page=2")
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
