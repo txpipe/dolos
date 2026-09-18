@@ -110,6 +110,12 @@ pub mod archive {
         /// stores keep verbatim instead of hashing (see
         /// [`dolos_core::key_hash`]).
         METADATA = dolos_core::VERBATIM_KEY_DIMENSION;
+
+        /// Pool operator hash of the block issuer.
+        ///
+        /// Blockfrost lists the blocks a pool minted. Byron blocks carry no
+        /// issuer, so only Shelley-era blocks onward are tagged.
+        POOL_BLOCKS = "pool_blocks";
     }
 }
 
@@ -148,6 +154,7 @@ mod tests {
                 "pool_certs",
                 "account_withdrawals",
                 "metadata",
+                "pool_blocks",
             ]
         );
     }
