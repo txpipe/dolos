@@ -23,7 +23,7 @@ use pallas::{
         primitives::{
             alonzo,
             conway::{
-                Anchor, Certificate, DatumOption, GovAction, PlutusData, PlutusScript,
+                Anchor, Certificate, DRep, DatumOption, GovAction, PlutusData, PlutusScript,
                 PostAlonzoTransactionOutput, ProposalProcedure, ScriptRef, TransactionBody,
                 TransactionOutput, Value, WitnessSet,
             },
@@ -788,13 +788,22 @@ fn sample_transaction(
     };
 
     let delegation = Certificate::StakeDelegation(stake_cred.clone(), pool_keyhash);
-    let registration = Certificate::StakeRegistration(stake_cred);
+    let registration = Certificate::StakeRegistration(stake_cred.clone());
 
     let drep_cred = StakeCredential::AddrKeyhash(AddrKeyhash::from(drep_keyhash));
     let drep_cert = Certificate::RegDRepCert(drep_cred, drep_deposit, None);
+    // The stake credential delegates its vote to the DRep in the same tx that
+    // registers the DRep.
+    let vote_delegation = Certificate::VoteDeleg(stake_cred, DRep::Key(drep_keyhash.into()));
 
-    let certificates = NonEmptySet::try_from(vec![registration, delegation, pool_cert, drep_cert])
-        .expect("non-empty certificates");
+    let certificates = NonEmptySet::try_from(vec![
+        registration,
+        delegation,
+        pool_cert,
+        drep_cert,
+        vote_delegation,
+    ])
+    .expect("non-empty certificates");
 
     let body = TransactionBody {
         inputs: Set::from(vec![input]),
