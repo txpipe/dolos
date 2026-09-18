@@ -12,7 +12,7 @@
 //! Per namespace, a **canary**: a fully-populated value ([`canaries`]) and the
 //! hex of its encoding at the current `SCHEMA_REVS` revision. The encoding is
 //! taken through the production path — `Entity::encode_entity` for the
-//! thirteen entity namespaces, `layers::state::encode_utxo_value` for `utxos`,
+//! fifteen entity namespaces, `layers::state::encode_utxo_value` for `utxos`,
 //! the one namespace whose value this profile builds rather than carries.
 //!
 //! ## Append-only history
@@ -58,7 +58,7 @@ pub mod ground_rules;
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
     FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
-    StakeLog,
+    ScriptSeqState, ScriptState, StakeLog,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -257,6 +257,24 @@ pub fn registry() -> Vec<Entry> {
             &[Pinned {
                 rev: 1,
                 hex: include_str!("goldens/proposals.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_script_seqs,
+            ScriptSeqState,
+            canaries::script_seq_state,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/script_seqs.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_scripts,
+            ScriptState,
+            canaries::script_state,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/scripts.rev1.hex"),
             }]
         ),
         entity_entry!(
