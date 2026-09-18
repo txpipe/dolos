@@ -77,7 +77,7 @@ where
                 .archive()
                 .get_tip()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
             if *number > tip {
                 return Err(Error::InvalidBlockNumber);
