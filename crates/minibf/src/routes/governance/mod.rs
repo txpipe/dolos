@@ -1870,8 +1870,15 @@ mod tests {
         let descending = get_drep_votes(&app, drep, "?order=desc").await;
 
         assert_eq!(
-            descending.iter().map(|row| &row.tx_hash).collect_vec(),
-            ascending.iter().rev().map(|row| &row.tx_hash).collect_vec()
+            descending
+                .iter()
+                .map(|row| (&row.tx_hash, row.cert_index, &row.proposal_id))
+                .collect_vec(),
+            ascending
+                .iter()
+                .rev()
+                .map(|row| (&row.tx_hash, row.cert_index, &row.proposal_id))
+                .collect_vec()
         );
 
         let page = get_drep_votes(&app, drep, "?count=2&page=2").await;
