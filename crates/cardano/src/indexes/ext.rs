@@ -189,6 +189,18 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
         self.slots_by_tag(archive::METADATA, &label.to_be_bytes(), start, end)
     }
 
+    /// Iterate over slots of blocks that a pool minted.
+    ///
+    /// The key is the pool operator hash. Byron blocks are never listed.
+    fn slots_by_pool_blocks(
+        &self,
+        pool: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(archive::POOL_BLOCKS, pool, start, end)
+    }
+
     // ============ Bulk Export ============
 
     /// Iterate every archive tag record in `slots`, across every Cardano
