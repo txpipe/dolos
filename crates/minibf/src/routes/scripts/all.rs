@@ -190,3 +190,133 @@ where
 
     Ok(Json(items))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{TestApp, TestFault};
+    use dolos_testing::synthetic::SyntheticBlockConfig;
+    use itertools::Itertools;
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    async fn get_scripts(app: &TestApp, query: &str) -> Vec<String> {
+        let path = format!("/scripts{query}");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} for {path} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let items: Vec<ScriptsInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse scripts");
+
+        items.into_iter().map(|x| x.script_hash).collect()
+    }
+
+    /// The first tx of every synthetic block carries the same two scripts: a
+    /// native one as the reference script of its output and a plutus one as a
+    /// witness. That is the listing order, and what every later block repeats.
+    fn expected(app: &TestApp) -> Vec<String> {
+        vec![
+            app.vectors().script_hash.clone(),
+            app.vectors().plutus_script_hash.clone(),
+        ]
+    }
+
+    #[tokio::test]
+    async fn scripts_all_happy_path() {
+        let app = TestApp::new();
+
+        // three blocks repeat the scripts, each one is listed once
+        let scripts = get_scripts(&app, "").await;
+        assert_eq!(scripts, expected(&app));
+
+        // everything listed resolves
+        for script in scripts {
+            assert_status(&app, &format!("/scripts/{script}"), StatusCode::OK).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn scripts_all_order_desc() {
+        let app = TestApp::new();
+
+        let desc = get_scripts(&app, "?order=desc").await;
+        let reversed = expected(&app).into_iter().rev().collect_vec();
+        assert_eq!(desc, reversed);
+    }
+
+    #[tokio::test]
+    async fn scripts_all_paginates_in_both_orders() {
+        let app = TestApp::new();
+        let expected = expected(&app);
+
+        // asc: page 2 of size 1 is the second script ever seen
+        let page = get_scripts(&app, "?order=asc&page=2&count=1").await;
+        assert_eq!(page, vec![expected[1].clone()]);
+
+        // desc: page 1 of size 1 is the newest script
+        let page = get_scripts(&app, "?order=desc&page=1&count=1").await;
+        assert_eq!(page, vec![expected[1].clone()]);
+
+        // desc: page 2 of size 1 is the oldest script
+        let page = get_scripts(&app, "?order=desc&page=2&count=1").await;
+        assert_eq!(page, vec![expected[0].clone()]);
+
+        // a page past the end is empty, not an error
+        let page = get_scripts(&app, "?page=3&count=1").await;
+        assert!(page.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scripts_all_stops_at_scan_budget() {
+        // four blocks carrying the same scripts: only the first block shows
+        // new ones, so anything past two scripts costs blocks and yields
+        // nothing
+        let app = TestApp::new_with_scan_limit(
+            SyntheticBlockConfig {
+                block_count: 4,
+                txs_per_block: 1,
+                ..Default::default()
+            },
+            3,
+        );
+
+        // a page the scan covers before the budget runs out is served
+        let page = get_scripts(&app, "?count=2").await;
+        assert_eq!(page.len(), 2);
+
+        // a page that would need a fourth block is refused, not truncated
+        let (status, bytes) = app.get_bytes("/scripts?count=3").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("archive blocks"), "unexpected body: {body}");
+    }
+
+    #[tokio::test]
+    async fn scripts_all_bad_request() {
+        let app = TestApp::new();
+        assert_status(&app, "/scripts?count=0", StatusCode::BAD_REQUEST).await;
+        assert_status(&app, "/scripts?page=x", StatusCode::BAD_REQUEST).await;
+        assert_status(&app, "/scripts?order=sideways", StatusCode::BAD_REQUEST).await;
+        // page * count beyond the default scan limit (3000)
+        assert_status(&app, "/scripts?page=31&count=100", StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn scripts_all_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        assert_status(&app, "/scripts", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+}
