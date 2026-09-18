@@ -30,6 +30,7 @@ pub mod dreps;
 pub mod epochs;
 pub mod pools;
 pub mod proposals;
+pub mod scripts;
 pub mod txs;
 pub mod work_unit;
 
@@ -43,6 +44,7 @@ use datums::DatumVisitor;
 use dreps::{DRepStateVisitor, DormancyContext};
 use epochs::EpochStateVisitor;
 use pools::PoolStateVisitor;
+use scripts::{block_script_hashes, ScriptRegistryContext, ScriptRegistryVisitor};
 use txs::TxLogVisitor;
 
 pub trait BlockVisitor {
@@ -225,6 +227,7 @@ pub struct DeltaBuilder<'a> {
     pool_state: PoolStateVisitor,
     tx_logs: TxLogVisitor,
     proposal_logs: ProposalVisitor,
+    script_registry: ScriptRegistryVisitor,
 }
 
 impl<'a> DeltaBuilder<'a> {
@@ -238,6 +241,7 @@ impl<'a> DeltaBuilder<'a> {
         work: &'a mut WorkBlock,
         utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
         dormancy: DormancyContext,
+        script_registry: ScriptRegistryVisitor,
     ) -> Self {
         Self {
             genesis,
@@ -255,6 +259,7 @@ impl<'a> DeltaBuilder<'a> {
             pool_state: Default::default(),
             tx_logs: Default::default(),
             proposal_logs: Default::default(),
+            script_registry,
         }
     }
 
@@ -264,6 +269,12 @@ impl<'a> DeltaBuilder<'a> {
     /// the context into the next block's builder.
     pub fn take_dormancy(&mut self) -> DormancyContext {
         self.drep_state.take_dormancy()
+    }
+
+    /// The script registry context after this block's deltas: the scripts it
+    /// registered and the sequence numbers it used up.
+    pub fn take_script_registry(&mut self) -> ScriptRegistryContext {
+        self.script_registry.take_context()
     }
 
     pub fn crawl(&mut self) -> Result<(), ChainError> {
@@ -335,6 +346,15 @@ impl<'a> DeltaBuilder<'a> {
             self.protocol,
         )?;
         self.proposal_logs.visit_root(
+            &mut deltas,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
+        )?;
+        self.script_registry.visit_root(
             &mut deltas,
             block,
             &self.genesis,
@@ -626,7 +646,19 @@ pub(crate) fn compute_delta<D: Domain>(
         dormancy.drep_keys = Arc::new(keys);
     }
 
-    for block in batch.blocks.iter_mut() {
+    // Script registry context: which of the scripts the batch carries are
+    // registered already, and the next free sequence number. Like dormancy it
+    // evolves across the blocks of the batch, so it's taken back after each
+    // crawl.
+    let carried: Vec<_> = batch
+        .blocks
+        .iter()
+        .map(|block| block_script_hashes(block.decoded().view()))
+        .collect();
+
+    let mut script_registry = ScriptRegistryContext::load(state, &carried)?;
+
+    for (block, carried) in batch.blocks.iter_mut().zip(carried) {
         let mut builder = DeltaBuilder::new(
             genesis.clone(),
             *protocol,
@@ -636,11 +668,13 @@ pub(crate) fn compute_delta<D: Domain>(
             block,
             &batch.utxos_decoded,
             std::mem::take(&mut dormancy),
+            ScriptRegistryVisitor::new(std::mem::take(&mut script_registry), carried),
         );
 
         builder.crawl()?;
 
         dormancy = builder.take_dormancy();
+        script_registry = builder.take_script_registry();
 
         // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
         // this into the entity system. (#1042)
@@ -804,6 +838,7 @@ mod tests {
             &mut work,
             &utxos,
             DormancyContext::default(),
+            ScriptRegistryVisitor::default(),
         );
 
         builder.crawl().unwrap();
