@@ -137,6 +137,16 @@ impl TestApp {
         Self::from_domain(domain, vectors, None, Some(max_scan_items))
     }
 
+    pub fn new_with_scan_limit_and_setup(
+        cfg: SyntheticBlockConfig,
+        max_scan_items: u64,
+        setup: impl FnOnce(&ToyDomain, &SyntheticVectors),
+    ) -> Self {
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        setup(&domain, &vectors);
+        Self::from_domain(domain, vectors, None, Some(max_scan_items))
+    }
+
     fn from_domain(
         domain: ToyDomain,
         vectors: SyntheticVectors,

@@ -856,12 +856,14 @@ fn settle_casts<D: Domain>(
 /// This function resolves archive data and selects a vote page.
 ///
 /// Rows without archived cast data do not affect page offsets. The function
-/// resolves each slot group before it counts rows.
+/// resolves each slot group before it counts rows. `budget` limits the number
+/// of slot groups that the function can resolve.
 fn page_resolved_votes<D: Domain>(
     domain: &D,
     voter: &Voter,
     rows: Vec<VoteRow>,
     pagination: &Pagination,
+    budget: usize,
 ) -> Result<Vec<VoteRow>, Error> {
     let mut groups: Vec<Vec<VoteRow>> = Vec::new();
 
@@ -882,7 +884,11 @@ fn page_resolved_votes<D: Domain>(
     let mut skipped = 0;
     let mut out = Vec::with_capacity(pagination.count);
 
-    for mut group in groups {
+    for (scanned, mut group) in groups.into_iter().enumerate() {
+        if scanned == budget {
+            return Err(Error::ScanBudgetExceeded);
+        }
+
         settle_casts(domain, voter, group[0].slot, &mut group)?;
         group.retain(|row| row.cast.is_some());
 
@@ -919,6 +925,7 @@ fn vote_page<D: Domain>(
     domain: &D,
     voter: &StakeCredential,
     pagination: &Pagination,
+    budget: usize,
 ) -> Result<Vec<DrepVotesInner>, Error> {
     let mut rows = Vec::new();
 
@@ -951,7 +958,7 @@ fn vote_page<D: Domain>(
 
     let voter = drep_voter(voter);
 
-    let page = page_resolved_votes(domain, &voter, rows, pagination)?;
+    let page = page_resolved_votes(domain, &voter, rows, pagination, budget)?;
 
     page.into_iter()
         .map(|row| {
@@ -984,6 +991,7 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
     let (_, drep_bytes, _, is_special_case) = parse_drep_id(&drep_id)?;
 
@@ -994,10 +1002,11 @@ where
     }
 
     let voter = drep_credential(&drep_bytes)?;
+    let budget = domain.config.max_scan_items() as usize;
 
     let page = domain
         .query()
-        .run_blocking(move |domain| Ok(vote_page(&domain, &voter, &pagination)))
+        .run_blocking(move |domain| Ok(vote_page(&domain, &voter, &pagination, budget)))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
@@ -1966,6 +1975,36 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_stops_at_scan_budget() {
+        let app = TestApp::new_with_scan_limit_and_setup(drep_votes_config(), 1, |domain, _| {
+            domain
+                .archive()
+                .prune_history(0, None)
+                .expect("The archive did not prune its history.");
+        });
+        let path = format!("/governance/dreps/{}/votes?count=1", app.vectors().drep_id);
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(
+            body.contains("archive blocks"),
+            "The response body was {body}."
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_rejects_deep_page() {
+        let app = TestApp::new_with_scan_limit(drep_votes_config(), 3);
+        let path = format!(
+            "/governance/dreps/{}/votes?count=2&page=2",
+            app.vectors().drep_id
+        );
+
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]
