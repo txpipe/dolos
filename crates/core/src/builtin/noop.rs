@@ -224,6 +224,16 @@ impl ArchiveStore for NoOpArchiveStore {
         Ok(EmptySlotIter)
     }
 
+    fn addresses_by_stake_log(
+        &self,
+        _stake: &[u8],
+        _offset: usize,
+        _limit: usize,
+        _reverse: bool,
+    ) -> Result<Vec<Vec<u8>>, ArchiveError> {
+        Ok(Vec::new())
+    }
+
     /// Errors rather than yielding an empty iteration: this seam's callers
     /// publish the iterated records as a signed snapshot layer, and a
     /// well-formed *empty* layer from an index-less node is indistinguishable
