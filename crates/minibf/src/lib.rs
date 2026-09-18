@@ -431,6 +431,10 @@ where
             get(routes::addresses::by_address::<D>),
         )
         .route(
+            "/addresses/{address}/extended",
+            get(routes::addresses::extended::<D>),
+        )
+        .route(
             "/addresses/{address}/utxos",
             get(routes::addresses::utxos::<D>),
         )
