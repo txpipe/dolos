@@ -28,9 +28,6 @@ pub enum Error {
     /// runs out at the same point: it is the page that has to shrink, not the
     /// node that has to recover.
     ScanBudgetExceeded,
-    /// The node prunes its archive, so it no longer holds the history the
-    /// answer has to be read from.
-    HistoryPruned,
     InvalidCertIndex,
     InvalidGovActionId,
 }
@@ -176,15 +173,6 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "The requested page needs more archive blocks than this node is willing to scan, reduce page number or count.",
-                )),
-            )
-                .into_response(),
-            Error::HistoryPruned => (
-                StatusCode::NOT_IMPLEMENTED,
-                Json(ErrorBody::new(
-                    501,
-                    "Not Implemented",
-                    "This node prunes its chain history and cannot serve this endpoint.",
                 )),
             )
                 .into_response(),
