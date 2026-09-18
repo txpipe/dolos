@@ -51,7 +51,7 @@ enum Command {
     /// Commands to fix problems
     Doctor(doctor::Args),
 
-    /// Commands to publish this node's data as a Stelae snapshot
+    /// Inspect and reproduce Stelae snapshots for this node
     Snapshot(snapshot::Args),
 
     /// Bootstrap the node using Mithril
@@ -98,7 +98,7 @@ fn main() -> Result<()> {
         (Ok(config), Command::Serve(args)) => serve::run(config, &args),
         (Ok(config), Command::Eval(args)) => eval::run(&config, &args),
         (Ok(config), Command::Doctor(args)) => doctor::run(&config, &args, &feedback),
-        (Ok(config), Command::Snapshot(args)) => snapshot::run(&config, &args, &feedback),
+        (Ok(config), Command::Snapshot(args)) => snapshot::run(&config, &args),
 
         // the init command is special because it knows how to execute with or without a valid
         // configuration, that is why we pass the whole result and let the command logic decide what

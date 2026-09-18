@@ -120,8 +120,8 @@ fn client_builder(config: &MithrilConfig) -> ClientBuilder {
 
 /// The highest immutable file number any aggregator snapshot covers.
 ///
-/// What `snapshot backfill` sizes its next download window against, and how it
-/// knows the aggregator has nothing past the files already on disk.
+/// What an embedding backfill host sizes its next download window against, and
+/// how it knows the aggregator has nothing past the files already on disk.
 pub async fn latest_immutable_file(config: &MithrilConfig) -> MithrilResult<u64> {
     let client = client_builder(config).build()?;
 

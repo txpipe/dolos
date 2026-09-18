@@ -60,23 +60,22 @@ print(json.dumps(api.block_latest().to_dict(), indent=2))
 ### Using a Tx Builder
 
 The endpoints required for most tx builders to work are supported. Libraries like Lucid, Lucid-evolution, Blaze, MeshJS, etc can be used by pointing their corresponding provider configuration to Dolos Mini-BF endpoint.
- 
 
 ## Configuration
 
 The `serve.minibf` section controls the options for the MiniBF endpoint that can be used by clients.
 
-| property           | type    | example                          |
-| ------------------ | ------- | -------------------------------- |
-| listen_address     | string  | "[::]:3000"                     |
-| permissive_cors    | boolean | true                             |
-| token_registry_url | string  | "https://token-registry.io"     |
-| url                | string  | "https://minibf.local"          |
-| max_scan_items     | integer | 3000                             |
+| property           | type    | example                     |
+| ------------------ | ------- | --------------------------- |
+| listen_address     | string  | "[::]:3000"                 |
+| permissive_cors    | boolean | true                        |
+| token_registry_url | string  | "https://token-registry.io" |
+| url                | string  | "https://minibf.local"      |
+| max_scan_items     | integer | 3000                        |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin.
-- `token_registry_url`: optional token registry base URL used for off-chain asset metadata. 
+- `token_registry_url`: optional token registry base URL used for off-chain asset metadata.
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
 
@@ -106,6 +105,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/accounts/{stake_address}`                                | Get account information for a stake address              |
 | `/accounts/{stake_address}/addresses`                      | Get addresses for a stake address                        |
 | `/accounts/{stake_address}/addresses/assets`               | Get assets held across a stake address's addresses       |
+| `/accounts/{stake_address}/addresses/total`                | Get lifetime received/sent totals for a stake address    |
 | `/accounts/{stake_address}/delegations`                    | Get delegations for a stake address                      |
 | `/accounts/{stake_address}/history`                        | Get the per-epoch stake history for a stake address      |
 | `/accounts/{stake_address}/registrations`                  | Get registrations for a stake address                    |
@@ -129,6 +129,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/blocks/latest`                                           | Get latest block information                             |
 | `/blocks/latest/txs`                                       | Get transactions for the latest block                    |
 | `/blocks/latest/txs/cbor`                                  | Get transactions with CBOR data for the latest block     |
+| `/blocks/epoch/{epoch_number}/slot/{slot_number}`          | Get block by epoch and epoch-relative slot               |
 | `/blocks/slot/{slot_number}`                               | Get block by slot number                                 |
 | `/blocks/{hash_or_number}`                                 | Get block information                                    |
 | `/blocks/{hash_or_number}/addresses`                       | Get addresses in a specific block                        |
@@ -147,11 +148,17 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/epochs/{epoch}/stakes`                                   | Get epoch stake distribution                             |
 | `/epochs/{epoch}/stakes/{pool_id}`                         | Get epoch stake distribution for a specific pool         |
 | `/genesis`                                                 | Get genesis information                                  |
+| `/governance/committee`                                    | Get the current constitutional committee                 |
 | `/governance/dreps/{drep_id}`                              | Get DRep information                                     |
+| `/governance/dreps/{drep_id}/metadata`                     | Get DRep metadata                                        |
 | `/governance/proposals`                                    | Get list of governance proposals                         |
 | `/governance/proposals/{tx_hash}/{cert_index}`             | Get governance proposal information                      |
 | `/governance/proposals/{gov_action_id}`                    | Get governance proposal by CIP-129 action id             |
+| `/governance/proposals/{gov_action_id}/metadata`           | Get metadata of a proposal by CIP-129 id                 |
+| `/governance/proposals/{gov_action_id}/parameters`         | Get parameter change of a proposal by CIP-129 id         |
 | `/governance/proposals/{gov_action_id}/withdrawals`        | Get withdrawals of a proposal by CIP-129 id              |
+| `/governance/proposals/{tx_hash}/{cert_index}/metadata`    | Get metadata of a specific proposal                      |
+| `/governance/proposals/{tx_hash}/{cert_index}/parameters`  | Get parameter change of a specific proposal              |
 | `/governance/proposals/{tx_hash}/{cert_index}/withdrawals` | Get withdrawals of a specific proposal                   |
 | `/metadata/txs/labels/{label}`                             | Get metadata for transactions with a specific label      |
 | `/metadata/txs/labels/{label}/cbor`                        | Get CBOR metadata for transactions with a specific label |
@@ -187,3 +194,8 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/txs/{tx_hash}/stakes`                                    | Get stakes for a specific transaction                    |
 | `/txs/{tx_hash}/utxos`                                     | Get UTXOs for a specific transaction                     |
 | `/txs/{tx_hash}/withdrawals`                               | Get withdrawals for a specific transaction               |
+| `/utils/addresses/xpub/{xpub}/{role}/{index}`              | Derive an address from an xpub                           |
+
+## Lifetime totals and `sync.max_history`
+
+`/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` fold every transaction kept in the archive. When `sync.max_history` is set, blocks pruned by housekeeping are not counted, so the sums and `tx_count` only cover the retained window. Run with full history if you need true lifetime totals.

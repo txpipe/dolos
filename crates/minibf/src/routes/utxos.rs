@@ -1,11 +1,11 @@
 use axum::http::StatusCode;
-use futures::future::join_all;
 use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraOutput;
 use std::collections::{HashMap, HashSet};
 
 use dolos_cardano::indexes::AsyncCardanoQueryExt;
-use dolos_core::{async_query::BlockRefMeta, Domain, StateStore as _, TxHash, TxoIdx, TxoRef};
+use dolos_core::async_query::BlockMetaResolver;
+use dolos_core::{Domain, StateStore as _, TxHash, TxoIdx, TxoRef};
 
 use crate::{
     mapping::{IntoModel, UtxoOutputModelBuilder},
@@ -35,21 +35,11 @@ where
         .try_collect()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let tx_deps: Vec<_> = utxos.keys().map(|txoref| txoref.0).unique().collect();
-    let block_deps: HashMap<TxHash, BlockRefMeta> = join_all(tx_deps.iter().map(|tx| {
-        let tx = *tx;
-        async move {
-            match domain.query().block_meta_by_tx_hash(tx.to_vec()).await {
-                Ok(Some(block_data)) => Some(Ok((tx, block_data))),
-                Ok(None) => None,
-                Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
-            }
-        }
-    }))
-    .await
-    .into_iter()
-    .flatten()
-    .collect::<Result<_, _>>()?;
+    let mut block_meta = BlockMetaResolver::new(domain.query());
+    let block_deps = block_meta
+        .resolve_batch(utxos.keys().map(|txo_ref| txo_ref.0))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut models: Vec<_> = utxos
         .into_iter()

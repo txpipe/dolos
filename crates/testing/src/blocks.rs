@@ -15,6 +15,24 @@ use pallas::{
 };
 use std::collections::BTreeMap;
 
+/// Write one deterministic immutable chunk and an excluded volatile tail.
+pub fn write_immutable_fixture(dir: &std::path::Path, blocks: &[RawBlock]) {
+    let mut primary = vec![1u8];
+    let mut secondary = Vec::new();
+    let mut chunk = Vec::new();
+    for (index, body) in blocks.iter().enumerate() {
+        primary.extend_from_slice(&((index * 56) as u32).to_be_bytes());
+        secondary.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
+        secondary.extend_from_slice(&[0u8; 48]);
+        chunk.extend_from_slice(body);
+    }
+    primary.extend_from_slice(&((blocks.len() * 56) as u32).to_be_bytes());
+    std::fs::write(dir.join("00000.primary"), primary).unwrap();
+    std::fs::write(dir.join("00000.secondary"), secondary).unwrap();
+    std::fs::write(dir.join("00000.chunk"), chunk).unwrap();
+    std::fs::write(dir.join("00001.chunk"), []).unwrap();
+}
+
 pub fn slot_to_hash(slot: u64) -> BlockHash {
     let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
     hasher.input(&(slot as i32).to_le_bytes());

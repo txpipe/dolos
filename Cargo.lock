@@ -433,7 +433,7 @@ checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
  "bitcoin_hashes",
  "rand 0.8.6",
- "rand_core 0.5.1",
+ "rand_core 0.6.4",
  "serde",
  "unicode-normalization",
 ]
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "dolos"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1420,7 +1420,6 @@ dependencies = [
  "dolos-testing",
  "dolos-trp",
  "flate2",
- "fs4",
  "futures-core",
  "futures-util",
  "gasket",
@@ -1473,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-cardano"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1501,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-core"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "dolos-testing",
  "futures-core",
@@ -1527,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-fjall"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "bincode 1.3.3",
  "dolos-core",
@@ -1543,8 +1542,9 @@ dependencies = [
 
 [[package]]
 name = "dolos-flatfiles"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
+ "rayon",
  "sha2 0.10.9",
  "tempfile",
  "zstd",
@@ -1552,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-minibf"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "axum 0.8.4",
  "base58",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-minikupo"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "axum 0.8.4",
  "base58",
@@ -1609,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-mithril"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "dolos-core",
  "mithril-client",
@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-redb3"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "bincode 1.3.3",
  "dolos-core",
@@ -1643,15 +1643,13 @@ dependencies = [
 
 [[package]]
 name = "dolos-snapshot"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "dolos-cardano",
  "dolos-core",
- "dolos-flatfiles",
- "dolos-mithril",
+ "dolos-fjall",
  "dolos-testing",
  "hex",
- "itertools 0.14.0",
  "minicbor 0.26.4",
  "pallas",
  "rustls",
@@ -1661,15 +1659,14 @@ dependencies = [
  "stelae-driver",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
- "tokio-util",
  "toml 0.8.20",
  "tracing",
+ "zstd",
 ]
 
 [[package]]
 name = "dolos-testing"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "bech32 0.9.1",
  "dolos-cardano",
@@ -1682,6 +1679,7 @@ dependencies = [
  "itertools 0.14.0",
  "pallas",
  "rand 0.9.3",
+ "serde",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -1689,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-trp"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "base64 0.22.1",
  "bincode 1.3.3",
@@ -2230,6 +2228,7 @@ checksum = "765c9198f173dd59ce26ff9f95ef0aafd0a0fe01fb9d72841bc5066a4c06511d"
 dependencies = [
  "base64 0.21.7",
  "byteorder",
+ "crossbeam-channel",
  "flate2",
  "nom 7.1.3",
  "num-traits",
@@ -3685,9 +3684,9 @@ checksum = "1036865bb9422d3300cf723f657c2851d0e9ab12567854b1f4eba3d77decf564"
 
 [[package]]
 name = "pallas"
-version = "1.1.1"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "846ff0e3269c223e6ed6202eca1dc98399bc85f7db9be4e4574fab778cfa981b"
+checksum = "2d0c4055a1a049ce7a04700dadf377155ef036a27455a8ac4e63fbf283d0cc9f"
 dependencies = [
  "pallas-addresses",
  "pallas-codec",
@@ -3704,9 +3703,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-addresses"
-version = "1.1.1"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d10fe64a9b5b4b72d1e9ed3a802a6d87a204385a48bdca0136f7fb9ff8be73f"
+checksum = "c5c732645954bdad3650d14a662de055600a783662df00c949dd3dbc309eb50b"
 dependencies = [
  "base58",
  "bech32 0.11.1",
@@ -3720,9 +3719,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-codec"
-version = "1.1.1"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84f558ab7f9d4057aba59a3c8f18dcc06876d803dabced52c431b4ae5b137b2a"
+checksum = "6b0fc6266d38846c1f87b42fc201ad87fbdb18357ce9527a7f844a31b84d6b7c"
 dependencies = [
  "hex",
  "minicbor 0.26.4",
@@ -3732,9 +3731,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-configs"
-version = "1.1.1"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9413d9d84c67434857c08ec2d92c96452671c68fb1921c0c1999a7a699587186"
+checksum = "86000c9ec3e49b6eec784a76e14e2faa201f10befc280e7fe87fe15c0098b567"
 dependencies = [
  "base64 0.22.1",
  "num-rational",
@@ -3748,9 +3747,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-crypto"
-version = "1.1.1"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5abe09448466b168f50eb0beaae4e38a16e49bdfe6b2fba5748ea17a025b15b1"
+checksum = "793988e0ec31b615b809d940945d001faff5db8e27364b351205086cf33ba613"
 dependencies = [
  "cryptoxide 0.4.4",
  "hex",
@@ -3762,9 +3761,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-hardano"
-version = "1.1.1"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adf818b49428697b0d0d5e680fecffa94020b141460dc6ebfe45295b43c8a6b1"
+checksum = "11d1ac1e6aef4f82c02fd6a5af7ce52d96ccd590a92b0e56ff2813af10d06db4"
 dependencies = [
  "binary-layout",
  "hex",
@@ -3783,9 +3782,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-network"
-version = "1.1.1"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4854a1aacddb0021d35469a961e494cb6d2bd2d6de82c6ee4ca2768861cf16cb"
+checksum = "849e12be145235443d0d4e345b9825edb98419574e3f7e3b85c025230ec006e7"
 dependencies = [
  "byteorder",
  "hex",
@@ -3801,9 +3800,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-primitives"
-version = "1.1.1"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35c2b627b97f708bbb0252834e300d56b1ccea9c982c0e4189d1a414c1b53c18"
+checksum = "58a9a8976244dfa57532952ad7e0463916e1dd39e3dea80a007478bce52eda10"
 dependencies = [
  "hex",
  "pallas-codec",
@@ -3814,9 +3813,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-traverse"
-version = "1.1.1"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba24ccce6561ab01d910aa8a89abf7f949f4009c0e36771e763f09d3efba1eed"
+checksum = "a2a2ecdd57afc8477d621a5c5a3392b060703eaaaf64238687eadc9f82222063"
 dependencies = [
  "hex",
  "itertools 0.14.0",
@@ -3831,9 +3830,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-txbuilder"
-version = "1.1.1"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24573093e2c342a63cda545ef799c51248a9ccb07061a9de0f2126b694830697"
+checksum = "e5305c6331f2151e995634ddd1f7f27ca14ee58b5c5b5fa661aae69e54ef7d02"
 dependencies = [
  "hex",
  "pallas-addresses",
@@ -3848,9 +3847,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-utxorpc"
-version = "1.1.1"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb8a5432ea38e559378d5872d012c5cf34df95e0ed7e5a224aa2645ce57f9675"
+checksum = "0b73e671c76477ea0d7b6e00686e3175def18682f99a5330aac2af2e338f7b61"
 dependencies = [
  "pallas-codec",
  "pallas-crypto",
@@ -3863,9 +3862,9 @@ dependencies = [
 
 [[package]]
 name = "pallas-validate"
-version = "1.1.1"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfaac47eb61c648c32cb98bd9fc74414bd173ee57b17c59412242731d0365964"
+checksum = "d3a8b152b8a7e0072ac8cf80fbd1b1ab069033469e8f97fe381c907c025d418a"
 dependencies = [
  "amaru-uplc",
  "chrono",
@@ -4721,9 +4720,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.42"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "log",
  "once_cell",
@@ -4794,9 +4793,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -7109,19 +7108,34 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum 0.8.4",
  "bech32 0.11.1",
+ "chrono",
  "clap",
  "dolos",
  "dolos-cardano",
  "dolos-core",
+ "dolos-flatfiles",
+ "dolos-minibf",
+ "dolos-testing",
+ "hdrhistogram",
  "hex",
+ "libc",
  "pallas",
  "postgres",
  "postgres-native-tls",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
  "toml 0.8.20",
+ "tonic 0.12.3",
+ "tower 0.4.13",
+ "vergen-gitcl",
  "xshell",
+ "zstd",
 ]
 
 [[package]]

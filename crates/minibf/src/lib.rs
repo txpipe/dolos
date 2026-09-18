@@ -6,7 +6,8 @@ use axum::{
 };
 use dolos_cardano::{
     model::{
-        AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState, ProposalState,
+        gov::GovState, AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState,
+        ProposalState,
     },
     ChainSummary, PParamsSet, StakeLog,
 };
@@ -352,6 +353,7 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
+    Option<GovState>: From<D::Entity>,
 {
     build_router_with_facade(Facade::<D> {
         inner: domain,
@@ -369,6 +371,7 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
+    Option<GovState>: From<D::Entity>,
 {
     let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
@@ -398,6 +401,10 @@ where
         .route(
             "/accounts/{stake_address}/addresses/assets",
             get(routes::accounts::by_stake_addresses_assets::<D>),
+        )
+        .route(
+            "/accounts/{stake_address}/addresses/total",
+            get(routes::accounts::by_stake_addresses_total::<D>),
         )
         .route(
             "/accounts/{stake_address}/utxos",
@@ -477,6 +484,10 @@ where
         .route(
             "/blocks/{hash_or_number}/addresses",
             get(routes::blocks::by_hash_or_number_addresses::<D>),
+        )
+        .route(
+            "/blocks/epoch/{epoch_number}/slot/{slot_number}",
+            get(routes::blocks::by_epoch_slot::<D>),
         )
         .route(
             "/blocks/slot/{slot_number}",
@@ -627,8 +638,16 @@ where
         .route("/pools", get(routes::pools::all::<D>))
         .route("/pools/{id}", get(routes::pools::by_id::<D>))
         .route(
+            "/governance/committee",
+            get(routes::governance::committee::<D>),
+        )
+        .route(
             "/governance/dreps/{drep_id}",
             get(routes::governance::drep_by_id::<D>),
+        )
+        .route(
+            "/governance/dreps/{drep_id}/metadata",
+            get(routes::governance::drep_metadata::<D>),
         )
         .route(
             "/governance/proposals",
@@ -643,12 +662,28 @@ where
             get(routes::governance::proposal_by_gov_action_id::<D>),
         )
         .route(
+            "/governance/proposals/{tx_hash}/{cert_index}/metadata",
+            get(routes::governance::proposal_metadata::<D>),
+        )
+        .route(
+            "/governance/proposals/{gov_action_id}/metadata",
+            get(routes::governance::proposal_metadata_by_gov_action::<D>),
+        )
+        .route(
             "/governance/proposals/{tx_hash}/{cert_index}/withdrawals",
             get(routes::governance::proposal_withdrawals::<D>),
         )
         .route(
             "/governance/proposals/{gov_action_id}/withdrawals",
             get(routes::governance::proposal_withdrawals_by_gov_action::<D>),
+        )
+        .route(
+            "/governance/proposals/{tx_hash}/{cert_index}/parameters",
+            get(routes::governance::proposal_parameters::<D>),
+        )
+        .route(
+            "/governance/proposals/{gov_action_id}/parameters",
+            get(routes::governance::proposal_parameters_by_gov_action::<D>),
         )
         .with_state(facade)
         .layer(
@@ -694,6 +729,7 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
+    Option<GovState>: From<D::Entity>,
 {
     type Config = MinibfConfig;
 

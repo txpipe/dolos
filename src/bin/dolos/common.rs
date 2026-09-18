@@ -1,18 +1,18 @@
-use dolos_core::config::{ChainConfig, GenesisConfig, LoggingConfig, RootConfig, TelemetryConfig};
-use dolos_core::BootstrapExt;
+use dolos_core::config::{GenesisConfig, LoggingConfig, RootConfig, TelemetryConfig};
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig as _;
 use std::sync::Arc;
-use std::{fs, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::adapters::DomainAdapter;
 use dolos::core::Genesis;
+use dolos::engine::{DomainBuildError, DomainBuilder};
 use dolos::prelude::*;
 use dolos::storage;
 
@@ -69,56 +69,39 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
 
 /// The same domain [`setup_domain`] assembles, with `chain.stop_epoch` forced.
 ///
-/// For callers that replay to a chosen epoch boundary over the live stores —
-/// `snapshot backfill` — the way `doctor rebuild-state` forces it on the
-/// domain it hand-builds. A `Some` here overrides whatever the configuration
-/// says; `None` leaves it alone.
+/// For embedding callers that replay to a chosen epoch boundary over the live
+/// stores, the way `doctor rebuild-state` forces it on the domain it
+/// hand-builds. A `Some` here overrides whatever the configuration says;
+/// `None` leaves it alone.
 pub fn setup_domain_with_stop_epoch(
     config: &RootConfig,
     stop_epoch: Option<u64>,
 ) -> miette::Result<DomainAdapter> {
-    let stores = open_data_stores(config).map_err(|e| match e {
-        Error::WalError(WalError::IncompatibleVersion { found, expected }) => miette::miette!(
+    let genesis = Arc::new(open_genesis_files(&config.genesis)?);
+
+    DomainBuilder::new(config, genesis)
+        .stop_epoch(stop_epoch)
+        .build()
+        .map_err(render_domain_build_error)
+}
+
+/// Keep actionable executable diagnostics at the UI boundary while the
+/// library returns typed construction errors.
+fn render_domain_build_error(error: DomainBuildError) -> miette::Report {
+    match error {
+        DomainBuildError::Storage(Error::WalError(WalError::IncompatibleVersion {
+            found,
+            expected,
+        })) => miette::miette!(
             help = format!(
                 "WAL was created by a newer dolos version (v{found}) than this binary supports (v{expected}); upgrade dolos or run `dolos bootstrap --force` to wipe storage and re-bootstrap",
             ),
             "incompatible WAL version: found v{found}, expected v{expected}",
         ),
-        other => miette::miette!("{other}"),
-    })?;
-    let genesis = Arc::new(open_genesis_files(&config.genesis)?);
-    let mempool = stores.mempool.clone();
-    let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
-    let chain = config.chain.clone();
-
-    let ChainConfig::Cardano(mut chain_config) = chain;
-
-    if stop_epoch.is_some() {
-        chain_config.stop_epoch = stop_epoch;
-    }
-
-    let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
-        chain_config,
-        &stores.state,
-        &genesis,
-    )
-    .into_diagnostic()?;
-
-    let domain = DomainAdapter {
-        storage_config: Arc::new(config.storage.clone()),
-        sync_config: Arc::new(config.sync.clone()),
-        genesis,
-        chain: Arc::new(std::sync::RwLock::new(chain)),
-        wal: stores.wal,
-        state: stores.state,
-        archive: stores.archive,
-        mempool,
-        tip_broadcast,
-    };
-
-    // this will make sure the domain is correctly initialized and in a valid state.
-    domain.bootstrap().map_err(|e| match e {
-        dolos_core::DomainError::InconsistentState { ref wal, ref state } => {
+        DomainBuildError::Bootstrap(dolos_core::DomainError::InconsistentState {
+            ref wal,
+            ref state,
+        }) => {
             let msg = match (wal, state) {
                 (Some(w), Some(s)) => format!(
                     "state (slot {}) is ahead of WAL (slot {})",
@@ -137,10 +120,8 @@ pub fn setup_domain_with_stop_epoch(
             };
             miette::miette!(help = help, "{msg}")
         }
-        other => miette::miette!("{other:?}"),
-    })?;
-
-    Ok(domain)
+        other => miette::miette!("{other}"),
+    }
 }
 
 pub fn setup_tracing_error_only() -> miette::Result<()> {
@@ -353,24 +334,6 @@ pub async fn monitor_drivers(
     }
 
     first_failure.map_or(Ok(()), Err)
-}
-
-pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
-    let root = &config.storage.path;
-
-    if root.is_dir() {
-        for entry_result in fs::read_dir(root)? {
-            let entry = entry_result?;
-            let entry_path = entry.path();
-            if entry_path.is_file() {
-                fs::remove_file(&entry_path)?;
-            }
-        }
-        fs::remove_dir(root)?; // Remove the now-empty directory
-    } else {
-        info!("Path is not a directory, ignoring.");
-    }
-    Ok(())
 }
 
 #[cfg(test)]

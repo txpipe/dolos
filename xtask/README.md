@@ -1,6 +1,6 @@
 # xtask
 
-Custom developer tasks for Dolos. These commands help bootstrap test instances from Mithril snapshots and generate ground-truth fixtures from cardano-db-sync.
+Custom developer tasks for Dolos. These commands help bootstrap test instances from Mithril snapshots, generate ground-truth fixtures from cardano-db-sync, and benchmark the archive's block segments.
 
 If `cargo xtask` isn't available yet, install the helper once:
 
@@ -131,6 +131,13 @@ Output fields per entity:
 - **pools** — `pool_bech32,pool_hash,total_lovelace`
 - **accounts** — `stake,pool,lovelace`
 - **rewards** — `stake,pool,amount,type,earned_epoch`
+
+### `perf`
+
+Performance experiments for storage and minibf, with shared load generation,
+version comparison and reporting. Start with the [perf overview](perf/README.md),
+then choose [storage](perf/storage.md), [minibf](perf/minibf.md) or
+[HTTP calibration](perf/http.md). Rust microbenchmarks remain under `cargo bench`.
 
 ### `e2e-test`
 

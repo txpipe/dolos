@@ -75,6 +75,11 @@ without running a full node:
 - **404/400 behavior**: Where the OpenAPI spec requires “not found” or “bad
   request,” tests assert those codes to keep API behavior aligned with the spec.
 
+The reference spec is the upstream Blockfrost OpenAPI document at the version
+pinned by the `blockfrost-openapi` dependency in `Cargo.toml`:
+<https://github.com/blockfrost/openapi/blob/v0.1.91/openapi.yaml>. Bump the
+link together with the dependency.
+
 Key modules:
 
 - `crates/minibf/src/test_support.rs` – test harness + synthetic vectors

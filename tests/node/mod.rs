@@ -1,10 +1,10 @@
 //! A live Dolos node behind a real `dolos.toml`, for the tests that drive the
 //! binary.
 //!
-//! Shared by the publish and restore suites because both need the same thing:
-//! a node whose stores were opened by `open_data_stores`, so the backend enums
-//! stand in for the store traits exactly as they do in production, and a
-//! configuration file a separate process can be pointed at.
+//! Shared by the restore suites because they need the same thing: a node whose
+//! stores were opened by `open_data_stores`, so the backend enums stand in for
+//! the store traits exactly as they do in production, and a configuration file
+//! a separate process can be pointed at.
 
 // Each integration test binary compiles this module in full, so the parts one
 // binary does not reach look dead to it. They are not.
@@ -53,7 +53,7 @@ impl Node {
             peer_address = "unused.example:3001"
 
             [storage]
-            version = "v3"
+            version = "v4"
             path = {data}
 
             [genesis]
@@ -92,7 +92,8 @@ impl Node {
     pub fn sync(&self) {
         dolos::storage::ensure_storage_path(&self.config).unwrap();
 
-        let stores = dolos::storage::open_data_stores(&self.config).unwrap();
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
         let genesis = Arc::new(dolos_cardano::include::preview::load());
 
         // Inside epoch zero, so the ledger stays epoch-coherent and the
@@ -156,15 +157,27 @@ impl Node {
         drop(domain);
     }
 
-    pub fn publish(&self, output: &std::path::Path, extra: &[&str]) -> std::process::Output {
-        let mut command = self.command();
+    /// Write a directory stele as a restore fixture through the retained
+    /// headless profile encoder.
+    pub fn write_stele(&self, output: &std::path::Path) {
+        use dolos_snapshot::facade::{Selection, SnapshotSource as _, StoreSnapshot};
 
-        command
-            .args(["snapshot", "publish", "--output-dir"])
-            .arg(output)
-            .args(extra);
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
+        let genesis = dolos_cardano::include::preview::load();
+        let retained = dolos_snapshot::planning::retained_epochs(&self.config).unwrap();
+        let snapshot = StoreSnapshot::new(&stores.archive, &stores.state);
+        let plan = snapshot
+            .selected_plan(
+                u64::from(genesis.network_magic()),
+                retained,
+                Selection::default(),
+            )
+            .unwrap();
 
-        command.output().unwrap()
+        snapshot
+            .publish_directory(output, &plan, &dolos_snapshot::progress::Observer::silent())
+            .unwrap();
     }
 
     /// `dolos bootstrap stelae --force --source …`, the operator's own restore

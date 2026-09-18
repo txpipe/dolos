@@ -16,7 +16,7 @@ Dolos uses three distinct storage backends, each serving a specific purpose:
 
 ### ArchiveStore
 - **Purpose**: Historical block storage with temporal indexing
-- **Contents**: Raw blocks indexed by slot, entity logs keyed by `LogKey` (slot + entity key), and the lookups over them: archive tags (by address, payment, stake, policy, asset, datum, …) and exact lookups (by block hash, block number, tx hash), written in the same batch as the blocks they project
+- **Contents**: Block bodies indexed by slot (one zstd frame per body in flat segment files, compressed with the dictionary bundled in `dolos-flatfiles`), entity logs keyed by `LogKey` (slot + entity key), and the lookups over them: archive tags (by address, payment, stake, policy, asset, datum, …) and exact lookups (by block hash, block number, tx hash), written in the same batch as the blocks they project
 - **Traits**: `ArchiveStore` (reads) + `ArchiveWriter` (batched writes)
 - **Database**: `<storage.path>/archive` (index plus flat block segment files)
 
@@ -27,8 +27,8 @@ Dolos uses three distinct storage backends, each serving a specific purpose:
 - **Database**: `<storage.path>/wal`
 
 ### Where the indexes live
-There is no standalone index store — it was removed in v1.7. Every index is a
-projection, and lives in the store that holds what it projects:
+There is no standalone index store. Every index is a projection and lives in
+the store that holds what it projects:
 - the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
 - the archive tags and the exact lookups (by block hash, block number, tx hash) project the block history and live in the `ArchiveStore` (`ArchiveStore::slots_by_tag` / `slot_by_*`, written through `ArchiveWriter::apply_index` in the same batch as the blocks)
 
@@ -106,7 +106,7 @@ The project follows a modular workspace architecture with clear separation of co
     - **`state-entities`**: All entity types with `[ns_hash:8][entity_key:32]` keys
     - **`state-tags`**: Live-UTxO tags with `[dim_hash:8][lookup_key:var][txo_ref:36]` keys
   - `archive`: `ArchiveStore` implementation with four-keyspace design:
-    - **`archive-blocks`**: Slot -> packed block locations in the flat segment files
+    - **`archive-blocks`**: Slot -> packed physical frame locations in the flat segment files
     - **`archive-logs`**: All log namespaces with `[ns_hash:8][log_key:40]` keys
     - **`archive-tags`**: Tag-based prefix scans for block tags with `[dim_hash:8][key_hash:8][slot:8]` keys
     - **`index-exact`**: Exact-match lookups with `[dim_hash:8][key_data:var]` -> `[slot:8]`
@@ -146,7 +146,7 @@ The project follows a modular workspace architecture with clear separation of co
 
 #### `xtask` (Development Automation)
 - **Purpose**: Development task automation following cargo-xtask pattern
-- **Role**: Build scripts and development utilities
+- **Role**: Build scripts and development utilities, including `cargo xtask perf` — storage and minibf performance experiments with shared measurement and reporting; see `xtask/perf/README.md`
 
 ## Dependency Flow
 
@@ -321,22 +321,21 @@ All agents working on this repository must verify their modifications by running
    runs both commands, so a verification that passes locally cannot drift from
    what the repository keeps green.
 
-4. **Registry round trip** (requires Docker): the `#[ignore]`d suites that
-   spawn a real OCI registry
+4. **Registry restore round trip** (requires Docker): the `#[ignore]`d suite
+   that spawns a real OCI registry
    ```bash
-   cargo test -p dolos-snapshot --test publish -- --ignored --test-threads=1
    cargo test -p dolos-snapshot --test restore_registry -- --ignored --test-threads=1
    ```
 
    Each test spawns its own registry container via `docker run` and tears it
-   down on the way out; the suites are `#[ignore]`d so plain `cargo test`
-   stays green without a container runtime. Run them when touching the
-   stelae pin or `crates/snapshot`'s registry publish/restore paths;
+   down on the way out; the suite is `#[ignore]`d so plain `cargo test` stays
+   green without a container runtime. Run it when touching the Stelae pin or
+   `crates/snapshot`'s registry restore path;
    `STELAE_TEST_REGISTRY_IMAGE` selects the server.
 
    These are local verification tools, deliberately not a CI job here.
-   Registry interaction — transport and publish lifecycle — is implemented
-   by the stelae crates, so testing that integration in CI is
+   Registry interaction — transport and publication lifecycle — is implemented
+   by the Stelae crates, so testing that integration in CI is
    `github.com/txpipe/stelae`'s responsibility, and its `Registry` workflow
    runs against `registry:2`, `registry:3` and a pinned `zot`. Dolos's test
    subject is the profile, and the profile is transport-blind by

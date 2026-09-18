@@ -8,7 +8,7 @@
 //! `apply_utxoset` are reached through the adapter dispatch rather than through
 //! a concrete backend — the binary's own source-scheme parsing, `--force`
 //! clearing the storage directory, and a node that has to come back from
-//! nothing but a directory another process wrote.
+//! nothing but a directory the retained profile encoder wrote.
 
 mod node;
 
@@ -76,7 +76,7 @@ fn wal_tip(node: &Node) -> Option<dolos_core::ChainPoint> {
 
 /// Done criterion 1 and 3, at the CLI.
 #[test]
-fn a_published_stele_restores_the_node_that_published_it() {
+fn a_directory_stele_restores_the_node_that_encoded_it() {
     let node = Node::new();
     node.sync();
 
@@ -84,7 +84,7 @@ fn a_published_stele_restores_the_node_that_published_it() {
     before.assert_populated();
 
     let stele = node.root.path().join("stele");
-    assert_ok(&node.publish(&stele, &[]));
+    node.write_stele(&stele);
 
     let stdout = assert_ok(&node.bootstrap_stelae(&format!("file://{}", stele.display())));
 
@@ -105,7 +105,7 @@ fn a_stele_restores_into_a_directory_that_does_not_exist() {
     let before = Contents::read(&node);
 
     let stele = node.root.path().join("stele");
-    assert_ok(&node.publish(&stele, &[]));
+    node.write_stele(&stele);
 
     std::fs::remove_dir_all(&node.config.storage.path).unwrap();
 
@@ -347,7 +347,7 @@ fn a_restored_node_has_a_wal_seeded_from_its_own_cursor() {
     );
 
     let stele = node.root.path().join("stele");
-    assert_ok(&node.publish(&stele, &[]));
+    node.write_stele(&stele);
     assert_ok(&node.bootstrap_stelae(&format!("file://{}", stele.display())));
 
     let restored = Contents::read(&node);

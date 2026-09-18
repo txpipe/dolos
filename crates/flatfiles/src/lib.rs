@@ -1,30 +1,27 @@
 //! Flat segment files for archived block bodies.
 //!
 //! Bodies are appended to numbered segment files (one Cardano epoch per
-//! segment) and addressed by packed [`BlockLocation`]s stored in whichever
-//! archive index backend is in use. The layout is backend-independent: the
-//! redb and fjall archive stores share these files byte for byte, which is
-//! why this crate knows nothing about Cardano and depends on little beyond
-//! the standard library: `tempfile` for throwaway stores, and `zstd` plus
-//! `sha2` for the [`compressed`] segment codec.
-//!
-//! A segment is stored raw or compressed; the store reads either through the
-//! same [`BlockLocation`]s and moves a segment between the two with a
-//! recoverable transition (`LIFECYCLE.md`).
+//! segment) as independent zstd frames, one per body, compressed with the
+//! dictionary bundled in this crate. A packed [`BlockLocation`] names a frame
+//! by its physical offset and length inside its segment; the archive index
+//! holds those locations and this crate decodes the frame they name. The
+//! crate knows nothing about Cardano and depends on little beyond the
+//! standard library: `zstd` for the frames, `rayon` for eligible batches'
+//! parallel encoding and `tempfile` for throwaway stores.
 
-pub mod compressed;
-mod layout;
-mod lease;
+mod codec;
 mod store;
 
-pub use layout::{Found, Representation, SegmentPaths, Transition, DICTIONARIES_DIR};
-pub use lease::{Access, Lease, LEASE_FILE};
-pub use store::{FlatFileOptions, FlatFileStore, SegmentInfo};
+pub use codec::{frame_bound, BUNDLED_DICTIONARY, COMPRESSION_LEVEL, MAX_BODY_BYTES};
+pub use store::{
+    parse_segment_filename, AppendStats, FlatFileStore, ResourceStats, ENCODE_WINDOW_BYTES,
+};
 
 /// Number of slots per segment file (one Cardano epoch).
 pub const SLOTS_PER_SEGMENT: u64 = 432_000;
 
-/// Location of a block within the flat file store.
+/// Location of a block's frame within the flat file store: the segment, the
+/// frame's byte offset in the segment file, and the frame's length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockLocation {
     pub segment_id: u32,
@@ -94,12 +91,6 @@ pub fn encode_locations(locations: &[BlockLocation]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    fn raw_path(store: &FlatFileStore, segment_id: u32) -> std::path::PathBuf {
-        store
-            .segments_dir()
-            .join(format!("{segment_id:06}.segment"))
-    }
-
     #[test]
     fn test_block_location_roundtrip() {
         let loc = BlockLocation {
@@ -133,8 +124,11 @@ mod tests {
         assert_eq!(locs.len(), 2);
         assert_eq!(locs[0].segment_id, 0);
         assert_eq!(locs[0].offset, 0);
-        assert_eq!(locs[0].length, data1.len() as u32);
-        assert_eq!(locs[1].offset, data1.len() as u64);
+        assert_eq!(locs[1].offset, locs[0].length as u64);
+        assert_eq!(
+            locs[1].offset + locs[1].length as u64,
+            std::fs::metadata(store.segment_path(0)).unwrap().len()
+        );
 
         let read1 = store.read(&locs[0]).unwrap();
         assert_eq!(read1, data1);
@@ -197,7 +191,7 @@ mod tests {
         store.append_batch(&[(0, b"data".as_slice())]).unwrap();
 
         store.truncate(0, 0).unwrap();
-        assert!(!raw_path(&store, 0).exists());
+        assert!(!store.segment_path(0).exists());
 
         drop(dir);
     }
@@ -215,9 +209,9 @@ mod tests {
 
         store.delete_segments_before(2).unwrap();
 
-        assert!(!raw_path(&store, 0).exists());
-        assert!(!raw_path(&store, 1).exists());
-        assert!(raw_path(&store, 2).exists());
+        assert!(!store.segment_path(0).exists());
+        assert!(!store.segment_path(1).exists());
+        assert!(store.segment_path(2).exists());
 
         drop(dir);
     }

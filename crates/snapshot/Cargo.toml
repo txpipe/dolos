@@ -4,20 +4,6 @@ description = "The io.txpipe.dolos.cardano Stelae profile"
 version.workspace = true
 edition.workspace = true
 
-[features]
-# The backfill daemon (`src/backfill.rs`): the publisher loop that composes
-# the mithril fetch with the publish lifecycle. Default-off, and the only
-# reason this crate ever pulls the aggregator client, pallas or a tokio
-# runtime handle — a build that only writes steles keeps the dependency tree it
-# had. `dolos`'s own `mithril` feature is what turns this on.
-backfill = [
-    "dep:dolos-mithril",
-    "dep:pallas",
-    "dep:itertools",
-    "dep:tokio",
-    "dep:tokio-util",
-]
-
 # This crate is the *profile* half of the Stelae boundary: it depends on the
 # stelae crates and on `dolos-*`, never the other way around — structural now
 # that the protocol lives in its own repository. This is the workspace's one
@@ -42,13 +28,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-# Feature `backfill` only.
-dolos-mithril = { path = "../mithril", optional = true }
-pallas = { workspace = true, optional = true }
-itertools = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["macros"] }
-tokio-util = { workspace = true, optional = true }
-
 [dev-dependencies]
 tempfile = "3.20.0"
 
@@ -66,7 +45,11 @@ rustls = { version = "0.23", default-features = false, features = [
 ] }
 
 # The export tests drive real store sets through `dolos-testing`'s harness
-# domain and its backend bindings; the restore suite seals the fjall
-# harness's block segment to export from compressed storage.
+# domain and its backend bindings.
 dolos-testing = { path = "../testing" }
-dolos-flatfiles = { path = "../flatfiles" }
+
+# The restore suite walks a restored fjall archive's segment files with
+# libzstd alone and decodes the blocks it appends afterwards.
+dolos-fjall = { path = "../fjall" }
+pallas = { workspace = true }
+zstd = "0.13"

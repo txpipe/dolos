@@ -2,7 +2,7 @@
 block_production_interval = 10
 
 [storage]
-version = "v3"
+version = "v4"
 path = "data"
 
 [genesis]
