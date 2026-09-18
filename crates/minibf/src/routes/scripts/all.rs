@@ -28,6 +28,11 @@ use crate::{
 /// witness scripts out of a map keyed by script hash, so sorted by hash. These
 /// are the same scripts the archive tags, which keeps the listing to what
 /// `/scripts/{script_hash}` can resolve.
+///
+/// One known gap: db-sync skips the witness scripts of a tx that failed
+/// phase-2 validation and the archive tags them, so a script first seen in
+/// such a tx is listed from there while Blockfrost waits for its first valid
+/// use.
 fn tx_script_hashes(tx: &MultiEraTx<'_>) -> Vec<Hash<28>> {
     let mut hashes: Vec<Hash<28>> = tx
         .produces()
