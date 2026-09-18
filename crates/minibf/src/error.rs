@@ -27,6 +27,9 @@ pub enum Error {
     /// The node uses a fixed limit. Thus, the same request always stops at the
     /// same point.
     ScanBudgetExceeded,
+    /// The node prunes its archive, so it no longer holds the history the
+    /// answer has to be read from.
+    HistoryPruned,
     InvalidCertIndex,
     InvalidGovActionId,
 }
@@ -172,6 +175,15 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "The request exceeds the scan limit of this node. Reduce the page number or the count.",
+                )),
+            )
+                .into_response(),
+            Error::HistoryPruned => (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(ErrorBody::new(
+                    501,
+                    "Not Implemented",
+                    "This node prunes its chain history and cannot serve this endpoint.",
                 )),
             )
                 .into_response(),
