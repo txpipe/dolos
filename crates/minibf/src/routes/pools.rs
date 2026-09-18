@@ -1105,13 +1105,18 @@ impl IntoModel<PoolDelegatorsInner> for PoolDelegatorModelBuilder {
 /// the scan budget does not apply.
 pub async fn by_id_blocks<D>(
     Path(id): Path<String>,
-    Query(params): Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
     Option<PoolState>: From<D::Entity>,
 {
+    // Drop `from`/`to` before validation: Blockfrost never reads them here,
+    // so a malformed or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
     let operator = decode_pool_id(&id)?;
 
     // Make sure that the decoded id is 28 bytes before the existence check.
@@ -2703,6 +2708,38 @@ mod tests {
             "querystring/count must be <= 100",
         )
         .await;
+    }
+
+    /// Blockfrost does not declare `from`/`to` for this route, so a malformed
+    /// or reversed window changes nothing.
+    #[tokio::test]
+    async fn pools_blocks_ignores_from_to() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+
+        let (status, plain) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?count=100"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let expected: Vec<String> = serde_json::from_slice(&plain).unwrap();
+        assert!(!expected.is_empty());
+
+        for window in ["from=bad", "from=999999999&to=1", "from=abc&to=xyz"] {
+            let (status, bytes) = app
+                .get_bytes(&format!("/pools/{pool}/blocks?count=100&{window}"))
+                .await;
+
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "unexpected status {status} for {window} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+
+            let hashes: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(hashes, expected, "{window} changed the body");
+        }
     }
 
     #[tokio::test]
