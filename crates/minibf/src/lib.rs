@@ -523,6 +523,7 @@ where
             "/epochs/latest/parameters",
             get(routes::epochs::latest_parameters::<D>),
         )
+        .route("/scripts", get(routes::scripts::all::<D>))
         .route("/scripts/{script_hash}", get(routes::scripts::by_hash::<D>))
         .route(
             "/scripts/{script_hash}/json",
