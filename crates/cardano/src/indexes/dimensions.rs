@@ -115,6 +115,12 @@ pub mod archive {
         /// the CIP-129 DRep id bytes: the key-or-script header, then the
         /// credential hash.
         DREP_CERTS = "drep_certs";
+
+        /// Pool operator hash of the block issuer.
+        ///
+        /// Blockfrost lists the blocks a pool minted. Byron blocks carry no
+        /// issuer, so only Shelley-era blocks onward are tagged.
+        POOL_BLOCKS = "pool_blocks";
     }
 }
 
@@ -154,6 +160,7 @@ mod tests {
                 "account_withdrawals",
                 "metadata",
                 "drep_certs",
+                "pool_blocks",
             ]
         );
     }
