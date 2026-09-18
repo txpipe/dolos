@@ -67,7 +67,7 @@ use watcher::Watcher;
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
-    "sha256:a4224fbb87099130c64f7a0ea85b52a05917cf88838f6d1674e36dd226bc0708";
+    "sha256:b13e79f32f46d8b8ddb621296c7081c93b214599fea3eb5bccd87117ea209615";
 
 /// The chain point the skeleton fixture stands at: mid-epoch-2 under
 /// [`skeleton_summary`], so the export covers three epochs and the last window
@@ -1193,6 +1193,23 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:ad5994d901c69e757457b2ad6bac6a2679e45ae25769cc616375c10c8c6dc582","kind":"state-pending-rewards","mediaType":"application/vnd.dolos.stele.state-pending-rewards.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":56},"#,
     r#"{"diffId":"sha256:da799488bcc20ea1d8c8e236169d7204e328b34f806075a951f266819bd35e34","kind":"state-pools","mediaType":"application/vnd.dolos.stele.state-pools.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:640c0f9db84510212ae0d71860df7c518244db6eed6728e9fcc6540d99bdcbe7","kind":"state-proposals","mediaType":"application/vnd.dolos.stele.state-proposals.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":50},"#,
+    r#"{"diffId":"sha256:e6cc95ff91af4e6386fb6b392b3f35d06362c69974a19a0f6b8bc1b0c71d2556","kind":"state-script-seqs","mediaType":"application/vnd.dolos.stele.state-script-seqs.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":52},"#,
+    r#"{"diffId":"sha256:2901928c0a75a257e8d11a5fc22e7dc5d6e8df20a9a2f8b55356bc41909e01cc","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:e566d01ada21c4676f61e44f59b85172bb9268efb1116aa32382e2a58e7cde28","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:e6aacb84e49d7341c8e7b689c022c15c85b78c60aede4bf4776469a9c2408e36","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":2},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:abc0305c3dff5319311da0af02cbbe533fabe0bff9d6e973435458f8c5399e9c","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":3},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:abe61811e27bcad7cbd8318cf422a0d96cc025212c076ee219adeaa99421663c","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":4},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:c7d15ad0266305f9346469859a20763d5d2665535b86a4c7b38dbc63abbab056","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":5},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:8ee6f8cd82bc5e67ab5ea1ed8b3ea3284f485bc9b169ca37c7d19e7704d5011b","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":6},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:47531281578bc07a19e35e597c3884359406b5ae5f8fbc2a5642b712473e3273","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":7},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:ff3973102c00ca236447b5180808754f7144da5b05c689a34751cb5a0e7537db","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":8},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:f3703c92220a506acb1ca45f9c04c6bbc19f5e5d89534946a3a52b7687042759","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":9},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:2cfda7d57f7f5ac25db341c26896dbebfb3533c9d61d6b0ba5259d52e48e3c62","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":10},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:b6762ee2a13625ad0f569b1aeb75e2e6c09edb78a00163cbc0a40502c5a0b7f9","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":11},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:cc8e2f84e34a2d4d36593aa615964aa41a63851002f8246ba777abd4d8f5ebdd","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":12},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:ee8b3494dac5ecea8ed70953c647b6de50263651dfce1140fa90cfba46f47876","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":13},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:3f80ebaaefc4726943dd452f7461f8042f6016c12d533b8e56daf17c22b91ccb","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":48},"#,
+    r#"{"diffId":"sha256:3e016061b189f31c0089a0e4a9069823c3aac133836e412eccc1971282b9cb87","kind":"state-scripts","mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":48},"#,
     r#"{"diffId":"sha256:c8517773130f10b7dfb51ca3415ccbe9005f1b84abada0418f46bee7dc7d095f","kind":"state-stakes","mediaType":"application/vnd.dolos.stele.state-stakes.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":47},"#,
     r#"{"diffId":"sha256:6978ebcdd1accb802d0711afbe6c25747eea28f533de050c184ea24bade637a5","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:aa056a5c4a03811c52492eec692ba0612f7f32f9c447ddd63f64a4c7b1c5ed4a","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":46},"#,
@@ -1212,8 +1229,8 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:e59d8b7ec7144216a9caab188b2de8d09d98c7c419e228a41131722796b81711","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":46}"#,
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"gov":1,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":0,"pools":1,"proposals":1,"stakes":1,"utxos":1},"#,
-    r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"gov":1,"pending_mirs":1,"pending_rewards":1,"pools":1,"proposals":1,"stakes":1,"utxos":16},"#,
+    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"gov":1,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":0,"pools":1,"proposals":1,"script_seqs":1,"scripts":1,"stakes":1,"utxos":1},"#,
+    r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"gov":1,"pending_mirs":1,"pending_rewards":1,"pools":1,"proposals":1,"script_seqs":1,"scripts":16,"stakes":1,"utxos":16},"#,
     r#""stateEpochs":[]"#,
     r#"},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
 );

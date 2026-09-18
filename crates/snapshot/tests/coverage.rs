@@ -45,10 +45,10 @@ fn namespace_registry_matches_build_schema() {
         "the profile's state namespaces have drifted from build_schema()"
     );
 
-    // ADR-004 says thirteen entity namespaces plus `utxos`. If that count
+    // ADR-004 says fifteen entity namespaces plus `utxos`. If that count
     // moves, the sentence in the ADR moves with it.
-    assert_eq!(entities.len(), 13);
-    assert_eq!(NAMESPACES.len(), 14);
+    assert_eq!(entities.len(), 15);
+    assert_eq!(NAMESPACES.len(), 16);
 }
 
 #[test]
@@ -339,13 +339,15 @@ fn state_kinds_derive_from_their_namespaces() {
         "STATE_KINDS and NAMESPACES disagree about the namespaces"
     );
 
-    // The shard map is the spec's, not the data's: four chain-scale namespaces
-    // split sixteen ways, and every other namespace is a single blob. Changing
+    // The shard map is the spec's, not the data's: five chain-scale namespaces
+    // keyed by a hash split sixteen ways, and every other namespace is a single
+    // blob (`script_seqs` included: its counter key starts with a zero nibble,
+    // so it would not split). Changing
     // one of these is a media-type-version event for that kind, so it is spelled
     // out here rather than derived from the table it is checking.
     for (_, ns, shards) in STATE_KINDS {
         let expected = match ns {
-            "utxos" | "accounts" | "assets" | "datums" => 16,
+            "utxos" | "accounts" | "assets" | "datums" | "scripts" => 16,
             _ => 1,
         };
 

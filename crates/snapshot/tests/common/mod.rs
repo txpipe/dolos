@@ -32,7 +32,7 @@ use dolos_snapshot::{
         state::{self, StateRecord, ENTITY_KEY_LEN},
     },
     DigestsScope, DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS, DIGESTS,
-    INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
+    INDEXES, LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
 };
 use stelae::{
     dir::{BlobIndex, SteleDir, WrittenLayer},
@@ -178,8 +178,8 @@ pub fn logs(ns: Namespace) -> Vec<LogRecord> {
 ///
 /// One layer per namespace now, rather than sixteen layers carrying all
 /// eighteen namespaces between them, so a kind's shards are the shards its
-/// spec'd count allows: both of [`SHARDS`] for the four sixteen-way kinds, and
-/// shard 0 alone for the fourteen single blobs. Twenty-two layers, and every
+/// spec'd count allows: both of [`SHARDS`] for the five sixteen-way kinds, and
+/// shard 0 alone for the eleven single blobs. Twenty-one layers, and every
 /// namespace among them — which is what
 /// `the_golden_state_layers_cover_every_namespace` holds this to.
 pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
@@ -194,23 +194,56 @@ pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
         .collect()
 }
 
+/// The number each namespace's fixture record is made of.
+///
+/// Frozen, and handed out in order of arrival rather than read off a
+/// namespace's position in [`NAMESPACES`]: that list is byte-sorted, so a new
+/// namespace lands in the middle of it and would move the record, and with it
+/// the pinned digest, of every namespace sorting after it. A new namespace
+/// takes the next number here and nobody else's golden moves. The number has
+/// to fit the low nibble of the record's first byte, so there is room for
+/// sixteen.
+pub const FIXTURE_INDEX: [(Namespace, u8); 16] = [
+    ("account-epochs", 0),
+    ("accounts", 1),
+    ("assets", 2),
+    ("datums", 3),
+    ("dreps", 4),
+    ("epochs", 5),
+    ("eras", 6),
+    ("gov", 7),
+    ("pending_mirs", 8),
+    ("pending_rewards", 9),
+    ("pools", 10),
+    ("proposals", 11),
+    ("stakes", 12),
+    ("utxos", 13),
+    ("script_seqs", 14),
+    ("scripts", 15),
+];
+
+fn fixture_index(ns: Namespace) -> u8 {
+    FIXTURE_INDEX
+        .into_iter()
+        .find(|(known, _)| *known == ns)
+        .map(|(_, index)| index)
+        .expect("a state namespace with a fixture index")
+}
+
 /// One record for `ns`, which is one layer's worth.
 ///
 /// The namespace is no longer in the record — it is the layer's kind — so what
 /// distinguishes one state layer's content from another's is the record's key
-/// and value, both derived from the namespace's position in [`NAMESPACES`].
-/// The eighteen namespace strings are frozen by the kinds in the layer
-/// headers instead, which is where they now live on the wire.
+/// and value, both derived from the namespace's [`FIXTURE_INDEX`]. The
+/// namespace strings are frozen by the kinds in the layer headers instead,
+/// which is where they now live on the wire.
 ///
 /// The key's first byte carries the shard in its high nibble, so the record
 /// lands in the layer that claims it under [`state_layers`] — the routing rule
 /// [`dolos_snapshot::shard_of`] applies, spelled out here because the fixture
 /// writes layers directly rather than through the export's router.
 pub fn state(ns: Namespace, shard: u8) -> Vec<StateRecord> {
-    let i = NAMESPACES
-        .iter()
-        .position(|known| *known == ns)
-        .expect("a state namespace") as u8;
+    let i = fixture_index(ns);
 
     let byte = (shard << 4) | (i & 0x0f);
 
