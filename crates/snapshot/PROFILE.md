@@ -87,6 +87,8 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 | `pool-epochs` | — | `PoolKey`, 28 B |
 | `pools` | `PoolKey`: operator hash, 28 B | — |
 | `proposals` | `ProposalKey`: `idx(4) ‖ tx(32)`, 36 B | — |
+| `script_seqs` | `u64`: listing position, big-endian, 8 B | — |
+| `scripts` | `ScriptKey`: script hash, 28 B | — |
 | `staged-account-stats` | `StagedKey<AccountKey, ()>`: `account(32) ‖ epoch(8)`, 40 B | — |
 | `staged-address-stats` | `(Epoch, AddressStatsKey)`: `epoch(8) ‖` the `address-stats` log key, epoch first, 70 B for a base address | — |
 | `staged-first-mints` | `StagedKey<PolicyKey, AssetKey>`: `policy(28) ‖ epoch(8) ‖ asset key(32)`, 68 B | — |
@@ -98,7 +100,7 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 
 A state row under a log-only namespace is never written; one that arrives is held to the log's key kind.
 
-State kinds: one per state namespace, and the set is closed — each spelled `state-` followed by the namespace with `_` rewritten to `-`, by the same rule and for the same reasons as the log kinds below. The namespace is therefore **not** in the record — it is the layer — which is what puts the fail-closed edge of a breaking change on exactly the namespace that broke, and lets a reader skip a namespace this profile does not define at the transport rather than choking on one shared layer. The shard count is **specification, never tuning**: `utxos`, `accounts`, `assets` and `datums` split 16 ways, every other namespace is a single blob, and `parameters.shards` reports the map so a reader never has to discover it from the data. Re-sharding a namespace is a media-type-version event for that namespace's kind. Every shard of every kind is published, empty ones included, so tip completeness is structural: a restore requires every state kind and, per kind, exactly the shards its count promises.
+State kinds: one per state namespace, and the set is closed — each spelled `state-` followed by the namespace with `_` rewritten to `-`, by the same rule and for the same reasons as the log kinds below. The namespace is therefore **not** in the record — it is the layer — which is what puts the fail-closed edge of a breaking change on exactly the namespace that broke, and lets a reader skip a namespace this profile does not define at the transport rather than choking on one shared layer. The shard count is **specification, never tuning**: `utxos`, `accounts`, `assets`, `datums` and `scripts` split 16 ways, every other namespace is a single blob, and `parameters.shards` reports the map so a reader never has to discover it from the data. Re-sharding a namespace is a media-type-version event for that namespace's kind. Every shard of every kind is published, empty ones included, so tip completeness is structural: a restore requires every state kind and, per kind, exactly the shards its count promises.
 
 **State history: retained dumps at configured epochs, plus the moving tip.** A stele's state is the tip — the ledger as of `sequence`, swapped whole by every publish — and, for each epoch a publisher retains, an immutable **dump** of the state as of that epoch. The two are the same kinds, the same records and the same shard geometry; a dump differs from a tip in its descriptor scope, which names the epoch, and in nothing else.
 
@@ -157,7 +159,7 @@ and the meaning of `sequence`:
                 "point": {"slot": 152236812, "hash": "…"},
                 "epoch": 550 },
   "parameters": { "indexKeyHash": "xxh3-64",
-                   "shards": {"accounts": 16, "assets": 16, "datums": 16, "utxos": 16, "…": 1},
+                   "shards": {"accounts": 16, "assets": 16, "datums": 16, "scripts": 16, "utxos": 16, "…": 1},
                    "schemas": {"accounts": 1, "utxos": 1, "…": 1},
                    "stateEpochs": [208, 236, 290, 365] },
   "compression": {"algo": "zstd", "level": 9},

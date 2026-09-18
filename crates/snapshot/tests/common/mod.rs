@@ -26,9 +26,9 @@ use dolos_cardano::{
         AddressStatsKey, AssetKey, AssetState, DRepKey, DRepState, DatumKey, DatumState,
         EpochState, EraKey, EraState, FirstMintChunk, FixedNamespace as _, GovState, PaymentKey,
         PaymentStats, PaymentTail, PendingMirState, PendingRewardState, PolicyKey, PolicyMintChunk,
-        PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState, StagedAccountStats,
-        StagedAddressStats, StagedFirstMint, StagedPaymentAddress, StagedPaymentStats,
-        StagedStakeAddress, StakeAddressesRow,
+        PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState, ScriptKey, ScriptSeqState,
+        ScriptState, StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
+        StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
     periods::StagedKey,
@@ -131,6 +131,8 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         PolicyMintChunk::NS => keys::encode(&(PolicyKey([byte; 28].into()), u32::from(byte))),
         PoolState::NS | PoolEpochLog::NS => keys::encode(&PoolKey([byte; 28].into())),
         ProposalState::NS => keys::encode(&ProposalKey::new([byte; 32].into(), u32::from(byte))),
+        ScriptSeqState::NS => keys::encode(&u64::from(byte)),
+        ScriptState::NS => keys::encode(&ScriptKey([byte; 28].into())),
         StagedFirstMint::NS => keys::encode(&StagedKey {
             group: PolicyKey([byte; 28].into()),
             epoch: u64::from(byte),
@@ -267,8 +269,8 @@ pub fn logs(ns: Namespace) -> Vec<LogRecord> {
 ///
 /// One layer per namespace, so a kind's shards are the ones its spec'd count
 /// allows and its fixture keys reach: both of [`SHARDS`] for `assets`,
-/// `datums` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`, and shard 0
-/// for every single blob. Every namespace is among them — which is what
+/// `datums`, `scripts` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`, and
+/// shard 0 for every single blob. Every namespace is among them — which is what
 /// `the_golden_state_layers_cover_every_namespace` holds this to.
 pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
     STATE_KINDS

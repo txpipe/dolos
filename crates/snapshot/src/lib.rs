@@ -108,8 +108,8 @@ pub use stelae::{dir, inscription, transport, SteleReader};
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
     EpochState, EraState, FirstMintChunk, FixedNamespace, GovState, PaymentStats, PendingMirState,
-    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
-    StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
+    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState, ScriptSeqState,
+    ScriptState, StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
     StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
 };
 use dolos_core::{ChainPoint, Namespace};
@@ -195,13 +195,15 @@ pub const LOG_KINDS: [(&str, Namespace); 9] = [
 /// rename cannot silently rename a published kind. The derivation is a test,
 /// not a constructor (`state_kinds_derive_from_their_namespaces`).
 ///
-/// The shard count is **specification, never tuning**: the namespaces whose
-/// populations are chain-scale — the UTxO set, accounts, assets and datums —
-/// shard sixteen ways by the first key nibble, and every other namespace is a
-/// single blob. Re-sharding a namespace is a media-type-version event for that
-/// namespace's kind, decided by the format's owner; it is not a constant to
-/// nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
+/// The shard count is **specification, never tuning**: the five namespaces
+/// whose populations are chain-scale and whose keys are hashes — the UTxO
+/// set, accounts, assets, datums and scripts — shard sixteen ways by the first
+/// key nibble, and every other namespace is a single blob. `script_seqs` is
+/// chain-scale too, but its key is a big-endian counter whose first nibble is
+/// always zero, so sharding it would fill one shard and leave fifteen empty.
+/// Re-sharding a namespace is a media-type-version event for that namespace's
+/// kind, decided by the format's owner; it is not a constant to nudge.
+pub const STATE_KINDS: [(&str, Namespace, u8); 28] = [
     ("state-account-epochs", AccountEpochLog::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
@@ -220,6 +222,8 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
     ("state-pool-epochs", PoolEpochLog::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
+    ("state-script-seqs", ScriptSeqState::NS, 1),
+    ("state-scripts", ScriptState::NS, 16),
     ("state-staged-account-stats", StagedAccountStats::NS, 1),
     ("state-staged-address-stats", StagedAddressStats::NS, 1),
     ("state-staged-first-mints", StagedFirstMint::NS, 1),
@@ -286,7 +290,7 @@ pub fn shards_for(ns: Namespace) -> Option<u8> {
         .map(|(_, _, shards)| shards)
 }
 
-/// How many state layers every publish writes: the shard counts summed — 86
+/// How many state layers every publish writes: the shard counts summed — 103
 /// today. Every shard of every namespace kind is written even when empty, so
 /// tip completeness stays structural rather than data-dependent.
 pub const fn state_layer_count() -> usize {

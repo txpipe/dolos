@@ -27,8 +27,8 @@ use dolos_cardano::{
         EpochValue, EraBoundary, EraState, FirstMintChunk, GovDistr, GovRoots, GovState, Nonces,
         PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
         PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction,
-        ProposalState, RollingStats, ShardProgress, StagedFirstMint, StagedStakeAddress, Stake,
-        StakeAddressesRow, VoteEntry,
+        ProposalState, RollingStats, ScriptSeqState, ScriptState, ShardProgress, StagedFirstMint,
+        StagedStakeAddress, Stake, StakeAddressesRow, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, PaymentStats, StagedAccountStats, StagedAddressStats,
@@ -303,6 +303,19 @@ pub fn stake_addresses_row() -> StakeAddressesRow {
                 .concat()
                 .into(),
         ],
+    }
+}
+
+pub fn script_state() -> ScriptState {
+    ScriptState {
+        seq: 1_234_567,
+        first_slot: 99_999_999,
+    }
+}
+
+pub fn script_seq_state() -> ScriptSeqState {
+    ScriptSeqState {
+        script_hash: hash28(0xa0),
     }
 }
 

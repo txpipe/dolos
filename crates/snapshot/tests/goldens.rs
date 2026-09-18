@@ -39,7 +39,7 @@ use stelae::{
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 76] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -347,6 +347,42 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
         92,
     ),
     (
+        "state-script-seqs",
+        "sha256:6e6a38bdda40c775627fb19552fd00a1a3d6165723436705ac0d6f32d0deb5ae",
+        2,
+        65,
+    ),
+    (
+        "state-script-seqs",
+        "sha256:2810d7cba9163e69e6b1129933dde896c098759a49ecd346419589219c315883",
+        2,
+        65,
+    ),
+    (
+        "state-scripts",
+        "sha256:48f8e39a3f296e8d4ef4b28b5c38da20b2bcb198ea8f07e94c7b2721ad28eee5",
+        2,
+        82,
+    ),
+    (
+        "state-scripts",
+        "sha256:35faf37d7bc36d5416ab1bb738121ad668b1099a11d8d8b7c98c84fffa95bd31",
+        2,
+        82,
+    ),
+    (
+        "state-scripts",
+        "sha256:6d5ee2c694caa67a997142b28c6884ad1704eb91764c739a48a278e3f688436b",
+        2,
+        82,
+    ),
+    (
+        "state-scripts",
+        "sha256:88144141d81469302f2acc62249a210862bd275ed9a853e6ddc5fe7d666962fb",
+        2,
+        82,
+    ),
+    (
         "state-staged-account-stats",
         "sha256:85102debce17765784a5f60982d0724cf09bc3524b17a52e06628d8aaeb08a6a",
         2,
@@ -432,25 +468,25 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
     ),
     (
         "state-utxos",
-        "sha256:02a27db8ad3d8ce42ba4608bd6a749b08bf11affb6a7ca6edd356ebfb2cc4155",
+        "sha256:1ae36c40ece57979f7a3dd99b9c64e10694805656a888d4a8e35614ca182132f",
         2,
         91,
     ),
     (
         "state-utxos",
-        "sha256:2caa5472d471d5fd7290a6ef5ed4d9a2494a9370caace621f3e417f42578c2ef",
+        "sha256:6581aa25d3c9f4ba4fa87ee33d8dd52eec56f9308d021f5dfa7cca5d196c49f1",
         2,
         91,
     ),
     (
         "state-utxos",
-        "sha256:646b283b79c8da802333596178ba06619977ecae70f47038e388cd1e2d408d5b",
+        "sha256:24bdf2a3f47a1063f2e9d20f0f62cb91f0345ccf99f4409c95c1954116f3b929",
         2,
         91,
     ),
     (
         "state-utxos",
-        "sha256:1c8dcddafc12310582faa97eebda1e384a46ce8eb12bf1193e9a07a7d23548d8",
+        "sha256:e52f1fabd0150959698c58da8ec080a2832d4802c5cb66ae933a14ebc37fe271",
         2,
         91,
     ),
@@ -861,13 +897,13 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:02a27db8ad3d8ce42ba4608bd6a749b08bf11affb6a7ca6edd356ebfb2cc4155","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:2caa5472d471d5fd7290a6ef5ed4d9a2494a9370caace621f3e417f42578c2ef","kind":"state-utxos","#,
+    r#"{"diffId":"sha256:6581aa25d3c9f4ba4fa87ee33d8dd52eec56f9308d021f5dfa7cca5d196c49f1","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":1},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:646b283b79c8da802333596178ba06619977ecae70f47038e388cd1e2d408d5b","kind":"state-utxos","#,
+    r#"{"diffId":"sha256:24bdf2a3f47a1063f2e9d20f0f62cb91f0345ccf99f4409c95c1954116f3b929","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:1c8dcddafc12310582faa97eebda1e384a46ce8eb12bf1193e9a07a7d23548d8","kind":"state-utxos","#,
+    r#"{"diffId":"sha256:e52f1fabd0150959698c58da8ec080a2832d4802c5cb66ae933a14ebc37fe271","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"shard":1},"uncompressedSize":91},"#,
     r#"{"diffId":"sha256:13f9bbdf676ac47ad7238a52fa525f4413a88335c23d2d567c888abd8dedec80","kind":"digests","#,

@@ -16,8 +16,8 @@
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
     EpochState, EraState, FirstMintChunk, FixedNamespace, GovState, PaymentStats, PendingMirState,
-    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
-    StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
+    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState, ScriptSeqState,
+    ScriptState, StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
     StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
@@ -36,7 +36,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against `build_schema()` directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 26] = [
+pub const NAMESPACES: [Namespace; 28] = [
     AccountEpochLog::NS,
     AccountStats::NS,
     AccountState::NS,
@@ -55,6 +55,8 @@ pub const NAMESPACES: [Namespace; 26] = [
     PoolEpochLog::NS,
     PoolState::NS,
     ProposalState::NS,
+    ScriptSeqState::NS,
+    ScriptState::NS,
     StagedAccountStats::NS,
     StagedAddressStats::NS,
     StagedFirstMint::NS,
@@ -84,7 +86,7 @@ pub const NAMESPACES: [Namespace; 26] = [
 /// fixed width (decision 0051), and each of those moved one revision for it.
 /// Kept beside [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 28] = [
     (AccountEpochLog::NS, 1),
     (AccountStats::NS, 1),
     (AccountState::NS, 1),
@@ -103,6 +105,8 @@ pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
     (PoolEpochLog::NS, 2),
     (PoolState::NS, 2),
     (ProposalState::NS, 4),
+    (ScriptSeqState::NS, 1),
+    (ScriptState::NS, 1),
     (StagedAccountStats::NS, 1),
     (StagedAddressStats::NS, 1),
     (StagedFirstMint::NS, 2),
@@ -138,6 +142,8 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         PendingRewardState::NS => exact::<<PendingRewardState as StateEntity>::Key>(key),
         PoolState::NS => exact::<<PoolState as StateEntity>::Key>(key),
         ProposalState::NS => exact::<<ProposalState as StateEntity>::Key>(key),
+        ScriptSeqState::NS => exact::<<ScriptSeqState as StateEntity>::Key>(key),
+        ScriptState::NS => exact::<<ScriptState as StateEntity>::Key>(key),
         StagedAccountStats::NS => exact::<<StagedAccountStats as StateEntity>::Key>(key),
         StagedAddressStats::NS => exact::<<StagedAddressStats as StateEntity>::Key>(key),
         StagedFirstMint::NS => exact::<<StagedFirstMint as StateEntity>::Key>(key),
