@@ -1926,6 +1926,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn governance_drep_votes_for_same_block_proposal() {
+        let voter = Voter::DRepKey(Hash::from([7u8; 28]));
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information], vec![]]],
+            votes_by_block: vec![vec![
+                vec![],
+                vec![synthetic_vote(voter, 0, 0, 0, Vote::Yes)],
+            ]],
+            ..Default::default()
+        });
+
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "").await;
+        let block = &app.vectors().blocks[0];
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, block.tx_hashes[1]);
+        assert_eq!(rows[0].cert_index, 0);
+        assert_eq!(rows[0].proposal_tx_hash, block.tx_hashes[0]);
+        assert_eq!(rows[0].proposal_cert_index, 0);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::Yes);
+    }
+
+    #[tokio::test]
     async fn governance_drep_votes_orders_and_paginates() {
         let app = drep_votes_app();
         let drep = &app.vectors().drep_id;

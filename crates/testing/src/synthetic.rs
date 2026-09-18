@@ -349,7 +349,7 @@ pub fn build_synthetic_blocks(
         let slot = cfg.slot + offset as u64;
         let block_number = cfg.start_block + offset as u64;
         let asset_name = Bytes::from(asset_name.as_bytes().to_vec());
-        let mut tx_specs = Vec::with_capacity(txs_per_block);
+        let mut tx_specs: Vec<SyntheticTxSpec> = Vec::with_capacity(txs_per_block);
         let mut tx_hashes = Vec::with_capacity(txs_per_block);
         let mut withdrawal_amounts = Vec::with_capacity(txs_per_block);
 
@@ -435,11 +435,16 @@ pub fn build_synthetic_blocks(
                 .into_iter()
                 .fold(VotingProcedures::new(), |mut procedures, vote| {
                     assert!(
-                        vote.proposal.block < offset,
-                        "A synthetic vote must target an earlier block."
+                        vote.proposal.block < offset
+                            || (vote.proposal.block == offset && vote.proposal.tx < tx_offset),
+                        "A synthetic vote must target an earlier transaction."
                     );
 
-                    let proposal_tx = built_tx_hashes[vote.proposal.block][vote.proposal.tx];
+                    let proposal_tx = if vote.proposal.block == offset {
+                        tx_specs[vote.proposal.tx].body.compute_hash()
+                    } else {
+                        built_tx_hashes[vote.proposal.block][vote.proposal.tx]
+                    };
                     procedures.entry(vote.voter).or_default().insert(
                         GovActionId {
                             transaction_id: proposal_tx,
