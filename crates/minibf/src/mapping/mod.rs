@@ -33,6 +33,7 @@ use std::{
 use blockfrost_openapi::models::{
     address_content::{AddressContent, Type as AddressType},
     address_utxo_content_inner::AddressUtxoContentInner,
+    asset_utxo_content_inner::AssetUtxoContentInner,
     dreps_inner_metadata_error::{Code, DrepsInnerMetadataError},
     script_utxos_inner::ScriptUtxosInner,
     tx_content::TxContent,
@@ -1240,6 +1241,7 @@ pub struct UtxoOutputModelBuilder<'a> {
     output: MultiEraOutput<'a>,
     is_collateral: bool,
     block_data: Option<BlockRefMeta>,
+    block_time: Option<u64>,
     consumed_by_tx: Option<TxHash>,
 }
 
@@ -1254,6 +1256,7 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             output,
             is_collateral: false,
             block_data: None,
+            block_time: None,
             consumed_by_tx: None,
         }
     }
@@ -1269,6 +1272,7 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             output,
             is_collateral: true,
             block_data: None,
+            block_time: None,
             consumed_by_tx: None,
         }
     }
@@ -1276,6 +1280,15 @@ impl<'a> UtxoOutputModelBuilder<'a> {
     pub fn with_block_data(self, block_data: BlockRefMeta) -> Self {
         Self {
             block_data: Some(block_data),
+            ..self
+        }
+    }
+
+    /// The wall-clock time of the block that created the output; only models
+    /// that expose `block_time` read it.
+    pub fn with_block_time(self, block_time: u64) -> Self {
+        Self {
+            block_time: Some(block_time),
             ..self
         }
     }
@@ -1376,6 +1389,64 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
     }
 }
 
+impl<'a> IntoModel<AssetUtxoContentInner> for UtxoOutputModelBuilder<'a> {
+    type SortKey = (u64, usize, u32);
+
+    fn sort_key(&self) -> Option<Self::SortKey> {
+        self.block_data
+            .as_ref()
+            .map(|data| (data.slot, data.tx_index, self.txo_ref.1))
+    }
+
+    fn into_model(self) -> Result<AssetUtxoContentInner, StatusCode> {
+        let inline_datum = self.output.datum().and_then(|x| match x {
+            DatumOption::Hash(_) => None,
+            DatumOption::Data(x) => Some(x),
+        });
+
+        let inline_datum_json = inline_datum
+            .as_ref()
+            .map(|x| PlutusDataWrapper(x.0.deref().clone()).as_value())
+            .transpose()?;
+
+        // the model requires the creating block; callers only build it for
+        // outputs whose block the archive still holds.
+        let block = self
+            .block_data
+            .as_ref()
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        let block_time = self.block_time.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let out = AssetUtxoContentInner {
+            address: self.output.address().into_model()?,
+            tx_hash: self.txo_ref.0.to_string(),
+            output_index: try_into_or_500!(self.txo_ref.1),
+            amount: self.output.value().into_model()?,
+            block: block.hash.to_string(),
+            block_height: try_into_or_500!(block.height),
+            block_time: try_into_or_500!(block_time),
+            data_hash: self.output.datum().map(|x| match x {
+                DatumOption::Hash(x) => x.to_string(),
+                DatumOption::Data(x) => x.original_hash().to_string(),
+            }),
+            // re-encode the raw datum so the hex matches the on-chain bytes
+            inline_datum: inline_datum
+                .map(|x| minicbor::to_vec(&x.0))
+                .transpose()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .map(hex::encode),
+            inline_datum_json,
+            reference_script_hash: self
+                .output
+                .script_ref()
+                .map(|h| h.into_model())
+                .transpose()?,
+        };
+
+        Ok(out)
+    }
+}
+
 impl<'a> IntoModel<ScriptUtxosInner> for UtxoOutputModelBuilder<'a> {
     type SortKey = (u64, usize, u32);
 
@@ -1422,6 +1493,85 @@ impl<'a> IntoModel<ScriptUtxosInner> for UtxoOutputModelBuilder<'a> {
         };
 
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod utxo_output_tests {
+    use super::*;
+    use dolos_core::async_query::BlockRefMeta;
+    use pallas::codec::utils::{CborWrap, KeepRaw};
+    use pallas::ledger::primitives::conway::{PostAlonzoTransactionOutput, Value};
+    use pallas::ledger::traverse::Era;
+
+    fn output_bytes() -> Vec<u8> {
+        let output = PostAlonzoTransactionOutput {
+            address: vec![0x60; 29].into(),
+            value: Value::Coin(1_000_000),
+            datum_option: None,
+            script_ref: None,
+        };
+
+        minicbor::to_vec(&output).unwrap()
+    }
+
+    fn output_with_inline_datum_bytes() -> Vec<u8> {
+        let datum = PlutusData::BigInt(pallas::ledger::primitives::BigInt::Int(42.into()));
+        let output = PostAlonzoTransactionOutput {
+            address: vec![0x60; 29].into(),
+            value: Value::Coin(1_000_000),
+            datum_option: Some(KeepRaw::from(DatumOption::Data(CborWrap(KeepRaw::from(
+                datum,
+            ))))),
+            script_ref: None,
+        };
+
+        minicbor::to_vec(&output).unwrap()
+    }
+
+    /// The asset UTxO model carries the block height and time and decodes the
+    /// inline datum into JSON next to its CBOR.
+    #[test]
+    fn asset_utxo_model_exposes_block_position_and_datum_json() {
+        let bytes = output_with_inline_datum_bytes();
+        let output = MultiEraOutput::decode(Era::Conway, &bytes).unwrap();
+
+        let builder = UtxoOutputModelBuilder::from_output(Hash::from([0xaa; 32]), 3, output)
+            .with_block_data(BlockRefMeta {
+                slot: 100,
+                hash: Hash::from([0x11; 32]),
+                height: 7,
+                tx_hash: Hash::from([0xaa; 32]),
+                tx_index: 2,
+            })
+            .with_block_time(1_700_000_000);
+
+        let model: AssetUtxoContentInner = builder.into_model().unwrap();
+
+        assert_eq!(model.tx_hash, Hash::from([0xaa; 32]).to_string());
+        assert_eq!(model.output_index, 3);
+        assert_eq!(model.block, Hash::from([0x11; 32]).to_string());
+        assert_eq!(model.block_height, 7);
+        assert_eq!(model.block_time, 1_700_000_000);
+        assert_eq!(model.inline_datum.as_deref(), Some("182a"));
+        assert_eq!(
+            model.inline_datum_json,
+            Some(serde_json::json!({ "int": 42 }))
+        );
+        assert!(model.data_hash.is_some());
+        assert_eq!(model.reference_script_hash, None);
+    }
+
+    /// The model never reports made-up block data: an output whose creation
+    /// block was pruned is a caller bug here, not a row with zeroed fields.
+    #[test]
+    fn asset_utxo_model_refuses_missing_block_data() {
+        let bytes = output_bytes();
+        let output = MultiEraOutput::decode(Era::Conway, &bytes).unwrap();
+        let builder = UtxoOutputModelBuilder::from_output(Hash::from([0xaa; 32]), 0, output);
+
+        let model: Result<AssetUtxoContentInner, _> = builder.into_model();
+        assert_eq!(model, Err(StatusCode::INTERNAL_SERVER_ERROR));
     }
 }
 
@@ -2896,6 +3046,23 @@ impl IntoModel<Vec<TxContentStakeAddrInner>> for TxModelBuilder<'_> {
     }
 }
 
+/// Turns a Plutus integer into a JSON number without wrapping it.
+///
+/// Anything within the `i64`/`u64` range is exact. Wider magnitudes only fit
+/// a JSON number as a float here, so they fall back to the closest `f64`.
+fn plutus_int_to_json(value: &BigInt) -> Result<serde_json::Number, StatusCode> {
+    if let Some(i) = value.to_i64() {
+        return Ok(i.into());
+    }
+
+    if let Some(u) = value.to_u64() {
+        return Ok(u.into());
+    }
+
+    let approx = value.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    serde_json::Number::from_f64(approx).ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 pub struct PlutusDataWrapper(pub PlutusData);
 impl PlutusDataWrapper {
     fn as_value(&self) -> Result<serde_json::Value, StatusCode> {
@@ -2947,37 +3114,27 @@ impl PlutusDataWrapper {
                 )])))
             }
 
-            PlutusData::BigInt(x) => match x {
-                pallas::ledger::primitives::BigInt::Int(int) => {
-                    let i = Into::<i128>::into(*int);
-                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                        "int".to_string(),
-                        serde_json::Value::Number((i as i64).into()),
-                    )])))
-                }
-                pallas::ledger::primitives::BigInt::BigUInt(bounded_bytes) => {
-                    let bigint = num_bigint::BigUint::from_bytes_be(bounded_bytes.as_slice());
-                    let number = serde_json::Number::from_f64(
-                        bigint.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
-                    )
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                        "int".to_string(),
-                        serde_json::Value::Number(number),
-                    )])))
-                }
-                pallas::ledger::primitives::BigInt::BigNInt(bounded_bytes) => {
-                    let bigint = num_bigint::BigInt::from_signed_bytes_be(bounded_bytes.as_slice());
-                    let number = serde_json::Number::from_f64(
-                        bigint.to_f64().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
-                    )
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                    Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
-                        "int".to_string(),
-                        serde_json::Value::Number(number),
-                    )])))
-                }
-            },
+            PlutusData::BigInt(x) => {
+                let bigint = match x {
+                    pallas::ledger::primitives::BigInt::Int(int) => {
+                        BigInt::from(Into::<i128>::into(*int))
+                    }
+                    pallas::ledger::primitives::BigInt::BigUInt(bounded_bytes) => {
+                        BigInt::from(num_bigint::BigUint::from_bytes_be(bounded_bytes.as_slice()))
+                    }
+                    pallas::ledger::primitives::BigInt::BigNInt(bounded_bytes) => {
+                        // CBOR encodes a negative bignum as -1 - n, with n the
+                        // unsigned magnitude
+                        let n = num_bigint::BigUint::from_bytes_be(bounded_bytes.as_slice());
+                        BigInt::from(-1) - BigInt::from(n)
+                    }
+                };
+
+                Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
+                    "int".to_string(),
+                    serde_json::Value::Number(plutus_int_to_json(&bigint)?),
+                )])))
+            }
 
             PlutusData::BoundedBytes(x) => {
                 Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
@@ -2994,5 +3151,99 @@ impl IntoModel<HashMap<String, serde_json::Value>> for PlutusDataWrapper {
     fn into_model(self) -> Result<HashMap<String, serde_json::Value>, StatusCode> {
         let value = self.as_value()?;
         serde_json::from_value(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+#[cfg(test)]
+mod plutus_int_tests {
+    use super::*;
+    use pallas::codec::utils::MaybeIndefArray;
+
+    fn datum_json(datum: PlutusData) -> serde_json::Value {
+        PlutusDataWrapper(datum).as_value().unwrap()
+    }
+
+    fn int(value: i128) -> PlutusData {
+        PlutusData::BigInt(pallas::ledger::primitives::BigInt::Int(
+            pallas::codec::utils::Int::try_from(value).unwrap(),
+        ))
+    }
+
+    fn big_uint(bytes: &[u8]) -> PlutusData {
+        PlutusData::BigInt(pallas::ledger::primitives::BigInt::BigUInt(
+            bytes.to_vec().into(),
+        ))
+    }
+
+    fn big_nint(bytes: &[u8]) -> PlutusData {
+        PlutusData::BigInt(pallas::ledger::primitives::BigInt::BigNInt(
+            bytes.to_vec().into(),
+        ))
+    }
+
+    /// Integers past `i64::MAX` used to wrap negative; they must come out as
+    /// exact unsigned JSON numbers instead.
+    #[test]
+    fn int_above_i64_max_is_exact() {
+        let value = i64::MAX as i128 + 1;
+        assert_eq!(
+            datum_json(int(value)),
+            serde_json::json!({ "int": 9223372036854775808u64 })
+        );
+        assert_eq!(
+            datum_json(int(u64::MAX as i128)),
+            serde_json::json!({ "int": u64::MAX })
+        );
+    }
+
+    #[test]
+    fn int_bounds_of_i64_are_exact() {
+        assert_eq!(
+            datum_json(int(i64::MIN as i128)),
+            serde_json::json!({ "int": i64::MIN })
+        );
+        assert_eq!(
+            datum_json(int(i64::MAX as i128)),
+            serde_json::json!({ "int": i64::MAX })
+        );
+        assert_eq!(datum_json(int(-1)), serde_json::json!({ "int": -1 }));
+    }
+
+    /// Bignums that still fit `u64` / `i64` keep every digit.
+    #[test]
+    fn bignum_within_u64_is_exact() {
+        // 2^64 - 1 as a CBOR bignum
+        assert_eq!(
+            datum_json(big_uint(&[0xff; 8])),
+            serde_json::json!({ "int": u64::MAX })
+        );
+        // -1 - 0x7fff_ffff_ffff_ffff == i64::MIN
+        assert_eq!(
+            datum_json(big_nint(&i64::MAX.to_be_bytes())),
+            serde_json::json!({ "int": i64::MIN })
+        );
+    }
+
+    /// Beyond `u64` the JSON number can only be a float; make sure it is the
+    /// nearest one rather than an error.
+    #[test]
+    fn bignum_beyond_u64_is_a_float_approximation() {
+        // 2^64
+        let mut bytes = vec![0x01];
+        bytes.extend([0x00; 8]);
+        assert_eq!(
+            datum_json(big_uint(&bytes)),
+            serde_json::json!({ "int": 18446744073709551616.0 })
+        );
+    }
+
+    /// Nested structures get the same exact conversion.
+    #[test]
+    fn nested_ints_are_exact() {
+        let datum = PlutusData::Array(MaybeIndefArray::Def(vec![int(u64::MAX as i128)]));
+        assert_eq!(
+            datum_json(datum),
+            serde_json::json!({ "list": [{ "int": u64::MAX }] })
+        );
     }
 }
