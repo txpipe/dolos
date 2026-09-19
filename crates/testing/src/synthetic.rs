@@ -23,9 +23,10 @@ use pallas::{
         primitives::{
             alonzo,
             conway::{
-                Anchor, Certificate, DatumOption, GovAction, PlutusData, PlutusScript,
+                Anchor, Certificate, DatumOption, GovAction, GovActionId, PlutusData, PlutusScript,
                 PostAlonzoTransactionOutput, ProposalProcedure, ScriptRef, TransactionBody,
-                TransactionOutput, Value, WitnessSet,
+                TransactionOutput, Value, Vote, Voter, VotingProcedure, VotingProcedures,
+                WitnessSet,
             },
             AddrKeyhash, Bytes, NonEmptySet, NonZeroInt, PositiveCoin, Relay, Set, StakeCredential,
             TransactionInput, VrfKeyhash,
@@ -57,6 +58,7 @@ pub struct SyntheticBlockConfig {
     pub drep_keyhash: [u8; 28],
     pub drep_deposit: u64,
     pub gov_actions_by_block: Vec<BlockGovActions>,
+    pub votes_by_block: Vec<BlockVotes>,
     pub proposal_deposit: u64,
     /// Fund each tx from the previous block's tx at the same index instead of
     /// from a fresh `seed_address` UTxO.
@@ -124,6 +126,7 @@ impl Default for SyntheticBlockConfig {
             drep_keyhash: [7u8; 28],
             drep_deposit: 1000,
             gov_actions_by_block: vec![],
+            votes_by_block: vec![],
             proposal_deposit: 100_000_000,
             spend_previous_outputs: false,
         }
@@ -131,6 +134,27 @@ impl Default for SyntheticBlockConfig {
 }
 
 pub type BlockGovActions = Vec<Vec<GovAction>>;
+
+/// A synthetic vote identifies its target by block index, transaction index,
+/// and action index. These indices identify the action location in the chain.
+/// Transaction hashes do not exist until the block build is complete.
+#[derive(Clone, Copy, Debug)]
+pub struct SyntheticProposalRef {
+    pub block: usize,
+    pub tx: usize,
+    pub action: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct SyntheticVote {
+    pub voter: Voter,
+    pub proposal: SyntheticProposalRef,
+    pub vote: Vote,
+}
+
+/// Votes in each transaction of a block. Each outer entry represents one
+/// transaction.
+pub type BlockVotes = Vec<Vec<SyntheticVote>>;
 
 #[derive(Clone, Debug)]
 pub struct SyntheticVectors {
@@ -267,6 +291,17 @@ pub fn build_synthetic_blocks(
         );
         cfg.gov_actions_by_block.clone()
     };
+
+    let votes_by_block = if cfg.votes_by_block.is_empty() {
+        vec![vec![]; block_count]
+    } else {
+        assert_eq!(
+            cfg.votes_by_block.len(),
+            block_count,
+            "The length of votes_by_block must equal the block count."
+        );
+        cfg.votes_by_block.clone()
+    };
     let policy_id_hex = hex::encode(cfg.policy_id);
     let asset_name_hex = hex::encode(asset_names[0].as_bytes());
     let fixture_extras = Some(build_datum_and_script_fixture());
@@ -308,12 +343,13 @@ pub fn build_synthetic_blocks(
     });
     let mut prev_block_hash: Option<Hash<32>> = None;
     let mut prev_block_tx_hashes: Vec<Hash<32>> = Vec::new();
+    let mut built_tx_hashes: Vec<Vec<Hash<32>>> = Vec::with_capacity(block_count);
 
     for (offset, asset_name) in asset_names.iter().enumerate() {
         let slot = cfg.slot + offset as u64;
         let block_number = cfg.start_block + offset as u64;
         let asset_name = Bytes::from(asset_name.as_bytes().to_vec());
-        let mut tx_specs = Vec::with_capacity(txs_per_block);
+        let mut tx_specs: Vec<SyntheticTxSpec> = Vec::with_capacity(txs_per_block);
         let mut tx_hashes = Vec::with_capacity(txs_per_block);
         let mut withdrawal_amounts = Vec::with_capacity(txs_per_block);
 
@@ -392,6 +428,38 @@ pub fn build_synthetic_blocks(
                 .cloned()
                 .unwrap_or_default();
 
+            let voting_procedures = votes_by_block[offset]
+                .get(tx_offset)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .fold(VotingProcedures::new(), |mut procedures, vote| {
+                    assert!(
+                        vote.proposal.block < offset
+                            || (vote.proposal.block == offset && vote.proposal.tx < tx_offset),
+                        "A synthetic vote must target an earlier transaction."
+                    );
+
+                    let proposal_tx = if vote.proposal.block == offset {
+                        tx_specs[vote.proposal.tx].body.compute_hash()
+                    } else {
+                        built_tx_hashes[vote.proposal.block][vote.proposal.tx]
+                    };
+                    procedures.entry(vote.voter).or_default().insert(
+                        GovActionId {
+                            transaction_id: proposal_tx,
+                            action_index: vote.proposal.action,
+                        },
+                        VotingProcedure {
+                            vote: vote.vote,
+                            anchor: None,
+                        },
+                    );
+                    procedures
+                });
+
+            let voting_procedures = (!voting_procedures.is_empty()).then_some(voting_procedures);
+
             tx_specs.push(sample_transaction(
                 Bytes::from(output_address),
                 cfg.lovelace,
@@ -409,6 +477,7 @@ pub fn build_synthetic_blocks(
                 if tx_offset == 0 { Some(aux_hash) } else { None },
                 extras,
                 gov_actions,
+                voting_procedures,
                 cfg.proposal_deposit,
             ));
         }
@@ -433,6 +502,7 @@ pub fn build_synthetic_blocks(
         let block_hash = block.header.compute_hash();
         prev_block_hash = Some(block_hash);
         prev_block_tx_hashes = hashes.clone();
+        built_tx_hashes.push(hashes.clone());
         let wrapper = (7, block);
         let raw_block = Arc::new(minicbor::to_vec(wrapper).unwrap());
 
@@ -709,6 +779,7 @@ fn sample_transaction(
     auxiliary_data_hash: Option<Hash<32>>,
     extras: Option<&SyntheticFixtureExtras>,
     gov_actions: Vec<GovAction>,
+    voting_procedures: Option<VotingProcedures>,
     proposal_deposit: u64,
 ) -> SyntheticTxSpec {
     let input = TransactionInput {
@@ -816,7 +887,7 @@ fn sample_transaction(
         collateral_return: None,
         total_collateral: None,
         reference_inputs: None,
-        voting_procedures: None,
+        voting_procedures,
         proposal_procedures,
         treasury_value: None,
         donation: None,

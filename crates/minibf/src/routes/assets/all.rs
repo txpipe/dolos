@@ -320,7 +320,7 @@ mod tests {
         let (status, bytes) = app.get_bytes("/assets?count=3").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let body = String::from_utf8_lossy(&bytes);
-        assert!(body.contains("archive blocks"), "unexpected body: {body}");
+        assert!(body.contains("scan limit"), "The response body was {body}.");
     }
 
     #[tokio::test]

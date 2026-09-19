@@ -1,6 +1,6 @@
 mod mapping;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use self::mapping::description_json;
 
@@ -14,6 +14,7 @@ use blockfrost_openapi::models::{
     committee_members_inner::{CommitteeMembersInner, Status},
     committee_quorum::CommitteeQuorum,
     drep_metadata::DrepMetadata,
+    drep_votes_inner::{self, DrepVotesInner},
     proposal::{self, Proposal},
     proposal_metadata::ProposalMetadata,
     proposal_metadata_v2::ProposalMetadataV2,
@@ -35,7 +36,10 @@ use pallas::{
     crypto::hash::Hash,
     ledger::{
         addresses::Network,
-        primitives::{conway::GovAction, Coin, Epoch, StakeCredential},
+        primitives::{
+            conway::{GovAction, Vote, Voter},
+            Coin, Epoch, StakeCredential,
+        },
         traverse::{MultiEraBlock, MultiEraTx},
     },
 };
@@ -547,25 +551,27 @@ fn order_within_block<D: Domain>(
     Ok(())
 }
 
-/// Order the listing the way Blockfrost does — by the order the chain saw the
-/// proposals — and cut it down to the requested page.
+/// This function selects a page from a listing that uses slots as its primary
+/// order.
 ///
-/// Proposals of one block form a group whose place in the listing the slot
-/// already fixes, so the block behind a group is only read once the page
-/// reaches it: a page costs at most as many block reads as it has rows, and
-/// only for blocks that proposed more than once.
-fn select_proposals<D: Domain>(
-    domain: &D,
-    mut proposals: Vec<ProposalRow>,
+/// Rows with the same slot form a group. The slot determines the position of
+/// the group. `settle` reads blocks only for groups that overlap the requested
+/// page. Thus, the page reads no more blocks than it contains rows.
+///
+/// The caller supplies `rows` in ascending slot order. It also supplies a
+/// deterministic order for rows with the same slot. If the archive does not
+/// contain a block, the group keeps this order.
+fn page_slot_groups<T>(
+    rows: Vec<T>,
+    slot_of: impl Fn(&T) -> BlockSlot,
     pagination: &Pagination,
-) -> Result<Vec<ProposalRow>, Error> {
-    proposals.sort_unstable_by_key(|row| (row.slot, row.tx, row.idx));
+    mut settle: impl FnMut(BlockSlot, &mut Vec<T>) -> Result<(), Error>,
+) -> Result<Vec<T>, Error> {
+    let mut groups: Vec<Vec<T>> = Vec::new();
 
-    let mut groups: Vec<Vec<ProposalRow>> = Vec::new();
-
-    for row in proposals {
+    for row in rows {
         match groups.last_mut() {
-            Some(group) if group[0].slot == row.slot => group.push(row),
+            Some(group) if slot_of(&group[0]) == slot_of(&row) => group.push(row),
             _ => groups.push(vec![row]),
         }
     }
@@ -594,7 +600,7 @@ fn select_proposals<D: Domain>(
             break;
         }
 
-        order_within_block(domain, group[0].slot, &mut group)?;
+        settle(slot_of(&group[0]), &mut group)?;
 
         // desc is the whole asc listing read backwards, group order included
         if descending {
@@ -611,6 +617,23 @@ fn select_proposals<D: Domain>(
     }
 
     Ok(out)
+}
+
+/// This function orders proposals by chain order and selects the requested
+/// page.
+fn select_proposals<D: Domain>(
+    domain: &D,
+    mut proposals: Vec<ProposalRow>,
+    pagination: &Pagination,
+) -> Result<Vec<ProposalRow>, Error> {
+    proposals.sort_unstable_by_key(|row| (row.slot, row.tx, row.idx));
+
+    page_slot_groups(
+        proposals,
+        |row| row.slot,
+        pagination,
+        |slot, group| order_within_block(domain, slot, group),
+    )
 }
 
 /// The page of `GET /governance/proposals`, read off the state and ordered
@@ -683,6 +706,312 @@ where
     let page = domain
         .query()
         .run_blocking(move |domain| Ok(read_page(&domain, &pagination)))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    Ok(Json(page))
+}
+
+/// A DRep vote from the proposal namespace.
+struct VoteRow {
+    slot: BlockSlot,
+    proposal_tx: Hash<32>,
+    proposal_idx: u32,
+    vote: Vote,
+
+    /// The transaction that contains the vote and its index in that
+    /// transaction. These values stay empty until `settle_casts` processes the
+    /// row group.
+    cast: Option<(Hash<32>, u32)>,
+}
+
+/// This function converts a DRep ID to the proposal vote-map key.
+fn drep_credential(drep_bytes: &[u8]) -> Result<StakeCredential, StatusCode> {
+    let hash: Hash<28> = drep_bytes
+        .get(1..)
+        .and_then(|hash| <[u8; 28]>::try_from(hash).ok())
+        .ok_or(StatusCode::BAD_REQUEST)?
+        .into();
+
+    if pallas_extras::drep_id_is_script(drep_bytes) {
+        Ok(StakeCredential::ScriptHash(hash))
+    } else {
+        Ok(StakeCredential::AddrKeyhash(hash))
+    }
+}
+
+/// This function converts a stake credential to a transaction voter key.
+fn drep_voter(cred: &StakeCredential) -> Voter {
+    match cred {
+        StakeCredential::AddrKeyhash(hash) => Voter::DRepKey(*hash),
+        StakeCredential::ScriptHash(hash) => Voter::DRepScript(*hash),
+    }
+}
+
+/// This function converts a ledger vote to a Blockfrost value.
+fn vote_model(vote: &Vote) -> drep_votes_inner::Vote {
+    match vote {
+        Vote::Yes => drep_votes_inner::Vote::Yes,
+        Vote::No => drep_votes_inner::Vote::No,
+        Vote::Abstain => drep_votes_inner::Vote::Abstain,
+    }
+}
+
+/// This function returns proposal IDs in Blockfrost index order.
+///
+/// `cert_index` is the index in one voter ballot. db-sync restarts this value
+/// for each voter. The ledger stores each ballot in a map that uses governance
+/// action IDs as keys. Thus, the order uses the proposal transaction hash
+/// first and the action index second.
+fn ballot(tx: &MultiEraTx, voter: &Voter) -> Vec<(Hash<32>, u32)> {
+    let MultiEraTx::Conway(tx) = tx else {
+        return Vec::new();
+    };
+
+    let Some(procedures) = &tx.transaction_body.voting_procedures else {
+        return Vec::new();
+    };
+
+    let Some(ballot) = procedures.get(voter) else {
+        return Vec::new();
+    };
+
+    ballot
+        .keys()
+        .map(|id| (id.transaction_id, id.action_index))
+        .collect()
+}
+
+/// This function finds the transaction and index for each vote in one block.
+/// It also sorts vote rows by transaction position and ballot index.
+///
+/// The proposal state stores the vote slot, but it does not store transaction
+/// data. The archived block supplies the transaction hash and ballot index.
+///
+/// If the archive does not contain the block, rows keep their provisional
+/// order and have no cast data. `vote_page` removes these rows.
+fn settle_casts<D: Domain>(
+    domain: &D,
+    voter: &Voter,
+    slot: BlockSlot,
+    rows: &mut Vec<VoteRow>,
+) -> Result<(), Error> {
+    let Some(body) = domain
+        .archive()
+        .get_block_by_slot(&slot)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Ok(());
+    };
+
+    let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // The map stores ballot casts for this voter. The keys are target
+    // proposals. The values preserve block order. A later transaction can
+    // cast another vote for the same proposal.
+    type CastsByProposal = HashMap<(Hash<32>, u32), VecDeque<(usize, Hash<32>, u32)>>;
+    let mut casts = CastsByProposal::new();
+
+    for (position, tx) in block.txs().iter().enumerate() {
+        // The ledger ignores governance procedures in phase-2-invalid txs.
+        if !tx.is_valid() {
+            continue;
+        }
+
+        for (cert_index, target) in ballot(tx, voter).into_iter().enumerate() {
+            casts
+                .entry(target)
+                .or_default()
+                .push_back((position, tx.hash(), cert_index as u32));
+        }
+    }
+
+    // Proposal history stores rows in cast order. Each removal takes the first
+    // matching cast in block order.
+    let mut settled: Vec<((usize, u32), VoteRow)> = rows
+        .drain(..)
+        .map(|row| {
+            match casts
+                .get_mut(&(row.proposal_tx, row.proposal_idx))
+                .and_then(VecDeque::pop_front)
+            {
+                Some((position, tx, cert_index)) => (
+                    (position, cert_index),
+                    VoteRow {
+                        cast: Some((tx, cert_index)),
+                        ..row
+                    },
+                ),
+                None => ((usize::MAX, u32::MAX), row),
+            }
+        })
+        .collect();
+
+    settled.sort_by_key(|(order, _)| *order);
+    rows.extend(settled.into_iter().map(|(_, row)| row));
+
+    Ok(())
+}
+
+/// This function resolves archive data and selects a vote page.
+///
+/// Rows without archived cast data do not affect page offsets. The function
+/// resolves each slot group before it counts rows. `budget` limits the number
+/// of slot groups that the function can resolve.
+fn page_resolved_votes<D: Domain>(
+    domain: &D,
+    voter: &Voter,
+    rows: Vec<VoteRow>,
+    pagination: &Pagination,
+    budget: usize,
+) -> Result<Vec<VoteRow>, Error> {
+    let mut groups: Vec<Vec<VoteRow>> = Vec::new();
+
+    for row in rows {
+        match groups.last_mut() {
+            Some(group) if group[0].slot == row.slot => group.push(row),
+            _ => groups.push(vec![row]),
+        }
+    }
+
+    let descending = matches!(pagination.order, Order::Desc);
+
+    if descending {
+        groups.reverse();
+    }
+
+    let from = pagination.from();
+    let mut skipped = 0;
+    let mut out = Vec::with_capacity(pagination.count);
+
+    for (scanned, mut group) in groups.into_iter().enumerate() {
+        if scanned == budget {
+            return Err(Error::ScanBudgetExceeded);
+        }
+
+        settle_casts(domain, voter, group[0].slot, &mut group)?;
+        group.retain(|row| row.cast.is_some());
+
+        if descending {
+            group.reverse();
+        }
+
+        for row in group {
+            if skipped < from {
+                skipped += 1;
+                continue;
+            }
+
+            out.push(row);
+
+            if out.len() == pagination.count {
+                return Ok(out);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// This function reads DRep votes from state and adds archive data to the
+/// page.
+///
+/// The proposal that receives a vote stores that vote. Thus, this function
+/// scans the proposal namespace for the voter. The namespace contains one row
+/// for each submitted governance action. Every action requires a deposit.
+/// `/governance/proposals` scans the same namespace. The function returns an
+/// error before matching vote entries exceed `budget`. It reads no more
+/// archive blocks after it fills the requested page.
+fn vote_page<D: Domain>(
+    domain: &D,
+    voter: &StakeCredential,
+    pagination: &Pagination,
+    budget: usize,
+) -> Result<Vec<DrepVotesInner>, Error> {
+    let mut rows = Vec::new();
+
+    let entities = domain
+        .state()
+        .iter_entities_typed::<ProposalState>(ProposalState::NS, None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for entry in entities {
+        let (_, state) = entry.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let Some(history) = state.drep_votes.get(voter) else {
+            continue;
+        };
+
+        for (slot, vote) in history {
+            if rows.len() >= budget {
+                return Err(Error::ScanBudgetExceeded);
+            }
+
+            rows.push(VoteRow {
+                slot: *slot,
+                proposal_tx: state.tx,
+                proposal_idx: state.idx,
+                vote: vote.clone(),
+                cast: None,
+            });
+        }
+    }
+
+    // This sort orders rows by slot, then by governance action ID. The stable
+    // sort keeps the cast order for repeated votes on the same proposal.
+    rows.sort_by_key(|row| (row.slot, row.proposal_tx, row.proposal_idx));
+
+    let voter = drep_voter(voter);
+
+    let page = page_resolved_votes(domain, &voter, rows, pagination, budget)?;
+
+    page.into_iter()
+        .map(|row| {
+            let (tx, cert_index) = row.cast.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            Ok(DrepVotesInner {
+                tx_hash: hex::encode(tx),
+                cert_index: i32_or_500(cert_index)?,
+                proposal_id: bech32_gov_action(&row.proposal_tx, row.proposal_idx)?,
+                proposal_tx_hash: hex::encode(row.proposal_tx),
+                proposal_cert_index: i32_or_500(row.proposal_idx)?,
+                vote: vote_model(&row.vote),
+            })
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()
+        .map_err(Error::from)
+}
+
+/// `GET /governance/dreps/{drep_id}/votes` lists all votes from a DRep in
+/// oldest-first order.
+///
+/// If a DRep does not exist or has no votes, the endpoint returns an empty
+/// list. It does not return 404.
+pub async fn drep_votes<D>(
+    Path(drep_id): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<DrepVotesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
+
+    let (_, drep_bytes, _, is_special_case) = parse_drep_id(&drep_id)?;
+
+    // The two special DReps are delegation targets, not voters. They cannot
+    // cast votes.
+    if is_special_case {
+        return Ok(Json(Vec::new()));
+    }
+
+    let voter = drep_credential(&drep_bytes)?;
+    let budget = domain.config.max_scan_items() as usize;
+
+    let page = domain
+        .query()
+        .run_blocking(move |domain| Ok(vote_page(&domain, &voter, &pagination, budget)))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
@@ -1299,7 +1628,10 @@ mod tests {
     use bech32::{Bech32, Hrp};
     use dolos_cardano::model::GovPurpose;
     use dolos_core::StateWriter as _;
-    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
+    use dolos_testing::{
+        synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote},
+        toy_domain::ToyDomain,
+    };
     use itertools::Itertools;
     use pallas::{
         codec::utils::Bytes,
@@ -1488,6 +1820,305 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}/metadata");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    fn synthetic_vote(
+        voter: Voter,
+        block: usize,
+        tx: usize,
+        action: u32,
+        vote: Vote,
+    ) -> SyntheticVote {
+        SyntheticVote {
+            voter,
+            proposal: SyntheticProposalRef { block, tx, action },
+            vote,
+        }
+    }
+
+    /// Transaction 0 in block 0 proposes two actions. Transaction 1 in block 0
+    /// proposes one action. Two transactions in block 1 cast votes on all
+    /// three actions. Block 2 changes the first vote. A script DRep also votes
+    /// in block 1. Thus, one chain covers both CIP-129 credential variants.
+    fn drep_votes_config() -> SyntheticBlockConfig {
+        let key_voter = Voter::DRepKey(Hash::from([7u8; 28]));
+        let script_voter = Voter::DRepScript(Hash::from([8u8; 28]));
+
+        SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![
+                vec![
+                    vec![GovAction::Information, GovAction::Information],
+                    vec![GovAction::Information],
+                ],
+                vec![],
+                vec![],
+            ],
+            votes_by_block: vec![
+                vec![],
+                vec![
+                    vec![
+                        // The transaction map sorts these votes by action.
+                        synthetic_vote(key_voter.clone(), 0, 0, 1, Vote::No),
+                        synthetic_vote(key_voter.clone(), 0, 0, 0, Vote::Yes),
+                        synthetic_vote(script_voter, 0, 0, 1, Vote::Abstain),
+                    ],
+                    vec![synthetic_vote(key_voter.clone(), 0, 1, 0, Vote::Abstain)],
+                ],
+                vec![vec![synthetic_vote(key_voter, 0, 0, 0, Vote::No)]],
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn drep_votes_app() -> TestApp {
+        TestApp::new_with_cfg(drep_votes_config())
+    }
+
+    async fn get_drep_votes(app: &TestApp, drep: &str, query: &str) -> Vec<DrepVotesInner> {
+        let path = format!("/governance/dreps/{drep}/votes{query}");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "The request to {path} returned status {status}. The response body was {}.",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes).expect("The DRep vote response did not contain valid JSON.")
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_happy_path() {
+        let app = drep_votes_app();
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "").await;
+        let blocks = &app.vectors().blocks;
+
+        assert_eq!(rows.len(), 4);
+
+        assert_eq!(rows[0].tx_hash, blocks[1].tx_hashes[0]);
+        assert_eq!(rows[0].cert_index, 0);
+        assert_eq!(rows[0].proposal_tx_hash, blocks[0].tx_hashes[0]);
+        assert_eq!(rows[0].proposal_cert_index, 0);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::Yes);
+
+        assert_eq!(rows[1].tx_hash, blocks[1].tx_hashes[0]);
+        assert_eq!(rows[1].cert_index, 1);
+        assert_eq!(rows[1].proposal_tx_hash, blocks[0].tx_hashes[0]);
+        assert_eq!(rows[1].proposal_cert_index, 1);
+        assert_eq!(rows[1].vote, drep_votes_inner::Vote::No);
+
+        assert_eq!(rows[2].tx_hash, blocks[1].tx_hashes[1]);
+        assert_eq!(rows[2].cert_index, 0);
+        assert_eq!(rows[2].proposal_tx_hash, blocks[0].tx_hashes[1]);
+        assert_eq!(rows[2].proposal_cert_index, 0);
+        assert_eq!(rows[2].vote, drep_votes_inner::Vote::Abstain);
+
+        assert_eq!(rows[3].tx_hash, blocks[2].tx_hashes[0]);
+        assert_eq!(rows[3].cert_index, 0);
+        assert_eq!(rows[3].proposal_tx_hash, blocks[0].tx_hashes[0]);
+        assert_eq!(rows[3].proposal_cert_index, 0);
+        assert_eq!(rows[3].vote, drep_votes_inner::Vote::No);
+
+        for row in rows {
+            let proposal_tx: Hash<32> = row.proposal_tx_hash.parse().unwrap();
+            assert_eq!(
+                row.proposal_id,
+                bech32_gov_action(&proposal_tx, row.proposal_cert_index as u32).unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_for_same_block_proposal() {
+        let voter = Voter::DRepKey(Hash::from([7u8; 28]));
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information], vec![]]],
+            votes_by_block: vec![vec![
+                vec![],
+                vec![synthetic_vote(voter, 0, 0, 0, Vote::Yes)],
+            ]],
+            ..Default::default()
+        });
+
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "").await;
+        let block = &app.vectors().blocks[0];
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, block.tx_hashes[1]);
+        assert_eq!(rows[0].cert_index, 0);
+        assert_eq!(rows[0].proposal_tx_hash, block.tx_hashes[0]);
+        assert_eq!(rows[0].proposal_cert_index, 0);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::Yes);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_orders_and_paginates() {
+        let app = drep_votes_app();
+        let drep = &app.vectors().drep_id;
+        let ascending = get_drep_votes(&app, drep, "").await;
+        let descending = get_drep_votes(&app, drep, "?order=desc").await;
+
+        assert_eq!(
+            descending
+                .iter()
+                .map(|row| (&row.tx_hash, row.cert_index, &row.proposal_id))
+                .collect_vec(),
+            ascending
+                .iter()
+                .rev()
+                .map(|row| (&row.tx_hash, row.cert_index, &row.proposal_id))
+                .collect_vec()
+        );
+
+        let page = get_drep_votes(&app, drep, "?count=2&page=2").await;
+        assert_eq!(
+            page.iter().map(|row| &row.proposal_id).collect_vec(),
+            ascending[2..]
+                .iter()
+                .map(|row| &row.proposal_id)
+                .collect_vec()
+        );
+
+        assert!(get_drep_votes(&app, drep, "?page=9").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_excludes_pruned_rows_before_pagination() {
+        let app = TestApp::new_with_cfg_and_setup(drep_votes_config(), |domain, _| {
+            domain
+                .archive()
+                .prune_history(0, None)
+                .expect("The archive did not prune its history.");
+        });
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "?count=1").await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, app.vectors().blocks[2].tx_hashes[0]);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::No);
+
+        assert!(
+            get_drep_votes(&app, &app.vectors().drep_id, "?count=1&page=2")
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_rejects_history_over_scan_budget() {
+        let voter = Voter::DRepKey(Hash::from([7u8; 28]));
+        let app = TestApp::new_with_scan_limit(
+            SyntheticBlockConfig {
+                block_count: 3,
+                txs_per_block: 1,
+                gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![]],
+                votes_by_block: vec![
+                    vec![],
+                    vec![vec![synthetic_vote(voter.clone(), 0, 0, 0, Vote::Yes)]],
+                    vec![vec![synthetic_vote(voter, 0, 0, 0, Vote::No)]],
+                ],
+                ..Default::default()
+            },
+            1,
+        );
+        let path = format!("/governance/dreps/{}/votes?count=1", app.vectors().drep_id);
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("scan limit"), "The response body was {body}.");
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_accepts_history_at_scan_budget() {
+        let voter = Voter::DRepKey(Hash::from([7u8; 28]));
+        let app = TestApp::new_with_scan_limit(
+            SyntheticBlockConfig {
+                block_count: 2,
+                txs_per_block: 1,
+                gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![]],
+                votes_by_block: vec![
+                    vec![],
+                    vec![vec![synthetic_vote(voter, 0, 0, 0, Vote::Yes)]],
+                ],
+                ..Default::default()
+            },
+            1,
+        );
+
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "?count=1").await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::Yes);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_rejects_deep_page() {
+        let app = TestApp::new_with_scan_limit(drep_votes_config(), 3);
+        let path = format!(
+            "/governance/dreps/{}/votes?count=2&page=2",
+            app.vectors().drep_id
+        );
+
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn governance_script_drep_votes() {
+        let app = drep_votes_app();
+        let drep = bech32(
+            Hrp::parse("drep").unwrap(),
+            [vec![pallas_extras::DREP_SCRIPT_PREFIX], vec![8u8; 28]].concat(),
+        )
+        .unwrap();
+        let rows = get_drep_votes(&app, &drep, "").await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cert_index, 0);
+        assert_eq!(rows[0].proposal_cert_index, 1);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::Abstain);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_without_rows() {
+        let app = drep_votes_app();
+
+        assert!(get_drep_votes(&app, &missing_drep(), "").await.is_empty());
+        assert!(get_drep_votes(&app, "drep_always_abstain", "")
+            .await
+            .is_empty());
+        assert!(get_drep_votes(&app, "drep_always_no_confidence", "")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_bad_request() {
+        let app = drep_votes_app();
+        let base = format!("/governance/dreps/{}/votes", app.vectors().drep_id);
+
+        assert_status(&app, &format!("{base}?count=0"), StatusCode::BAD_REQUEST).await;
+        assert_status(
+            &app,
+            &format!("{base}?order=sideways"),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/dreps/not-a-drep/votes",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let path = format!("/governance/dreps/{}/votes", app.vectors().drep_id);
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
