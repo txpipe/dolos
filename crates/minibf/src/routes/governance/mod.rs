@@ -2029,7 +2029,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let body = String::from_utf8_lossy(&bytes);
-        assert!(body.contains("more items"), "The response body was {body}.");
+        assert!(body.contains("scan limit"), "The response body was {body}.");
     }
 
     #[tokio::test]

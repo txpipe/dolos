@@ -171,7 +171,7 @@ impl IntoResponse for Error {
                 Json(ErrorBody::new(
                     400,
                     "Bad Request",
-                    "The request has more items than this node permits.",
+                    "The request exceeds the scan limit of this node. Reduce the page number or the count.",
                 )),
             )
                 .into_response(),
