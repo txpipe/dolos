@@ -919,8 +919,9 @@ fn page_resolved_votes<D: Domain>(
 /// The proposal that receives a vote stores that vote. Thus, this function
 /// scans the proposal namespace for the voter. The namespace contains one row
 /// for each submitted governance action. Every action requires a deposit.
-/// `/governance/proposals` scans the same namespace. This function reads no
-/// more archive blocks after it fills the requested page.
+/// `/governance/proposals` scans the same namespace. The function returns an
+/// error before matching vote entries exceed `budget`. It reads no more
+/// archive blocks after it fills the requested page.
 fn vote_page<D: Domain>(
     domain: &D,
     voter: &StakeCredential,
@@ -942,6 +943,10 @@ fn vote_page<D: Domain>(
         };
 
         for (slot, vote) in history {
+            if rows.len() >= budget {
+                return Err(Error::ScanBudgetExceeded);
+            }
+
             rows.push(VoteRow {
                 slot: *slot,
                 proposal_tx: state.tx,
@@ -2003,22 +2008,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn governance_drep_votes_stops_at_scan_budget() {
-        let app = TestApp::new_with_scan_limit_and_setup(drep_votes_config(), 1, |domain, _| {
-            domain
-                .archive()
-                .prune_history(0, None)
-                .expect("The archive did not prune its history.");
-        });
+    async fn governance_drep_votes_rejects_history_over_scan_budget() {
+        let voter = Voter::DRepKey(Hash::from([7u8; 28]));
+        let app = TestApp::new_with_scan_limit(
+            SyntheticBlockConfig {
+                block_count: 3,
+                txs_per_block: 1,
+                gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![]],
+                votes_by_block: vec![
+                    vec![],
+                    vec![vec![synthetic_vote(voter.clone(), 0, 0, 0, Vote::Yes)]],
+                    vec![vec![synthetic_vote(voter, 0, 0, 0, Vote::No)]],
+                ],
+                ..Default::default()
+            },
+            1,
+        );
         let path = format!("/governance/dreps/{}/votes?count=1", app.vectors().drep_id);
         let (status, bytes) = app.get_bytes(&path).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let body = String::from_utf8_lossy(&bytes);
-        assert!(
-            body.contains("archive blocks"),
-            "The response body was {body}."
+        assert!(body.contains("more items"), "The response body was {body}.");
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_accepts_history_at_scan_budget() {
+        let voter = Voter::DRepKey(Hash::from([7u8; 28]));
+        let app = TestApp::new_with_scan_limit(
+            SyntheticBlockConfig {
+                block_count: 2,
+                txs_per_block: 1,
+                gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![]],
+                votes_by_block: vec![
+                    vec![],
+                    vec![vec![synthetic_vote(voter, 0, 0, 0, Vote::Yes)]],
+                ],
+                ..Default::default()
+            },
+            1,
         );
+
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "?count=1").await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::Yes);
     }
 
     #[tokio::test]
