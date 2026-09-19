@@ -1500,10 +1500,6 @@ impl BoundaryWork {
             self.add_delta(crate::GovDormancyTick::new());
         }
 
-        // committee-state GC (step 7) — reads the post-enactment
-        // committee when the delta applies
-        self.add_delta(crate::CommitteeGc::new());
-
         // fold the boundary-paid credits (enacted withdrawals,
         // pool-deposit refunds) into the completed accumulator before it
         // rotates, so the persisted row and the next boundary's tally
