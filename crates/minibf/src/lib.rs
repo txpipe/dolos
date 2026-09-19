@@ -638,6 +638,14 @@ where
             get(routes::governance::committee::<D>),
         )
         .route(
+            "/governance/committee/votes",
+            get(routes::governance::committee_votes::<D>),
+        )
+        .route(
+            "/governance/committee/{cc_id}/votes",
+            get(routes::governance::committee_votes_by_id::<D>),
+        )
+        .route(
             "/governance/dreps/{drep_id}",
             get(routes::governance::drep_by_id::<D>),
         )
