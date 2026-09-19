@@ -1,6 +1,6 @@
 mod mapping;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use self::mapping::description_json;
 
@@ -13,6 +13,7 @@ use blockfrost_openapi::models::{
     committee::Committee,
     committee_members_inner::{CommitteeMembersInner, Status},
     committee_quorum::CommitteeQuorum,
+    committee_votes_inner::{self, CommitteeVotesInner},
     drep_metadata::DrepMetadata,
     drep_votes_inner::{self, DrepVotesInner},
     proposal::{self, Proposal},
@@ -37,7 +38,7 @@ use pallas::{
     ledger::{
         addresses::Network,
         primitives::{
-            conway::{DRep, GovAction, Vote, Voter},
+            conway::{Anchor, DRep, GovAction, Vote, Voter},
             Coin, Epoch, StakeCredential,
         },
         traverse::{MultiEraBlock, MultiEraTx},
@@ -474,6 +475,452 @@ where
         quorum: Box::new(quorum),
         members,
     }))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommitteeCredentialRole {
+    Hot,
+    Cold,
+}
+
+/// This function parses a CIP-129 constitutional-committee credential. The
+/// header byte gives the role and the credential type. If the header role and
+/// the Bech32 prefix do not agree, the credential is not valid.
+fn parse_committee_id(id: &str) -> Result<(CommitteeCredentialRole, StakeCredential), Error> {
+    let parsed = bech32::primitives::decode::CheckedHrpstring::new::<bech32::Bech32>(id)
+        .map_err(|_| Error::InvalidCommitteeId)?;
+
+    let role = match parsed.hrp().as_str() {
+        "cc_hot" => CommitteeCredentialRole::Hot,
+        "cc_cold" => CommitteeCredentialRole::Cold,
+        _ => return Err(Error::InvalidCommitteeId),
+    };
+
+    let payload: Vec<u8> = parsed.byte_iter().collect();
+    let (header, hash) = payload.split_first().ok_or(Error::InvalidCommitteeId)?;
+    let hash: Hash<28> = <[u8; 28]>::try_from(hash)
+        .map_err(|_| Error::InvalidCommitteeId)?
+        .into();
+
+    let header_role = match header >> 4 {
+        0x0 => CommitteeCredentialRole::Hot,
+        0x1 => CommitteeCredentialRole::Cold,
+        _ => return Err(Error::InvalidCommitteeId),
+    };
+
+    if header_role != role {
+        return Err(Error::InvalidCommitteeId);
+    }
+
+    let credential = match header & 0x0f {
+        0x2 => StakeCredential::AddrKeyhash(hash),
+        0x3 => StakeCredential::ScriptHash(hash),
+        _ => return Err(Error::InvalidCommitteeId),
+    };
+
+    Ok((role, credential))
+}
+
+/// A constitutional-committee vote from the proposal namespace.
+struct CommitteeVoteRow {
+    slot: BlockSlot,
+    voter: StakeCredential,
+    proposal_tx: Hash<32>,
+    proposal_idx: u32,
+    governance_type: committee_votes_inner::GovernanceType,
+    vote: Vote,
+    cast: Option<CommitteeVoteCast>,
+}
+
+/// The transaction data that one vote gets from its archived block.
+struct CommitteeVoteCast {
+    order: (usize, usize),
+    tx: Hash<32>,
+    anchor: Option<Anchor>,
+    block_height: u64,
+}
+
+/// A bounded set of complete slot groups at one end of the chain.
+///
+/// The set keeps the highest slots in descending order and the lowest slots in
+/// ascending order. The boundary slot moves in one direction only, so an
+/// evicted group cannot return. Each group in the set is therefore complete.
+/// If the scan removes a group, `truncated` is true.
+struct CommitteeVoteFrontier {
+    groups: BTreeMap<BlockSlot, Vec<CommitteeVoteRow>>,
+    limit: usize,
+    descending: bool,
+    truncated: bool,
+}
+
+impl CommitteeVoteFrontier {
+    fn new(limit: usize, descending: bool) -> Self {
+        Self {
+            groups: BTreeMap::new(),
+            limit,
+            descending,
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, row: CommitteeVoteRow) {
+        if let Some(group) = self.groups.get_mut(&row.slot) {
+            group.push(row);
+            return;
+        }
+
+        if self.groups.len() < self.limit {
+            self.groups.insert(row.slot, vec![row]);
+            return;
+        }
+
+        let boundary = if self.descending {
+            *self.groups.first_key_value().unwrap().0
+        } else {
+            *self.groups.last_key_value().unwrap().0
+        };
+
+        let belongs = if self.descending {
+            row.slot > boundary
+        } else {
+            row.slot < boundary
+        };
+
+        self.truncated = true;
+
+        if belongs {
+            if self.descending {
+                self.groups.pop_first();
+            } else {
+                self.groups.pop_last();
+            }
+            self.groups.insert(row.slot, vec![row]);
+        }
+    }
+}
+
+fn committee_governance_type(
+    action: &ProposalAction,
+) -> Option<committee_votes_inner::GovernanceType> {
+    use committee_votes_inner::GovernanceType;
+
+    match action {
+        ProposalAction::ParamChange(_) => Some(GovernanceType::ParameterChange),
+        ProposalAction::HardFork(_) => Some(GovernanceType::HardForkInitiation),
+        ProposalAction::TreasuryWithdrawal(_) => Some(GovernanceType::TreasuryWithdrawals),
+        ProposalAction::NoConfidence => Some(GovernanceType::NoConfidence),
+        ProposalAction::UpdateCommittee { .. } => Some(GovernanceType::NewCommittee),
+        ProposalAction::NewConstitution { .. } => Some(GovernanceType::NewConstitution),
+        ProposalAction::Info => Some(GovernanceType::InfoAction),
+        ProposalAction::Other => None,
+    }
+}
+
+fn committee_vote_model(vote: &Vote) -> committee_votes_inner::Vote {
+    match vote {
+        Vote::Yes => committee_votes_inner::Vote::Yes,
+        Vote::No => committee_votes_inner::Vote::No,
+        Vote::Abstain => committee_votes_inner::Vote::Abstain,
+    }
+}
+
+fn committee_voter(cred: &StakeCredential) -> Voter {
+    match cred {
+        StakeCredential::AddrKeyhash(hash) => Voter::ConstitutionalCommitteeKey(*hash),
+        StakeCredential::ScriptHash(hash) => Voter::ConstitutionalCommitteeScript(*hash),
+    }
+}
+
+/// This function finds the transaction, the anchor, and the block height for
+/// each vote in one block. It then sorts the rows by transaction position and
+/// ballot index.
+fn settle_committee_casts<D: Domain>(
+    domain: &D,
+    slot: BlockSlot,
+    rows: &mut Vec<CommitteeVoteRow>,
+) -> Result<(), Error> {
+    let Some(body) = domain
+        .archive()
+        .get_block_by_slot(&slot)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Ok(());
+    };
+
+    let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let block_height = block.number();
+    type CastsByTarget = BTreeMap<(Voter, Hash<32>, u32), VecDeque<CommitteeVoteCast>>;
+    let mut casts = CastsByTarget::new();
+
+    for (tx_position, tx) in block.txs().iter().enumerate() {
+        if !tx.is_valid() {
+            continue;
+        }
+
+        let MultiEraTx::Conway(conway) = tx else {
+            continue;
+        };
+        let Some(procedures) = &conway.transaction_body.voting_procedures else {
+            continue;
+        };
+
+        let mut vote_position = 0;
+        for (voter, ballot) in procedures {
+            if !matches!(
+                voter,
+                Voter::ConstitutionalCommitteeKey(_) | Voter::ConstitutionalCommitteeScript(_)
+            ) {
+                continue;
+            }
+
+            for (target, procedure) in ballot {
+                casts
+                    .entry((voter.clone(), target.transaction_id, target.action_index))
+                    .or_default()
+                    .push_back(CommitteeVoteCast {
+                        order: (tx_position, vote_position),
+                        tx: tx.hash(),
+                        anchor: procedure.anchor.clone(),
+                        block_height,
+                    });
+                vote_position += 1;
+            }
+        }
+    }
+
+    let mut settled: Vec<((usize, usize), CommitteeVoteRow)> = rows
+        .drain(..)
+        .map(|mut row| {
+            let key = (
+                committee_voter(&row.voter),
+                row.proposal_tx,
+                row.proposal_idx,
+            );
+            let cast = casts.get_mut(&key).and_then(VecDeque::pop_front);
+            let order = cast
+                .as_ref()
+                .map(|cast| cast.order)
+                .unwrap_or((usize::MAX, usize::MAX));
+            row.cast = cast;
+            (order, row)
+        })
+        .collect();
+
+    settled.sort_by_key(|(order, _)| *order);
+    rows.extend(settled.into_iter().map(|(_, row)| row));
+
+    Ok(())
+}
+
+fn resolve_committee_vote_page<D: Domain>(
+    domain: &D,
+    groups: BTreeMap<BlockSlot, Vec<CommitteeVoteRow>>,
+    pagination: &Pagination,
+) -> Result<Vec<CommitteeVoteRow>, Error> {
+    let descending = matches!(pagination.order, Order::Desc);
+    let mut groups: Vec<_> = groups.into_values().collect();
+    if descending {
+        groups.reverse();
+    }
+
+    let mut skipped = 0;
+    let mut out = Vec::with_capacity(pagination.count);
+
+    for mut group in groups {
+        settle_committee_casts(domain, group[0].slot, &mut group)?;
+        group.retain(|row| row.cast.is_some());
+
+        if descending {
+            group.reverse();
+        }
+
+        for row in group {
+            if skipped < pagination.from() {
+                skipped += 1;
+                continue;
+            }
+
+            out.push(row);
+            if out.len() == pagination.count {
+                return Ok(out);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// This function scans the committee vote histories of every proposal. It
+/// keeps only a bounded frontier of slots.
+fn collect_committee_vote_frontier<D: Domain>(
+    domain: &D,
+    voters: Option<&BTreeSet<StakeCredential>>,
+    group_limit: usize,
+    descending: bool,
+) -> Result<CommitteeVoteFrontier, Error> {
+    let mut frontier = CommitteeVoteFrontier::new(group_limit, descending);
+    let entities = domain
+        .state()
+        .iter_entities_typed::<ProposalState>(ProposalState::NS, None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for entry in entities {
+        let (_, state) = entry.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let Some(governance_type) = committee_governance_type(&state.action) else {
+            continue;
+        };
+
+        for (voter, history) in &state.cc_votes {
+            if voters.is_some_and(|voters| !voters.contains(voter)) {
+                continue;
+            }
+
+            for (slot, vote) in history {
+                frontier.push(CommitteeVoteRow {
+                    slot: *slot,
+                    voter: voter.clone(),
+                    proposal_tx: state.tx,
+                    proposal_idx: state.idx,
+                    governance_type,
+                    vote: vote.clone(),
+                    cast: None,
+                });
+            }
+        }
+    }
+
+    Ok(frontier)
+}
+
+fn committee_vote_page<D: Domain>(
+    domain: &D,
+    voters: Option<&BTreeSet<StakeCredential>>,
+    chain: &ChainSummary,
+    pagination: &Pagination,
+    budget: usize,
+) -> Result<Vec<CommitteeVotesInner>, Error> {
+    let descending = matches!(pagination.order, Order::Desc);
+    let mut group_limit = pagination.to().min(budget).max(1);
+
+    let page = loop {
+        let frontier = collect_committee_vote_frontier(domain, voters, group_limit, descending)?;
+        let truncated = frontier.truncated;
+        let page = resolve_committee_vote_page(domain, frontier.groups, pagination)?;
+
+        if page.len() == pagination.count || !truncated {
+            break page;
+        }
+
+        if group_limit == budget {
+            return Err(Error::ScanBudgetExceeded);
+        }
+
+        group_limit = (group_limit * 2).min(budget);
+    };
+
+    page.into_iter()
+        .map(|row| {
+            let cast = row.cast.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            let (metadata_url, metadata_hash) = match cast.anchor {
+                Some(anchor) => (Some(anchor.url), Some(hex::encode(anchor.content_hash))),
+                None => (None, None),
+            };
+
+            Ok(CommitteeVotesInner {
+                tx_hash: hex::encode(cast.tx),
+                voter_hot_id: bech32_committee_hot(&row.voter)?,
+                proposal_id: bech32_gov_action(&row.proposal_tx, row.proposal_idx)?,
+                proposal_tx_hash: hex::encode(row.proposal_tx),
+                proposal_index: i32_or_500(row.proposal_idx)?,
+                governance_type: row.governance_type,
+                vote: committee_vote_model(&row.vote),
+                metadata_url,
+                metadata_hash,
+                block_height: i32_or_500(cast.block_height)?,
+                block_time: i32_or_500(chain.slot_time(row.slot))?,
+            })
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()
+        .map_err(Error::from)
+}
+
+async fn query_committee_votes<D>(
+    domain: Facade<D>,
+    pagination: Pagination,
+    voters: Option<BTreeSet<StakeCredential>>,
+) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let budget = domain.config.max_scan_items() as usize;
+    let chain = domain.get_chain_summary()?;
+    let page = domain
+        .query()
+        .run_blocking(move |domain| {
+            Ok(committee_vote_page(
+                &domain,
+                voters.as_ref(),
+                &chain,
+                &pagination,
+                budget,
+            ))
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    Ok(Json(page))
+}
+
+/// `GET /governance/committee/votes` lists votes from every past and current
+/// constitutional committee member.
+pub async fn committee_votes<D>(
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
+
+    query_committee_votes(domain, pagination, None).await
+}
+
+/// `GET /governance/committee/{cc_id}/votes` accepts a hot or cold CIP-129
+/// credential. A cold credential selects every hot credential that it
+/// authorized.
+pub async fn committee_votes_by_id<D>(
+    Path(cc_id): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<GovState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
+    let (role, credential) = parse_committee_id(&cc_id)?;
+
+    let voters = match role {
+        CommitteeCredentialRole::Hot => BTreeSet::from([credential]),
+        CommitteeCredentialRole::Cold => domain
+            .read_cardano_entity::<GovState>(GovState::singleton_key())?
+            .and_then(|mut gov| gov.committee_auths.remove(&credential))
+            .into_iter()
+            .flatten()
+            .filter_map(|(_, auth)| match auth {
+                CommitteeAuthorization::HotCredential(hot) => Some(hot),
+                CommitteeAuthorization::Resigned(_) => None,
+            })
+            .collect(),
+    };
+
+    if voters.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    query_committee_votes(domain, pagination, Some(voters)).await
 }
 
 struct ProposalRow {
@@ -1788,6 +2235,26 @@ mod tests {
             voter,
             proposal: SyntheticProposalRef { block, tx, action },
             vote,
+            anchor: None,
+        }
+    }
+
+    /// A vote with an anchor. The committee endpoints show this anchor as
+    /// `metadata_url` and `metadata_hash`.
+    fn synthetic_vote_with_anchor(
+        voter: Voter,
+        block: usize,
+        tx: usize,
+        action: u32,
+        vote: Vote,
+        url: &str,
+    ) -> SyntheticVote {
+        SyntheticVote {
+            anchor: Some(Anchor {
+                url: url.to_string(),
+                content_hash: Hash::from([9u8; 32]),
+            }),
+            ..synthetic_vote(voter, block, tx, action, vote)
         }
     }
 
@@ -2075,6 +2542,289 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let path = format!("/governance/dreps/{}/votes", app.vectors().drep_id);
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    fn cc_hot_key() -> StakeCredential {
+        StakeCredential::AddrKeyhash(Hash::from([21u8; 28]))
+    }
+
+    fn cc_hot_script() -> StakeCredential {
+        StakeCredential::ScriptHash(Hash::from([22u8; 28]))
+    }
+
+    /// Transaction 0 in block 0 proposes two actions. Transaction 1 proposes
+    /// one more action. Block 1 casts four committee votes, and three of them
+    /// are in one transaction. The listing must therefore resolve the order
+    /// inside one block. Block 2 changes an earlier vote. As a result, one hot
+    /// credential has two rows for one proposal.
+    fn committee_votes_config() -> SyntheticBlockConfig {
+        let key = Voter::ConstitutionalCommitteeKey(Hash::from([21u8; 28]));
+        let script = Voter::ConstitutionalCommitteeScript(Hash::from([22u8; 28]));
+
+        SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![
+                vec![
+                    vec![GovAction::Information, GovAction::Information],
+                    vec![GovAction::Information],
+                ],
+                vec![],
+                vec![],
+            ],
+            votes_by_block: vec![
+                vec![],
+                vec![
+                    vec![
+                        synthetic_vote_with_anchor(
+                            key.clone(),
+                            0,
+                            0,
+                            1,
+                            Vote::No,
+                            "https://example.com/no",
+                        ),
+                        synthetic_vote_with_anchor(
+                            key.clone(),
+                            0,
+                            0,
+                            0,
+                            Vote::Yes,
+                            "https://example.com/yes",
+                        ),
+                        synthetic_vote(script, 0, 0, 1, Vote::Abstain),
+                    ],
+                    vec![synthetic_vote(key.clone(), 0, 1, 0, Vote::Abstain)],
+                ],
+                vec![vec![synthetic_vote(key, 0, 0, 0, Vote::No)]],
+            ],
+            ..Default::default()
+        }
+    }
+
+    async fn get_committee_votes(app: &TestApp, path: &str) -> Vec<CommitteeVotesInner> {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "The request to {path} returned status {status}. The response body was {}.",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes)
+            .expect("The committee vote response did not contain valid JSON.")
+    }
+
+    /// The identity of a row. The tests use this identity when the assertion
+    /// is about the order and not about the content.
+    fn committee_row_id(row: &CommitteeVotesInner) -> (&String, &String, &String) {
+        (&row.tx_hash, &row.voter_hot_id, &row.proposal_id)
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_happy_path() {
+        let app = TestApp::new_with_cfg(committee_votes_config());
+        let rows = get_committee_votes(&app, "/governance/committee/votes").await;
+        let blocks = &app.vectors().blocks;
+        let hot_key = bech32_committee_hot(&cc_hot_key()).unwrap();
+        let hot_script = bech32_committee_hot(&cc_hot_script()).unwrap();
+
+        assert_eq!(rows.len(), 5);
+
+        // A committee script sorts before a committee key. The script row is
+        // therefore first, but the chain configuration lists this vote last.
+        assert_eq!(rows[0].tx_hash, blocks[1].tx_hashes[0]);
+        assert_eq!(rows[0].voter_hot_id, hot_script);
+        assert_eq!(rows[0].proposal_tx_hash, blocks[0].tx_hashes[0]);
+        assert_eq!(rows[0].proposal_index, 1);
+        assert_eq!(rows[0].vote, committee_votes_inner::Vote::Abstain);
+        assert_eq!(rows[0].metadata_url, None);
+        assert_eq!(rows[0].metadata_hash, None);
+
+        assert_eq!(rows[1].tx_hash, blocks[1].tx_hashes[0]);
+        assert_eq!(rows[1].voter_hot_id, hot_key);
+        assert_eq!(rows[1].proposal_index, 0);
+        assert_eq!(rows[1].vote, committee_votes_inner::Vote::Yes);
+        assert_eq!(
+            rows[1].metadata_url.as_deref(),
+            Some("https://example.com/yes")
+        );
+        assert_eq!(
+            rows[1].metadata_hash.as_deref(),
+            Some(&hex::encode([9u8; 32])[..])
+        );
+
+        assert_eq!(rows[2].tx_hash, blocks[1].tx_hashes[0]);
+        assert_eq!(rows[2].voter_hot_id, hot_key);
+        assert_eq!(rows[2].proposal_index, 1);
+        assert_eq!(rows[2].vote, committee_votes_inner::Vote::No);
+        assert_eq!(
+            rows[2].metadata_url.as_deref(),
+            Some("https://example.com/no")
+        );
+
+        assert_eq!(rows[3].tx_hash, blocks[1].tx_hashes[1]);
+        assert_eq!(rows[3].proposal_tx_hash, blocks[0].tx_hashes[1]);
+        assert_eq!(rows[3].vote, committee_votes_inner::Vote::Abstain);
+
+        // The second vote adds a row. It does not replace the first row.
+        assert_eq!(rows[4].tx_hash, blocks[2].tx_hashes[0]);
+        assert_eq!(rows[4].proposal_index, 0);
+        assert_eq!(rows[4].vote, committee_votes_inner::Vote::No);
+
+        for (row, block) in rows.iter().zip([1usize, 1, 1, 1, 2]) {
+            let proposal_tx: Hash<32> = row.proposal_tx_hash.parse().unwrap();
+            assert_eq!(
+                row.proposal_id,
+                bech32_gov_action(&proposal_tx, row.proposal_index as u32).unwrap()
+            );
+            assert_eq!(
+                row.governance_type,
+                committee_votes_inner::GovernanceType::InfoAction
+            );
+            assert_eq!(row.block_height, blocks[block].block_number as i32);
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_orders_and_paginates() {
+        let app = TestApp::new_with_cfg(committee_votes_config());
+        let ascending = get_committee_votes(&app, "/governance/committee/votes").await;
+        let descending = get_committee_votes(&app, "/governance/committee/votes?order=desc").await;
+
+        assert_eq!(
+            descending.iter().map(committee_row_id).collect_vec(),
+            ascending.iter().rev().map(committee_row_id).collect_vec()
+        );
+
+        let page = get_committee_votes(&app, "/governance/committee/votes?count=2&page=2").await;
+        assert_eq!(
+            page.iter().map(committee_row_id).collect_vec(),
+            ascending[2..4].iter().map(committee_row_id).collect_vec()
+        );
+
+        assert!(
+            get_committee_votes(&app, "/governance/committee/votes?page=9")
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_by_hot_id_selects_one_voter() {
+        let app = TestApp::new_with_cfg(committee_votes_config());
+        let hot_script = bech32_committee_hot(&cc_hot_script()).unwrap();
+        let rows =
+            get_committee_votes(&app, &format!("/governance/committee/{hot_script}/votes")).await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].voter_hot_id, hot_script);
+        assert_eq!(rows[0].vote, committee_votes_inner::Vote::Abstain);
+    }
+
+    /// A cold credential selects every hot credential that it authorized. A
+    /// rotation therefore returns the votes of both hot keys. A resignation
+    /// adds no hot credential.
+    #[tokio::test]
+    async fn governance_committee_votes_by_cold_id_follows_authorizations() {
+        let cold = cc_cold_key(31);
+        let app = TestApp::new_with_cfg_and_setup(committee_votes_config(), move |domain, _| {
+            let auths = BTreeMap::from([(
+                cc_cold_key(31),
+                vec![
+                    (5, CommitteeAuthorization::HotCredential(cc_hot_script())),
+                    (15, CommitteeAuthorization::HotCredential(cc_hot_key())),
+                    (25, CommitteeAuthorization::Resigned(None)),
+                ],
+            )]);
+            seed_committee(domain, None, auths, None);
+        });
+
+        let cold_id = bech32_committee_cold(&cold).unwrap();
+        let rows =
+            get_committee_votes(&app, &format!("/governance/committee/{cold_id}/votes")).await;
+        let all = get_committee_votes(&app, "/governance/committee/votes").await;
+
+        // Both authorized hot credentials voted. The cold listing is therefore
+        // the full listing.
+        assert_eq!(
+            rows.iter().map(committee_row_id).collect_vec(),
+            all.iter().map(committee_row_id).collect_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_by_unauthorized_cold_id_is_empty() {
+        let app = TestApp::new_with_cfg(committee_votes_config());
+        let cold_id = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+
+        assert!(
+            get_committee_votes(&app, &format!("/governance/committee/{cold_id}/votes"))
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_bad_request() {
+        let app = TestApp::new_with_cfg(committee_votes_config());
+        let hot = bech32_committee_hot(&cc_hot_key()).unwrap();
+
+        assert_status(
+            &app,
+            "/governance/committee/votes?count=0",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/committee/votes?order=sideways",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            &format!("/governance/committee/{hot}/votes?page=0"),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/committee/not-a-credential/votes",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+
+        // A DRep credential is correct Bech32 text with the wrong prefix.
+        assert_status(
+            &app,
+            &format!("/governance/committee/{}/votes", app.vectors().drep_id),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+
+        // The prefix says hot, but the CIP-129 header says cold.
+        let mismatched = bech32::encode::<Bech32>(
+            Hrp::parse_unchecked("cc_hot"),
+            &[&[0x12u8][..], &[21u8; 28][..]].concat(),
+        )
+        .unwrap();
+        assert_status(
+            &app,
+            &format!("/governance/committee/{mismatched}/votes"),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(
+            &app,
+            "/governance/committee/votes",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
     }
 
     /// Three blocks: the first tx of block 1 proposes two actions, block 2
