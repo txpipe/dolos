@@ -268,14 +268,13 @@ impl CardanoIndexDeltaBuilder {
 
     /// Tag the current block with the pool that minted it.
     ///
-    /// Blockfrost lists the blocks of a pool. Byron blocks carry no issuer
-    /// and stay untagged, because Blockfrost has no pool for them.
+    /// Byron blocks carry no issuer and stay untagged.
     pub fn add_block_issuer(&mut self, block: &pallas::ledger::traverse::MultiEraBlock<'_>) {
         use pallas::crypto::hash::Hasher;
 
         if let Some(vkey) = block.header().issuer_vkey() {
             // The same derivation as the minted-block counter uses, so the
-            // tag key equals the pool id Blockfrost reports.
+            // tag key equals the `PoolState` entity key.
             let operator = Hasher::<224>::hash(vkey);
 
             self.current_block()
@@ -680,8 +679,8 @@ mod tests {
         }
     }
 
-    /// Blockfrost lists a block under the pool that minted it. The tag key is
-    /// the hash of the issuer key, which is the pool id.
+    /// A block is tagged under the pool that minted it. The tag key is the
+    /// hash of the issuer key, which is the pool id.
     #[test]
     fn index_block_tags_the_issuer_pool() {
         use pallas::crypto::hash::Hasher;
@@ -707,8 +706,7 @@ mod tests {
         assert_eq!(tags[0].key, Hasher::<224>::hash(&[0x10, 0x11]).to_vec());
     }
 
-    /// Byron blocks carry no issuer key. Blockfrost has no pool for them, so
-    /// they stay untagged.
+    /// Byron blocks carry no issuer key, so they stay untagged.
     #[test]
     fn index_block_skips_byron_issuer() {
         use pallas::ledger::traverse::MultiEraBlock;
