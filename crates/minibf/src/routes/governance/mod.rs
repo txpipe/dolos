@@ -756,9 +756,11 @@ fn collect_committee_vote_frontier<D: Domain>(
     domain: &D,
     voters: Option<&BTreeSet<StakeCredential>>,
     group_limit: usize,
+    budget: usize,
     descending: bool,
 ) -> Result<CommitteeVoteFrontier, Error> {
     let mut frontier = CommitteeVoteFrontier::new(group_limit, descending);
+    let mut scanned = 0;
     let entities = domain
         .state()
         .iter_entities_typed::<ProposalState>(ProposalState::NS, None)
@@ -776,6 +778,11 @@ fn collect_committee_vote_frontier<D: Domain>(
             }
 
             for (slot, vote) in history {
+                if scanned == budget {
+                    return Err(Error::ScanBudgetExceeded);
+                }
+                scanned += 1;
+
                 frontier.push(CommitteeVoteRow {
                     slot: *slot,
                     voter: voter.clone(),
@@ -803,7 +810,8 @@ fn committee_vote_page<D: Domain>(
     let mut group_limit = pagination.to().min(budget).max(1);
 
     let page = loop {
-        let frontier = collect_committee_vote_frontier(domain, voters, group_limit, descending)?;
+        let frontier =
+            collect_committee_vote_frontier(domain, voters, group_limit, budget, descending)?;
         let truncated = frontier.truncated;
         let page = resolve_committee_vote_page(domain, frontier.groups, pagination)?;
 
@@ -906,12 +914,11 @@ where
         CommitteeCredentialRole::Hot => BTreeSet::from([credential]),
         CommitteeCredentialRole::Cold => domain
             .read_cardano_entity::<GovState>(GovState::singleton_key())?
-            .and_then(|mut gov| gov.committee_auths.remove(&credential))
             .into_iter()
-            .flatten()
-            .filter_map(|(_, auth)| match auth {
-                CommitteeAuthorization::HotCredential(hot) => Some(hot),
-                CommitteeAuthorization::Resigned(_) => None,
+            .flat_map(|gov| {
+                gov.committee_hot_credentials(&credential)
+                    .cloned()
+                    .collect::<Vec<_>>()
             })
             .collect(),
     };
@@ -2728,15 +2735,24 @@ mod tests {
     async fn governance_committee_votes_by_cold_id_follows_authorizations() {
         let cold = cc_cold_key(31);
         let app = TestApp::new_with_cfg_and_setup(committee_votes_config(), move |domain, _| {
-            let auths = BTreeMap::from([(
-                cc_cold_key(31),
-                vec![
-                    (5, CommitteeAuthorization::HotCredential(cc_hot_script())),
-                    (15, CommitteeAuthorization::HotCredential(cc_hot_key())),
-                    (25, CommitteeAuthorization::Resigned(None)),
-                ],
-            )]);
-            seed_committee(domain, None, auths, None);
+            seed_gov(
+                domain,
+                GovState {
+                    committee_auths: BTreeMap::from([(
+                        cc_cold_key(31),
+                        vec![
+                            (15, CommitteeAuthorization::HotCredential(cc_hot_key())),
+                            (25, CommitteeAuthorization::Resigned(None)),
+                        ],
+                    )]),
+                    committee_auth_archive: BTreeMap::from([(
+                        cc_cold_key(31),
+                        vec![(5, CommitteeAuthorization::HotCredential(cc_hot_script()))],
+                    )]),
+                    active_since: Some(0),
+                    ..Default::default()
+                },
+            );
         });
 
         let cold_id = bech32_committee_cold(&cold).unwrap();
