@@ -116,10 +116,7 @@ pub mod archive {
         /// credential hash.
         DREP_CERTS = "drep_certs";
 
-        /// Pool operator hash of the block issuer.
-        ///
-        /// Blockfrost lists the blocks a pool minted. Byron blocks carry no
-        /// issuer, so only Shelley-era blocks onward are tagged.
+        /// Pool hash of the block issuer.
         POOL_BLOCKS = "pool_blocks";
     }
 }
