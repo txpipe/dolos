@@ -1055,6 +1055,13 @@ impl dolos_core::EntityDelta for CommitteeGc {
         self.removed = removed;
     }
 
+    /// The archive must hold the tail that `apply` appended, and this method
+    /// asserts this. A store from an older version cannot break the
+    /// assertion. A `CommitteeGc` delta never reaches the WAL, because the
+    /// boundary work unit keeps the default, empty `commit_wal`. Only
+    /// `RollWorkUnit` writes a `LogValue`. Thus, the rollback in
+    /// `core/sync.rs` reads block deltas only, and cannot supply a delta
+    /// from an older version.
     fn undo(&self, entity: &mut Option<GovState>) {
         let state = entity.as_mut().expect(GOV_MUST_EXIST);
 

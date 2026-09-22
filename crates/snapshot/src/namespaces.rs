@@ -64,7 +64,9 @@ pub const NAMESPACES: [Namespace; 14] = [
 ///
 /// `epochs` is at 2: `RollingStats::registered_pools` was a `HashSet`, whose
 /// per-instance iteration order made the namespace's bytes irreproducible
-/// across publishers of identical state. Kept beside [`NAMESPACES`], in the
+/// across publishers of identical state. `gov` is at 2: `GovState` carries
+/// `committee_auth_archive`, which keeps the committee authorization
+/// histories that the EPOCH rule removes. Kept beside [`NAMESPACES`], in the
 /// same order, and held to it by `every_namespace_has_a_schema_rev` below.
 pub const SCHEMA_REVS: [(Namespace, u64); 14] = [
     (AccountEpochLog::NS, 1),
