@@ -340,9 +340,7 @@ fn state_kinds_derive_from_their_namespaces() {
     );
 
     // The shard map is the spec's, not the data's: five chain-scale namespaces
-    // keyed by a hash split sixteen ways, and every other namespace is a single
-    // blob (`script_seqs` included: its counter key starts with a zero nibble,
-    // so it would not split). Changing
+    // split sixteen ways, and every other namespace is a single blob. Changing
     // one of these is a media-type-version event for that kind, so it is spelled
     // out here rather than derived from the table it is checking.
     for (_, ns, shards) in STATE_KINDS {

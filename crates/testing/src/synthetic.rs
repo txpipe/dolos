@@ -321,7 +321,7 @@ pub fn build_synthetic_blocks(
 
         let aux_data = alonzo::AuxiliaryData::ShelleyMa(alonzo::ShelleyMaAuxiliaryData {
             transaction_metadata: metadata,
-            auxiliary_scripts: None,
+            auxiliary_scripts: fixture_extras.as_ref().map(|_| vec![aux_script()]),
         });
         let aux_hash = aux_data.compute_hash();
 
@@ -524,6 +524,17 @@ pub fn build_synthetic_blocks(
     };
 
     (raw_blocks, vectors, chain_config)
+}
+
+/// A native script the fixture blocks carry in their auxiliary data and
+/// nowhere else.
+pub fn aux_script() -> alonzo::NativeScript {
+    alonzo::NativeScript::InvalidBefore(400_001)
+}
+
+/// Hex hash of [`aux_script`].
+pub fn aux_script_hash() -> String {
+    aux_script().compute_hash().to_string()
 }
 
 fn build_datum_and_script_fixture() -> SyntheticFixtureExtras {

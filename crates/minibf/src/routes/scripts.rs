@@ -262,6 +262,87 @@ mod tests {
         assert_eq!(item.serialised_size, None);
     }
 
+    /// A script the chain only ever carried in a tx's auxiliary data is in
+    /// the `/scripts` listing, so the archive has to resolve it too.
+    #[tokio::test]
+    async fn scripts_by_hash_auxiliary_only_script() {
+        let app = fixture_app();
+        let script_hash = dolos_testing::synthetic::aux_script_hash();
+        let script_hash = script_hash.as_str();
+        let path = format!("/scripts/{script_hash}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let item: Script = serde_json::from_slice(&bytes).expect("failed to parse script");
+        assert_eq!(item.script_hash, script_hash);
+        assert_eq!(item.r#type, ScriptType::Timelock);
+
+        let (status, bytes) = app.get_bytes(&format!("{path}/json")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let item: ScriptJson = serde_json::from_slice(&bytes).expect("failed to parse script json");
+        assert!(item.json.is_some());
+    }
+
+    /// An archive written before auxiliary scripts were tagged has no tag
+    /// for them, while a registry rebuilt by `doctor rebuild-state` lists
+    /// them. The lookup starts from the registry row, so it still resolves.
+    #[tokio::test]
+    async fn scripts_by_hash_listed_script_without_archive_tag() {
+        use dolos_cardano::indexes::archive_dimensions::SCRIPT;
+        use dolos_core::{
+            indexes::{ArchiveIndexDelta, Tag},
+            ArchiveStore as _, ArchiveWriter as _,
+        };
+
+        let app = TestApp::new_with_cfg_and_setup(Default::default(), |domain, vectors| {
+            let hash = hex::decode(dolos_testing::synthetic::aux_script_hash()).unwrap();
+            let deltas: Vec<_> = vectors
+                .blocks
+                .iter()
+                .map(|block| ArchiveIndexDelta {
+                    slot: block.slot,
+                    block_hash: vec![],
+                    block_number: None,
+                    tx_hashes: vec![],
+                    tags: vec![Tag::new(SCRIPT, hash.clone())],
+                })
+                .collect();
+
+            let writer = domain.archive().start_writer().unwrap();
+            writer.undo_index(&deltas).unwrap();
+            writer.commit().unwrap();
+
+            // the archive index alone no longer finds it
+            let tagged = domain
+                .archive()
+                .slots_by_tag(SCRIPT, &hash, 0, u64::MAX)
+                .unwrap()
+                .count();
+            assert_eq!(tagged, 0);
+        });
+
+        let script_hash = dolos_testing::synthetic::aux_script_hash();
+        let script_hash = script_hash.as_str();
+        let (status, bytes) = app.get_bytes(&format!("/scripts/{script_hash}")).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let item: Script = serde_json::from_slice(&bytes).expect("failed to parse script");
+        assert_eq!(item.script_hash, script_hash);
+        assert_eq!(item.r#type, ScriptType::Timelock);
+    }
+
     #[tokio::test]
     async fn scripts_by_hash_not_found_for_invalid_hash() {
         let app = fixture_app();

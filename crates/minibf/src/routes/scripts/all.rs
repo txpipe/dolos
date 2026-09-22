@@ -110,13 +110,15 @@ mod tests {
         items.into_iter().map(|x| x.script_hash).collect()
     }
 
-    /// The first tx of every synthetic block carries the same two scripts: a
-    /// native one as the reference script of its output and a plutus one as a
-    /// witness. That is the listing order, and what every later block repeats.
+    /// The first tx of every synthetic block carries the same three scripts:
+    /// a native one as the reference script of its output, a plutus one as a
+    /// witness and a native one in its auxiliary data. That is the listing
+    /// order, and what every later block repeats.
     fn expected(app: &TestApp) -> Vec<String> {
         vec![
             app.vectors().script_hash.clone(),
             app.vectors().plutus_script_hash.clone(),
+            dolos_testing::synthetic::aux_script_hash(),
         ]
     }
 
@@ -154,10 +156,16 @@ mod tests {
 
         // desc: page 1 of size 1 is the newest script
         let page = get_scripts(&app, "?order=desc&page=1&count=1").await;
-        assert_eq!(page, vec![expected[1].clone()]);
+        assert_eq!(page, vec![expected[2].clone()]);
 
-        // desc: page 2 of size 1 is the oldest script
-        let page = get_scripts(&app, "?order=desc&page=2&count=1").await;
+        // desc: page 3 of size 1 is the oldest script
+        let page = get_scripts(&app, "?order=desc&page=3&count=1").await;
+        assert_eq!(page, vec![expected[0].clone()]);
+
+        // a page in the middle, from either side
+        let page = get_scripts(&app, "?order=asc&page=2&count=2").await;
+        assert_eq!(page, vec![expected[2].clone()]);
+        let page = get_scripts(&app, "?order=desc&page=2&count=2").await;
         assert_eq!(page, vec![expected[0].clone()]);
 
         // a page that straddles the end is cut short, from either side
@@ -172,8 +180,8 @@ mod tests {
         let app = TestApp::new();
 
         for query in [
-            "?page=3&count=1",
-            "?order=desc&page=3&count=1",
+            "?page=4&count=1",
+            "?order=desc&page=4&count=1",
             // as deep as a page goes: nothing is scanned to get there
             "?page=21474836",
             "?order=desc&page=21474836",

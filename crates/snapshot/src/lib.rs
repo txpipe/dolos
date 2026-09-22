@@ -176,13 +176,11 @@ pub const LOG_KINDS: [(&str, Namespace); 3] = [
 /// not a constructor (`state_kinds_derive_from_their_namespaces`).
 ///
 /// The shard count is **specification, never tuning**: the five namespaces
-/// whose populations are chain-scale and whose keys are hashes — the UTxO
-/// set, accounts, assets, datums and scripts — shard sixteen ways by the first
-/// key nibble, and every other namespace is a single blob. `script_seqs` is
-/// chain-scale too, but its key is a big-endian counter whose first nibble is
-/// always zero, so sharding it would fill one shard and leave fifteen empty.
-/// Re-sharding a namespace is a media-type-version event for that namespace's
-/// kind, decided by the format's owner; it is not a constant to nudge.
+/// whose populations are chain-scale — the UTxO set, accounts, assets, datums
+/// and scripts — shard sixteen ways by the first key nibble, and every other
+/// namespace is a single blob. Re-sharding a namespace is a media-type-version
+/// event for that namespace's kind, decided by the format's owner; it is not a
+/// constant to nudge.
 pub const STATE_KINDS: [(&str, Namespace, u8); 16] = [
     ("state-account-epochs", AccountEpochLog::NS, 1),
     ("state-accounts", AccountState::NS, 16),

@@ -5,7 +5,7 @@ use pallas::{
     crypto::hash::Hash,
     ledger::{
         primitives::conway::{DatumOption, PlutusData, ScriptRef},
-        traverse::{ComputeHash, MultiEraBlock, OriginalHash},
+        traverse::{ComputeHash, MultiEraBlock, MultiEraTx, OriginalHash},
     },
 };
 
@@ -15,7 +15,7 @@ use dolos_core::{
 };
 
 use crate::indexes::dimensions::archive;
-use crate::model::{DatumState, DATUM_NS};
+use crate::model::{DatumState, FixedNamespace as _, ScriptState, DATUM_NS};
 
 use futures_core::Stream;
 
@@ -176,6 +176,13 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
 
     async fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, DomainError>;
 
+    /// The script `script_hash` names if the script registry lists it, the
+    /// way cardano-db-sync's `script` table has it: a script only a
+    /// phase-2-invalid tx witnessed is not found.
+    ///
+    /// The registry row points at the block that carried the script first,
+    /// so no archive tag is needed to find it. Without a row, or with that
+    /// block pruned, it falls back to the archive index.
     async fn script_by_hash(
         &self,
         script_hash: &Hash<28>,
@@ -496,102 +503,44 @@ where
         &self,
         script_hash: &Hash<28>,
     ) -> Result<Option<ScriptData>, DomainError> {
-        let end_slot = self
+        let script_hash = *script_hash;
+        let key = EntityKey::from(script_hash.as_slice());
+
+        let (first_slot, first_blocks) = self
             .run_blocking(move |domain| {
-                Ok(domain
-                    .archive()
-                    .get_tip()?
-                    .map(|(slot, _)| slot)
-                    .unwrap_or_default())
+                let row: Option<ScriptState> =
+                    domain.state().read_entity_typed(ScriptState::NS, &key)?;
+
+                let Some(row) = row else {
+                    return Ok((None, vec![]));
+                };
+
+                let blocks = domain.archive().get_blocks_by_slot(&row.first_slot)?;
+                Ok((Some(row.first_slot), blocks))
             })
             .await?;
 
-        let script_hash = *script_hash;
+        for raw in first_blocks {
+            let block = MultiEraBlock::decode(raw.as_slice())
+                .map_err(|e| DomainError::ChainError(ChainError::DecodingError(e)))?;
+
+            if let Some(script) = script_in_block(&block, script_hash) {
+                return Ok(Some(script));
+            }
+        }
+
+        // no registry row (data synced before the registry existed) or its
+        // first block pruned by `sync.max_history`: the archive index still
+        // knows every later carrier
+        let end_slot = archive_tip_slot(self).await?;
+
         find_first_by_tag(
             self,
             archive::SCRIPT,
             script_hash.as_slice().to_vec(),
-            0,
+            first_slot.unwrap_or(0),
             end_slot,
-            |block| {
-                for tx in block.txs() {
-                    for script in tx.native_scripts() {
-                        if script.original_hash() == script_hash {
-                            return Some(ScriptData {
-                                language: ScriptLanguage::Native,
-                                script: script.raw_cbor().to_vec(),
-                            });
-                        }
-                    }
-
-                    for script in tx.plutus_v1_scripts() {
-                        if script.compute_hash() == script_hash {
-                            return Some(ScriptData {
-                                language: ScriptLanguage::PlutusV1,
-                                script: script.as_ref().to_vec(),
-                            });
-                        }
-                    }
-
-                    for script in tx.plutus_v2_scripts() {
-                        if script.compute_hash() == script_hash {
-                            return Some(ScriptData {
-                                language: ScriptLanguage::PlutusV2,
-                                script: script.as_ref().to_vec(),
-                            });
-                        }
-                    }
-
-                    for script in tx.plutus_v3_scripts() {
-                        if script.compute_hash() == script_hash {
-                            return Some(ScriptData {
-                                language: ScriptLanguage::PlutusV3,
-                                script: script.as_ref().to_vec(),
-                            });
-                        }
-                    }
-
-                    for (_, output) in tx.produces() {
-                        if let Some(script_ref) = output.script_ref() {
-                            match script_ref {
-                                ScriptRef::NativeScript(script) => {
-                                    if script.original_hash() == script_hash {
-                                        return Some(ScriptData {
-                                            language: ScriptLanguage::Native,
-                                            script: script.raw_cbor().to_vec(),
-                                        });
-                                    }
-                                }
-                                ScriptRef::PlutusV1Script(script) => {
-                                    if script.compute_hash() == script_hash {
-                                        return Some(ScriptData {
-                                            language: ScriptLanguage::PlutusV1,
-                                            script: script.as_ref().to_vec(),
-                                        });
-                                    }
-                                }
-                                ScriptRef::PlutusV2Script(script) => {
-                                    if script.compute_hash() == script_hash {
-                                        return Some(ScriptData {
-                                            language: ScriptLanguage::PlutusV2,
-                                            script: script.as_ref().to_vec(),
-                                        });
-                                    }
-                                }
-                                ScriptRef::PlutusV3Script(script) => {
-                                    if script.compute_hash() == script_hash {
-                                        return Some(ScriptData {
-                                            language: ScriptLanguage::PlutusV3,
-                                            script: script.as_ref().to_vec(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                None
-            },
+            |block| script_in_block(block, script_hash),
         )
         .await
     }
@@ -652,6 +601,136 @@ where
     }
 
     Ok(out)
+}
+
+/// The script `script_hash` names, if `block` carries it.
+fn script_in_block(block: &MultiEraBlock, script_hash: Hash<28>) -> Option<ScriptData> {
+    block
+        .txs()
+        .iter()
+        .find_map(|tx| script_in_tx(tx, script_hash))
+}
+
+/// The script `script_hash` names, if `tx` carries it the way the script
+/// registry counts (`roll::scripts::tx_script_hashes`): a tx that failed
+/// phase-2 validation contributes only the reference scripts of its outputs,
+/// as in cardano-db-sync.
+fn script_in_tx(tx: &MultiEraTx, script_hash: Hash<28>) -> Option<ScriptData> {
+    if tx.is_valid() {
+        for script in tx.native_scripts() {
+            if script.original_hash() == script_hash {
+                return Some(ScriptData {
+                    language: ScriptLanguage::Native,
+                    script: script.raw_cbor().to_vec(),
+                });
+            }
+        }
+
+        for script in tx.plutus_v1_scripts() {
+            if script.compute_hash() == script_hash {
+                return Some(ScriptData {
+                    language: ScriptLanguage::PlutusV1,
+                    script: script.as_ref().to_vec(),
+                });
+            }
+        }
+
+        for script in tx.plutus_v2_scripts() {
+            if script.compute_hash() == script_hash {
+                return Some(ScriptData {
+                    language: ScriptLanguage::PlutusV2,
+                    script: script.as_ref().to_vec(),
+                });
+            }
+        }
+
+        for script in tx.plutus_v3_scripts() {
+            if script.compute_hash() == script_hash {
+                return Some(ScriptData {
+                    language: ScriptLanguage::PlutusV3,
+                    script: script.as_ref().to_vec(),
+                });
+            }
+        }
+
+        // the auxiliary data carries no raw bytes, so the script is re-encoded:
+        // the same bytes its hash was computed over
+        for script in tx.aux_native_scripts() {
+            if script.compute_hash() == script_hash {
+                return Some(ScriptData {
+                    language: ScriptLanguage::Native,
+                    script: pallas::codec::minicbor::to_vec(script)
+                        .expect("encoding a native script cannot fail"),
+                });
+            }
+        }
+
+        for script in tx.aux_plutus_v1_scripts() {
+            if script.compute_hash() == script_hash {
+                return Some(ScriptData {
+                    language: ScriptLanguage::PlutusV1,
+                    script: script.as_ref().to_vec(),
+                });
+            }
+        }
+    }
+
+    for (_, output) in tx.produces() {
+        if let Some(script_ref) = output.script_ref() {
+            match script_ref {
+                ScriptRef::NativeScript(script) => {
+                    if script.original_hash() == script_hash {
+                        return Some(ScriptData {
+                            language: ScriptLanguage::Native,
+                            script: script.raw_cbor().to_vec(),
+                        });
+                    }
+                }
+                ScriptRef::PlutusV1Script(script) => {
+                    if script.compute_hash() == script_hash {
+                        return Some(ScriptData {
+                            language: ScriptLanguage::PlutusV1,
+                            script: script.as_ref().to_vec(),
+                        });
+                    }
+                }
+                ScriptRef::PlutusV2Script(script) => {
+                    if script.compute_hash() == script_hash {
+                        return Some(ScriptData {
+                            language: ScriptLanguage::PlutusV2,
+                            script: script.as_ref().to_vec(),
+                        });
+                    }
+                }
+                ScriptRef::PlutusV3Script(script) => {
+                    if script.compute_hash() == script_hash {
+                        return Some(ScriptData {
+                            language: ScriptLanguage::PlutusV3,
+                            script: script.as_ref().to_vec(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Slot of the archive tip, 0 for an empty archive.
+async fn archive_tip_slot<D>(facade: &AsyncQueryFacade<D>) -> Result<BlockSlot, DomainError>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    facade
+        .run_blocking(move |domain| {
+            Ok(domain
+                .archive()
+                .get_tip()?
+                .map(|(slot, _)| slot)
+                .unwrap_or_default())
+        })
+        .await
 }
 
 /// Find the first match in blocks tagged with a specific dimension/key.
@@ -772,5 +851,40 @@ where
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::roll::scripts::tests::tx_cbor;
+
+    /// A tx that failed phase-2 validation lists only the reference scripts
+    /// of its collateral return, so its witnesses and auxiliary scripts are
+    /// not found.
+    #[test]
+    fn invalid_tx_yields_its_reference_scripts_only() {
+        let (cbor, reference, witness, auxiliary) = tx_cbor(false);
+        let tx = MultiEraTx::decode(&cbor).unwrap();
+        assert!(!tx.is_valid());
+
+        let found = |hash| script_in_tx(&tx, hash).map(|x| x.language);
+
+        assert_eq!(found(reference), Some(ScriptLanguage::Native));
+        assert_eq!(found(witness), None);
+        assert_eq!(found(auxiliary), None);
+    }
+
+    /// A valid tx lists its witnesses and auxiliary scripts.
+    #[test]
+    fn valid_tx_yields_witness_and_auxiliary_scripts() {
+        let (cbor, _, witness, auxiliary) = tx_cbor(true);
+        let tx = MultiEraTx::decode(&cbor).unwrap();
+        assert!(tx.is_valid());
+
+        let found = |hash| script_in_tx(&tx, hash).map(|x| x.language);
+
+        assert_eq!(found(witness), Some(ScriptLanguage::PlutusV2));
+        assert_eq!(found(auxiliary), Some(ScriptLanguage::Native));
     }
 }
