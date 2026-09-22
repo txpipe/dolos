@@ -751,7 +751,8 @@ fn resolve_committee_vote_page<D: Domain>(
 }
 
 /// This function scans the committee vote histories of every proposal. It
-/// keeps only a bounded frontier of slots.
+/// keeps only a bounded frontier of slots. The scan reads no more than
+/// `budget` vote rows.
 fn collect_committee_vote_frontier<D: Domain>(
     domain: &D,
     voters: Option<&BTreeSet<StakeCredential>>,
@@ -819,6 +820,10 @@ fn committee_vote_page<D: Domain>(
             break page;
         }
 
+        // The scan counts one row for each group that it starts. Thus, a
+        // frontier at the budget cannot truncate, because the row counter
+        // stops the scan first. This guard only makes sure that the loop
+        // ends.
         if group_limit == budget {
             return Err(Error::ScanBudgetExceeded);
         }
@@ -2609,6 +2614,33 @@ mod tests {
         }
     }
 
+    /// Transaction 0 in block 0 proposes one action. Each subsequent block
+    /// casts one committee vote on that action. Thus, the four votes are in
+    /// four different slots. A small frontier limit cannot hold all four.
+    fn committee_votes_across_slots_config() -> SyntheticBlockConfig {
+        let key = Voter::ConstitutionalCommitteeKey(Hash::from([21u8; 28]));
+
+        SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![
+                vec![vec![GovAction::Information]],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            ],
+            votes_by_block: vec![
+                vec![],
+                vec![vec![synthetic_vote(key.clone(), 0, 0, 0, Vote::Yes)]],
+                vec![vec![synthetic_vote(key.clone(), 0, 0, 0, Vote::No)]],
+                vec![vec![synthetic_vote(key.clone(), 0, 0, 0, Vote::Abstain)]],
+                vec![vec![synthetic_vote(key, 0, 0, 0, Vote::No)]],
+            ],
+            ..Default::default()
+        }
+    }
+
     async fn get_committee_votes(app: &TestApp, path: &str) -> Vec<CommitteeVotesInner> {
         let (status, bytes) = app.get_bytes(path).await;
         assert_eq!(
@@ -2841,6 +2873,139 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
         )
         .await;
+    }
+
+    /// The scan budget counts vote rows, and not slot groups. Thus, a chain
+    /// with more votes than the budget gives an error. This is also true
+    /// when the page is small.
+    #[tokio::test]
+    async fn governance_committee_votes_rejects_history_over_scan_budget() {
+        let app = TestApp::new_with_scan_limit(committee_votes_across_slots_config(), 3);
+        let (status, bytes) = app.get_bytes("/governance/committee/votes?count=1").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("scan limit"), "The response body was {body}.");
+    }
+
+    /// One slot can hold more votes than the budget of slot groups. The row
+    /// counter must stop this scan. The group counter alone cannot stop it.
+    #[tokio::test]
+    async fn governance_committee_votes_counts_rows_inside_one_slot() {
+        let key = Voter::ConstitutionalCommitteeKey(Hash::from([21u8; 28]));
+        let script = Voter::ConstitutionalCommitteeScript(Hash::from([22u8; 28]));
+        let app = TestApp::new_with_scan_limit(
+            SyntheticBlockConfig {
+                block_count: 2,
+                txs_per_block: 1,
+                gov_actions_by_block: vec![
+                    vec![vec![
+                        GovAction::Information,
+                        GovAction::Information,
+                        GovAction::Information,
+                    ]],
+                    vec![],
+                ],
+                votes_by_block: vec![
+                    vec![],
+                    // Every vote of this block is in the same slot.
+                    vec![vec![
+                        synthetic_vote(key.clone(), 0, 0, 0, Vote::Yes),
+                        synthetic_vote(key.clone(), 0, 0, 1, Vote::No),
+                        synthetic_vote(key, 0, 0, 2, Vote::Abstain),
+                        synthetic_vote(script, 0, 0, 0, Vote::Yes),
+                    ]],
+                ],
+                ..Default::default()
+            },
+            3,
+        );
+        let (status, bytes) = app.get_bytes("/governance/committee/votes?count=1").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("scan limit"), "The response body was {body}.");
+    }
+
+    /// A budget that holds every row starts with a frontier that is too
+    /// small for the page. The retry must increase the frontier. It must
+    /// then return the full page in the correct order.
+    #[tokio::test]
+    async fn governance_committee_votes_grows_a_truncated_frontier() {
+        let app = TestApp::new_with_scan_limit(committee_votes_across_slots_config(), 4);
+        let blocks = app.vectors().blocks.clone();
+
+        // The first frontier holds two groups, because `count` is 2. The
+        // chain has four groups. Thus, the scan truncates, and the retry
+        // doubles the limit.
+        let page = get_committee_votes(&app, "/governance/committee/votes?count=2&page=2").await;
+        assert_eq!(
+            page.iter().map(|row| &row.tx_hash).collect_vec(),
+            vec![&blocks[3].tx_hashes[0], &blocks[4].tx_hashes[0]]
+        );
+
+        let descending = get_committee_votes(
+            &app,
+            "/governance/committee/votes?count=2&page=2&order=desc",
+        )
+        .await;
+        assert_eq!(
+            descending.iter().map(|row| &row.tx_hash).collect_vec(),
+            vec![&blocks[2].tx_hashes[0], &blocks[1].tx_hashes[0]]
+        );
+    }
+
+    /// A pruned slot group holds no rows after the archive lookup. Thus, the
+    /// page is short and the frontier is truncated. The retry must find the
+    /// remaining rows in the older groups.
+    #[tokio::test]
+    async fn governance_committee_votes_grows_past_a_pruned_group() {
+        let app = TestApp::new_with_scan_limit_and_setup(
+            committee_votes_across_slots_config(),
+            4,
+            |domain, _| {
+                // This call keeps only the last slot of the chain.
+                domain
+                    .archive()
+                    .prune_history(0, None)
+                    .expect("The archive did not prune its history.");
+            },
+        );
+        let blocks = app.vectors().blocks.clone();
+
+        // Only the vote of the last block stays after the prune. The scan
+        // must find this vote. The retry must not add a row that has no
+        // block.
+        let rows = get_committee_votes(&app, "/governance/committee/votes?count=1").await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, blocks[4].tx_hashes[0]);
+        assert_eq!(rows[0].vote, committee_votes_inner::Vote::No);
+    }
+
+    /// The frontier increases to the budget, and the scan then holds every
+    /// group. A page that stays short is short because the rows do not
+    /// exist. It is not short because the scan stopped too early.
+    #[tokio::test]
+    async fn governance_committee_votes_returns_a_short_page_at_the_group_budget() {
+        let app = TestApp::new_with_scan_limit_and_setup(
+            committee_votes_across_slots_config(),
+            4,
+            |domain, _| {
+                domain
+                    .archive()
+                    .prune_history(0, None)
+                    .expect("The archive did not prune its history.");
+            },
+        );
+        let blocks = app.vectors().blocks.clone();
+
+        // The chain holds four vote rows in four slots. The prune keeps one
+        // of these slots. The frontier starts at two groups and increases to
+        // the budget of four. It then holds every group.
+        let rows = get_committee_votes(&app, "/governance/committee/votes?count=2").await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, blocks[4].tx_hashes[0]);
     }
 
     /// Three blocks: the first tx of block 1 proposes two actions, block 2
