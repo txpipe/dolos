@@ -7,7 +7,7 @@ use axum::{
 };
 use blockfrost_openapi::models::scripts_inner::ScriptsInner;
 use dolos_cardano::model::{FixedNamespace as _, ScriptSeqState};
-use dolos_core::{Domain, StateStore as _};
+use dolos_core::{ChainPoint, Domain, StateStore as _};
 
 use crate::{
     error::Error,
@@ -15,13 +15,63 @@ use crate::{
     Facade,
 };
 
-/// One page of the script registry.
+/// How many times a page is read before one that the chain moved under is
+/// served anyway.
+const MAX_READS: usize = 8;
+
+/// One page of the script registry, read from a single state revision.
+///
+/// The state store has no read snapshot, and the total and the page are
+/// separate reads (the total alone is several), so a commit landing between
+/// them can pair a total from before a rollback with the rows after it: a
+/// `desc` page then starts at keys that no longer exist. Every state commit
+/// moves the cursor in the same batch as the rows, so a read the cursor did
+/// not move across saw one revision; one it moved across is read again.
+fn read_page<D: Domain>(domain: &D, pagination: &Pagination) -> Result<Vec<String>, StatusCode> {
+    let state = domain.state();
+
+    coherent_read(
+        || {
+            state
+                .read_cursor()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        },
+        || read_page_once(domain, pagination),
+    )
+}
+
+/// Run `read` until `cursor` reads the same before and after it, at most
+/// [`MAX_READS`] times; the last read is served whatever the cursor did.
+fn coherent_read<T, E>(
+    cursor: impl Fn() -> Result<Option<ChainPoint>, E>,
+    read: impl Fn() -> Result<T, E>,
+) -> Result<T, E> {
+    let mut before = cursor()?;
+
+    for _ in 1..MAX_READS {
+        let value = read()?;
+        let after = cursor()?;
+
+        if after == before {
+            return Ok(value);
+        }
+
+        before = after;
+    }
+
+    read()
+}
+
+/// One page of the script registry, as the state reads right now.
 ///
 /// The roll numbers scripts in the order Blockfrost lists them (the db-sync
 /// `script` row), densely, so a page is a key range: counted from the start
 /// for `asc` and from the total for `desc`. Nothing is scanned and no block is
 /// decoded, however deep the page is.
-fn read_page<D: Domain>(domain: &D, pagination: &Pagination) -> Result<Vec<String>, StatusCode> {
+fn read_page_once<D: Domain>(
+    domain: &D,
+    pagination: &Pagination,
+) -> Result<Vec<String>, StatusCode> {
     let state = domain.state();
 
     let total = ScriptSeqState::count(state).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -83,6 +133,54 @@ mod tests {
     use crate::test_support::{TestApp, TestFault};
     use dolos_testing::synthetic::SyntheticBlockConfig;
     use itertools::Itertools;
+    use std::cell::Cell;
+
+    /// A commit between the cursor reads makes the page be read again, and
+    /// the read the cursor held still across is the one served.
+    #[test]
+    fn coherent_read_rereads_when_the_cursor_moves() {
+        // the cursor moves across the first two reads, then holds
+        let cursors = [1u64, 2, 3, 3];
+        let cursor_reads = Cell::new(0);
+        let reads = Cell::new(0);
+
+        let page = coherent_read(
+            || {
+                let slot = cursors[cursor_reads.get()];
+                cursor_reads.set(cursor_reads.get() + 1);
+                Ok::<_, ()>(Some(ChainPoint::Slot(slot)))
+            },
+            || {
+                reads.set(reads.get() + 1);
+                Ok(reads.get())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page, 3);
+        assert_eq!(cursor_reads.get(), 4);
+    }
+
+    /// A chain that never holds still still gets an answer: the last read.
+    #[test]
+    fn coherent_read_gives_up_after_max_reads() {
+        let cursor_reads = Cell::new(0u64);
+        let reads = Cell::new(0);
+
+        let page = coherent_read(
+            || {
+                cursor_reads.set(cursor_reads.get() + 1);
+                Ok::<_, ()>(Some(ChainPoint::Slot(cursor_reads.get())))
+            },
+            || {
+                reads.set(reads.get() + 1);
+                Ok(reads.get())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page, MAX_READS);
+    }
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
@@ -110,13 +208,15 @@ mod tests {
         items.into_iter().map(|x| x.script_hash).collect()
     }
 
-    /// The first tx of every synthetic block carries the same two scripts: a
-    /// native one as the reference script of its output and a plutus one as a
-    /// witness. That is the listing order, and what every later block repeats.
+    /// The first tx of every synthetic block carries the same three scripts:
+    /// a native one as the reference script of its output, a plutus one as a
+    /// witness and a native one in its auxiliary data. That is the listing
+    /// order, and what every later block repeats.
     fn expected(app: &TestApp) -> Vec<String> {
         vec![
             app.vectors().script_hash.clone(),
             app.vectors().plutus_script_hash.clone(),
+            dolos_testing::synthetic::aux_script_hash(),
         ]
     }
 
@@ -154,10 +254,16 @@ mod tests {
 
         // desc: page 1 of size 1 is the newest script
         let page = get_scripts(&app, "?order=desc&page=1&count=1").await;
-        assert_eq!(page, vec![expected[1].clone()]);
+        assert_eq!(page, vec![expected[2].clone()]);
 
-        // desc: page 2 of size 1 is the oldest script
-        let page = get_scripts(&app, "?order=desc&page=2&count=1").await;
+        // desc: page 3 of size 1 is the oldest script
+        let page = get_scripts(&app, "?order=desc&page=3&count=1").await;
+        assert_eq!(page, vec![expected[0].clone()]);
+
+        // a page in the middle, from either side
+        let page = get_scripts(&app, "?order=asc&page=2&count=2").await;
+        assert_eq!(page, vec![expected[2].clone()]);
+        let page = get_scripts(&app, "?order=desc&page=2&count=2").await;
         assert_eq!(page, vec![expected[0].clone()]);
 
         // a page that straddles the end is cut short, from either side
@@ -172,8 +278,8 @@ mod tests {
         let app = TestApp::new();
 
         for query in [
-            "?page=3&count=1",
-            "?order=desc&page=3&count=1",
+            "?page=4&count=1",
+            "?order=desc&page=4&count=1",
             // as deep as a page goes: nothing is scanned to get there
             "?page=21474836",
             "?order=desc&page=21474836",

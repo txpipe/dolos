@@ -67,7 +67,7 @@ One exception to the tag hashing rule is normative for `indexes` v1: records in 
 
 State namespaces: the fifteen entity namespaces from `dolos_cardano::model::build_schema()` (key = 32-byte `EntityKey` verbatim, value = stored minicbor verbatim) plus `utxos` (key = `tx_hash(32) ‖ output_index(4, BE)`, value = CBOR `[era: uint, body: bytes]`). The chain point lives in the inscription's `position`, not in a layer. Live-UTxO tags (`utxo::*`) are not shipped; they are rebuilt at restore into the state store via `utxo_index_delta_from_utxo_delta`.
 
-State kinds: one per state namespace, and the set is closed — 16 of them, spelled `state-` followed by the namespace with `_` rewritten to `-`, by the same rule and for the same reasons as the log kinds below. The namespace is therefore **not** in the record — it is the layer — which is what puts the fail-closed edge of a breaking change on exactly the namespace that broke, and lets a reader skip a namespace this profile does not define at the transport rather than choking on one shared layer. The shard count is **specification, never tuning**: `utxos`, `accounts`, `assets`, `datums` and `scripts` split 16 ways, every other namespace is a single blob (`script_seqs` too: its key is a big-endian counter, so the first nibble it would split by is always zero), and `parameters.shards` reports the map so a reader never has to discover it from the data. Re-sharding a namespace is a media-type-version event for that namespace's kind. Every shard of every kind is published, empty ones included, so tip completeness is structural: a restore requires all 16 kinds and, per kind, exactly the shards its count promises.
+State kinds: one per state namespace, and the set is closed — 16 of them, spelled `state-` followed by the namespace with `_` rewritten to `-`, by the same rule and for the same reasons as the log kinds below. The namespace is therefore **not** in the record — it is the layer — which is what puts the fail-closed edge of a breaking change on exactly the namespace that broke, and lets a reader skip a namespace this profile does not define at the transport rather than choking on one shared layer. The shard count is **specification, never tuning**: `utxos`, `accounts`, `assets`, `datums` and `scripts` split 16 ways, every other namespace is a single blob, and `parameters.shards` reports the map so a reader never has to discover it from the data. Re-sharding a namespace is a media-type-version event for that namespace's kind. Every shard of every kind is published, empty ones included, so tip completeness is structural: a restore requires all 16 kinds and, per kind, exactly the shards its count promises.
 
 **State history: retained dumps at configured epochs, plus the moving tip.** A stele's state is the tip — the ledger as of `sequence`, swapped whole by every publish — and, for each epoch a publisher retains, an immutable **dump** of the state as of that epoch. The two are the same kinds, the same records and the same shard geometry; a dump differs from a tip in its descriptor scope, which names the epoch, and in nothing else.
 
@@ -166,9 +166,9 @@ epochs, the ceiling of what a publisher is expected to configure, that is
 ~4,911 layers and a manifest of roughly 1.7 MB, comfortably inside. The
 bound is loose in the direction that helps: the log kinds are omitted when
 empty, and Byron's ~200 epochs carry no reward or stake logs at all, so the
-realized count sits near ~4,150. **This is the arithmetic that bounds the
+realized count sits near ~4,500. **This is the arithmetic that bounds the
 retained list**, and the reason per-epoch dumps were rejected: ~580 of them
-would be ~43,000 state layers on their own, more than three times the
+would be ~53,000 state layers on their own, more than four times the
 ceiling. (The Rationale's "~1,700 manifest descriptors" is decision-time
 sizing of the pre-split artifact; this paragraph is the authoritative count,
 and it counts layers rather than epochs.)
