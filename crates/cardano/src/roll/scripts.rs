@@ -164,7 +164,7 @@ impl BlockVisitor for ScriptRegistryVisitor {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use dolos_core::{builtin::MemoryStateStore, Entity as _, EntityDelta as _, StateWriter as _};
 
     use crate::CardanoEntity;
@@ -188,7 +188,7 @@ mod tests {
     /// A Conway tx with a native reference script on its collateral return, a
     /// plutus script among its witnesses and a native script in its auxiliary
     /// data. Returns the three hashes in that order.
-    fn tx_cbor(success: bool) -> (Vec<u8>, Hash<28>, Hash<28>, Hash<28>) {
+    pub(crate) fn tx_cbor(success: bool) -> (Vec<u8>, Hash<28>, Hash<28>, Hash<28>) {
         let native = NativeScript::InvalidHereafter(7);
         let native_hash = native.compute_hash();
 

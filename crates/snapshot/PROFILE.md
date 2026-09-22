@@ -87,7 +87,7 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 | `pool-epochs` | — | `PoolKey`, 28 B |
 | `pools` | `PoolKey`: operator hash, 28 B | — |
 | `proposals` | `ProposalKey`: `idx(4) ‖ tx(32)`, 36 B | — |
-| `script_seqs` | `u64`: listing position, big-endian, 8 B | — |
+| `script-seqs` | `u64`: listing position, big-endian, 8 B | — |
 | `scripts` | `ScriptKey`: script hash, 28 B | — |
 | `staged-account-stats` | `StagedKey<AccountKey, ()>`: `account(32) ‖ epoch(8)`, 40 B | — |
 | `staged-address-stats` | `(Epoch, AddressStatsKey)`: `epoch(8) ‖` the `address-stats` log key, epoch first, 70 B for a base address | — |

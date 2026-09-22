@@ -457,7 +457,7 @@ pub fn registry() -> Vec<Entry> {
             canaries::script_seq_state,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/script_seqs.rev1.hex"),
+                hex: include_str!("goldens/script-seqs.rev1.hex"),
             }]
         ),
         entity_entry!(

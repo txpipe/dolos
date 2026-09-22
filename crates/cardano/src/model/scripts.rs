@@ -7,7 +7,7 @@
 //!
 //! - `scripts`, keyed by script hash: what a block needs to tell a new script
 //!   from a repeat.
-//! - `script_seqs`, keyed by a dense sequence number: the listing. Sequence
+//! - `script-seqs`, keyed by a dense sequence number: the listing. Sequence
 //!   numbers are handed out in the order cardano-db-sync numbers its `script`
 //!   rows, so a page of the listing is a key range and its position from either
 //!   end is arithmetic.
@@ -51,7 +51,7 @@ pub struct ScriptSeqState {
 
 // The sequence number is the key, stored big-endian, so key order is listing
 // order.
-entity_boilerplate!(ScriptSeqState, "script_seqs", state = u64);
+entity_boilerplate!(ScriptSeqState, "script-seqs", state = u64);
 
 impl ScriptSeqState {
     /// How many scripts the registry lists.

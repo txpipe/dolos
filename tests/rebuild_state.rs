@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use dolos_core::{
+    indexes::{ExactRecord, TagRecord},
     ArchiveStore as _, ChainPoint, EntityKey, LogKey, StateStore as _, UtxoEntry, WalStore as _,
 };
 use node::{assert_ok, Node};
@@ -54,12 +55,14 @@ impl StateContents {
     }
 }
 
-/// The instance seen whole: state, the archive's derived-log rows, the WAL
-/// tip, and the archive segment files byte for byte.
+/// The instance seen whole: state, the archive's derived-log rows and index
+/// entries, the WAL tip, and the archive segment files byte for byte.
 #[derive(Debug, PartialEq)]
 struct InstanceContents {
     state: StateContents,
     logs: BTreeMap<&'static str, Vec<(LogKey, Vec<u8>)>>,
+    tags: Vec<TagRecord>,
+    exact: Vec<ExactRecord>,
     wal_tip: Option<ChainPoint>,
     segments: BTreeMap<String, Vec<u8>>,
 }
@@ -82,9 +85,28 @@ impl InstanceContents {
             logs.insert(*ns, rows);
         }
 
+        let tags = stores
+            .archive
+            .iter_archive_tags(
+                &dolos_cardano::indexes::archive_dimensions::ALL,
+                0..u64::MAX,
+            )
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        let exact = stores
+            .archive
+            .iter_exact_records(0..u64::MAX)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
         let contents = Self {
             state: StateContents::read(&stores.state),
             logs,
+            tags,
+            exact,
             wal_tip: stores.wal.find_tip().unwrap().map(|(point, _)| point),
             segments: read_segments(&node.config.storage.archive_path().unwrap()),
         };
@@ -154,10 +176,10 @@ fn an_in_place_rebuild_reproduces_the_synced_state() {
     assert_eq!(after.wal_tip, after.state.cursor, "WAL was not reseeded");
 }
 
-/// `--rewrite-logs` replays with derived-log writes passing through to the
-/// live archive. The keys are slot-derived, so a faithful replay overwrites
-/// every row with the value it already carries — and the blocks and segment
-/// files stay exactly as they were.
+/// `--rewrite-logs` replays with derived-log and index writes passing
+/// through to the live archive. The keys are slot-derived, so a faithful
+/// replay overwrites every row with the value it already carries — and the
+/// blocks and segment files stay exactly as they were.
 #[test]
 fn rewrite_logs_reproduces_the_log_rows_and_leaves_blocks_alone() {
     let node = Node::new();
@@ -170,8 +192,71 @@ fn rewrite_logs_reproduces_the_log_rows_and_leaves_blocks_alone() {
     let after = InstanceContents::read(&node);
 
     assert_eq!(after.logs, before.logs);
+    assert_eq!(after.tags, before.tags);
+    assert_eq!(after.exact, before.exact);
     assert_eq!(after.segments, before.segments);
     assert_eq!(after.state, before.state);
+}
+
+/// An archive written before scripts in auxiliary data were tagged has no
+/// `script` tag for them, so once `sync.max_history` prunes a script's first
+/// block, `script_by_hash` cannot find a later one. `--rewrite-logs`
+/// re-applies the index of every block it replays, which fills them in.
+#[test]
+fn rewrite_logs_fills_in_index_entries_an_older_archive_lacks() {
+    use dolos_cardano::indexes::archive_dimensions::SCRIPT;
+    use dolos_core::{
+        indexes::{ArchiveIndexDelta, Tag},
+        ArchiveWriter as _,
+    };
+
+    let node = Node::new();
+    node.sync();
+
+    let before = InstanceContents::read(&node);
+
+    let hash = hex::decode(dolos_testing::synthetic::aux_script_hash()).unwrap();
+
+    let tagged = |archive: &dolos::storage::ArchiveStoreBackend| {
+        archive
+            .slots_by_tag(SCRIPT, &hash, 0, u64::MAX)
+            .unwrap()
+            .count()
+    };
+
+    // what an older indexer left behind: the blocks without their tag
+    {
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+
+        assert!(
+            tagged(&stores.archive) > 1,
+            "fixture carries no repeated aux script"
+        );
+
+        let deltas: Vec<_> = stores
+            .archive
+            .get_range(None, None)
+            .unwrap()
+            .map(|(slot, _)| ArchiveIndexDelta {
+                slot,
+                tags: vec![Tag::new(SCRIPT, hash.clone())],
+                ..Default::default()
+            })
+            .collect();
+
+        let writer = stores.archive.start_writer().unwrap();
+        writer.undo_index(&deltas).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(tagged(&stores.archive), 0);
+    }
+
+    assert_ok(&rebuild(&node, &["--force", "--rewrite-logs"]));
+
+    let after = InstanceContents::read(&node);
+    assert_eq!(after.tags, before.tags);
+    assert_eq!(after.exact, before.exact);
 }
 
 /// `--target` writes the rebuilt state somewhere else and `--ephemeral`
