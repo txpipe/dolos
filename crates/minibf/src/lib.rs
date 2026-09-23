@@ -6,7 +6,8 @@ use axum::{
 };
 use dolos_cardano::{
     model::{
-        AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState, ProposalState,
+        gov::GovState, AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState,
+        ProposalState,
     },
     ChainSummary, PParamsSet, StakeLog,
 };
@@ -353,6 +354,7 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
+    Option<GovState>: From<D::Entity>,
 {
     build_router_with_facade(Facade::<D> {
         inner: domain,
@@ -370,6 +372,7 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
+    Option<GovState>: From<D::Entity>,
 {
     let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
@@ -632,6 +635,10 @@ where
         .route("/pools", get(routes::pools::all::<D>))
         .route("/pools/{id}", get(routes::pools::by_id::<D>))
         .route(
+            "/governance/committee",
+            get(routes::governance::committee::<D>),
+        )
+        .route(
             "/governance/dreps/{drep_id}",
             get(routes::governance::drep_by_id::<D>),
         )
@@ -726,6 +733,7 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
+    Option<GovState>: From<D::Entity>,
 {
     type Config = MinibfConfig;
 
