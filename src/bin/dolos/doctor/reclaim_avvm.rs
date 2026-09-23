@@ -44,7 +44,7 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+    let _tracing = crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
