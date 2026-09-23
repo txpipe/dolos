@@ -62,6 +62,7 @@ pub mod pending;
 pub mod pools;
 pub mod pparams;
 pub mod proposals;
+pub mod scripts;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -79,6 +80,7 @@ pub use pending::*;
 pub use pools::*;
 pub use pparams::*;
 pub use proposals::*;
+pub use scripts::*;
 
 // --- CardanoEntity ---
 
@@ -97,6 +99,8 @@ pub enum CardanoEntity {
     PendingMirState(Box<PendingMirState>),
     GovState(Box<GovState>),
     AccountEpochLog(Box<AccountEpochLog>),
+    ScriptState(Box<ScriptState>),
+    ScriptSeqState(Box<ScriptSeqState>),
 }
 
 macro_rules! variant_boilerplate {
@@ -131,6 +135,8 @@ variant_boilerplate!(PendingRewardState);
 variant_boilerplate!(PendingMirState);
 variant_boilerplate!(GovState);
 variant_boilerplate!(AccountEpochLog);
+variant_boilerplate!(ScriptState);
+variant_boilerplate!(ScriptSeqState);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -148,6 +154,8 @@ impl dolos_core::Entity for CardanoEntity {
             PendingMirState::NS => PendingMirState::decode_entity(ns, value).map(Into::into),
             GovState::NS => GovState::decode_entity(ns, value).map(Into::into),
             AccountEpochLog::NS => AccountEpochLog::decode_entity(ns, value).map(Into::into),
+            ScriptState::NS => ScriptState::decode_entity(ns, value).map(Into::into),
+            ScriptSeqState::NS => ScriptSeqState::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -167,6 +175,8 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PendingMirState(x) => PendingMirState::encode_entity(x),
             Self::GovState(x) => GovState::encode_entity(x),
             Self::AccountEpochLog(x) => AccountEpochLog::encode_entity(x),
+            Self::ScriptState(x) => ScriptState::encode_entity(x),
+            Self::ScriptSeqState(x) => ScriptSeqState::encode_entity(x),
         }
     }
 }
@@ -186,6 +196,8 @@ pub fn build_schema() -> StateSchema {
     schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
     schema.insert(PendingMirState::NS, NamespaceType::KeyValue);
     schema.insert(GovState::NS, NamespaceType::KeyValue);
+    schema.insert(ScriptState::NS, NamespaceType::KeyValue);
+    schema.insert(ScriptSeqState::NS, NamespaceType::KeyValue);
     schema
 }
 
@@ -266,6 +278,8 @@ pub enum CardanoDelta {
     GovDistrRotate(Box<GovDistrRotate>),
     ProposalResolved(Box<ProposalResolved>),
     GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
+    ScriptFirstSeen(Box<ScriptFirstSeen>),
+    ScriptSeqAssigned(Box<ScriptSeqAssigned>),
 }
 
 impl CardanoDelta {
@@ -370,6 +384,8 @@ delta_from!(CommitteeGc);
 delta_from!(GovDistrRotate);
 delta_from!(GovDistrBoundaryCredit);
 delta_from!(ProposalResolved);
+delta_from!(ScriptFirstSeen);
+delta_from!(ScriptSeqAssigned);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -416,6 +432,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDistrRotate(x) => x.key(),
             Self::GovDistrBoundaryCredit(x) => x.key(),
             Self::ProposalResolved(x) => x.key(),
+            Self::ScriptFirstSeen(x) => x.key(),
+            Self::ScriptSeqAssigned(x) => x.key(),
             Self::AssignRewards(x) => x.key(),
             Self::NonceTransition(x) => x.key(),
             Self::PoolTransition(x) => x.key(),
@@ -485,6 +503,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDistrRotate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDistrBoundaryCredit(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::ProposalResolved(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::ScriptFirstSeen(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::ScriptSeqAssigned(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::AssignRewards(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NonceTransition(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolTransition(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -554,6 +574,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDistrRotate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDistrBoundaryCredit(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::ProposalResolved(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::ScriptFirstSeen(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::ScriptSeqAssigned(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::AssignRewards(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NonceTransition(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolTransition(x) => Self::downcast_undo(x.as_ref(), entity),

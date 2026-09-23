@@ -15,10 +15,10 @@
 //! a re-run on unchanged code is encoding nondeterminism, which is a finding,
 //! never a re-pin.
 //!
-//! Between them these freeze: the twenty media types, the tag string, the
+//! Between them these freeze: the twenty-two media types, the tag string, the
 //! twelve archive dimension names, the three exact-record kind literals, the
-//! three `log-{ns}` and fourteen `state-{ns}` kind strings — which is where the
-//! seventeen namespace strings live now that neither record names one — the
+//! three `log-{ns}` and sixteen `state-{ns}` kind strings — which is where the
+//! nineteen namespace strings live now that neither record names one — the
 //! layer header and scope shapes, and the `position`/`parameters` key
 //! spellings, the shard and schema maps included.
 
@@ -40,7 +40,7 @@ use stelae::{
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 42] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 48] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -252,6 +252,42 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 42] = [
         88,
     ),
     (
+        "state-script-seqs",
+        "sha256:c0af3ad043ce21831e0059b5c62eda50a7aa25d6e6d5fbfcc2d848e28c2c66e0",
+        2,
+        90,
+    ),
+    (
+        "state-script-seqs",
+        "sha256:1ba90872ce2b59a66172180356023ebc24bb2d5e15e6193291e2a7ee650b95d2",
+        2,
+        90,
+    ),
+    (
+        "state-scripts",
+        "sha256:a99dcd9dc4d21baabd78199db165c3a0d7fed2fc16e9aafa2970572902f4ab6a",
+        2,
+        86,
+    ),
+    (
+        "state-scripts",
+        "sha256:efcd51184f9b72c239792ec1cdba0682b34e13137e7a249f18dabbc9402961ab",
+        2,
+        86,
+    ),
+    (
+        "state-scripts",
+        "sha256:d6597914ec9d10d69d71e94a0fc31f2186bc041785b4fbd22ae54d139b3eb980",
+        2,
+        86,
+    ),
+    (
+        "state-scripts",
+        "sha256:271fb2f8efc4f57e4be0352949032f2d5ce060308e49d5331d15277b0e782316",
+        2,
+        86,
+    ),
+    (
         "state-stakes",
         "sha256:481b837172a1d81fd0e3302798fbfbbba987d029f865e61dc2f0daa2ce801f75",
         2,
@@ -297,7 +333,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 42] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:3eb3c9373201208a315eecaad348f9bdba934e15b3f88890d82768df96ad1de7";
+    "sha256:cff7309731efd3b6feacbe70821532d21e5ee5d8f5baddcc8160dbc07dd9dd3a";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -370,6 +406,24 @@ fn per_kind_diff_ids_are_pinned() {
         assert_eq!(records.len() as u64 + 1, count, "{kind}: record count");
         assert_eq!(bytes.len() as u64, size, "{kind}: uncompressed size");
     }
+}
+
+/// Every state namespace has its own frozen fixture number, so the records the
+/// goldens above are computed from cannot collide, and a namespace added to
+/// `NAMESPACES` without one fails here rather than inside the fixture.
+#[test]
+fn the_fixture_indexes_cover_every_namespace() {
+    use std::collections::BTreeSet;
+
+    let named: BTreeSet<_> = FIXTURE_INDEX.into_iter().map(|(ns, _)| ns).collect();
+    let numbers: BTreeSet<_> = FIXTURE_INDEX.into_iter().map(|(_, n)| n).collect();
+
+    assert_eq!(named, dolos_snapshot::NAMESPACES.into_iter().collect());
+    assert_eq!(numbers.len(), FIXTURE_INDEX.len());
+    assert!(
+        numbers.into_iter().all(|n| n < 16),
+        "a number has to fit a nibble"
+    );
 }
 
 /// The whole stele: written, read back through the streaming reader under the
@@ -601,6 +655,24 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:b01d5d3f233967452480859202ed73432e106558f89f873215fed3b12baa6068","kind":"state-proposals","#,
     r#""mediaType":"application/vnd.dolos.stele.state-proposals.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":88},"#,
+    r#"{"diffId":"sha256:c0af3ad043ce21831e0059b5c62eda50a7aa25d6e6d5fbfcc2d848e28c2c66e0","kind":"state-script-seqs","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-script-seqs.v1+zstd","records":2,"#,
+    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":90},"#,
+    r#"{"diffId":"sha256:1ba90872ce2b59a66172180356023ebc24bb2d5e15e6193291e2a7ee650b95d2","kind":"state-script-seqs","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-script-seqs.v1+zstd","records":2,"#,
+    r#""scope":{"shard":0},"uncompressedSize":90},"#,
+    r#"{"diffId":"sha256:a99dcd9dc4d21baabd78199db165c3a0d7fed2fc16e9aafa2970572902f4ab6a","kind":"state-scripts","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":2,"#,
+    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":86},"#,
+    r#"{"diffId":"sha256:efcd51184f9b72c239792ec1cdba0682b34e13137e7a249f18dabbc9402961ab","kind":"state-scripts","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":2,"#,
+    r#""scope":{"epoch":4,"shard":1},"uncompressedSize":86},"#,
+    r#"{"diffId":"sha256:d6597914ec9d10d69d71e94a0fc31f2186bc041785b4fbd22ae54d139b3eb980","kind":"state-scripts","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":2,"#,
+    r#""scope":{"shard":0},"uncompressedSize":86},"#,
+    r#"{"diffId":"sha256:271fb2f8efc4f57e4be0352949032f2d5ce060308e49d5331d15277b0e782316","kind":"state-scripts","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-scripts.v1+zstd","records":2,"#,
+    r#""scope":{"shard":1},"uncompressedSize":86},"#,
     r#"{"diffId":"sha256:481b837172a1d81fd0e3302798fbfbbba987d029f865e61dc2f0daa2ce801f75","kind":"state-stakes","#,
     r#""mediaType":"application/vnd.dolos.stele.state-stakes.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":85},"#,
@@ -624,8 +696,8 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#""scope":{"lastImmutable":3},"uncompressedSize":250}"#,
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"gov":1,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":0,"pools":1,"proposals":1,"stakes":1,"utxos":1},"#,
-    r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"gov":1,"pending_mirs":1,"pending_rewards":1,"pools":1,"proposals":1,"stakes":1,"utxos":16},"#,
+    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"gov":1,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":0,"pools":1,"proposals":1,"script_seqs":1,"scripts":1,"stakes":1,"utxos":1},"#,
+    r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"gov":1,"pending_mirs":1,"pending_rewards":1,"pools":1,"proposals":1,"script_seqs":1,"scripts":16,"stakes":1,"utxos":16},"#,
     r#""stateEpochs":[4]"#,
     r#"},"position":{"#,
     r#""epoch":7,"network":{"magic":764824073,"name":"mainnet"},"#,
@@ -642,7 +714,7 @@ fn decode_one(kind: &str, record: &[u8]) {
         return;
     }
 
-    // And one codec for all fourteen state kinds, for the same reason — the
+    // And one codec for all sixteen state kinds, for the same reason — the
     // namespace it needs is the one the kind names.
     if let Some(ns) = state_ns_for(kind) {
         state::decode(ns, record).unwrap();

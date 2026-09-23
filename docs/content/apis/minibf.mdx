@@ -173,6 +173,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/pools/{id}/metadata`                                     | Get metadata for a specific pool                         |
 | `/pools/{id}/relays`                                       | Get relays for a specific pool                           |
 | `/pools/{id}/updates`                                      | Get certificate updates for a specific pool              |
+| `/scripts`                                                 | List scripts in order of first appearance                |
 | `/scripts/{script_hash}`                                   | Get script information                                   |
 | `/scripts/{script_hash}/json`                              | Get script JSON                                          |
 | `/scripts/{script_hash}/cbor`                              | Get script CBOR                                          |
@@ -198,3 +199,9 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 ## Lifetime totals and `sync.max_history`
 
 `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` fold every transaction kept in the archive. When `sync.max_history` is set, blocks pruned by housekeeping are not counted, so the sums and `tx_count` only cover the retained window. Run with full history if you need true lifetime totals.
+
+## The script list and data synced by an earlier version
+
+`/scripts` reads a registry the node builds while it rolls blocks: every script, numbered in the order it first showed up. Data synced by a version that did not keep the registry has none for the blocks it already holds, so the list would start wherever the upgrade happened. Run `dolos doctor rebuild-state` (or bootstrap again) to build it from the start of the chain. The registry is part of the ledger state, so `sync.max_history` does not affect it. A stele snapshot published by such a version has no registry either; a restore refuses it by name rather than leaving the list empty, so bootstrap from a stele published by a version that keeps it.
+
+`/scripts/{script_hash}` and its `/json`, `/cbor` and `/utxos` variants answer for the scripts the list holds, the way Blockfrost does: a script only a transaction that failed phase-2 validation carried is in neither. The registry points each script at the block that carried it first, so after `dolos doctor rebuild-state` those lookups need nothing rebuilt in the archive. The script body still comes from that block, so with `sync.max_history` a script whose every carrying block was pruned stays listed but is not found by hash.

@@ -1,12 +1,12 @@
 //! The closed set of state namespaces a Dolos stele carries.
 //!
-//! ADR-004 defines state as one uniform key-value space: the thirteen entity
+//! ADR-004 defines state as one uniform key-value space: the fifteen entity
 //! namespaces of `dolos_cardano::model::build_schema()` plus [`UTXOS`], which
 //! is the UTxO set wearing the same shape as everything else. That uniformity
 //! is deliberate — it means the format has one state record, and the planned
 //! refactor folding UTxOs into the entity system (#1042) is invisible to it.
 //!
-//! The names are not spelled here. Thirteen of them are read off the entity
+//! The names are not spelled here. Fifteen of them are read off the entity
 //! types' own `FixedNamespace::NS`, and `utxos` is defined here because nothing
 //! else in the tree defines it. A namespace that exists in `build_schema` and
 //! not in [`NAMESPACES`] would be silently dropped from every published stele,
@@ -16,7 +16,7 @@
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
     FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
-    StakeLog,
+    ScriptSeqState, ScriptState, StakeLog,
 };
 use dolos_core::Namespace;
 
@@ -34,7 +34,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against `build_schema()` directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 14] = [
+pub const NAMESPACES: [Namespace; 16] = [
     AccountEpochLog::NS,
     AccountState::NS,
     AssetState::NS,
@@ -47,6 +47,8 @@ pub const NAMESPACES: [Namespace; 14] = [
     PendingRewardState::NS,
     PoolState::NS,
     ProposalState::NS,
+    ScriptSeqState::NS,
+    ScriptState::NS,
     StakeLog::NS,
     UTXOS,
 ];
@@ -66,7 +68,7 @@ pub const NAMESPACES: [Namespace; 14] = [
 /// per-instance iteration order made the namespace's bytes irreproducible
 /// across publishers of identical state. Kept beside [`NAMESPACES`], in the
 /// same order, and held to it by `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 14] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 16] = [
     (AccountEpochLog::NS, 1),
     (AccountState::NS, 1),
     (AssetState::NS, 1),
@@ -79,6 +81,8 @@ pub const SCHEMA_REVS: [(Namespace, u64); 14] = [
     (PendingRewardState::NS, 1),
     (PoolState::NS, 1),
     (ProposalState::NS, 1),
+    (ScriptSeqState::NS, 1),
+    (ScriptState::NS, 1),
     (StakeLog::NS, 1),
     (UTXOS, 1),
 ];
