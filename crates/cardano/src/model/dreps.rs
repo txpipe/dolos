@@ -1,6 +1,7 @@
 use dolos_core::{BlockSlot, EntityKey, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
+    crypto::hash::Hash,
     ledger::primitives::{
         conway::{Anchor, DRep},
         Epoch,
@@ -22,6 +23,25 @@ pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
     };
 
     EntityKey::from(bytes)
+}
+
+/// This function is the inverse of [`drep_to_entity_key`]. It returns the
+/// DRep that an entity key names.
+///
+/// The two special delegation targets and a malformed key have no DRep. For
+/// these keys, the function returns `None`.
+pub fn drep_from_entity_key(key: &[u8]) -> Option<DRep> {
+    let prefix = *key.first()?;
+    let hash: Hash<28> = key
+        .get(1..)
+        .and_then(|x| <[u8; 28]>::try_from(x).ok())?
+        .into();
+
+    match prefix {
+        pallas_extras::DREP_KEY_PREFIX => Some(DRep::Key(hash)),
+        pallas_extras::DREP_SCRIPT_PREFIX => Some(DRep::Script(hash)),
+        _ => None,
+    }
 }
 
 /// Epoch-based DRep expiry, stored exactly as the Haskell ledger stores

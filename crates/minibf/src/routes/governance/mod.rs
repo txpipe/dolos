@@ -37,7 +37,7 @@ use pallas::{
     ledger::{
         addresses::Network,
         primitives::{
-            conway::{GovAction, Vote, Voter},
+            conway::{DRep, GovAction, Vote, Voter},
             Coin, Epoch, StakeCredential,
         },
         traverse::{MultiEraBlock, MultiEraTx},
@@ -725,26 +725,16 @@ struct VoteRow {
     cast: Option<(Hash<32>, u32)>,
 }
 
-/// This function converts a DRep ID to the proposal vote-map key.
-fn drep_credential(drep_bytes: &[u8]) -> Result<StakeCredential, StatusCode> {
-    let hash: Hash<28> = drep_bytes
-        .get(1..)
-        .and_then(|hash| <[u8; 28]>::try_from(hash).ok())
-        .ok_or(StatusCode::BAD_REQUEST)?
-        .into();
-
-    if pallas_extras::drep_id_is_script(drep_bytes) {
-        Ok(StakeCredential::ScriptHash(hash))
-    } else {
-        Ok(StakeCredential::AddrKeyhash(hash))
-    }
-}
-
-/// This function converts a stake credential to a transaction voter key.
-fn drep_voter(cred: &StakeCredential) -> Voter {
-    match cred {
-        StakeCredential::AddrKeyhash(hash) => Voter::DRepKey(*hash),
-        StakeCredential::ScriptHash(hash) => Voter::DRepScript(*hash),
+/// This function converts a DRep ID to the voter key of its ballots.
+///
+/// `parse_drep_id` builds the same bytes that `drep_to_entity_key` writes.
+/// Thus, `drep_from_entity_key` reads them back. The CIP-129 header rule
+/// stays in `dolos-cardano`, next to the writer.
+fn drep_voter(drep_bytes: &[u8]) -> Result<Voter, StatusCode> {
+    match dolos_cardano::model::drep_from_entity_key(drep_bytes) {
+        Some(DRep::Key(hash)) => Ok(Voter::DRepKey(hash)),
+        Some(DRep::Script(hash)) => Ok(Voter::DRepScript(hash)),
+        Some(DRep::Abstain | DRep::NoConfidence) | None => Err(StatusCode::BAD_REQUEST),
     }
 }
 
@@ -790,6 +780,9 @@ fn ballot(tx: &MultiEraTx, voter: &Voter) -> Vec<(Hash<32>, u32)> {
 ///
 /// If the archive does not contain the block, rows keep their provisional
 /// order and have no cast data. `vote_page` removes these rows.
+///
+/// If the archive contains the block but the block has no matching cast, the
+/// state and the archive disagree. This function logs a warning for that row.
 fn settle_casts<D: Domain>(
     domain: &D,
     voter: &Voter,
@@ -842,7 +835,20 @@ fn settle_casts<D: Domain>(
                         ..row
                     },
                 ),
-                None => ((usize::MAX, u32::MAX), row),
+                None => {
+                    // The archive contains this block, so the block must
+                    // contain the ballot. A missing cast means that the state
+                    // and the archive disagree.
+                    tracing::warn!(
+                        slot,
+                        voter = ?voter,
+                        proposal_tx = %row.proposal_tx,
+                        proposal_idx = row.proposal_idx,
+                        "archived block has no matching DRep vote, row removed"
+                    );
+
+                    ((usize::MAX, u32::MAX), row)
+                }
             }
         })
         .collect();
@@ -853,80 +859,24 @@ fn settle_casts<D: Domain>(
     Ok(())
 }
 
-/// This function resolves archive data and selects a vote page.
-///
-/// Rows without archived cast data do not affect page offsets. The function
-/// resolves each slot group before it counts rows. `budget` limits the number
-/// of slot groups that the function can resolve.
-fn page_resolved_votes<D: Domain>(
-    domain: &D,
-    voter: &Voter,
-    rows: Vec<VoteRow>,
-    pagination: &Pagination,
-    budget: usize,
-) -> Result<Vec<VoteRow>, Error> {
-    let mut groups: Vec<Vec<VoteRow>> = Vec::new();
-
-    for row in rows {
-        match groups.last_mut() {
-            Some(group) if group[0].slot == row.slot => group.push(row),
-            _ => groups.push(vec![row]),
-        }
-    }
-
-    let descending = matches!(pagination.order, Order::Desc);
-
-    if descending {
-        groups.reverse();
-    }
-
-    let from = pagination.from();
-    let mut skipped = 0;
-    let mut out = Vec::with_capacity(pagination.count);
-
-    for (scanned, mut group) in groups.into_iter().enumerate() {
-        if scanned == budget {
-            return Err(Error::ScanBudgetExceeded);
-        }
-
-        settle_casts(domain, voter, group[0].slot, &mut group)?;
-        group.retain(|row| row.cast.is_some());
-
-        if descending {
-            group.reverse();
-        }
-
-        for row in group {
-            if skipped < from {
-                skipped += 1;
-                continue;
-            }
-
-            out.push(row);
-
-            if out.len() == pagination.count {
-                return Ok(out);
-            }
-        }
-    }
-
-    Ok(out)
-}
-
 /// This function reads DRep votes from state and adds archive data to the
 /// page.
 ///
 /// The proposal that receives a vote stores that vote. Thus, this function
 /// scans the proposal namespace for the voter. The namespace contains one row
 /// for each submitted governance action. Every action requires a deposit.
-/// `/governance/proposals` scans the same namespace. The function returns an
-/// error before matching vote entries exceed `budget`. It reads no more
-/// archive blocks after it fills the requested page.
+/// `/governance/proposals` scans the same namespace without a budget. The
+/// archive reads are the cost of a request. `enforce_max_scan_limit` limits
+/// that cost. `page_slot_groups` reads a block only for a group that overlaps
+/// the requested page.
+///
+/// If the archive does not contain the block of a vote, the vote leaves its
+/// page. The other history endpoints return the same short page under
+/// `sync.max_history`. The offsets stay the same as in Blockfrost.
 fn vote_page<D: Domain>(
     domain: &D,
-    voter: &StakeCredential,
+    voter: &Voter,
     pagination: &Pagination,
-    budget: usize,
 ) -> Result<Vec<DrepVotesInner>, Error> {
     let mut rows = Vec::new();
 
@@ -938,15 +888,11 @@ fn vote_page<D: Domain>(
     for entry in entities {
         let (_, state) = entry.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let Some(history) = state.drep_votes.get(voter) else {
+        let Some(history) = state.vote_history(voter) else {
             continue;
         };
 
         for (slot, vote) in history {
-            if rows.len() >= budget {
-                return Err(Error::ScanBudgetExceeded);
-            }
-
             rows.push(VoteRow {
                 slot: *slot,
                 proposal_tx: state.tx,
@@ -961,11 +907,17 @@ fn vote_page<D: Domain>(
     // sort keeps the cast order for repeated votes on the same proposal.
     rows.sort_by_key(|row| (row.slot, row.proposal_tx, row.proposal_idx));
 
-    let voter = drep_voter(voter);
-
-    let page = page_resolved_votes(domain, &voter, rows, pagination, budget)?;
+    let page = page_slot_groups(
+        rows,
+        |row| row.slot,
+        pagination,
+        |slot, group| settle_casts(domain, voter, slot, group),
+    )?;
 
     page.into_iter()
+        // A row without archive data has no transaction to report. The row
+        // leaves its page. The rows after it do not move.
+        .filter(|row| row.cast.is_some())
         .map(|row| {
             let (tx, cert_index) = row.cast.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -987,6 +939,9 @@ fn vote_page<D: Domain>(
 ///
 /// If a DRep does not exist or has no votes, the endpoint returns an empty
 /// list. It does not return 404.
+///
+/// `max_scan_items` limits the page depth. The other endpoints that read a
+/// block for each row use the same limit.
 pub async fn drep_votes<D>(
     Path(drep_id): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -1006,12 +961,11 @@ where
         return Ok(Json(Vec::new()));
     }
 
-    let voter = drep_credential(&drep_bytes)?;
-    let budget = domain.config.max_scan_items() as usize;
+    let voter = drep_voter(&drep_bytes)?;
 
     let page = domain
         .query()
-        .run_blocking(move |domain| Ok(vote_page(&domain, &voter, &pagination, budget)))
+        .run_blocking(move |domain| Ok(vote_page(&domain, &voter, &pagination)))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
@@ -1703,7 +1657,7 @@ mod tests {
     /// endpoint reads. The synthetic chain imported a registration with no
     /// anchor, and this function replaces it.
     fn seed_drep_anchor(domain: &ToyDomain, drep_bytes: Vec<u8>) {
-        use pallas::ledger::primitives::conway::{Anchor, DRep};
+        use pallas::ledger::primitives::conway::Anchor;
 
         // This code builds the identifier from the same bytes as the entity
         // key. If the keyhash of the synthetic vector changes, the identifier
@@ -1986,73 +1940,74 @@ mod tests {
         assert!(get_drep_votes(&app, drep, "?page=9").await.is_empty());
     }
 
+    /// A pruned block removes its votes from their page. The pages after it
+    /// do not move. The other history endpoints return the same short page
+    /// under `sync.max_history`. Thus, a client that reads all pages gets the
+    /// same offsets as from Blockfrost.
+    ///
+    /// The test prunes the archive to one slot. Only the last block remains.
+    /// The three votes of block 1 are gone. The one vote of block 2 keeps
+    /// offset 3.
     #[tokio::test]
-    async fn governance_drep_votes_excludes_pruned_rows_before_pagination() {
+    async fn governance_drep_votes_skips_pruned_rows_without_shifting_offsets() {
         let app = TestApp::new_with_cfg_and_setup(drep_votes_config(), |domain, _| {
             domain
                 .archive()
                 .prune_history(0, None)
                 .expect("The archive did not prune its history.");
         });
-        let rows = get_drep_votes(&app, &app.vectors().drep_id, "?count=1").await;
+        let drep = &app.vectors().drep_id;
+
+        assert!(get_drep_votes(&app, drep, "?count=1").await.is_empty());
+        assert!(get_drep_votes(&app, drep, "?count=1&page=3")
+            .await
+            .is_empty());
+
+        let rows = get_drep_votes(&app, drep, "?count=1&page=4").await;
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tx_hash, app.vectors().blocks[2].tx_hashes[0]);
         assert_eq!(rows[0].vote, drep_votes_inner::Vote::No);
-
-        assert!(
-            get_drep_votes(&app, &app.vectors().drep_id, "?count=1&page=2")
-                .await
-                .is_empty()
-        );
     }
 
+    /// One DRep votes two times on one proposal in one block. The cast queue
+    /// for each proposal exists for this case. Both rows have the same slot
+    /// and the same proposal. Only the position of the vote transaction
+    /// separates them.
     #[tokio::test]
-    async fn governance_drep_votes_rejects_history_over_scan_budget() {
+    async fn governance_drep_votes_pairs_repeated_votes_within_one_block() {
         let voter = Voter::DRepKey(Hash::from([7u8; 28]));
-        let app = TestApp::new_with_scan_limit(
-            SyntheticBlockConfig {
-                block_count: 3,
-                txs_per_block: 1,
-                gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![]],
-                votes_by_block: vec![
-                    vec![],
-                    vec![vec![synthetic_vote(voter.clone(), 0, 0, 0, Vote::Yes)]],
-                    vec![vec![synthetic_vote(voter, 0, 0, 0, Vote::No)]],
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 2,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information], vec![]], vec![]],
+            votes_by_block: vec![
+                vec![],
+                vec![
+                    vec![synthetic_vote(voter.clone(), 0, 0, 0, Vote::Yes)],
+                    vec![synthetic_vote(voter, 0, 0, 0, Vote::No)],
                 ],
-                ..Default::default()
-            },
-            1,
-        );
-        let path = format!("/governance/dreps/{}/votes?count=1", app.vectors().drep_id);
-        let (status, bytes) = app.get_bytes(&path).await;
+            ],
+            ..Default::default()
+        });
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let body = String::from_utf8_lossy(&bytes);
-        assert!(body.contains("scan limit"), "The response body was {body}.");
-    }
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "").await;
+        let votes = &app.vectors().blocks[1];
 
-    #[tokio::test]
-    async fn governance_drep_votes_accepts_history_at_scan_budget() {
-        let voter = Voter::DRepKey(Hash::from([7u8; 28]));
-        let app = TestApp::new_with_scan_limit(
-            SyntheticBlockConfig {
-                block_count: 2,
-                txs_per_block: 1,
-                gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![]],
-                votes_by_block: vec![
-                    vec![],
-                    vec![vec![synthetic_vote(voter, 0, 0, 0, Vote::Yes)]],
-                ],
-                ..Default::default()
-            },
-            1,
-        );
+        assert_eq!(rows.len(), 2);
 
-        let rows = get_drep_votes(&app, &app.vectors().drep_id, "?count=1").await;
-
-        assert_eq!(rows.len(), 1);
+        // The first transaction of the block gives the first row.
+        assert_eq!(rows[0].tx_hash, votes.tx_hashes[0]);
+        assert_eq!(rows[0].cert_index, 0);
         assert_eq!(rows[0].vote, drep_votes_inner::Vote::Yes);
+
+        assert_eq!(rows[1].tx_hash, votes.tx_hashes[1]);
+        assert_eq!(rows[1].cert_index, 0);
+        assert_eq!(rows[1].vote, drep_votes_inner::Vote::No);
+
+        // Both rows name the same proposal. Only the transaction hash orders
+        // them.
+        assert_eq!(rows[0].proposal_id, rows[1].proposal_id);
     }
 
     #[tokio::test]

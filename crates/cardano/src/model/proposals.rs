@@ -323,6 +323,22 @@ impl ProposalState {
         }
     }
 
+    /// This function reads the history of `voter` from the vote map of its
+    /// class. If the voter never voted on this proposal, it returns `None`.
+    pub fn vote_history(&self, voter: &Voter) -> Option<&VoteHistory> {
+        match voter {
+            Voter::ConstitutionalCommitteeKey(hash) => {
+                self.cc_votes.get(&StakeCredential::AddrKeyhash(*hash))
+            }
+            Voter::ConstitutionalCommitteeScript(hash) => {
+                self.cc_votes.get(&StakeCredential::ScriptHash(*hash))
+            }
+            Voter::DRepKey(hash) => self.drep_votes.get(&StakeCredential::AddrKeyhash(*hash)),
+            Voter::DRepScript(hash) => self.drep_votes.get(&StakeCredential::ScriptHash(*hash)),
+            Voter::StakePoolKey(hash) => self.spo_votes.get(hash),
+        }
+    }
+
     /// Mutable access to `voter`'s history in the vote map matching its
     /// class, creating the entry if absent. Returns whether the entry was
     /// created (needed for exact delta undo).
@@ -1249,6 +1265,29 @@ mod prop_tests {
 
         let state = entity.as_ref().unwrap();
         assert!(state.drep_votes.is_empty());
+    }
+
+    proptest! {
+        /// For every voter class, the read side finds the map and the key
+        /// that the write side used.
+        #[test]
+        fn vote_history_reads_back_what_vote_cast_wrote(
+            state in any_proposal_state(),
+            voter in root::any_voter(),
+            vote in root::any_vote(),
+            slot in root::any_slot(),
+        ) {
+            use dolos_core::EntityDelta as _;
+
+            let mut expected = state.vote_history(&voter).cloned().unwrap_or_default();
+            expected.push((slot, vote.clone()));
+
+            let mut delta = VoteCast::new(state.tx, state.idx, voter.clone(), vote, slot);
+            let mut entity = Some(state);
+            delta.apply(&mut entity);
+
+            prop_assert_eq!(entity.as_ref().unwrap().vote_history(&voter), Some(&expected));
+        }
     }
 }
 
