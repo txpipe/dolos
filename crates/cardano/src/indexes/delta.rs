@@ -13,7 +13,7 @@ use pallas::{
     codec::minicbor,
     ledger::{
         addresses::Address,
-        primitives::conway::DatumOption,
+        primitives::{alonzo::InstantaneousRewardTarget, conway::DatumOption},
         traverse::{MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraValue},
     },
 };
@@ -244,6 +244,21 @@ impl CardanoIndexDeltaBuilder {
             self.current_block()
                 .tags
                 .push(Tag::new(archive::ACCOUNT_CERTS, bytes));
+        }
+
+        // A MIR certificate pays stake credentials from the reserves or the
+        // treasury, so it is account activity like the stake certificates
+        // above. The MIR form that only moves funds between reserves and
+        // treasury pays no account and produces no tag.
+        if let Some(mir) = pallas_extras::cert_as_mir_certificate(cert) {
+            if let InstantaneousRewardTarget::StakeCredentials(targets) = mir.target {
+                for cred in targets.keys() {
+                    let bytes = minicbor::to_vec(cred).unwrap();
+                    self.current_block()
+                        .tags
+                        .push(Tag::new(archive::ACCOUNT_CERTS, bytes));
+                }
+            }
         }
 
         if let Some(cert) = pallas_extras::cert_as_pool_registration(cert) {
@@ -521,6 +536,55 @@ mod tests {
             .expect("output with a reference script must produce a script_ref tag");
 
         assert_eq!(tag.key, expected.to_vec());
+    }
+
+    /// A MIR certificate tags every stake credential it pays, keyed the same
+    /// way the other account certs are; a pot-to-pot move tags nothing.
+    #[test]
+    fn mir_certificate_tags_target_accounts() {
+        use pallas::ledger::primitives::alonzo::{
+            Certificate, InstantaneousRewardSource, MoveInstantaneousReward,
+        };
+        use pallas::ledger::primitives::StakeCredential;
+        use std::borrow::Cow;
+        use std::collections::BTreeMap;
+
+        let key_cred = StakeCredential::AddrKeyhash(Hash::new([0x55; 28]));
+        let script_cred = StakeCredential::ScriptHash(Hash::new([0x66; 28]));
+
+        let mir = |target| {
+            let cert = Certificate::MoveInstantaneousRewardsCert(MoveInstantaneousReward {
+                source: InstantaneousRewardSource::Reserves,
+                target,
+            });
+
+            let mut builder = CardanoIndexDeltaBuilder::new();
+            builder.start_block(100, vec![0; 32], Some(50));
+            builder.add_cert(&MultiEraCert::AlonzoCompatible(Box::new(Cow::Owned(cert))));
+            builder.build().remove(0).tags
+        };
+
+        let tags = mir(InstantaneousRewardTarget::StakeCredentials(BTreeMap::from(
+            [(key_cred.clone(), 3i64), (script_cred.clone(), -1i64)],
+        )));
+
+        let keys: Vec<_> = tags
+            .iter()
+            .filter(|tag| tag.dimension == archive::ACCOUNT_CERTS)
+            .map(|tag| tag.key.clone())
+            .collect();
+
+        // pallas orders credentials the way the ledger does: script first
+        assert_eq!(
+            keys,
+            [
+                minicbor::to_vec(&script_cred).unwrap(),
+                minicbor::to_vec(&key_cred).unwrap(),
+            ]
+        );
+
+        let tags = mir(InstantaneousRewardTarget::OtherAccountingPot(5));
+        assert!(tags.is_empty());
     }
 
     /// Drive every tag-producing method on the builder once.
