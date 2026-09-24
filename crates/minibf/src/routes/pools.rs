@@ -22,11 +22,11 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     cip151,
-    indexes::{AsyncCardanoQueryExt, SlotOrder},
+    indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
     model::{AccountState, PoolState},
     pallas_extras, PoolDelegation, PoolHash, StakeLog,
 };
-use dolos_core::{BlockSlot, Domain, EntityKey};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey};
 use futures::{future::join_all, StreamExt};
 use itertools::Itertools;
 use pallas::{
@@ -39,6 +39,7 @@ use serde::Serialize;
 
 use crate::{
     error::Error,
+    log_and_500,
     mapping::{
         bech32_calidus, bech32_pool, pool_offchain_metadata, rational_to_f64,
         stake_cred_to_address, vkey_to_stake_address, IntoModel,
@@ -1094,6 +1095,105 @@ impl IntoModel<PoolDelegatorsInner> for PoolDelegatorModelBuilder {
             live_stake: live_stake.to_string(),
         })
     }
+}
+
+/// Blocks minted by a pool, oldest first.
+///
+/// The `pool_blocks` archive dimension tags each block with its issuer pool,
+/// so the page is a key-only slot scan plus one body read per listed block.
+/// The cost does not grow with the page number, so deep pages stay cheap and
+/// the scan budget does not apply.
+pub async fn by_id_blocks<D>(
+    Path(id): Path<String>,
+    Query(mut params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<String>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<PoolState>: From<D::Entity>,
+{
+    // Drop `from`/`to` before validation: Blockfrost never reads them here,
+    // so a malformed or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
+    let operator = decode_pool_id(&id)?;
+
+    // Make sure that the decoded id is 28 bytes before the existence check.
+    // A short or long bech32 payload pads into a valid EntityKey. The check
+    // then returns a 404 for a malformed id, but the caller expects a 400.
+    let pool: PoolHash = <[u8; 28]>::try_from(operator.as_slice())
+        .map_err(|_| Error::InvalidPoolId)?
+        .into();
+
+    let pagination = Pagination::try_from(params)?;
+    let tip = domain.get_tip_slot()?;
+
+    let inner = domain.inner.clone();
+    let skip = pagination.skip();
+    let count = pagination.count;
+    let order = pagination.order;
+
+    let (page, minted_any) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), StatusCode> {
+            let mut slots = inner
+                .archive()
+                .slots_by_pool_blocks(pool.as_slice(), 0, tip)
+                .map_err(log_and_500("failed to read the pool blocks index"))?
+                .peekable();
+
+            // Whether the pool minted anything at all. The 404 rule below
+            // needs it, and the slots are already in memory.
+            let minted_any = slots.peek().is_some();
+
+            // Page over the slots alone, so no block outside the page is read.
+            let page_slots: Vec<BlockSlot> = match order {
+                crate::pagination::Order::Asc => {
+                    slots.skip(skip).take(count).collect::<Result<_, _>>()
+                }
+                crate::pagination::Order::Desc => {
+                    slots.rev().skip(skip).take(count).collect::<Result<_, _>>()
+                }
+            }
+            .map_err(log_and_500("failed to page the pool blocks index"))?;
+
+            let mut page = Vec::with_capacity(page_slots.len());
+
+            for slot in page_slots {
+                let body = inner
+                    .archive()
+                    .get_block_by_slot(&slot)
+                    .map_err(log_and_500("failed to read a block of a pool"))?;
+
+                // A tagged slot always holds a block, and a Byron block is
+                // never tagged. Skip either, rather than fail the page.
+                let Some(body) = body else {
+                    tracing::warn!(slot, "pool blocks index points at a missing block");
+                    continue;
+                };
+
+                let Some(header) = super::epochs::decode_block_header(&body)? else {
+                    tracing::warn!(slot, "pool blocks index points at a Byron block");
+                    continue;
+                };
+
+                page.push(header.hash().to_string());
+            }
+
+            Ok((page, minted_any))
+        })
+        .await
+        .map_err(log_and_500("pool blocks scan task failed"))??;
+
+    // Blockfrost 404s a pool that db-sync never saw. The `PoolState` entity
+    // covers every pool that registered on chain, and a pool must register
+    // before it can mint. The index acts as a second proof of existence, for
+    // any issuer that has no entity.
+    if !minted_any && !domain.cardano_entity_exists::<PoolState>(pool)? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    Ok(Json(page))
 }
 
 pub async fn by_id_delegators<D: Domain>(
@@ -2421,6 +2521,239 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let pool_id = app.vectors().pool_id.as_str();
         let path = format!("/pools/{pool_id}/delegators");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// Every synthetic block is minted by the same fixed issuer key, so the
+    /// pool derived from it owns the whole toy chain.
+    fn toy_issuer_pool() -> String {
+        bech32_pool(Hasher::<224>::hash(&[0x10, 0x11])).expect("valid pool id")
+    }
+
+    /// The hex form of the same pool id. Blockfrost accepts either form.
+    fn toy_issuer_pool_hex() -> String {
+        Hasher::<224>::hash(&[0x10, 0x11]).to_string()
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_happy_path() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+
+        let (status, bytes) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?count=100"))
+            .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let hashes: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse hashes");
+
+        assert!(!hashes.is_empty());
+
+        for hash in &hashes {
+            assert_eq!(hash.len(), 64);
+            assert!(hash
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        }
+
+        // The toy chain sits in one epoch, so the sibling epoch endpoint
+        // lists exactly the same blocks.
+        let epoch = app.tip_epoch();
+        let (_, bytes) = app
+            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}?count=100"))
+            .await;
+        let by_epoch: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse hashes");
+
+        assert_eq!(hashes, by_epoch);
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_hex_id_matches_bech32() {
+        let app = TestApp::new();
+
+        let (_, bech32_bytes) = app
+            .get_bytes(&format!("/pools/{}/blocks?count=100", toy_issuer_pool()))
+            .await;
+        let (status, hex_bytes) = app
+            .get_bytes(&format!(
+                "/pools/{}/blocks?count=100",
+                toy_issuer_pool_hex()
+            ))
+            .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&hex_bytes)
+        );
+
+        let from_bech32: Vec<String> = serde_json::from_slice(&bech32_bytes).unwrap();
+        let from_hex: Vec<String> = serde_json::from_slice(&hex_bytes).unwrap();
+
+        assert!(!from_hex.is_empty());
+        assert_eq!(from_bech32, from_hex);
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_paginated() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+
+        let (status_1, bytes_1) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?count=1&page=1"))
+            .await;
+        let (status_2, bytes_2) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?count=1&page=2"))
+            .await;
+        let (status_far, bytes_far) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?count=1&page=1000"))
+            .await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+        assert_eq!(status_far, StatusCode::OK);
+
+        let page_1: Vec<String> = serde_json::from_slice(&bytes_1).unwrap();
+        let page_2: Vec<String> = serde_json::from_slice(&bytes_2).unwrap();
+        let page_far: Vec<String> = serde_json::from_slice(&bytes_far).unwrap();
+
+        assert_eq!(page_1.len(), 1);
+        assert_eq!(page_2.len(), 1);
+        assert_ne!(page_1, page_2);
+        assert!(page_far.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_desc_is_reversed_asc() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+
+        let (_, asc_bytes) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?order=asc&count=100"))
+            .await;
+        let (_, desc_bytes) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?order=desc&count=100"))
+            .await;
+
+        let asc: Vec<String> = serde_json::from_slice(&asc_bytes).unwrap();
+        let mut desc: Vec<String> = serde_json::from_slice(&desc_bytes).unwrap();
+
+        assert!(!asc.is_empty());
+
+        desc.reverse();
+        assert_eq!(asc, desc);
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_registered_pool_without_blocks_is_empty() {
+        let app = TestApp::new();
+        let pool = app.vectors().pool_id.clone();
+
+        let (status, bytes) = app.get_bytes(&format!("/pools/{pool}/blocks")).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let hashes: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+        assert!(hashes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_bad_request() {
+        let app = TestApp::new();
+
+        let path = format!("/pools/{}/blocks", invalid_pool_id());
+        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
+
+        // A pool1 string that decodes but carries 27 bytes, not 28.
+        let hrp = bech32::Hrp::parse("pool").expect("invalid hrp");
+        let short = bech32::encode::<bech32::Bech32>(hrp, &[0u8; 27])
+            .expect("failed to encode short pool id");
+
+        let path = format!("/pools/{short}/blocks");
+        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_bad_pagination() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+
+        assert_error_message(
+            &app,
+            &format!("/pools/{pool}/blocks?order=a"),
+            "querystring/order must be equal to one of the allowed values",
+        )
+        .await;
+        assert_error_message(
+            &app,
+            &format!("/pools/{pool}/blocks?page=0"),
+            "querystring/page must be >= 1",
+        )
+        .await;
+        assert_error_message(
+            &app,
+            &format!("/pools/{pool}/blocks?count=101"),
+            "querystring/count must be <= 100",
+        )
+        .await;
+    }
+
+    /// Blockfrost does not declare `from`/`to` for this route, so a malformed
+    /// or reversed window changes nothing.
+    #[tokio::test]
+    async fn pools_blocks_ignores_from_to() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+
+        let (status, plain) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?count=100"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let expected: Vec<String> = serde_json::from_slice(&plain).unwrap();
+        assert!(!expected.is_empty());
+
+        for window in ["from=bad", "from=999999999&to=1", "from=abc&to=xyz"] {
+            let (status, bytes) = app
+                .get_bytes(&format!("/pools/{pool}/blocks?count=100&{window}"))
+                .await;
+
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "unexpected status {status} for {window} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+
+            let hashes: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(hashes, expected, "{window} changed the body");
+        }
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_not_found() {
+        let app = TestApp::new();
+        let pool = bech32_pool([0xff; 28]).expect("valid pool id");
+        let path = format!("/pools/{pool}/blocks");
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let path = format!("/pools/{}/blocks", toy_issuer_pool());
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 

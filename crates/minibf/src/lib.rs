@@ -615,6 +615,7 @@ where
             "/metadata/txs/labels/{label}/cbor",
             get(routes::metadata::by_label_cbor::<D>),
         )
+        .route("/pools/{id}/blocks", get(routes::pools::by_id_blocks::<D>))
         .route(
             "/pools/{id}/delegators",
             get(routes::pools::by_id_delegators::<D>),

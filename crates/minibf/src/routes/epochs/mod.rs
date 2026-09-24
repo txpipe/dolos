@@ -393,7 +393,7 @@ pub async fn by_number_blocks<D: Domain>(
 
 /// Parses the header of a stored block without decoding the transactions.
 /// Returns `None` for Byron blocks (no issuer).
-fn decode_block_header(body: &[u8]) -> Result<Option<MultiEraHeader<'_>>, StatusCode> {
+pub(crate) fn decode_block_header(body: &[u8]) -> Result<Option<MultiEraHeader<'_>>, StatusCode> {
     use std::borrow::Cow;
 
     use pallas::codec::utils::KeepRaw;

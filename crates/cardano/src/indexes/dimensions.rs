@@ -110,6 +110,9 @@ pub mod archive {
         /// stores keep verbatim instead of hashing (see
         /// [`dolos_core::key_hash`]).
         METADATA = dolos_core::VERBATIM_KEY_DIMENSION;
+
+        /// Pool hash of the block issuer.
+        POOL_BLOCKS = "pool_blocks";
     }
 }
 
@@ -148,6 +151,7 @@ mod tests {
                 "pool_certs",
                 "account_withdrawals",
                 "metadata",
+                "pool_blocks",
             ]
         );
     }
