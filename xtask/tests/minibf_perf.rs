@@ -70,11 +70,14 @@ async fn verify_fixture<Stores: ToyStores>(stores: Stores) {
                     (fixture.shape.blocks * fixture.shape.transactions_per_block) as u64
                 );
                 assert_eq!(work.exact_lookups, work.utxo_refs);
-                assert_eq!(work.tip_reads, selected_rows);
-                assert_eq!(
-                    work.block_reads - work.tip_reads,
-                    fixture.shape.blocks as u64
-                );
+                // one tip read tells the loader how high the chain goes; the
+                // rows are live, so none of them looks up a spending tx
+                assert_eq!(work.tip_reads, 1);
+                // one block for the oldest retained slot, then only the
+                // blocks the page touches: one UTxO per tx in the fixture
+                let page_blocks =
+                    selected_rows.div_ceil(fixture.shape.transactions_per_block as u64);
+                assert_eq!(work.block_reads - work.tip_reads, 1 + page_blocks);
                 assert!(work.decoded_bytes > 0);
             }
             _ => {}

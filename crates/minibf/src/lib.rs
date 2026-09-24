@@ -604,6 +604,10 @@ where
             get(routes::assets::by_subject_transactions::<D>),
         )
         .route(
+            "/assets/{subject}/utxos",
+            get(routes::assets::by_subject_utxos::<D>),
+        )
+        .route(
             "/assets/{subject}/txs",
             get(routes::assets::by_subject_txs::<D>),
         )
