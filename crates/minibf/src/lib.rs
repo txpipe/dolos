@@ -760,14 +760,18 @@ mod tests {
 
     use crate::test_support::TestApp;
 
-    /// Paths measured against Blockfrost on the issue that match no route:
-    /// unknown endpoints and missing segments.
+    /// These paths match no route. The first five paths are from issue #1323:
+    /// unknown endpoints and paths with too few segments. The sixth path
+    /// contains an empty segment in the middle. `NormalizePathLayer` removes
+    /// only the slashes at the start and at the end of a path. As a result,
+    /// the router receives `/blocks//latest` unchanged.
     const UNMATCHED_PATHS: &[&str] = &[
         "/nonexistent",
         "/foo/bar/baz",
         "/txs",
         "/blocks/latest/nope",
         "/blocks/epoch/2/slot",
+        "/blocks//latest",
     ];
 
     #[tokio::test]
