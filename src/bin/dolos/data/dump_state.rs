@@ -515,7 +515,7 @@ fn dump_state<T: TableRow>(
 use dolos_core::config::RootConfig;
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    setup_tracing_for_format(config, args.format)?;
+    let _tracing = setup_tracing_for_format(config, args.format)?;
 
     let state = crate::common::open_state_store(config)?;
     let genesis = crate::common::open_genesis_files(&config.genesis)?;
@@ -548,7 +548,10 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     Ok(())
 }
 
-fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette::Result<()> {
+fn setup_tracing_for_format(
+    config: &RootConfig,
+    format: OutputFormat,
+) -> miette::Result<crate::common::TracingGuard> {
     if matches!(format, OutputFormat::Dbsync) {
         let filter = Targets::new().with_default(tracing::Level::ERROR);
 
@@ -559,7 +562,7 @@ fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette
 
         tracing_log::LogTracer::init().ok();
 
-        return Ok(());
+        return Ok(crate::common::TracingGuard::default());
     }
 
     crate::common::setup_tracing(&config.logging, &config.telemetry)
