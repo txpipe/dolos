@@ -49,8 +49,9 @@ use crate::{
     error::Error,
     mapping::{
         anchor_offchain_metadata, bech32, bech32_committee_cold, bech32_committee_hot,
-        bech32_gov_action, i32_or_500, parse_gov_action_id, rational_to_f64_unrounded,
-        stake_cred_to_address, AnchorMetadata, IntoModel, Unrounded,
+        bech32_gov_action, i32_or_500, parse_committee_id, parse_gov_action_id,
+        rational_to_f64_unrounded, stake_cred_to_address, AnchorMetadata, CommitteeCredentialRole,
+        IntoModel, Unrounded,
     },
     pagination::{Order, Pagination, PaginationParameters},
     routes::epochs::mapping::{map_cost_models_raw, protocol_params_model},
@@ -477,50 +478,6 @@ where
     }))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CommitteeCredentialRole {
-    Hot,
-    Cold,
-}
-
-/// This function parses a CIP-129 constitutional-committee credential. The
-/// header byte gives the role and the credential type. If the header role and
-/// the Bech32 prefix do not agree, the credential is not valid.
-fn parse_committee_id(id: &str) -> Result<(CommitteeCredentialRole, StakeCredential), Error> {
-    let parsed = bech32::primitives::decode::CheckedHrpstring::new::<bech32::Bech32>(id)
-        .map_err(|_| Error::InvalidCommitteeId)?;
-
-    let role = match parsed.hrp().as_str() {
-        "cc_hot" => CommitteeCredentialRole::Hot,
-        "cc_cold" => CommitteeCredentialRole::Cold,
-        _ => return Err(Error::InvalidCommitteeId),
-    };
-
-    let payload: Vec<u8> = parsed.byte_iter().collect();
-    let (header, hash) = payload.split_first().ok_or(Error::InvalidCommitteeId)?;
-    let hash: Hash<28> = <[u8; 28]>::try_from(hash)
-        .map_err(|_| Error::InvalidCommitteeId)?
-        .into();
-
-    let header_role = match header >> 4 {
-        0x0 => CommitteeCredentialRole::Hot,
-        0x1 => CommitteeCredentialRole::Cold,
-        _ => return Err(Error::InvalidCommitteeId),
-    };
-
-    if header_role != role {
-        return Err(Error::InvalidCommitteeId);
-    }
-
-    let credential = match header & 0x0f {
-        0x2 => StakeCredential::AddrKeyhash(hash),
-        0x3 => StakeCredential::ScriptHash(hash),
-        _ => return Err(Error::InvalidCommitteeId),
-    };
-
-    Ok((role, credential))
-}
-
 /// A constitutional-committee vote from the proposal namespace.
 struct CommitteeVoteRow {
     slot: BlockSlot,
@@ -540,61 +497,81 @@ struct CommitteeVoteCast {
     block_height: u64,
 }
 
-/// A bounded set of complete slot groups at one end of the chain.
+/// A bounded set of complete slot groups at one end of the listing.
 ///
 /// The set keeps the highest slots in descending order and the lowest slots in
-/// ascending order. The boundary slot moves in one direction only, so an
-/// evicted group cannot return. Each group in the set is therefore complete.
-/// If the scan removes a group, `truncated` is true.
+/// ascending order. A group stays in the set until the nearer groups hold
+/// `limit` rows. The count of nearer rows only increases during a scan. Thus,
+/// a group that leaves the set does not return, and the boundary slot moves
+/// in one direction only. Each group in the set is therefore complete.
+///
+/// The set covers the first `limit` positions of the listing, or it holds the
+/// whole listing. It holds fewer than `limit` rows plus the farthest group.
+/// Thus, its size does not depend on the number of votes in one block.
 struct CommitteeVoteFrontier {
     groups: BTreeMap<BlockSlot, Vec<CommitteeVoteRow>>,
+    rows: usize,
     limit: usize,
     descending: bool,
-    truncated: bool,
 }
 
 impl CommitteeVoteFrontier {
     fn new(limit: usize, descending: bool) -> Self {
         Self {
             groups: BTreeMap::new(),
+            rows: 0,
             limit,
             descending,
-            truncated: false,
         }
     }
 
-    fn push(&mut self, row: CommitteeVoteRow) {
-        if let Some(group) = self.groups.get_mut(&row.slot) {
-            group.push(row);
-            return;
-        }
-
-        if self.groups.len() < self.limit {
-            self.groups.insert(row.slot, vec![row]);
-            return;
-        }
-
-        let boundary = if self.descending {
-            *self.groups.first_key_value().unwrap().0
+    /// The slot of the group farthest from the requested end.
+    fn far_slot(&self) -> Option<BlockSlot> {
+        let far = if self.descending {
+            self.groups.first_key_value()
         } else {
-            *self.groups.last_key_value().unwrap().0
+            self.groups.last_key_value()
         };
 
-        let belongs = if self.descending {
-            row.slot > boundary
-        } else {
-            row.slot < boundary
-        };
+        far.map(|(slot, _)| *slot)
+    }
 
-        self.truncated = true;
+    /// This function is true if a row at `slot` has a place in the set.
+    fn accepts(&self, slot: BlockSlot) -> bool {
+        if self.rows < self.limit || self.groups.contains_key(&slot) {
+            return true;
+        }
 
-        if belongs {
+        self.far_slot().is_some_and(|far| {
             if self.descending {
-                self.groups.pop_first();
+                slot > far
             } else {
-                self.groups.pop_last();
+                slot < far
             }
-            self.groups.insert(row.slot, vec![row]);
+        })
+    }
+
+    fn push(&mut self, row: CommitteeVoteRow) {
+        if !self.accepts(row.slot) {
+            return;
+        }
+
+        self.groups.entry(row.slot).or_default().push(row);
+        self.rows += 1;
+
+        // If the nearer rows alone cover the `limit` positions, the farthest
+        // group leaves the set. One push adds one row, so at most one group
+        // leaves.
+        let far = if self.descending {
+            self.groups.first_entry()
+        } else {
+            self.groups.last_entry()
+        };
+
+        if let Some(far) = far {
+            if self.rows - far.get().len() >= self.limit {
+                self.rows -= far.remove().len();
+            }
         }
     }
 }
@@ -697,6 +674,20 @@ fn settle_committee_casts<D: Domain>(
                 row.proposal_idx,
             );
             let cast = casts.get_mut(&key).and_then(VecDeque::pop_front);
+
+            if cast.is_none() {
+                // The archive contains this block, so the block must
+                // contain the ballot. If the cast is missing, the state and
+                // the archive do not agree.
+                tracing::warn!(
+                    slot,
+                    voter = ?row.voter,
+                    proposal_tx = %row.proposal_tx,
+                    proposal_idx = row.proposal_idx,
+                    "the archived block does not contain this committee vote, so the row leaves the page"
+                );
+            }
+
             let order = cast
                 .as_ref()
                 .map(|cast| cast.order)
@@ -712,56 +703,21 @@ fn settle_committee_casts<D: Domain>(
     Ok(())
 }
 
-fn resolve_committee_vote_page<D: Domain>(
-    domain: &D,
-    groups: BTreeMap<BlockSlot, Vec<CommitteeVoteRow>>,
-    pagination: &Pagination,
-) -> Result<Vec<CommitteeVoteRow>, Error> {
-    let descending = matches!(pagination.order, Order::Desc);
-    let mut groups: Vec<_> = groups.into_values().collect();
-    if descending {
-        groups.reverse();
-    }
-
-    let mut skipped = 0;
-    let mut out = Vec::with_capacity(pagination.count);
-
-    for mut group in groups {
-        settle_committee_casts(domain, group[0].slot, &mut group)?;
-        group.retain(|row| row.cast.is_some());
-
-        if descending {
-            group.reverse();
-        }
-
-        for row in group {
-            if skipped < pagination.from() {
-                skipped += 1;
-                continue;
-            }
-
-            out.push(row);
-            if out.len() == pagination.count {
-                return Ok(out);
-            }
-        }
-    }
-
-    Ok(out)
-}
-
 /// This function scans the committee vote histories of every proposal. It
-/// keeps only a bounded frontier of slots. The scan reads no more than
-/// `budget` vote rows.
+/// keeps only the slot groups that cover the first `limit` positions at the
+/// requested end of the listing.
+///
+/// The namespace contains one row for each submitted governance action, and
+/// every action requires a deposit. `/governance/proposals` and the DRep vote
+/// listing scan the same namespace. The archive reads are the cost of a
+/// request, and `enforce_max_scan_limit` limits that cost.
 fn collect_committee_vote_frontier<D: Domain>(
     domain: &D,
     voters: Option<&BTreeSet<StakeCredential>>,
-    group_limit: usize,
-    budget: usize,
+    limit: usize,
     descending: bool,
 ) -> Result<CommitteeVoteFrontier, Error> {
-    let mut frontier = CommitteeVoteFrontier::new(group_limit, descending);
-    let mut scanned = 0;
+    let mut frontier = CommitteeVoteFrontier::new(limit, descending);
     let entities = domain
         .state()
         .iter_entities_typed::<ProposalState>(ProposalState::NS, None)
@@ -779,10 +735,9 @@ fn collect_committee_vote_frontier<D: Domain>(
             }
 
             for (slot, vote) in history {
-                if scanned == budget {
-                    return Err(Error::ScanBudgetExceeded);
+                if !frontier.accepts(*slot) {
+                    continue;
                 }
-                scanned += 1;
 
                 frontier.push(CommitteeVoteRow {
                     slot: *slot,
@@ -800,38 +755,40 @@ fn collect_committee_vote_frontier<D: Domain>(
     Ok(frontier)
 }
 
+/// This function reads committee votes from state and adds archive data to
+/// the page.
+///
+/// The frontier holds the slot groups that cover the first `to()` positions
+/// at the requested end of the listing. Thus, it covers every position of the
+/// page. `page_slot_groups` then counts positions before it reads a block. It
+/// reads blocks only for the groups that overlap the page.
+///
+/// If the archive does not contain the block of a vote, the vote leaves its
+/// page. The rows after it do not move. `/governance/dreps/{drep_id}/votes`
+/// and the other history endpoints return the same short page under
+/// `sync.max_history`. The offsets stay the same as in Blockfrost.
 fn committee_vote_page<D: Domain>(
     domain: &D,
     voters: Option<&BTreeSet<StakeCredential>>,
     chain: &ChainSummary,
     pagination: &Pagination,
-    budget: usize,
 ) -> Result<Vec<CommitteeVotesInner>, Error> {
     let descending = matches!(pagination.order, Order::Desc);
-    let mut group_limit = pagination.to().min(budget).max(1);
 
-    let page = loop {
-        let frontier =
-            collect_committee_vote_frontier(domain, voters, group_limit, budget, descending)?;
-        let truncated = frontier.truncated;
-        let page = resolve_committee_vote_page(domain, frontier.groups, pagination)?;
+    let frontier = collect_committee_vote_frontier(domain, voters, pagination.to(), descending)?;
+    let rows: Vec<_> = frontier.groups.into_values().flatten().collect();
 
-        if page.len() == pagination.count || !truncated {
-            break page;
-        }
-
-        // The scan counts one row for each group that it starts. Thus, a
-        // frontier at the budget cannot truncate, because the row counter
-        // stops the scan first. This guard only makes sure that the loop
-        // ends.
-        if group_limit == budget {
-            return Err(Error::ScanBudgetExceeded);
-        }
-
-        group_limit = (group_limit * 2).min(budget);
-    };
+    let page = page_slot_groups(
+        rows,
+        |row| row.slot,
+        pagination,
+        |slot, group| settle_committee_casts(domain, slot, group),
+    )?;
 
     page.into_iter()
+        // A row without archive data has no transaction to report. The row
+        // leaves its page. The rows after it do not move.
+        .filter(|row| row.cast.is_some())
         .map(|row| {
             let cast = row.cast.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
             let (metadata_url, metadata_hash) = match cast.anchor {
@@ -865,7 +822,6 @@ async fn query_committee_votes<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let budget = domain.config.max_scan_items() as usize;
     let chain = domain.get_chain_summary()?;
     let page = domain
         .query()
@@ -875,7 +831,6 @@ where
                 voters.as_ref(),
                 &chain,
                 &pagination,
-                budget,
             ))
         })
         .await
@@ -913,7 +868,7 @@ where
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
-    let (role, credential) = parse_committee_id(&cc_id)?;
+    let (role, credential) = parse_committee_id(&cc_id).map_err(|_| Error::InvalidCommitteeId)?;
 
     let voters = match role {
         CommitteeCredentialRole::Hot => BTreeSet::from([credential]),
@@ -2618,25 +2573,42 @@ mod tests {
     /// casts one committee vote on that action. Thus, the four votes are in
     /// four different slots. A small frontier limit cannot hold all four.
     fn committee_votes_across_slots_config() -> SyntheticBlockConfig {
+        committee_votes_in_blocks_config(&[1, 1, 1, 1])
+    }
+
+    /// Transaction 0 in block 0 proposes one action for each vote in the
+    /// largest block. Each subsequent block casts the given number of
+    /// committee votes in one transaction. The votes go to action 0, action
+    /// 1, and so on. The listing therefore has one slot group per block, and
+    /// the groups differ in size. The votes cycle through yes, no, abstain,
+    /// and no in cast order. Thus, two consecutive rows are different, and
+    /// the fourth row is no.
+    fn committee_votes_in_blocks_config(votes_per_block: &[usize]) -> SyntheticBlockConfig {
         let key = Voter::ConstitutionalCommitteeKey(Hash::from([21u8; 28]));
+        let votes = [Vote::Yes, Vote::No, Vote::Abstain, Vote::No];
+        let actions = votes_per_block.iter().copied().max().unwrap_or(1);
+
+        let mut gov_actions_by_block =
+            vec![vec![(0..actions).map(|_| GovAction::Information).collect()]];
+        let mut votes_by_block = vec![vec![]];
+        let mut cast = 0;
+
+        for &count in votes_per_block {
+            gov_actions_by_block.push(vec![]);
+            votes_by_block.push(vec![(0..count)
+                .map(|action| {
+                    let vote = votes[cast % votes.len()].clone();
+                    cast += 1;
+                    synthetic_vote(key.clone(), 0, 0, action as u32, vote)
+                })
+                .collect()]);
+        }
 
         SyntheticBlockConfig {
-            block_count: 5,
+            block_count: votes_per_block.len() + 1,
             txs_per_block: 1,
-            gov_actions_by_block: vec![
-                vec![vec![GovAction::Information]],
-                vec![],
-                vec![],
-                vec![],
-                vec![],
-            ],
-            votes_by_block: vec![
-                vec![],
-                vec![vec![synthetic_vote(key.clone(), 0, 0, 0, Vote::Yes)]],
-                vec![vec![synthetic_vote(key.clone(), 0, 0, 0, Vote::No)]],
-                vec![vec![synthetic_vote(key.clone(), 0, 0, 0, Vote::Abstain)]],
-                vec![vec![synthetic_vote(key, 0, 0, 0, Vote::No)]],
-            ],
+            gov_actions_by_block,
+            votes_by_block,
             ..Default::default()
         }
     }
@@ -2751,13 +2723,33 @@ mod tests {
     #[tokio::test]
     async fn governance_committee_votes_by_hot_id_selects_one_voter() {
         let app = TestApp::new_with_cfg(committee_votes_config());
+        let hot_key = bech32_committee_hot(&cc_hot_key()).unwrap();
         let hot_script = bech32_committee_hot(&cc_hot_script()).unwrap();
+
+        let rows =
+            get_committee_votes(&app, &format!("/governance/committee/{hot_key}/votes")).await;
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|row| row.voter_hot_id == hot_key));
+
         let rows =
             get_committee_votes(&app, &format!("/governance/committee/{hot_script}/votes")).await;
-
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].voter_hot_id, hot_script);
         assert_eq!(rows[0].vote, committee_votes_inner::Vote::Abstain);
+
+        // Bech32 permits an ID in upper case. Blockfrost accepts it.
+        let upper = get_committee_votes(
+            &app,
+            &format!(
+                "/governance/committee/{}/votes",
+                hot_script.to_ascii_uppercase()
+            ),
+        )
+        .await;
+        assert_eq!(
+            upper.iter().map(committee_row_id).collect_vec(),
+            rows.iter().map(committee_row_id).collect_vec()
+        );
     }
 
     /// A cold credential selects every hot credential that it authorized. A
@@ -2875,137 +2867,293 @@ mod tests {
         .await;
     }
 
-    /// The scan budget counts vote rows, and not slot groups. Thus, a chain
-    /// with more votes than the budget gives an error. This is also true
-    /// when the page is small.
+    /// The page depth is limited like on the other endpoints that read a
+    /// block for each row. The vote history itself has no limit.
     #[tokio::test]
-    async fn governance_committee_votes_rejects_history_over_scan_budget() {
+    async fn governance_committee_votes_rejects_a_deep_page() {
         let app = TestApp::new_with_scan_limit(committee_votes_across_slots_config(), 3);
-        let (status, bytes) = app.get_bytes("/governance/committee/votes?count=1").await;
 
+        let rows = get_committee_votes(&app, "/governance/committee/votes?count=1&page=3").await;
+        assert_eq!(rows.len(), 1);
+
+        let (status, bytes) = app
+            .get_bytes("/governance/committee/votes?count=2&page=2")
+            .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let body = String::from_utf8_lossy(&bytes);
         assert!(body.contains("scan limit"), "The response body was {body}.");
     }
 
-    /// One slot can hold more votes than the budget of slot groups. The row
-    /// counter must stop this scan. The group counter alone cannot stop it.
+    /// The frontier covers `count * page` positions. The chain has more votes
+    /// than that, so the scan removes groups at the far end. The page must
+    /// still be the same as on an unbounded listing.
     #[tokio::test]
-    async fn governance_committee_votes_counts_rows_inside_one_slot() {
-        let key = Voter::ConstitutionalCommitteeKey(Hash::from([21u8; 28]));
-        let script = Voter::ConstitutionalCommitteeScript(Hash::from([22u8; 28]));
-        let app = TestApp::new_with_scan_limit(
-            SyntheticBlockConfig {
-                block_count: 2,
-                txs_per_block: 1,
-                gov_actions_by_block: vec![
-                    vec![vec![
-                        GovAction::Information,
-                        GovAction::Information,
-                        GovAction::Information,
-                    ]],
-                    vec![],
-                ],
-                votes_by_block: vec![
-                    vec![],
-                    // Every vote of this block is in the same slot.
-                    vec![vec![
-                        synthetic_vote(key.clone(), 0, 0, 0, Vote::Yes),
-                        synthetic_vote(key.clone(), 0, 0, 1, Vote::No),
-                        synthetic_vote(key, 0, 0, 2, Vote::Abstain),
-                        synthetic_vote(script, 0, 0, 0, Vote::Yes),
-                    ]],
-                ],
-                ..Default::default()
-            },
-            3,
-        );
-        let (status, bytes) = app.get_bytes("/governance/committee/votes?count=1").await;
-
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let body = String::from_utf8_lossy(&bytes);
-        assert!(body.contains("scan limit"), "The response body was {body}.");
-    }
-
-    /// A budget that holds every row starts with a frontier that is too
-    /// small for the page. The retry must increase the frontier. It must
-    /// then return the full page in the correct order.
-    #[tokio::test]
-    async fn governance_committee_votes_grows_a_truncated_frontier() {
-        let app = TestApp::new_with_scan_limit(committee_votes_across_slots_config(), 4);
+    async fn governance_committee_votes_pages_a_bounded_frontier() {
+        let app = TestApp::new_with_cfg(committee_votes_across_slots_config());
         let blocks = app.vectors().blocks.clone();
 
-        // The first frontier holds two groups, because `count` is 2. The
-        // chain has four groups. Thus, the scan truncates, and the retry
-        // doubles the limit.
-        let page = get_committee_votes(&app, "/governance/committee/votes?count=2&page=2").await;
+        let page = get_committee_votes(&app, "/governance/committee/votes?count=1&page=2").await;
         assert_eq!(
             page.iter().map(|row| &row.tx_hash).collect_vec(),
-            vec![&blocks[3].tx_hashes[0], &blocks[4].tx_hashes[0]]
+            vec![&blocks[2].tx_hashes[0]]
         );
 
         let descending = get_committee_votes(
             &app,
-            "/governance/committee/votes?count=2&page=2&order=desc",
+            "/governance/committee/votes?count=1&page=2&order=desc",
         )
         .await;
         assert_eq!(
             descending.iter().map(|row| &row.tx_hash).collect_vec(),
-            vec![&blocks[2].tx_hashes[0], &blocks[1].tx_hashes[0]]
+            vec![&blocks[3].tx_hashes[0]]
+        );
+
+        let all = get_committee_votes(&app, "/governance/committee/votes").await;
+        assert_eq!(
+            all.iter().map(|row| &row.tx_hash).collect_vec(),
+            blocks[1..5].iter().map(|b| &b.tx_hashes[0]).collect_vec()
         );
     }
 
-    /// A pruned slot group holds no rows after the archive lookup. Thus, the
-    /// page is short and the frontier is truncated. The retry must find the
-    /// remaining rows in the older groups.
+    /// The frontier counts rows, not groups. A group that is larger than the
+    /// page does not remove the groups before it. A group is complete or
+    /// absent. Each page must be equal to the same slice of the unbounded
+    /// listing.
     #[tokio::test]
-    async fn governance_committee_votes_grows_past_a_pruned_group() {
-        let app = TestApp::new_with_scan_limit_and_setup(
-            committee_votes_across_slots_config(),
-            4,
-            |domain, _| {
+    async fn governance_committee_votes_page_lopsided_groups() {
+        let app = TestApp::new_with_cfg(committee_votes_in_blocks_config(&[1, 5, 1, 1]));
+        let blocks = app.vectors().blocks.clone();
+
+        let all = get_committee_votes(&app, "/governance/committee/votes").await;
+        assert_eq!(all.len(), 8);
+        assert_eq!(
+            all.iter().map(|row| &row.tx_hash).collect_vec(),
+            [1usize, 2, 2, 2, 2, 2, 3, 4]
+                .iter()
+                .map(|&block| &blocks[block].tx_hashes[0])
+                .collect_vec()
+        );
+        assert_eq!(
+            all.iter().map(|row| row.vote).collect_vec(),
+            [
+                committee_votes_inner::Vote::Yes,
+                committee_votes_inner::Vote::No,
+                committee_votes_inner::Vote::Abstain,
+                committee_votes_inner::Vote::No,
+                committee_votes_inner::Vote::Yes,
+                committee_votes_inner::Vote::No,
+                committee_votes_inner::Vote::Abstain,
+                committee_votes_inner::Vote::No,
+            ]
+        );
+
+        let reversed = all.iter().rev().cloned().collect_vec();
+
+        for count in 1..=8 {
+            for page in 1..=8 {
+                let from = (page - 1) * count;
+                let to = (from + count).min(all.len());
+                let slice = |listing: &[CommitteeVotesInner]| {
+                    listing.get(from..to).unwrap_or_default().to_vec()
+                };
+
+                let ascending = get_committee_votes(
+                    &app,
+                    &format!("/governance/committee/votes?count={count}&page={page}"),
+                )
+                .await;
+                assert_eq!(
+                    ascending,
+                    slice(&all),
+                    "The ascending page {page} with count {count} is wrong."
+                );
+
+                let descending = get_committee_votes(
+                    &app,
+                    &format!("/governance/committee/votes?count={count}&page={page}&order=desc"),
+                )
+                .await;
+                assert_eq!(
+                    descending,
+                    slice(&reversed),
+                    "The descending page {page} with count {count} is wrong."
+                );
+            }
+        }
+    }
+
+    fn frontier_row(slot: BlockSlot) -> CommitteeVoteRow {
+        CommitteeVoteRow {
+            slot,
+            voter: cc_hot_key(),
+            proposal_tx: Hash::from([0u8; 32]),
+            proposal_idx: 0,
+            governance_type: committee_votes_inner::GovernanceType::InfoAction,
+            vote: Vote::Yes,
+            cast: None,
+        }
+    }
+
+    fn frontier_slots(frontier: &CommitteeVoteFrontier) -> Vec<(BlockSlot, usize)> {
+        frontier
+            .groups
+            .iter()
+            .map(|(slot, group)| (*slot, group.len()))
+            .collect()
+    }
+
+    /// The frontier keeps the groups that cover the first `limit` positions
+    /// and no more. If the nearest group is larger than `limit`, it stays
+    /// complete. The arrival order of the rows has no effect.
+    #[test]
+    fn committee_vote_frontier_is_bounded_by_rows() {
+        let mut ascending = CommitteeVoteFrontier::new(3, false);
+        for slot in [50, 50, 50, 50, 50, 10, 30, 30, 20, 60, 10] {
+            ascending.push(frontier_row(slot));
+        }
+        assert_eq!(frontier_slots(&ascending), vec![(10, 2), (20, 1)]);
+        assert_eq!(ascending.rows, 3);
+        // A group in the set stays complete, so the set accepts its slot.
+        assert!(ascending.accepts(10));
+        assert!(ascending.accepts(20));
+        assert!(ascending.accepts(5));
+        assert!(ascending.accepts(15));
+        assert!(!ascending.accepts(30));
+        assert!(!ascending.accepts(50));
+
+        let mut descending = CommitteeVoteFrontier::new(3, true);
+        for slot in [10, 10, 10, 10, 10, 50, 30, 30, 40, 5, 50] {
+            descending.push(frontier_row(slot));
+        }
+        assert_eq!(frontier_slots(&descending), vec![(40, 1), (50, 2)]);
+        assert_eq!(descending.rows, 3);
+        assert!(descending.accepts(50));
+        assert!(descending.accepts(40));
+        assert!(descending.accepts(60));
+        assert!(descending.accepts(45));
+        assert!(!descending.accepts(30));
+        assert!(!descending.accepts(10));
+
+        // The nearest group is larger than the limit. It stays complete.
+        let mut wide = CommitteeVoteFrontier::new(2, false);
+        for slot in [10, 10, 10, 10, 20, 5, 5, 5] {
+            wide.push(frontier_row(slot));
+        }
+        assert_eq!(frontier_slots(&wide), vec![(5, 3)]);
+        assert_eq!(wide.rows, 3);
+        assert!(!wide.accepts(10));
+
+        // The listing is smaller than the limit. Nothing leaves.
+        let mut small = CommitteeVoteFrontier::new(10, true);
+        for slot in [10, 20, 20, 30] {
+            small.push(frontier_row(slot));
+        }
+        assert_eq!(frontier_slots(&small), vec![(10, 1), (20, 2), (30, 1)]);
+        assert_eq!(small.rows, 4);
+    }
+
+    /// The listing has groups of different sizes. For each arrival order of
+    /// its rows, the frontier holds exactly the groups that cover the first
+    /// `limit` positions. Its size is less than `limit` plus the size of its
+    /// farthest group.
+    #[test]
+    fn committee_vote_frontier_covers_the_limit_in_any_order() {
+        // Each pair is a slot and the number of rows in its group.
+        let listing = [(10u64, 3usize), (20, 1), (30, 4), (40, 2), (50, 1), (60, 5)];
+        let mut rows = Vec::new();
+        for (slot, size) in listing {
+            rows.extend(std::iter::repeat_n(slot, size));
+        }
+
+        // Each stride visits the rows in a different order.
+        for stride in [1usize, 5, 7, 11, 13] {
+            let order: Vec<u64> = (0..rows.len())
+                .map(|i| rows[(i * stride) % rows.len()])
+                .collect();
+
+            for limit in 1..=rows.len() + 1 {
+                for descending in [false, true] {
+                    let mut frontier = CommitteeVoteFrontier::new(limit, descending);
+                    for &slot in &order {
+                        frontier.push(frontier_row(slot));
+                    }
+
+                    let mut expected = Vec::new();
+                    let mut covered = 0;
+                    let mut groups = listing.to_vec();
+                    if descending {
+                        groups.reverse();
+                    }
+                    for (slot, size) in groups {
+                        if covered >= limit {
+                            break;
+                        }
+                        expected.push((slot, size));
+                        covered += size;
+                    }
+                    expected.sort_unstable();
+
+                    assert_eq!(
+                        frontier_slots(&frontier),
+                        expected,
+                        "The frontier is wrong for stride {stride}, limit {limit}, descending {descending}."
+                    );
+                    assert_eq!(frontier.rows, covered);
+                    let far = frontier
+                        .far_slot()
+                        .map_or(0, |slot| frontier.groups[&slot].len());
+                    assert!(frontier.rows < limit + far);
+                }
+            }
+        }
+    }
+
+    /// If the archive does not contain the block of a vote, the vote leaves
+    /// its page. The rows after it keep their offsets, as on the DRep vote
+    /// listing.
+    #[tokio::test]
+    async fn governance_committee_votes_skip_pruned_blocks_without_shifting_offsets() {
+        let app =
+            TestApp::new_with_cfg_and_setup(committee_votes_across_slots_config(), |domain, _| {
                 // This call keeps only the last slot of the chain.
                 domain
                     .archive()
                     .prune_history(0, None)
                     .expect("The archive did not prune its history.");
-            },
-        );
+            });
         let blocks = app.vectors().blocks.clone();
+        let last = &blocks[4].tx_hashes[0];
 
-        // Only the vote of the last block stays after the prune. The scan
-        // must find this vote. The retry must not add a row that has no
-        // block.
-        let rows = get_committee_votes(&app, "/governance/committee/votes?count=1").await;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].tx_hash, blocks[4].tx_hashes[0]);
-        assert_eq!(rows[0].vote, committee_votes_inner::Vote::No);
-    }
-
-    /// The frontier increases to the budget, and the scan then holds every
-    /// group. A page that stays short is short because the rows do not
-    /// exist. It is not short because the scan stopped too early.
-    #[tokio::test]
-    async fn governance_committee_votes_returns_a_short_page_at_the_group_budget() {
-        let app = TestApp::new_with_scan_limit_and_setup(
-            committee_votes_across_slots_config(),
-            4,
-            |domain, _| {
-                domain
-                    .archive()
-                    .prune_history(0, None)
-                    .expect("The archive did not prune its history.");
-            },
+        // The archive does not contain the blocks of the first three votes.
+        // Their pages are empty.
+        assert!(
+            get_committee_votes(&app, "/governance/committee/votes?count=1")
+                .await
+                .is_empty()
         );
-        let blocks = app.vectors().blocks.clone();
 
-        // The chain holds four vote rows in four slots. The prune keeps one
-        // of these slots. The frontier starts at two groups and increases to
-        // the budget of four. It then holds every group.
-        let rows = get_committee_votes(&app, "/governance/committee/votes?count=2").await;
+        // The fourth vote keeps its offset.
+        let page = get_committee_votes(&app, "/governance/committee/votes?count=1&page=4").await;
+        assert_eq!(
+            page.iter().map(|row| &row.tx_hash).collect_vec(),
+            vec![last]
+        );
+        assert_eq!(page[0].vote, committee_votes_inner::Vote::No);
 
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].tx_hash, blocks[4].tx_hashes[0]);
+        // A page that contains a missing block and a kept block is short.
+        let page = get_committee_votes(&app, "/governance/committee/votes?count=2&page=2").await;
+        assert_eq!(
+            page.iter().map(|row| &row.tx_hash).collect_vec(),
+            vec![last]
+        );
+
+        // In descending order the kept vote is the first row.
+        let page =
+            get_committee_votes(&app, "/governance/committee/votes?count=1&order=desc").await;
+        assert_eq!(
+            page.iter().map(|row| &row.tx_hash).collect_vec(),
+            vec![last]
+        );
     }
 
     /// Three blocks: the first tx of block 1 proposes two actions, block 2
