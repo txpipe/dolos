@@ -108,12 +108,14 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/accounts/{stake_address}/addresses/total`                | Get lifetime received/sent totals for a stake address    |
 | `/accounts/{stake_address}/delegations`                    | Get delegations for a stake address                      |
 | `/accounts/{stake_address}/history`                        | Get the per-epoch stake history for a stake address      |
+| `/accounts/{stake_address}/mirs`                           | Get MIRs for a stake address                             |
 | `/accounts/{stake_address}/registrations`                  | Get registrations for a stake address                    |
 | `/accounts/{stake_address}/rewards`                        | Get rewards for a stake address                          |
 | `/accounts/{stake_address}/transactions`                   | Get transactions for a stake address                     |
 | `/accounts/{stake_address}/utxos`                          | Get UTXOs for a stake address                            |
 | `/accounts/{stake_address}/withdrawals`                    | Get withdrawals for a stake address                      |
 | `/addresses/{address}`                                     | Get general information for a specific address           |
+| `/addresses/{address}/extended`                            | Get address information with extended asset data         |
 | `/addresses/{address}/total`                               | Get lifetime received/sent totals for a specific address |
 | `/addresses/{address}/transactions`                        | Get transactions for a specific address                  |
 | `/addresses/{address}/txs`                                 | Alias of `/addresses/{address}/transactions`             |
@@ -151,6 +153,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/governance/committee/votes`                              | Get votes cast by every constitutional committee member  |
 | `/governance/committee/{cc_id}/votes`                      | Get votes cast by a constitutional committee member      |
 | `/governance/dreps/{drep_id}`                              | Get DRep information                                     |
+| `/governance/dreps/{drep_id}/delegators`                   | Get delegators for a specific DRep                       |
 | `/governance/dreps/{drep_id}/metadata`                     | Get DRep metadata                                        |
 | `/governance/dreps/{drep_id}/votes`                        | Get votes cast by a DRep                                 |
 | `/governance/proposals`                                    | Get list of governance proposals                         |

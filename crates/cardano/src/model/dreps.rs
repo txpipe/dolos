@@ -1,7 +1,6 @@
 use dolos_core::{BlockSlot, EntityKey, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
-    crypto::hash::Hash,
     ledger::primitives::{
         conway::{Anchor, DRep},
         Epoch,
@@ -25,21 +24,34 @@ pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
     EntityKey::from(bytes)
 }
 
-/// This function is the inverse of [`drep_to_entity_key`]. It returns the
-/// DRep that an entity key names.
+/// Decodes the DRep that [`drep_to_entity_key`] encoded into `key`.
 ///
-/// The two special delegation targets and a malformed key have no DRep. For
-/// these keys, the function returns `None`.
-pub fn drep_from_entity_key(key: &[u8]) -> Option<DRep> {
-    let prefix = *key.first()?;
-    let hash: Hash<28> = key
-        .get(1..)
-        .and_then(|x| <[u8; 28]>::try_from(x).ok())?
-        .into();
+/// Returns `None` when the bytes are not a padded DRep key.
+pub fn drep_from_entity_key(key: &EntityKey) -> Option<DRep> {
+    let bytes = key.as_ref();
 
-    match prefix {
-        pallas_extras::DREP_KEY_PREFIX => Some(DRep::Key(hash)),
-        pallas_extras::DREP_SCRIPT_PREFIX => Some(DRep::Script(hash)),
+    // Regular DReps use 29 bytes, the special ones 1. The store pads both to
+    // the fixed key size with zeros.
+    let (head, padding) = match bytes.first()? {
+        &pallas_extras::DREP_KEY_PREFIX | &pallas_extras::DREP_SCRIPT_PREFIX => {
+            bytes.split_at_checked(29)?
+        }
+        _ => bytes.split_at(1),
+    };
+
+    if padding.iter().any(|x| *x != 0) {
+        return None;
+    }
+
+    match head {
+        [0] => Some(DRep::Abstain),
+        [1] => Some(DRep::NoConfidence),
+        [pallas_extras::DREP_KEY_PREFIX, hash @ ..] => {
+            <[u8; 28]>::try_from(hash).ok().map(|x| DRep::Key(x.into()))
+        }
+        [pallas_extras::DREP_SCRIPT_PREFIX, hash @ ..] => <[u8; 28]>::try_from(hash)
+            .ok()
+            .map(|x| DRep::Script(x.into())),
         _ => None,
     }
 }
@@ -703,6 +715,41 @@ impl dolos_core::EntityDelta for DRepPowerUpdate {
         let entity = entity.as_mut().expect("existing drep");
 
         entity.voting_power = self.prev_power;
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn drep_entity_key_roundtrip_covers_every_variant() {
+        let dreps = [
+            DRep::Key([7u8; 28].into()),
+            DRep::Script([8u8; 28].into()),
+            DRep::Abstain,
+            DRep::NoConfidence,
+        ];
+
+        for drep in dreps {
+            let key = drep_to_entity_key(&drep);
+            assert_eq!(drep_from_entity_key(&key), Some(drep));
+        }
+    }
+
+    #[test]
+    fn drep_from_entity_key_rejects_foreign_keys() {
+        // unknown prefix
+        assert_eq!(drep_from_entity_key(&EntityKey::from(vec![0x42; 29])), None);
+
+        // regular key with non-zero padding
+        let mut bytes = [0u8; 32];
+        bytes[0] = pallas_extras::DREP_KEY_PREFIX;
+        bytes[31] = 1;
+        assert_eq!(drep_from_entity_key(&EntityKey::from(bytes.to_vec())), None);
+
+        // special key with non-zero padding
+        assert_eq!(drep_from_entity_key(&EntityKey::from(vec![1, 1])), None);
     }
 }
 
