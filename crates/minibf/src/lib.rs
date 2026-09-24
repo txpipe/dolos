@@ -431,6 +431,10 @@ where
             get(routes::addresses::by_address::<D>),
         )
         .route(
+            "/addresses/{address}/extended",
+            get(routes::addresses::extended::<D>),
+        )
+        .route(
             "/addresses/{address}/utxos",
             get(routes::addresses::utxos::<D>),
         )
@@ -644,6 +648,10 @@ where
         .route(
             "/governance/dreps/{drep_id}/metadata",
             get(routes::governance::drep_metadata::<D>),
+        )
+        .route(
+            "/governance/dreps/{drep_id}/delegators",
+            get(routes::governance::drep_delegators::<D>),
         )
         .route(
             "/governance/dreps/{drep_id}/votes",
