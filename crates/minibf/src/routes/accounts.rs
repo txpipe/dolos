@@ -288,7 +288,8 @@ where
     Ok(false)
 }
 
-/// `GET /accounts/{stake_address}/addresses`.
+/// `GET /accounts/{stake_address}/addresses`: the account's addresses by first
+/// on-chain appearance, read from the stake address log.
 ///
 /// Blockfrost declares only `count`, `page` and `order` for this endpoint.
 /// The shared query struct also accepts `from` and `to`; they are ignored
@@ -313,69 +314,36 @@ where
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
+
     if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())?
         && !account_appears_in_pool_registrations(&domain, &account_key.address)?
     {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    // `from`/`to` are ignored, so the scan always covers the whole history.
-    let end_slot = domain.get_tip_slot()?;
-    let stream = domain.query().blocks_by_stake_stream(
-        &account_key.address.to_vec(),
-        0,
-        end_slot,
-        SlotOrder::from(pagination.order),
-    );
+    // Every page is one read of the stake address log, in either order. The
+    // log is written in the same batch as the blocks it projects, by every
+    // path that applies blocks from genesis.
+    let addresses = domain
+        .archive()
+        .addresses_by_stake_log(
+            &account_key.address.to_vec(),
+            pagination.skip(),
+            pagination.count,
+            matches!(pagination.order, Order::Desc),
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut items = vec![];
-    let mut skipped = 0;
-    let mut seen = BTreeSet::new();
-
-    let mut stream = Box::pin(stream);
-
-    while let Some(res) = stream.next().await {
-        if items.len() >= pagination.count {
-            break;
-        }
-
-        let (_slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let Some(block) = block else {
-            continue;
-        };
-
-        let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        for (_, utxo) in block.txs().iter().flat_map(|tx| tx.produces()) {
-            let address = utxo
-                .address()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            if match &address {
-                Address::Shelley(shelley) => {
-                    pallas_extras::shelley_address_to_stake_address(shelley)
-                        .map(|x| x.to_vec() == account_key.address.to_vec())
-                        .unwrap_or(false)
-                }
-                Address::Stake(stake) => stake.to_vec() == account_key.address.to_vec(),
-                Address::Byron(_) => false,
-            } && seen.insert(address.to_string())
-            {
-                if skipped < (pagination.page as usize - 1) * pagination.count {
-                    skipped += 1;
-                } else {
-                    items.push(AccountAddressesContentInner {
-                        address: address.to_string(),
-                    });
-                    if items.len() >= pagination.count {
-                        break;
-                    }
-                }
-            }
-        }
-        if items.len() >= pagination.count {
-            break;
-        }
-    }
+    let items = addresses
+        .into_iter()
+        .map(|bytes| {
+            Address::from_bytes(&bytes)
+                .map(|address| AccountAddressesContentInner {
+                    address: address.to_string(),
+                })
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Json(items))
 }
@@ -2071,15 +2039,47 @@ mod tests {
     async fn accounts_by_stake_addresses_order_desc() {
         let app = TestApp::new();
         let stake_address = app.vectors().stake_address.as_str();
-        let path = format!("/accounts/{stake_address}/addresses?order=desc&count=5");
-        let (status, bytes) = app.get_bytes(&path).await;
-        assert_eq!(status, StatusCode::OK);
 
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/accounts/{stake_address}/addresses?order=asc&count=100"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let asc: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses asc");
+
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/accounts/{stake_address}/addresses?order=desc&count=100"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
         let desc: Vec<AccountAddressesContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse addresses desc");
-        if desc.is_empty() {
-            return;
-        }
+
+        assert!(!asc.is_empty());
+
+        // The synthetic chain reuses the primary address in every block. A
+        // last-appearance ordering would move that address to the front of
+        // `desc`. Blockfrost defines `desc` as the reverse of `asc`.
+        let mut reversed: Vec<_> = asc.iter().map(|x| x.address.clone()).collect();
+        reversed.reverse();
+        let desc_addresses: Vec<_> = desc.iter().map(|x| x.address.clone()).collect();
+        assert_eq!(desc_addresses, reversed);
+
+        // A `desc` page must be a window into the reversed list.
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/accounts/{stake_address}/addresses?order=desc&count=2&page=2"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let page: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses desc page");
+        let page_addresses: Vec<_> = page.iter().map(|x| x.address.clone()).collect();
+        assert_eq!(page_addresses, reversed[2..4].to_vec());
+
         let address_bounds = |addr: &str| {
             app.vectors()
                 .account_address_bounds
@@ -2088,7 +2088,8 @@ mod tests {
                 .expect("missing address in vectors")
         };
 
-        let desc_blocks: Vec<_> = desc.iter().map(|x| address_bounds(&x.address).1).collect();
+        // first on-chain appearance must not increase along `desc`
+        let desc_blocks: Vec<_> = desc.iter().map(|x| address_bounds(&x.address).0).collect();
 
         assert!(desc_blocks.windows(2).all(|w| w[0] >= w[1]));
     }

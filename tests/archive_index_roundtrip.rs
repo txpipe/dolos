@@ -34,7 +34,7 @@ use dolos_cardano::indexes::{archive_dimensions, CardanoArchiveIndexExt};
 use dolos_core::{
     builtin::MemoryArchiveStore, ArchiveIndexDelta, ArchiveStore as CoreArchiveStore,
     ArchiveWriter as CoreArchiveWriter, BlockSlot, ExactKind, ExactRecord, IndexRecord,
-    StateSchema, Tag, TagDimension, TagRecord,
+    StakeAddressAppearance, StateSchema, Tag, TagDimension, TagRecord,
 };
 
 const EPOCH_LEN: BlockSlot = 432_000;
@@ -210,6 +210,7 @@ fn seed_deltas(spec: &SeedSpec, sink: &mut impl FnMut(Vec<ArchiveIndexDelta>)) -
                     block_number: Some(epoch * 1_000_000 + b),
                     tx_hashes,
                     tags,
+                    stake_addresses: Vec::new(),
                 });
             }
 
@@ -330,6 +331,21 @@ macro_rules! conformance_suite {
             fn slots_by_tag_are_ordered_in_both_directions() {
                 super::slots_by_tag_are_ordered_in_both_directions::<$backend>();
             }
+
+            #[test]
+            fn stake_log_round_trips_and_pages() {
+                super::stake_log_round_trips_and_pages::<$backend>();
+            }
+
+            #[test]
+            fn stake_log_replay_moves_a_pair_to_an_earlier_appearance() {
+                super::stake_log_replay_moves_a_pair_to_an_earlier_appearance::<$backend>();
+            }
+
+            #[test]
+            fn stake_log_apply_and_undo_share_one_writer() {
+                super::stake_log_apply_and_undo_share_one_writer::<$backend>();
+            }
         }
     };
 }
@@ -426,6 +442,7 @@ fn slots_by_tag_are_ordered_in_both_directions<B: Backend>() {
             block_number: Some(slot),
             tx_hashes: Vec::new(),
             tags: vec![Tag::new(archive_dimensions::POLICY, policy.clone())],
+            stake_addresses: Vec::new(),
         })
         .collect();
 
@@ -1341,6 +1358,7 @@ fn malformed_exact_keys_are_refused<B: Backend>() {
             block_number: Some(1),
             tx_hashes: vec![vec![0xCD; 32]],
             tags: Vec::new(),
+            stake_addresses: Vec::new(),
         }];
 
         let writer = store.start_writer().expect("start_writer failed");
@@ -1378,6 +1396,7 @@ fn malformed_exact_keys_are_refused<B: Backend>() {
             block_number: Some(1),
             tx_hashes: vec![vec![0xEF; width]],
             tags: Vec::new(),
+            stake_addresses: Vec::new(),
         }];
 
         let writer = store.start_writer().expect("start_writer failed");
@@ -1426,4 +1445,243 @@ fn seeded_block() -> (Vec<u8>, u64, BlockSlot) {
         .first()
         .expect("the seed writes blocks")
         .clone()
+}
+
+/// The stake address log conformance check: first-appearance dedup (also
+/// inside one writer spanning blocks), ordered paging in both directions,
+/// and undo of only the first appearance.
+fn stake_log_round_trips_and_pages<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let stake_a = vec![0xAA; 29];
+    let stake_b = vec![0xBB; 29];
+    let addr = |b: u8| vec![b; 57];
+
+    let appearance = |order: u32, stake: &[u8], address: u8| StakeAddressAppearance {
+        order,
+        stake: stake.to_vec(),
+        address: addr(address),
+    };
+
+    let delta = |slot: BlockSlot, items: Vec<StakeAddressAppearance>| ArchiveIndexDelta {
+        slot,
+        block_hash: hash32(0x0B, slot, 0),
+        block_number: Some(slot),
+        stake_addresses: items,
+        ..Default::default()
+    };
+
+    let page = |stake: &[u8], offset: usize, limit: usize, reverse: bool| {
+        store
+            .addresses_by_stake_log(stake, offset, limit, reverse)
+            .expect("addresses_by_stake_log failed")
+    };
+
+    apply(&store, &[delta(1, vec![appearance(0, &stake_a, 0x01)])]);
+    assert_eq!(page(&stake_a, 0, 10, false), vec![addr(0x01)]);
+
+    // one writer spanning two blocks dedups the pair the later block repeats
+    apply(
+        &store,
+        &[
+            delta(2, vec![appearance(0, &stake_a, 0x02)]),
+            delta(
+                3,
+                vec![appearance(0, &stake_a, 0x02), appearance(1, &stake_b, 0x03)],
+            ),
+        ],
+    );
+
+    // a repeat in a later writer is deduped against the committed store
+    apply(&store, &[delta(4, vec![appearance(0, &stake_a, 0x01)])]);
+
+    let asc = page(&stake_a, 0, 10, false);
+    assert_eq!(asc, vec![addr(0x01), addr(0x02)]);
+
+    // desc is the exact reverse of asc
+    let desc = page(&stake_a, 0, 10, true);
+    assert_eq!(desc, vec![addr(0x02), addr(0x01)]);
+
+    // offset windows work from both ends
+    assert_eq!(page(&stake_a, 1, 1, false), vec![addr(0x02)]);
+    assert_eq!(page(&stake_a, 1, 1, true), vec![addr(0x01)]);
+
+    // stakes are isolated, and an unknown stake is an empty page
+    assert_eq!(page(&stake_b, 0, 10, false), vec![addr(0x03)]);
+    assert_eq!(page(&[0xCC; 29], 0, 10, false), Vec::<Vec<u8>>::new());
+
+    // within one block, `order` decides: output 3 before output 7
+    apply(
+        &store,
+        &[delta(
+            5,
+            vec![appearance(7, &stake_b, 0x05), appearance(3, &stake_b, 0x04)],
+        )],
+    );
+    assert_eq!(
+        page(&stake_b, 0, 10, false),
+        vec![addr(0x03), addr(0x04), addr(0x05)]
+    );
+
+    let undo_one = |d: ArchiveIndexDelta| {
+        let writer = store.start_writer().expect("start_writer failed");
+        writer
+            .undo_index(std::slice::from_ref(&d))
+            .expect("undo_index failed");
+        writer.commit().expect("commit failed");
+    };
+
+    // undoing the repeat leaves the pair in place
+    undo_one(delta(4, vec![appearance(0, &stake_a, 0x01)]));
+    assert_eq!(page(&stake_a, 0, 10, false), vec![addr(0x01), addr(0x02)]);
+
+    // undoing the first appearance removes it
+    undo_one(delta(1, vec![appearance(0, &stake_a, 0x01)]));
+    assert_eq!(page(&stake_a, 0, 10, false), vec![addr(0x02)]);
+}
+
+/// A log that started mid-chain holds the first appearance it saw. A replay
+/// from origin (`doctor rebuild-state --rewrite-logs`) reaches the earlier
+/// appearance and must move the pair there, with no stale entry left behind
+/// and undo following the new position. Later appearances never move a pair.
+fn stake_log_replay_moves_a_pair_to_an_earlier_appearance<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let stake = vec![0xAA; 29];
+    let addr = |b: u8| vec![b; 57];
+
+    let appearance = |address: u8| StakeAddressAppearance {
+        order: 0,
+        stake: stake.clone(),
+        address: addr(address),
+    };
+
+    let delta = |slot: BlockSlot, items: Vec<StakeAddressAppearance>| ArchiveIndexDelta {
+        slot,
+        block_hash: hash32(0x0C, slot, 0),
+        block_number: Some(slot),
+        stake_addresses: items,
+        ..Default::default()
+    };
+
+    let page = |reverse: bool| {
+        store
+            .addresses_by_stake_log(&stake, 0, 10, reverse)
+            .expect("addresses_by_stake_log failed")
+    };
+
+    // the log started at slot 90: B is first seen at 95, A only at a repeat
+    // at 100, though A's first on-chain appearance is slot 10
+    apply(
+        &store,
+        &[
+            delta(95, vec![appearance(0x0B)]),
+            delta(100, vec![appearance(0x0A)]),
+        ],
+    );
+    assert_eq!(page(false), vec![addr(0x0B), addr(0x0A)]);
+
+    // a replay from origin, in one writer: A at 10 moves the pair, the repeat
+    // at 50 and the already-stored positions of B and A change nothing
+    apply(
+        &store,
+        &[
+            delta(10, vec![appearance(0x0A)]),
+            delta(50, vec![appearance(0x0A)]),
+            delta(95, vec![appearance(0x0B)]),
+            delta(100, vec![appearance(0x0A)]),
+        ],
+    );
+    assert_eq!(page(false), vec![addr(0x0A), addr(0x0B)]);
+    assert_eq!(page(true), vec![addr(0x0B), addr(0x0A)]);
+
+    // a later appearance never moves a pair
+    apply(&store, &[delta(200, vec![appearance(0x0A)])]);
+    assert_eq!(page(false), vec![addr(0x0A), addr(0x0B)]);
+
+    let undo_one = |d: ArchiveIndexDelta| {
+        let writer = store.start_writer().expect("start_writer failed");
+        writer
+            .undo_index(std::slice::from_ref(&d))
+            .expect("undo_index failed");
+        writer.commit().expect("commit failed");
+    };
+
+    // the old position no longer owns the pair; the new one does
+    undo_one(delta(100, vec![appearance(0x0A)]));
+    assert_eq!(page(false), vec![addr(0x0A), addr(0x0B)]);
+
+    undo_one(delta(10, vec![appearance(0x0A)]));
+    assert_eq!(page(false), vec![addr(0x0B)]);
+}
+
+/// One writer may apply and undo before it commits. The writer's own pending
+/// inserts and removals must be what a later apply or undo in the same writer
+/// sees, exactly as if each had been committed in turn.
+fn stake_log_apply_and_undo_share_one_writer<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let stake = vec![0xAA; 29];
+    let addr = |b: u8| vec![b; 57];
+
+    let appearance = |address: u8| StakeAddressAppearance {
+        order: 0,
+        stake: stake.clone(),
+        address: addr(address),
+    };
+
+    let delta = |slot: BlockSlot, items: Vec<StakeAddressAppearance>| ArchiveIndexDelta {
+        slot,
+        block_hash: hash32(0x0D, slot, 0),
+        block_number: Some(slot),
+        stake_addresses: items,
+        ..Default::default()
+    };
+
+    let page = || {
+        store
+            .addresses_by_stake_log(&stake, 0, 10, false)
+            .expect("addresses_by_stake_log failed")
+    };
+
+    // A is committed at slot 1
+    apply(&store, &[delta(1, vec![appearance(0x0A)])]);
+
+    // apply then undo of the same block in one writer: B never lands
+    let writer = store.start_writer().expect("start_writer failed");
+    writer
+        .apply_index(&[delta(2, vec![appearance(0x0B)])])
+        .expect("apply_index failed");
+    writer
+        .undo_index(&[delta(2, vec![appearance(0x0B)])])
+        .expect("undo_index failed");
+    writer.commit().expect("commit failed");
+    assert_eq!(
+        page(),
+        vec![addr(0x0A)],
+        "apply then undo left the pair behind"
+    );
+
+    // undo then apply of a committed block in one writer: A stays at slot 1
+    let writer = store.start_writer().expect("start_writer failed");
+    writer
+        .undo_index(&[delta(1, vec![appearance(0x0A)])])
+        .expect("undo_index failed");
+    writer
+        .apply_index(&[delta(1, vec![appearance(0x0A)])])
+        .expect("apply_index failed");
+    writer.commit().expect("commit failed");
+    assert_eq!(page(), vec![addr(0x0A)], "undo then apply lost the pair");
+
+    // a repeat of A and a new C in one block, applied and undone in one
+    // writer: A keeps its first appearance, C never lands
+    let writer = store.start_writer().expect("start_writer failed");
+    writer
+        .apply_index(&[delta(3, vec![appearance(0x0A), appearance(0x0C)])])
+        .expect("apply_index failed");
+    writer
+        .undo_index(&[delta(3, vec![appearance(0x0A), appearance(0x0C)])])
+        .expect("undo_index failed");
+    writer.commit().expect("commit failed");
+    assert_eq!(page(), vec![addr(0x0A)]);
 }

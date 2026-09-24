@@ -1048,6 +1048,7 @@ fn index_delta(slot: u64, seed: u8) -> ArchiveIndexDelta {
         block_number: Some(slot),
         tx_hashes: vec![vec![0x80 | seed; 32]],
         tags: vec![Tag::new(archive_dimensions::ADDRESS, vec![seed; 28])],
+        stake_addresses: Vec::new(),
     }
 }
 
@@ -1144,6 +1145,7 @@ fn slots_by_tag_bounds_are_inclusive<B: Backend>() {
             block_number: Some(slot),
             tx_hashes: Vec::new(),
             tags: vec![Tag::new(archive_dimensions::ADDRESS, key.clone())],
+            stake_addresses: Vec::new(),
         })
         .collect();
 
@@ -1185,6 +1187,7 @@ fn slot_delta(slot: u64) -> ArchiveIndexDelta {
             archive_dimensions::ADDRESS,
             SHARED_TAG_KEY.to_vec(),
         )],
+        stake_addresses: Vec::new(),
     }
 }
 
