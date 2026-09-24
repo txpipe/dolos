@@ -121,14 +121,16 @@ impl TestApp {
         Self::build(cfg, fault, minibf)
     }
 
-    /// Validates the `base_path` the same way that startup does. Then builds
-    /// the app. If the `base_path` is malformed, this returns the validation
-    /// error and does not panic.
-    pub fn try_new_with_base_path(base_path: Option<String>) -> Result<Self, String> {
+    /// App that serves each route under `base_path`. The value must pass
+    /// `MinibfConfig::validate`, the same check that startup does. The tests
+    /// in `dolos-core` cover the values that this check rejects.
+    pub fn new_with_base_path(base_path: &str) -> Self {
         let mut minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        minibf.base_path = base_path;
-        minibf.validate()?;
-        Ok(Self::build(
+        minibf.base_path = Some(base_path.into());
+        minibf
+            .validate()
+            .expect("the test base_path did not pass MinibfConfig::validate");
+        Self::build(
             SyntheticBlockConfig {
                 block_count: 5,
                 txs_per_block: 3,
@@ -136,7 +138,7 @@ impl TestApp {
             },
             None,
             minibf,
-        ))
+        )
     }
 
     fn build(cfg: SyntheticBlockConfig, fault: Option<TestFault>, minibf: MinibfConfig) -> Self {

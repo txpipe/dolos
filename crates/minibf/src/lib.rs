@@ -763,8 +763,7 @@ mod base_path_tests {
 
     #[tokio::test]
     async fn routes_resolve_under_configured_base_path() {
-        let app = TestApp::try_new_with_base_path(Some("/api/v0".into()))
-            .expect("router should build with valid base_path");
+        let app = TestApp::new_with_base_path("/api/v0");
 
         let (status, _) = app.get_bytes("/api/v0/network").await;
         assert_eq!(status, StatusCode::OK, "prefixed route should resolve");
@@ -781,8 +780,7 @@ mod base_path_tests {
     async fn trailing_slash_in_base_path_config_is_trimmed() {
         // The router removes a trailing slash from `base_path` before it nests the
         // routes.
-        let app = TestApp::try_new_with_base_path(Some("/api/v0/".into()))
-            .expect("router should build with trailing-slash base_path");
+        let app = TestApp::new_with_base_path("/api/v0/");
 
         let (status, _) = app.get_bytes("/api/v0/network").await;
         assert_eq!(status, StatusCode::OK);
@@ -790,8 +788,7 @@ mod base_path_tests {
 
     #[tokio::test]
     async fn trailing_slash_in_request_is_normalized() {
-        let app = TestApp::try_new_with_base_path(Some("/api/v0".into()))
-            .expect("the router did not accept a valid base_path");
+        let app = TestApp::new_with_base_path("/api/v0");
 
         // The router removes a trailing slash from the request path before route
         // matching.
@@ -809,26 +806,5 @@ mod base_path_tests {
             StatusCode::OK,
             "the base path with a trailing slash did not resolve to the root route"
         );
-    }
-
-    #[tokio::test]
-    async fn invalid_base_path_fails_config_validation() {
-        for invalid in [
-            "",
-            "/",
-            "no-leading-slash",
-            "/with*wildcard",
-            "/api/v0?x=y",
-            "/api/v0#fragment",
-            "/api/v0 with-space",
-        ] {
-            let err = TestApp::try_new_with_base_path(Some(invalid.into()))
-                .err()
-                .unwrap_or_else(|| panic!("expected a config error for base_path = {invalid:?}"));
-            assert!(
-                err.contains("base_path"),
-                "expected a base_path validation error for {invalid:?}, got {err:?}"
-            );
-        }
     }
 }
