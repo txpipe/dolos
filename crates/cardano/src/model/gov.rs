@@ -197,8 +197,9 @@ pub struct GovState {
     #[n(1)]
     pub committee: Option<Committee>,
 
-    /// Per cold credential, the slot-stamped history of hot-key
-    /// authorizations and resignations.
+    /// The slot-stamped history of hot-key authorizations and resignations,
+    /// for each cold credential of the current committee. The EPOCH rule
+    /// removes an entry when the cold credential leaves the committee.
     #[n(2)]
     #[cbor(default)]
     pub committee_auths: BTreeMap<StakeCredential, AuthHistory>,
@@ -246,6 +247,14 @@ pub struct GovState {
     #[n(7)]
     #[cbor(default)]
     pub prev_distr: Option<GovDistr>,
+
+    /// The authorization histories that the EPOCH rule removed from
+    /// `committee_auths`. This archive is not ledger-effective state. The
+    /// Blockfrost API reads it to find the former hot credentials of a cold
+    /// credential.
+    #[n(8)]
+    #[cbor(default)]
+    pub committee_auth_archive: BTreeMap<StakeCredential, AuthHistory>,
 }
 
 entity_boilerplate!(GovState, "gov");
@@ -289,6 +298,24 @@ impl GovState {
             .get(cold)
             .and_then(|history| history.iter().rev().find(|(at, _)| *at <= slot))
             .map(|(_, auth)| auth)
+    }
+
+    /// Every hot credential that `cold` authorized. The result includes the
+    /// generations that the EPOCH rule removed from the effective committee
+    /// state.
+    pub fn committee_hot_credentials(
+        &self,
+        cold: &StakeCredential,
+    ) -> impl Iterator<Item = &StakeCredential> {
+        self.committee_auth_archive
+            .get(cold)
+            .into_iter()
+            .chain(self.committee_auths.get(cold))
+            .flatten()
+            .filter_map(|(_, auth)| match auth {
+                CommitteeAuthorization::HotCredential(hot) => Some(hot),
+                CommitteeAuthorization::Resigned(_) => None,
+            })
     }
 }
 
@@ -969,11 +996,13 @@ impl dolos_core::EntityDelta for GovDormancyTick {
 }
 
 /// Committee-state GC — the EPOCH rule's step 7 (`updateCommitteeState`,
-/// research §5.5): drop the authorization histories of cold credentials
-/// that are not members of the post-enactment committee (everything, if
-/// the committee dissolved into the no-confidence state). Reads the
-/// committee at apply time, so it must be queued after the boundary's
-/// enactment deltas.
+/// research §5.5). The delta removes the effective authorization history of
+/// each cold credential that is not a member of the post-enactment
+/// committee. If the committee is dissolved, the delta removes every
+/// effective history. Each removed history moves to
+/// `committee_auth_archive`, where historical API queries can read it. The
+/// delta reads the committee at apply time, so it must come after the
+/// enactment deltas of the boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitteeGc {
     // undo — the removed entries, re-inserted wholesale
@@ -1014,13 +1043,46 @@ impl dolos_core::EntityDelta for CommitteeGc {
         };
 
         state.committee_auths = kept;
+
+        for (cold, history) in &removed {
+            state
+                .committee_auth_archive
+                .entry(cold.clone())
+                .or_default()
+                .extend(history.iter().cloned());
+        }
+
         self.removed = removed;
     }
 
+    /// The archive must hold the tail that `apply` appended, and this method
+    /// asserts this. A store from an older version cannot break the
+    /// assertion. A `CommitteeGc` delta never reaches the WAL, because the
+    /// boundary work unit keeps the default, empty `commit_wal`. Only
+    /// `RollWorkUnit` writes a `LogValue`. Thus, the rollback in
+    /// `core/sync.rs` reads block deltas only, and cannot supply a delta
+    /// from an older version.
     fn undo(&self, entity: &mut Option<GovState>) {
         let state = entity.as_mut().expect(GOV_MUST_EXIST);
 
         for (cold, history) in &self.removed {
+            let remove_archive_entry = {
+                let archived = state
+                    .committee_auth_archive
+                    .get_mut(cold)
+                    .expect("committee authorization archive must contain the GC history");
+                assert!(
+                    archived.ends_with(history),
+                    "committee authorization archive must end with the GC history"
+                );
+                archived.truncate(archived.len() - history.len());
+                archived.is_empty()
+            };
+
+            if remove_archive_entry {
+                state.committee_auth_archive.remove(cold);
+            }
+
             state.committee_auths.insert(cold.clone(), history.clone());
         }
     }
@@ -1236,6 +1298,11 @@ pub(crate) mod testing {
                 any_auth_history(),
                 0..3,
             ),
+            committee_auth_archive in prop::collection::btree_map(
+                root::any_stake_credential(),
+                any_auth_history(),
+                0..3,
+            ),
             prev_gov_action_ids in any_gov_roots(),
             num_dormant_epochs in 0u64..32u64,
             active_since in prop::option::of(root::any_epoch()),
@@ -1246,6 +1313,7 @@ pub(crate) mod testing {
                 constitution,
                 committee,
                 committee_auths,
+                committee_auth_archive,
                 prev_gov_action_ids,
                 num_dormant_epochs,
                 active_since,
@@ -1291,6 +1359,15 @@ mod tests {
                     ),
                     (200, CommitteeAuthorization::Resigned(None)),
                 ],
+            )]),
+            committee_auth_archive: BTreeMap::from([(
+                StakeCredential::AddrKeyhash([9u8; 28].into()),
+                vec![(
+                    50,
+                    CommitteeAuthorization::HotCredential(StakeCredential::ScriptHash(
+                        [10u8; 28].into(),
+                    )),
+                )],
             )]),
             prev_gov_action_ids: GovRoots {
                 committee: Some(GovActionId {
@@ -1972,9 +2049,9 @@ mod prop_tests {
         assert_eq!(distr.pool_total, 7);
     }
 
-    /// The GC keeps the authorization histories of sitting members,
-    /// drops everyone else's, and clears the whole map when the
-    /// committee dissolved — with undo restoring the removed entries.
+    /// The GC keeps the authorization history of each sitting member. It
+    /// moves each removed history to the archive. The undo restores both
+    /// maps.
     #[test]
     fn committee_gc_intersects_with_members() {
         use dolos_core::EntityDelta as _;
@@ -1982,6 +2059,7 @@ mod prop_tests {
         let member = StakeCredential::ScriptHash([1u8; 28].into());
         let stranger = StakeCredential::ScriptHash([2u8; 28].into());
         let hot = StakeCredential::AddrKeyhash([3u8; 28].into());
+        let archived_hot = StakeCredential::AddrKeyhash([4u8; 28].into());
 
         let auths: BTreeMap<StakeCredential, AuthHistory> = BTreeMap::from([
             (
@@ -1993,6 +2071,10 @@ mod prop_tests {
                 vec![(200, CommitteeAuthorization::HotCredential(hot))],
             ),
         ]);
+        let archive = BTreeMap::from([(
+            stranger.clone(),
+            vec![(50, CommitteeAuthorization::HotCredential(archived_hot))],
+        )]);
 
         let mut entity = Some(GovState {
             committee: Some(Committee {
@@ -2003,6 +2085,7 @@ mod prop_tests {
                 },
             }),
             committee_auths: auths.clone(),
+            committee_auth_archive: archive.clone(),
             ..Default::default()
         });
 
@@ -2012,23 +2095,85 @@ mod prop_tests {
         let state = entity.as_ref().unwrap();
         assert!(state.committee_auths.contains_key(&member));
         assert!(!state.committee_auths.contains_key(&stranger));
+        assert_eq!(state.committee_auth_archive[&stranger].len(), 2);
 
         gc.undo(&mut entity);
-        assert_eq!(entity.as_ref().unwrap().committee_auths, auths);
+        let state = entity.as_ref().unwrap();
+        assert_eq!(state.committee_auths, auths);
+        assert_eq!(state.committee_auth_archive, archive);
 
-        // no-confidence state: everything is dropped
+        // no-confidence state: every effective history moves to the archive.
         let mut entity = Some(GovState {
             committee: None,
             committee_auths: auths.clone(),
+            committee_auth_archive: archive.clone(),
             ..Default::default()
         });
 
         let mut gc = CommitteeGc::new();
         gc.apply(&mut entity);
-        assert!(entity.as_ref().unwrap().committee_auths.is_empty());
+        let state = entity.as_ref().unwrap();
+        assert!(state.committee_auths.is_empty());
+        assert_eq!(state.committee_auth_archive[&member].len(), 1);
+        assert_eq!(state.committee_auth_archive[&stranger].len(), 2);
 
         gc.undo(&mut entity);
-        assert_eq!(entity.unwrap().committee_auths, auths);
+        let state = entity.unwrap();
+        assert_eq!(state.committee_auths, auths);
+        assert_eq!(state.committee_auth_archive, archive);
+    }
+
+    /// A cold credential that comes back to the committee has no effective
+    /// authorization until a new certificate arrives. Historical API queries
+    /// can still read the old hot credential of that cold credential.
+    #[test]
+    fn committee_gc_separates_old_and_effective_authorizations() {
+        use dolos_core::EntityDelta as _;
+
+        let cold = StakeCredential::ScriptHash([1u8; 28].into());
+        let old_hot = StakeCredential::AddrKeyhash([2u8; 28].into());
+        let new_hot = StakeCredential::AddrKeyhash([3u8; 28].into());
+        let mut entity = Some(GovState {
+            committee_auths: BTreeMap::from([(
+                cold.clone(),
+                vec![(100, CommitteeAuthorization::HotCredential(old_hot.clone()))],
+            )]),
+            ..Default::default()
+        });
+
+        let mut gc = CommitteeGc::new();
+        gc.apply(&mut entity);
+
+        let state = entity.as_mut().unwrap();
+        state.committee = Some(Committee {
+            members: BTreeMap::from([(cold.clone(), 600)]),
+            threshold: RationalNumber {
+                numerator: 2,
+                denominator: 3,
+            },
+        });
+
+        assert_eq!(state.committee_auth(&cold), None);
+        assert_eq!(
+            state.committee_hot_credentials(&cold).collect::<Vec<_>>(),
+            vec![&old_hot]
+        );
+
+        let mut auth = CommitteeAuth::new(cold.clone(), new_hot.clone(), 300);
+        auth.apply(&mut entity);
+
+        let state = entity.as_ref().unwrap();
+        assert_eq!(
+            state.committee_auth(&cold),
+            Some(&CommitteeAuthorization::HotCredential(new_hot.clone()))
+        );
+        assert_eq!(
+            state.committee_hot_credentials(&cold).collect::<Vec<_>>(),
+            vec![&old_hot, &new_hot]
+        );
+
+        auth.undo(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().committee_auth(&cold), None);
     }
 
     /// The rotation moves a complete accumulator into `prev_distr`,

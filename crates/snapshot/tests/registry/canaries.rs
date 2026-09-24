@@ -408,6 +408,13 @@ pub fn gov_state() -> GovState {
             threshold: rational(2, 3),
         }),
         committee_auths: auths,
+        committee_auth_archive: BTreeMap::from([(
+            StakeCredential::AddrKeyhash(hash28(0xdc)),
+            vec![(
+                200_000u64,
+                CommitteeAuthorization::HotCredential(StakeCredential::ScriptHash(hash28(0xdd))),
+            )],
+        )]),
         prev_gov_action_ids: GovRoots {
             pparam_update: Some(gov_action_id(0xd6, 0)),
             hard_fork: Some(gov_action_id(0xd7, 1)),

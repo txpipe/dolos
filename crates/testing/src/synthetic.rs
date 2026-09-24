@@ -150,6 +150,7 @@ pub struct SyntheticVote {
     pub voter: Voter,
     pub proposal: SyntheticProposalRef,
     pub vote: Vote,
+    pub anchor: Option<Anchor>,
 }
 
 /// Votes in each transaction of a block. Each outer entry represents one
@@ -452,7 +453,7 @@ pub fn build_synthetic_blocks(
                         },
                         VotingProcedure {
                             vote: vote.vote,
-                            anchor: None,
+                            anchor: vote.anchor,
                         },
                     );
                     procedures

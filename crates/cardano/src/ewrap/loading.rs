@@ -1500,8 +1500,8 @@ impl BoundaryWork {
             self.add_delta(crate::GovDormancyTick::new());
         }
 
-        // committee-state GC (step 7) — reads the post-enactment
-        // committee when the delta applies
+        // committee-state GC (step 7). The delta reads the
+        // post-enactment committee when it applies.
         self.add_delta(crate::CommitteeGc::new());
 
         // fold the boundary-paid credits (enacted withdrawals,
