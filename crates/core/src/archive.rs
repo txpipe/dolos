@@ -370,6 +370,12 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError>;
 
+    /// Prune history outside the retained slot window.
+    ///
+    /// `max_prune` caps slot advancement per call; backends may also bound
+    /// index maintenance. The result includes pending backend index work:
+    /// callers needing convergence must keep calling until `true`.
+    /// Uncapped calls (`None`) complete the requested cleanup synchronously.
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError>;
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError>;

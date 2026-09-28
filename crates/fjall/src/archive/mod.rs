@@ -38,13 +38,13 @@
 //!
 //! The slot is the *last* key component of a tag entry and the *value* of an
 //! exact entry, so neither keyspace can be range-deleted by slot the way the
-//! blocks and logs are. `prune_history` instead sweeps them: a full walk of
-//! both keyspaces removing every entry below the cutoff. Under sliding
-//! history the retained entry set is one window wide once the sweep has run,
-//! so a walk costs the window, not the chain — and the sweep is amortized
-//! across housekeeping rounds, running only when the cutoff has advanced by
-//! a sixteenth of the window since the last one. A node restored from a
-//! full-history stele pays one whole-keyspace scan on its first sweep.
+//! blocks and logs are. `prune_history` walks them in resumable chunks,
+//! examining at most 100,000 rows across both keyspaces per capped call.
+//! Retained rows consume the same budget as expired rows. Each pass fixes
+//! its cutoff; subsequent calls resume with fresh snapshots so block
+//! application can run between chunks, including during history catch-up.
+//! Passes are amortized over a sixteenth of the retained window. Uncapped
+//! administrative pruning finishes all due work synchronously.
 //!
 //! Unlike the redb writer, log batches are not reordered before insertion:
 //! shuffling exists to work around redb's half-split of ascending B-tree
@@ -54,7 +54,6 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::ops::{Bound, Range};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
@@ -100,10 +99,29 @@ const INDEX_MEMTABLE_SIZE_MB: usize = 128;
 /// fraction of the retained window since the last sweep.
 const INDEX_SWEEP_WINDOW_DIVISOR: u64 = 16;
 
-/// Most removals one sweep batch carries before it is committed and a new
-/// one started, so the first sweep after a full-history restore — tens of
-/// millions of entries — never builds one memory-resident batch.
-const INDEX_SWEEP_BATCH_KEYS: usize = 100_000;
+/// Maximum rows examined per capped prune call, and per deletion batch.
+const INDEX_SWEEP_CHUNK_ENTRIES: usize = 100_000;
+
+#[derive(Default)]
+struct IndexSweepState {
+    last_completed: Option<BlockSlot>,
+    active: Option<IndexSweep>,
+}
+
+struct IndexSweep {
+    cutoff: BlockSlot,
+    tags_done: bool,
+    after: Option<fjall::UserKey>,
+    tags_removed: u64,
+    exact_removed: u64,
+}
+
+struct SweepChunk {
+    after: Option<fjall::UserKey>,
+    visited: usize,
+    removed: u64,
+    exhausted: bool,
+}
 
 /// Keyspace names for the archive store
 mod keyspace_names {
@@ -139,9 +157,9 @@ pub struct ArchiveStore {
     flatfiles: Arc<FlatFileStore>,
     schema: Arc<StateSchema>,
     flush_on_commit: bool,
-    /// The prune cutoff the index keyspaces were last swept up to; zero
-    /// until the first sweep after open, which is why that one always runs.
-    last_index_sweep: Arc<AtomicU64>,
+    /// Shared progress only; no snapshot or iterator survives a prune call.
+    /// ponytail: reopen rescans; persist cursors only if restart rescans prove material.
+    index_sweep: Arc<Mutex<IndexSweepState>>,
     _tempdir: Option<Arc<tempfile::TempDir>>,
 }
 
@@ -256,7 +274,7 @@ impl ArchiveStore {
             flatfiles: Arc::new(flatfiles),
             schema: Arc::new(schema),
             flush_on_commit,
-            last_index_sweep: Arc::new(AtomicU64::new(0)),
+            index_sweep: Arc::new(Mutex::new(IndexSweepState::default())),
             _tempdir: tempdir,
         })
     }
@@ -352,82 +370,144 @@ impl ArchiveStore {
         }
     }
 
-    /// Remove every index entry below `prune_before` if the cutoff has moved
-    /// far enough since the last sweep to be worth a walk of both keyspaces.
-    ///
-    /// The threshold is a sixteenth of the retained window (at least one
-    /// slot), so a sliding node walks its window-sized index about sixteen
-    /// times per window of chain instead of once per housekeeping round. The
-    /// first prune after open always sweeps.
+    /// Resume one pass within a shared row budget, or finish all work when uncapped.
+    /// `true` means no active or currently due pass remains; a sub-threshold
+    /// tail of expired entries can still await the next amortized pass.
     fn sweep_indexes(
         &self,
         snapshot: &Snapshot,
         prune_before: BlockSlot,
         max_slots: u64,
-    ) -> Result<(), ArchiveError> {
-        let last = self.last_index_sweep.load(Ordering::Acquire);
-        let threshold = (max_slots / INDEX_SWEEP_WINDOW_DIVISOR).max(1);
-
-        if last != 0 && prune_before.saturating_sub(last) < threshold {
-            tracing::debug!(
-                cutoff_slot = prune_before,
-                last_sweep = last,
-                threshold,
-                "index sweep deferred"
-            );
-            return Ok(());
+        max_entries: Option<usize>,
+    ) -> Result<bool, ArchiveError> {
+        let mut state = self.index_sweep.lock().map_err(|_| Error::LockPoisoned)?;
+        if state.active.as_ref().is_some_and(|x| x.cutoff > prune_before)
+            || state.last_completed.is_some_and(|x| x > prune_before)
+        {
+            *state = IndexSweepState::default();
+        }
+        if prune_before == 0 {
+            return Ok(true);
         }
 
-        let tags = self.sweep_below(snapshot, &self.tags, prune_before, |key, _| {
-            tags::slot_of_entry(key)
-        })?;
-        let exact = self.sweep_below(snapshot, &self.exact, prune_before, |_, value| {
-            exact::slot_of_entry(value)
-        })?;
+        let threshold = if max_entries.is_some() {
+            (max_slots / INDEX_SWEEP_WINDOW_DIVISOR).max(1)
+        } else {
+            1
+        };
+        let due = |last: Option<BlockSlot>| {
+            last.is_none_or(|last| prune_before.saturating_sub(last) >= threshold)
+        };
+        let mut remaining = max_entries.unwrap_or(INDEX_SWEEP_CHUNK_ENTRIES);
 
-        self.last_index_sweep.store(prune_before, Ordering::Release);
+        loop {
+            if state.active.is_none() {
+                if !due(state.last_completed) {
+                    return Ok(true);
+                }
+                state.active = Some(IndexSweep {
+                    cutoff: prune_before,
+                    tags_done: false,
+                    after: None,
+                    tags_removed: 0,
+                    exact_removed: 0,
+                });
+            }
+            if remaining == 0 {
+                if max_entries.is_some() {
+                    return Ok(false);
+                }
+                remaining = INDEX_SWEEP_CHUNK_ENTRIES;
+            }
 
-        tracing::info!(
-            cutoff_slot = prune_before,
-            tags,
-            exact,
-            "swept archive index entries below cutoff"
-        );
+            let active = state.active.as_mut().unwrap();
+            let limit = remaining.min(INDEX_SWEEP_CHUNK_ENTRIES);
+            let chunk = if active.tags_done {
+                self.sweep_below(
+                    snapshot,
+                    &self.exact,
+                    active.cutoff,
+                    active.after.as_deref(),
+                    limit,
+                    |_, value| exact::slot_of_entry(value),
+                )?
+            } else {
+                self.sweep_below(
+                    snapshot,
+                    &self.tags,
+                    active.cutoff,
+                    active.after.as_deref(),
+                    limit,
+                    |key, _| tags::slot_of_entry(key),
+                )?
+            };
 
-        Ok(())
+            // A chunk publishes progress only after its removal batch commits.
+            remaining -= chunk.visited;
+            active.after = chunk.after;
+            if active.tags_done {
+                active.exact_removed += chunk.removed;
+            } else {
+                active.tags_removed += chunk.removed;
+            }
+            if !chunk.exhausted {
+                continue;
+            }
+            if !active.tags_done {
+                active.tags_done = true;
+                active.after = None;
+                continue;
+            }
+
+            tracing::info!(
+                cutoff_slot = active.cutoff,
+                tags = active.tags_removed,
+                exact = active.exact_removed,
+                "swept archive index entries below cutoff"
+            );
+            state.last_completed = Some(active.cutoff);
+            state.active = None;
+            if max_entries.is_some() {
+                // Leave any newer due pass for the next maintenance unit.
+                return Ok(!due(state.last_completed));
+            }
+        }
     }
 
-    /// Walk `keyspace` under `snapshot` and remove every entry whose slot,
-    /// as `slot_of` reads it from the entry, is below `prune_before`.
-    ///
-    /// Removals are committed in batches of at most
-    /// [`INDEX_SWEEP_BATCH_KEYS`], in sequence. Returns the number removed.
+    /// Examine at most `limit` rows strictly after `after`, deleting only
+    /// slots below the fixed cutoff. Errors leave the whole chunk uncommitted.
     fn sweep_below(
         &self,
         snapshot: &Snapshot,
         keyspace: &Keyspace,
         prune_before: BlockSlot,
+        after: Option<&[u8]>,
+        limit: usize,
         slot_of: impl Fn(&[u8], &[u8]) -> Result<BlockSlot, Error>,
-    ) -> Result<u64, ArchiveError> {
-        let mut removed = 0u64;
+    ) -> Result<SweepChunk, ArchiveError> {
+        let lower = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut entries = snapshot.range::<&[u8], _>(keyspace, (lower, Bound::Unbounded));
+        let mut chunk = SweepChunk {
+            after: None,
+            visited: 0,
+            removed: 0,
+            exhausted: false,
+        };
         let mut batch = self.db.batch();
 
-        for guard in snapshot.iter(keyspace) {
+        for _ in 0..limit {
+            let Some(guard) = entries.next() else {
+                chunk.exhausted = true;
+                break;
+            };
             let (key, value) = guard.into_inner().map_err(fjall_err)?;
-
-            if slot_of(&key, &value)? >= prune_before {
-                continue;
+            let slot = slot_of(&key, &value)?;
+            chunk.visited += 1;
+            if slot < prune_before {
+                batch.remove(keyspace, key.clone());
+                chunk.removed += 1;
             }
-
-            batch.remove(keyspace, key);
-            removed += 1;
-
-            if batch.len() >= INDEX_SWEEP_BATCH_KEYS {
-                let full = std::mem::replace(&mut batch, self.db.batch());
-                full.durability(Some(PersistMode::Buffer))
-                    .commit()
-                    .map_err(fjall_err)?;
-            }
+            chunk.after = Some(key);
         }
 
         if !batch.is_empty() {
@@ -437,7 +517,7 @@ impl ArchiveStore {
                 .map_err(fjall_err)?;
         }
 
-        Ok(removed)
+        Ok(chunk)
     }
 }
 
@@ -1020,6 +1100,7 @@ impl CoreArchiveStore for ArchiveStore {
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
         let snapshot = self.db.snapshot();
+        let max_entries = max_prune.map(|_| INDEX_SWEEP_CHUNK_ENTRIES);
 
         let first = snapshot
             .first_key_value(&self.blocks)
@@ -1028,6 +1109,8 @@ impl CoreArchiveStore for ArchiveStore {
             .map_err(fjall_err)?;
 
         let Some(first) = first else {
+            *self.index_sweep.lock().map_err(|_| Error::LockPoisoned)? =
+                IndexSweepState::default();
             tracing::debug!("no start point found on chain, skipping housekeeping");
             return Ok(true);
         };
@@ -1051,15 +1134,19 @@ impl CoreArchiveStore for ArchiveStore {
 
         if excess == 0 {
             tracing::debug!(delta, max_slots, "no pruning necessary on chain");
-            return Ok(true);
+            return self.sweep_indexes(&snapshot, start, max_slots, max_entries);
         }
 
-        let (done, max_prune) = match max_prune {
+        let (blocks_done, max_prune) = match max_prune {
             Some(max) => (excess <= max, core::cmp::min(excess, max)),
             None => (true, excess),
         };
 
         let prune_before = start + max_prune;
+        if max_prune == 0 {
+            let indexes_done = self.sweep_indexes(&snapshot, start, max_slots, max_entries)?;
+            return Ok(blocks_done && indexes_done);
+        }
 
         tracing::info!(
             cutoff_slot = prune_before,
@@ -1098,11 +1185,10 @@ impl CoreArchiveStore for ArchiveStore {
         let batch = batch.durability(Some(PersistMode::Buffer));
         batch.commit().map_err(fjall_err)?;
 
-        // The index keyspaces cannot be range-deleted by slot; they are swept
-        // under the same snapshot, after the rows that point at the blocks.
-        self.sweep_indexes(&snapshot, prune_before, max_slots)?;
+        // Index work shares one row budget, even after block pruning converges.
+        let indexes_done = self.sweep_indexes(&snapshot, prune_before, max_slots, max_entries)?;
 
-        Ok(done)
+        Ok(blocks_done && indexes_done)
     }
 
     /// Drop everything the archive holds after `after`.
@@ -1261,6 +1347,247 @@ mod tests {
 
     fn segment_bytes(store: &ArchiveStore, segment: u32) -> Vec<u8> {
         std::fs::read(store.flatfiles.segment_path(segment)).unwrap()
+    }
+
+    fn number_delta(slot: u64, number: u64) -> ArchiveIndexDelta {
+        ArchiveIndexDelta {
+            slot,
+            block_number: Some(number),
+            ..Default::default()
+        }
+    }
+
+    fn write_indexes(store: &ArchiveStore, deltas: &[ArchiveIndexDelta]) {
+        let writer = store.start_writer().unwrap();
+        writer.apply_index(deltas).unwrap();
+        writer.commit().unwrap();
+    }
+
+    fn tagged_slots(store: &ArchiveStore, key: &[u8]) -> Vec<u64> {
+        store
+            .slots_by_tag("address", key, 0, u64::MAX)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn index_chunks_share_budget_and_cursor_and_read_fresh_values() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        let mut deltas: Vec<_> = (1..=4).map(|number| number_delta(10, number)).collect();
+        deltas[0].tags.push(dolos_core::Tag::new("address", vec![1; 28]));
+        write_indexes(&store, &deltas);
+
+        assert!(!store
+            .sweep_indexes(&store.db.snapshot(), 20, 1_600, Some(2))
+            .unwrap());
+        assert!(tagged_slots(&store, &[1; 28]).is_empty());
+        assert_eq!(store.slot_by_block_number(1).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(2).unwrap(), Some(10));
+
+        write_indexes(&store, &[number_delta(20, 2)]);
+        let clone = store.clone();
+        assert!(!clone
+            .sweep_indexes(&clone.db.snapshot(), 20, 1_600, Some(1))
+            .unwrap());
+        assert_eq!(store.slot_by_block_number(2).unwrap(), Some(20));
+        assert_eq!(store.slot_by_block_number(3).unwrap(), Some(10));
+
+        write_indexes(&store, &[number_delta(30, 3)]);
+        assert!(!store
+            .sweep_indexes(&store.db.snapshot(), 20, 1_600, Some(1))
+            .unwrap());
+        assert_eq!(store.slot_by_block_number(3).unwrap(), Some(30));
+        assert_eq!(store.slot_by_block_number(4).unwrap(), Some(10));
+
+        // Ending exactly on the budget cannot peek to discover exhaustion.
+        assert!(!store
+            .sweep_indexes(&store.db.snapshot(), 20, 1_600, Some(1))
+            .unwrap());
+        assert_eq!(store.slot_by_block_number(4).unwrap(), None);
+        assert!(store
+            .sweep_indexes(&store.db.snapshot(), 20, 1_600, Some(1))
+            .unwrap());
+        assert_eq!(store.slot_by_block_number(2).unwrap(), Some(20));
+        assert_eq!(store.slot_by_block_number(3).unwrap(), Some(30));
+
+        let empty = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        assert!(empty
+            .sweep_indexes(&empty.db.snapshot(), 20, 1_600, Some(1))
+            .unwrap());
+    }
+
+    #[test]
+    fn failed_index_chunk_keeps_deletions_and_cursor_retryable() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        let mut deltas = vec![number_delta(10, 1), number_delta(10, 2), number_delta(30, 3)];
+        deltas[0].tags.push(dolos_core::Tag::new("address", vec![1; 28]));
+        write_indexes(&store, &deltas);
+        let (key, value) = store
+            .db
+            .snapshot()
+            .iter(&store.exact)
+            .nth(1)
+            .unwrap()
+            .into_inner()
+            .unwrap();
+        store.exact.insert(key.clone(), [0u8]).unwrap();
+
+        let error = store
+            .sweep_indexes(&store.db.snapshot(), 20, 1_600, Some(4))
+            .unwrap_err();
+        assert!(matches!(error, ArchiveError::InternalError(_)));
+        assert_eq!(store.slot_by_block_number(1).unwrap(), Some(10));
+        assert_eq!(store.slot_by_block_number(3).unwrap(), Some(30));
+        // The earlier tag chunk committed, unlike the failed exact chunk.
+        assert!(tagged_slots(&store, &[1; 28]).is_empty());
+
+        store.exact.insert(key, value).unwrap();
+        assert!(store
+            .sweep_indexes(&store.db.snapshot(), 20, 1_600, Some(4))
+            .unwrap());
+        assert_eq!(store.slot_by_block_number(1).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(2).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(3).unwrap(), Some(30));
+    }
+
+    #[test]
+    fn index_sweep_resets_unsafe_cutoffs_and_uncapped_prune_finishes_newer_work() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write_indexes(&store, &[number_delta(10, 1), number_delta(70, 2)]);
+        assert!(!store
+            .sweep_indexes(&store.db.snapshot(), 100, 1_600, Some(1))
+            .unwrap());
+        assert!(store
+            .sweep_indexes(&store.db.snapshot(), 50, 1_600, Some(10))
+            .unwrap());
+        assert_eq!(store.slot_by_block_number(2).unwrap(), Some(70));
+
+        // A newer uncapped cutoff must clean even a sub-threshold tail.
+        assert!(store
+            .sweep_indexes(&store.db.snapshot(), 80, 1_600, None)
+            .unwrap());
+        assert_eq!(store.slot_by_block_number(2).unwrap(), None);
+        write_indexes(&store, &[number_delta(190, 3), number_delta(210, 4)]);
+        assert!(!store
+            .sweep_indexes(&store.db.snapshot(), 180, 1_600, Some(1))
+            .unwrap());
+        // Finish the older active pass, then the newer cutoff in the same call.
+        assert!(store
+            .sweep_indexes(&store.db.snapshot(), 200, 1_600, None)
+            .unwrap());
+        assert_eq!(store.slot_by_block_number(3).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(4).unwrap(), Some(210));
+
+        // Regression must also reset an already completed pass.
+        write_indexes(&store, &[number_delta(90, 5), number_delta(110, 6)]);
+        assert!(store
+            .sweep_indexes(&store.db.snapshot(), 100, 1_600, Some(10))
+            .unwrap());
+        assert_eq!(store.slot_by_block_number(5).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(6).unwrap(), Some(110));
+    }
+
+    #[test]
+    fn zero_prune_budget_only_cleans_indexes_below_retained_blocks() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(10, body(10, 0)), (100, body(100, 0))]);
+        write_indexes(
+            &store,
+            &[number_delta(0, 0), number_delta(10, 10), number_delta(100, 100)],
+        );
+        assert!(!store.prune_history(10, Some(0)).unwrap());
+        assert_eq!(
+            store.get_block_by_slot(&10).unwrap(),
+            Some((*body(10, 0)).clone())
+        );
+        assert_eq!(
+            store.get_block_by_slot(&100).unwrap(),
+            Some((*body(100, 0)).clone())
+        );
+        assert_eq!(store.slot_by_block_number(0).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(10).unwrap(), Some(10));
+        assert_eq!(store.slot_by_block_number(100).unwrap(), Some(100));
+    }
+
+    #[test]
+    fn empty_archive_clears_progress_without_sweeping_orphan_indexes() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write_indexes(&store, &[number_delta(10, 1), number_delta(10, 2)]);
+        assert!(!store
+            .sweep_indexes(&store.db.snapshot(), 20, 1_600, Some(1))
+            .unwrap());
+        assert!(store.prune_history(100, Some(1)).unwrap());
+        assert_eq!(store.slot_by_block_number(2).unwrap(), Some(10));
+
+        // Slot zero is not a safe deletion cutoff either.
+        write(&store, &[(0, body(0, 0))]);
+        assert!(store.prune_history(100, Some(1)).unwrap());
+        assert_eq!(store.slot_by_block_number(2).unwrap(), Some(10));
+        // Reintroducing a key before the old cursor proves that it was reset.
+        write_indexes(&store, &[number_delta(10, 1)]);
+        write(&store, &[(100, body(100, 0))]);
+        assert!(store.prune_history(0, Some(100)).unwrap());
+        assert_eq!(store.slot_by_block_number(1).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(2).unwrap(), None);
+    }
+
+    #[test]
+    fn reopen_finishes_index_cleanup_without_new_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = FjallArchiveConfig {
+            cache: Some(16),
+            worker_threads: Some(1),
+            ..Default::default()
+        };
+        let mut deltas = vec![
+            number_delta(0, 0),
+            number_delta(10, 10),
+            number_delta(1_000, 1_000),
+        ];
+        for delta in &mut deltas {
+            delta.block_hash = vec![0; 32];
+            delta.block_hash[..8].copy_from_slice(&delta.slot.to_be_bytes());
+            delta.tx_hashes = vec![delta.block_hash.clone()];
+            delta.tags.push(dolos_core::Tag::new("address", vec![1; 28]));
+        }
+        {
+            let store = ArchiveStore::open(StateSchema::default(), dir.path(), &config).unwrap();
+            write(&store, &[(1_000, body(1_000, 0))]);
+            write_indexes(&store, &deltas);
+            let clone = store.clone();
+            assert!(!clone
+                .sweep_indexes(&clone.db.snapshot(), 1_000, 100, Some(1))
+                .unwrap());
+            assert_eq!(tagged_slots(&store, &[1; 28]), [10, 1_000]);
+            store.shutdown().unwrap();
+        }
+        let store = ArchiveStore::open(StateSchema::default(), dir.path(), &config).unwrap();
+        let mut done = false;
+        for _ in 0..20 {
+            done = store.prune_history(100, Some(10_000)).unwrap();
+            if done {
+                break;
+            }
+        }
+        assert!(
+            done,
+            "reopened cleanup must converge without importing blocks"
+        );
+        assert_eq!(tagged_slots(&store, &[1; 28]), [1_000]);
+        assert_eq!(
+            store.get_block_by_slot(&1_000).unwrap(),
+            Some((*body(1_000, 0)).clone())
+        );
+        for delta in &deltas {
+            let expected = (delta.slot == 1_000).then_some(1_000);
+            assert_eq!(store.slot_by_block_number(delta.slot).unwrap(), expected);
+            assert_eq!(
+                store.slot_by_block_hash(&delta.block_hash).unwrap(),
+                expected
+            );
+            assert_eq!(store.slot_by_tx_hash(&delta.tx_hashes[0]).unwrap(), expected);
+        }
     }
 
     #[test]

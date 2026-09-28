@@ -1200,10 +1200,10 @@ fn write_indexed_blocks<S: CoreArchiveStore>(store: &S, slots: &[u64]) {
     writer.commit().unwrap();
 }
 
-/// Whether every exact lookup of the block at `slot` still resolves.
+/// Check retained entries or fully cleaned expired entries.
 ///
-/// The three answer together or not at all: a block's entries are pruned
-/// as one, so a split answer is a defect this helper would hide.
+/// Exact kinds may disappear in different chunks during multi-call cleanup;
+/// this helper does not assert atomicity across an in-progress sweep.
 fn exact_entries_present<S: CoreArchiveStore>(store: &S, slot: u64) -> bool {
     let delta = slot_delta(slot);
     let answers = [
@@ -1297,50 +1297,25 @@ fn slots_by_tag_after_prune_answers_only_retained_slots<B: Backend>() {
     );
 }
 
-/// The fjall backend sweeps its index keyspaces only when the cutoff has
-/// advanced by a sixteenth of the window since the last sweep, so between
-/// sweeps a pruned block's entries linger; the memory backend has no such
-/// cadence, which is why this is not a conformance case.
-///
-/// Window 1600 makes the threshold 100 slots; each round prunes 40. The
-/// first prune after open always sweeps, the next two fall inside the
-/// threshold and leave the entries of the blocks they pruned in place, and
-/// the fourth crosses it and removes them.
 #[test]
-fn fjall_index_sweep_is_amortized_across_prune_rounds() {
+fn fjall_pruning_finishes_indexes_after_sparse_block_catchup() {
     let (store, _guard) = Fjall::open();
+    write_indexed_blocks(&store, &[0, 10, 20, 3_000]);
 
-    let slots: Vec<u64> = (0..=3_000).step_by(10).collect();
-    write_indexed_blocks(&store, &slots);
-
-    let max_slots = 1_600;
-    let max_prune = Some(40);
-
-    // Round 1: cutoff 40, first sweep after open.
-    assert!(!store.prune_history(max_slots, max_prune).unwrap());
-    assert!(!exact_entries_present(&store, 30));
-    assert!(exact_entries_present(&store, 40));
-
-    // Rounds 2 and 3: cutoffs 80 and 120, inside the threshold. The blocks
-    // are gone, their entries are not yet.
-    assert!(!store.prune_history(max_slots, max_prune).unwrap());
-    assert!(!store.prune_history(max_slots, max_prune).unwrap());
-    assert_eq!(store.get_block_by_slot(&40).unwrap(), None);
-    assert_eq!(store.get_block_by_slot(&110).unwrap(), None);
-    assert!(exact_entries_present(&store, 40));
-    assert!(exact_entries_present(&store, 110));
-    assert_eq!(
-        tagged_slots(&store, &SHARED_TAG_KEY, 0, 120),
-        [40, 50, 60, 70, 80, 90, 100, 110, 120]
-    );
-
-    // Round 4: cutoff 160, past the threshold: everything below it goes.
-    assert!(!store.prune_history(max_slots, max_prune).unwrap());
-    assert!(!exact_entries_present(&store, 40));
-    assert!(!exact_entries_present(&store, 110));
-    assert!(!exact_entries_present(&store, 150));
-    assert!(exact_entries_present(&store, 160));
-    assert_eq!(tagged_slots(&store, &SHARED_TAG_KEY, 0, 170), [160, 170]);
+    let mut done = false;
+    for _ in 0..20 {
+        done = store.prune_history(1_600, Some(1)).unwrap();
+        assert!(exact_entries_present(&store, 3_000));
+        if done {
+            break;
+        }
+    }
+    assert!(done, "sparse pruning must converge without new blocks");
+    assert_eq!(stored_slots(&store), [3_000]);
+    assert_eq!(tagged_slots(&store, &SHARED_TAG_KEY, 0, u64::MAX), [3_000]);
+    for slot in [0, 10, 20] {
+        assert!(!exact_entries_present(&store, slot));
+    }
 }
 
 // ---------------------------------------------------------------------------

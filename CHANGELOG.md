@@ -30,6 +30,7 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 Bug Fixes
 
+- *(archive)* Bound capped index pruning to 100,000 examined rows per call and resume pending cleanup after block pruning converges. Uncapped pruning still finishes synchronously. Existing archives need no migration or rebuild: stop Dolos cleanly, replace the binary, and restart with the same configuration and storage directory.
 - *(ci)* Keep the Windows job off `getrusage` (#1267)
 - *(cli)* Don't swallow driver errors (#999)
 - *(cli)* Let a fatal driver failure reach the exit status (#1269)
