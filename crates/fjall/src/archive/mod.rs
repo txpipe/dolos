@@ -158,7 +158,8 @@ pub struct ArchiveStore {
     schema: Arc<StateSchema>,
     flush_on_commit: bool,
     /// Shared progress only; no snapshot or iterator survives a prune call.
-    /// ponytail: reopen rescans; persist cursors only if restart rescans prove material.
+    /// ponytail: reopen rescans; persist cursors only if restart rescans prove
+    /// material.
     index_sweep: Arc<Mutex<IndexSweepState>>,
     _tempdir: Option<Arc<tempfile::TempDir>>,
 }
@@ -370,9 +371,10 @@ impl ArchiveStore {
         }
     }
 
-    /// Resume one pass within a shared row budget, or finish all work when uncapped.
-    /// `true` means no active or currently due pass remains; a sub-threshold
-    /// tail of expired entries can still await the next amortized pass.
+    /// Resume one pass within a shared row budget, or finish all work when
+    /// uncapped. `true` means no active or currently due pass remains; a
+    /// sub-threshold tail of expired entries can still await the next
+    /// amortized pass.
     fn sweep_indexes(
         &self,
         snapshot: &Snapshot,
@@ -381,7 +383,10 @@ impl ArchiveStore {
         max_entries: Option<usize>,
     ) -> Result<bool, ArchiveError> {
         let mut state = self.index_sweep.lock().map_err(|_| Error::LockPoisoned)?;
-        if state.active.as_ref().is_some_and(|x| x.cutoff > prune_before)
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|x| x.cutoff > prune_before)
             || state.last_completed.is_some_and(|x| x > prune_before)
         {
             *state = IndexSweepState::default();
@@ -1109,8 +1114,7 @@ impl CoreArchiveStore for ArchiveStore {
             .map_err(fjall_err)?;
 
         let Some(first) = first else {
-            *self.index_sweep.lock().map_err(|_| Error::LockPoisoned)? =
-                IndexSweepState::default();
+            *self.index_sweep.lock().map_err(|_| Error::LockPoisoned)? = IndexSweepState::default();
             tracing::debug!("no start point found on chain, skipping housekeeping");
             return Ok(true);
         };
@@ -1375,7 +1379,9 @@ mod tests {
     fn index_chunks_share_budget_and_cursor_and_read_fresh_values() {
         let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
         let mut deltas: Vec<_> = (1..=4).map(|number| number_delta(10, number)).collect();
-        deltas[0].tags.push(dolos_core::Tag::new("address", vec![1; 28]));
+        deltas[0]
+            .tags
+            .push(dolos_core::Tag::new("address", vec![1; 28]));
         write_indexes(&store, &deltas);
 
         assert!(!store
@@ -1420,8 +1426,14 @@ mod tests {
     #[test]
     fn failed_index_chunk_keeps_deletions_and_cursor_retryable() {
         let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
-        let mut deltas = vec![number_delta(10, 1), number_delta(10, 2), number_delta(30, 3)];
-        deltas[0].tags.push(dolos_core::Tag::new("address", vec![1; 28]));
+        let mut deltas = vec![
+            number_delta(10, 1),
+            number_delta(10, 2),
+            number_delta(30, 3),
+        ];
+        deltas[0]
+            .tags
+            .push(dolos_core::Tag::new("address", vec![1; 28]));
         write_indexes(&store, &deltas);
         let (key, value) = store
             .db
@@ -1494,7 +1506,11 @@ mod tests {
         write(&store, &[(10, body(10, 0)), (100, body(100, 0))]);
         write_indexes(
             &store,
-            &[number_delta(0, 0), number_delta(10, 10), number_delta(100, 100)],
+            &[
+                number_delta(0, 0),
+                number_delta(10, 10),
+                number_delta(100, 100),
+            ],
         );
         assert!(!store.prune_history(10, Some(0)).unwrap());
         assert_eq!(
@@ -1549,7 +1565,9 @@ mod tests {
             delta.block_hash = vec![0; 32];
             delta.block_hash[..8].copy_from_slice(&delta.slot.to_be_bytes());
             delta.tx_hashes = vec![delta.block_hash.clone()];
-            delta.tags.push(dolos_core::Tag::new("address", vec![1; 28]));
+            delta
+                .tags
+                .push(dolos_core::Tag::new("address", vec![1; 28]));
         }
         {
             let store = ArchiveStore::open(StateSchema::default(), dir.path(), &config).unwrap();
@@ -1586,7 +1604,10 @@ mod tests {
                 store.slot_by_block_hash(&delta.block_hash).unwrap(),
                 expected
             );
-            assert_eq!(store.slot_by_tx_hash(&delta.tx_hashes[0]).unwrap(), expected);
+            assert_eq!(
+                store.slot_by_tx_hash(&delta.tx_hashes[0]).unwrap(),
+                expected
+            );
         }
     }
 

@@ -373,8 +373,10 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     /// Prune history outside the retained slot window.
     ///
     /// `max_prune` caps slot advancement per call; backends may also bound
-    /// index maintenance. The result includes pending backend index work:
-    /// callers needing convergence must keep calling until `true`.
+    /// index maintenance. `true` means block pruning and all active or
+    /// currently due index maintenance are complete. Capped calls can leave
+    /// expired index entries until a later pass is due.
+    /// Repeat capped calls until `true` to finish active or currently due work.
     /// Uncapped calls (`None`) complete the requested cleanup synchronously.
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError>;
 
