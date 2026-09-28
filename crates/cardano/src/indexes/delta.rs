@@ -294,20 +294,16 @@ impl CardanoIndexDeltaBuilder {
     }
 
     /// Tag the current block with the pool that minted it.
-    ///
-    /// Byron blocks carry no issuer and stay untagged.
-    pub fn add_block_issuer(&mut self, block: &pallas::ledger::traverse::MultiEraBlock<'_>) {
+    pub fn add_block_issuer(&mut self, vkey: &[u8]) {
         use pallas::crypto::hash::Hasher;
 
-        if let Some(vkey) = block.header().issuer_vkey() {
-            // The same derivation as the minted-block counter uses, so the
-            // tag key equals the `PoolState` entity key.
-            let operator = Hasher::<224>::hash(vkey);
+        // The same derivation as the minted-block counter uses, so the
+        // tag key equals the `PoolState` entity key.
+        let operator = Hasher::<224>::hash(vkey);
 
-            self.current_block()
-                .tags
-                .push(Tag::new(archive::POOL_BLOCKS, operator.to_vec()));
-        }
+        self.current_block()
+            .tags
+            .push(Tag::new(archive::POOL_BLOCKS, operator.to_vec()));
     }
 
     /// Add a metadata label to the current block.
@@ -335,7 +331,10 @@ impl CardanoIndexDeltaBuilder {
 
         self.start_block(block.slot(), block.hash().to_vec(), Some(block.number()));
 
-        self.add_block_issuer(block);
+        // Byron blocks carry no issuer key, so they stay untagged.
+        if let Some(vkey) = block.header().issuer_vkey() {
+            self.add_block_issuer(vkey);
+        }
 
         for tx in block.txs() {
             self.add_tx_hash(tx.hash().to_vec());
@@ -684,9 +683,7 @@ mod tests {
         builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(drep_update))));
 
         // POOL_BLOCKS
-        let (_, raw) = dolos_testing::blocks::make_conway_block(100);
-        let block = pallas::ledger::traverse::MultiEraBlock::decode(&raw).unwrap();
-        builder.add_block_issuer(&block);
+        builder.add_block_issuer(&[0x88; 32]);
     }
 
     /// Every DRep certificate kind tags the DRep under its CIP-129 id bytes,
