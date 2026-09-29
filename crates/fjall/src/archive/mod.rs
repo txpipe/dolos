@@ -39,12 +39,12 @@
 //! The slot is the *last* key component of a tag entry and the *value* of an
 //! exact entry, so neither keyspace can be range-deleted by slot the way the
 //! blocks and logs are. `prune_history` walks them in resumable chunks,
-//! examining at most 100,000 rows across both keyspaces per capped call.
-//! Retained rows consume the same budget as expired rows. Each pass fixes
-//! its cutoff; subsequent calls resume with fresh snapshots so block
-//! application can run between chunks, including during history catch-up.
-//! Passes are amortized over a sixteenth of the retained window. Uncapped
-//! administrative pruning finishes all due work synchronously.
+//! examining at most the caller's index row budget across both keyspaces
+//! per call. Retained rows consume the same budget as expired rows. Each
+//! pass fixes its cutoff; subsequent calls resume with fresh snapshots so
+//! block application can run between chunks, including during history
+//! catch-up. Passes under a budget are amortized over a sixteenth of the
+//! retained window. Without a budget, all due work finishes synchronously.
 //!
 //! Unlike the redb writer, log batches are not reordered before insertion:
 //! shuffling exists to work around redb's half-split of ascending B-tree
@@ -99,7 +99,7 @@ const INDEX_MEMTABLE_SIZE_MB: usize = 128;
 /// fraction of the retained window since the last sweep.
 const INDEX_SWEEP_WINDOW_DIVISOR: u64 = 16;
 
-/// Maximum rows examined per capped prune call, and per deletion batch.
+/// Maximum rows examined per deletion batch.
 const INDEX_SWEEP_CHUNK_ENTRIES: usize = 100_000;
 
 #[derive(Default)]
@@ -403,7 +403,8 @@ impl ArchiveStore {
         let due = |last: Option<BlockSlot>| {
             last.is_none_or(|last| prune_before.saturating_sub(last) >= threshold)
         };
-        let mut remaining = max_entries.unwrap_or(INDEX_SWEEP_CHUNK_ENTRIES);
+        // A zero budget would report pending work without ever advancing.
+        let mut remaining = max_entries.map_or(INDEX_SWEEP_CHUNK_ENTRIES, |rows| rows.max(1));
 
         loop {
             if state.active.is_none() {
@@ -1103,9 +1104,14 @@ impl CoreArchiveStore for ArchiveStore {
         Ok(Some((slot, body)))
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
+    fn prune_history(
+        &self,
+        max_slots: u64,
+        max_prune: Option<u64>,
+        max_index_rows: Option<u64>,
+    ) -> Result<bool, ArchiveError> {
         let snapshot = self.db.snapshot();
-        let max_entries = max_prune.map(|_| INDEX_SWEEP_CHUNK_ENTRIES);
+        let max_entries = max_index_rows.map(|rows| usize::try_from(rows).unwrap_or(usize::MAX));
 
         let first = snapshot
             .first_key_value(&self.blocks)
@@ -1512,7 +1518,7 @@ mod tests {
                 number_delta(100, 100),
             ],
         );
-        assert!(!store.prune_history(10, Some(0)).unwrap());
+        assert!(!store.prune_history(10, Some(0), Some(100_000)).unwrap());
         assert_eq!(
             store.get_block_by_slot(&10).unwrap(),
             Some((*body(10, 0)).clone())
@@ -1527,23 +1533,63 @@ mod tests {
     }
 
     #[test]
+    fn slot_capped_prune_without_index_budget_finishes_every_chunk() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(10, body(10, 0)), (1_000, body(1_000, 0))]);
+        let expired = INDEX_SWEEP_CHUNK_ENTRIES as u64 + 1;
+        let mut deltas: Vec<_> = (1..=expired)
+            .map(|number| number_delta(10, number))
+            .collect();
+        deltas.push(number_delta(1_000, expired + 1));
+        write_indexes(&store, &deltas);
+
+        // One slot of block pruning, yet the index cleanup below it completes.
+        assert!(!store.prune_history(100, Some(1), None).unwrap());
+        assert_eq!(store.slot_by_block_number(1).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(expired).unwrap(), None);
+        assert_eq!(
+            store.slot_by_block_number(expired + 1).unwrap(),
+            Some(1_000)
+        );
+    }
+
+    #[test]
+    fn zero_index_budget_still_advances() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write_indexes(&store, &[number_delta(10, 1), number_delta(10, 2)]);
+
+        let mut done = false;
+        for _ in 0..10 {
+            done = store
+                .sweep_indexes(&store.db.snapshot(), 20, 1_600, Some(0))
+                .unwrap();
+            if done {
+                break;
+            }
+        }
+        assert!(done, "a zero budget must not stall the sweep");
+        assert_eq!(store.slot_by_block_number(1).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(2).unwrap(), None);
+    }
+
+    #[test]
     fn empty_archive_clears_progress_without_sweeping_orphan_indexes() {
         let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
         write_indexes(&store, &[number_delta(10, 1), number_delta(10, 2)]);
         assert!(!store
             .sweep_indexes(&store.db.snapshot(), 20, 1_600, Some(1))
             .unwrap());
-        assert!(store.prune_history(100, Some(1)).unwrap());
+        assert!(store.prune_history(100, Some(1), Some(100_000)).unwrap());
         assert_eq!(store.slot_by_block_number(2).unwrap(), Some(10));
 
         // Slot zero is not a safe deletion cutoff either.
         write(&store, &[(0, body(0, 0))]);
-        assert!(store.prune_history(100, Some(1)).unwrap());
+        assert!(store.prune_history(100, Some(1), Some(100_000)).unwrap());
         assert_eq!(store.slot_by_block_number(2).unwrap(), Some(10));
         // Reintroducing a key before the old cursor proves that it was reset.
         write_indexes(&store, &[number_delta(10, 1)]);
         write(&store, &[(100, body(100, 0))]);
-        assert!(store.prune_history(0, Some(100)).unwrap());
+        assert!(store.prune_history(0, Some(100), Some(100_000)).unwrap());
         assert_eq!(store.slot_by_block_number(1).unwrap(), None);
         assert_eq!(store.slot_by_block_number(2).unwrap(), None);
     }
@@ -1583,7 +1629,9 @@ mod tests {
         let store = ArchiveStore::open(StateSchema::default(), dir.path(), &config).unwrap();
         let mut done = false;
         for _ in 0..20 {
-            done = store.prune_history(100, Some(10_000)).unwrap();
+            done = store
+                .prune_history(100, Some(10_000), Some(100_000))
+                .unwrap();
             if done {
                 break;
             }

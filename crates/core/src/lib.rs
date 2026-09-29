@@ -678,6 +678,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn notify_tip(&self, tip: TipEvent);
 
     const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
+    const MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING: u64 = 100_000;
 
     fn housekeeping(&self) -> Result<bool, DomainError> {
         let max_ledger_slots = self
@@ -693,9 +694,11 @@ pub trait Domain: Send + Sync + Clone + 'static {
         if let Some(max_slots) = self.sync_config().max_history {
             info!(max_slots, "pruning archive for excess history");
 
-            archive_pruned = self
-                .archive()
-                .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
+            archive_pruned = self.archive().prune_history(
+                max_slots,
+                Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING),
+                Some(Self::MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING),
+            )?;
         }
 
         let mut wal_pruned = true;

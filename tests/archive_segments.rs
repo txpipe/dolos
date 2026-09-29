@@ -447,8 +447,8 @@ fn pruning_drops_whole_segments_and_survives_a_reopen() {
     // The history spans slots 1 .. 3·SEGMENT+1; keeping two segments' worth
     // moves the cutoff into segment 1, which prunes segment 0 whole.
     let max_slots = 2 * SLOTS_PER_SEGMENT;
-    assert!(pair.fjall().prune_history(max_slots, None).unwrap());
-    assert!(pair.memory.prune_history(max_slots, None).unwrap());
+    assert!(pair.fjall().prune_history(max_slots, None, None).unwrap());
+    assert!(pair.memory.prune_history(max_slots, None, None).unwrap());
     pair.assert_agree("after pruning");
     assert_eq!(
         pair.segment_files(),
