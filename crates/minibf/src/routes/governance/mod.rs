@@ -1787,6 +1787,11 @@ impl IntoModel<ProposalVotesInner> for ProposalVoteRow {
 /// the proposal is still live; re-registering does not restore it. Once the
 /// proposal closes the tally freezes, so only a deregistration before the
 /// close matters.
+///
+/// A deregistration in the voting tx also drops the vote. The ledger's GOV
+/// rule adds the votes of a tx first. Then it removes every vote of each DRep
+/// that the tx deregisters. Blockfrost checks only later txs and reports such
+/// a vote as counted. Dolos follows the ledger here.
 fn drep_vote_counts<D: Domain>(
     domain: &D,
     drep: &DRep,
@@ -1814,8 +1819,8 @@ fn drep_vote_counts<D: Domain>(
         .chain(drep.unregistered_at.as_ref());
 
     for deregistered_at in deregistrations {
-        // only a deregistration strictly after the voting tx can drop it
-        if *deregistered_at <= vote_at {
+        // a deregistration before the voting tx cannot drop the vote
+        if *deregistered_at < vote_at {
             continue;
         }
 
@@ -5375,8 +5380,9 @@ mod tests {
         })
     }
 
-    /// A deregistration after the newest vote drops it from the tally while
-    /// the proposal is live; one before the vote changes nothing.
+    /// A deregistration after the newest vote, or in the same tx, drops it
+    /// from the tally while the proposal is live; one before the vote changes
+    /// nothing.
     #[tokio::test]
     async fn governance_proposal_votes_drep_deregistration() {
         // deregistered after every vote: the drep's newest votes stop
@@ -5402,6 +5408,17 @@ mod tests {
         let rows = get_votes(&app, &path).await;
         let counted: Vec<bool> = rows.iter().map(|row| row.counted).collect();
         assert_eq!(counted, [true, true, false, true, true]);
+
+        // deregistered (and re-registered) in the tx of the newest vote: the
+        // ledger drops that vote, while Blockfrost still counts it
+        let newest_vote_at = (app.vectors().blocks[2].slot, 0);
+        let app = vote_app_with_drep_dereg(newest_vote_at);
+        let proposal_tx = tx_hash_of_block(&app, 0);
+
+        let path = format!("/governance/proposals/{proposal_tx}/0/votes");
+        let rows = get_votes(&app, &path).await;
+        let counted: Vec<bool> = rows.iter().map(|row| row.counted).collect();
+        assert_eq!(counted, [true, true, false, true, false]);
     }
 
     /// Every voter role in its CIP-129 spelling: one header byte — key type,
