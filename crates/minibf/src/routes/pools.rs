@@ -262,6 +262,25 @@ pub(crate) fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
     Err(Error::InvalidPoolId)
 }
 
+/// This function decodes a pool ID and returns the hash of the pool.
+///
+/// The hash of a pool always has 28 bytes. If a pool ID has a valid format but
+/// its payload does not have 28 bytes, no pool has this ID. Thus, the function
+/// returns a 404 error. Blockfrost also returns 404 for this ID.
+///
+/// An `EntityKey` has 32 bytes. The conversion to `EntityKey` adds zeros to a
+/// shorter payload and removes the extra bytes from a longer payload. Thus,
+/// payloads with different lengths can have the same key. For example, a
+/// 29-byte payload that ends in `0x00` has the same key as its first 28 bytes.
+/// Without the length check, the registration check can find a pool for this
+/// payload.
+fn decode_pool_hash(pool_id: &str) -> Result<PoolHash, Error> {
+    let payload = decode_pool_id(pool_id)?;
+    let hash = <[u8; 28]>::try_from(payload.as_slice()).map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok(PoolHash::from(hash))
+}
+
 fn scan_pool_cert_hashes_in_block(
     block: &MultiEraBlock,
     target_pool: &PoolHash,
@@ -1247,14 +1266,7 @@ where
     D: Domain + Clone + Send + Sync + 'static,
     Option<PoolState>: From<D::Entity>,
 {
-    let operator = decode_pool_id(&id)?;
-
-    // Make sure that the decoded id is 28 bytes before the existence check.
-    // A short or long bech32 payload pads into a valid EntityKey. The check
-    // then returns a 404 for a malformed id, but the caller expects a 400.
-    let pool: PoolHash = <[u8; 28]>::try_from(operator.as_slice())
-        .map_err(|_| Error::InvalidPoolId)?
-        .into();
+    let pool = decode_pool_hash(&id)?;
 
     if !domain.cardano_entity_exists::<PoolState>(pool)? {
         return Err(StatusCode::NOT_FOUND.into());
@@ -1319,15 +1331,7 @@ where
     Option<PoolState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    let operator = decode_pool_id(&id)?;
-
-    // If the decoded ID does not have 28 bytes, the endpoint returns 400. The
-    // registration check cannot find this error, because the conversion to
-    // `EntityKey` accepts a payload of any length. Thus, this check is before
-    // the registration check.
-    let pool: PoolHash = <[u8; 28]>::try_from(operator.as_slice())
-        .map_err(|_| Error::InvalidPoolId)?
-        .into();
+    let pool = decode_pool_hash(&id)?;
 
     if !domain.cardano_entity_exists::<PoolState>(pool)? {
         return Err(StatusCode::NOT_FOUND.into());
@@ -1392,6 +1396,20 @@ mod tests {
 
     fn missing_pool_id() -> &'static str {
         "pool1qurswpc8qurswpc8qurswpc8qurswpc8qurswpc8qursw2w89e2"
+    }
+
+    /// The payloads of these pool IDs do not have 28 bytes. The first payload
+    /// is the hash of the registered pool without its last byte. The second
+    /// payload is the hash with a `0x00` byte at the end. Without the length
+    /// check, the registration check finds the pool for the second payload.
+    fn wrong_length_pool_ids(app: &TestApp) -> [String; 2] {
+        let mut payload =
+            decode_pool_id(&app.vectors().pool_id).expect("Cannot decode the pool ID.");
+        let short = bech32_pool(&payload[..27]).expect("Cannot encode the short pool ID.");
+        payload.push(0);
+        let long = bech32_pool(&payload).expect("Cannot encode the long pool ID.");
+
+        [short, long]
     }
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
@@ -2571,23 +2589,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pools_updates_wrong_length_bech32_is_bad_request() {
-        let app = TestApp::new();
-
-        // A pool1 string that decodes but carries 27 bytes, not 28.
-        let hrp = bech32::Hrp::parse("pool").expect("invalid hrp");
-        let short = bech32::encode::<bech32::Bech32>(hrp, &[0u8; 27])
-            .expect("failed to encode short pool id");
-
-        let path = format!("/pools/{short}/updates");
-        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
-    }
-
-    #[tokio::test]
     async fn pools_updates_not_found() {
         let app = TestApp::new();
         let path = format!("/pools/{}/updates", missing_pool_id());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        for pool_id in wrong_length_pool_ids(&app) {
+            let path = format!("/pools/{pool_id}/updates");
+            assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+        }
     }
 
     #[tokio::test]
@@ -2762,12 +2772,6 @@ mod tests {
         let path = format!("/pools/{}/votes", invalid_pool_id());
         assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
 
-        let hrp = bech32::Hrp::parse("pool").expect("Cannot parse the pool HRP.");
-        let short = bech32::encode::<bech32::Bech32>(hrp, &[0u8; 27])
-            .expect("Cannot encode the short pool ID.");
-        let path = format!("/pools/{short}/votes");
-        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
-
         // The endpoint does the query string check before the pool ID check.
         let path = format!("/pools/{}/votes?count=0", invalid_pool_id());
         assert_error_message(&app, &path, "querystring/count must be >= 1").await;
@@ -2791,6 +2795,11 @@ mod tests {
         // never registered.
         let path = format!("/pools/{}/votes", hex::encode([5u8; 28]));
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        for pool_id in wrong_length_pool_ids(&app) {
+            let path = format!("/pools/{pool_id}/votes");
+            assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+        }
     }
 
     #[tokio::test]
