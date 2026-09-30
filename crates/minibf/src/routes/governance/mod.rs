@@ -1788,14 +1788,15 @@ impl IntoModel<ProposalVotesInner> for ProposalVoteRow {
 /// proposal closes the tally freezes, so only a deregistration before the
 /// close matters.
 ///
-/// `DRepState` keeps only the newest deregistration. A vote killed by an
-/// earlier one reads as counted again if the DRep deregistered once more
-/// after the proposal closed — that takes two full cycles around the close.
-///
 /// A deregistration in the voting tx also drops the vote. The ledger's GOV
 /// rule adds the votes of a tx first. Then it removes every vote of each DRep
 /// that the tx deregisters. Blockfrost checks only later txs and reports such
 /// a vote as counted. Dolos follows the ledger here.
+///
+/// The `drep_certs` archive dimension gives the blocks with certificates of
+/// the DRep between the vote and the close. A deregistration is always newer
+/// than the vote, so its block is in the archive whenever the block of the
+/// vote is.
 fn drep_vote_counts<D: Domain>(
     domain: &D,
     drep: &DRep,
@@ -1803,33 +1804,61 @@ fn drep_vote_counts<D: Domain>(
     closed_epoch: Option<Epoch>,
     chain: &ChainSummary,
 ) -> Result<bool, StatusCode> {
-    let key = dolos_cardano::model::drep_to_entity_key(drep);
+    let cred = match drep {
+        DRep::Key(hash) => StakeCredential::AddrKeyhash(*hash),
+        DRep::Script(hash) => StakeCredential::ScriptHash(*hash),
+        DRep::Abstain | DRep::NoConfidence => return Ok(true),
+    };
 
-    let drep = domain
-        .state()
-        .read_entity_typed::<DRepState>(DRepState::NS, &key)
+    let drep_id = pallas_extras::drep_id_bytes(&cred);
+
+    // The last slot whose deregistration can still drop the vote: the one
+    // before the epoch that the proposal closes in.
+    let end = match closed_epoch {
+        Some(closed) => chain.epoch_start(closed).saturating_sub(1),
+        None => BlockSlot::MAX,
+    };
+
+    if end < vote_at.0 {
+        return Ok(true);
+    }
+
+    let slots = domain
+        .archive()
+        .slots_by_drep_certs(&drep_id, vote_at.0, end)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let Some(drep) = drep else {
-        return Ok(true);
-    };
+    for slot in slots {
+        let slot = slot.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let Some(deregistered_at) = drep.unregistered_at else {
-        return Ok(true);
-    };
+        let Some(body) = domain
+            .archive()
+            .get_block_by_slot(&slot)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        else {
+            continue;
+        };
 
-    // a deregistration before the voting tx cannot drop the vote
-    if deregistered_at < vote_at {
-        return Ok(true);
-    }
+        let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    match closed_epoch {
-        None => Ok(false),
-        Some(closed) => {
-            let (dereg_epoch, _) = chain.slot_epoch(deregistered_at.0);
-            Ok(dereg_epoch >= closed)
+        for (tx_order, tx) in block.txs().iter().enumerate() {
+            // a deregistration before the voting tx cannot drop the vote
+            if !tx.is_valid() || (slot, tx_order as TxOrder) < vote_at {
+                continue;
+            }
+
+            let deregisters = tx.certs().iter().any(|cert| {
+                pallas_extras::cert_as_drep_unregistration(cert)
+                    .is_some_and(|unreg| pallas_extras::drep_id_bytes(&unreg.cred) == drep_id)
+            });
+
+            if deregisters {
+                return Ok(false);
+            }
         }
     }
+
+    Ok(true)
 }
 
 /// Scans one block body and returns its votes on `action`, ordered the way
@@ -5322,13 +5351,20 @@ mod tests {
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
-    /// Seed a `DRepState` for the voting drep whose newest deregistration
-    /// sits at `unregistered_at`.
-    fn vote_app_with_drep_dereg(unregistered_at: (BlockSlot, dolos_core::TxOrder)) -> TestApp {
-        use dolos_cardano::model::drep_to_entity_key;
+    /// The vote fixture with a fourth, empty block. The tx of block 0
+    /// registers the voting DRep, and the tx of block `dereg_block`
+    /// deregisters it. When `closed_epoch` is set, the setup marks proposal 0
+    /// as ratified in that epoch, which closes it.
+    fn vote_app_with_drep_dereg(dereg_block: usize, closed_epoch: Option<Epoch>) -> TestApp {
+        use pallas::ledger::primitives::conway::Certificate;
+
+        let cred = StakeCredential::AddrKeyhash([0x66u8; 28].into());
+        let mut extra_certs_by_block = vec![vec![vec![]]; 4];
+        extra_certs_by_block[0][0].push(Certificate::RegDRepCert(cred.clone(), 500, None));
+        extra_certs_by_block[dereg_block][0].push(Certificate::UnRegDRepCert(cred, 500));
 
         let cfg = SyntheticBlockConfig {
-            block_count: 3,
+            block_count: 4,
             txs_per_block: 1,
             gov_actions_by_block: vec![
                 vec![vec![
@@ -5336,6 +5372,7 @@ mod tests {
                     GovAction::NoConfidence(None),
                     GovAction::Information,
                 ]],
+                vec![],
                 vec![],
                 vec![],
             ],
@@ -5349,26 +5386,48 @@ mod tests {
                     cast(spo_voter(), 0, Vote::Abstain),
                 ]],
                 vec![vec![cast(drep_key_voter(), 0, Vote::Abstain)]],
+                vec![],
             ],
+            extra_certs_by_block,
             ..Default::default()
         };
 
-        TestApp::new_with_cfg_and_setup(cfg, move |domain, _| {
-            let identifier = pallas::ledger::primitives::conway::DRep::Key([0x66u8; 28].into());
+        TestApp::new_with_cfg_and_setup(cfg, move |domain, vectors| {
+            let Some(closed_epoch) = closed_epoch else {
+                return;
+            };
 
-            let mut state = dolos_cardano::model::DRepState::new(identifier.clone());
-            state.registered_at = Some((1, 0));
-            state.unregistered_at = Some(unregistered_at);
+            let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
+                .parse()
+                .expect("failed to parse the proposal tx hash");
+            let key = ProposalState::build_entity_key(tx, 0);
+
+            let mut state = domain
+                .state()
+                .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
+                .expect("failed to read the proposal")
+                .expect("the proposal is missing");
+            state.ratified_epoch = Some(closed_epoch);
 
             let writer = domain
                 .state()
                 .start_writer()
                 .expect("failed to start writer");
             writer
-                .write_entity_typed(&drep_to_entity_key(&identifier), &state)
-                .expect("failed to write drep");
-            writer.commit().expect("failed to commit drep");
+                .write_entity_typed(&key, &state)
+                .expect("failed to write the proposal");
+            writer.commit().expect("failed to commit the proposal");
         })
+    }
+
+    async fn counted_on(app: &TestApp, action: u32) -> Vec<bool> {
+        let proposal_tx = tx_hash_of_block(app, 0);
+        let path = format!("/governance/proposals/{proposal_tx}/{action}/votes");
+        get_votes(app, &path)
+            .await
+            .iter()
+            .map(|row| row.counted)
+            .collect()
     }
 
     /// A deregistration after the newest vote, or in the same tx, drops it
@@ -5378,38 +5437,29 @@ mod tests {
     async fn governance_proposal_votes_drep_deregistration() {
         // deregistered after every vote: the drep's newest votes stop
         // counting on both proposals; the superseded one already did not
-        let app = vote_app_with_drep_dereg((1_000_000, 0));
-        let proposal_tx = tx_hash_of_block(&app, 0);
+        let app = vote_app_with_drep_dereg(3, None);
+        assert_eq!(counted_on(&app, 0).await, [true, true, false, true, false]);
+        assert_eq!(counted_on(&app, 1).await, [false]);
 
-        let path = format!("/governance/proposals/{proposal_tx}/0/votes");
-        let rows = get_votes(&app, &path).await;
-        let counted: Vec<bool> = rows.iter().map(|row| row.counted).collect();
-        assert_eq!(counted, [true, true, false, true, false]);
+        // deregistered before the votes: the newest votes still count
+        let app = vote_app_with_drep_dereg(0, None);
+        assert_eq!(counted_on(&app, 0).await, [true, true, false, true, true]);
 
-        let path = format!("/governance/proposals/{proposal_tx}/1/votes");
-        let rows = get_votes(&app, &path).await;
-        assert!(!rows[0].counted);
+        // deregistered in the tx of the newest vote: the ledger drops that
+        // vote, while Blockfrost still counts it
+        let app = vote_app_with_drep_dereg(2, None);
+        assert_eq!(counted_on(&app, 0).await, [true, true, false, true, false]);
+    }
 
-        // deregistered before the votes (and re-registered since): the
-        // newest votes still count
-        let app = vote_app_with_drep_dereg((1, 0));
-        let proposal_tx = tx_hash_of_block(&app, 0);
+    /// Once a proposal closes, its tally is frozen: a deregistration in the
+    /// close epoch or later does not drop the vote.
+    #[tokio::test]
+    async fn governance_proposal_votes_freeze_at_close() {
+        let app = vote_app_with_drep_dereg(3, None);
+        let dereg_epoch = app.vectors().blocks[3].slot / 86_400;
 
-        let path = format!("/governance/proposals/{proposal_tx}/0/votes");
-        let rows = get_votes(&app, &path).await;
-        let counted: Vec<bool> = rows.iter().map(|row| row.counted).collect();
-        assert_eq!(counted, [true, true, false, true, true]);
-
-        // deregistered (and re-registered) in the tx of the newest vote: the
-        // ledger drops that vote, while Blockfrost still counts it
-        let newest_vote_at = (app.vectors().blocks[2].slot, 0);
-        let app = vote_app_with_drep_dereg(newest_vote_at);
-        let proposal_tx = tx_hash_of_block(&app, 0);
-
-        let path = format!("/governance/proposals/{proposal_tx}/0/votes");
-        let rows = get_votes(&app, &path).await;
-        let counted: Vec<bool> = rows.iter().map(|row| row.counted).collect();
-        assert_eq!(counted, [true, true, false, true, false]);
+        let app = vote_app_with_drep_dereg(3, Some(dereg_epoch));
+        assert_eq!(counted_on(&app, 0).await, [true, true, false, true, true]);
     }
 
     /// Every voter role in its CIP-129 spelling: one header byte — key type,
