@@ -27,7 +27,7 @@ use blockfrost_openapi::models::{
     DrepsInnerMetadataError,
 };
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, SlotOrder},
+    indexes::CardanoArchiveIndexExt as _,
     model::{
         drep_from_entity_key,
         gov::{CommitteeAuthorization, GovState},
@@ -36,8 +36,10 @@ use dolos_cardano::{
     },
     pallas_extras, ChainSummary, PParamsSet,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey, StateStore as _, TxOrder};
-use futures::StreamExt;
+use dolos_core::{
+    ArchiveError, ArchiveStore as _, BlockBody, BlockSlot, Domain, EntityKey, StateStore as _,
+    TxOrder,
+};
 use itertools::Itertools;
 use pallas::{
     crypto::hash::Hash,
@@ -1156,6 +1158,84 @@ fn drep_updates_in_block(
     Ok(out)
 }
 
+/// This function reads the certificate blocks of one DRep in order and
+/// returns its updates until it has `needed` rows.
+///
+/// A tagged block can hold no update of the DRep, for example when its
+/// certificate sits in a phase-2-invalid transaction. Such a block costs a
+/// read but adds no row. So the function stops with `ScanBudgetExceeded` when
+/// it has read `budget` blocks and still needs another one.
+fn collect_drep_updates(
+    mut blocks: impl Iterator<Item = Result<Option<BlockBody>, ArchiveError>>,
+    drep: &[u8],
+    descending: bool,
+    needed: usize,
+    budget: usize,
+) -> Result<Vec<DrepUpdatesInner>, Error> {
+    let mut rows = Vec::new();
+    let mut scanned = 0;
+
+    while rows.len() < needed {
+        let Some(body) = blocks.next() else {
+            break;
+        };
+
+        if scanned == budget {
+            return Err(Error::ScanBudgetExceeded);
+        }
+
+        scanned += 1;
+
+        // A block that the archive no longer has leaves the list. The other
+        // history endpoints do the same under `sync.max_history`.
+        let Some(body) = body.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? else {
+            continue;
+        };
+
+        let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let mut block_rows = drep_updates_in_block(&block, drep)?;
+
+        // The blocks come from the tip backward in descending order. The rows
+        // of each block are reversed too, so that the list is the exact
+        // reverse of the ascending list.
+        if descending {
+            block_rows.reverse();
+        }
+
+        rows.append(&mut block_rows);
+    }
+
+    Ok(rows)
+}
+
+/// This function reads the certificate blocks of one DRep from the archive, in
+/// the requested order, and returns its first `needed` updates.
+fn read_drep_updates<D: Domain>(
+    domain: &D,
+    drep: &[u8],
+    tip: BlockSlot,
+    descending: bool,
+    needed: usize,
+    budget: usize,
+) -> Result<Vec<DrepUpdatesInner>, Error> {
+    let archive = domain.archive();
+
+    let slots = archive
+        .slots_by_drep_certs(drep, 0, tip)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let slots: Box<dyn Iterator<Item = _>> = if descending {
+        Box::new(slots.rev())
+    } else {
+        Box::new(slots)
+    };
+
+    let blocks = slots.map(|slot| archive.get_block_by_slot(&slot?));
+
+    collect_drep_updates(blocks, drep, descending, needed, budget)
+}
+
 /// `GET /governance/dreps/{drep_id}/updates` lists the registration,
 /// deregistration and update certificates of a DRep in chain order.
 ///
@@ -1165,16 +1245,21 @@ fn drep_updates_in_block(
 ///
 /// The `drep_certs` archive dimension gives the blocks that hold certificates
 /// of the DRep. The endpoint reads blocks only until the requested page is
-/// full. `max_scan_items` limits the page depth. The other endpoints that read
-/// a block for each row use the same limit.
+/// full. `max_scan_items` limits both the page depth and the number of blocks
+/// that one request reads.
 pub async fn drep_updates<D>(
     Path(drep_id): Path<String>,
-    Query(params): Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<DrepUpdatesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    // Drop `from`/`to` before validation: Blockfrost never reads them here,
+    // so a malformed or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
@@ -1184,48 +1269,25 @@ where
         return Ok(Json(Vec::new()));
     }
 
-    let order = match pagination.order {
-        Order::Asc => SlotOrder::Asc,
-        Order::Desc => SlotOrder::Desc,
-    };
-
     let tip = domain.get_tip_slot()?;
-    let mut stream = Box::pin(domain.query().blocks_by_drep_certs_stream(
-        &drep_bytes,
-        0,
-        tip,
-        order,
-    ));
+    let descending = matches!(pagination.order, Order::Desc);
+    let needed = pagination.to();
+    let budget = domain.config.max_scan_items() as usize;
 
-    let mut rows = Vec::new();
-
-    while let Some(item) = stream.next().await {
-        let (_, body) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        // A block that the archive no longer has leaves the list. The other
-        // history endpoints do the same under `sync.max_history`.
-        let Some(body) = body else {
-            continue;
-        };
-
-        let block = MultiEraBlock::decode(body.as_slice())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let mut block_rows = drep_updates_in_block(&block, &drep_bytes)?;
-
-        // The descending stream gives the blocks from the tip backward. The
-        // rows of each block are reversed too, so that the list is the exact
-        // reverse of the ascending list.
-        if matches!(order, SlotOrder::Desc) {
-            block_rows.reverse();
-        }
-
-        rows.append(&mut block_rows);
-
-        if rows.len() >= pagination.to() {
-            break;
-        }
-    }
+    let rows = domain
+        .query()
+        .run_blocking(move |domain| {
+            Ok(read_drep_updates(
+                &domain,
+                &drep_bytes,
+                tip,
+                descending,
+                needed,
+                budget,
+            ))
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
     let page = rows
         .into_iter()
@@ -4405,15 +4467,12 @@ mod tests {
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
-    /// The ledger does not apply the certificates of a phase-2-invalid tx,
-    /// so its DRep certificates are not updates.
-    #[test]
-    fn drep_updates_skip_invalid_transactions() {
+    /// A block with one tx, which registers the DRep with key hash `[7; 28]`.
+    fn drep_registration_block(valid: bool) -> BlockBody {
         use pallas::codec::utils::{NonEmptySet, Set};
         use pallas::ledger::primitives::conway::{Certificate, TransactionBody};
 
         let cred = StakeCredential::AddrKeyhash(Hash::from([7u8; 28]));
-        let drep = pallas_extras::drep_id_bytes(&cred);
 
         let body = TransactionBody {
             inputs: Set::from(vec![]),
@@ -4440,14 +4499,73 @@ mod tests {
             donation: None,
         };
 
+        let (_, raw) = dolos_testing::blocks::make_conway_block_with_tx(100, body, None, valid);
+        (*raw).clone()
+    }
+
+    fn drep_updates_test_drep() -> Vec<u8> {
+        pallas_extras::drep_id_bytes(&StakeCredential::AddrKeyhash(Hash::from([7u8; 28])))
+    }
+
+    /// The ledger does not apply the certificates of a phase-2-invalid tx,
+    /// so its DRep certificates are not updates.
+    #[test]
+    fn drep_updates_skip_invalid_transactions() {
         let rows = |valid: bool| {
-            let (_, raw) =
-                dolos_testing::blocks::make_conway_block_with_tx(100, body.clone(), None, valid);
-            let block = MultiEraBlock::decode(&raw).unwrap();
-            drep_updates_in_block(&block, &drep).unwrap()
+            let body = drep_registration_block(valid);
+            let block = MultiEraBlock::decode(&body).unwrap();
+            drep_updates_in_block(&block, &drep_updates_test_drep()).unwrap()
         };
 
         assert_eq!(rows(true).len(), 1);
         assert!(rows(false).is_empty());
+    }
+
+    /// A tagged block whose DRep certificate sits in a phase-2-invalid tx adds
+    /// no row, but the scan still counts it. Enough of those blocks stop the
+    /// request instead of letting it read without end.
+    #[test]
+    fn drep_updates_scan_stops_at_the_budget() {
+        let drep = drep_updates_test_drep();
+
+        let blocks = || {
+            [false, false, true]
+                .into_iter()
+                .map(|valid| Ok(Some(drep_registration_block(valid))))
+        };
+
+        // two empty blocks spend a budget of two before the row appears
+        assert!(matches!(
+            collect_drep_updates(blocks(), &drep, false, 1, 2),
+            Err(Error::ScanBudgetExceeded)
+        ));
+
+        // a budget of three reaches the block that holds the row
+        let rows = collect_drep_updates(blocks(), &drep, false, 1, 3).unwrap();
+        assert_eq!(rows.len(), 1);
+
+        // a full page stops the scan before the budget matters
+        let blocks = [true, false, false]
+            .into_iter()
+            .map(|valid| Ok(Some(drep_registration_block(valid))));
+        let rows = collect_drep_updates(blocks, &drep, false, 1, 1).unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    /// Blockfrost declares no `from`/`to` for this endpoint, so a malformed
+    /// or reversed window is ignored, not rejected.
+    #[tokio::test]
+    async fn governance_drep_updates_ignores_from_and_to() {
+        let app = drep_updates_app();
+        let drep = app.vectors().drep_id.clone();
+        let expected = expected_drep_updates(&app);
+
+        for query in ["?from=bad", "?to=bad", "?from=200&to=100"] {
+            assert_eq!(
+                get_drep_updates(&app, &drep, query).await,
+                expected,
+                "{query} must be ignored"
+            );
+        }
     }
 }
