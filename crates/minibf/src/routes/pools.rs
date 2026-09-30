@@ -1270,6 +1270,7 @@ where
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
 {
+    let pagination = Pagination::try_from(params)?;
     let Some(hash) = parse_pool_id_bounded(&id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
@@ -1289,8 +1290,6 @@ where
             .or(account.retired_pool.as_ref())
             .is_some_and(|f| *f == hash)
     });
-
-    let pagination = Pagination::try_from(params)?;
 
     let page: Vec<_> = filtered
         .skip(pagination.skip())
@@ -1359,11 +1358,17 @@ pub async fn by_id_history<D: Domain>(
 ) -> Result<Json<Vec<PoolHistoryInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
 {
-    let Some(hash) = parse_pool_id_unbounded(&id)? else {
+    let hash = parse_pool_id_unbounded(&id)?;
+    let pagination = Pagination::try_from(params)?;
+    let Some(hash) = hash else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    let pagination = Pagination::try_from(params)?;
+    if !domain.cardano_entity_exists::<PoolState>(hash)? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
     let tip = domain.get_tip_slot()?;
     let summary = domain.get_chain_summary()?;
     let (epoch, _) = summary.slot_epoch(tip);
@@ -1407,6 +1412,7 @@ where
     D: Domain + Clone + Send + Sync + 'static,
     Option<PoolState>: From<D::Entity>,
 {
+    let pagination = Pagination::try_from(params)?;
     let Some(pool) = parse_pool_id_bounded(&id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
@@ -1414,8 +1420,6 @@ where
     if !domain.cardano_entity_exists::<PoolState>(pool)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
-
-    let pagination = Pagination::try_from(params)?;
 
     let order = match pagination.order {
         crate::pagination::Order::Asc => SlotOrder::Asc,
@@ -2970,6 +2974,91 @@ mod tests {
         let pool_id = app.vectors().pool_id.as_str();
         let path = format!("/pools/{pool_id}/votes");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    const COUNT_MESSAGE: &str = "querystring/count must be >= 1";
+    const POOL_ID_MESSAGE: &str = "Invalid or malformed pool id format.";
+    const NOT_FOUND_MESSAGE: &str = "The requested component has not been found.";
+
+    fn registered_pool_app() -> TestApp {
+        TestApp::new_with_cfg(SyntheticBlockConfig {
+            pool_id: REG_POOL_ID.to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn pool_id_case(label: &str) -> PoolIdCase {
+        pool_id_cases()
+            .into_iter()
+            .find(|case| case.label == label)
+            .expect("Cannot find the pool ID case.")
+    }
+
+    /// Gives a text for each difference from the Blockfrost error body.
+    async fn error_mismatch(
+        app: &TestApp,
+        path: &str,
+        status: StatusCode,
+        message: &str,
+    ) -> Option<String> {
+        let (actual, bytes) = app.get_bytes(path).await;
+        let expected = serde_json::json!({
+            "status_code": status.as_u16(),
+            "error": status.canonical_reason(),
+            "message": message,
+        });
+        let body = serde_json::from_slice::<Value>(&bytes).ok();
+
+        (actual != status || body.as_ref() != Some(&expected)).then(|| {
+            format!(
+                "{path}: expected {status} {message:?}, got {actual} {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn pools_history_happy_path() {
+        let app = registered_pool_app();
+        let path = format!("/pools/{REG_POOL_ID}/history");
+        assert_status(&app, &path, StatusCode::OK).await;
+    }
+
+    #[tokio::test]
+    async fn pools_history_not_found() {
+        let app = registered_pool_app();
+        let path = format!("/pools/{}/history", missing_pool_id());
+        let mismatch = error_mismatch(&app, &path, StatusCode::NOT_FOUND, NOT_FOUND_MESSAGE).await;
+        assert!(mismatch.is_none(), "{mismatch:?}");
+    }
+
+    #[tokio::test]
+    async fn pool_routes_check_pagination_in_blockfrost_order() {
+        let app = registered_pool_app();
+        let mut mismatches = Vec::new();
+
+        for label in ["invalid", "bmissing", "b29", "h58"] {
+            let id = pool_id_case(label).path_id();
+
+            for suffix in ["delegators", "updates", "votes"] {
+                let path = format!("/pools/{id}/{suffix}?count=0");
+                let mismatch =
+                    error_mismatch(&app, &path, StatusCode::BAD_REQUEST, COUNT_MESSAGE).await;
+                mismatches.extend(mismatch);
+            }
+
+            // The `/history` route parses the pool ID format before the pagination.
+            // The 404 for a valid ID comes after the pagination.
+            let message = if label == "invalid" {
+                POOL_ID_MESSAGE
+            } else {
+                COUNT_MESSAGE
+            };
+            let path = format!("/pools/{id}/history?count=0");
+            mismatches.extend(error_mismatch(&app, &path, StatusCode::BAD_REQUEST, message).await);
+        }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     fn parse_mismatches(

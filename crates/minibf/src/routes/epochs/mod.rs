@@ -446,9 +446,6 @@ where
     Option<PoolState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    let Some(hash) = super::pools::parse_pool_id_bounded(&pool_id)? else {
-        return Err(StatusCode::NOT_FOUND.into());
-    };
     ensure_epoch_in_range(epoch)?;
 
     let tip = domain.get_tip_slot()?;
@@ -459,6 +456,9 @@ where
     if epoch > current {
         return Err(StatusCode::NOT_FOUND.into());
     }
+    let Some(hash) = super::pools::parse_pool_id_bounded(&pool_id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
 
     let start = summary.epoch_start(epoch);
     // `get_range` treats the upper bound as exclusive, so the next epoch's
@@ -628,19 +628,20 @@ where
     Option<PoolState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-
-    let Some(operator) = super::pools::parse_pool_id_bounded(&pool_id)? else {
-        return Err(StatusCode::NOT_FOUND.into());
-    };
-    if !domain.cardano_entity_exists::<PoolState>(operator)? {
-        return Err(StatusCode::NOT_FOUND.into());
-    }
+    ensure_epoch_in_range(epoch)?;
 
     let tip = domain.get_tip_slot()?;
     let summary = domain.get_chain_summary()?;
     let (current, _) = summary.slot_epoch(tip);
 
     if epoch > current {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    let Some(operator) = super::pools::parse_pool_id_bounded(&pool_id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+    if !domain.cardano_entity_exists::<PoolState>(operator)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -702,8 +703,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{pool_id_cases, TestApp, TestFault, REG_POOL_ID};
     use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
+    use dolos_testing::synthetic::SyntheticBlockConfig;
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
@@ -1194,6 +1196,95 @@ mod tests {
             StatusCode::NOT_FOUND,
         )
         .await;
+    }
+
+    /// Gives a text for each difference from the Blockfrost error body.
+    async fn error_mismatch(
+        app: &TestApp,
+        path: &str,
+        status: StatusCode,
+        message: &str,
+    ) -> Option<String> {
+        let (actual, bytes) = app.get_bytes(path).await;
+        let expected = serde_json::json!({
+            "status_code": status.as_u16(),
+            "error": status.canonical_reason(),
+            "message": message,
+        });
+        let body = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+
+        (actual != status || body.as_ref() != Some(&expected)).then(|| {
+            format!(
+                "{path}: expected {status} {message:?}, got {actual} {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
+    fn pool_path_ids(labels: &[&str]) -> Vec<String> {
+        labels
+            .iter()
+            .map(|label| {
+                pool_id_cases()
+                    .into_iter()
+                    .find(|case| case.label == *label)
+                    .expect("Cannot find the pool ID case.")
+                    .path_id()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn epochs_pool_routes_check_in_blockfrost_order() {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            pool_id: REG_POOL_ID.to_string(),
+            ..Default::default()
+        });
+        let tip = app.tip_epoch();
+        let mut mismatches = Vec::new();
+
+        for route in ["blocks", "stakes"] {
+            for id in pool_path_ids(&["invalid", "bmissing", "b29", "h58"]) {
+                let path = format!("/epochs/{tip}/{route}/{id}?count=0");
+                mismatches.extend(
+                    error_mismatch(
+                        &app,
+                        &path,
+                        StatusCode::BAD_REQUEST,
+                        "querystring/count must be >= 1",
+                    )
+                    .await,
+                );
+            }
+
+            for id in pool_path_ids(&["invalid", "b28", "b29", "h58"]) {
+                for epoch in [999_999, MAX_EPOCH_NUMBER] {
+                    let path = format!("/epochs/{epoch}/{route}/{id}");
+                    mismatches.extend(
+                        error_mismatch(
+                            &app,
+                            &path,
+                            StatusCode::NOT_FOUND,
+                            "The requested component has not been found.",
+                        )
+                        .await,
+                    );
+                }
+
+                let path = format!("/epochs/{}/{route}/{id}", MAX_EPOCH_NUMBER + 1);
+                mismatches.extend(
+                    error_mismatch(
+                        &app,
+                        &path,
+                        StatusCode::BAD_REQUEST,
+                        "Missing, out of range or malformed epoch_number.",
+                    )
+                    .await,
+                );
+            }
+        }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     #[tokio::test]
