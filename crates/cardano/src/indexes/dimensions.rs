@@ -110,6 +110,11 @@ pub mod archive {
         /// stores keep verbatim instead of hashing (see
         /// [`dolos_core::key_hash`]).
         METADATA = dolos_core::VERBATIM_KEY_DIMENSION;
+
+        /// DRep certificates (registration, deregistration and update) by
+        /// the CIP-129 DRep id bytes: the key-or-script header, then the
+        /// credential hash.
+        DREP_CERTS = "drep_certs";
     }
 }
 
@@ -148,6 +153,7 @@ mod tests {
                 "pool_certs",
                 "account_withdrawals",
                 "metadata",
+                "drep_certs",
             ]
         );
     }

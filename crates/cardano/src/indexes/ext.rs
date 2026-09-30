@@ -168,6 +168,19 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
         self.slots_by_tag(archive::POOL_CERTS, pool, start, end)
     }
 
+    /// Iterate over slots of blocks containing certificates for a DRep.
+    ///
+    /// The key is the CIP-129 DRep id bytes: the key-or-script header, then
+    /// the credential hash.
+    fn slots_by_drep_certs(
+        &self,
+        drep: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(archive::DREP_CERTS, drep, start, end)
+    }
+
     /// Iterate over slots of blocks containing withdrawals for an account.
     fn slots_by_account_withdrawals(
         &self,

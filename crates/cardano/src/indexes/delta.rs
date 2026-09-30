@@ -272,6 +272,18 @@ impl CardanoIndexDeltaBuilder {
                 .tags
                 .push(Tag::new(archive::POOL_CERTS, cert.operator.to_vec()));
         }
+
+        let drep = pallas_extras::cert_as_drep_registration(cert)
+            .map(|x| x.cred)
+            .or_else(|| pallas_extras::cert_as_drep_unregistration(cert).map(|x| x.cred))
+            .or_else(|| pallas_extras::cert_as_drep_update(cert));
+
+        if let Some(cred) = drep {
+            self.current_block().tags.push(Tag::new(
+                archive::DREP_CERTS,
+                pallas_extras::drep_id_bytes(&cred),
+            ));
+        }
     }
 
     /// Add withdrawal tags to the current block.
@@ -646,6 +658,61 @@ mod tests {
 
         // METADATA
         builder.add_metadata_label(674);
+
+        // DREP_CERTS
+        let drep_update =
+            Certificate::UpdateDRepCert(StakeCredential::AddrKeyhash(Hash::new([0x88; 28])), None);
+        builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(drep_update))));
+    }
+
+    /// Every DRep certificate kind tags the DRep under its CIP-129 id bytes,
+    /// the key that the endpoint parses from a `drep1…` id. A key and a script
+    /// credential with the same hash get different keys.
+    #[test]
+    fn drep_certificates_tag_the_cip129_drep_id() {
+        use crate::model::drep_to_entity_key;
+        use pallas::ledger::primitives::{
+            conway::{Certificate, DRep},
+            StakeCredential,
+        };
+        use std::borrow::Cow;
+
+        let hash = Hash::new([0x99; 28]);
+        let key = StakeCredential::AddrKeyhash(hash);
+        let script = StakeCredential::ScriptHash(hash);
+
+        let certs = [
+            Certificate::RegDRepCert(key.clone(), 500, None),
+            Certificate::UnRegDRepCert(key, 500),
+            Certificate::UpdateDRepCert(script, None),
+        ];
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.start_block(100, vec![0; 32], Some(50));
+
+        for cert in certs {
+            builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(cert))));
+        }
+
+        let keys: Vec<Vec<u8>> = builder
+            .build()
+            .remove(0)
+            .tags
+            .into_iter()
+            .filter(|tag| tag.dimension == archive::DREP_CERTS)
+            .map(|tag| tag.key)
+            .collect();
+
+        let key_id = [&[0x22u8][..], hash.as_slice()].concat();
+        let script_id = [&[0x23u8][..], hash.as_slice()].concat();
+
+        assert_eq!(keys, [key_id.clone(), key_id.clone(), script_id]);
+
+        // the same bytes the dreps namespace keys its entities by
+        assert_eq!(
+            &drep_to_entity_key(&DRep::Key(hash)).as_ref()[..29],
+            key_id.as_slice()
+        );
     }
 
     /// The dimension registry has to hold every dimension this builder emits.
