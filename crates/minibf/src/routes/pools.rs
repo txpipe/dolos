@@ -3061,6 +3061,64 @@ mod tests {
         assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
+    /// Gives a text for a difference from the Blockfrost response.
+    /// The text contains the case label, not the path, because some IDs have
+    /// thousands of characters.
+    async fn pool_id_case_mismatch(
+        app: &TestApp,
+        case: &PoolIdCase,
+        route: &str,
+        expected: u16,
+    ) -> Option<String> {
+        let (status, bytes) = app.get_bytes(&route.replace("{id}", &case.path_id())).await;
+        let expected_body = match expected {
+            400 => Some(("Bad Request", POOL_ID_MESSAGE)),
+            404 => Some(("Not Found", NOT_FOUND_MESSAGE)),
+            _ => None,
+        }
+        .map(|(error, message)| {
+            serde_json::json!({ "status_code": expected, "error": error, "message": message })
+        });
+        let body = serde_json::from_slice::<Value>(&bytes).ok();
+        let matched =
+            status.as_u16() == expected && (expected_body.is_none() || body == expected_body);
+
+        (!matched).then(|| {
+            format!(
+                "{} {route}: expected {expected}, got {status} {}",
+                case.label,
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn pool_routes_match_blockfrost_for_each_pool_id() {
+        let app = registered_pool_app();
+        let mut mismatches = Vec::new();
+
+        for case in pool_id_cases() {
+            for suffix in [
+                "",
+                "/metadata",
+                "/relays",
+                "/delegators",
+                "/history",
+                "/updates",
+                "/votes",
+            ] {
+                let expected = match suffix {
+                    "" | "/history" => case.unbounded_status,
+                    _ => case.bounded_status,
+                };
+                let route = format!("/pools/{{id}}{suffix}");
+                mismatches.extend(pool_id_case_mismatch(&app, &case, &route, expected).await);
+            }
+        }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
     fn parse_mismatches(
         parse: fn(&str) -> Result<Option<PoolHash>, Error>,
         expected: fn(&PoolIdCase) -> u16,
