@@ -18,7 +18,7 @@ use pallas::{
 };
 
 use dolos_cardano::{
-    model::{AccountEpochLog, EpochState, FixedNamespace as _, PoolHash, PoolState},
+    model::{AccountEpochLog, EpochState, FixedNamespace as _, PoolState},
     rupd::StakeSnapshot,
     ChainSummary, EraProtocol,
 };
@@ -446,7 +446,9 @@ where
     Option<PoolState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    let operator = super::pools::decode_pool_id(&pool_id)?;
+    let Some(hash) = super::pools::parse_pool_id_bounded(&pool_id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
     ensure_epoch_in_range(epoch)?;
 
     let tip = domain.get_tip_slot()?;
@@ -464,7 +466,7 @@ where
     let end = summary.epoch_start(epoch + 1);
 
     let inner = domain.inner.clone();
-    let issuer = operator.clone();
+    let issuer = hash;
     let skip = pagination.skip();
     let count = pagination.count;
     let order = pagination.order;
@@ -490,7 +492,7 @@ where
                         continue;
                     };
 
-                    if Hasher::<224>::hash(key).as_slice() != issuer.as_slice() {
+                    if Hasher::<224>::hash(key) != issuer {
                         continue;
                     }
 
@@ -528,7 +530,7 @@ where
     // covers every pool that registered on chain, and a pool must register
     // before it can mint. The scan result acts as a second proof of
     // existence, for any issuer that has no entity.
-    if !minted_here && !domain.cardano_entity_exists::<PoolState>(operator.as_slice())? {
+    if !minted_here && !domain.cardano_entity_exists::<PoolState>(hash)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -627,19 +629,12 @@ where
 {
     let pagination = Pagination::try_from(params)?;
 
-    let operator = super::pools::decode_pool_id(&pool_id)?;
-    if !domain.cardano_entity_exists::<PoolState>(operator.as_slice())? {
+    let Some(operator) = super::pools::parse_pool_id_bounded(&pool_id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+    if !domain.cardano_entity_exists::<PoolState>(operator)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
-
-    // The merged row stores the pool as a hash rather than as loose bytes, so
-    // the comparison below is against one. A pool with an entity always has a
-    // 28-byte key, which makes this unreachable rather than merely unlikely.
-    let operator: [u8; 28] = operator
-        .as_slice()
-        .try_into()
-        .map_err(|_| Error::InvalidPoolId)?;
-    let operator = PoolHash::from(operator);
 
     let tip = domain.get_tip_slot()?;
     let summary = domain.get_chain_summary()?;

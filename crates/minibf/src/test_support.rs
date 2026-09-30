@@ -23,6 +23,187 @@ use tower::util::ServiceExt;
 use crate::{build_router_with_facade, Facade};
 
 pub use dolos_testing::faults::TestFault;
+
+pub const REG_POOL_HEX: &str = "5fe086be9d20749a9e59d6cae6ff1df9dae2e0ee95798bd83a143efe";
+pub const REG_POOL_ID: &str = "pool1tlsgd05ayp6f48je6m9wdlcal8dw9c8wj4uchkp6zsl0uuvslt4";
+pub const MISSING_POOL_ID: &str = "pool1qurswpc8qurswpc8qurswpc8qurswpc8qurswpc8qursw2w89e2";
+
+const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const KELVIN: char = '\u{212A}';
+
+fn polymod(values: &[u8]) -> u32 {
+    const GENERATOR: [u32; 5] = [
+        0x3b6a_57b2,
+        0x2650_8e6d,
+        0x1ea1_19fa,
+        0x3d42_33dd,
+        0x2a14_62b3,
+    ];
+    let mut checksum = 1u32;
+    for value in values {
+        let top = checksum >> 25;
+        checksum = ((checksum & 0x01ff_ffff) << 5) ^ u32::from(*value);
+        for (bit, generator) in GENERATOR.iter().enumerate() {
+            if (top >> bit) & 1 == 1 {
+                checksum ^= generator;
+            }
+        }
+    }
+    checksum
+}
+
+pub fn bech32_values_from_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut values = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for byte in bytes {
+        acc = (acc << 8) | u32::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            values.push(((acc >> bits) & 31) as u8);
+        }
+        acc &= (1 << bits) - 1;
+    }
+    if bits > 0 {
+        values.push(((acc << (5 - bits)) & 31) as u8);
+    }
+    values
+}
+
+pub fn bech32_encode_values(hrp: &str, values: &[u8], constant: u32) -> String {
+    let mut input: Vec<u8> = hrp.bytes().map(|c| c >> 5).collect();
+    input.push(0);
+    input.extend(hrp.bytes().map(|c| c & 31));
+    input.extend_from_slice(values);
+    input.extend([0; 6]);
+    let residue = polymod(&input) ^ constant;
+    let checksum = (0..6u32).map(|i| ((residue >> (5 * (5 - i))) & 31) as u8);
+    let data: String = values
+        .iter()
+        .copied()
+        .chain(checksum)
+        .map(|v| CHARSET[usize::from(v)] as char)
+        .collect();
+    format!("{hrp}1{data}")
+}
+
+pub struct PoolIdCase {
+    pub label: &'static str,
+    pub id: String,
+    pub unbounded_status: u16,
+    pub bounded_status: u16,
+}
+
+impl PoolIdCase {
+    pub fn path_id(&self) -> String {
+        self.id.replace(KELVIN, "%E2%84%AA")
+    }
+}
+
+/// Statuses for an app that registers `REG_POOL_ID`.
+pub fn pool_id_cases() -> Vec<PoolIdCase> {
+    let reg = hex::decode(REG_POOL_HEX).expect("Cannot decode the pool hex.");
+    let hex = REG_POOL_HEX;
+    let with_zeros = |n: usize| {
+        let mut bytes = reg.clone();
+        bytes.resize(reg.len() + n, 0);
+        bytes
+    };
+    let encode = |bytes: &[u8]| bech32_encode_values("pool", &bech32_values_from_bytes(bytes), 1);
+    let values = bech32_values_from_bytes(&reg);
+    let mut pad_bit = values.clone();
+    if let Some(last) = pad_bit.last_mut() {
+        *last |= 1;
+    }
+    let mut pad_word = values.clone();
+    pad_word.push(0);
+    let mut values_1001 = values.clone();
+    values_1001.resize(1001 - 11, 0);
+    let mixed: String = hex
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if i % 2 == 1 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
+        .collect();
+    let upper = REG_POOL_ID.to_uppercase();
+    let case = |label, id: String, unbounded_status, bounded_status| PoolIdCase {
+        label,
+        id,
+        unbounded_status,
+        bounded_status,
+    };
+
+    vec![
+        case("b28", REG_POOL_ID.to_string(), 200, 200),
+        case("b29", encode(&with_zeros(1)), 404, 404),
+        case("b27", encode(&reg[..27]), 404, 404),
+        case("bmissing", MISSING_POOL_ID.to_string(), 404, 404),
+        case("h56", hex.to_string(), 200, 200),
+        case("h56upper", hex.to_uppercase(), 200, 200),
+        case("h56mixed", mixed, 200, 200),
+        case("h57", format!("{hex}0"), 400, 200),
+        case("h55", hex[..55].to_string(), 400, 404),
+        case("h58", format!("{hex}00"), 404, 404),
+        case("h54", hex[..54].to_string(), 404, 404),
+        case("h1", "a".to_string(), 400, 404),
+        case("h98", format!("{hex}{}", "00".repeat(21)), 404, 404),
+        case("h99", format!("{hex}{}0", "00".repeat(21)), 400, 404),
+        case("h100", format!("{hex}{}", "00".repeat(22)), 404, 400),
+        case("hex2000", format!("{hex}{}", "00".repeat(972)), 404, 400),
+        case("hex2001", format!("{hex}{}0", "00".repeat(972)), 400, 400),
+        case("hex9000", format!("{hex}{}", "00".repeat(4472)), 404, 400),
+        case("invalid", "not-a-pool".to_string(), 400, 400),
+        case("bupper", upper.clone(), 404, 404),
+        case(
+            "bech32m",
+            bech32_encode_values("pool", &values, 0x2bc8_30a3),
+            404,
+            400,
+        ),
+        case(
+            "hrp_pool1x",
+            bech32_encode_values("pool1x", &values, 1),
+            400,
+            400,
+        ),
+        case(
+            "pad_bit",
+            bech32_encode_values("pool", &pad_bit, 1),
+            404,
+            404,
+        ),
+        case(
+            "pad_word",
+            bech32_encode_values("pool", &pad_word, 1),
+            404,
+            404,
+        ),
+        case("b1000", encode(&with_zeros(590)), 404, 404),
+        case(
+            "b1001",
+            bech32_encode_values("pool", &values_1001, 1),
+            404,
+            400,
+        ),
+        case("b1002", encode(&with_zeros(591)), 404, 400),
+        case("b1023", encode(&with_zeros(604)), 404, 400),
+        case("b1024", encode(&with_zeros(605)), 404, 400),
+        case("b5000", encode(&with_zeros(3094)), 404, 400),
+        case("kelvin_upper", upper.replace('K', "\u{212A}"), 400, 404),
+        case(
+            "kelvin_lower",
+            REG_POOL_ID.replace('k', "\u{212A}"),
+            400,
+            400,
+        ),
+    ]
+}
+
 pub struct TestDomainBuilder {
     domain: ToyDomain,
     vectors: SyntheticVectors,
