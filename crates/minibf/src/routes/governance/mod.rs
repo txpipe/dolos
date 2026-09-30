@@ -15,6 +15,7 @@ use blockfrost_openapi::models::{
     committee_quorum::CommitteeQuorum,
     drep_delegators_inner::DrepDelegatorsInner,
     drep_metadata::DrepMetadata,
+    drep_updates_inner::{self, DrepUpdatesInner},
     drep_votes_inner::{self, DrepVotesInner},
     proposal::{self, Proposal},
     proposal_metadata::ProposalMetadata,
@@ -26,6 +27,7 @@ use blockfrost_openapi::models::{
     DrepsInnerMetadataError,
 };
 use dolos_cardano::{
+    indexes::{AsyncCardanoQueryExt, SlotOrder},
     model::{
         drep_from_entity_key,
         gov::{CommitteeAuthorization, GovState},
@@ -35,6 +37,7 @@ use dolos_cardano::{
     pallas_extras, ChainSummary, PParamsSet,
 };
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey, StateStore as _, TxOrder};
+use futures::StreamExt;
 use itertools::Itertools;
 use pallas::{
     crypto::hash::Hash,
@@ -1099,6 +1102,136 @@ where
         .run_blocking(move |domain| Ok(vote_page(&domain, &voter, &pagination)))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    Ok(Json(page))
+}
+
+/// This function returns the certificates of one DRep in one block, in
+/// Blockfrost order: the position of the transaction first, then the position
+/// of the certificate in the transaction.
+///
+/// The ledger does not apply the certificates of a phase-2-invalid
+/// transaction, so the function skips those transactions.
+fn drep_updates_in_block(
+    block: &MultiEraBlock,
+    drep: &[u8],
+) -> Result<Vec<DrepUpdatesInner>, StatusCode> {
+    use drep_updates_inner::Action;
+
+    let mut out = Vec::new();
+
+    for tx in block.txs() {
+        if !tx.is_valid() {
+            continue;
+        }
+
+        for (cert_index, cert) in tx.certs().iter().enumerate() {
+            let update = if let Some(reg) = pallas_extras::cert_as_drep_registration(cert) {
+                Some((reg.cred, Action::Registered, Some(reg.deposit.to_string())))
+            } else if let Some(unreg) = pallas_extras::cert_as_drep_unregistration(cert) {
+                Some((unreg.cred, Action::Deregistered, None))
+            } else {
+                pallas_extras::cert_as_drep_update(cert).map(|cred| (cred, Action::Updated, None))
+            };
+
+            let Some((cred, action, deposit)) = update else {
+                continue;
+            };
+
+            // A block that is tagged for this DRep can also hold the
+            // certificates of other DReps.
+            if pallas_extras::drep_id_bytes(&cred) != drep {
+                continue;
+            }
+
+            out.push(DrepUpdatesInner {
+                tx_hash: tx.hash().to_string(),
+                cert_index: i32_or_500(cert_index)?,
+                action,
+                deposit,
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+/// `GET /governance/dreps/{drep_id}/updates` lists the registration,
+/// deregistration and update certificates of a DRep in chain order.
+///
+/// Blockfrost has no existence check on this endpoint. An unknown DRep, and
+/// the two special DReps that have no certificates, return an empty list. They
+/// do not return 404.
+///
+/// The `drep_certs` archive dimension gives the blocks that hold certificates
+/// of the DRep. The endpoint reads blocks only until the requested page is
+/// full. `max_scan_items` limits the page depth. The other endpoints that read
+/// a block for each row use the same limit.
+pub async fn drep_updates<D>(
+    Path(drep_id): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<DrepUpdatesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
+
+    let (_, drep_bytes, _, is_special_case) = parse_drep_id(&drep_id)?;
+
+    if is_special_case {
+        return Ok(Json(Vec::new()));
+    }
+
+    let order = match pagination.order {
+        Order::Asc => SlotOrder::Asc,
+        Order::Desc => SlotOrder::Desc,
+    };
+
+    let tip = domain.get_tip_slot()?;
+    let mut stream = Box::pin(domain.query().blocks_by_drep_certs_stream(
+        &drep_bytes,
+        0,
+        tip,
+        order,
+    ));
+
+    let mut rows = Vec::new();
+
+    while let Some(item) = stream.next().await {
+        let (_, body) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // A block that the archive no longer has leaves the list. The other
+        // history endpoints do the same under `sync.max_history`.
+        let Some(body) = body else {
+            continue;
+        };
+
+        let block = MultiEraBlock::decode(body.as_slice())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let mut block_rows = drep_updates_in_block(&block, &drep_bytes)?;
+
+        // The descending stream gives the blocks from the tip backward. The
+        // rows of each block are reversed too, so that the list is the exact
+        // reverse of the ascending list.
+        if matches!(order, SlotOrder::Desc) {
+            block_rows.reverse();
+        }
+
+        rows.append(&mut block_rows);
+
+        if rows.len() >= pagination.to() {
+            break;
+        }
+    }
+
+    let page = rows
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect();
 
     Ok(Json(page))
 }
@@ -4123,5 +4256,198 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
         )
         .await;
+    }
+
+    /// Three blocks with one tx each. Every synthetic tx registers the DRep in
+    /// certificate 3. The tx of block 1 also updates the DRep, and the tx of
+    /// block 2 also deregisters it, both in certificate 5.
+    fn drep_updates_app() -> TestApp {
+        use pallas::ledger::primitives::conway::Certificate;
+
+        let cred = StakeCredential::AddrKeyhash(Hash::from([7u8; 28]));
+
+        TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 1,
+            extra_certs_by_block: vec![
+                vec![],
+                vec![vec![Certificate::UpdateDRepCert(cred.clone(), None)]],
+                vec![vec![Certificate::UnRegDRepCert(cred, 1000)]],
+            ],
+            ..Default::default()
+        })
+    }
+
+    fn expected_drep_updates(app: &TestApp) -> Vec<DrepUpdatesInner> {
+        use drep_updates_inner::Action;
+
+        let row = |block: usize, cert_index: i32, action: Action, deposit: Option<&str>| {
+            DrepUpdatesInner {
+                tx_hash: tx_hash_of_block(app, block),
+                cert_index,
+                action,
+                deposit: deposit.map(str::to_string),
+            }
+        };
+
+        vec![
+            row(0, 3, Action::Registered, Some("1000")),
+            row(1, 3, Action::Registered, Some("1000")),
+            row(1, 5, Action::Updated, None),
+            row(2, 3, Action::Registered, Some("1000")),
+            row(2, 5, Action::Deregistered, None),
+        ]
+    }
+
+    async fn get_drep_updates(app: &TestApp, drep: &str, query: &str) -> Vec<DrepUpdatesInner> {
+        let path = format!("/governance/dreps/{drep}/updates{query}");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "The request to {path} returned status {status}. The response body was {}.",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes)
+            .expect("The DRep update response did not contain valid JSON.")
+    }
+
+    #[tokio::test]
+    async fn governance_drep_updates_happy_path() {
+        let app = drep_updates_app();
+        let drep = app.vectors().drep_id.clone();
+
+        assert_eq!(
+            get_drep_updates(&app, &drep, "").await,
+            expected_drep_updates(&app)
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_drep_updates_orders_and_paginates() {
+        let app = drep_updates_app();
+        let drep = app.vectors().drep_id.clone();
+        let expected = expected_drep_updates(&app);
+        let reversed = expected.iter().rev().cloned().collect_vec();
+
+        // desc is the exact reverse of asc, inside a tx too
+        assert_eq!(get_drep_updates(&app, &drep, "?order=desc").await, reversed);
+
+        assert_eq!(
+            get_drep_updates(&app, &drep, "?count=2&page=2").await,
+            expected[2..4].to_vec()
+        );
+        assert_eq!(
+            get_drep_updates(&app, &drep, "?count=2&page=1&order=desc").await,
+            reversed[..2].to_vec()
+        );
+        assert_eq!(
+            get_drep_updates(&app, &drep, "?count=2&page=3").await,
+            expected[4..].to_vec()
+        );
+
+        // a page past the end is empty, not an error
+        assert!(get_drep_updates(&app, &drep, "?count=2&page=4")
+            .await
+            .is_empty());
+    }
+
+    /// Blockfrost has no existence check on this endpoint, so every
+    /// well-formed id without certificates gets an empty list. That includes a
+    /// script DRep with the same hash as the registered key DRep.
+    #[tokio::test]
+    async fn governance_drep_updates_without_rows() {
+        let app = drep_updates_app();
+        let script_drep = bech32_drep(&DRep::Script(Hash::from([7u8; 28]))).unwrap();
+
+        for drep in [
+            missing_drep(),
+            script_drep,
+            "drep_always_abstain".to_string(),
+            "drep_always_no_confidence".to_string(),
+        ] {
+            assert!(
+                get_drep_updates(&app, &drep, "").await.is_empty(),
+                "{drep} must list no updates"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_drep_updates_bad_request() {
+        let app = drep_updates_app();
+        let base = format!("/governance/dreps/{}/updates", app.vectors().drep_id);
+
+        assert_status(&app, &format!("{base}?count=0"), StatusCode::BAD_REQUEST).await;
+        assert_status(
+            &app,
+            &format!("{base}?order=sideways"),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/dreps/not-a-drep/updates",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+
+        // Blockfrost decodes the id as bech32 only, so a hex id is a 400
+        let hex_id = hex::encode([&[0x22u8][..], &[7u8; 28]].concat());
+        let path = format!("/governance/dreps/{hex_id}/updates");
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_updates_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let path = format!("/governance/dreps/{}/updates", app.vectors().drep_id);
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// The ledger does not apply the certificates of a phase-2-invalid tx,
+    /// so its DRep certificates are not updates.
+    #[test]
+    fn drep_updates_skip_invalid_transactions() {
+        use pallas::codec::utils::{NonEmptySet, Set};
+        use pallas::ledger::primitives::conway::{Certificate, TransactionBody};
+
+        let cred = StakeCredential::AddrKeyhash(Hash::from([7u8; 28]));
+        let drep = pallas_extras::drep_id_bytes(&cred);
+
+        let body = TransactionBody {
+            inputs: Set::from(vec![]),
+            outputs: vec![],
+            fee: 0,
+            ttl: None,
+            certificates: Some(
+                NonEmptySet::try_from(vec![Certificate::RegDRepCert(cred, 500, None)]).unwrap(),
+            ),
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: None,
+            proposal_procedures: None,
+            treasury_value: None,
+            donation: None,
+        };
+
+        let rows = |valid: bool| {
+            let (_, raw) =
+                dolos_testing::blocks::make_conway_block_with_tx(100, body.clone(), None, valid);
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            drep_updates_in_block(&block, &drep).unwrap()
+        };
+
+        assert_eq!(rows(true).len(), 1);
+        assert!(rows(false).is_empty());
     }
 }
