@@ -2087,12 +2087,17 @@ fn read_votes<D: Domain>(
 /// on the proposal, oldest first.
 pub async fn proposal_votes<D>(
     Path((tx_hash, cert_index)): Path<(String, String)>,
-    Query(params): Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<ProposalVotesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    // Drop `from`/`to` before validation: Blockfrost never reads them here,
+    // so a malformed or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
     let pagination = Pagination::try_from(params)?;
 
     let cert_index = cert_index
@@ -2118,12 +2123,17 @@ where
 /// addressed by CIP-129 id instead of by tx hash and action index.
 pub async fn proposal_votes_by_gov_action<D>(
     Path(gov_action_id): Path<String>,
-    Query(params): Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<ProposalVotesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    // Drop `from`/`to` before validation: Blockfrost never reads them here,
+    // so a malformed or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
     let pagination = Pagination::try_from(params)?;
 
     let (tx, idx) = parse_gov_action_id(&gov_action_id).map_err(|_| Error::InvalidGovActionId)?;
@@ -5250,6 +5260,33 @@ mod tests {
 
         let path = "/governance/proposals/not-a-tx-hash/0/votes";
         assert!(get_votes(&app, path).await.is_empty());
+    }
+
+    /// Blockfrost declares no `from`/`to` for these endpoints, so a malformed
+    /// or reversed window is ignored, not rejected.
+    #[tokio::test]
+    async fn governance_proposal_votes_ignores_from_and_to() {
+        let app = vote_app();
+        let tx: Hash<32> = tx_hash_of_block(&app, 0)
+            .parse()
+            .expect("failed to parse tx hash");
+        let expected = expected_votes(&app);
+
+        let by_tx = format!("/governance/proposals/{tx}/0/votes");
+        let by_id = format!(
+            "/governance/proposals/{}/votes",
+            bech32_gov_action(&tx, 0).unwrap()
+        );
+
+        for base in [by_tx, by_id] {
+            for query in ["?from=bad", "?to=bad", "?from=200&to=100"] {
+                assert_eq!(
+                    get_votes(&app, &format!("{base}{query}")).await,
+                    expected,
+                    "{base}{query} must ignore the window"
+                );
+            }
+        }
     }
 
     #[tokio::test]
