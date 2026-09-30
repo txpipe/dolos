@@ -1107,11 +1107,12 @@ impl CoreArchiveStore for ArchiveStore {
     fn prune_history(
         &self,
         max_slots: u64,
-        max_prune: Option<u64>,
-        max_index_rows: Option<u64>,
+        max_prune_slots: Option<u64>,
+        max_prune_index_rows: Option<u64>,
     ) -> Result<bool, ArchiveError> {
         let snapshot = self.db.snapshot();
-        let max_entries = max_index_rows.map(|rows| usize::try_from(rows).unwrap_or(usize::MAX));
+        let max_entries =
+            max_prune_index_rows.map(|rows| usize::try_from(rows).unwrap_or(usize::MAX));
 
         let first = snapshot
             .first_key_value(&self.blocks)
@@ -1147,7 +1148,7 @@ impl CoreArchiveStore for ArchiveStore {
             return self.sweep_indexes(&snapshot, start, max_slots, max_entries);
         }
 
-        let (blocks_done, max_prune) = match max_prune {
+        let (blocks_done, max_prune) = match max_prune_slots {
             Some(max) => (excess <= max, core::cmp::min(excess, max)),
             None => (true, excess),
         };

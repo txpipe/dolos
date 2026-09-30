@@ -309,14 +309,14 @@ impl ArchiveStore for FaultyArchiveStore {
     fn prune_history(
         &self,
         max_slots: u64,
-        max_prune: Option<u64>,
-        max_index_rows: Option<u64>,
+        max_prune_slots: Option<u64>,
+        max_prune_index_rows: Option<u64>,
     ) -> Result<bool, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
         self.inner
-            .prune_history(max_slots, max_prune, max_index_rows)
+            .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
     }
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {

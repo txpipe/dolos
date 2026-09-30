@@ -1318,12 +1318,12 @@ fn fjall_index_sweep_is_amortized_across_prune_rounds() {
     write_indexed_blocks(&store, &slots);
 
     let max_slots = 1_600;
-    let max_prune = Some(40);
-    let max_index_rows = Some(100_000);
+    let max_prune_slots = Some(40);
+    let max_prune_index_rows = Some(100_000);
 
     // Round 1: cutoff 40, first sweep after open.
     assert!(!store
-        .prune_history(max_slots, max_prune, max_index_rows)
+        .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
         .unwrap());
     assert!(!exact_entries_present(&store, 30));
     assert!(exact_entries_present(&store, 40));
@@ -1331,10 +1331,10 @@ fn fjall_index_sweep_is_amortized_across_prune_rounds() {
     // Rounds 2 and 3: cutoffs 80 and 120, inside the threshold. The blocks
     // are gone, their entries are not yet.
     assert!(!store
-        .prune_history(max_slots, max_prune, max_index_rows)
+        .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
         .unwrap());
     assert!(!store
-        .prune_history(max_slots, max_prune, max_index_rows)
+        .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
         .unwrap());
     assert_eq!(store.get_block_by_slot(&40).unwrap(), None);
     assert_eq!(store.get_block_by_slot(&110).unwrap(), None);
@@ -1347,7 +1347,7 @@ fn fjall_index_sweep_is_amortized_across_prune_rounds() {
 
     // Round 4: cutoff 160, past the threshold: everything below it goes.
     assert!(!store
-        .prune_history(max_slots, max_prune, max_index_rows)
+        .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
         .unwrap());
     assert!(!exact_entries_present(&store, 40));
     assert!(!exact_entries_present(&store, 110));
