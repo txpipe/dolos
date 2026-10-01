@@ -115,6 +115,9 @@ pub mod archive {
         /// the CIP-129 DRep id bytes: the key-or-script header, then the
         /// credential hash.
         DREP_CERTS = "drep_certs";
+
+        /// Pool hash of the block issuer.
+        POOL_BLOCKS = "pool_blocks";
     }
 }
 
@@ -154,6 +157,7 @@ mod tests {
                 "account_withdrawals",
                 "metadata",
                 "drep_certs",
+                "pool_blocks",
             ]
         );
     }

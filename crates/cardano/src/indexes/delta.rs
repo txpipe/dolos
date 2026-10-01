@@ -293,6 +293,19 @@ impl CardanoIndexDeltaBuilder {
             .push(Tag::new(archive::ACCOUNT_WITHDRAWALS, account.to_vec()));
     }
 
+    /// Tag the current block with the pool that minted it.
+    pub fn add_block_issuer(&mut self, vkey: &[u8]) {
+        use pallas::crypto::hash::Hasher;
+
+        // The same derivation as the minted-block counter uses, so the
+        // tag key equals the `PoolState` entity key.
+        let operator = Hasher::<224>::hash(vkey);
+
+        self.current_block()
+            .tags
+            .push(Tag::new(archive::POOL_BLOCKS, operator.to_vec()));
+    }
+
     /// Add a metadata label to the current block.
     pub fn add_metadata_label(&mut self, label: u64) {
         self.current_block()
@@ -317,6 +330,11 @@ impl CardanoIndexDeltaBuilder {
         };
 
         self.start_block(block.slot(), block.hash().to_vec(), Some(block.number()));
+
+        // Byron blocks carry no issuer key, so they stay untagged.
+        if let Some(vkey) = block.header().issuer_vkey() {
+            self.add_block_issuer(vkey);
+        }
 
         for tx in block.txs() {
             self.add_tx_hash(tx.hash().to_vec());
@@ -663,6 +681,9 @@ mod tests {
         let drep_update =
             Certificate::UpdateDRepCert(StakeCredential::AddrKeyhash(Hash::new([0x88; 28])), None);
         builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(drep_update))));
+
+        // POOL_BLOCKS
+        builder.add_block_issuer(&[0x88; 32]);
     }
 
     /// Every DRep certificate kind tags the DRep under its CIP-129 id bytes,
@@ -755,5 +776,81 @@ mod tests {
              test stops covering the ones it misses: {:?} are unexercised",
             &registered - &produced,
         );
+    }
+
+    /// A minimal Conway body, so a block carries one transaction and nothing
+    /// else that produces tags.
+    fn empty_tx_body() -> pallas::ledger::primitives::conway::TransactionBody<'static> {
+        use pallas::codec::utils::Set;
+
+        pallas::ledger::primitives::conway::TransactionBody {
+            inputs: Set::from(vec![]),
+            outputs: vec![],
+            fee: 0,
+            ttl: None,
+            certificates: None,
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: None,
+            proposal_procedures: None,
+            treasury_value: None,
+            donation: None,
+        }
+    }
+
+    /// A block is tagged under the pool that minted it. The tag key is the
+    /// hash of the issuer key, which is the pool id.
+    #[test]
+    fn index_block_tags_the_issuer_pool() {
+        use pallas::crypto::hash::Hasher;
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        let (_, raw) =
+            dolos_testing::blocks::make_conway_block_with_tx(100, empty_tx_body(), None, true);
+        let block = MultiEraBlock::decode(&raw).unwrap();
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.index_block(&block, &std::collections::HashMap::new());
+
+        let archive = builder.build();
+        assert_eq!(archive.len(), 1);
+
+        let tags: Vec<&Tag> = archive[0]
+            .tags
+            .iter()
+            .filter(|tag| tag.dimension == archive::POOL_BLOCKS)
+            .collect();
+
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].key, Hasher::<224>::hash(&[0x10, 0x11]).to_vec());
+    }
+
+    /// Byron blocks carry no issuer key, so they stay untagged.
+    #[test]
+    fn index_block_skips_byron_issuer() {
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        let (_, raw) = dolos_testing::blocks::make_byron_ebb(1, Hash::new([0x00; 32]));
+        let block = MultiEraBlock::decode(&raw).unwrap();
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.index_block(&block, &std::collections::HashMap::new());
+
+        let archive = builder.build();
+        assert_eq!(archive.len(), 1);
+
+        assert!(archive[0]
+            .tags
+            .iter()
+            .all(|tag| tag.dimension != archive::POOL_BLOCKS));
     }
 }
