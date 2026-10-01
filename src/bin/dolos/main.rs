@@ -70,7 +70,7 @@ enum Command {
 #[derive(Debug, Parser)]
 #[clap(name = "Dolos")]
 #[clap(bin_name = "dolos")]
-#[clap(author, version, about, long_about = None)]
+#[clap(author, version = env!("DOLOS_VERSION"), about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
