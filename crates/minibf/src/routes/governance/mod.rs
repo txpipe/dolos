@@ -843,7 +843,7 @@ where
     Ok(Json(page))
 }
 
-/// A DRep vote from the proposal namespace.
+/// A vote from the proposal namespace.
 struct VoteRow {
     slot: BlockSlot,
     proposal_tx: Hash<32>,
@@ -854,6 +854,19 @@ struct VoteRow {
     /// transaction. These values stay empty until `settle_casts` processes the
     /// row group.
     cast: Option<(Hash<32>, u32)>,
+}
+
+/// A vote and the transaction that contains the vote.
+pub(crate) struct CastVote {
+    /// The hash of the transaction that contains the vote.
+    pub tx: Hash<32>,
+
+    /// The index of the vote in the ballot of the voter in `tx`.
+    pub cert_index: u32,
+
+    pub proposal_tx: Hash<32>,
+    pub proposal_idx: u32,
+    pub vote: Vote,
 }
 
 /// This function converts a DRep ID to the voter key of its ballots.
@@ -910,7 +923,7 @@ fn ballot(tx: &MultiEraTx, voter: &Voter) -> Vec<(Hash<32>, u32)> {
 /// data. The archived block supplies the transaction hash and ballot index.
 ///
 /// If the archive does not contain the block, rows keep their provisional
-/// order and have no cast data. `vote_page` removes these rows.
+/// order and have no cast data. `voter_casts` removes these rows.
 ///
 /// If the archive contains the block but the block has no matching cast, the
 /// state and the archive disagree. This function logs a warning for that row.
@@ -975,7 +988,8 @@ fn settle_casts<D: Domain>(
                         voter = ?voter,
                         proposal_tx = %row.proposal_tx,
                         proposal_idx = row.proposal_idx,
-                        "archived block has no matching DRep vote, row removed"
+                        "The state has a vote that is not in the archived block. \
+                         The response will not contain this vote."
                     );
 
                     ((usize::MAX, u32::MAX), row)
@@ -990,8 +1004,12 @@ fn settle_casts<D: Domain>(
     Ok(())
 }
 
-/// This function reads DRep votes from state and adds archive data to the
-/// page.
+/// This function reads the votes of one voter from the state. The archived
+/// blocks supply the transaction hash and the ballot index of each vote on the
+/// requested page. The votes on the page are in chain order, or in the
+/// opposite order for `Order::Desc`. Chain order is the order of the blocks,
+/// then the position of the transaction in the block, then the ballot index. A
+/// repeated vote on the same proposal is a separate row.
 ///
 /// The proposal that receives a vote stores that vote. Thus, this function
 /// scans the proposal namespace for the voter. The namespace contains one row
@@ -1004,11 +1022,11 @@ fn settle_casts<D: Domain>(
 /// If the archive does not contain the block of a vote, the vote leaves its
 /// page. The other history endpoints return the same short page under
 /// `sync.max_history`. The offsets stay the same as in Blockfrost.
-fn vote_page<D: Domain>(
+pub(crate) fn voter_casts<D: Domain>(
     domain: &D,
     voter: &Voter,
     pagination: &Pagination,
-) -> Result<Vec<DrepVotesInner>, Error> {
+) -> Result<Vec<CastVote>, Error> {
     let mut rows = Vec::new();
 
     let entities = domain
@@ -1045,20 +1063,40 @@ fn vote_page<D: Domain>(
         |slot, group| settle_casts(domain, voter, slot, group),
     )?;
 
-    page.into_iter()
-        // A row without archive data has no transaction to report. The row
-        // leaves its page. The rows after it do not move.
-        .filter(|row| row.cast.is_some())
-        .map(|row| {
-            let (tx, cert_index) = row.cast.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    // A row without archive data has no transaction hash and no ballot index.
+    // The filter removes the row from its page. The rows after this row stay
+    // on their pages.
+    Ok(page
+        .into_iter()
+        .filter_map(|row| {
+            let (tx, cert_index) = row.cast?;
 
+            Some(CastVote {
+                tx,
+                cert_index,
+                proposal_tx: row.proposal_tx,
+                proposal_idx: row.proposal_idx,
+                vote: row.vote,
+            })
+        })
+        .collect())
+}
+
+fn vote_page<D: Domain>(
+    domain: &D,
+    voter: &Voter,
+    pagination: &Pagination,
+) -> Result<Vec<DrepVotesInner>, Error> {
+    voter_casts(domain, voter, pagination)?
+        .into_iter()
+        .map(|cast| {
             Ok(DrepVotesInner {
-                tx_hash: hex::encode(tx),
-                cert_index: i32_or_500(cert_index)?,
-                proposal_id: bech32_gov_action(&row.proposal_tx, row.proposal_idx)?,
-                proposal_tx_hash: hex::encode(row.proposal_tx),
-                proposal_cert_index: i32_or_500(row.proposal_idx)?,
-                vote: vote_model(&row.vote),
+                tx_hash: hex::encode(cast.tx),
+                cert_index: i32_or_500(cast.cert_index)?,
+                proposal_id: bech32_gov_action(&cast.proposal_tx, cast.proposal_idx)?,
+                proposal_tx_hash: hex::encode(cast.proposal_tx),
+                proposal_cert_index: i32_or_500(cast.proposal_idx)?,
+                vote: vote_model(&cast.vote),
             })
         })
         .collect::<Result<Vec<_>, StatusCode>>()
