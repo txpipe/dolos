@@ -1945,10 +1945,21 @@ fn read_votes<D: Domain>(
         return Ok(vec![]);
     };
 
+    // The sync commits the state before the archive. So for a short time the
+    // state row can hold votes whose blocks the archive does not have yet.
+    // The listing stops at the archive tip and leaves out those votes.
+    let Some((archive_tip, _)) = domain
+        .archive()
+        .get_tip()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Ok(vec![]);
+    };
+
     let mut row_counts: BTreeMap<BlockSlot, usize> = BTreeMap::new();
 
-    // Each voter's newest vote is the last entry of its history, and it is
-    // the only one that can count toward the tally.
+    // Each voter's newest vote is the last entry of its history up to the
+    // archive tip, and it is the only one that can count toward the tally.
     let mut newest_slots: HashMap<(u8, Vec<u8>), BlockSlot> = HashMap::new();
 
     let keyed_histories = state
@@ -1969,12 +1980,15 @@ fn read_votes<D: Domain>(
         );
 
     for (voter, history) in keyed_histories {
-        for (slot, _) in history {
+        let mut newest = None;
+
+        for (slot, _) in history.iter().filter(|(slot, _)| *slot <= archive_tip) {
             *row_counts.entry(*slot).or_default() += 1;
+            newest = Some(*slot);
         }
 
-        if let Some((slot, _)) = history.last() {
-            newest_slots.insert(voter, *slot);
+        if let Some(slot) = newest {
+            newest_slots.insert(voter, slot);
         }
     }
 
@@ -2029,10 +2043,10 @@ fn read_votes<D: Domain>(
             .get_block_by_slot(&slot)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         else {
-            // The state row proves these votes exist, so a missing block
-            // means the archive was pruned below the proposal's vote
-            // history. A short page would misreport the votes; fail loudly
-            // instead.
+            // The state row proves these votes exist, and the slot is not
+            // past the archive tip. So a missing block means the archive was
+            // pruned below the proposal's vote history. A short page would
+            // misreport the votes; fail loudly instead.
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
         };
 
@@ -5114,8 +5128,8 @@ mod tests {
     /// with all three voter roles — its drep votes on action 1 too, so the
     /// per-voter cert index shows. Block 2 carries the same drep re-voting on
     /// action 0. Action 2 collects no votes.
-    fn vote_app() -> TestApp {
-        TestApp::new_with_cfg(SyntheticBlockConfig {
+    fn vote_cfg() -> SyntheticBlockConfig {
+        SyntheticBlockConfig {
             block_count: 3,
             txs_per_block: 1,
             gov_actions_by_block: vec![
@@ -5139,7 +5153,41 @@ mod tests {
                 vec![vec![cast(drep_key_voter(), 0, Vote::Abstain)]],
             ],
             ..Default::default()
-        })
+        }
+    }
+
+    fn vote_app() -> TestApp {
+        TestApp::new_with_cfg(vote_cfg())
+    }
+
+    /// Reads proposal 0 of a vote fixture, changes it with `change`, and
+    /// writes it back.
+    fn edit_vote_proposal(
+        domain: &ToyDomain,
+        vectors: &dolos_testing::synthetic::SyntheticVectors,
+        change: impl FnOnce(&mut ProposalState),
+    ) {
+        let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
+            .parse()
+            .expect("failed to parse the proposal tx hash");
+        let key = ProposalState::build_entity_key(tx, 0);
+
+        let mut state = domain
+            .state()
+            .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
+            .expect("failed to read the proposal")
+            .expect("the proposal is missing");
+
+        change(&mut state);
+
+        let writer = domain
+            .state()
+            .start_writer()
+            .expect("failed to start writer");
+        writer
+            .write_entity_typed(&key, &state)
+            .expect("failed to write the proposal");
+        writer.commit().expect("failed to commit the proposal");
     }
 
     async fn get_votes(app: &TestApp, path: &str) -> Vec<ProposalVotesInner> {
@@ -5352,7 +5400,7 @@ mod tests {
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
-    /// A state row that records a vote at a slot the archive does not hold —
+    /// A state row that records a vote below the oldest block of the archive —
     /// the shape a pruned archive leaves behind. The listing must fail
     /// loudly rather than misreport the votes with a short page.
     #[tokio::test]
@@ -5361,7 +5409,7 @@ mod tests {
             let mut state = lifecycle_state(None, None);
             state.drep_votes.insert(
                 StakeCredential::AddrKeyhash([6u8; 28].into()),
-                vec![(999_999, Vote::Yes)],
+                vec![(0, Vote::Yes)],
             );
 
             let writer = domain
@@ -5386,6 +5434,29 @@ mod tests {
             hex::encode(proposal_tx())
         );
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// The sync commits the state before the archive. So for a short time
+    /// the state row holds a vote whose block the archive does not have yet.
+    /// The listing leaves out that vote, and the previous vote of the voter
+    /// still counts.
+    #[tokio::test]
+    async fn governance_proposal_votes_stop_at_the_archive_tip() {
+        let app = TestApp::new_with_cfg_and_setup(vote_cfg(), |domain, vectors| {
+            let next_slot = vectors.blocks[2].slot + 1;
+
+            edit_vote_proposal(domain, vectors, |state| {
+                state
+                    .drep_votes
+                    .get_mut(&StakeCredential::AddrKeyhash([0x66u8; 28].into()))
+                    .expect("the drep has no votes")
+                    .push((next_slot, Vote::No));
+            });
+        });
+
+        let proposal_tx = tx_hash_of_block(&app, 0);
+        let path = format!("/governance/proposals/{proposal_tx}/0/votes");
+        assert_eq!(get_votes(&app, &path).await, expected_votes(&app));
     }
 
     /// The vote fixture with a fourth, empty block. The tx of block 0
@@ -5430,30 +5501,11 @@ mod tests {
         };
 
         TestApp::new_with_cfg_and_setup(cfg, move |domain, vectors| {
-            let Some(closed_epoch) = closed_epoch else {
-                return;
-            };
-
-            let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
-                .parse()
-                .expect("failed to parse the proposal tx hash");
-            let key = ProposalState::build_entity_key(tx, 0);
-
-            let mut state = domain
-                .state()
-                .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
-                .expect("failed to read the proposal")
-                .expect("the proposal is missing");
-            state.ratified_epoch = Some(closed_epoch);
-
-            let writer = domain
-                .state()
-                .start_writer()
-                .expect("failed to start writer");
-            writer
-                .write_entity_typed(&key, &state)
-                .expect("failed to write the proposal");
-            writer.commit().expect("failed to commit the proposal");
+            if let Some(closed_epoch) = closed_epoch {
+                edit_vote_proposal(domain, vectors, |state| {
+                    state.ratified_epoch = Some(closed_epoch);
+                });
+            }
         })
     }
 
