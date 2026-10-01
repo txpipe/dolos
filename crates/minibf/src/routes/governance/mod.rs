@@ -1796,7 +1796,8 @@ impl IntoModel<ProposalVotesInner> for ProposalVoteRow {
 /// The `drep_certs` archive dimension gives the blocks with certificates of
 /// the DRep between the vote and the close. A deregistration is always newer
 /// than the vote, so its block is in the archive whenever the block of the
-/// vote is.
+/// vote is. A tagged block that the archive does not hold is a broken
+/// archive: the check fails loudly instead of reporting the vote as counted.
 fn drep_vote_counts<D: Domain>(
     domain: &D,
     drep: &DRep,
@@ -1836,7 +1837,7 @@ fn drep_vote_counts<D: Domain>(
             .get_block_by_slot(&slot)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         else {
-            continue;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
         };
 
         let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -5470,10 +5471,11 @@ mod tests {
     }
 
     /// Block 0 registers the DRep and proposes. In block 1, a committee
-    /// member and the DRep vote. The setup then adds a block that cannot be
-    /// decoded and tags it as a certificate block of the DRep. So the
-    /// `counted` check of the DRep vote fails with 500.
-    fn vote_app_with_corrupt_drep_block() -> TestApp {
+    /// member and the DRep vote. The setup then tags one more slot as a
+    /// certificate block of the DRep. With `body`, the archive holds that body
+    /// at the slot; without it, the slot has no block. Both make the `counted`
+    /// check of the DRep vote fail with 500.
+    fn vote_app_with_extra_drep_tag(body: Option<Vec<u8>>) -> TestApp {
         use dolos_cardano::indexes::archive_dimensions::DREP_CERTS;
         use dolos_core::{ArchiveIndexDelta, ArchiveWriter as _, ChainPoint, Tag};
         use pallas::ledger::primitives::conway::Certificate;
@@ -5505,12 +5507,14 @@ mod tests {
                 .archive()
                 .start_writer()
                 .expect("failed to start writer");
-            writer
-                .apply(
-                    &ChainPoint::Specific(slot, hash),
-                    &std::sync::Arc::new(vec![0xFF; 8]),
-                )
-                .expect("failed to write the block");
+            if let Some(body) = body {
+                writer
+                    .apply(
+                        &ChainPoint::Specific(slot, hash),
+                        &std::sync::Arc::new(body),
+                    )
+                    .expect("failed to write the block");
+            }
             writer
                 .apply_index(&[ArchiveIndexDelta {
                     slot,
@@ -5528,7 +5532,8 @@ mod tests {
     /// row never reads the certificate blocks of the DRep.
     #[tokio::test]
     async fn governance_proposal_votes_check_only_the_page() {
-        let app = vote_app_with_corrupt_drep_block();
+        // a block that cannot be decoded
+        let app = vote_app_with_extra_drep_tag(Some(vec![0xFF; 8]));
         let proposal_tx = tx_hash_of_block(&app, 0);
         let base = format!("/governance/proposals/{proposal_tx}/0/votes");
 
@@ -5540,6 +5545,23 @@ mod tests {
         assert!(rows[0].counted);
 
         // the DRep row reads the corrupt block
+        assert_status(
+            &app,
+            &format!("{base}?count=2"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+    }
+
+    /// A tagged certificate block that the archive does not hold could hide a
+    /// deregistration. So the DRep row fails loudly instead of reporting the
+    /// vote as counted.
+    #[tokio::test]
+    async fn governance_proposal_votes_missing_drep_block() {
+        let app = vote_app_with_extra_drep_tag(None);
+        let proposal_tx = tx_hash_of_block(&app, 0);
+        let base = format!("/governance/proposals/{proposal_tx}/0/votes");
+
         assert_status(
             &app,
             &format!("{base}?count=2"),
