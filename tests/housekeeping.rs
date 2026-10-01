@@ -123,6 +123,33 @@ fn housekeeping_returns_false_until_converged() {
     );
 }
 
+/// The archive's round is bounded by rows, not slots: a backlog of more
+/// expired blocks than one round's budget takes more than one round.
+#[test]
+fn housekeeping_prunes_the_archive_by_rows() {
+    let domain = ToyDomain::new(None, None).with_sync_config(sync_config(None, Some(1_000)));
+    seed_archive(&domain, 0..120_001); // tip 120_000, one block per slot
+
+    // The domain's genesis log rows share the budget, so the front lands a
+    // little short of one block per row; the WAL's slot cap would have
+    // stopped it at 10_000.
+    assert!(!domain.housekeeping().unwrap(), "backlog exceeds one round");
+    let first = archive_slots(&domain)[0];
+    assert!(
+        first > <ToyDomain as Domain>::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING
+            && first <= <ToyDomain as Domain>::MAX_PRUNE_ROWS_PER_HOUSEKEEPING,
+        "one round removes up to one block per row of budget, got {first}"
+    );
+
+    domain.drain_housekeeping(None).unwrap();
+    assert_eq!(
+        archive_slots(&domain).first(),
+        Some(&119_000),
+        "converges to tip - max_history"
+    );
+    assert_eq!(archive_tip(&domain), Some(120_000), "tip preserved");
+}
+
 /// Unconfigured windows (`None`) leave a store untouched, and `housekeeping`
 /// still reports `done`.
 #[test]
