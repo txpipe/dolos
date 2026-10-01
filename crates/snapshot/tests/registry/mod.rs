@@ -177,19 +177,10 @@ pub fn registry() -> Vec<Entry> {
             enc_dreps,
             DRepState,
             canaries::drep_state,
-            // Revision 2 appended `unregistrations` (index 9), the full
-            // deregistration history the vote `counted` flag reads. Revision
-            // 1 is retained as a decode witness for rows written before it.
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/dreps.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/dreps.rev2.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/dreps.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_epochs,
