@@ -2401,7 +2401,7 @@ mod tests {
         let app = TestApp::new_with_cfg_and_setup(drep_votes_config(), |domain, _| {
             domain
                 .archive()
-                .prune_history(0, None)
+                .prune_history(0, None, None)
                 .expect("The archive did not prune its history.");
         });
         let drep = &app.vectors().drep_id;
