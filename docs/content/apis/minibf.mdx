@@ -155,6 +155,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/governance/dreps/{drep_id}`                              | Get DRep information                                     |
 | `/governance/dreps/{drep_id}/delegators`                   | Get delegators for a specific DRep                       |
 | `/governance/dreps/{drep_id}/metadata`                     | Get DRep metadata                                        |
+| `/governance/dreps/{drep_id}/updates`                      | Get certificate updates of a DRep                        |
 | `/governance/dreps/{drep_id}/votes`                        | Get votes cast by a DRep                                 |
 | `/governance/proposals`                                    | Get list of governance proposals                         |
 | `/governance/proposals/{tx_hash}/{cert_index}`             | Get governance proposal information                      |
@@ -174,11 +175,13 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/pools/retired`                                           | Get list of retired pools                                |
 | `/pools/retiring`                                          | Get list of retiring pools                               |
 | `/pools/{id}`                                              | Get information for a specific pool                      |
+| `/pools/{id}/blocks`                                       | Get blocks minted by a specific pool                     |
 | `/pools/{id}/delegators`                                   | Get delegators for a specific pool                       |
 | `/pools/{id}/history`                                      | Get history for a specific pool                          |
 | `/pools/{id}/metadata`                                     | Get metadata for a specific pool                         |
 | `/pools/{id}/relays`                                       | Get relays for a specific pool                           |
 | `/pools/{id}/updates`                                      | Get certificate updates for a specific pool              |
+| `/pools/{id}/votes`                                        | Get votes cast by a specific pool                        |
 | `/scripts/{script_hash}`                                   | Get script information                                   |
 | `/scripts/{script_hash}/json`                              | Get script JSON                                          |
 | `/scripts/{script_hash}/cbor`                              | Get script CBOR                                          |

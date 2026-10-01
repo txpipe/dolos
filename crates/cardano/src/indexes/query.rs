@@ -100,6 +100,14 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
         order: SlotOrder,
     ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
 
+    fn blocks_by_drep_certs_stream(
+        &self,
+        drep: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+
     fn blocks_by_account_withdrawals_stream(
         &self,
         account: &[u8],
@@ -309,6 +317,24 @@ where
             (*self).clone(),
             archive::POOL_CERTS,
             pool.to_vec(),
+            start_slot,
+            end_slot,
+            order,
+        )
+    }
+
+    fn blocks_by_drep_certs_stream(
+        &self,
+        drep: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    {
+        blocks_by_tag_stream(
+            (*self).clone(),
+            archive::DREP_CERTS,
+            drep.to_vec(),
             start_slot,
             end_slot,
             order,

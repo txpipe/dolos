@@ -168,6 +168,19 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
         self.slots_by_tag(archive::POOL_CERTS, pool, start, end)
     }
 
+    /// Iterate over slots of blocks containing certificates for a DRep.
+    ///
+    /// The key is the CIP-129 DRep id bytes: the key-or-script header, then
+    /// the credential hash.
+    fn slots_by_drep_certs(
+        &self,
+        drep: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(archive::DREP_CERTS, drep, start, end)
+    }
+
     /// Iterate over slots of blocks containing withdrawals for an account.
     fn slots_by_account_withdrawals(
         &self,
@@ -187,6 +200,18 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
         end: BlockSlot,
     ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::METADATA, &label.to_be_bytes(), start, end)
+    }
+
+    /// Iterate over slots of blocks that a pool minted.
+    ///
+    /// The key is the pool operator hash. Byron blocks are never listed.
+    fn slots_by_pool_blocks(
+        &self,
+        pool: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(archive::POOL_BLOCKS, pool, start, end)
     }
 
     // ============ Bulk Export ============

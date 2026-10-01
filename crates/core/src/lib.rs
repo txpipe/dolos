@@ -678,6 +678,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn notify_tip(&self, tip: TipEvent);
 
     const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
+    const MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING: u64 = 100_000;
 
     fn housekeeping(&self) -> Result<bool, DomainError> {
         let max_ledger_slots = self
@@ -693,9 +694,11 @@ pub trait Domain: Send + Sync + Clone + 'static {
         if let Some(max_slots) = self.sync_config().max_history {
             info!(max_slots, "pruning archive for excess history");
 
-            archive_pruned = self
-                .archive()
-                .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
+            archive_pruned = self.archive().prune_history(
+                max_slots,
+                Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING),
+                Some(Self::MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING),
+            )?;
         }
 
         let mut wal_pruned = true;
@@ -711,10 +714,13 @@ pub trait Domain: Send + Sync + Clone + 'static {
         Ok(archive_pruned && wal_pruned)
     }
 
-    /// Runs [`Self::housekeeping`] repeatedly until it reports no remaining
-    /// backlog (each call prunes at most `MAX_PRUNE_SLOTS_PER_HOUSEKEEPING`).
-    /// `max_rounds` is an upper bound, not a fixed count: a converged run stops
-    /// early. Returns the number of rounds executed.
+    /// Run bounded housekeeping rounds until no active or currently due work
+    /// remains.
+    ///
+    /// `max_rounds` limits the number of rounds. `None` removes only that
+    /// limit; each round keeps the normal per-call pruning limits.
+    /// Completion does not force index cleanup that the backend has
+    /// deferred. Returns the number of rounds executed.
     fn drain_housekeeping(&self, max_rounds: Option<u64>) -> Result<u64, DomainError> {
         let mut rounds = 0;
 

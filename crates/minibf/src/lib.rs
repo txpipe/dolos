@@ -619,6 +619,7 @@ where
             "/metadata/txs/labels/{label}/cbor",
             get(routes::metadata::by_label_cbor::<D>),
         )
+        .route("/pools/{id}/blocks", get(routes::pools::by_id_blocks::<D>))
         .route(
             "/pools/{id}/delegators",
             get(routes::pools::by_id_delegators::<D>),
@@ -636,6 +637,7 @@ where
             "/pools/{id}/updates",
             get(routes::pools::by_id_updates::<D>),
         )
+        .route("/pools/{id}/votes", get(routes::pools::by_id_votes::<D>))
         .route("/pools/extended", get(routes::pools::all_extended::<D>))
         .route("/pools/retiring", get(routes::pools::all_retiring::<D>))
         .route("/pools/retired", get(routes::pools::all_retired::<D>))
@@ -668,6 +670,10 @@ where
         .route(
             "/governance/dreps/{drep_id}/votes",
             get(routes::governance::drep_votes::<D>),
+        )
+        .route(
+            "/governance/dreps/{drep_id}/updates",
+            get(routes::governance::drep_updates::<D>),
         )
         .route(
             "/governance/proposals",

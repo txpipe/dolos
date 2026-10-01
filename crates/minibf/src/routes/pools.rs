@@ -17,33 +17,43 @@ use blockfrost_openapi::models::{
     pool_list_extended_inner::PoolListExtendedInner,
     pool_list_retire_inner::PoolListRetireInner,
     pool_updates_inner::{Action, PoolUpdatesInner},
+    pool_votes_inner::{self, PoolVotesInner},
     tx_content_pool_certs_inner_relays_inner::TxContentPoolCertsInnerRelaysInner,
     DrepsInnerMetadataError, PoolListExtendedInnerMetadata, PoolMetadata as PoolMetadataModel,
 };
 use dolos_cardano::{
     cip151,
-    indexes::{AsyncCardanoQueryExt, SlotOrder},
+    indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
     model::{AccountState, PoolState},
     pallas_extras, PoolDelegation, PoolHash, StakeLog,
 };
-use dolos_core::{BlockSlot, Domain, EntityKey};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey};
 use futures::{future::join_all, StreamExt};
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
     crypto::hash::Hasher,
-    ledger::{addresses::Network, primitives::StakeCredential, traverse::MultiEraBlock},
+    ledger::{
+        addresses::Network,
+        primitives::{
+            conway::{Vote, Voter},
+            StakeCredential,
+        },
+        traverse::MultiEraBlock,
+    },
 };
 use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
     error::Error,
+    log_and_500,
     mapping::{
-        bech32_calidus, bech32_pool, pool_offchain_metadata, rational_to_f64,
+        bech32_calidus, bech32_pool, i32_or_500, pool_offchain_metadata, rational_to_f64,
         stake_cred_to_address, vkey_to_stake_address, IntoModel,
     },
     pagination::{Pagination, PaginationParameters},
+    routes::governance::voter_casts,
     Facade,
 };
 
@@ -242,15 +252,165 @@ where
     Ok(metrics)
 }
 
-pub(crate) fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
-    if pool_id.starts_with("pool1") {
-        let (_, operator) = bech32::decode(pool_id).map_err(|_| Error::InvalidPoolId)?;
-        return Ok(operator);
-    } else if pool_id.len() == 56 {
-        return hex::decode(pool_id).map_err(|_| Error::InvalidPoolId);
+const POOL_HASH_LEN: usize = 28;
+const POOL_HRP: &str = "pool";
+const POOL_HRP_UPPER: &str = "POOL";
+const POOL_HEX_MAX_BYTES: usize = 49;
+const POOL_ID_MIN_UNITS: usize = 8;
+const POOL_ID_MAX_UNITS: usize = 1000;
+const BECH32_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const BECH32_CHECKSUM_LEN: usize = 6;
+const BECH32_CONST: u32 = 1;
+const BECH32M_CONST: u32 = 0x2bc8_30a3;
+const BECH32_GENERATOR: [u32; 5] = [
+    0x3b6a_57b2,
+    0x2650_8e6d,
+    0x1ea1_19fa,
+    0x3d42_33dd,
+    0x2a14_62b3,
+];
+
+fn bech32_step(checksum: u32) -> u32 {
+    let top = checksum >> 25;
+    let mut next = (checksum & 0x01ff_ffff) << 5;
+    for (bit, generator) in BECH32_GENERATOR.iter().enumerate() {
+        if (top >> bit) & 1 == 1 {
+            next ^= generator;
+        }
+    }
+    next
+}
+
+fn bech32_residue(hrp: &[u8], values: &[u8]) -> u32 {
+    let mut checksum = 1;
+    for c in hrp {
+        checksum = bech32_step(checksum) ^ u32::from(c >> 5);
+    }
+    checksum = bech32_step(checksum);
+    for c in hrp {
+        checksum = bech32_step(checksum) ^ u32::from(c & 0x1f);
+    }
+    for value in values {
+        checksum = bech32_step(checksum) ^ u32::from(*value);
+    }
+    checksum
+}
+
+fn bech32_values(data: &str) -> Option<Vec<u8>> {
+    data.bytes()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            BECH32_CHARSET
+                .iter()
+                .position(|&x| x == c)
+                .map(|value| value as u8)
+        })
+        .collect()
+}
+
+fn pool_hash_from_bytes(bytes: &[u8]) -> Option<PoolHash> {
+    <[u8; POOL_HASH_LEN]>::try_from(bytes)
+        .ok()
+        .map(PoolHash::from)
+}
+
+/// Gives the hash only for the canonical ID: the lowercase Bech32 text of 28
+/// bytes.
+///
+/// An `EntityKey` has 32 bytes. `EntityKey::from(&[u8])` adds zero bytes to a
+/// short value and cuts a long value to 32 bytes. Thus, a 29-byte value that
+/// ends with `0x00` finds the pool of its first 28 bytes. The parsers return a
+/// `PoolHash` for this reason.
+fn canonical_pool_hash(input: &str) -> Option<PoolHash> {
+    let (_, bytes) = bech32::decode(input).ok()?;
+    let hash = pool_hash_from_bytes(&bytes)?;
+    (bech32_pool(hash).ok()? == input).then_some(hash)
+}
+
+/// Parses a pool ID with the rules of `/pools/{pool_id}` and
+/// `/pools/{pool_id}/history`.
+///
+/// Hex of even length gives its bytes, with no length limit.
+/// Other text must be a Bech32 or Bech32m string with the `pool` prefix in one
+/// letter case. Other input gives `Error::InvalidPoolId`.
+///
+/// The result is `None` for a valid ID that no pool can have.
+/// Blockfrost finds a pool only from the canonical form of its ID.
+/// Thus, a valid ID in a different form finds no pool.
+pub(crate) fn parse_pool_id_unbounded(input: &str) -> Result<Option<PoolHash>, Error> {
+    if let Ok(bytes) = hex::decode(input) {
+        return Ok(pool_hash_from_bytes(&bytes));
     }
 
-    Err(Error::InvalidPoolId)
+    let (hrp, data) = input.rsplit_once('1').ok_or(Error::InvalidPoolId)?;
+    let upper = match hrp {
+        POOL_HRP => false,
+        POOL_HRP_UPPER => true,
+        _ => return Err(Error::InvalidPoolId),
+    };
+    let wrong_case = |c: u8| {
+        if upper {
+            c.is_ascii_lowercase()
+        } else {
+            c.is_ascii_uppercase()
+        }
+    };
+    if data.len() < BECH32_CHECKSUM_LEN || data.bytes().any(wrong_case) {
+        return Err(Error::InvalidPoolId);
+    }
+
+    let values = bech32_values(data).ok_or(Error::InvalidPoolId)?;
+    let residue = bech32_residue(POOL_HRP.as_bytes(), &values);
+    if residue != BECH32_CONST && residue != BECH32M_CONST {
+        return Err(Error::InvalidPoolId);
+    }
+
+    Ok(canonical_pool_hash(input))
+}
+
+/// Parses a pool ID with the rules of the other pool routes and the epoch pool
+/// routes.
+///
+/// Hex gives its bytes. For hex of odd length, the parser ignores the last
+/// digit. Hex of 50 bytes or more gives `Error::InvalidPoolId`.
+/// Other text must be a Bech32 string of 8 to 1000 UTF-16 units with the
+/// `pool` prefix. The text must be equal to its Unicode lowercase form or its
+/// Unicode uppercase form.
+///
+/// The Kelvin sign U+212A has the lowercase form `k` and is its own uppercase
+/// form. Thus, an uppercase ID with this sign is valid, but it finds no pool.
+///
+/// The result is `None` for a valid ID that no pool can have.
+pub(crate) fn parse_pool_id_bounded(input: &str) -> Result<Option<PoolHash>, Error> {
+    if !input.is_empty() && input.bytes().all(|c| c.is_ascii_hexdigit()) {
+        let bytes = hex::decode(&input[..input.len() & !1]).map_err(|_| Error::InvalidPoolId)?;
+        if bytes.len() > POOL_HEX_MAX_BYTES {
+            return Err(Error::InvalidPoolId);
+        }
+        return Ok(pool_hash_from_bytes(&bytes));
+    }
+
+    let units = input.encode_utf16().count();
+    if !(POOL_ID_MIN_UNITS..=POOL_ID_MAX_UNITS).contains(&units) {
+        return Err(Error::InvalidPoolId);
+    }
+
+    let lower = input.to_lowercase();
+    if input != lower && input != input.to_uppercase() {
+        return Err(Error::InvalidPoolId);
+    }
+
+    let (hrp, data) = lower.rsplit_once('1').ok_or(Error::InvalidPoolId)?;
+    if hrp != POOL_HRP || data.len() < BECH32_CHECKSUM_LEN {
+        return Err(Error::InvalidPoolId);
+    }
+
+    let values = bech32_values(data).ok_or(Error::InvalidPoolId)?;
+    if bech32_residue(POOL_HRP.as_bytes(), &values) != BECH32_CONST {
+        return Err(Error::InvalidPoolId);
+    }
+
+    Ok(canonical_pool_hash(input))
 }
 
 fn scan_pool_cert_hashes_in_block(
@@ -480,9 +640,11 @@ where
     Option<PoolState>: From<D::Entity>,
     Option<AccountState>: From<D::Entity>,
 {
-    let operator = decode_pool_id(&id)?;
+    let Some(hash) = parse_pool_id_unbounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
     let pool = domain
-        .read_cardano_entity::<PoolState>(operator.as_slice())?
+        .read_cardano_entity::<PoolState>(hash)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let snapshot = pool
@@ -1029,9 +1191,11 @@ pub async fn by_id_metadata<D: Domain>(
 where
     Option<PoolState>: From<D::Entity>,
 {
-    let operator = decode_pool_id(&id)?;
+    let Some(hash) = parse_pool_id_bounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
     let pool = domain
-        .read_cardano_entity::<PoolState>(operator.as_slice())?
+        .read_cardano_entity::<PoolState>(hash)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let onchain = pool
@@ -1041,7 +1205,7 @@ where
     let (offchain, error) = fetch_pool_metadata_with_error(&pool).await;
 
     Ok(Json(build_pool_metadata_response(
-        operator, onchain, offchain, error,
+        hash, onchain, offchain, error,
     )?))
 }
 
@@ -1052,9 +1216,11 @@ pub async fn by_id_relays<D: Domain>(
 where
     Option<PoolState>: From<D::Entity>,
 {
-    let operator = decode_pool_id(&id)?;
+    let Some(hash) = parse_pool_id_bounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
     let pool = domain
-        .read_cardano_entity::<PoolState>(operator.as_slice())?
+        .read_cardano_entity::<PoolState>(hash)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let relays = pool
@@ -1096,6 +1262,100 @@ impl IntoModel<PoolDelegatorsInner> for PoolDelegatorModelBuilder {
     }
 }
 
+/// Blocks minted by a pool, oldest first.
+///
+/// The `pool_blocks` archive dimension tags each block with its issuer pool,
+/// so the page is a key-only slot scan plus one body read per listed block.
+/// The cost does not grow with the page number, so deep pages stay cheap and
+/// the scan budget does not apply.
+pub async fn by_id_blocks<D>(
+    Path(id): Path<String>,
+    Query(mut params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<String>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<PoolState>: From<D::Entity>,
+{
+    // Drop `from`/`to` before validation: Blockfrost never reads them here,
+    // so a malformed or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
+    let pagination = Pagination::try_from(params)?;
+    let Some(pool) = parse_pool_id_bounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+
+    let tip = domain.get_tip_slot()?;
+
+    let inner = domain.inner.clone();
+    let skip = pagination.skip();
+    let count = pagination.count;
+    let order = pagination.order;
+
+    let (page, minted_any) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), StatusCode> {
+            let mut slots = inner
+                .archive()
+                .slots_by_pool_blocks(pool.as_slice(), 0, tip)
+                .map_err(log_and_500("failed to read the pool blocks index"))?
+                .peekable();
+
+            // Whether the pool minted anything at all. The 404 rule below
+            // needs it, and the slots are already in memory.
+            let minted_any = slots.peek().is_some();
+
+            // Page over the slots alone, so no block outside the page is read.
+            let page_slots: Vec<BlockSlot> = match order {
+                crate::pagination::Order::Asc => {
+                    slots.skip(skip).take(count).collect::<Result<_, _>>()
+                }
+                crate::pagination::Order::Desc => {
+                    slots.rev().skip(skip).take(count).collect::<Result<_, _>>()
+                }
+            }
+            .map_err(log_and_500("failed to page the pool blocks index"))?;
+
+            let mut page = Vec::with_capacity(page_slots.len());
+
+            for slot in page_slots {
+                let body = inner
+                    .archive()
+                    .get_block_by_slot(&slot)
+                    .map_err(log_and_500("failed to read a block of a pool"))?;
+
+                // A tagged slot always holds a block, and a Byron block is
+                // never tagged. Skip either, rather than fail the page.
+                let Some(body) = body else {
+                    tracing::warn!(slot, "pool blocks index points at a missing block");
+                    continue;
+                };
+
+                let Some(header) = super::epochs::decode_block_header(&body)? else {
+                    tracing::warn!(slot, "pool blocks index points at a Byron block");
+                    continue;
+                };
+
+                page.push(header.hash().to_string());
+            }
+
+            Ok((page, minted_any))
+        })
+        .await
+        .map_err(log_and_500("pool blocks scan task failed"))??;
+
+    // Blockfrost 404s a pool that db-sync never saw. The `PoolState` entity
+    // covers every pool that registered on chain, and a pool must register
+    // before it can mint. The index acts as a second proof of existence, for
+    // any issuer that has no entity.
+    if !minted_any && !domain.cardano_entity_exists::<PoolState>(pool)? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    Ok(Json(page))
+}
+
 pub async fn by_id_delegators<D: Domain>(
     Path(id): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -1105,8 +1365,11 @@ where
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
 {
-    let operator = decode_pool_id(&id)?;
-    if !domain.cardano_entity_exists::<PoolState>(operator.as_slice())? {
+    let pagination = Pagination::try_from(params)?;
+    let Some(hash) = parse_pool_id_bounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+    if !domain.cardano_entity_exists::<PoolState>(hash)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1120,10 +1383,8 @@ where
         account
             .delegated_pool_live()
             .or(account.retired_pool.as_ref())
-            .is_some_and(|f| f.as_slice() == operator.as_slice())
+            .is_some_and(|f| *f == hash)
     });
-
-    let pagination = Pagination::try_from(params)?;
 
     let page: Vec<_> = filtered
         .skip(pagination.skip())
@@ -1192,15 +1453,23 @@ pub async fn by_id_history<D: Domain>(
 ) -> Result<Json<Vec<PoolHistoryInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
 {
-    let operator = decode_pool_id(&id)?;
+    let hash = parse_pool_id_unbounded(&id)?;
     let pagination = Pagination::try_from(params)?;
+    let Some(hash) = hash else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+    if !domain.cardano_entity_exists::<PoolState>(hash)? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
     let tip = domain.get_tip_slot()?;
     let summary = domain.get_chain_summary()?;
     let (epoch, _) = summary.slot_epoch(tip);
 
     let mut entries = domain
-        .iter_cardano_logs_per_epoch::<StakeLog>(operator.into(), 0..epoch)
+        .iter_cardano_logs_per_epoch::<StakeLog>(hash.into(), 0..epoch)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Apply order before pagination
@@ -1238,20 +1507,14 @@ where
     D: Domain + Clone + Send + Sync + 'static,
     Option<PoolState>: From<D::Entity>,
 {
-    let operator = decode_pool_id(&id)?;
-
-    // Make sure that the decoded id is 28 bytes before the existence check.
-    // A short or long bech32 payload pads into a valid EntityKey. The check
-    // then returns a 404 for a malformed id, but the caller expects a 400.
-    let pool: PoolHash = <[u8; 28]>::try_from(operator.as_slice())
-        .map_err(|_| Error::InvalidPoolId)?
-        .into();
+    let pagination = Pagination::try_from(params)?;
+    let Some(pool) = parse_pool_id_bounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
 
     if !domain.cardano_entity_exists::<PoolState>(pool)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
-
-    let pagination = Pagination::try_from(params)?;
 
     let order = match pagination.order {
         crate::pagination::Order::Asc => SlotOrder::Asc,
@@ -1274,10 +1537,81 @@ where
     Ok(Json(out))
 }
 
+fn pool_vote_model(vote: &Vote) -> pool_votes_inner::Vote {
+    match vote {
+        Vote::Yes => pool_votes_inner::Vote::Yes,
+        Vote::No => pool_votes_inner::Vote::No,
+        Vote::Abstain => pool_votes_inner::Vote::Abstain,
+    }
+}
+
+/// `GET /pools/{pool_id}/votes` returns the votes of a stake pool. By default,
+/// the list starts with the oldest vote.
+///
+/// `tx_hash` is the hash of the transaction that contains the vote.
+/// `cert_index` is the index of the vote in the ballot of the pool in that
+/// transaction. A repeated vote on the same proposal is a separate row.
+///
+/// If the pool never registered, the endpoint returns 404. The endpoint does
+/// not return 404 for a retired pool. If the pool registered but has no votes,
+/// the endpoint returns an empty list.
+///
+/// `max_scan_items` is the limit for the page depth. The other endpoints that
+/// read a block for each row use the same limit.
+///
+/// The endpoint does the checks in the same order as Blockfrost. The order is
+/// the query string, then the pool ID, then the registration of the pool.
+/// Blockfrost has no scan limit. Thus, the endpoint does the scan limit check
+/// after the Blockfrost checks.
+pub async fn by_id_votes<D>(
+    Path(id): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<PoolVotesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<PoolState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+    let Some(pool) = parse_pool_id_bounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+
+    if !domain.cardano_entity_exists::<PoolState>(pool)? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
+
+    let voter = Voter::StakePoolKey(pool);
+
+    let casts = domain
+        .query()
+        .run_blocking(move |domain| Ok(voter_casts(&domain, &voter, &pagination)))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    let out = casts
+        .into_iter()
+        .map(|cast| {
+            Ok(PoolVotesInner {
+                tx_hash: hex::encode(cast.tx),
+                cert_index: i32_or_500(cast.cert_index)?,
+                vote: pool_vote_model(&cast.vote),
+            })
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{
+        bech32_encode_values, bech32_values_from_bytes, pool_id_cases, PoolIdCase, TestApp,
+        TestFault, REG_POOL_HEX, REG_POOL_ID,
+    };
     use blockfrost_openapi::models::{
         pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
         pool_list_extended_inner::PoolListExtendedInner,
@@ -1285,11 +1619,13 @@ mod tests {
     };
     use dolos_cardano::cip151;
     use dolos_cardano::model::{DRepDelegation, EpochValue, PoolParams, PoolSnapshot, Stake};
-    use dolos_testing::synthetic::SyntheticBlockConfig;
+    use dolos_testing::synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote};
     use pallas::{
         codec::utils::Bytes,
         crypto::hash::Hash,
-        ledger::primitives::{alonzo, Int, PoolMetadata, Relay, StakeCredential},
+        ledger::primitives::{
+            alonzo, conway::GovAction, Int, PoolMetadata, Relay, StakeCredential,
+        },
     };
     use serde_json::Value;
 
@@ -1307,6 +1643,23 @@ mod tests {
 
     fn missing_pool_id() -> &'static str {
         "pool1qurswpc8qurswpc8qurswpc8qurswpc8qurswpc8qursw2w89e2"
+    }
+
+    /// The payloads of these pool IDs do not have 28 bytes. The first payload
+    /// is the hash of the registered pool without its last byte. The second
+    /// payload is the hash with a `0x00` byte at the end. Without the length
+    /// check, the registration check finds the pool for the second payload.
+    fn wrong_length_pool_ids(app: &TestApp) -> [String; 2] {
+        let mut payload = parse_pool_id_unbounded(&app.vectors().pool_id)
+            .ok()
+            .flatten()
+            .expect("Cannot decode the pool ID.")
+            .to_vec();
+        let short = bech32_pool(&payload[..27]).expect("Cannot encode the short pool ID.");
+        payload.push(0);
+        let long = bech32_pool(&payload).expect("Cannot encode the long pool ID.");
+
+        [short, long]
     }
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
@@ -1358,7 +1711,11 @@ mod tests {
         nonce: i128,
         calidus_key: [u8; 32],
     ) -> alonzo::Metadatum {
-        let operator = decode_pool_id(pool_id).expect("valid pool id");
+        let operator = parse_pool_id_unbounded(pool_id)
+            .ok()
+            .flatten()
+            .expect("valid pool id")
+            .to_vec();
 
         md_map(vec![
             (md_int(0), md_int(2)),
@@ -2424,6 +2781,240 @@ mod tests {
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
+    /// Every synthetic block is minted by the same fixed issuer key, so the
+    /// pool derived from it owns the whole toy chain.
+    fn toy_issuer_pool() -> String {
+        bech32_pool(Hasher::<224>::hash(&[0x10, 0x11])).expect("valid pool id")
+    }
+
+    /// The hex form of the same pool id. Blockfrost accepts either form.
+    fn toy_issuer_pool_hex() -> String {
+        Hasher::<224>::hash(&[0x10, 0x11]).to_string()
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_happy_path() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+
+        let (status, bytes) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?count=100"))
+            .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let hashes: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse hashes");
+
+        assert!(!hashes.is_empty());
+
+        for hash in &hashes {
+            assert_eq!(hash.len(), 64);
+            assert!(hash
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        }
+
+        // The toy chain sits in one epoch, so the sibling epoch endpoint
+        // lists exactly the same blocks.
+        let epoch = app.tip_epoch();
+        let (_, bytes) = app
+            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}?count=100"))
+            .await;
+        let by_epoch: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse hashes");
+
+        assert_eq!(hashes, by_epoch);
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_hex_id_matches_bech32() {
+        let app = TestApp::new();
+
+        let (_, bech32_bytes) = app
+            .get_bytes(&format!("/pools/{}/blocks?count=100", toy_issuer_pool()))
+            .await;
+        let (status, hex_bytes) = app
+            .get_bytes(&format!(
+                "/pools/{}/blocks?count=100",
+                toy_issuer_pool_hex()
+            ))
+            .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&hex_bytes)
+        );
+
+        let from_bech32: Vec<String> = serde_json::from_slice(&bech32_bytes).unwrap();
+        let from_hex: Vec<String> = serde_json::from_slice(&hex_bytes).unwrap();
+
+        assert!(!from_hex.is_empty());
+        assert_eq!(from_bech32, from_hex);
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_paginated() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+
+        let (status_1, bytes_1) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?count=1&page=1"))
+            .await;
+        let (status_2, bytes_2) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?count=1&page=2"))
+            .await;
+        let (status_far, bytes_far) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?count=1&page=1000"))
+            .await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+        assert_eq!(status_far, StatusCode::OK);
+
+        let page_1: Vec<String> = serde_json::from_slice(&bytes_1).unwrap();
+        let page_2: Vec<String> = serde_json::from_slice(&bytes_2).unwrap();
+        let page_far: Vec<String> = serde_json::from_slice(&bytes_far).unwrap();
+
+        assert_eq!(page_1.len(), 1);
+        assert_eq!(page_2.len(), 1);
+        assert_ne!(page_1, page_2);
+        assert!(page_far.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_desc_is_reversed_asc() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+
+        let (_, asc_bytes) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?order=asc&count=100"))
+            .await;
+        let (_, desc_bytes) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?order=desc&count=100"))
+            .await;
+
+        let asc: Vec<String> = serde_json::from_slice(&asc_bytes).unwrap();
+        let mut desc: Vec<String> = serde_json::from_slice(&desc_bytes).unwrap();
+
+        assert!(!asc.is_empty());
+
+        desc.reverse();
+        assert_eq!(asc, desc);
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_registered_pool_without_blocks_is_empty() {
+        let app = TestApp::new();
+        let pool = app.vectors().pool_id.clone();
+
+        let (status, bytes) = app.get_bytes(&format!("/pools/{pool}/blocks")).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let hashes: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+        assert!(hashes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_bad_request() {
+        let app = TestApp::new();
+
+        let path = format!("/pools/{}/blocks", invalid_pool_id());
+        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
+
+        // The endpoint does the query string check before the pool ID check.
+        let path = format!("/pools/{}/blocks?count=0", invalid_pool_id());
+        assert_error_message(&app, &path, "querystring/count must be >= 1").await;
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_bad_pagination() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+
+        assert_error_message(
+            &app,
+            &format!("/pools/{pool}/blocks?order=a"),
+            "querystring/order must be equal to one of the allowed values",
+        )
+        .await;
+        assert_error_message(
+            &app,
+            &format!("/pools/{pool}/blocks?page=0"),
+            "querystring/page must be >= 1",
+        )
+        .await;
+        assert_error_message(
+            &app,
+            &format!("/pools/{pool}/blocks?count=101"),
+            "querystring/count must be <= 100",
+        )
+        .await;
+    }
+
+    /// Blockfrost does not declare `from`/`to` for this route, so a malformed
+    /// or reversed window changes nothing.
+    #[tokio::test]
+    async fn pools_blocks_ignores_from_to() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+
+        let (status, plain) = app
+            .get_bytes(&format!("/pools/{pool}/blocks?count=100"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let expected: Vec<String> = serde_json::from_slice(&plain).unwrap();
+        assert!(!expected.is_empty());
+
+        for window in ["from=bad", "from=999999999&to=1", "from=abc&to=xyz"] {
+            let (status, bytes) = app
+                .get_bytes(&format!("/pools/{pool}/blocks?count=100&{window}"))
+                .await;
+
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "unexpected status {status} for {window} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+
+            let hashes: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(hashes, expected, "{window} changed the body");
+        }
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_not_found() {
+        let app = TestApp::new();
+        let pool = bech32_pool([0xff; 28]).expect("valid pool id");
+        let path = format!("/pools/{pool}/blocks");
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        for pool_id in wrong_length_pool_ids(&app) {
+            let path = format!("/pools/{pool_id}/blocks");
+            assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn pools_blocks_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let path = format!("/pools/{}/blocks", toy_issuer_pool());
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
     #[tokio::test]
     async fn pools_updates_happy_path() {
         let app = TestApp::new();
@@ -2486,23 +3077,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pools_updates_wrong_length_bech32_is_bad_request() {
-        let app = TestApp::new();
-
-        // A pool1 string that decodes but carries 27 bytes, not 28.
-        let hrp = bech32::Hrp::parse("pool").expect("invalid hrp");
-        let short = bech32::encode::<bech32::Bech32>(hrp, &[0u8; 27])
-            .expect("failed to encode short pool id");
-
-        let path = format!("/pools/{short}/updates");
-        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
-    }
-
-    #[tokio::test]
     async fn pools_updates_not_found() {
         let app = TestApp::new();
         let path = format!("/pools/{}/updates", missing_pool_id());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        for pool_id in wrong_length_pool_ids(&app) {
+            let path = format!("/pools/{pool_id}/updates");
+            assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+        }
     }
 
     #[tokio::test]
@@ -2511,5 +3094,457 @@ mod tests {
         let pool_id = app.vectors().pool_id.as_str();
         let path = format!("/pools/{pool_id}/updates");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    const VOTING_POOL: [u8; 28] = [9u8; 28];
+
+    fn synthetic_vote(
+        voter: &Voter,
+        block: usize,
+        tx: usize,
+        action: u32,
+        vote: Vote,
+    ) -> SyntheticVote {
+        SyntheticVote {
+            voter: voter.clone(),
+            proposal: SyntheticProposalRef { block, tx, action },
+            vote,
+            anchor: None,
+        }
+    }
+
+    /// Transaction 0 of block 0 proposes three actions. In block 1,
+    /// transaction 0 contains a ballot of the pool on actions 2 and 0. The
+    /// same transaction also contains the ballots of a DRep and of a second
+    /// pool. In block 1, transaction 1 contains a ballot of the pool on
+    /// action 1. In block 2, transaction 0 contains a new vote of the pool on
+    /// action 0.
+    ///
+    /// Each ballot is a map that sorts its votes by governance action ID. As a
+    /// result, in transaction 0 of block 1, the vote of the pool on action 0
+    /// has `cert_index` 0. The vote of the pool on action 2 has `cert_index` 1.
+    /// In that transaction, the ballot of the DRep is before the ballot of the
+    /// pool. The index starts at 0 for each voter. Thus, the ballot of the
+    /// DRep does not change the index.
+    ///
+    /// Transaction 0 is before transaction 1. Thus, in chain order, the vote
+    /// of the pool on action 2 is before the vote of the pool on action 1.
+    fn pool_votes_config() -> SyntheticBlockConfig {
+        let pool = Voter::StakePoolKey(Hash::from(VOTING_POOL));
+        let drep = Voter::DRepKey(Hash::from([7u8; 28]));
+        let other_pool = Voter::StakePoolKey(Hash::from([5u8; 28]));
+
+        SyntheticBlockConfig {
+            pool_id: bech32_pool(VOTING_POOL).expect("Cannot encode the pool ID."),
+            block_count: 3,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![
+                vec![vec![
+                    GovAction::Information,
+                    GovAction::Information,
+                    GovAction::Information,
+                ]],
+                vec![],
+                vec![],
+            ],
+            votes_by_block: vec![
+                vec![],
+                vec![
+                    vec![
+                        synthetic_vote(&drep, 0, 0, 0, Vote::No),
+                        synthetic_vote(&pool, 0, 0, 2, Vote::Abstain),
+                        synthetic_vote(&pool, 0, 0, 0, Vote::Yes),
+                        synthetic_vote(&other_pool, 0, 0, 1, Vote::No),
+                    ],
+                    vec![synthetic_vote(&pool, 0, 0, 1, Vote::No)],
+                ],
+                vec![vec![synthetic_vote(&pool, 0, 0, 0, Vote::No)]],
+            ],
+            ..Default::default()
+        }
+    }
+
+    async fn get_pool_votes(app: &TestApp, pool_id: &str, query: &str) -> Vec<PoolVotesInner> {
+        let path = format!("/pools/{pool_id}/votes{query}");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "The request to {path} returned status {status}. The response body was {}.",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes).expect("The pool vote response did not contain valid JSON.")
+    }
+
+    fn pool_vote_row(
+        tx_hash: &str,
+        cert_index: i32,
+        vote: pool_votes_inner::Vote,
+    ) -> PoolVotesInner {
+        PoolVotesInner {
+            tx_hash: tx_hash.to_string(),
+            cert_index,
+            vote,
+        }
+    }
+
+    fn expected_pool_votes(app: &TestApp) -> Vec<PoolVotesInner> {
+        let blocks = &app.vectors().blocks;
+
+        vec![
+            pool_vote_row(&blocks[1].tx_hashes[0], 0, pool_votes_inner::Vote::Yes),
+            pool_vote_row(&blocks[1].tx_hashes[0], 1, pool_votes_inner::Vote::Abstain),
+            pool_vote_row(&blocks[1].tx_hashes[1], 0, pool_votes_inner::Vote::No),
+            pool_vote_row(&blocks[2].tx_hashes[0], 0, pool_votes_inner::Vote::No),
+        ]
+    }
+
+    #[tokio::test]
+    async fn pools_votes_happy_path() {
+        let app = TestApp::new_with_cfg(pool_votes_config());
+        let expected = expected_pool_votes(&app);
+
+        let rows = get_pool_votes(&app, &app.vectors().pool_id, "").await;
+        assert_eq!(rows, expected);
+
+        let rows = get_pool_votes(&app, &hex::encode(VOTING_POOL), "").await;
+        assert_eq!(rows, expected);
+    }
+
+    #[tokio::test]
+    async fn pools_votes_orders_and_paginates() {
+        let app = TestApp::new_with_cfg(pool_votes_config());
+        let pool_id = app.vectors().pool_id.clone();
+        let expected = expected_pool_votes(&app);
+        let reversed = expected.iter().rev().cloned().collect_vec();
+
+        assert_eq!(
+            get_pool_votes(&app, &pool_id, "?order=desc").await,
+            reversed
+        );
+        assert_eq!(
+            get_pool_votes(&app, &pool_id, "?order=desc&count=3").await,
+            reversed[..3]
+        );
+        assert_eq!(
+            get_pool_votes(&app, &pool_id, "?count=2").await,
+            expected[..2]
+        );
+
+        // If `count` is 2, page 1 contains two of the three votes of the pool
+        // in block 1. The first vote on page 2 is the third of these votes.
+        assert_eq!(
+            get_pool_votes(&app, &pool_id, "?count=2&page=2").await,
+            expected[2..]
+        );
+        assert_eq!(
+            get_pool_votes(&app, &pool_id, "?count=1&page=2").await,
+            expected[1..2]
+        );
+        assert!(get_pool_votes(&app, &pool_id, "?page=2").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pools_votes_without_votes() {
+        let app = TestApp::new();
+        let pool_id = app.vectors().pool_id.clone();
+
+        assert!(get_pool_votes(&app, &pool_id, "").await.is_empty());
+        assert!(get_pool_votes(&app, &pool_id, "?order=desc")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn pools_votes_bad_request() {
+        let app = TestApp::new_with_cfg(pool_votes_config());
+        let path = format!("/pools/{}/votes", invalid_pool_id());
+        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
+
+        // The endpoint does the query string check before the pool ID check.
+        let path = format!("/pools/{}/votes?count=0", invalid_pool_id());
+        assert_error_message(&app, &path, "querystring/count must be >= 1").await;
+
+        let path = format!("/pools/{}/votes?order=sideways", missing_pool_id());
+        assert_error_message(
+            &app,
+            &path,
+            "querystring/order must be equal to one of the allowed values",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pools_votes_not_found() {
+        let app = TestApp::new_with_cfg(pool_votes_config());
+        let path = format!("/pools/{}/votes", missing_pool_id());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        // Block 1 contains a vote of the second pool, but the second pool
+        // never registered.
+        let path = format!("/pools/{}/votes", hex::encode([5u8; 28]));
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        for pool_id in wrong_length_pool_ids(&app) {
+            let path = format!("/pools/{pool_id}/votes");
+            assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn pools_votes_rejects_deep_page() {
+        let app = TestApp::new_with_scan_limit(pool_votes_config(), 3);
+        let path = format!("/pools/{}/votes?count=2&page=2", app.vectors().pool_id);
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn pools_votes_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/votes");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    const COUNT_MESSAGE: &str = "querystring/count must be >= 1";
+    const POOL_ID_MESSAGE: &str = "Invalid or malformed pool id format.";
+    const NOT_FOUND_MESSAGE: &str = "The requested component has not been found.";
+
+    fn registered_pool_app() -> TestApp {
+        TestApp::new_with_cfg(SyntheticBlockConfig {
+            pool_id: REG_POOL_ID.to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn pool_id_case(label: &str) -> PoolIdCase {
+        pool_id_cases()
+            .into_iter()
+            .find(|case| case.label == label)
+            .expect("Cannot find the pool ID case.")
+    }
+
+    /// Gives a text for each difference from the Blockfrost error body.
+    async fn error_mismatch(
+        app: &TestApp,
+        path: &str,
+        status: StatusCode,
+        message: &str,
+    ) -> Option<String> {
+        let (actual, bytes) = app.get_bytes(path).await;
+        let expected = serde_json::json!({
+            "status_code": status.as_u16(),
+            "error": status.canonical_reason(),
+            "message": message,
+        });
+        let body = serde_json::from_slice::<Value>(&bytes).ok();
+
+        (actual != status || body.as_ref() != Some(&expected)).then(|| {
+            format!(
+                "{path}: expected {status} {message:?}, got {actual} {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn pools_history_happy_path() {
+        let app = registered_pool_app();
+        let path = format!("/pools/{REG_POOL_ID}/history");
+        assert_status(&app, &path, StatusCode::OK).await;
+    }
+
+    #[tokio::test]
+    async fn pools_history_not_found() {
+        let app = registered_pool_app();
+        let path = format!("/pools/{}/history", missing_pool_id());
+        let mismatch = error_mismatch(&app, &path, StatusCode::NOT_FOUND, NOT_FOUND_MESSAGE).await;
+        assert!(mismatch.is_none(), "{mismatch:?}");
+    }
+
+    #[tokio::test]
+    async fn pool_routes_check_pagination_in_blockfrost_order() {
+        let app = registered_pool_app();
+        let mut mismatches = Vec::new();
+
+        for label in ["invalid", "bmissing", "b29", "h58"] {
+            let id = pool_id_case(label).path_id();
+
+            for suffix in ["delegators", "updates", "votes"] {
+                let path = format!("/pools/{id}/{suffix}?count=0");
+                let mismatch =
+                    error_mismatch(&app, &path, StatusCode::BAD_REQUEST, COUNT_MESSAGE).await;
+                mismatches.extend(mismatch);
+            }
+
+            // The `/history` route parses the pool ID format before the pagination.
+            // The 404 for a valid ID comes after the pagination.
+            let message = if label == "invalid" {
+                POOL_ID_MESSAGE
+            } else {
+                COUNT_MESSAGE
+            };
+            let path = format!("/pools/{id}/history?count=0");
+            mismatches.extend(error_mismatch(&app, &path, StatusCode::BAD_REQUEST, message).await);
+        }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    /// Gives a text for a difference from the Blockfrost response.
+    /// The text contains the case label, not the path, because some IDs have
+    /// thousands of characters.
+    async fn pool_id_case_mismatch(
+        app: &TestApp,
+        case: &PoolIdCase,
+        route: &str,
+        expected: u16,
+    ) -> Option<String> {
+        let (status, bytes) = app.get_bytes(&route.replace("{id}", &case.path_id())).await;
+        let expected_body = match expected {
+            400 => Some(("Bad Request", POOL_ID_MESSAGE)),
+            404 => Some(("Not Found", NOT_FOUND_MESSAGE)),
+            _ => None,
+        }
+        .map(|(error, message)| {
+            serde_json::json!({ "status_code": expected, "error": error, "message": message })
+        });
+        let body = serde_json::from_slice::<Value>(&bytes).ok();
+        let matched =
+            status.as_u16() == expected && (expected_body.is_none() || body == expected_body);
+
+        (!matched).then(|| {
+            format!(
+                "{} {route}: expected {expected}, got {status} {}",
+                case.label,
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn pool_routes_match_blockfrost_for_each_pool_id() {
+        let app = registered_pool_app();
+        let mut mismatches = Vec::new();
+
+        for case in pool_id_cases() {
+            for suffix in [
+                "",
+                "/metadata",
+                "/relays",
+                "/delegators",
+                "/history",
+                "/updates",
+                "/votes",
+            ] {
+                let expected = match suffix {
+                    "" | "/history" => case.unbounded_status,
+                    _ => case.bounded_status,
+                };
+                let route = format!("/pools/{{id}}{suffix}");
+                mismatches.extend(pool_id_case_mismatch(&app, &case, &route, expected).await);
+            }
+        }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    fn parse_mismatches(
+        parse: fn(&str) -> Result<Option<PoolHash>, Error>,
+        expected: fn(&PoolIdCase) -> u16,
+    ) -> Vec<String> {
+        let registered = PoolHash::from(
+            <[u8; 28]>::try_from(hex::decode(REG_POOL_HEX).expect("Cannot decode the pool hex."))
+                .expect("The pool hex does not have 28 bytes."),
+        );
+
+        pool_id_cases()
+            .iter()
+            .filter_map(|case| {
+                let result = parse(&case.id);
+                let matched = match expected(case) {
+                    400 => matches!(result, Err(Error::InvalidPoolId)),
+                    200 => matches!(result, Ok(Some(hash)) if hash == registered),
+                    404 => matches!(result, Ok(ref hash) if *hash != Some(registered)),
+                    status => panic!("Unknown status {status} for case {}.", case.label),
+                };
+                (!matched).then(|| {
+                    format!(
+                        "{}: expected {}, got {result:?}.",
+                        case.label,
+                        expected(case)
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parse_pool_id_unbounded_matches_blockfrost() {
+        let mismatches = parse_mismatches(parse_pool_id_unbounded, |case| case.unbounded_status);
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn parse_pool_id_bounded_matches_blockfrost() {
+        let mismatches = parse_mismatches(parse_pool_id_bounded, |case| case.bounded_status);
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn pool_id_cases_have_expected_lengths() {
+        let cases = pool_id_cases();
+        let expected = [
+            ("b1000", 1000),
+            ("b1001", 1001),
+            ("b1002", 1002),
+            ("b1023", 1023),
+            ("b1024", 1024),
+            ("b5000", 5007),
+        ];
+
+        for (label, len) in expected {
+            let case = cases
+                .iter()
+                .find(|case| case.label == label)
+                .expect("Cannot find the case.");
+            assert_eq!(case.id.chars().count(), len, "Wrong length for {label}.");
+        }
+    }
+
+    #[test]
+    fn pool_id_case_paths_are_ascii() {
+        for case in pool_id_cases() {
+            assert!(
+                case.path_id().is_ascii(),
+                "The path for {} is not ASCII.",
+                case.label
+            );
+        }
+    }
+
+    #[test]
+    fn pool_id_encoder_matches_bech32_crate() {
+        let registered = hex::decode(REG_POOL_HEX).expect("Cannot decode the pool hex.");
+        let encode = |bytes: &[u8], constant| {
+            bech32_encode_values("pool", &bech32_values_from_bytes(bytes), constant)
+        };
+
+        assert_eq!(REG_POOL_ID, encode(&registered, 1));
+        assert_eq!(
+            bech32_pool(&registered).expect("Cannot encode the pool ID."),
+            encode(&registered, 1)
+        );
+        assert_eq!(
+            bech32_pool([9u8; 28]).expect("Cannot encode the pool ID."),
+            encode(&[9u8; 28], 1)
+        );
+
+        let hrp = bech32::Hrp::parse("pool").expect("Cannot parse the HRP.");
+        assert_eq!(
+            bech32::encode::<bech32::Bech32m>(hrp, &registered)
+                .expect("Cannot encode the Bech32m ID."),
+            encode(&registered, 0x2bc8_30a3)
+        );
     }
 }
