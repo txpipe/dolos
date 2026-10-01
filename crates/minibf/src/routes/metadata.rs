@@ -6,8 +6,12 @@ use axum::{
 use blockfrost_openapi::models::{
     tx_metadata_label_cbor_inner::TxMetadataLabelCborInner,
     tx_metadata_label_json_inner::TxMetadataLabelJsonInner,
+    tx_metadata_labels_inner::TxMetadataLabelsInner,
 };
-use dolos_cardano::indexes::{AsyncCardanoQueryExt, SlotOrder};
+use dolos_cardano::{
+    indexes::{AsyncCardanoQueryExt, SlotOrder},
+    model::{metadata_label_from_entity_key, MetadataLabelState},
+};
 use dolos_core::Domain;
 use futures_util::StreamExt;
 use pallas::{
@@ -22,9 +26,44 @@ use pallas::{
 use crate::{
     error::Error,
     mapping::IntoModel,
-    pagination::{Pagination, PaginationParameters},
+    pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
+
+/// The labels in the CIP-10 registry. Each label has the description that
+/// Blockfrost shows for it.
+const CIP10_LABELS: [(u64, &str); 17] = [
+    (
+        87,
+        "milkomeda.com - The protocol magic for the milkomeda protocol",
+    ),
+    (
+        88,
+        "milkomeda.com - the destination address in the sidechain",
+    ),
+    (309, "Proof of Existence record"),
+    (674, "CIP-0020 - Transaction message/comment metadata"),
+    (721, "CIP-0025 - NFT Metadata Standard"),
+    (777, "CIP-0027 - Royalties Standard"),
+    (1188, "paradiso.app marketplace metadata"),
+    (1189, "paradiso.app services metadata"),
+    (1870, "Open Badges v2.0 compliant metadata"),
+    (1967, "nut.link metadata oracles registry"),
+    (1968, "nut.link metadata oracles data points"),
+    (1988, "cardahub.io marketplace metadata"),
+    (1989, "cardahub.io services metadata"),
+    (6770, "fortunes.coconutpool.com fortune teller"),
+    (61284, "CIP-0015 - Catalyst registration"),
+    (61285, "CIP-0015 - Catalyst registration"),
+    (61286, "CIP-0015 - Catalyst registration"),
+];
+
+fn cip10_description(label: u64) -> Option<String> {
+    CIP10_LABELS
+        .iter()
+        .find(|(known, _)| *known == label)
+        .map(|(_, description)| description.to_string())
+}
 
 struct MetadataHistoryModelBuilder {
     label: u64,
@@ -197,14 +236,52 @@ where
     Ok(Json(model))
 }
 
+pub async fn labels<D>(
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<TxMetadataLabelsInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<MetadataLabelState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let mut labels = domain
+        .iter_cardano_entities::<MetadataLabelState>(None)?
+        .map(|item| {
+            let (key, state) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            Ok((metadata_label_from_entity_key(&key), state.tx_count))
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    labels.sort_unstable_by_key(|(label, _)| *label);
+
+    if matches!(pagination.order, Order::Desc) {
+        labels.reverse();
+    }
+
+    let page = labels
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(label, tx_count)| {
+            TxMetadataLabelsInner::new(
+                label.to_string(),
+                cip10_description(label),
+                tx_count.to_string(),
+            )
+        })
+        .collect();
+
+    Ok(Json(page))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{TestApp, TestFault};
-    use blockfrost_openapi::models::{
-        tx_metadata_label_cbor_inner::TxMetadataLabelCborInner,
-        tx_metadata_label_json_inner::TxMetadataLabelJsonInner,
-    };
+    use dolos_testing::synthetic::SyntheticBlockConfig;
 
     fn invalid_label() -> &'static str {
         "not-a-number"
@@ -477,5 +554,141 @@ mod tests {
         let label = app.vectors().metadata_label.as_str();
         let path = format!("/metadata/txs/labels/{label}/cbor");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    fn labels_app() -> TestApp {
+        TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 4,
+            txs_per_block: 2,
+            metadata_entries: vec![
+                (674, Metadatum::Text("message".into())),
+                (5, Metadatum::Int(1.into())),
+                (87, Metadatum::Text("milkomeda".into())),
+            ],
+            ..Default::default()
+        })
+    }
+
+    async fn get_labels(app: &TestApp, path: &str) -> Vec<TxMetadataLabelsInner> {
+        let (status, bytes) = app.get_bytes(path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "incorrect status {status}, body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        serde_json::from_slice(&bytes).expect("cannot parse the metadata labels")
+    }
+
+    fn label_names(items: &[TxMetadataLabelsInner]) -> Vec<&str> {
+        items.iter().map(|x| x.label.as_str()).collect()
+    }
+
+    async fn assert_bad_request(app: &TestApp, path: &str, message: &str) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("cannot parse the error body");
+        assert_eq!(body["message"], message);
+    }
+
+    #[tokio::test]
+    async fn metadata_labels_counts_each_transaction_carrying_the_label() {
+        let app = TestApp::new();
+        let label = app.vectors().metadata_label.clone();
+        let blocks = app.vectors().blocks.len().to_string();
+
+        let items = get_labels(&app, "/metadata/txs/labels").await;
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, label);
+        assert_eq!(items[0].cip10, None);
+        assert_eq!(items[0].count, blocks);
+    }
+
+    #[tokio::test]
+    async fn metadata_labels_are_sorted_numerically_with_cip10_descriptions() {
+        let app = labels_app();
+
+        let items = get_labels(&app, "/metadata/txs/labels").await;
+
+        assert_eq!(label_names(&items), ["5", "87", "674"]);
+        assert_eq!(items[0].cip10, None);
+        assert_eq!(
+            items[1].cip10.as_deref(),
+            Some("milkomeda.com - The protocol magic for the milkomeda protocol")
+        );
+        assert_eq!(
+            items[2].cip10.as_deref(),
+            Some("CIP-0020 - Transaction message/comment metadata")
+        );
+        assert!(items.iter().all(|x| x.count == "4"));
+    }
+
+    #[tokio::test]
+    async fn metadata_labels_order_desc() {
+        let app = labels_app();
+
+        let items = get_labels(&app, "/metadata/txs/labels?order=desc").await;
+
+        assert_eq!(label_names(&items), ["674", "87", "5"]);
+    }
+
+    #[tokio::test]
+    async fn metadata_labels_paginated() {
+        let app = labels_app();
+
+        let page_2 = get_labels(&app, "/metadata/txs/labels?count=1&page=2").await;
+        assert_eq!(label_names(&page_2), ["87"]);
+
+        let desc_page_2 = get_labels(&app, "/metadata/txs/labels?count=2&page=2&order=desc").await;
+        assert_eq!(label_names(&desc_page_2), ["5"]);
+
+        let beyond = get_labels(&app, "/metadata/txs/labels?page=21474836").await;
+        assert!(beyond.is_empty());
+    }
+
+    #[tokio::test]
+    async fn metadata_labels_bad_request() {
+        let app = TestApp::new();
+
+        assert_bad_request(
+            &app,
+            "/metadata/txs/labels?order=a",
+            "querystring/order must be equal to one of the allowed values",
+        )
+        .await;
+        assert_bad_request(
+            &app,
+            "/metadata/txs/labels?page=x",
+            "querystring/page must be integer",
+        )
+        .await;
+        assert_bad_request(
+            &app,
+            "/metadata/txs/labels?count=0",
+            "querystring/count must be >= 1",
+        )
+        .await;
+        assert_bad_request(
+            &app,
+            "/metadata/txs/labels?count=101",
+            "querystring/count must be <= 100",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn metadata_labels_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(
+            &app,
+            "/metadata/txs/labels",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
     }
 }

@@ -163,6 +163,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/governance/proposals/{tx_hash}/{cert_index}/metadata`    | Get metadata of a specific proposal                      |
 | `/governance/proposals/{tx_hash}/{cert_index}/parameters`  | Get parameter change of a specific proposal              |
 | `/governance/proposals/{tx_hash}/{cert_index}/withdrawals` | Get withdrawals of a specific proposal                   |
+| `/metadata/txs/labels`                                     | Get the list of transaction metadata labels              |
 | `/metadata/txs/labels/{label}`                             | Get metadata for transactions with a specific label      |
 | `/metadata/txs/labels/{label}/cbor`                        | Get CBOR metadata for transactions with a specific label |
 | `/network`                                                 | Get network information                                  |
@@ -202,3 +203,5 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 ## Lifetime totals and `sync.max_history`
 
 `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` fold every transaction kept in the archive. When `sync.max_history` is set, blocks pruned by housekeeping are not counted, so the sums and `tx_count` only cover the retained window. Run with full history if you need true lifetime totals.
+
+`/metadata/txs/labels` does not read the archive. Dolos keeps a transaction count for each label in the ledger state. When Dolos applies a block, it updates the counts. When housekeeping prunes old blocks, the counts do not change.

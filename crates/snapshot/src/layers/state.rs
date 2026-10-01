@@ -15,12 +15,12 @@
 //!
 //! ## One record shape, including for UTxOs
 //!
-//! ADR-004 treats the UTxO set as namespace [`crate::UTXOS`] beside the
-//! thirteen entity namespaces, rather than as a special layer kind. That is
-//! what keeps the format's state vocabulary to a single record, and it makes
-//! the planned refactor folding UTxOs into the entity system (#1042) invisible
-//! from outside: the day `utxos` becomes an ordinary namespace, nothing in this
-//! file changes.
+//! ADR-004 puts the UTxO set in the namespace [`crate::UTXOS`], next to the
+//! fourteen entity namespaces. The UTxO set does not have a special layer kind.
+//! That is what keeps the format's state vocabulary to a single record, and it
+//! makes the planned refactor folding UTxOs into the entity system (#1042)
+//! invisible from outside: the day `utxos` becomes an ordinary namespace,
+//! nothing in this file changes.
 //!
 //! The namespace still governs the *codec parameters* — the key width above
 //! all — so [`encode`] and [`decode`] take it as an argument, derived by the
