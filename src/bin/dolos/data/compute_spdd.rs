@@ -61,7 +61,7 @@ pub fn compute_spdd(store: &impl StateStore) -> miette::Result<HashMap<Hash<28>,
 }
 
 pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+    let _tracing = crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let state = crate::common::open_state_store(config)?;
 

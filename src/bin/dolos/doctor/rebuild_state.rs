@@ -371,7 +371,7 @@ fn replay(
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    crate::common::setup_tracing_error_only()?;
+    let _tracing = crate::common::setup_tracing_error_only()?;
 
     let mode = match (&args.target, args.ephemeral) {
         (Some(path), _) => Mode::Target(path.clone()),

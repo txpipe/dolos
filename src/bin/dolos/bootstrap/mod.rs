@@ -141,18 +141,19 @@ fn seed_wal(config: &RootConfig) -> miette::Result<()> {
     Ok(())
 }
 
-fn setup_tracing(config: &RootConfig, verbose: bool) -> miette::Result<()> {
+fn setup_tracing(
+    config: &RootConfig,
+    verbose: bool,
+) -> miette::Result<crate::common::TracingGuard> {
     if verbose {
-        crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+        crate::common::setup_tracing(&config.logging, &config.telemetry)
     } else {
-        crate::common::setup_tracing_error_only()?;
+        crate::common::setup_tracing_error_only()
     }
-
-    Ok(())
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    setup_tracing(config, args.verbose)?;
+    let _tracing = setup_tracing(config, args.verbose)?;
 
     let existing = inspect_existing_data(config, args)?;
 

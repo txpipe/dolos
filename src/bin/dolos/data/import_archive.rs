@@ -39,11 +39,11 @@ struct DecodedBlock {
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    if args.verbose {
-        crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+    let _tracing = if args.verbose {
+        crate::common::setup_tracing(&config.logging, &config.telemetry)?
     } else {
-        crate::common::setup_tracing_error_only()?;
-    }
+        crate::common::setup_tracing_error_only()?
+    };
 
     let source_path = Path::new(&args.source);
 
