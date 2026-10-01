@@ -34,17 +34,25 @@
 //! store gave them. A rollback removes its entries through
 //! [`CoreArchiveWriter::undo_index`]; `truncate_front` does not touch them.
 //!
-//! ## Pruning the index keyspaces
+//! ## Pruning
+//!
+//! `prune_history` removes whole slots below `tip - max_slots`, oldest first
+//! across the blocks and every log namespace, until the caller's row budget
+//! is spent. A batch closes only at a slot boundary, so a reader never sees a
+//! slot half removed: the per-epoch logs put a row per account at one slot,
+//! and readers that sum or page through it would get plausible but wrong
+//! answers. A call can therefore overshoot its budget by one slot. Segment
+//! files go once the first block left has moved past them, after the removal
+//! of their block keys is durable.
 //!
 //! The slot is the *last* key component of a tag entry and the *value* of an
-//! exact entry, so neither keyspace can be range-deleted by slot the way the
-//! blocks and logs are. `prune_history` walks them in resumable chunks,
-//! examining at most the caller's index row budget across both keyspaces
-//! per call. Retained rows consume the same budget as expired rows. Each
-//! pass fixes its cutoff; subsequent calls resume with fresh snapshots so
-//! block application can run between chunks, including during history
-//! catch-up. Passes under a budget are amortized over a sixteenth of the
-//! retained window. Without a budget, all due work finishes synchronously.
+//! exact entry, so neither index keyspace can be range-deleted by slot. Once
+//! no expired slot remains, the leftover budget walks them in resumable
+//! chunks below the first block left; retained rows consume it too. Each pass
+//! fixes its cutoff and later calls resume with fresh snapshots, so block
+//! application runs between chunks. Passes under a budget are amortized over
+//! a sixteenth of the retained window; without a budget, all due work
+//! finishes in one call.
 //!
 //! Unlike the redb writer, log batches are not reordered before insertion:
 //! shuffling exists to work around redb's half-split of ascending B-tree
@@ -80,7 +88,7 @@ pub mod tags;
 
 use log_keys::{
     build_log_key, build_temporal_bound, decode_log_key, namespace_end, namespace_start,
-    PREFIXED_LOG_KEY_SIZE,
+    NS_HASH_SIZE, PREFIXED_LOG_KEY_SIZE,
 };
 
 pub use exact::ExactRecordIterator as ExactIter;
@@ -95,12 +103,13 @@ const DEFAULT_CACHE_SIZE_MB: usize = 500;
 const INDEX_L0_THRESHOLD: u8 = 8;
 const INDEX_MEMTABLE_SIZE_MB: usize = 128;
 
-/// The index keyspaces are swept once the prune cutoff has advanced by this
-/// fraction of the retained window since the last sweep.
+/// The index keyspaces are swept once the first block left has advanced by
+/// this fraction of the retained window since the last sweep.
 const INDEX_SWEEP_WINDOW_DIVISOR: u64 = 16;
 
-/// Maximum rows examined per deletion batch.
-const INDEX_SWEEP_CHUNK_ENTRIES: usize = 100_000;
+/// Rows per deletion batch. A history batch closes at the first slot boundary
+/// past it; an index sweep chunk examines at most this many.
+const PRUNE_CHUNK_ROWS: usize = 100_000;
 
 #[derive(Default)]
 struct IndexSweepState {
@@ -121,6 +130,81 @@ struct SweepChunk {
     visited: usize,
     removed: u64,
     exhausted: bool,
+}
+
+/// One slot-ordered source of expired history: the blocks, or one log
+/// namespace, below the prune target.
+struct HistoryCursor<'a> {
+    keyspace: &'a Keyspace,
+    rows: fjall::Iter,
+    slot_at: usize,
+    head: Option<(BlockSlot, fjall::UserKey)>,
+}
+
+impl<'a> HistoryCursor<'a> {
+    fn open(
+        keyspace: &'a Keyspace,
+        rows: fjall::Iter,
+        slot_at: usize,
+    ) -> Result<Self, ArchiveError> {
+        let mut cursor = Self {
+            keyspace,
+            rows,
+            slot_at,
+            head: None,
+        };
+        cursor.advance()?;
+        Ok(cursor)
+    }
+
+    fn slot(&self) -> Option<BlockSlot> {
+        self.head.as_ref().map(|(slot, _)| *slot)
+    }
+
+    fn advance(&mut self) -> Result<(), ArchiveError> {
+        self.head = match self.rows.next() {
+            Some(guard) => {
+                let key = guard.key().map_err(fjall_err)?;
+                Some((key_slot(&key, self.slot_at)?, key))
+            }
+            None => None,
+        };
+        Ok(())
+    }
+
+    /// Queue the removal of every row at `slot`, returning how many.
+    fn take_slot(
+        &mut self,
+        slot: BlockSlot,
+        batch: &mut OwnedWriteBatch,
+    ) -> Result<u64, ArchiveError> {
+        let mut taken = 0;
+        while let Some((_, key)) = self.head.take_if(|(head, _)| *head == slot) {
+            batch.remove(self.keyspace, key);
+            taken += 1;
+            self.advance()?;
+        }
+        Ok(taken)
+    }
+}
+
+#[derive(Default)]
+struct HistoryPass {
+    rows: u64,
+    batches: usize,
+    /// No expired slot is left in the blocks or any log namespace.
+    caught_up: bool,
+    /// The first expired block left behind by a spent budget.
+    next_block: Option<BlockSlot>,
+    first_removed_block: Option<BlockSlot>,
+}
+
+/// The big-endian slot stored at `at` in an archive key.
+fn key_slot(key: &[u8], at: usize) -> Result<BlockSlot, ArchiveError> {
+    key.get(at..at + 8)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(BlockSlot::from_be_bytes)
+        .ok_or_else(|| ArchiveError::InternalError("malformed archive key".to_string()))
 }
 
 /// Keyspace names for the archive store
@@ -371,10 +455,10 @@ impl ArchiveStore {
         }
     }
 
-    /// Resume one pass within a shared row budget, or finish all work when
-    /// uncapped. `true` means no active or currently due pass remains; a
-    /// sub-threshold tail of expired entries can still await the next
-    /// amortized pass.
+    /// Resume one pass within the budget the history left, or finish all
+    /// work when uncapped. `true` means no active or currently due pass
+    /// remains; a sub-threshold tail of expired entries can still await the
+    /// next amortized pass.
     fn sweep_indexes(
         &self,
         snapshot: &Snapshot,
@@ -404,7 +488,7 @@ impl ArchiveStore {
             last.is_none_or(|last| prune_before.saturating_sub(last) >= threshold)
         };
         // A zero budget would report pending work without ever advancing.
-        let mut remaining = max_entries.map_or(INDEX_SWEEP_CHUNK_ENTRIES, |rows| rows.max(1));
+        let mut remaining = max_entries.map_or(PRUNE_CHUNK_ROWS, |rows| rows.max(1));
 
         loop {
             if state.active.is_none() {
@@ -423,11 +507,11 @@ impl ArchiveStore {
                 if max_entries.is_some() {
                     return Ok(false);
                 }
-                remaining = INDEX_SWEEP_CHUNK_ENTRIES;
+                remaining = PRUNE_CHUNK_ROWS;
             }
 
             let active = state.active.as_mut().unwrap();
-            let limit = remaining.min(INDEX_SWEEP_CHUNK_ENTRIES);
+            let limit = remaining.min(PRUNE_CHUNK_ROWS);
             let chunk = if active.tags_done {
                 self.sweep_below(
                     snapshot,
@@ -482,6 +566,10 @@ impl ArchiveStore {
 
     /// Examine at most `limit` rows strictly after `after`, deleting only
     /// slots below the fixed cutoff. Errors leave the whole chunk uncommitted.
+    ///
+    /// Deletes by key without re-reading the live value, so it must not run
+    /// concurrently with an archive writer; housekeeping runs between work
+    /// units on the apply worker.
     fn sweep_below(
         &self,
         snapshot: &Snapshot,
@@ -524,6 +612,108 @@ impl ArchiveStore {
         }
 
         Ok(chunk)
+    }
+
+    /// Remove whole slots below `target`, oldest first across the blocks and
+    /// every log namespace, until `budget` rows are spent. A batch closes at
+    /// the first slot boundary past `chunk_rows`, so readers never see a slot
+    /// half removed. Like [`Self::sweep_below`], it deletes by key from the
+    /// snapshot and must not run concurrently with an archive writer.
+    fn prune_below(
+        &self,
+        snapshot: &Snapshot,
+        target: BlockSlot,
+        budget: Option<u64>,
+        chunk_rows: usize,
+    ) -> Result<HistoryPass, ArchiveError> {
+        let mut blocks = HistoryCursor::open(
+            &self.blocks,
+            snapshot.range(&self.blocks, ..target.to_be_bytes().to_vec()),
+            0,
+        )?;
+        let mut logs = self
+            .schema
+            .iter()
+            .map(|(&ns, _)| {
+                let rows = snapshot.range(
+                    &self.logs,
+                    namespace_start(ns)..build_temporal_bound(ns, target),
+                );
+                HistoryCursor::open(&self.logs, rows, NS_HASH_SIZE)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut pass = HistoryPass::default();
+        let mut batch = self.db.batch();
+
+        while budget.is_none_or(|budget| pass.rows < budget) {
+            let next = std::iter::once(&blocks)
+                .chain(&logs)
+                .filter_map(|cursor| cursor.slot())
+                .min();
+            let Some(slot) = next else {
+                break;
+            };
+
+            let removed = blocks.take_slot(slot, &mut batch)?;
+            if removed > 0 {
+                pass.first_removed_block.get_or_insert(slot);
+            }
+            pass.rows += removed;
+            for log in &mut logs {
+                pass.rows += log.take_slot(slot, &mut batch)?;
+            }
+
+            if batch.len() >= chunk_rows {
+                let full = std::mem::replace(&mut batch, self.db.batch());
+                full.durability(Some(PersistMode::Buffer))
+                    .commit()
+                    .map_err(fjall_err)?;
+                pass.batches += 1;
+            }
+        }
+
+        if !batch.is_empty() {
+            batch
+                .durability(Some(PersistMode::Buffer))
+                .commit()
+                .map_err(fjall_err)?;
+            pass.batches += 1;
+        }
+
+        pass.next_block = blocks.slot();
+        pass.caught_up = pass.next_block.is_none() && logs.iter().all(|log| log.slot().is_none());
+        Ok(pass)
+    }
+
+    /// The first block at or after `slot`.
+    fn first_block_from(
+        &self,
+        snapshot: &Snapshot,
+        slot: BlockSlot,
+    ) -> Result<Option<BlockSlot>, ArchiveError> {
+        snapshot
+            .range(&self.blocks, slot.to_be_bytes().to_vec()..)
+            .next()
+            .map(|guard| key_slot(&guard.key().map_err(fjall_err)?, 0))
+            .transpose()
+    }
+
+    /// Delete the segment files wholly below `front`, the first block left.
+    /// Block keys this call removed from such a segment are made durable
+    /// first, so a crash cannot leave them pointing at a deleted file.
+    fn drop_segments_below(
+        &self,
+        front: BlockSlot,
+        first_removed: Option<BlockSlot>,
+    ) -> Result<(), ArchiveError> {
+        let threshold = BlockLocation::segment_for_slot(front);
+        if first_removed.is_some_and(|slot| BlockLocation::segment_for_slot(slot) < threshold) {
+            self.db.persist(PersistMode::SyncAll).map_err(fjall_err)?;
+        }
+        self.flatfiles
+            .delete_segments_before(threshold)
+            .map_err(io_err)
     }
 }
 
@@ -1090,13 +1280,7 @@ impl CoreArchiveStore for ArchiveStore {
         };
 
         let (key, value) = guard.into_inner().map_err(fjall_err)?;
-
-        let slot_bytes: [u8; 8] = key
-            .as_ref()
-            .get(..8)
-            .and_then(|b| b.try_into().ok())
-            .ok_or_else(|| ArchiveError::InternalError("malformed blocks key".to_string()))?;
-        let slot = u64::from_be_bytes(slot_bytes);
+        let slot = key_slot(&key, 0)?;
 
         let loc = BlockLocation::from_bytes(&value);
         let body = self.flatfiles.read(&loc).map_err(io_err)?;
@@ -1107,99 +1291,53 @@ impl CoreArchiveStore for ArchiveStore {
     fn prune_history(
         &self,
         max_slots: u64,
-        max_prune_slots: Option<u64>,
-        max_prune_index_rows: Option<u64>,
+        max_prune_rows: Option<u64>,
     ) -> Result<bool, ArchiveError> {
         let snapshot = self.db.snapshot();
-        let max_entries =
-            max_prune_index_rows.map(|rows| usize::try_from(rows).unwrap_or(usize::MAX));
 
-        let first = snapshot
-            .first_key_value(&self.blocks)
-            .map(|guard| guard.key())
-            .transpose()
-            .map_err(fjall_err)?;
-
-        let Some(first) = first else {
-            *self.index_sweep.lock().map_err(|_| Error::LockPoisoned)? = IndexSweepState::default();
-            tracing::debug!("no start point found on chain, skipping housekeeping");
-            return Ok(true);
-        };
-
-        let last = snapshot
+        let tip = snapshot
             .last_key_value(&self.blocks)
-            .map(|guard| guard.key())
-            .transpose()
-            .map_err(fjall_err)?;
+            .map(|guard| key_slot(&guard.key().map_err(fjall_err)?, 0))
+            .transpose()?;
 
-        let Some(last) = last else {
-            tracing::debug!("no tip found on chain, skipping housekeeping");
+        let Some(tip) = tip else {
+            *self.index_sweep.lock().map_err(|_| Error::LockPoisoned)? = IndexSweepState::default();
+            tracing::debug!("no blocks in the archive, skipping housekeeping");
             return Ok(true);
         };
 
-        let start = u64::from_be_bytes(first.as_ref()[..8].try_into().unwrap());
-        let last = u64::from_be_bytes(last.as_ref()[..8].try_into().unwrap());
+        let target = tip.saturating_sub(max_slots);
+        let budget = max_prune_rows.map(|rows| rows.max(1));
+        let pass = self.prune_below(&snapshot, target, budget, PRUNE_CHUNK_ROWS)?;
 
-        let delta = last.saturating_sub(start);
-        let excess = delta.saturating_sub(max_slots);
-
-        if excess == 0 {
-            tracing::debug!(delta, max_slots, "no pruning necessary on chain");
-            return self.sweep_indexes(&snapshot, start, max_slots, max_entries);
-        }
-
-        let (blocks_done, max_prune) = match max_prune_slots {
-            Some(max) => (excess <= max, core::cmp::min(excess, max)),
-            None => (true, excess),
+        // The tip is at or above the target, so a block is always left.
+        let front = match pass.next_block {
+            Some(slot) => slot,
+            None => self.first_block_from(&snapshot, target)?.unwrap_or(tip),
         };
+        self.drop_segments_below(front, pass.first_removed_block)?;
 
-        let prune_before = start + max_prune;
-        if max_prune == 0 {
-            let indexes_done = self.sweep_indexes(&snapshot, start, max_slots, max_entries)?;
-            return Ok(blocks_done && indexes_done);
-        }
-
-        tracing::info!(
-            cutoff_slot = prune_before,
-            start,
-            excess,
-            "pruning archive for excess history"
-        );
-
-        let mut batch = self.db.batch();
-
-        // Blocks strictly before the cutoff slot.
-        let to_remove = snapshot.range(&self.blocks, ..prune_before.to_be_bytes().to_vec());
-        for guard in to_remove {
-            let key = guard.key().map_err(fjall_err)?;
-            batch.remove(&self.blocks, key);
-        }
-
-        let threshold_segment = BlockLocation::segment_for_slot(prune_before);
-        self.flatfiles
-            .delete_segments_before(threshold_segment)
-            .map_err(io_err)?;
-
-        // Log rows with a temporal prefix strictly before the cutoff, per
-        // namespace — the price of the shared keyspace's hash prefix.
-        for (&ns, _) in self.schema.iter() {
-            let range = snapshot.range(
-                &self.logs,
-                namespace_start(ns)..build_temporal_bound(ns, prune_before),
+        if pass.rows > 0 {
+            tracing::info!(
+                target_slot = target,
+                front_slot = front,
+                rows = pass.rows,
+                batches = pass.batches,
+                caught_up = pass.caught_up,
+                "pruned archive history"
             );
-            for guard in range {
-                let key = guard.key().map_err(fjall_err)?;
-                batch.remove(&self.logs, key);
-            }
         }
 
-        let batch = batch.durability(Some(PersistMode::Buffer));
-        batch.commit().map_err(fjall_err)?;
+        if !pass.caught_up {
+            return Ok(false);
+        }
 
-        // Index work shares one row budget, even after block pruning converges.
-        let indexes_done = self.sweep_indexes(&snapshot, prune_before, max_slots, max_entries)?;
-
-        Ok(blocks_done && indexes_done)
+        // Indexes wait for the history, then sweep below the first block
+        // left. It only moves forward, so a rollback at the tip cannot restart
+        // a pass the way a cutoff drawn from the tip would.
+        let leftover = budget
+            .map(|budget| usize::try_from(budget.saturating_sub(pass.rows)).unwrap_or(usize::MAX));
+        self.sweep_indexes(&snapshot, front, max_slots, leftover)
     }
 
     /// Drop everything the archive holds after `after`.
@@ -1508,7 +1646,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_prune_budget_only_cleans_indexes_below_retained_blocks() {
+    fn zero_budget_takes_one_slot_then_one_index_row() {
         let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
         write(&store, &[(10, body(10, 0)), (100, body(100, 0))]);
         write_indexes(
@@ -1519,39 +1657,128 @@ mod tests {
                 number_delta(100, 100),
             ],
         );
-        assert!(!store.prune_history(10, Some(0), Some(100_000)).unwrap());
-        assert_eq!(
-            store.get_block_by_slot(&10).unwrap(),
-            Some((*body(10, 0)).clone())
-        );
+
+        // Tip 100, window 10: block 10 is the only expired slot and spends
+        // the budget, so the sweep examines a single row.
+        assert!(!store.prune_history(10, Some(0)).unwrap());
+        assert_eq!(store.get_block_by_slot(&10).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(0).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(10).unwrap(), Some(10));
+
+        let mut done = false;
+        for _ in 0..10 {
+            done = store.prune_history(10, Some(0)).unwrap();
+            if done {
+                break;
+            }
+        }
+        assert!(done, "a zero budget must not stall the sweep");
+        assert_eq!(store.slot_by_block_number(10).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(100).unwrap(), Some(100));
         assert_eq!(
             store.get_block_by_slot(&100).unwrap(),
             Some((*body(100, 0)).clone())
         );
-        assert_eq!(store.slot_by_block_number(0).unwrap(), None);
-        assert_eq!(store.slot_by_block_number(10).unwrap(), Some(10));
-        assert_eq!(store.slot_by_block_number(100).unwrap(), Some(100));
     }
 
     #[test]
-    fn slot_capped_prune_without_index_budget_finishes_every_chunk() {
+    fn unbudgeted_prune_finishes_every_index_chunk() {
         let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
         write(&store, &[(10, body(10, 0)), (1_000, body(1_000, 0))]);
-        let expired = INDEX_SWEEP_CHUNK_ENTRIES as u64 + 1;
+        let expired = PRUNE_CHUNK_ROWS as u64 + 1;
         let mut deltas: Vec<_> = (1..=expired)
             .map(|number| number_delta(10, number))
             .collect();
         deltas.push(number_delta(1_000, expired + 1));
         write_indexes(&store, &deltas);
 
-        // One slot of block pruning, yet the index cleanup below it completes.
-        assert!(!store.prune_history(100, Some(1), None).unwrap());
+        assert!(store.prune_history(100, None).unwrap());
         assert_eq!(store.slot_by_block_number(1).unwrap(), None);
         assert_eq!(store.slot_by_block_number(expired).unwrap(), None);
         assert_eq!(
             store.slot_by_block_number(expired + 1).unwrap(),
             Some(1_000)
         );
+    }
+
+    fn log_key(slot: u64, entity: u8) -> LogKey {
+        let mut bytes = [entity; 40];
+        bytes[..8].copy_from_slice(&slot.to_be_bytes());
+        LogKey::from(bytes.as_slice())
+    }
+
+    #[test]
+    fn history_batches_close_at_slot_boundaries() {
+        let mut schema = StateSchema::default();
+        schema.insert("ns-a", dolos_core::NamespaceType::KeyValue);
+        schema.insert("ns-b", dolos_core::NamespaceType::KeyValue);
+        let store = ArchiveStore::for_tempdir(schema).unwrap();
+
+        // Slots 1 to 4 hold three rows each, a block and a row per namespace;
+        // slot 5 holds ten rows in one namespace.
+        let writer = store.start_writer().unwrap();
+        for slot in 1..=4 {
+            writer.apply(&point(slot), &body(slot, 0)).unwrap();
+            for ns in ["ns-a", "ns-b"] {
+                writer.write_log(ns, &log_key(slot, 0), &vec![0]).unwrap();
+            }
+        }
+        for entity in 0..10 {
+            writer
+                .write_log("ns-a", &log_key(5, entity), &vec![entity])
+                .unwrap();
+        }
+        writer.apply(&point(100), &body(100, 0)).unwrap();
+        writer.commit().unwrap();
+
+        // A batch of four closes after the slot that crosses it: slots 1-2,
+        // slots 3-4, then slot 5 on its own.
+        let pass = store
+            .prune_below(&store.db.snapshot(), 100, None, 4)
+            .unwrap();
+        assert!(pass.caught_up);
+        assert_eq!(pass.rows, 22);
+        assert_eq!(pass.batches, 3);
+        assert_eq!(pass.first_removed_block, Some(1));
+    }
+
+    #[test]
+    fn index_sweep_gets_the_budget_history_leaves() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(
+            &store,
+            &[
+                (10, body(10, 0)),
+                (20, body(20, 0)),
+                (1_000, body(1_000, 0)),
+            ],
+        );
+        let mut deltas: Vec<_> = (1..=6).map(|number| number_delta(5, number)).collect();
+        deltas.push(number_delta(1_000, 7));
+        write_indexes(&store, &deltas);
+
+        // Tip 1000, window 100: blocks 10 and 20 have expired. One row of
+        // budget takes block 10 and leaves nothing for the indexes.
+        assert!(!store.prune_history(100, Some(1)).unwrap());
+        assert_eq!(store.get_block_by_slot(&10).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(1).unwrap(), Some(5));
+
+        // Block 20 spends one of four rows; the sweep examines three.
+        assert!(!store.prune_history(100, Some(4)).unwrap());
+        assert_eq!(store.get_block_by_slot(&20).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(3).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(4).unwrap(), Some(5));
+
+        let mut done = false;
+        for _ in 0..10 {
+            done = store.prune_history(100, Some(4)).unwrap();
+            if done {
+                break;
+            }
+        }
+        assert!(done);
+        assert_eq!(store.slot_by_block_number(6).unwrap(), None);
+        assert_eq!(store.slot_by_block_number(7).unwrap(), Some(1_000));
     }
 
     #[test]
@@ -1580,17 +1807,17 @@ mod tests {
         assert!(!store
             .sweep_indexes(&store.db.snapshot(), 20, 1_600, Some(1))
             .unwrap());
-        assert!(store.prune_history(100, Some(1), Some(100_000)).unwrap());
+        assert!(store.prune_history(100, Some(100_000)).unwrap());
         assert_eq!(store.slot_by_block_number(2).unwrap(), Some(10));
 
         // Slot zero is not a safe deletion cutoff either.
         write(&store, &[(0, body(0, 0))]);
-        assert!(store.prune_history(100, Some(1), Some(100_000)).unwrap());
+        assert!(store.prune_history(100, Some(100_000)).unwrap());
         assert_eq!(store.slot_by_block_number(2).unwrap(), Some(10));
         // Reintroducing a key before the old cursor proves that it was reset.
         write_indexes(&store, &[number_delta(10, 1)]);
         write(&store, &[(100, body(100, 0))]);
-        assert!(store.prune_history(0, Some(100), Some(100_000)).unwrap());
+        assert!(store.prune_history(0, Some(100_000)).unwrap());
         assert_eq!(store.slot_by_block_number(1).unwrap(), None);
         assert_eq!(store.slot_by_block_number(2).unwrap(), None);
     }
@@ -1630,9 +1857,7 @@ mod tests {
         let store = ArchiveStore::open(StateSchema::default(), dir.path(), &config).unwrap();
         let mut done = false;
         for _ in 0..20 {
-            done = store
-                .prune_history(100, Some(10_000), Some(100_000))
-                .unwrap();
+            done = store.prune_history(100, Some(100_000)).unwrap();
             if done {
                 break;
             }

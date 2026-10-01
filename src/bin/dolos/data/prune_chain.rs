@@ -10,9 +10,10 @@ pub struct Args {
     #[arg(long)]
     max_slots: Option<u64>,
 
-    /// the maximum number of slots to prune in a single operation
+    /// the maximum number of rows to remove per call; the command repeats
+    /// calls until the chain is pruned
     #[arg(long)]
-    max_prune: Option<u64>,
+    max_prune_rows: Option<u64>,
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
@@ -30,13 +31,20 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     info!(max_slots, "prunning to max slots");
 
-    // Nothing waits on this command, so index cleanup runs to completion;
-    // `--max-prune` bounds only the slots.
-    stores
+    // Each call runs to its budget and reports whether work is left. Calls
+    // repeat within this process because the index sweep resumes from a
+    // cursor that does not outlive it.
+    let mut rounds = 1u64;
+    while !stores
         .archive
-        .prune_history(max_slots, args.max_prune, None)
+        .prune_history(max_slots, args.max_prune_rows)
         .into_diagnostic()
-        .context("removing range from chain")?;
+        .context("removing range from chain")?
+    {
+        rounds += 1;
+    }
+
+    info!(rounds, "chain pruned");
 
     // Compaction requires direct backend access
     match &mut stores.archive {

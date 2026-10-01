@@ -121,6 +121,13 @@ fn temporal_bound(slot: BlockSlot) -> LogKey {
     LogKey::from(TemporalKey::from(slot))
 }
 
+/// The slot a log key's temporal prefix names.
+fn log_slot(key: &LogKey) -> BlockSlot {
+    let mut slot = [0u8; 8];
+    slot.copy_from_slice(&key.as_ref()[..8]);
+    BlockSlot::from_be_bytes(slot)
+}
+
 /// Archive store held entirely in memory.
 ///
 /// Cloning shares the underlying tables, which is what [`ArchiveStore`]'s
@@ -600,45 +607,53 @@ impl ArchiveStore for MemoryArchiveStore {
     fn prune_history(
         &self,
         max_slots: u64,
-        max_prune_slots: Option<u64>,
-        _max_prune_index_rows: Option<u64>,
+        max_prune_rows: Option<u64>,
     ) -> Result<bool, ArchiveError> {
         let mut tables = self.tables.write().map_err(|_| poisoned())?;
 
-        let Some((&first, _)) = tables.blocks.first_key_value() else {
+        let Some((&tip, _)) = tables.blocks.last_key_value() else {
             return Ok(true);
         };
 
-        let Some((&last, _)) = tables.blocks.last_key_value() else {
-            return Ok(true);
-        };
+        let target = tip.saturating_sub(max_slots);
+        let target_key = temporal_bound(target);
 
-        let excess = last.saturating_sub(first).saturating_sub(max_slots);
-
-        if excess == 0 {
-            return Ok(true);
+        // What each expired slot costs the disk backend: one row per block
+        // slot (blocks sharing a slot share its key) and one per log row.
+        let mut cost = BTreeMap::<BlockSlot, u64>::new();
+        for &slot in tables.blocks.range(..target).map(|(slot, _)| slot) {
+            *cost.entry(slot).or_default() += 1;
+        }
+        for (_, key) in tables.logs.keys().filter(|(_, key)| *key < target_key) {
+            *cost.entry(log_slot(key)).or_default() += 1;
         }
 
-        let (done, capped) = match max_prune_slots {
-            Some(max) => (excess <= max, core::cmp::min(excess, max)),
-            None => (true, excess),
-        };
+        let budget = max_prune_rows.map(|rows| rows.max(1));
+        let mut spent = 0;
+        let mut front = target;
+        for (&slot, &rows) in &cost {
+            if budget.is_some_and(|budget| spent >= budget) {
+                front = slot;
+                break;
+            }
+            spent += rows;
+        }
 
-        let prune_before = first.saturating_add(capped);
-        let cutoff = temporal_bound(prune_before);
-
-        tables.blocks.retain(|slot, _| *slot >= prune_before);
+        let cutoff = temporal_bound(front);
+        tables.blocks.retain(|slot, _| *slot >= front);
         tables.logs.retain(|(_, key), _| *key >= cutoff);
 
-        // The index entries of a pruned block go with it. The disk backend
-        // amortizes this across rounds; here a walk of the maps is the cost
-        // of a retain, so every round does it.
-        tables
-            .archive_tags
-            .retain(|(_, _, slot)| *slot >= prune_before);
-        tables.exact.retain(|_, slot| *slot >= prune_before);
+        // The index entries below the first block left go with the blocks.
+        // The disk backend sweeps them in passes; here a walk of the maps is
+        // the cost of a retain, so every round does it.
+        let held = tables
+            .blocks
+            .first_key_value()
+            .map_or(front, |(slot, _)| *slot);
+        tables.archive_tags.retain(|(_, _, slot)| *slot >= held);
+        tables.exact.retain(|_, slot| *slot >= held);
 
-        Ok(done)
+        Ok(front == target)
     }
 
     /// Drop everything the archive holds after `after`.
