@@ -4,7 +4,6 @@ use crate::{
     ArchiveStore as _, ChainPoint, Domain, DomainError, RawBlock, TipEvent, TipSubscription,
     WalStore,
 };
-use tracing::warn;
 
 pub enum Batch<D: Domain> {
     Tip(ChainPoint, D::TipSubscription),
@@ -48,11 +47,18 @@ impl<D: Domain> Batch<D> {
         // if the archive page is empty, this means we reached the end of the archive
         // store and we need to transition to the wal.
         if page.is_empty() {
-            let intersect = domain.wal().find_intersect(&[last_point])?;
+            let intersect = domain
+                .wal()
+                .find_intersect(std::slice::from_ref(&last_point))?;
 
+            // No overlap means the WAL no longer covers the point we were
+            // crawling from. Returning an error lets the caller re-seek instead
+            // of unwinding the task it is streaming from.
             let Some((point, _)) = intersect else {
-                warn!("no overlap between archive and wal");
-                panic!("no overlap between archive and wal");
+                return Err(DomainError::Internal(format!(
+                    "no overlap between archive and wal at {}",
+                    last_point.slot()
+                )));
             };
 
             return Self::from_wal(point, domain);
@@ -111,7 +117,10 @@ impl<D: Domain> ChainCrawler<D> {
         let domain = domain.clone();
 
         if intersect.is_empty() {
-            let (point, _) = domain.wal().find_tip()?.unwrap();
+            // An empty WAL has no tip to start from. Report it rather than
+            // unwinding, so a client connecting before the first block is
+            // imported gets an error it can retry.
+            let (point, _) = domain.wal().find_tip()?.ok_or(DomainError::WalIsEmpty)?;
             let batch = Batch::from_tip(point.clone(), &domain)?;
 
             let iter = Self { domain, batch };
