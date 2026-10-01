@@ -173,6 +173,36 @@ pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
     bech32(DREP_HRP, payload)
 }
 
+/// The role of a constitutional-committee credential.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitteeCredentialRole {
+    Hot,
+    Cold,
+}
+
+impl CommitteeCredentialRole {
+    /// The high nibble of the CIP-129 header byte.
+    const fn nibble(self) -> u8 {
+        match self {
+            Self::Hot => 0x0,
+            Self::Cold => 0x1,
+        }
+    }
+
+    const fn hrp(self) -> bech32::Hrp {
+        match self {
+            Self::Hot => CC_HOT_HRP,
+            Self::Cold => CC_COLD_HRP,
+        }
+    }
+}
+
+/// The low nibble of the CIP-129 header byte for a key hash.
+const CC_KEY_NIBBLE: u8 = 0x2;
+
+/// The low nibble of the CIP-129 header byte for a script hash.
+const CC_SCRIPT_NIBBLE: u8 = 0x3;
+
 /// CIP-129 credential ID for the constitutional committee.
 ///
 /// The header byte contains the role in the high nibble (cold `0x1`, hot
@@ -181,26 +211,148 @@ pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
 /// bech32 payload contains this header. The `..._hex` field that Blockfrost
 /// returns is the bare hash.
 fn bech32_committee(
-    hrp: bech32::Hrp,
-    role_nibble: u8,
+    role: CommitteeCredentialRole,
     cred: &StakeCredential,
 ) -> Result<String, StatusCode> {
-    let (hash, is_script): (&[u8], bool) = match cred {
-        StakeCredential::AddrKeyhash(key) => (key.as_ref(), false),
-        StakeCredential::ScriptHash(key) => (key.as_ref(), true),
+    let (hash, kind_nibble): (&[u8], u8) = match cred {
+        StakeCredential::AddrKeyhash(key) => (key.as_ref(), CC_KEY_NIBBLE),
+        StakeCredential::ScriptHash(key) => (key.as_ref(), CC_SCRIPT_NIBBLE),
     };
 
-    let header = (role_nibble << 4) | if is_script { 0x3 } else { 0x2 };
+    let header = (role.nibble() << 4) | kind_nibble;
 
-    bech32(hrp, [&[header], hash].concat())
+    bech32(role.hrp(), [&[header], hash].concat())
 }
 
 pub fn bech32_committee_cold(cred: &StakeCredential) -> Result<String, StatusCode> {
-    bech32_committee(CC_COLD_HRP, 0x1, cred)
+    bech32_committee(CommitteeCredentialRole::Cold, cred)
 }
 
 pub fn bech32_committee_hot(cred: &StakeCredential) -> Result<String, StatusCode> {
-    bech32_committee(CC_HOT_HRP, 0x0, cred)
+    bech32_committee(CommitteeCredentialRole::Hot, cred)
+}
+
+/// This function parses a CIP-129 constitutional-committee credential ID. It
+/// is the inverse of `bech32_committee_hot` and `bech32_committee_cold`.
+///
+/// The Bech32 prefix and the header byte both give the role. If the two roles
+/// are not the same, the ID is not valid. Bech32 permits an ID in upper case.
+/// The function accepts the prefix in upper case or in lower case.
+pub fn parse_committee_id(
+    id: &str,
+) -> Result<(CommitteeCredentialRole, StakeCredential), StatusCode> {
+    let parsed = bech32::primitives::decode::CheckedHrpstring::new::<bech32::Bech32>(id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let role = if parsed.hrp() == CC_HOT_HRP {
+        CommitteeCredentialRole::Hot
+    } else if parsed.hrp() == CC_COLD_HRP {
+        CommitteeCredentialRole::Cold
+    } else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+
+    let payload: Vec<u8> = parsed.byte_iter().collect();
+    let (header, hash) = payload.split_first().ok_or(StatusCode::BAD_REQUEST)?;
+    let hash: Hash<28> = <[u8; 28]>::try_from(hash)
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .into();
+
+    if header >> 4 != role.nibble() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let credential = match header & 0x0f {
+        CC_KEY_NIBBLE => StakeCredential::AddrKeyhash(hash),
+        CC_SCRIPT_NIBBLE => StakeCredential::ScriptHash(hash),
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    Ok((role, credential))
+}
+
+#[cfg(test)]
+mod committee_id_tests {
+    use super::*;
+
+    fn credentials() -> [StakeCredential; 2] {
+        [
+            StakeCredential::AddrKeyhash(Hash::from([21u8; 28])),
+            StakeCredential::ScriptHash(Hash::from([22u8; 28])),
+        ]
+    }
+
+    fn encode(hrp: &str, payload: &[u8]) -> String {
+        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse_unchecked(hrp), payload)
+            .expect("The test payload cannot be encoded.")
+    }
+
+    #[test]
+    fn parse_committee_id_inverts_the_encoders() {
+        for cred in credentials() {
+            let hot = bech32_committee_hot(&cred).unwrap();
+            assert_eq!(
+                parse_committee_id(&hot).unwrap(),
+                (CommitteeCredentialRole::Hot, cred.clone())
+            );
+
+            let cold = bech32_committee_cold(&cred).unwrap();
+            assert_eq!(
+                parse_committee_id(&cold).unwrap(),
+                (CommitteeCredentialRole::Cold, cred.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn parse_committee_id_ignores_the_case() {
+        for cred in credentials() {
+            let hot = bech32_committee_hot(&cred).unwrap();
+            assert_eq!(
+                parse_committee_id(&hot.to_ascii_uppercase()).unwrap(),
+                (CommitteeCredentialRole::Hot, cred.clone())
+            );
+
+            let cold = bech32_committee_cold(&cred).unwrap();
+            assert_eq!(
+                parse_committee_id(&cold.to_ascii_uppercase()).unwrap(),
+                (CommitteeCredentialRole::Cold, cred)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_committee_id_rejects_malformed_ids() {
+        let hash = [21u8; 28];
+
+        let rejected = [
+            // The payload has no header byte.
+            encode("cc_hot", &hash),
+            // The payload has one byte too many.
+            encode("cc_hot", &[&[0x02u8][..], &hash[..], &[0u8][..]].concat()),
+            // The low nibble is not a key or a script.
+            encode("cc_hot", &[&[0x00u8][..], &hash[..]].concat()),
+            encode("cc_hot", &[&[0x01u8][..], &hash[..]].concat()),
+            // The high nibble is not a role.
+            encode("cc_hot", &[&[0x22u8][..], &hash[..]].concat()),
+            // The prefix and the header give different roles.
+            encode("cc_hot", &[&[0x12u8][..], &hash[..]].concat()),
+            encode("cc_cold", &[&[0x02u8][..], &hash[..]].concat()),
+            // The prefix is not a committee prefix.
+            encode("drep", &[&[0x22u8][..], &hash[..]].concat()),
+            // The text is not Bech32.
+            "cc_hot1deadbeef".to_string(),
+            hex::encode(hash),
+        ];
+
+        for id in rejected {
+            assert_eq!(
+                parse_committee_id(&id),
+                Err(StatusCode::BAD_REQUEST),
+                "The parser accepted {id}."
+            );
+        }
+    }
 }
 
 pub fn bech32_pool(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
