@@ -476,29 +476,32 @@ where
     /// # Arguments
     ///
     /// * `max_slots` - The maximum number of slots to retain in the WAL.
-    /// * `max_prune` - Optional limit on the number of slots to prune in a
-    ///   single operation.
+    /// * `max_prune_slots` - Optional limit on the number of slots to prune in
+    ///   a single operation.
     ///
     /// # Returns
     ///
     /// Returns `Ok(true)` when the WAL is within `max_slots` (or was pruned all
-    /// the way down to it), and `Ok(false)` when `max_prune` capped this call
-    /// before the target was reached and another round is needed. Pruning is
-    /// deterministic: `remove_before` removes by cutoff bound, and any error it
-    /// raises is propagated (the write transaction is not committed).
+    /// the way down to it), and `Ok(false)` when `max_prune_slots` capped this
+    /// call before the target was reached and another round is needed.
+    /// Pruning is deterministic: `remove_before` removes by cutoff bound,
+    /// and any error it raises is propagated (the write transaction is not
+    /// committed).
     ///
     /// # Notes
     ///
     /// - If the WAL doesn't exceed the `max_slots` limit, no pruning occurs.
     /// - This method is typically called periodically as part of housekeeping
     ///   operations.
-    /// - If `max_prune` is specified, it limits the number of slots pruned in a
-    ///   single operation, which can help avoid long-running operations.
-    /// - If `max_prune` is not specified, all excess slots will be pruned.
+    /// - If `max_prune_slots` is specified, it limits the number of slots
+    ///   pruned in a single operation, which can help avoid long-running
+    ///   operations.
+    /// - If `max_prune_slots` is not specified, all excess slots will be
+    ///   pruned.
     pub fn prune_history(
         &self,
         max_slots: u64,
-        max_prune: Option<u64>,
+        max_prune_slots: Option<u64>,
     ) -> Result<bool, RedbWalError> {
         let Some((start, _)) = self.find_start()? else {
             debug!("no start point found, skipping housekeeping");
@@ -526,7 +529,7 @@ where
             return Ok(true);
         }
 
-        let (done, max_prune) = match max_prune {
+        let (done, max_prune) = match max_prune_slots {
             Some(max) => (excess <= max, core::cmp::min(excess, max)),
             None => (true, excess),
         };
@@ -812,8 +815,12 @@ where
         RedbWalStore::truncate_front(self, after).map_err(From::from)
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
-        RedbWalStore::prune_history(self, max_slots, max_prune).map_err(From::from)
+    fn prune_history(
+        &self,
+        max_slots: u64,
+        max_prune_slots: Option<u64>,
+    ) -> Result<bool, WalError> {
+        RedbWalStore::prune_history(self, max_slots, max_prune_slots).map_err(From::from)
     }
 
     fn read_entry(&self, key: &ChainPoint) -> Result<Option<LogValue<Self::Delta>>, WalError> {
