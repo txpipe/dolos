@@ -1709,30 +1709,6 @@ struct ProposalVoteRow {
     counted: bool,
 }
 
-/// The archive blocks that one votes request can still read.
-///
-/// `max_scan_items` sets the limit, as on
-/// `/governance/dreps/{drep_id}/updates`. The vote blocks of the page and the
-/// certificate blocks of its DReps share the limit.
-struct BlockReads {
-    left: usize,
-}
-
-impl BlockReads {
-    /// Reads one block. When no read is left, the request stops with
-    /// `ScanBudgetExceeded`.
-    fn read<D: Domain>(&mut self, domain: &D, slot: BlockSlot) -> Result<Option<BlockBody>, Error> {
-        self.left = self.left.checked_sub(1).ok_or(Error::ScanBudgetExceeded)?;
-
-        let body = domain
-            .archive()
-            .get_block_by_slot(&slot)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        Ok(body)
-    }
-}
-
 /// The vote-map identity of a voter: which of the proposal's three vote maps
 /// it lives in, and its key bytes there.
 fn voter_map_key(voter: &Voter) -> (u8, Vec<u8>) {
@@ -1827,8 +1803,7 @@ fn drep_vote_counts<D: Domain>(
     vote_at: (BlockSlot, TxOrder),
     closed_epoch: Option<Epoch>,
     chain: &ChainSummary,
-    reads: &mut BlockReads,
-) -> Result<bool, Error> {
+) -> Result<bool, StatusCode> {
     let cred = match drep {
         DRep::Key(hash) => StakeCredential::AddrKeyhash(*hash),
         DRep::Script(hash) => StakeCredential::ScriptHash(*hash),
@@ -1856,7 +1831,11 @@ fn drep_vote_counts<D: Domain>(
     for slot in slots {
         let slot = slot.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let Some(body) = reads.read(domain, slot)? else {
+        let Some(body) = domain
+            .archive()
+            .get_block_by_slot(&slot)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        else {
             continue;
         };
 
@@ -1946,14 +1925,12 @@ fn votes_in_block(body: &[u8], action: &GovActionId) -> Result<Vec<ProposalVoteR
 /// The state row carries each vote as a voter and a slot, so the number of
 /// rows per block is known upfront and only the blocks the page reaches are
 /// read from the archive — those resolve the voting tx hash and the index of
-/// the vote inside it. `budget` limits the blocks that one request reads: the
-/// vote blocks of the page and the certificate blocks of its DReps.
+/// the vote inside it.
 fn read_votes<D: Domain>(
     domain: &D,
     tx: Hash<32>,
     idx: u32,
     pagination: &Pagination,
-    budget: usize,
 ) -> Result<Vec<ProposalVotesInner>, Error> {
     let key = ProposalState::build_entity_key(tx, idx);
 
@@ -2048,7 +2025,6 @@ fn read_votes<D: Domain>(
 
     let mut out = Vec::new();
     let mut seen = 0;
-    let mut reads = BlockReads { left: budget };
 
     for (slot, count) in groups {
         let end = seen + count;
@@ -2062,7 +2038,11 @@ fn read_votes<D: Domain>(
             break;
         }
 
-        let Some(body) = reads.read(domain, slot)? else {
+        let Some(body) = domain
+            .archive()
+            .get_block_by_slot(&slot)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        else {
             // The state row proves these votes exist, and the slot is not
             // past the archive tip. So a missing block means the archive was
             // pruned below the proposal's vote history. A short page would
@@ -2114,7 +2094,6 @@ fn read_votes<D: Domain>(
                         (slot, row.tx_order),
                         closed_epoch,
                         &chain,
-                        &mut reads,
                     )?;
                 }
             }
@@ -2155,11 +2134,9 @@ where
         return Ok(Json(vec![]));
     };
 
-    let budget = domain.config.max_scan_items() as usize;
-
     let page = domain
         .query()
-        .run_blocking(move |domain| Ok(read_votes(&domain, tx, cert_index, &pagination, budget)))
+        .run_blocking(move |domain| Ok(read_votes(&domain, tx, cert_index, &pagination)))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
@@ -2185,11 +2162,9 @@ where
 
     let (tx, idx) = parse_gov_action_id(&gov_action_id).map_err(|_| Error::InvalidGovActionId)?;
 
-    let budget = domain.config.max_scan_items() as usize;
-
     let page = domain
         .query()
-        .run_blocking(move |domain| Ok(read_votes(&domain, tx, idx, &pagination, budget)))
+        .run_blocking(move |domain| Ok(read_votes(&domain, tx, idx, &pagination)))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
@@ -5495,59 +5470,82 @@ mod tests {
     }
 
     /// Block 0 registers the DRep and proposes. In block 1, a committee
-    /// member and the DRep vote. Block 2 deregisters the DRep, so the
-    /// `counted` flag of the DRep vote costs one more block read.
-    fn vote_app_with_scan_limit(max_scan_items: u64) -> TestApp {
+    /// member and the DRep vote. The setup then adds a block that cannot be
+    /// decoded and tags it as a certificate block of the DRep. So the
+    /// `counted` check of the DRep vote fails with 500.
+    fn vote_app_with_corrupt_drep_block() -> TestApp {
+        use dolos_cardano::indexes::archive_dimensions::DREP_CERTS;
+        use dolos_core::{ArchiveIndexDelta, ArchiveWriter as _, ChainPoint, Tag};
         use pallas::ledger::primitives::conway::Certificate;
 
         let cred = StakeCredential::AddrKeyhash([0x66u8; 28].into());
-        let mut extra_certs_by_block = vec![vec![vec![]]; 3];
+        let mut extra_certs_by_block = vec![vec![vec![]]; 2];
         extra_certs_by_block[0][0].push(Certificate::RegDRepCert(cred.clone(), 500, None));
-        extra_certs_by_block[2][0].push(Certificate::UnRegDRepCert(cred, 500));
 
         let cfg = SyntheticBlockConfig {
-            block_count: 3,
+            block_count: 2,
             txs_per_block: 1,
-            gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![]],
+            gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![]],
             votes_by_block: vec![
                 vec![],
                 vec![vec![
                     cast(cc_key_voter(), 0, Vote::Yes),
                     cast(drep_key_voter(), 0, Vote::Yes),
                 ]],
-                vec![],
             ],
             extra_certs_by_block,
             ..Default::default()
         };
 
-        TestApp::new_with_scan_limit(cfg, max_scan_items)
+        TestApp::new_with_cfg_and_setup(cfg, move |domain, vectors| {
+            let slot = vectors.blocks[1].slot + 1;
+            let hash = Hash::<32>::from([0xEEu8; 32]);
+
+            let writer = domain
+                .archive()
+                .start_writer()
+                .expect("failed to start writer");
+            writer
+                .apply(
+                    &ChainPoint::Specific(slot, hash),
+                    &std::sync::Arc::new(vec![0xFF; 8]),
+                )
+                .expect("failed to write the block");
+            writer
+                .apply_index(&[ArchiveIndexDelta {
+                    slot,
+                    block_hash: hash.to_vec(),
+                    block_number: None,
+                    tx_hashes: vec![],
+                    tags: vec![Tag::new(DREP_CERTS, pallas_extras::drep_id_bytes(&cred))],
+                }])
+                .expect("failed to tag the block");
+            writer.commit().expect("failed to commit the block");
+        })
     }
 
-    /// `max_scan_items` limits the blocks that one request reads. Only the
-    /// rows on the page read the certificate blocks of their DRep.
+    /// Only the rows on the page check `counted`. So a page without the DRep
+    /// row never reads the certificate blocks of the DRep.
     #[tokio::test]
-    async fn governance_proposal_votes_scan_budget() {
-        let path = |app: &TestApp, count: usize| {
-            let proposal_tx = tx_hash_of_block(app, 0);
-            format!("/governance/proposals/{proposal_tx}/0/votes?count={count}")
-        };
+    async fn governance_proposal_votes_check_only_the_page() {
+        let app = vote_app_with_corrupt_drep_block();
+        let proposal_tx = tx_hash_of_block(&app, 0);
+        let base = format!("/governance/proposals/{proposal_tx}/0/votes");
 
-        // the committee row alone needs only the vote block, although the
-        // DRep vote in that block is outside the page
-        let app = vote_app_with_scan_limit(1);
-        let rows = get_votes(&app, &path(&app, 1)).await;
-        assert_eq!(rows.iter().map(|row| row.counted).collect_vec(), [true]);
+        // the committee row alone; the DRep vote in the same block is off
+        // the page
+        let rows = get_votes(&app, &format!("{base}?count=1")).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].voter, voter_id(&cc_key_voter()));
+        assert!(rows[0].counted);
 
-        // the DRep row needs the block of the deregistration too
-        assert_status(&app, &path(&app, 2), StatusCode::BAD_REQUEST).await;
-
-        let app = vote_app_with_scan_limit(2);
-        let rows = get_votes(&app, &path(&app, 2)).await;
-        assert_eq!(
-            rows.iter().map(|row| row.counted).collect_vec(),
-            [true, false]
-        );
+        // the DRep row reads the corrupt block
+        assert_status(
+            &app,
+            &format!("{base}?count=2"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
     }
 
     /// The vote fixture with a fourth, empty block. The tx of block 0
