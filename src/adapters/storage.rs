@@ -716,15 +716,19 @@ impl CoreStateStore for StateStoreBackend {
 #[derive(Clone)]
 pub enum ArchiveStoreBackend {
     Memory(MemoryArchiveStore),
-    /// Write-gated view over an already-open archive: reads and derived-log
-    /// writes pass through, block appends and undos are discarded.
+    /// Write-gated view over an already-open archive: reads, derived-log
+    /// writes and index applies pass through, block appends and undos are
+    /// discarded.
     ///
     /// This exists for replays over an archive that already holds the chain
     /// (`dolos doctor rebuild-state --rewrite-logs`): block appends are not
     /// idempotent — replaying them would double every shared segment file,
     /// whichever backend owns the index — while boundary log keys are
     /// slot-derived and identical under replay, so re-written log rows
-    /// overwrite the originals in place.
+    /// overwrite the originals in place. Index entries are keyed by what they
+    /// project and the slot, so a replay re-writes the ones the archive holds
+    /// and adds the ones an older indexer never emitted (the auxiliary-data
+    /// script tags `script_by_hash` falls back on).
     ///
     /// [`Self::logs_only`] is the sole constructor, and it never nests one
     /// gate inside another.
@@ -804,8 +808,9 @@ impl ArchiveStoreBackend {
 
 pub enum ArchiveWriterBackend {
     Memory(Box<<MemoryArchiveStore as CoreArchiveStore>::Writer>),
-    /// Delegates `write_log` and `commit`; discards `apply`, `undo` and the
-    /// index writes, which project the blocks the gate refuses.
+    /// Delegates `write_log`, `apply_index` and `commit`; discards `apply`,
+    /// `undo`, `undo_index` and `append_prehashed`. See
+    /// [`ArchiveStoreBackend::LogsOnly`].
     LogsOnly(Box<ArchiveWriterBackend>),
     Fjall(Box<<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::Writer>),
     NoOp(NoOpArchiveWriter),
@@ -847,7 +852,7 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
     fn apply_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
         match self {
             Self::Memory(w) => w.apply_index(deltas),
-            Self::LogsOnly(_) => Ok(()),
+            Self::LogsOnly(w) => w.apply_index(deltas),
             Self::Fjall(w) => w.apply_index(deltas),
             Self::NoOp(w) => w.apply_index(deltas),
         }

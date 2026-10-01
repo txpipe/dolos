@@ -26,8 +26,8 @@ use dolos_cardano::{
         Constitution, DRepDelegation, DRepExpiry, DRepState, DatumState, EndStats, EpochState,
         EpochValue, EraBoundary, EraSummary, GovDistr, GovRoots, GovState, Nonces, PParamValue,
         PParamsSet, PendingMirState, PendingRewardState, PoolDelegation, PoolParams, PoolSnapshot,
-        PoolState, ProposalAction, ProposalState, RollingStats, ShardProgress, Stake, StakeLog,
-        VoteHistory,
+        PoolState, ProposalAction, ProposalState, RollingStats, ScriptSeqState, ScriptState,
+        ShardProgress, Stake, StakeLog, VoteHistory,
     },
     pallas::{
         codec::utils::Bytes,
@@ -187,6 +187,19 @@ pub fn asset_state() -> AssetState {
         initial_slot: Some(44_444),
         mint_tx_count: 19,
         metadata_tx: Some(hash32(0x82)),
+    }
+}
+
+pub fn script_state() -> ScriptState {
+    ScriptState {
+        seq: 1_234_567,
+        first_slot: 99_999_999,
+    }
+}
+
+pub fn script_seq_state() -> ScriptSeqState {
+    ScriptSeqState {
+        script_hash: hash28(0xa0),
     }
 }
 
