@@ -251,34 +251,165 @@ where
     Ok(metrics)
 }
 
-pub(crate) fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
-    if pool_id.starts_with("pool1") {
-        let (_, operator) = bech32::decode(pool_id).map_err(|_| Error::InvalidPoolId)?;
-        return Ok(operator);
-    } else if pool_id.len() == 56 {
-        return hex::decode(pool_id).map_err(|_| Error::InvalidPoolId);
-    }
+const POOL_HASH_LEN: usize = 28;
+const POOL_HRP: &str = "pool";
+const POOL_HRP_UPPER: &str = "POOL";
+const POOL_HEX_MAX_BYTES: usize = 49;
+const POOL_ID_MIN_UNITS: usize = 8;
+const POOL_ID_MAX_UNITS: usize = 1000;
+const BECH32_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const BECH32_CHECKSUM_LEN: usize = 6;
+const BECH32_CONST: u32 = 1;
+const BECH32M_CONST: u32 = 0x2bc8_30a3;
+const BECH32_GENERATOR: [u32; 5] = [
+    0x3b6a_57b2,
+    0x2650_8e6d,
+    0x1ea1_19fa,
+    0x3d42_33dd,
+    0x2a14_62b3,
+];
 
-    Err(Error::InvalidPoolId)
+fn bech32_step(checksum: u32) -> u32 {
+    let top = checksum >> 25;
+    let mut next = (checksum & 0x01ff_ffff) << 5;
+    for (bit, generator) in BECH32_GENERATOR.iter().enumerate() {
+        if (top >> bit) & 1 == 1 {
+            next ^= generator;
+        }
+    }
+    next
 }
 
-/// This function decodes a pool ID and returns the hash of the pool.
-///
-/// The hash of a pool always has 28 bytes. If a pool ID has a valid format but
-/// its payload does not have 28 bytes, no pool has this ID. Thus, the function
-/// returns a 404 error. Blockfrost also returns 404 for this ID.
-///
-/// An `EntityKey` has 32 bytes. The conversion to `EntityKey` adds zeros to a
-/// shorter payload and removes the extra bytes from a longer payload. Thus,
-/// payloads with different lengths can have the same key. For example, a
-/// 29-byte payload that ends in `0x00` has the same key as its first 28 bytes.
-/// Without the length check, the registration check can find a pool for this
-/// payload.
-fn decode_pool_hash(pool_id: &str) -> Result<PoolHash, Error> {
-    let payload = decode_pool_id(pool_id)?;
-    let hash = <[u8; 28]>::try_from(payload.as_slice()).map_err(|_| StatusCode::NOT_FOUND)?;
+fn bech32_residue(hrp: &[u8], values: &[u8]) -> u32 {
+    let mut checksum = 1;
+    for c in hrp {
+        checksum = bech32_step(checksum) ^ u32::from(c >> 5);
+    }
+    checksum = bech32_step(checksum);
+    for c in hrp {
+        checksum = bech32_step(checksum) ^ u32::from(c & 0x1f);
+    }
+    for value in values {
+        checksum = bech32_step(checksum) ^ u32::from(*value);
+    }
+    checksum
+}
 
-    Ok(PoolHash::from(hash))
+fn bech32_values(data: &str) -> Option<Vec<u8>> {
+    data.bytes()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            BECH32_CHARSET
+                .iter()
+                .position(|&x| x == c)
+                .map(|value| value as u8)
+        })
+        .collect()
+}
+
+fn pool_hash_from_bytes(bytes: &[u8]) -> Option<PoolHash> {
+    <[u8; POOL_HASH_LEN]>::try_from(bytes)
+        .ok()
+        .map(PoolHash::from)
+}
+
+/// Gives the hash only for the canonical ID: the lowercase Bech32 text of 28
+/// bytes.
+///
+/// An `EntityKey` has 32 bytes. `EntityKey::from(&[u8])` adds zero bytes to a
+/// short value and cuts a long value to 32 bytes. Thus, a 29-byte value that
+/// ends with `0x00` finds the pool of its first 28 bytes. The parsers return a
+/// `PoolHash` for this reason.
+fn canonical_pool_hash(input: &str) -> Option<PoolHash> {
+    let (_, bytes) = bech32::decode(input).ok()?;
+    let hash = pool_hash_from_bytes(&bytes)?;
+    (bech32_pool(hash).ok()? == input).then_some(hash)
+}
+
+/// Parses a pool ID with the rules of `/pools/{pool_id}` and
+/// `/pools/{pool_id}/history`.
+///
+/// Hex of even length gives its bytes, with no length limit.
+/// Other text must be a Bech32 or Bech32m string with the `pool` prefix in one
+/// letter case. Other input gives `Error::InvalidPoolId`.
+///
+/// The result is `None` for a valid ID that no pool can have.
+/// Blockfrost finds a pool only from the canonical form of its ID.
+/// Thus, a valid ID in a different form finds no pool.
+pub(crate) fn parse_pool_id_unbounded(input: &str) -> Result<Option<PoolHash>, Error> {
+    if let Ok(bytes) = hex::decode(input) {
+        return Ok(pool_hash_from_bytes(&bytes));
+    }
+
+    let (hrp, data) = input.rsplit_once('1').ok_or(Error::InvalidPoolId)?;
+    let upper = match hrp {
+        POOL_HRP => false,
+        POOL_HRP_UPPER => true,
+        _ => return Err(Error::InvalidPoolId),
+    };
+    let wrong_case = |c: u8| {
+        if upper {
+            c.is_ascii_lowercase()
+        } else {
+            c.is_ascii_uppercase()
+        }
+    };
+    if data.len() < BECH32_CHECKSUM_LEN || data.bytes().any(wrong_case) {
+        return Err(Error::InvalidPoolId);
+    }
+
+    let values = bech32_values(data).ok_or(Error::InvalidPoolId)?;
+    let residue = bech32_residue(POOL_HRP.as_bytes(), &values);
+    if residue != BECH32_CONST && residue != BECH32M_CONST {
+        return Err(Error::InvalidPoolId);
+    }
+
+    Ok(canonical_pool_hash(input))
+}
+
+/// Parses a pool ID with the rules of the other pool routes and the epoch pool
+/// routes.
+///
+/// Hex gives its bytes. For hex of odd length, the parser ignores the last
+/// digit. Hex of 50 bytes or more gives `Error::InvalidPoolId`.
+/// Other text must be a Bech32 string of 8 to 1000 UTF-16 units with the
+/// `pool` prefix. The text must be equal to its Unicode lowercase form or its
+/// Unicode uppercase form.
+///
+/// The Kelvin sign U+212A has the lowercase form `k` and is its own uppercase
+/// form. Thus, an uppercase ID with this sign is valid, but it finds no pool.
+///
+/// The result is `None` for a valid ID that no pool can have.
+pub(crate) fn parse_pool_id_bounded(input: &str) -> Result<Option<PoolHash>, Error> {
+    if !input.is_empty() && input.bytes().all(|c| c.is_ascii_hexdigit()) {
+        let bytes = hex::decode(&input[..input.len() & !1]).map_err(|_| Error::InvalidPoolId)?;
+        if bytes.len() > POOL_HEX_MAX_BYTES {
+            return Err(Error::InvalidPoolId);
+        }
+        return Ok(pool_hash_from_bytes(&bytes));
+    }
+
+    let units = input.encode_utf16().count();
+    if !(POOL_ID_MIN_UNITS..=POOL_ID_MAX_UNITS).contains(&units) {
+        return Err(Error::InvalidPoolId);
+    }
+
+    let lower = input.to_lowercase();
+    if input != lower && input != input.to_uppercase() {
+        return Err(Error::InvalidPoolId);
+    }
+
+    let (hrp, data) = lower.rsplit_once('1').ok_or(Error::InvalidPoolId)?;
+    if hrp != POOL_HRP || data.len() < BECH32_CHECKSUM_LEN {
+        return Err(Error::InvalidPoolId);
+    }
+
+    let values = bech32_values(data).ok_or(Error::InvalidPoolId)?;
+    if bech32_residue(POOL_HRP.as_bytes(), &values) != BECH32_CONST {
+        return Err(Error::InvalidPoolId);
+    }
+
+    Ok(canonical_pool_hash(input))
 }
 
 fn scan_pool_cert_hashes_in_block(
@@ -508,9 +639,11 @@ where
     Option<PoolState>: From<D::Entity>,
     Option<AccountState>: From<D::Entity>,
 {
-    let operator = decode_pool_id(&id)?;
+    let Some(hash) = parse_pool_id_unbounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
     let pool = domain
-        .read_cardano_entity::<PoolState>(operator.as_slice())?
+        .read_cardano_entity::<PoolState>(hash)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let snapshot = pool
@@ -1057,9 +1190,11 @@ pub async fn by_id_metadata<D: Domain>(
 where
     Option<PoolState>: From<D::Entity>,
 {
-    let operator = decode_pool_id(&id)?;
+    let Some(hash) = parse_pool_id_bounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
     let pool = domain
-        .read_cardano_entity::<PoolState>(operator.as_slice())?
+        .read_cardano_entity::<PoolState>(hash)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let onchain = pool
@@ -1069,7 +1204,7 @@ where
     let (offchain, error) = fetch_pool_metadata_with_error(&pool).await;
 
     Ok(Json(build_pool_metadata_response(
-        operator, onchain, offchain, error,
+        hash, onchain, offchain, error,
     )?))
 }
 
@@ -1080,9 +1215,11 @@ pub async fn by_id_relays<D: Domain>(
 where
     Option<PoolState>: From<D::Entity>,
 {
-    let operator = decode_pool_id(&id)?;
+    let Some(hash) = parse_pool_id_bounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
     let pool = domain
-        .read_cardano_entity::<PoolState>(operator.as_slice())?
+        .read_cardano_entity::<PoolState>(hash)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let relays = pool
@@ -1133,8 +1270,11 @@ where
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
 {
-    let operator = decode_pool_id(&id)?;
-    if !domain.cardano_entity_exists::<PoolState>(operator.as_slice())? {
+    let pagination = Pagination::try_from(params)?;
+    let Some(hash) = parse_pool_id_bounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+    if !domain.cardano_entity_exists::<PoolState>(hash)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1148,10 +1288,8 @@ where
         account
             .delegated_pool_live()
             .or(account.retired_pool.as_ref())
-            .is_some_and(|f| f.as_slice() == operator.as_slice())
+            .is_some_and(|f| *f == hash)
     });
-
-    let pagination = Pagination::try_from(params)?;
 
     let page: Vec<_> = filtered
         .skip(pagination.skip())
@@ -1220,15 +1358,23 @@ pub async fn by_id_history<D: Domain>(
 ) -> Result<Json<Vec<PoolHistoryInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
 {
-    let operator = decode_pool_id(&id)?;
+    let hash = parse_pool_id_unbounded(&id)?;
     let pagination = Pagination::try_from(params)?;
+    let Some(hash) = hash else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+    if !domain.cardano_entity_exists::<PoolState>(hash)? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
     let tip = domain.get_tip_slot()?;
     let summary = domain.get_chain_summary()?;
     let (epoch, _) = summary.slot_epoch(tip);
 
     let mut entries = domain
-        .iter_cardano_logs_per_epoch::<StakeLog>(operator.into(), 0..epoch)
+        .iter_cardano_logs_per_epoch::<StakeLog>(hash.into(), 0..epoch)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Apply order before pagination
@@ -1266,13 +1412,14 @@ where
     D: Domain + Clone + Send + Sync + 'static,
     Option<PoolState>: From<D::Entity>,
 {
-    let pool = decode_pool_hash(&id)?;
+    let pagination = Pagination::try_from(params)?;
+    let Some(pool) = parse_pool_id_bounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
 
     if !domain.cardano_entity_exists::<PoolState>(pool)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
-
-    let pagination = Pagination::try_from(params)?;
 
     let order = match pagination.order {
         crate::pagination::Order::Asc => SlotOrder::Asc,
@@ -1331,7 +1478,9 @@ where
     Option<PoolState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    let pool = decode_pool_hash(&id)?;
+    let Some(pool) = parse_pool_id_bounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
 
     if !domain.cardano_entity_exists::<PoolState>(pool)? {
         return Err(StatusCode::NOT_FOUND.into());
@@ -1364,7 +1513,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{
+        bech32_encode_values, bech32_values_from_bytes, pool_id_cases, PoolIdCase, TestApp,
+        TestFault, REG_POOL_HEX, REG_POOL_ID,
+    };
     use blockfrost_openapi::models::{
         pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
         pool_list_extended_inner::PoolListExtendedInner,
@@ -1403,8 +1555,11 @@ mod tests {
     /// payload is the hash with a `0x00` byte at the end. Without the length
     /// check, the registration check finds the pool for the second payload.
     fn wrong_length_pool_ids(app: &TestApp) -> [String; 2] {
-        let mut payload =
-            decode_pool_id(&app.vectors().pool_id).expect("Cannot decode the pool ID.");
+        let mut payload = parse_pool_id_unbounded(&app.vectors().pool_id)
+            .ok()
+            .flatten()
+            .expect("Cannot decode the pool ID.")
+            .to_vec();
         let short = bech32_pool(&payload[..27]).expect("Cannot encode the short pool ID.");
         payload.push(0);
         let long = bech32_pool(&payload).expect("Cannot encode the long pool ID.");
@@ -1461,7 +1616,11 @@ mod tests {
         nonce: i128,
         calidus_key: [u8; 32],
     ) -> alonzo::Metadatum {
-        let operator = decode_pool_id(pool_id).expect("valid pool id");
+        let operator = parse_pool_id_unbounded(pool_id)
+            .ok()
+            .flatten()
+            .expect("valid pool id")
+            .to_vec();
 
         md_map(vec![
             (md_int(0), md_int(2)),
@@ -2815,5 +2974,247 @@ mod tests {
         let pool_id = app.vectors().pool_id.as_str();
         let path = format!("/pools/{pool_id}/votes");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    const COUNT_MESSAGE: &str = "querystring/count must be >= 1";
+    const POOL_ID_MESSAGE: &str = "Invalid or malformed pool id format.";
+    const NOT_FOUND_MESSAGE: &str = "The requested component has not been found.";
+
+    fn registered_pool_app() -> TestApp {
+        TestApp::new_with_cfg(SyntheticBlockConfig {
+            pool_id: REG_POOL_ID.to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn pool_id_case(label: &str) -> PoolIdCase {
+        pool_id_cases()
+            .into_iter()
+            .find(|case| case.label == label)
+            .expect("Cannot find the pool ID case.")
+    }
+
+    /// Gives a text for each difference from the Blockfrost error body.
+    async fn error_mismatch(
+        app: &TestApp,
+        path: &str,
+        status: StatusCode,
+        message: &str,
+    ) -> Option<String> {
+        let (actual, bytes) = app.get_bytes(path).await;
+        let expected = serde_json::json!({
+            "status_code": status.as_u16(),
+            "error": status.canonical_reason(),
+            "message": message,
+        });
+        let body = serde_json::from_slice::<Value>(&bytes).ok();
+
+        (actual != status || body.as_ref() != Some(&expected)).then(|| {
+            format!(
+                "{path}: expected {status} {message:?}, got {actual} {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn pools_history_happy_path() {
+        let app = registered_pool_app();
+        let path = format!("/pools/{REG_POOL_ID}/history");
+        assert_status(&app, &path, StatusCode::OK).await;
+    }
+
+    #[tokio::test]
+    async fn pools_history_not_found() {
+        let app = registered_pool_app();
+        let path = format!("/pools/{}/history", missing_pool_id());
+        let mismatch = error_mismatch(&app, &path, StatusCode::NOT_FOUND, NOT_FOUND_MESSAGE).await;
+        assert!(mismatch.is_none(), "{mismatch:?}");
+    }
+
+    #[tokio::test]
+    async fn pool_routes_check_pagination_in_blockfrost_order() {
+        let app = registered_pool_app();
+        let mut mismatches = Vec::new();
+
+        for label in ["invalid", "bmissing", "b29", "h58"] {
+            let id = pool_id_case(label).path_id();
+
+            for suffix in ["delegators", "updates", "votes"] {
+                let path = format!("/pools/{id}/{suffix}?count=0");
+                let mismatch =
+                    error_mismatch(&app, &path, StatusCode::BAD_REQUEST, COUNT_MESSAGE).await;
+                mismatches.extend(mismatch);
+            }
+
+            // The `/history` route parses the pool ID format before the pagination.
+            // The 404 for a valid ID comes after the pagination.
+            let message = if label == "invalid" {
+                POOL_ID_MESSAGE
+            } else {
+                COUNT_MESSAGE
+            };
+            let path = format!("/pools/{id}/history?count=0");
+            mismatches.extend(error_mismatch(&app, &path, StatusCode::BAD_REQUEST, message).await);
+        }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    /// Gives a text for a difference from the Blockfrost response.
+    /// The text contains the case label, not the path, because some IDs have
+    /// thousands of characters.
+    async fn pool_id_case_mismatch(
+        app: &TestApp,
+        case: &PoolIdCase,
+        route: &str,
+        expected: u16,
+    ) -> Option<String> {
+        let (status, bytes) = app.get_bytes(&route.replace("{id}", &case.path_id())).await;
+        let expected_body = match expected {
+            400 => Some(("Bad Request", POOL_ID_MESSAGE)),
+            404 => Some(("Not Found", NOT_FOUND_MESSAGE)),
+            _ => None,
+        }
+        .map(|(error, message)| {
+            serde_json::json!({ "status_code": expected, "error": error, "message": message })
+        });
+        let body = serde_json::from_slice::<Value>(&bytes).ok();
+        let matched =
+            status.as_u16() == expected && (expected_body.is_none() || body == expected_body);
+
+        (!matched).then(|| {
+            format!(
+                "{} {route}: expected {expected}, got {status} {}",
+                case.label,
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn pool_routes_match_blockfrost_for_each_pool_id() {
+        let app = registered_pool_app();
+        let mut mismatches = Vec::new();
+
+        for case in pool_id_cases() {
+            for suffix in [
+                "",
+                "/metadata",
+                "/relays",
+                "/delegators",
+                "/history",
+                "/updates",
+                "/votes",
+            ] {
+                let expected = match suffix {
+                    "" | "/history" => case.unbounded_status,
+                    _ => case.bounded_status,
+                };
+                let route = format!("/pools/{{id}}{suffix}");
+                mismatches.extend(pool_id_case_mismatch(&app, &case, &route, expected).await);
+            }
+        }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    fn parse_mismatches(
+        parse: fn(&str) -> Result<Option<PoolHash>, Error>,
+        expected: fn(&PoolIdCase) -> u16,
+    ) -> Vec<String> {
+        let registered = PoolHash::from(
+            <[u8; 28]>::try_from(hex::decode(REG_POOL_HEX).expect("Cannot decode the pool hex."))
+                .expect("The pool hex does not have 28 bytes."),
+        );
+
+        pool_id_cases()
+            .iter()
+            .filter_map(|case| {
+                let result = parse(&case.id);
+                let matched = match expected(case) {
+                    400 => matches!(result, Err(Error::InvalidPoolId)),
+                    200 => matches!(result, Ok(Some(hash)) if hash == registered),
+                    404 => matches!(result, Ok(ref hash) if *hash != Some(registered)),
+                    status => panic!("Unknown status {status} for case {}.", case.label),
+                };
+                (!matched).then(|| {
+                    format!(
+                        "{}: expected {}, got {result:?}.",
+                        case.label,
+                        expected(case)
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parse_pool_id_unbounded_matches_blockfrost() {
+        let mismatches = parse_mismatches(parse_pool_id_unbounded, |case| case.unbounded_status);
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn parse_pool_id_bounded_matches_blockfrost() {
+        let mismatches = parse_mismatches(parse_pool_id_bounded, |case| case.bounded_status);
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn pool_id_cases_have_expected_lengths() {
+        let cases = pool_id_cases();
+        let expected = [
+            ("b1000", 1000),
+            ("b1001", 1001),
+            ("b1002", 1002),
+            ("b1023", 1023),
+            ("b1024", 1024),
+            ("b5000", 5007),
+        ];
+
+        for (label, len) in expected {
+            let case = cases
+                .iter()
+                .find(|case| case.label == label)
+                .expect("Cannot find the case.");
+            assert_eq!(case.id.chars().count(), len, "Wrong length for {label}.");
+        }
+    }
+
+    #[test]
+    fn pool_id_case_paths_are_ascii() {
+        for case in pool_id_cases() {
+            assert!(
+                case.path_id().is_ascii(),
+                "The path for {} is not ASCII.",
+                case.label
+            );
+        }
+    }
+
+    #[test]
+    fn pool_id_encoder_matches_bech32_crate() {
+        let registered = hex::decode(REG_POOL_HEX).expect("Cannot decode the pool hex.");
+        let encode = |bytes: &[u8], constant| {
+            bech32_encode_values("pool", &bech32_values_from_bytes(bytes), constant)
+        };
+
+        assert_eq!(REG_POOL_ID, encode(&registered, 1));
+        assert_eq!(
+            bech32_pool(&registered).expect("Cannot encode the pool ID."),
+            encode(&registered, 1)
+        );
+        assert_eq!(
+            bech32_pool([9u8; 28]).expect("Cannot encode the pool ID."),
+            encode(&[9u8; 28], 1)
+        );
+
+        let hrp = bech32::Hrp::parse("pool").expect("Cannot parse the HRP.");
+        assert_eq!(
+            bech32::encode::<bech32::Bech32m>(hrp, &registered)
+                .expect("Cannot encode the Bech32m ID."),
+            encode(&registered, 0x2bc8_30a3)
+        );
     }
 }

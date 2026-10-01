@@ -18,7 +18,7 @@ use pallas::{
 };
 
 use dolos_cardano::{
-    model::{AccountEpochLog, EpochState, FixedNamespace as _, PoolHash, PoolState},
+    model::{AccountEpochLog, EpochState, FixedNamespace as _, PoolState},
     rupd::StakeSnapshot,
     ChainSummary, EraProtocol,
 };
@@ -446,7 +446,6 @@ where
     Option<PoolState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    let operator = super::pools::decode_pool_id(&pool_id)?;
     ensure_epoch_in_range(epoch)?;
 
     let tip = domain.get_tip_slot()?;
@@ -457,6 +456,9 @@ where
     if epoch > current {
         return Err(StatusCode::NOT_FOUND.into());
     }
+    let Some(hash) = super::pools::parse_pool_id_bounded(&pool_id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
 
     let start = summary.epoch_start(epoch);
     // `get_range` treats the upper bound as exclusive, so the next epoch's
@@ -464,7 +466,7 @@ where
     let end = summary.epoch_start(epoch + 1);
 
     let inner = domain.inner.clone();
-    let issuer = operator.clone();
+    let issuer = hash;
     let skip = pagination.skip();
     let count = pagination.count;
     let order = pagination.order;
@@ -490,7 +492,7 @@ where
                         continue;
                     };
 
-                    if Hasher::<224>::hash(key).as_slice() != issuer.as_slice() {
+                    if Hasher::<224>::hash(key) != issuer {
                         continue;
                     }
 
@@ -528,7 +530,7 @@ where
     // covers every pool that registered on chain, and a pool must register
     // before it can mint. The scan result acts as a second proof of
     // existence, for any issuer that has no entity.
-    if !minted_here && !domain.cardano_entity_exists::<PoolState>(operator.as_slice())? {
+    if !minted_here && !domain.cardano_entity_exists::<PoolState>(hash)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -626,26 +628,20 @@ where
     Option<PoolState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-
-    let operator = super::pools::decode_pool_id(&pool_id)?;
-    if !domain.cardano_entity_exists::<PoolState>(operator.as_slice())? {
-        return Err(StatusCode::NOT_FOUND.into());
-    }
-
-    // The merged row stores the pool as a hash rather than as loose bytes, so
-    // the comparison below is against one. A pool with an entity always has a
-    // 28-byte key, which makes this unreachable rather than merely unlikely.
-    let operator: [u8; 28] = operator
-        .as_slice()
-        .try_into()
-        .map_err(|_| Error::InvalidPoolId)?;
-    let operator = PoolHash::from(operator);
+    ensure_epoch_in_range(epoch)?;
 
     let tip = domain.get_tip_slot()?;
     let summary = domain.get_chain_summary()?;
     let (current, _) = summary.slot_epoch(tip);
 
     if epoch > current {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    let Some(operator) = super::pools::parse_pool_id_bounded(&pool_id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+    if !domain.cardano_entity_exists::<PoolState>(operator)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -707,8 +703,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{pool_id_cases, PoolIdCase, TestApp, TestFault, REG_POOL_ID};
     use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
+    use dolos_testing::synthetic::SyntheticBlockConfig;
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
@@ -1199,6 +1196,148 @@ mod tests {
             StatusCode::NOT_FOUND,
         )
         .await;
+    }
+
+    /// Gives a text for each difference from the Blockfrost error body.
+    async fn error_mismatch(
+        app: &TestApp,
+        path: &str,
+        status: StatusCode,
+        message: &str,
+    ) -> Option<String> {
+        let (actual, bytes) = app.get_bytes(path).await;
+        let expected = serde_json::json!({
+            "status_code": status.as_u16(),
+            "error": status.canonical_reason(),
+            "message": message,
+        });
+        let body = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+
+        (actual != status || body.as_ref() != Some(&expected)).then(|| {
+            format!(
+                "{path}: expected {status} {message:?}, got {actual} {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
+    fn pool_path_ids(labels: &[&str]) -> Vec<String> {
+        labels
+            .iter()
+            .map(|label| {
+                pool_id_cases()
+                    .into_iter()
+                    .find(|case| case.label == *label)
+                    .expect("Cannot find the pool ID case.")
+                    .path_id()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn epochs_pool_routes_check_in_blockfrost_order() {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            pool_id: REG_POOL_ID.to_string(),
+            ..Default::default()
+        });
+        let tip = app.tip_epoch();
+        let mut mismatches = Vec::new();
+
+        for route in ["blocks", "stakes"] {
+            for id in pool_path_ids(&["invalid", "bmissing", "b29", "h58"]) {
+                for epoch in [tip, MAX_EPOCH_NUMBER + 1] {
+                    let path = format!("/epochs/{epoch}/{route}/{id}?count=0");
+                    mismatches.extend(
+                        error_mismatch(
+                            &app,
+                            &path,
+                            StatusCode::BAD_REQUEST,
+                            "querystring/count must be >= 1",
+                        )
+                        .await,
+                    );
+                }
+            }
+
+            for id in pool_path_ids(&["invalid", "b28", "b29", "h58"]) {
+                for epoch in [999_999, MAX_EPOCH_NUMBER] {
+                    let path = format!("/epochs/{epoch}/{route}/{id}");
+                    mismatches.extend(
+                        error_mismatch(
+                            &app,
+                            &path,
+                            StatusCode::NOT_FOUND,
+                            "The requested component has not been found.",
+                        )
+                        .await,
+                    );
+                }
+
+                let path = format!("/epochs/{}/{route}/{id}", MAX_EPOCH_NUMBER + 1);
+                mismatches.extend(
+                    error_mismatch(
+                        &app,
+                        &path,
+                        StatusCode::BAD_REQUEST,
+                        "Missing, out of range or malformed epoch_number.",
+                    )
+                    .await,
+                );
+            }
+        }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    /// Gives a text for a difference from the Blockfrost response.
+    /// The text contains the case label, not the path, because some IDs have
+    /// thousands of characters.
+    async fn pool_id_case_mismatch(
+        app: &TestApp,
+        case: &PoolIdCase,
+        route: &str,
+        expected: u16,
+    ) -> Option<String> {
+        let (status, bytes) = app.get_bytes(&route.replace("{id}", &case.path_id())).await;
+        let expected_body = match expected {
+            400 => Some(("Bad Request", "Invalid or malformed pool id format.")),
+            404 => Some(("Not Found", "The requested component has not been found.")),
+            _ => None,
+        }
+        .map(|(error, message)| {
+            serde_json::json!({ "status_code": expected, "error": error, "message": message })
+        });
+        let body = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+        let matched =
+            status.as_u16() == expected && (expected_body.is_none() || body == expected_body);
+
+        (!matched).then(|| {
+            format!(
+                "{} {route}: expected {expected}, got {status} {}",
+                case.label,
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn epoch_pool_routes_match_blockfrost_for_each_pool_id() {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            pool_id: REG_POOL_ID.to_string(),
+            ..Default::default()
+        });
+        let tip = app.tip_epoch();
+        let mut mismatches = Vec::new();
+
+        for case in pool_id_cases() {
+            for route in ["blocks", "stakes"] {
+                let route = format!("/epochs/{tip}/{route}/{{id}}");
+                mismatches
+                    .extend(pool_id_case_mismatch(&app, &case, &route, case.bounded_status).await);
+            }
+        }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     #[tokio::test]
