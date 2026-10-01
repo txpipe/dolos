@@ -1,4 +1,4 @@
-//! The fourteen canaries: one fully-populated value per namespace.
+//! The fifteen canaries: one fully-populated value per namespace.
 //!
 //! A canary is a value in which **every field is present and distinctive** —
 //! every `Option` is `Some`, every collection is non-empty, every nested type
@@ -24,10 +24,10 @@ use dolos_cardano::{
     model::{
         AccountEpochLog, AccountState, AssetState, AuthHistory, Committee, CommitteeAuthorization,
         Constitution, DRepDelegation, DRepExpiry, DRepState, DatumState, EndStats, EpochState,
-        EpochValue, EraBoundary, EraSummary, GovDistr, GovRoots, GovState, Nonces, PParamValue,
-        PParamsSet, PendingMirState, PendingRewardState, PoolDelegation, PoolParams, PoolSnapshot,
-        PoolState, ProposalAction, ProposalState, RollingStats, ShardProgress, Stake, StakeLog,
-        VoteHistory,
+        EpochValue, EraBoundary, EraSummary, GovDistr, GovRoots, GovState, MetadataLabelState,
+        Nonces, PParamValue, PParamsSet, PendingMirState, PendingRewardState, PoolDelegation,
+        PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState, RollingStats,
+        ShardProgress, Stake, StakeLog, VoteHistory,
     },
     pallas::{
         codec::utils::Bytes,
@@ -437,6 +437,12 @@ fn gov_distr(seed: u8, epoch_offset: Epoch) -> GovDistr {
             (hash28(seed.wrapping_add(3)), 666_000_000),
         ]),
         pool_total: 1_221_000_000,
+    }
+}
+
+pub fn metadata_label_state() -> MetadataLabelState {
+    MetadataLabelState {
+        tx_count: 20_912_422,
     }
 }
 

@@ -3,7 +3,7 @@
 //! [`stelae`] is the protocol: framing, canonicalization, digests and the
 //! naming rules that let vendors coexist in one registry. It knows nothing
 //! about Cardano. This crate is the other half — the *profile* — and it says
-//! what a Dolos stele actually contains: twenty layer kinds, their media
+//! what a Dolos stele actually contains: twenty-one layer kinds, their media
 //! types,
 //! the tag a sequence renders as, what goes in `position`, `parameters` and
 //! each layer's `scope`, and the byte-exact codec for every record shape.
@@ -108,8 +108,8 @@ pub use stelae::{dir, inscription, transport, SteleReader};
 
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
-    StakeLog,
+    FixedNamespace, GovState, MetadataLabelState, PendingMirState, PendingRewardState, PoolState,
+    ProposalState, StakeLog,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -181,7 +181,7 @@ pub const LOG_KINDS: [(&str, Namespace); 3] = [
 /// namespace is a single blob. Re-sharding a namespace is a media-type-version
 /// event for that namespace's kind, decided by the format's owner; it is not a
 /// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 14] = [
+pub const STATE_KINDS: [(&str, Namespace, u8); 15] = [
     ("state-account-epochs", AccountEpochLog::NS, 1),
     ("state-accounts", AccountState::NS, 16),
     ("state-assets", AssetState::NS, 16),
@@ -190,6 +190,7 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 14] = [
     ("state-epochs", EpochState::NS, 1),
     ("state-eras", EraSummary::NS, 1),
     ("state-gov", GovState::NS, 1),
+    ("state-metadata-labels", MetadataLabelState::NS, 1),
     ("state-pending-mirs", PendingMirState::NS, 1),
     ("state-pending-rewards", PendingRewardState::NS, 1),
     ("state-pools", PoolState::NS, 1),
@@ -198,9 +199,9 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 14] = [
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 
-/// The fourteen state kind names alone: what [`StateScope`] answers for
+/// The names of the fifteen state kinds. [`StateScope`] gives these names for
 /// [`Scope::kinds`].
-pub const STATE_KIND_NAMES: [&str; 14] = [
+pub const STATE_KIND_NAMES: [&str; 15] = [
     STATE_KINDS[0].0,
     STATE_KINDS[1].0,
     STATE_KINDS[2].0,
@@ -215,6 +216,7 @@ pub const STATE_KIND_NAMES: [&str; 14] = [
     STATE_KINDS[11].0,
     STATE_KINDS[12].0,
     STATE_KINDS[13].0,
+    STATE_KINDS[14].0,
 ];
 
 /// The kind carrying `ns`'s state tip, or `None` where the namespace is not one
@@ -239,8 +241,9 @@ pub fn state_ns_for(kind: &str) -> Option<Namespace> {
         .map(|(_, ns, _)| ns)
 }
 
-/// Whether `kind` is one of the fourteen state kinds — the tip predicate the
-/// driver's staging arithmetic sums under, reaching it through
+/// If `kind` is one of the fifteen state kinds, the result is `true`. When
+/// the driver calculates its staging sums, it uses this function as the tip
+/// predicate. The driver gets the predicate through
 /// [`stelae_driver::DriverProfile::is_state_kind`].
 pub fn is_state_kind(kind: &str) -> bool {
     state_ns_for(kind).is_some()
@@ -255,9 +258,10 @@ pub fn shards_for(ns: Namespace) -> Option<u8> {
         .map(|(_, _, shards)| shards)
 }
 
-/// How many state layers every publish writes: the shard counts summed — 74
-/// today. Every shard of every namespace kind is written even when empty, so
-/// tip completeness stays structural rather than data-dependent.
+/// The number of state layers that each publish writes. This number is 75, the
+/// sum of the shard counts. Every shard of every namespace kind is
+/// written even when empty, so tip completeness stays structural rather than
+/// data-dependent.
 pub const fn state_layer_count() -> usize {
     let mut total = 0;
     let mut i = 0;
@@ -392,8 +396,8 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
 /// [`registry::preview`] is made of.
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
-/// The twenty layer kinds, in the order the inscription lists them.
-pub const KINDS: [&str; 20] = [
+/// The twenty-one layer kinds, in the same order as in the inscription.
+pub const KINDS: [&str; 21] = [
     BLOCKS,
     INDEXES,
     LOG_KINDS[0].0,
@@ -413,6 +417,7 @@ pub const KINDS: [&str; 20] = [
     STATE_KIND_NAMES[11],
     STATE_KIND_NAMES[12],
     STATE_KIND_NAMES[13],
+    STATE_KIND_NAMES[14],
     DIGESTS,
 ];
 
@@ -1161,7 +1166,7 @@ pub enum StateRole {
 
 /// Scope of one shard of one state kind, in one of its two roles.
 ///
-/// Uniform across all fourteen kinds, single-blob namespaces included — their
+/// Uniform across all fifteen kinds, single-blob namespaces included — their
 /// one layer is shard 0 — so the header and descriptor shapes stay one shape
 /// and a reader never dispatches on the kind to parse a scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

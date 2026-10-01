@@ -58,6 +58,7 @@ pub mod epochs;
 pub mod eras;
 pub mod gov;
 pub mod logs;
+pub mod metadata_labels;
 pub mod pending;
 pub mod pools;
 pub mod pparams;
@@ -75,6 +76,7 @@ pub use epochs::*;
 pub use eras::*;
 pub use gov::*;
 pub use logs::*;
+pub use metadata_labels::*;
 pub use pending::*;
 pub use pools::*;
 pub use pparams::*;
@@ -97,6 +99,7 @@ pub enum CardanoEntity {
     PendingMirState(Box<PendingMirState>),
     GovState(Box<GovState>),
     AccountEpochLog(Box<AccountEpochLog>),
+    MetadataLabelState(Box<MetadataLabelState>),
 }
 
 macro_rules! variant_boilerplate {
@@ -131,6 +134,7 @@ variant_boilerplate!(PendingRewardState);
 variant_boilerplate!(PendingMirState);
 variant_boilerplate!(GovState);
 variant_boilerplate!(AccountEpochLog);
+variant_boilerplate!(MetadataLabelState);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -148,6 +152,7 @@ impl dolos_core::Entity for CardanoEntity {
             PendingMirState::NS => PendingMirState::decode_entity(ns, value).map(Into::into),
             GovState::NS => GovState::decode_entity(ns, value).map(Into::into),
             AccountEpochLog::NS => AccountEpochLog::decode_entity(ns, value).map(Into::into),
+            MetadataLabelState::NS => MetadataLabelState::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -167,6 +172,7 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PendingMirState(x) => PendingMirState::encode_entity(x),
             Self::GovState(x) => GovState::encode_entity(x),
             Self::AccountEpochLog(x) => AccountEpochLog::encode_entity(x),
+            Self::MetadataLabelState(x) => MetadataLabelState::encode_entity(x),
         }
     }
 }
@@ -186,6 +192,7 @@ pub fn build_schema() -> StateSchema {
     schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
     schema.insert(PendingMirState::NS, NamespaceType::KeyValue);
     schema.insert(GovState::NS, NamespaceType::KeyValue);
+    schema.insert(MetadataLabelState::NS, NamespaceType::KeyValue);
     schema
 }
 
@@ -266,6 +273,7 @@ pub enum CardanoDelta {
     GovDistrRotate(Box<GovDistrRotate>),
     ProposalResolved(Box<ProposalResolved>),
     GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
+    MetadataLabelTxInc(Box<MetadataLabelTxInc>),
 }
 
 impl CardanoDelta {
@@ -370,6 +378,7 @@ delta_from!(CommitteeGc);
 delta_from!(GovDistrRotate);
 delta_from!(GovDistrBoundaryCredit);
 delta_from!(ProposalResolved);
+delta_from!(MetadataLabelTxInc);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -441,6 +450,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => x.key(),
             Self::SetEpochIncentives(x) => x.key(),
             Self::DequeueReward(x) => x.key(),
+            Self::MetadataLabelTxInc(x) => x.key(),
         }
     }
 
@@ -510,6 +520,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::SetEpochIncentives(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DequeueReward(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::MetadataLabelTxInc(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -579,6 +590,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::SetEpochIncentives(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DequeueReward(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::MetadataLabelTxInc(x) => Self::downcast_undo(x.as_ref(), entity),
         }
     }
 }

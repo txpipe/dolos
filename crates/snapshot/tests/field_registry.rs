@@ -50,7 +50,7 @@ fn schema_rev(ns: Namespace) -> u64 {
 
 /// The assertions every registry entry answers, applied to one of them.
 ///
-/// Shared by the fourteen real namespaces and by the synthetic entry of
+/// Shared by the fifteen real namespaces and by the synthetic entry of
 /// `ground_rules`, so the append-only path is exercised by the same code that
 /// enforces it rather than by a parallel imitation of it.
 fn check_entry(entry: &Entry, expected_rev: u64) {
