@@ -1282,16 +1282,11 @@ where
     params.from = None;
     params.to = None;
 
-    let operator = decode_pool_id(&id)?;
-
-    // Make sure that the decoded id is 28 bytes before the existence check.
-    // A short or long bech32 payload pads into a valid EntityKey. The check
-    // then returns a 404 for a malformed id, but the caller expects a 400.
-    let pool: PoolHash = <[u8; 28]>::try_from(operator.as_slice())
-        .map_err(|_| Error::InvalidPoolId)?
-        .into();
-
     let pagination = Pagination::try_from(params)?;
+    let Some(pool) = parse_pool_id_bounded(&id)? else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+
     let tip = domain.get_tip_slot()?;
 
     let inner = domain.inner.clone();
@@ -2938,13 +2933,9 @@ mod tests {
         let path = format!("/pools/{}/blocks", invalid_pool_id());
         assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
 
-        // A pool1 string that decodes but carries 27 bytes, not 28.
-        let hrp = bech32::Hrp::parse("pool").expect("invalid hrp");
-        let short = bech32::encode::<bech32::Bech32>(hrp, &[0u8; 27])
-            .expect("failed to encode short pool id");
-
-        let path = format!("/pools/{short}/blocks");
-        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
+        // The endpoint does the query string check before the pool ID check.
+        let path = format!("/pools/{}/blocks?count=0", invalid_pool_id());
+        assert_error_message(&app, &path, "querystring/count must be >= 1").await;
     }
 
     #[tokio::test]
@@ -3010,6 +3001,11 @@ mod tests {
         let pool = bech32_pool([0xff; 28]).expect("valid pool id");
         let path = format!("/pools/{pool}/blocks");
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        for pool_id in wrong_length_pool_ids(&app) {
+            let path = format!("/pools/{pool_id}/blocks");
+            assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+        }
     }
 
     #[tokio::test]
