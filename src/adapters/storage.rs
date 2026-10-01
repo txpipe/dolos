@@ -374,9 +374,13 @@ where
         }
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
+    fn prune_history(
+        &self,
+        max_slots: u64,
+        max_prune_slots: Option<u64>,
+    ) -> Result<bool, WalError> {
         match self {
-            Self::Redb(s) => WalStore::prune_history(s, max_slots, max_prune),
+            Self::Redb(s) => WalStore::prune_history(s, max_slots, max_prune_slots),
         }
     }
 

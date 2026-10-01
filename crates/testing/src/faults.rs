@@ -428,12 +428,16 @@ impl WalStore for FaultyWalStore {
         self.inner.truncate_front(after)
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, WalError> {
+    fn prune_history(
+        &self,
+        max_slots: u64,
+        max_prune_slots: Option<u64>,
+    ) -> Result<bool, WalError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
         self.inner
-            .prune_history(max_slots, max_prune)
+            .prune_history(max_slots, max_prune_slots)
             .map_err(WalError::from)
     }
 
