@@ -663,6 +663,10 @@ where
             get(routes::governance::drep_votes::<D>),
         )
         .route(
+            "/governance/dreps/{drep_id}/updates",
+            get(routes::governance::drep_updates::<D>),
+        )
+        .route(
             "/governance/proposals",
             get(routes::governance::proposals::<D>),
         )

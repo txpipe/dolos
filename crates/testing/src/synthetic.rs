@@ -59,6 +59,9 @@ pub struct SyntheticBlockConfig {
     pub drep_deposit: u64,
     pub gov_actions_by_block: Vec<BlockGovActions>,
     pub votes_by_block: Vec<BlockVotes>,
+    /// Certificates to append to each tx, after the ones every synthetic tx
+    /// carries.
+    pub extra_certs_by_block: Vec<BlockCerts>,
     pub proposal_deposit: u64,
     /// Fund each tx from the previous block's tx at the same index instead of
     /// from a fresh `seed_address` UTxO.
@@ -127,6 +130,7 @@ impl Default for SyntheticBlockConfig {
             drep_deposit: 1000,
             gov_actions_by_block: vec![],
             votes_by_block: vec![],
+            extra_certs_by_block: vec![],
             proposal_deposit: 100_000_000,
             spend_previous_outputs: false,
         }
@@ -155,6 +159,10 @@ pub struct SyntheticVote {
 /// Votes in each transaction of a block. Each outer entry represents one
 /// transaction.
 pub type BlockVotes = Vec<Vec<SyntheticVote>>;
+
+/// Extra certificates in each transaction of a block. Each outer entry
+/// represents one transaction.
+pub type BlockCerts = Vec<Vec<Certificate>>;
 
 #[derive(Clone, Debug)]
 pub struct SyntheticVectors {
@@ -301,6 +309,17 @@ pub fn build_synthetic_blocks(
             "The length of votes_by_block must equal the block count."
         );
         cfg.votes_by_block.clone()
+    };
+
+    let extra_certs_by_block = if cfg.extra_certs_by_block.is_empty() {
+        vec![vec![]; block_count]
+    } else {
+        assert_eq!(
+            cfg.extra_certs_by_block.len(),
+            block_count,
+            "The length of extra_certs_by_block must equal the block count."
+        );
+        cfg.extra_certs_by_block.clone()
     };
     let policy_id_hex = hex::encode(cfg.policy_id);
     let asset_name_hex = hex::encode(asset_names[0].as_bytes());
@@ -460,6 +479,11 @@ pub fn build_synthetic_blocks(
 
             let voting_procedures = (!voting_procedures.is_empty()).then_some(voting_procedures);
 
+            let extra_certs = extra_certs_by_block[offset]
+                .get(tx_offset)
+                .cloned()
+                .unwrap_or_default();
+
             tx_specs.push(sample_transaction(
                 Bytes::from(output_address),
                 cfg.lovelace,
@@ -478,6 +502,7 @@ pub fn build_synthetic_blocks(
                 extras,
                 gov_actions,
                 voting_procedures,
+                extra_certs,
                 cfg.proposal_deposit,
             ));
         }
@@ -780,6 +805,7 @@ fn sample_transaction(
     extras: Option<&SyntheticFixtureExtras>,
     gov_actions: Vec<GovAction>,
     voting_procedures: Option<VotingProcedures>,
+    extra_certs: Vec<Certificate>,
     proposal_deposit: u64,
 ) -> SyntheticTxSpec {
     let input = TransactionInput {
@@ -867,14 +893,16 @@ fn sample_transaction(
     // registers the DRep.
     let vote_delegation = Certificate::VoteDeleg(stake_cred, DRep::Key(drep_keyhash.into()));
 
-    let certificates = NonEmptySet::try_from(vec![
+    let mut certificates = vec![
         registration,
         delegation,
         pool_cert,
         drep_cert,
         vote_delegation,
-    ])
-    .expect("non-empty certificates");
+    ];
+    certificates.extend(extra_certs);
+
+    let certificates = NonEmptySet::try_from(certificates).expect("non-empty certificates");
 
     let body = TransactionBody {
         inputs: Set::from(vec![input]),

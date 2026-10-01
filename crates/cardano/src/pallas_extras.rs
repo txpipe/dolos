@@ -176,6 +176,17 @@ pub fn cert_as_drep_unregistration(cert: &MultiEraCert) -> Option<MultiEraDRepUn
     }
 }
 
+/// Returns the credential of a DRep update certificate.
+pub fn cert_as_drep_update(cert: &MultiEraCert) -> Option<StakeCredential> {
+    match cert {
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::UpdateDRepCert(cred, _) => Some(cred.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub struct MultiEraCommitteeAuth {
     pub cold: StakeCredential,
     pub hot: StakeCredential,
@@ -456,6 +467,16 @@ pub const DREP_SCRIPT_PREFIX: u8 = 0b00100011;
 pub fn drep_id_is_script(drep_id: &[u8]) -> bool {
     let first = drep_id.first().unwrap();
     first & 0b00001111 == 0b00000011
+}
+
+/// Returns the CIP-129 id bytes of a DRep credential: the key or script header
+/// byte, then the 28-byte hash. These are the bytes that `drep_to_entity_key`
+/// writes before its padding.
+pub fn drep_id_bytes(cred: &StakeCredential) -> Vec<u8> {
+    match cred {
+        StakeCredential::AddrKeyhash(hash) => [&[DREP_KEY_PREFIX][..], hash.as_slice()].concat(),
+        StakeCredential::ScriptHash(hash) => [&[DREP_SCRIPT_PREFIX][..], hash.as_slice()].concat(),
+    }
 }
 
 pub fn stake_cred_to_drep(cred: &StakeCredential) -> DRep {
