@@ -311,6 +311,26 @@ impl TestApp {
         Self::from_domain(domain, vectors, None, None)
     }
 
+    /// The default chain with the archive pruned behind it: the synthetic
+    /// blocks sit in consecutive slots, so keeping a two-slot window drops
+    /// the first two blocks while their UTxOs stay live.
+    pub fn new_pruned() -> Self {
+        use dolos_core::ArchiveStore as _;
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+
+        Self::new_with_cfg_and_setup(cfg, |domain, _| {
+            domain
+                .archive()
+                .prune_history(2, None, None)
+                .expect("failed to prune the synthetic archive");
+        })
+    }
+
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
     /// can be exercised without building a chain of thousands of blocks.
     pub fn new_with_scan_limit(cfg: SyntheticBlockConfig, max_scan_items: u64) -> Self {

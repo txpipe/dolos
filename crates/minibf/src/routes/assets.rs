@@ -47,7 +47,9 @@ use crate::{
 };
 
 mod all;
+mod utxos;
 pub use all::all;
+pub use utxos::by_subject_utxos;
 
 struct OnchainMetadata {
     version: Option<OnchainMetadataStandard>,
@@ -1008,13 +1010,12 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::{TestApp, TestFault};
-    use blockfrost_openapi::models::asset::Asset;
-    use dolos_testing::synthetic::SyntheticBlockConfig;
+mod testing {
+    use axum::http::StatusCode;
 
-    fn invalid_assets() -> Vec<String> {
+    use crate::test_support::TestApp;
+
+    pub fn invalid_assets() -> Vec<String> {
         vec![
             // non-hex characters
             "not-hex-asset".to_string(),
@@ -1027,11 +1028,11 @@ mod tests {
         ]
     }
 
-    fn missing_asset() -> &'static str {
+    pub fn missing_asset() -> &'static str {
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     }
 
-    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+    pub async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
         assert_eq!(
             status,
@@ -1040,6 +1041,15 @@ mod tests {
             String::from_utf8_lossy(&bytes)
         );
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::*;
+    use super::*;
+    use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::asset::Asset;
+    use dolos_testing::synthetic::SyntheticBlockConfig;
 
     #[tokio::test]
     async fn assets_by_subject_happy_path() {
