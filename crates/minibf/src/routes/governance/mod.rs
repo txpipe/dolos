@@ -1804,6 +1804,7 @@ fn drep_vote_counts<D: Domain>(
     vote_at: (BlockSlot, TxOrder),
     closed_epoch: Option<Epoch>,
     chain: &ChainSummary,
+    visible: BlockSlot,
 ) -> Result<bool, StatusCode> {
     let cred = match drep {
         DRep::Key(hash) => StakeCredential::AddrKeyhash(*hash),
@@ -1814,11 +1815,13 @@ fn drep_vote_counts<D: Domain>(
     let drep_id = pallas_extras::drep_id_bytes(&cred);
 
     // The last slot whose deregistration can still drop the vote: the one
-    // before the epoch that the proposal closes in.
+    // before the epoch that the proposal closes in. The scan also stops at
+    // the visible tip, which bounds the rest of the response too.
     let end = match closed_epoch {
         Some(closed) => chain.epoch_start(closed).saturating_sub(1),
         None => BlockSlot::MAX,
-    };
+    }
+    .min(visible);
 
     if end < vote_at.0 {
         return Ok(true);
@@ -1946,9 +1949,12 @@ fn read_votes<D: Domain>(
         return Ok(vec![]);
     };
 
-    // The sync commits the state before the archive. So for a short time the
-    // state row can hold votes whose blocks the archive does not have yet.
-    // The listing stops at the archive tip and leaves out those votes.
+    // The sync commits the state before the archive, on a roll-forward and on
+    // a rollback. So for a short time the two stores can disagree: the state
+    // row can hold votes whose blocks the archive does not have yet, and the
+    // archive can hold blocks that a rollback already took out of the state.
+    // The response reads both stores only up to the lower tip, so that it
+    // shows one consistent chain.
     let Some((archive_tip, _)) = domain
         .archive()
         .get_tip()
@@ -1957,10 +1963,19 @@ fn read_votes<D: Domain>(
         return Ok(vec![]);
     };
 
+    let tip = domain
+        .state()
+        .read_cursor()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+        .slot();
+
+    let visible = archive_tip.min(tip);
+
     let mut row_counts: BTreeMap<BlockSlot, usize> = BTreeMap::new();
 
     // Each voter's newest vote is the last entry of its history up to the
-    // archive tip, and it is the only one that can count toward the tally.
+    // visible tip, and it is the only one that can count toward the tally.
     let mut newest_slots: HashMap<(u8, Vec<u8>), BlockSlot> = HashMap::new();
 
     let keyed_histories = state
@@ -1983,7 +1998,7 @@ fn read_votes<D: Domain>(
     for (voter, history) in keyed_histories {
         let mut newest = None;
 
-        for (slot, _) in history.iter().filter(|(slot, _)| *slot <= archive_tip) {
+        for (slot, _) in history.iter().filter(|(slot, _)| *slot <= visible) {
             *row_counts.entry(*slot).or_default() += 1;
             newest = Some(*slot);
         }
@@ -1995,13 +2010,6 @@ fn read_votes<D: Domain>(
 
     let chain = dolos_cardano::eras::load_era_summary::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let tip = domain
-        .state()
-        .read_cursor()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-        .slot();
 
     let (current_epoch, _) = chain.slot_epoch(tip);
 
@@ -2045,7 +2053,7 @@ fn read_votes<D: Domain>(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         else {
             // The state row proves these votes exist, and the slot is not
-            // past the archive tip. So a missing block means the archive was
+            // past the visible tip. So a missing block means the archive was
             // pruned below the proposal's vote history. A short page would
             // misreport the votes; fail loudly instead.
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
@@ -2095,6 +2103,7 @@ fn read_votes<D: Domain>(
                         (slot, row.tx_order),
                         closed_epoch,
                         &chain,
+                        visible,
                     )?;
                 }
             }
@@ -5453,6 +5462,8 @@ mod tests {
     /// still counts.
     #[tokio::test]
     async fn governance_proposal_votes_stop_at_the_archive_tip() {
+        use dolos_core::{ChainPoint, StateWriter as _};
+
         let app = TestApp::new_with_cfg_and_setup(vote_cfg(), |domain, vectors| {
             let next_slot = vectors.blocks[2].slot + 1;
 
@@ -5463,6 +5474,16 @@ mod tests {
                     .expect("the drep has no votes")
                     .push((next_slot, Vote::No));
             });
+
+            // the state has already committed the block of that vote
+            let writer = domain
+                .state()
+                .start_writer()
+                .expect("failed to start writer");
+            writer
+                .set_cursor(ChainPoint::Slot(next_slot))
+                .expect("failed to move the cursor");
+            writer.commit().expect("failed to commit the cursor");
         });
 
         let proposal_tx = tx_hash_of_block(&app, 0);
@@ -5471,13 +5492,16 @@ mod tests {
     }
 
     /// Block 0 registers the DRep and proposes. In block 1, a committee
-    /// member and the DRep vote. The setup then tags one more slot as a
+    /// member and the DRep vote. The setup then tags the next slot as a
     /// certificate block of the DRep. With `body`, the archive holds that body
-    /// at the slot; without it, the slot has no block. Both make the `counted`
-    /// check of the DRep vote fail with 500.
+    /// at the slot. Without it, the slot has no block, and an untagged filler
+    /// block after it keeps the slot below the archive tip. Both make the
+    /// `counted` check of the DRep vote fail with 500.
     fn vote_app_with_extra_drep_tag(body: Option<Vec<u8>>) -> TestApp {
         use dolos_cardano::indexes::archive_dimensions::DREP_CERTS;
-        use dolos_core::{ArchiveIndexDelta, ArchiveWriter as _, ChainPoint, Tag};
+        use dolos_core::{
+            ArchiveIndexDelta, ArchiveWriter as _, ChainPoint, StateWriter as _, Tag,
+        };
         use pallas::ledger::primitives::conway::Certificate;
 
         let cred = StakeCredential::AddrKeyhash([0x66u8; 28].into());
@@ -5503,18 +5527,22 @@ mod tests {
             let slot = vectors.blocks[1].slot + 1;
             let hash = Hash::<32>::from([0xEEu8; 32]);
 
+            let top = match body {
+                Some(body) => (slot, hash, body),
+                None => (slot + 1, Hash::<32>::from([0xEFu8; 32]), vec![0xFF; 8]),
+            };
+            let (top_slot, top_hash, top_body) = top;
+
             let writer = domain
                 .archive()
                 .start_writer()
                 .expect("failed to start writer");
-            if let Some(body) = body {
-                writer
-                    .apply(
-                        &ChainPoint::Specific(slot, hash),
-                        &std::sync::Arc::new(body),
-                    )
-                    .expect("failed to write the block");
-            }
+            writer
+                .apply(
+                    &ChainPoint::Specific(top_slot, top_hash),
+                    &std::sync::Arc::new(top_body),
+                )
+                .expect("failed to write the block");
             writer
                 .apply_index(&[ArchiveIndexDelta {
                     slot,
@@ -5525,6 +5553,17 @@ mod tests {
                 }])
                 .expect("failed to tag the block");
             writer.commit().expect("failed to commit the block");
+
+            // The state cursor moves up to the archive tip, so the tagged slot
+            // is inside the chain that the response reads.
+            let writer = domain
+                .state()
+                .start_writer()
+                .expect("failed to start writer");
+            writer
+                .set_cursor(ChainPoint::Specific(top_slot, top_hash))
+                .expect("failed to move the cursor");
+            writer.commit().expect("failed to commit the cursor");
         })
     }
 
@@ -5568,6 +5607,56 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
         )
         .await;
+    }
+
+    /// A rollback commits the state before the archive. So for a short time
+    /// the archive still holds a block that the state already took back. A
+    /// deregistration in that block must not drop the vote.
+    #[tokio::test]
+    async fn governance_proposal_votes_stop_at_the_state_cursor() {
+        use dolos_core::{ChainPoint, StateWriter as _};
+        use pallas::ledger::primitives::conway::Certificate;
+
+        let cred = StakeCredential::AddrKeyhash([0x66u8; 28].into());
+        let mut extra_certs_by_block = vec![vec![vec![]]; 3];
+        extra_certs_by_block[0][0].push(Certificate::RegDRepCert(cred.clone(), 500, None));
+        extra_certs_by_block[2][0].push(Certificate::UnRegDRepCert(cred, 500));
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![]],
+            votes_by_block: vec![
+                vec![],
+                vec![vec![cast(drep_key_voter(), 0, Vote::Yes)]],
+                vec![],
+            ],
+            extra_certs_by_block,
+            ..Default::default()
+        };
+
+        // the state steps back to block 1, as a rollback of block 2 leaves it
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let block = &vectors.blocks[1];
+            let hash: Hash<32> = block
+                .block_hash
+                .parse()
+                .expect("failed to parse the block hash");
+
+            let writer = domain
+                .state()
+                .start_writer()
+                .expect("failed to start writer");
+            writer
+                .set_cursor(ChainPoint::Specific(block.slot, hash))
+                .expect("failed to move the cursor");
+            writer.commit().expect("failed to commit the cursor");
+        });
+
+        let proposal_tx = tx_hash_of_block(&app, 0);
+        let path = format!("/governance/proposals/{proposal_tx}/0/votes");
+        let rows = get_votes(&app, &path).await;
+        assert_eq!(rows.iter().map(|row| row.counted).collect_vec(), [true]);
     }
 
     /// The vote fixture with a fourth, empty block. The tx of block 0
