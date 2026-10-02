@@ -496,6 +496,96 @@ impl ProposalState {
 
 // --- Deltas ---
 
+/// Frozen positional preimage shared by the two legacy creation deltas.
+/// New ProposalState fields must never be added here: bincode has no framing
+/// for missing trailing fields. Conversion must default any newer state fields.
+mod legacy_proposal_preimage {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    struct FrozenProposalState {
+        slot: BlockSlot,
+        tx: Hash<32>,
+        idx: u32,
+        action: ProposalAction,
+        max_epoch: Option<Epoch>,
+        ratified_epoch: Option<Epoch>,
+        canceled_epoch: Option<Epoch>,
+        deposit: Option<Lovelace>,
+        reward_account: Option<StakeCredential>,
+        proposed_in: Option<Epoch>,
+        parent: Option<GovActionId>,
+        purpose: Option<GovPurpose>,
+        anchor: Option<Anchor>,
+        cc_votes: BTreeMap<StakeCredential, VoteHistory>,
+        drep_votes: BTreeMap<StakeCredential, VoteHistory>,
+        spo_votes: BTreeMap<PoolHash, VoteHistory>,
+    }
+
+    impl From<ProposalState> for FrozenProposalState {
+        fn from(state: ProposalState) -> Self {
+            Self {
+                slot: state.slot,
+                tx: state.tx,
+                idx: state.idx,
+                action: state.action,
+                max_epoch: state.max_epoch,
+                ratified_epoch: state.ratified_epoch,
+                canceled_epoch: state.canceled_epoch,
+                deposit: state.deposit,
+                reward_account: state.reward_account,
+                proposed_in: state.proposed_in,
+                parent: state.parent,
+                purpose: state.purpose,
+                anchor: state.anchor,
+                cc_votes: state.cc_votes,
+                drep_votes: state.drep_votes,
+                spo_votes: state.spo_votes,
+            }
+        }
+    }
+
+    impl From<FrozenProposalState> for ProposalState {
+        fn from(state: FrozenProposalState) -> Self {
+            Self {
+                slot: state.slot,
+                tx: state.tx,
+                idx: state.idx,
+                action: state.action,
+                max_epoch: state.max_epoch,
+                ratified_epoch: state.ratified_epoch,
+                canceled_epoch: state.canceled_epoch,
+                deposit: state.deposit,
+                reward_account: state.reward_account,
+                proposed_in: state.proposed_in,
+                parent: state.parent,
+                purpose: state.purpose,
+                anchor: state.anchor,
+                cc_votes: state.cc_votes,
+                drep_votes: state.drep_votes,
+                spo_votes: state.spo_votes,
+            }
+        }
+    }
+
+    pub fn serialize<S: serde::Serializer>(
+        state: &Option<ProposalState>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        state
+            .clone()
+            .map(FrozenProposalState::from)
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<ProposalState>, D::Error> {
+        Option::<FrozenProposalState>::deserialize(deserializer)
+            .map(|state| state.map(ProposalState::from))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewProposal {
     pub(crate) slot: BlockSlot,
@@ -509,6 +599,7 @@ pub struct NewProposal {
     pub(crate) network_magic: u32,
     pub(crate) protocol: u16,
 
+    #[serde(with = "legacy_proposal_preimage")]
     pub(crate) prev: Option<ProposalState>,
 }
 
@@ -592,12 +683,12 @@ impl dolos_core::EntityDelta for NewProposal {
 
 /// Creation of a proposal with full governance capture.
 ///
-/// Supersedes [`NewProposal`] as the emitted delta: it additionally records
-/// the lineage parent, the purpose, and the metadata anchor of the submitted
-/// action (the full seven-variant action mapping flows through the shared
-/// `ProposalAction`). [`NewProposal`] remains only so pre-existing WAL rows
-/// keep decoding and replaying — its field layout is frozen (bincode) and
-/// can't grow.
+/// Superseded by [`NewProposalV3`] for new writes. Compared to [`NewProposal`],
+/// it additionally records the lineage parent, the purpose, and the metadata
+/// anchor of the submitted action (the full seven-variant action mapping flows
+/// through the shared `ProposalAction`). [`NewProposal`] remains only so
+/// pre-existing WAL rows keep decoding and replaying — its field layout is
+/// frozen (bincode) and can't grow.
 ///
 /// `network_magic` and `protocol` are vestigial on both deltas: they fed the
 /// per-network table that stamped ratification at creation. The epoch
@@ -620,6 +711,7 @@ pub struct NewProposalV2 {
     pub(crate) purpose: Option<GovPurpose>,
     pub(crate) anchor: Option<Anchor>,
 
+    #[serde(with = "legacy_proposal_preimage")]
     pub(crate) prev: Option<ProposalState>,
 }
 
@@ -699,6 +791,115 @@ impl dolos_core::EntityDelta for NewProposalV2 {
 
     fn undo(&self, entity: &mut Option<ProposalState>) {
         *entity = self.prev.clone();
+    }
+}
+
+/// Proposal creation with a complete, CBOR-encoded undo preimage.
+///
+/// New writes use this delta so adding optional ProposalState fields does not
+/// change the frozen positional preimages of NewProposal or NewProposalV2.
+/// The byte vector frames the CBOR row, preserving WAL replay and exact undo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewProposalV3 {
+    pub(crate) slot: BlockSlot,
+    pub(crate) tx: Hash<32>,
+    pub(crate) idx: u32,
+    pub(crate) action: ProposalAction,
+    pub(crate) deposit: Option<Lovelace>,
+    pub(crate) reward_account: Option<StakeCredential>,
+    pub(crate) validity_period: Option<u64>,
+    pub(crate) current_epoch: Epoch,
+    pub(crate) network_magic: u32,
+    pub(crate) protocol: u16,
+    pub(crate) parent: Option<GovActionId>,
+    pub(crate) purpose: Option<GovPurpose>,
+    pub(crate) anchor: Option<Anchor>,
+
+    // CBOR keeps the undo preimage extensible without growing the WAL shape.
+    pub(crate) prev: Option<Vec<u8>>,
+}
+
+impl NewProposalV3 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        slot: BlockSlot,
+        tx: Hash<32>,
+        idx: u32,
+        action: ProposalAction,
+        deposit: Option<Lovelace>,
+        reward_account: Option<StakeCredential>,
+        validity_period: Option<u64>,
+        current_epoch: Epoch,
+        network_magic: u32,
+        protocol: u16,
+        parent: Option<GovActionId>,
+        purpose: Option<GovPurpose>,
+        anchor: Option<Anchor>,
+    ) -> Self {
+        Self {
+            slot,
+            tx,
+            idx,
+            action,
+            deposit,
+            reward_account,
+            validity_period,
+            current_epoch,
+            network_magic,
+            protocol,
+            parent,
+            purpose,
+            anchor,
+            prev: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for NewProposalV3 {
+    type Entity = ProposalState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((
+            ProposalState::NS,
+            ProposalState::build_entity_key(self.tx, self.idx),
+        ))
+    }
+
+    fn apply(&mut self, entity: &mut Option<ProposalState>) {
+        self.prev = entity
+            .as_ref()
+            .map(|state| minicbor::to_vec(state).expect("encode proposal creation preimage"));
+
+        let max_epoch = self.validity_period.map(|x| self.current_epoch + x);
+
+        let state = ProposalState {
+            slot: self.slot,
+            tx: self.tx,
+            idx: self.idx,
+            action: self.action.clone(),
+            reward_account: self.reward_account.clone(),
+            deposit: self.deposit,
+            max_epoch,
+            // Unresolved until a boundary rules on it ([`ProposalResolved`]).
+            ratified_epoch: None,
+            canceled_epoch: None,
+            proposed_in: Some(self.current_epoch),
+            parent: self.parent.clone(),
+            purpose: self.purpose,
+            anchor: self.anchor.clone(),
+            cc_votes: Default::default(),
+            drep_votes: Default::default(),
+            spo_votes: Default::default(),
+        };
+
+        let _ = entity.insert(state);
+    }
+
+    fn undo(&self, entity: &mut Option<ProposalState>) {
+        *entity = self
+            .prev
+            .as_ref()
+            .map(|bytes| minicbor::decode(bytes).expect("decode proposal creation preimage"));
     }
 }
 
@@ -1128,6 +1329,20 @@ mod prop_tests {
             entity in prop::option::of(any_proposal_state()),
             delta in any_new_proposal_v2(),
         ) {
+            root::assert_delta_serde_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn new_proposal_v3_roundtrip(
+            entity in prop::option::of(any_proposal_state()),
+            source in any_new_proposal_v2(),
+        ) {
+            let delta = NewProposalV3::new(
+                source.slot, source.tx, source.idx, source.action,
+                source.deposit, source.reward_account, source.validity_period,
+                source.current_epoch, source.network_magic, source.protocol,
+                source.parent, source.purpose, source.anchor,
+            );
             root::assert_delta_serde_roundtrip(entity, delta);
         }
 

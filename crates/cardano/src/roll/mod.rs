@@ -886,6 +886,20 @@ mod tests {
     fn valid_tx_contributes_entity_state() {
         let deltas = crawl_single_tx_block(true);
 
+        let proposal_deltas: Vec<_> = deltas
+            .entities
+            .iter()
+            .filter(|(NsKey(ns, _), _)| *ns == "proposals")
+            .flat_map(|(_, group)| group.iter())
+            .collect();
+        assert!(proposal_deltas
+            .iter()
+            .any(|delta| matches!(delta, CardanoDelta::NewProposalV3(_))));
+        assert!(!proposal_deltas.iter().any(|delta| matches!(
+            delta,
+            CardanoDelta::NewProposal(_) | CardanoDelta::NewProposalV2(_)
+        )));
+
         for ns in ["accounts", "dreps", "proposals", "assets", "pools"] {
             assert!(
                 !keys_in(&deltas, ns).is_empty(),

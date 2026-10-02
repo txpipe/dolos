@@ -14,7 +14,7 @@ use pallas::{
 
 use super::WorkDeltas;
 use crate::{
-    owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, GovPurpose, NewProposalV2,
+    owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, GovPurpose, NewProposalV3,
     PParamValue, PParamsSet, ProposalAction, VoteCast,
 };
 
@@ -371,7 +371,7 @@ impl BlockVisitor for ProposalVisitor {
     ) -> Result<(), ChainError> {
         let action = pre_conway_to_pparamset(update);
 
-        deltas.add_for_entity(NewProposalV2::new(
+        deltas.add_for_entity(NewProposalV3::new(
             block.slot(),
             tx.map(|tx| tx.hash()).unwrap_or_else(|| block.hash()),
             0,
@@ -408,7 +408,7 @@ impl BlockVisitor for ProposalVisitor {
         let reward_account = pallas_extras::parse_reward_account(&proposal.reward_account)
             .ok_or(ChainError::InvalidProposalParams)?;
 
-        deltas.add_for_entity(NewProposalV2::new(
+        deltas.add_for_entity(NewProposalV3::new(
             block.slot(),
             tx.hash(),
             idx as u32,
@@ -431,7 +431,7 @@ impl BlockVisitor for ProposalVisitor {
         // Votes buffered during `visit_tx` are emitted at block flush so a
         // vote targeting a proposal submitted in the same block (legal in
         // Conway, even within the same tx) lands *after* that proposal's
-        // `NewProposalV2` in the per-entity delta ordering.
+        // `NewProposalV3` in the per-entity delta ordering.
         for vote in self.pending_votes.drain(..) {
             deltas.add_for_entity(vote);
         }
