@@ -137,7 +137,7 @@ impl RatioFormat for Unrounded {
     }
 }
 
-const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
+pub const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 const ASSET_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("asset");
 const CALIDUS_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("calidus");
@@ -593,49 +593,82 @@ fn resolve_anchor_urls(url: &str, ipfs_gateways: &[String]) -> Vec<String> {
 
 /// This function fetches metadata from a governance-anchor URL.
 ///
-/// The function resolves an `ipfs://` URL through `ipfs_gateways`. It sends a
-/// request to each gateway in order. It stops at the first gateway that serves
-/// content with a hash equal to `expected_hash`. The function fetches every
-/// other URL directly.
-///
-/// The function returns the JSON body and the raw bytes. If every candidate
-/// fails, the function returns a typed error from the last candidate. Every
-/// error keeps the original on-chain URL.
+/// The function returns the JSON body and the raw bytes. On failure, it
+/// returns a typed error that keeps the original on-chain URL. See
+/// [`anchor_offchain_body`] for the fetch rules.
 pub async fn anchor_offchain_metadata(
     url: &str,
     expected_hash: &[u8],
     ipfs_gateways: &[String],
 ) -> (Option<AnchorMetadata>, Option<DrepsInnerMetadataError>) {
+    let metadata = anchor_offchain_body(url, expected_hash, ipfs_gateways)
+        .await
+        .and_then(|body| anchor_metadata_from_body(url, &body));
+
+    match metadata {
+        Ok(metadata) => (Some(metadata), None),
+        Err(error) => (None, Some(error)),
+    }
+}
+
+/// This function fetches the raw body of a governance anchor and makes sure
+/// that its hash matches `expected_hash`.
+///
+/// The function resolves an `ipfs://` URL through `ipfs_gateways`. It sends a
+/// request to each gateway in order. It stops at the first gateway that serves
+/// content with a hash equal to `expected_hash`. The function fetches every
+/// other URL directly.
+///
+/// If every candidate fails, the function returns a typed error from the last
+/// candidate. Every error keeps the original on-chain URL.
+pub async fn anchor_offchain_body(
+    url: &str,
+    expected_hash: &[u8],
+    ipfs_gateways: &[String],
+) -> Result<Vec<u8>, DrepsInnerMetadataError> {
     let candidates = resolve_anchor_urls(url, ipfs_gateways);
 
     // The candidate list is empty only for an `ipfs://` URL with no gateway. A
     // direct HTTP(S) URL always gives one candidate.
     if candidates.is_empty() {
-        return (None, Some(offchain_no_gateway_error(url)));
+        return Err(offchain_no_gateway_error(url));
     }
 
-    let client = match anchor_http_client() {
-        Ok(client) => client,
-        Err(error) => {
-            tracing::error!(%error, "cannot create the HTTP client for governance metadata");
-            return (None, Some(offchain_unknown_error(url)));
-        }
-    };
+    let client = anchor_http_client().map_err(|error| {
+        tracing::error!(%error, "cannot create the HTTP client for governance metadata");
+        offchain_unknown_error(url)
+    })?;
 
     let mut last_error = None;
 
     for candidate in candidates {
         match fetch_anchor_candidate(client, &candidate, url, expected_hash).await {
-            Ok(metadata) => return (Some(metadata), None),
+            Ok(body) => return Ok(body),
             Err(error) => last_error = Some(error),
         }
     }
 
-    (None, last_error)
+    Err(last_error.unwrap_or_else(|| offchain_connection_error(url)))
+}
+
+/// This function decodes a verified anchor body into the JSON value and the
+/// raw bytes in the PostgreSQL `bytea` format.
+///
+/// A body that is not JSON gives a decode error that names `url`.
+pub fn anchor_metadata_from_body(
+    url: &str,
+    body: &[u8],
+) -> Result<AnchorMetadata, DrepsInnerMetadataError> {
+    serde_json::from_slice(body)
+        .map(|json| AnchorMetadata {
+            json,
+            bytes: format!("\\x{}", hex::encode(body)),
+        })
+        .map_err(|_| offchain_decode_error(url))
 }
 
 /// This function fetches one resolved candidate URL for
-/// [`anchor_offchain_metadata`]. The function makes sure that the body hash
+/// [`anchor_offchain_body`]. The function makes sure that the body hash
 /// matches `expected_hash`.
 ///
 /// `request_url` is the URL that the function fetches. For an `ipfs://` anchor,
@@ -646,7 +679,7 @@ async fn fetch_anchor_candidate(
     request_url: &str,
     original_url: &str,
     expected_hash: &[u8],
-) -> Result<AnchorMetadata, DrepsInnerMetadataError> {
+) -> Result<Vec<u8>, DrepsInnerMetadataError> {
     let request_url = match reqwest::Url::parse(request_url) {
         Ok(url) if is_public_http_url(&url) => url,
         _ => return Err(offchain_connection_error(original_url)),
@@ -677,12 +710,7 @@ async fn fetch_anchor_candidate(
         ));
     }
 
-    serde_json::from_slice(body.as_ref())
-        .map(|json| AnchorMetadata {
-            json,
-            bytes: format!("\\x{}", hex::encode(body.as_slice())),
-        })
-        .map_err(|_| offchain_decode_error(original_url))
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -838,8 +866,7 @@ mod anchor_tests {
 
         let error = fetch_anchor_candidate(&client, &request_url, original_url, &[0; 32])
             .await
-            .err()
-            .expect("The hash mismatch was accepted.");
+            .expect_err("The hash mismatch was accepted.");
 
         server.join().expect("The test server did not stop.");
         assert_eq!(error.code, Code::HashMismatch);
@@ -854,16 +881,19 @@ mod anchor_tests {
         let (url, server) = serve_body(body, None);
         let (client, request_url) = local_candidate_client(&url);
 
-        let metadata = fetch_anchor_candidate(
+        let body = fetch_anchor_candidate(
             &client,
             &request_url,
             "ipfs://bafy-valid-json",
             expected_hash.as_ref(),
         )
         .await
-        .expect("The valid metadata was rejected.");
+        .expect("The valid body was rejected.");
 
         server.join().expect("The test server did not stop.");
+
+        let metadata = anchor_metadata_from_body("ipfs://bafy-valid-json", &body)
+            .expect("The valid metadata was rejected.");
         assert_eq!(metadata.json["name"], "Dolos");
         assert_eq!(metadata.bytes, format!("\\x{expected_hex}"));
     }
@@ -876,13 +906,17 @@ mod anchor_tests {
         let (client, request_url) = local_candidate_client(&url);
         let original_url = "ipfs://bafy-invalid-json";
 
-        let error =
+        // the hash matches, so the body comes back; only decoding refuses it
+        let body =
             fetch_anchor_candidate(&client, &request_url, original_url, expected_hash.as_ref())
                 .await
-                .err()
-                .expect("The invalid JSON was accepted.");
+                .expect("The body with a matching hash was rejected.");
 
         server.join().expect("The test server did not stop.");
+
+        let error = anchor_metadata_from_body(original_url, &body)
+            .err()
+            .expect("The invalid JSON was accepted.");
         assert_eq!(error.code, Code::DecodeError);
         assert!(error.message.contains(original_url));
     }
