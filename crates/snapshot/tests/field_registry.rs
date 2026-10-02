@@ -310,3 +310,11 @@ fn print_current_canary_encodings() {
         }
     }
 }
+
+#[test]
+fn proposals_rev1_without_positions_reencodes_identically() {
+    let bytes = decode_hex(include_str!("registry/goldens/proposals.rev1.hex"));
+    let proposal: dolos_cardano::ProposalState = minicbor::decode(&bytes).unwrap();
+    assert!(proposal.drep_vote_positions.is_none());
+    assert_eq!(minicbor::to_vec(proposal).unwrap(), bytes);
+}

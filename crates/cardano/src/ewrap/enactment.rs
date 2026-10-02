@@ -189,6 +189,7 @@ mod tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
+            drep_vote_positions: None,
         }
     }
 

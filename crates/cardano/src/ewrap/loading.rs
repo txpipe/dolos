@@ -1223,7 +1223,10 @@ impl BoundaryWork {
                 expires_after,
                 order: (proposal.slot, proposal.tx, proposal.idx),
                 cc_votes: proposal.cc_votes_as_of(cutoff),
-                drep_votes: proposal.drep_votes_as_of(cutoff),
+                drep_votes: snapshot.map_or_else(
+                    || proposal.drep_votes_as_of(cutoff),
+                    |snapshot| proposal.drep_votes_at_snapshot(cutoff, snapshot),
+                ),
                 spo_votes: proposal.spo_votes_as_of(cutoff),
             });
         }
@@ -1965,6 +1968,7 @@ mod tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
+            drep_vote_positions: None,
         };
 
         // a second live proposal, submitted *during* the closing epoch: the
@@ -2109,6 +2113,7 @@ mod tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
+            drep_vote_positions: None,
         };
 
         // ratified at the previous boundary: out of the forest, refunded
@@ -2253,7 +2258,7 @@ mod tests {
 
     /// A DRep certificate, as the tests below replay it: the position it
     /// lands at, and whether it registers or unregisters.
-    enum Cert {
+    pub(super) enum Cert {
         Reg(BlockSlot, TxOrder),
         UnReg(BlockSlot, TxOrder),
     }
@@ -2262,7 +2267,7 @@ mod tests {
     /// deltas, so the stored `registered_at` / `unregistered_at` pair is
     /// exactly what a chain replay leaves behind — in particular, each field
     /// holding only the *latest* certificate of its kind.
-    fn replay_drep_certs(identifier: DRep, certs: &[Cert]) -> crate::DRepState {
+    pub(super) fn replay_drep_certs(identifier: DRep, certs: &[Cert]) -> crate::DRepState {
         let mut entity: Option<crate::DRepState> = None;
 
         for cert in certs {
@@ -2837,6 +2842,7 @@ mod ratification_tests {
                 .map(|vote| BTreeMap::from([(drep_cred(), vec![(1u64, vote)])]))
                 .unwrap_or_default(),
             spo_votes: Default::default(),
+            drep_vote_positions: None,
         }
     }
 
@@ -2988,6 +2994,154 @@ mod ratification_tests {
             .unwrap();
 
         boundary
+    }
+
+    #[test]
+    fn snapshot_drep_vote_cleanup_matches_transaction_order() {
+        use super::tests::{replay_drep_certs, Cert};
+        use dolos_core::EntityDelta as _;
+        use pallas::ledger::primitives::conway::Voter;
+
+        // Each tuple is (history, latest removal, whether the latest vote
+        // survives). All positions precede the seeded ratification cutoff.
+        for (history, removed, survives) in [
+            (vec![(10, Some(0), Vote::Yes)], (20, 0), false),
+            (vec![(20, Some(2), Vote::Yes)], (20, 0), true),
+            (vec![(20, Some(0), Vote::Yes)], (20, 0), false),
+            (vec![(20, Some(0), Vote::Yes)], (20, 1), false),
+            (vec![(15, Some(0), Vote::Yes)], (20, 0), false),
+            (
+                vec![(10, Some(0), Vote::No), (21, Some(0), Vote::Yes)],
+                (20, 0),
+                true,
+            ),
+            (vec![(20, None, Vote::Yes)], (20, 0), false),
+            (vec![(21, None, Vote::Yes)], (20, 0), true),
+            (vec![(20, Some(0), Vote::No)], (20, 1), false),
+            (vec![(20, Some(0), Vote::Abstain)], (20, 1), false),
+        ] {
+            let mut proposal = withdrawal(1, Some(Vote::Yes), CLOSING + 10);
+            proposal.drep_votes.clear();
+            let mut entity = Some(proposal);
+            for (slot, order, vote) in history {
+                let voter = Voter::DRepKey([0xd7; 28].into());
+                if let Some(order) = order {
+                    crate::VoteCastV2::new([1; 32].into(), 0, voter, vote, slot, order)
+                        .apply(&mut entity);
+                } else {
+                    crate::VoteCast::new([1; 32].into(), 0, voter, vote, slot).apply(&mut entity);
+                }
+            }
+            let proposal = entity.unwrap();
+            let domain = seed(std::slice::from_ref(&proposal));
+            let row = replay_drep_certs(
+                drep(),
+                &[
+                    Cert::Reg(1, 0),
+                    Cert::UnReg(12, 0),
+                    Cert::Reg(13, 0),
+                    Cert::UnReg(removed.0, removed.1),
+                    Cert::Reg(removed.0, removed.1),
+                ],
+            );
+            assert!(BoundaryWork::is_drep_registered_at_boundary(&row, 30));
+            let mut gov = crate::load_gov::<ToyDomain>(domain.state()).unwrap();
+            gov.drep_snapshot
+                .as_mut()
+                .unwrap()
+                .dreps
+                .get_mut(&drep_cred())
+                .unwrap()
+                .unregistered_at = row.unregistered_at;
+            let writer = domain.state().start_writer().unwrap();
+            writer
+                .write_entity_typed(&GovState::singleton_key(), &gov)
+                .unwrap();
+            writer
+                .write_entity_typed(&drep_to_entity_key(&drep()), &row)
+                .unwrap();
+            writer.commit().unwrap();
+            let boundary =
+                BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+            let input = boundary
+                .build_ratify_input::<ToyDomain>(domain.state())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                input.proposals[0].drep_votes.contains_key(&drep_cred()),
+                survives
+            );
+            let tally = crate::ewrap::ratify::drep_tally(
+                CLOSING,
+                &input.drep_distr,
+                &input.dreps,
+                &input.proposals[0].drep_votes,
+                false,
+            );
+            assert_eq!(tally, (if survives { 1_000 } else { 0 }, 1_000));
+            // Cleanup affects the tally input; the stored history is intact.
+            assert_eq!(read(&domain, &proposal), proposal);
+        }
+    }
+
+    /// Port of Conway Imp/GovSpec's "DRep votes are removed", adding
+    /// re-registration before the snapshot so the DRep still contributes No.
+    #[test]
+    fn ledger_drep_votes_are_removed_after_reregistration() {
+        use super::tests::{replay_drep_certs, Cert};
+        let mut proposal = withdrawal(1, Some(Vote::No), CLOSING + 10);
+        proposal.action = ProposalAction::Info;
+        let domain = seed(std::slice::from_ref(&proposal));
+        let row = replay_drep_certs(
+            drep(),
+            &[Cert::Reg(0, 0), Cert::UnReg(2, 0), Cert::Reg(3, 0)],
+        );
+        let mut gov = crate::load_gov::<ToyDomain>(domain.state()).unwrap();
+        gov.drep_snapshot
+            .as_mut()
+            .unwrap()
+            .dreps
+            .get_mut(&drep_cred())
+            .unwrap()
+            .unregistered_at = row.unregistered_at;
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(&GovState::singleton_key(), &gov)
+            .unwrap();
+        writer
+            .write_entity_typed(&drep_to_entity_key(&drep()), &row)
+            .unwrap();
+        writer.commit().unwrap();
+        let boundary =
+            BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+        let input = boundary
+            .build_ratify_input::<ToyDomain>(domain.state())
+            .unwrap()
+            .unwrap();
+        assert!(input.dreps.contains_key(&drep_cred()));
+        assert!(input.proposals[0].drep_votes.is_empty());
+        assert_eq!(
+            read(&domain, &proposal).drep_votes[&drep_cred()],
+            vec![(1, Vote::No)]
+        );
+    }
+
+    #[test]
+    fn votes_from_dreps_outside_snapshot_are_absent() {
+        let mut proposal = withdrawal(1, Some(Vote::Yes), CLOSING + 10);
+        let outsider = StakeCredential::ScriptHash([0xef; 28].into());
+        proposal
+            .drep_votes
+            .insert(outsider.clone(), vec![(1, Vote::Yes)]);
+        let domain = seed(&[proposal]);
+        let boundary =
+            BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+        let input = boundary
+            .build_ratify_input::<ToyDomain>(domain.state())
+            .unwrap()
+            .unwrap();
+        assert!(!input.proposals[0].drep_votes.contains_key(&outsider));
+        assert_eq!(input.proposals[0].drep_votes.len(), 1);
     }
 
     #[test]

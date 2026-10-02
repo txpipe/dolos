@@ -128,7 +128,12 @@ fn legacy_creation_wal_bytes_replay_and_undo() {
 
 #[test]
 fn new_creation_wal_preserves_complete_preimage_and_metadata() {
-    for original in [None, Some(preimage())] {
+    let mut positioned = preimage();
+    positioned.drep_vote_positions = Some(std::collections::BTreeMap::from([(
+        StakeCredential::ScriptHash([6; 28].into()),
+        vec![Some(4)],
+    )]));
+    for original in [None, Some(preimage()), Some(positioned)] {
         let mut delta: CardanoDelta = NewProposalV3::new(
             123,
             [1; 32].into(),
