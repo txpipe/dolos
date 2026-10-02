@@ -1,6 +1,6 @@
 mod mapping;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use self::mapping::description_json;
 
@@ -1709,28 +1709,6 @@ struct ProposalVoteRow {
     counted: bool,
 }
 
-/// The vote-map identity of a voter: which of the proposal's three vote maps
-/// it lives in, and its key bytes there.
-fn voter_map_key(voter: &Voter) -> (u8, Vec<u8>) {
-    let cred_key =
-        |is_script: bool, hash: &Hash<28>| [&[is_script as u8][..], hash.as_slice()].concat();
-
-    match voter {
-        Voter::ConstitutionalCommitteeKey(hash) => (0, cred_key(false, hash)),
-        Voter::ConstitutionalCommitteeScript(hash) => (0, cred_key(true, hash)),
-        Voter::DRepKey(hash) => (1, cred_key(false, hash)),
-        Voter::DRepScript(hash) => (1, cred_key(true, hash)),
-        Voter::StakePoolKey(hash) => (2, hash.to_vec()),
-    }
-}
-
-fn cred_map_key(cred: &StakeCredential) -> Vec<u8> {
-    match cred {
-        StakeCredential::AddrKeyhash(hash) => [&[0u8][..], hash.as_slice()].concat(),
-        StakeCredential::ScriptHash(hash) => [&[1u8][..], hash.as_slice()].concat(),
-    }
-}
-
 /// The CIP-129 spelling Blockfrost gives each voter: a hot-credential id for
 /// a committee member, a drep id for a DRep, the bare pool id for an SPO.
 fn voter_model(voter: &Voter) -> Result<(proposal_votes_inner::VoterRole, String), StatusCode> {
@@ -1769,10 +1747,7 @@ impl IntoModel<ProposalVotesInner> for ProposalVoteRow {
 
         Ok(ProposalVotesInner {
             tx_hash: hex::encode(self.tx),
-            cert_index: self
-                .cert_index
-                .try_into()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            cert_index: i32_or_500(self.cert_index)?,
             voter_role,
             voter,
             vote: proposal_vote_model(&self.vote),
@@ -1800,19 +1775,13 @@ impl IntoModel<ProposalVotesInner> for ProposalVoteRow {
 /// archive: the check fails loudly instead of reporting the vote as counted.
 fn drep_vote_counts<D: Domain>(
     domain: &D,
-    drep: &DRep,
+    cred: &StakeCredential,
     vote_at: (BlockSlot, TxOrder),
     closed_epoch: Option<Epoch>,
     chain: &ChainSummary,
     visible: BlockSlot,
 ) -> Result<bool, StatusCode> {
-    let cred = match drep {
-        DRep::Key(hash) => StakeCredential::AddrKeyhash(*hash),
-        DRep::Script(hash) => StakeCredential::ScriptHash(*hash),
-        DRep::Abstain | DRep::NoConfidence => return Ok(true),
-    };
-
-    let drep_id = pallas_extras::drep_id_bytes(&cred);
+    let drep_id = pallas_extras::drep_id_bytes(cred);
 
     // The last slot whose deregistration can still drop the vote: the one
     // before the epoch that the proposal closes in. The scan also stops at
@@ -1927,9 +1896,9 @@ fn votes_in_block(body: &[u8], action: &GovActionId) -> Result<Vec<ProposalVoteR
 /// even ones the ledger no longer counts.
 ///
 /// The state row carries each vote as a voter and a slot, so the number of
-/// rows per block is known upfront and only the blocks the page reaches are
-/// read from the archive — those resolve the voting tx hash and the index of
-/// the vote inside it.
+/// rows per block is known upfront. `page_slot_groups` reads only the blocks
+/// the page reaches from the archive — those resolve the voting tx hash and
+/// the index of the vote inside it.
 fn read_votes<D: Domain>(
     domain: &D,
     tx: Hash<32>,
@@ -1972,41 +1941,20 @@ fn read_votes<D: Domain>(
 
     let visible = archive_tip.min(tip);
 
-    let mut row_counts: BTreeMap<BlockSlot, usize> = BTreeMap::new();
-
-    // Each voter's newest vote is the last entry of its history up to the
-    // visible tip, and it is the only one that can count toward the tally.
-    let mut newest_slots: HashMap<(u8, Vec<u8>), BlockSlot> = HashMap::new();
-
-    let keyed_histories = state
+    // One placeholder for each vote up to the visible tip. When the page
+    // reaches a slot, the archived block replaces the placeholders of that
+    // slot with the resolved rows.
+    let mut rows: Vec<(BlockSlot, Option<ProposalVoteRow>)> = state
         .cc_votes
-        .iter()
-        .map(|(cred, history)| ((0, cred_map_key(cred)), history))
-        .chain(
-            state
-                .drep_votes
-                .iter()
-                .map(|(cred, history)| ((1, cred_map_key(cred)), history)),
-        )
-        .chain(
-            state
-                .spo_votes
-                .iter()
-                .map(|(pool, history)| ((2, pool.to_vec()), history)),
-        );
+        .values()
+        .chain(state.drep_votes.values())
+        .chain(state.spo_votes.values())
+        .flat_map(|history| history.iter().map(|(slot, _)| *slot))
+        .filter(|slot| *slot <= visible)
+        .map(|slot| (slot, None))
+        .collect();
 
-    for (voter, history) in keyed_histories {
-        let mut newest = None;
-
-        for (slot, _) in history.iter().filter(|(slot, _)| *slot <= visible) {
-            *row_counts.entry(*slot).or_default() += 1;
-            newest = Some(*slot);
-        }
-
-        if let Some(slot) = newest {
-            newest_slots.insert(voter, slot);
-        }
-    }
+    rows.sort_by_key(|(slot, _)| *slot);
 
     let chain = dolos_cardano::eras::load_era_summary::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -2015,103 +1963,83 @@ fn read_votes<D: Domain>(
 
     let closed_epoch = proposal_closed_epoch(&state, current_epoch);
 
-    let mut groups: Vec<(BlockSlot, usize)> = row_counts.into_iter().collect();
-
-    let descending = matches!(pagination.order, Order::Desc);
-
-    // desc is the whole ascending listing read backwards
-    if descending {
-        groups.reverse();
-    }
-
     let action = GovActionId {
         transaction_id: tx,
         action_index: idx,
     };
 
-    let from = pagination.from();
-    let to = from + pagination.count;
-
-    let mut out = Vec::new();
-    let mut seen = 0;
-
-    for (slot, count) in groups {
-        let end = seen + count;
-
-        if end <= from {
-            seen = end;
-            continue;
-        }
-
-        if seen >= to {
-            break;
-        }
-
-        let Some(body) = domain
-            .archive()
-            .get_block_by_slot(&slot)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        else {
-            // The state row proves these votes exist, and the slot is not
-            // past the visible tip. So a missing block means the archive was
-            // pruned below the proposal's vote history. A short page would
-            // misreport the votes; fail loudly instead.
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
-        };
-
-        let mut rows = votes_in_block(&body, &action)?;
-
-        // Mark each voter's newest vote. A voter's history entries at one
-        // slot map onto its rows in that block in the same order, so the
-        // newest vote is the voter's last row in the block holding its last
-        // history entry.
-        let mut last_in_block: HashMap<(u8, Vec<u8>), usize> = HashMap::new();
-        for (index, row) in rows.iter().enumerate() {
-            last_in_block.insert(voter_map_key(&row.voter), index);
-        }
-
-        // Only the newest vote can count. For a DRep vote, the page loop
-        // below also looks for a deregistration that drops it.
-        for (index, row) in rows.iter_mut().enumerate() {
-            let voter = voter_map_key(&row.voter);
-
-            row.counted = newest_slots.get(&voter) == Some(&slot) && last_in_block[&voter] == index;
-        }
-
-        if descending {
-            rows.reverse();
-        }
-
-        for (offset, mut row) in rows.into_iter().enumerate() {
-            if !(from..to).contains(&(seen + offset)) {
-                continue;
-            }
-
-            let drep = match &row.voter {
-                Voter::DRepKey(hash) => Some(DRep::Key(*hash)),
-                Voter::DRepScript(hash) => Some(DRep::Script(*hash)),
-                _ => None,
+    let page = page_slot_groups(
+        rows,
+        |(slot, _)| *slot,
+        pagination,
+        |slot, group| {
+            let Some(body) = domain
+                .archive()
+                .get_block_by_slot(&slot)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            else {
+                // The state row proves these votes exist, and the slot is
+                // not past the visible tip. So a missing block means the
+                // archive was pruned below the proposal's vote history. A
+                // short page would misreport the votes; fail loudly instead.
+                return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
             };
 
-            // Only the rows on the page pay for the certificate scan of their
-            // DRep.
-            if row.counted {
-                if let Some(drep) = drep {
-                    row.counted = drep_vote_counts(
-                        domain,
-                        &drep,
-                        (slot, row.tx_order),
-                        closed_epoch,
-                        &chain,
-                        visible,
-                    )?;
-                }
+            let mut votes = votes_in_block(&body, &action)?;
+
+            // Only the newest vote of a voter can count. A voter's history
+            // entries at one slot map onto its rows in that block in the same
+            // order, so the newest vote is the voter's last row in the block
+            // of its newest visible history entry.
+            let mut later = BTreeSet::new();
+
+            for row in votes.iter_mut().rev() {
+                let last_in_block = later.insert(row.voter.clone());
+
+                let newest = state.vote_history(&row.voter).and_then(|history| {
+                    history
+                        .iter()
+                        .rev()
+                        .map(|(slot, _)| *slot)
+                        .find(|slot| *slot <= visible)
+                });
+
+                row.counted = last_in_block && newest == Some(slot);
             }
 
-            out.push(row.into_model()?);
+            *group = votes.into_iter().map(|row| (slot, Some(row))).collect();
+
+            Ok(())
+        },
+    )?;
+
+    let mut out = Vec::with_capacity(page.len());
+
+    for (slot, row) in page {
+        let mut row = row.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let drep = match &row.voter {
+            Voter::DRepKey(hash) => Some(StakeCredential::AddrKeyhash(*hash)),
+            Voter::DRepScript(hash) => Some(StakeCredential::ScriptHash(*hash)),
+            _ => None,
+        };
+
+        // Only the rows on the page pay for the certificate scan of their
+        // DRep.
+        if row.counted {
+            if let Some(cred) = drep {
+                row.counted = drep_vote_counts(
+                    domain,
+                    &cred,
+                    (slot, row.tx_order),
+                    closed_epoch,
+                    &chain,
+                    visible,
+                )?;
+            }
         }
 
-        seen = end;
+        out.push(row.into_model()?);
     }
 
     Ok(out)
@@ -5132,18 +5060,6 @@ mod tests {
         Voter::StakePoolKey([0x99u8; 28].into())
     }
 
-    fn cast(voter: Voter, action_index: u32, vote: Vote) -> SyntheticVote {
-        SyntheticVote {
-            voter,
-            proposal: SyntheticProposalRef {
-                block: 0,
-                tx: 0,
-                action: action_index,
-            },
-            vote,
-        }
-    }
-
     /// Block 0 proposes three actions in one tx. Block 1 votes on action 0
     /// with all three voter roles — its drep votes on action 1 too, so the
     /// per-voter cert index shows. Block 2 carries the same drep re-voting on
@@ -5164,13 +5080,19 @@ mod tests {
             votes_by_block: vec![
                 vec![],
                 vec![vec![
-                    cast(drep_key_voter(), 0, Vote::Yes),
-                    cast(drep_key_voter(), 1, Vote::No),
-                    cast(cc_key_voter(), 0, Vote::Yes),
-                    cast(cc_script_voter(), 0, Vote::No),
-                    cast(spo_voter(), 0, Vote::Abstain),
+                    synthetic_vote(drep_key_voter(), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(drep_key_voter(), 0, 0, 1, Vote::No),
+                    synthetic_vote(cc_key_voter(), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(cc_script_voter(), 0, 0, 0, Vote::No),
+                    synthetic_vote(spo_voter(), 0, 0, 0, Vote::Abstain),
                 ]],
-                vec![vec![cast(drep_key_voter(), 0, Vote::Abstain)]],
+                vec![vec![synthetic_vote(
+                    drep_key_voter(),
+                    0,
+                    0,
+                    0,
+                    Vote::Abstain,
+                )]],
             ],
             ..Default::default()
         }
@@ -5303,6 +5225,43 @@ mod tests {
         // a page past the end is empty, not an error
         let page = get_votes(&app, &format!("{base}?page=7")).await;
         assert!(page.is_empty());
+    }
+
+    /// Two txs of one block carry a vote of the same DRep on the same
+    /// proposal. Both rows are listed, and only the later one counts.
+    #[tokio::test]
+    async fn governance_proposal_votes_revote_in_one_block() {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 2,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information], vec![]], vec![]],
+            votes_by_block: vec![
+                vec![],
+                vec![
+                    vec![synthetic_vote(drep_key_voter(), 0, 0, 0, Vote::Yes)],
+                    vec![synthetic_vote(drep_key_voter(), 0, 0, 0, Vote::No)],
+                ],
+            ],
+            ..Default::default()
+        });
+
+        let proposal_tx = tx_hash_of_block(&app, 0);
+        let path = format!("/governance/proposals/{proposal_tx}/0/votes");
+        let rows = get_votes(&app, &path).await;
+
+        let txs = &app.vectors().blocks[1].tx_hashes;
+        let summary = rows
+            .iter()
+            .map(|row| (row.tx_hash.clone(), row.vote, row.counted))
+            .collect_vec();
+
+        assert_eq!(
+            summary,
+            [
+                (txs[0].clone(), proposal_votes_inner::Vote::Yes, false),
+                (txs[1].clone(), proposal_votes_inner::Vote::No, true),
+            ]
+        );
     }
 
     /// Blockfrost joins the proposal against db-sync's voting table and sends
@@ -5515,8 +5474,8 @@ mod tests {
             votes_by_block: vec![
                 vec![],
                 vec![vec![
-                    cast(cc_key_voter(), 0, Vote::Yes),
-                    cast(drep_key_voter(), 0, Vote::Yes),
+                    synthetic_vote(cc_key_voter(), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(drep_key_voter(), 0, 0, 0, Vote::Yes),
                 ]],
             ],
             extra_certs_by_block,
@@ -5628,7 +5587,7 @@ mod tests {
             gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![]],
             votes_by_block: vec![
                 vec![],
-                vec![vec![cast(drep_key_voter(), 0, Vote::Yes)]],
+                vec![vec![synthetic_vote(drep_key_voter(), 0, 0, 0, Vote::Yes)]],
                 vec![],
             ],
             extra_certs_by_block,
@@ -5687,13 +5646,19 @@ mod tests {
             votes_by_block: vec![
                 vec![],
                 vec![vec![
-                    cast(drep_key_voter(), 0, Vote::Yes),
-                    cast(drep_key_voter(), 1, Vote::No),
-                    cast(cc_key_voter(), 0, Vote::Yes),
-                    cast(cc_script_voter(), 0, Vote::No),
-                    cast(spo_voter(), 0, Vote::Abstain),
+                    synthetic_vote(drep_key_voter(), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(drep_key_voter(), 0, 0, 1, Vote::No),
+                    synthetic_vote(cc_key_voter(), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(cc_script_voter(), 0, 0, 0, Vote::No),
+                    synthetic_vote(spo_voter(), 0, 0, 0, Vote::Abstain),
                 ]],
-                vec![vec![cast(drep_key_voter(), 0, Vote::Abstain)]],
+                vec![vec![synthetic_vote(
+                    drep_key_voter(),
+                    0,
+                    0,
+                    0,
+                    Vote::Abstain,
+                )]],
                 vec![],
             ],
             extra_certs_by_block,
