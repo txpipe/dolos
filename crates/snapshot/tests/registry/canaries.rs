@@ -418,6 +418,16 @@ pub fn gov_state() -> GovState {
         active_since: Some(507),
         distr: Some(gov_distr(0xda, 4)),
         prev_distr: Some(gov_distr(0xdb, 8)),
+        drep_snapshot: Some(dolos_cardano::DRepSnapshot {
+            closing_epoch: 508,
+            dreps: BTreeMap::from([(
+                StakeCredential::AddrKeyhash(hash28(0xdc)),
+                dolos_cardano::DRepSnapshotEntry {
+                    expiry: Some(530),
+                    unregistered_at: Some((123_000, 2)),
+                },
+            )]),
+        }),
     }
 }
 
