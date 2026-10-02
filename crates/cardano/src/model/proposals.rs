@@ -864,7 +864,6 @@ pub struct NewProposalV3 {
     pub(crate) purpose: Option<GovPurpose>,
     pub(crate) anchor: Option<Anchor>,
 
-    // CBOR keeps the undo preimage extensible without growing the WAL shape.
     pub(crate) prev: Option<Vec<u8>>,
 }
 
@@ -1533,8 +1532,7 @@ mod prop_tests {
 
             let expected = history
                 .iter()
-                .filter(|(slot, _)| *slot <= cutoff)
-                .next_back()
+                .rfind(|(slot, _)| *slot <= cutoff)
                 .map(|(_, vote)| vote.clone());
 
             prop_assert_eq!(
