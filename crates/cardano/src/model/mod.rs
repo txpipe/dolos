@@ -266,6 +266,9 @@ pub enum CardanoDelta {
     GovDistrRotate(Box<GovDistrRotate>),
     ProposalResolved(Box<ProposalResolved>),
     GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
+    GovDRepSnapshot(Box<GovDRepSnapshot>),
+    NewProposalV3(Box<NewProposalV3>),
+    VoteCastV2(Box<VoteCastV2>),
 }
 
 impl CardanoDelta {
@@ -353,7 +356,9 @@ delta_from!(EpochTransitionV2);
 delta_from!(EpochWrapUpV3);
 delta_from!(DRepAnchorUpdate);
 delta_from!(NewProposalV2);
+delta_from!(NewProposalV3);
 delta_from!(VoteCast);
+delta_from!(VoteCastV2);
 delta_from!(DRepExpiryUpdate);
 delta_from!(DRepDormancyRelease);
 delta_from!(GovGenesisInit);
@@ -368,6 +373,7 @@ delta_from!(DRepPowerUpdate);
 delta_from!(GovDormancyTick);
 delta_from!(CommitteeGc);
 delta_from!(GovDistrRotate);
+delta_from!(GovDRepSnapshot);
 delta_from!(GovDistrBoundaryCredit);
 delta_from!(ProposalResolved);
 
@@ -399,7 +405,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NoncesUpdate(x) => x.key(),
             Self::NewProposal(x) => x.key(),
             Self::NewProposalV2(x) => x.key(),
+            Self::NewProposalV3(x) => x.key(),
             Self::VoteCast(x) => x.key(),
+            Self::VoteCastV2(x) => x.key(),
             Self::DRepExpiryUpdate(x) => x.key(),
             Self::DRepDormancyRelease(x) => x.key(),
             Self::GovGenesisInit(x) => x.key(),
@@ -414,6 +422,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDormancyTick(x) => x.key(),
             Self::CommitteeGc(x) => x.key(),
             Self::GovDistrRotate(x) => x.key(),
+            Self::GovDRepSnapshot(x) => x.key(),
             Self::GovDistrBoundaryCredit(x) => x.key(),
             Self::ProposalResolved(x) => x.key(),
             Self::AssignRewards(x) => x.key(),
@@ -468,7 +477,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NoncesUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NewProposal(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NewProposalV2(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::NewProposalV3(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::VoteCast(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::VoteCastV2(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepExpiryUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepDormancyRelease(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovGenesisInit(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -483,6 +494,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDormancyTick(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::CommitteeGc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDistrRotate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::GovDRepSnapshot(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDistrBoundaryCredit(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::ProposalResolved(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::AssignRewards(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -537,7 +549,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NoncesUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NewProposal(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NewProposalV2(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::NewProposalV3(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::VoteCast(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::VoteCastV2(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepExpiryUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepDormancyRelease(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovGenesisInit(x) => Self::downcast_undo(x.as_ref(), entity),
@@ -552,6 +566,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDormancyTick(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::CommitteeGc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDistrRotate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::GovDRepSnapshot(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDistrBoundaryCredit(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::ProposalResolved(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::AssignRewards(x) => Self::downcast_undo(x.as_ref(), entity),

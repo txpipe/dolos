@@ -218,10 +218,16 @@ pub fn registry() -> Vec<Entry> {
             enc_gov,
             GovState,
             canaries::gov_state,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/gov.rev1.hex"),
-            }]
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/gov.rev1.hex"),
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/gov.rev2.hex"),
+                }
+            ]
         ),
         entity_entry!(
             enc_pending_mirs,
@@ -254,10 +260,16 @@ pub fn registry() -> Vec<Entry> {
             enc_proposals,
             ProposalState,
             canaries::proposal_state,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/proposals.rev1.hex"),
-            }]
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/proposals.rev1.hex")
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/proposals.rev2.hex")
+                },
+            ]
         ),
         entity_entry!(
             enc_stakes,

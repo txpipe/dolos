@@ -14,8 +14,8 @@ use pallas::{
 
 use super::WorkDeltas;
 use crate::{
-    owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, GovPurpose, NewProposalV2,
-    PParamValue, PParamsSet, ProposalAction, VoteCast,
+    owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, GovPurpose, NewProposalV3,
+    PParamValue, PParamsSet, ProposalAction, VoteCastV2,
 };
 
 macro_rules! map_conway_pparam {
@@ -304,7 +304,8 @@ pub struct ProposalVisitor {
     current_epoch: Option<Epoch>,
     network_magic: Option<u32>,
     protocol: Option<u16>,
-    pending_votes: Vec<VoteCast>,
+    pending_votes: Vec<VoteCastV2>,
+    tx_count: dolos_core::TxOrder,
 }
 
 impl BlockVisitor for ProposalVisitor {
@@ -318,6 +319,7 @@ impl BlockVisitor for ProposalVisitor {
         _: u64,
         protocol: u16,
     ) -> Result<(), ChainError> {
+        self.tx_count = 0;
         self.validity_period = pparams.governance_action_validity_period();
         self.current_epoch = Some(epoch);
         self.network_magic = Some(genesis.network_magic());
@@ -333,6 +335,7 @@ impl BlockVisitor for ProposalVisitor {
         tx: &MultiEraTx,
         _: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
+        self.tx_count += 1;
         let MultiEraTx::Conway(conway_tx) = tx else {
             return Ok(());
         };
@@ -349,12 +352,13 @@ impl BlockVisitor for ProposalVisitor {
 
         for (voter, votes) in voting_procedures.iter() {
             for (gov_action_id, procedure) in votes.iter() {
-                self.pending_votes.push(VoteCast::new(
+                self.pending_votes.push(VoteCastV2::new(
                     gov_action_id.transaction_id,
                     gov_action_id.action_index,
                     voter.clone(),
                     procedure.vote.clone(),
                     block.slot(),
+                    self.tx_count - 1,
                 ));
             }
         }
@@ -371,7 +375,7 @@ impl BlockVisitor for ProposalVisitor {
     ) -> Result<(), ChainError> {
         let action = pre_conway_to_pparamset(update);
 
-        deltas.add_for_entity(NewProposalV2::new(
+        deltas.add_for_entity(NewProposalV3::new(
             block.slot(),
             tx.map(|tx| tx.hash()).unwrap_or_else(|| block.hash()),
             0,
@@ -408,7 +412,7 @@ impl BlockVisitor for ProposalVisitor {
         let reward_account = pallas_extras::parse_reward_account(&proposal.reward_account)
             .ok_or(ChainError::InvalidProposalParams)?;
 
-        deltas.add_for_entity(NewProposalV2::new(
+        deltas.add_for_entity(NewProposalV3::new(
             block.slot(),
             tx.hash(),
             idx as u32,
@@ -431,7 +435,7 @@ impl BlockVisitor for ProposalVisitor {
         // Votes buffered during `visit_tx` are emitted at block flush so a
         // vote targeting a proposal submitted in the same block (legal in
         // Conway, even within the same tx) lands *after* that proposal's
-        // `NewProposalV2` in the per-entity delta ordering.
+        // `NewProposalV3` in the per-entity delta ordering.
         for vote in self.pending_votes.drain(..) {
             deltas.add_for_entity(vote);
         }

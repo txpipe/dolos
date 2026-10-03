@@ -297,7 +297,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 42] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:d4357383316cf36dd30ffbbf2a72b22b21b08fc6b7d9396f1152e569ce96f442";
+    "sha256:b1a46694acdd8789257750d741ea855dae7091c0f470d450d45d8e363d2c96d6";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -624,7 +624,7 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#""scope":{"lastImmutable":3},"uncompressedSize":250}"#,
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"gov":1,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":0,"pools":1,"proposals":1,"stakes":1,"utxos":1},"#,
+    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"gov":2,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":0,"pools":1,"proposals":2,"stakes":1,"utxos":1},"#,
     r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"gov":1,"pending_mirs":1,"pending_rewards":1,"pools":1,"proposals":1,"stakes":1,"utxos":16},"#,
     r#""stateEpochs":[4]"#,
     r#"},"position":{"#,
