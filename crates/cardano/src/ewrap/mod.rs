@@ -233,15 +233,6 @@ pub struct BoundaryWork {
     /// finalize pass that rules on the boundary as a whole.
     pub pv10_migration: bool,
 
-    /// Compatibility reconstruction used only when the persisted DRep
-    /// snapshot is missing or stale. Expiries are read at the previous epoch
-    /// (`None` on pre-upgrade rows without the epoch-based field).
-    pub ratify_dreps: BTreeMap<StakeCredential, Option<Epoch>>,
-
-    /// Suppress repeated degraded-snapshot warnings. Shards leave the warning
-    /// to the finalize pass.
-    pub drep_snapshot_warned: std::sync::atomic::AtomicBool,
-
     /// The boundary's ruling on the live governance forest: which proposals
     /// this boundary removes and why. `None` until the finalize pass runs
     /// the engine — and on the shard passes, which never need it.

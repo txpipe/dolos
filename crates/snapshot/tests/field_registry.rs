@@ -245,15 +245,6 @@ fn a_missing_trailing_field_is_defaulted() {
     assert_eq!(defaulted.c, 0);
 }
 
-/// An absent additive field must not rewrite a pre-fix row's bytes.
-#[test]
-fn gov_rev1_without_snapshot_reencodes_identically() {
-    let bytes = decode_hex(include_str!("registry/goldens/gov.rev1.hex"));
-    let gov: dolos_cardano::GovState = minicbor::decode(&bytes).unwrap();
-    assert!(gov.drep_snapshot.is_none());
-    assert_eq!(minicbor::to_vec(gov).unwrap(), bytes);
-}
-
 /// Rule 2: a gap in the index sequence is null-padded rather than closed, so
 /// the fields before it keep their positions.
 #[test]
@@ -309,12 +300,4 @@ fn print_current_canary_encodings() {
             println!("{}::{name} {}", table.name, hex::encode(&bytes));
         }
     }
-}
-
-#[test]
-fn proposals_rev1_without_positions_reencodes_identically() {
-    let bytes = decode_hex(include_str!("registry/goldens/proposals.rev1.hex"));
-    let proposal: dolos_cardano::ProposalState = minicbor::decode(&bytes).unwrap();
-    assert!(proposal.drep_vote_positions.is_none());
-    assert_eq!(minicbor::to_vec(proposal).unwrap(), bytes);
 }

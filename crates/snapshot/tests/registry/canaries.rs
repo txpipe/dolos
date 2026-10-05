@@ -567,16 +567,10 @@ pub fn proposal_state() -> ProposalState {
             (hash28(0x1e), vote_history(5)),
             (hash28(0x1f), vote_history(6)),
         ]),
-        drep_vote_positions: Some(BTreeMap::from([
-            (
-                StakeCredential::AddrKeyhash(hash28(0x1c)),
-                vec![None, Some(3)],
-            ),
-            (
-                StakeCredential::ScriptHash(hash28(0x1d)),
-                vec![Some(0), Some(4)],
-            ),
-        ])),
+        drep_vote_positions: BTreeMap::from([
+            (StakeCredential::AddrKeyhash(hash28(0x1c)), vec![0, 3, 1]),
+            (StakeCredential::ScriptHash(hash28(0x1d)), vec![2, 0, 4]),
+        ]),
     }
 }
 

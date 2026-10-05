@@ -266,7 +266,7 @@ pub struct GovState {
     pub prev_distr: Option<GovDistr>,
 
     /// DRep state captured alongside `prev_distr` at EWRAP finalize, before
-    /// any block of the opening epoch. Missing on pre-fix stores.
+    /// any block of the opening epoch.
     #[n(8)]
     #[cbor(default)]
     pub drep_snapshot: Option<DRepSnapshot>,

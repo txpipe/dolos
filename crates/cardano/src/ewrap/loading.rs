@@ -100,9 +100,7 @@ impl BoundaryWork {
             stake_pools: Default::default(),
             pool_refunds: Default::default(),
             pv10_migration: false,
-            ratify_dreps: Default::default(),
             boundary_dreps: Default::default(),
-            drep_snapshot_warned: Default::default(),
             ratification: None,
             proposal_deposits: Default::default(),
             snapshot_registered_dreps: Default::default(),
@@ -396,9 +394,6 @@ impl BoundaryWork {
         // is cheap.
         boundary.load_pool_data::<D>(state)?;
         boundary.load_drep_data::<D>(state)?;
-        boundary
-            .drep_snapshot_warned
-            .store(true, std::sync::atomic::Ordering::Relaxed);
         boundary.detect_pv10_migration::<D>(state)?;
 
         if boundary.distr_snapshot_epoch().is_some() {
@@ -722,49 +717,24 @@ impl BoundaryWork {
         }
     }
 
-    /// Compatibility reconstruction for stores without a boundary snapshot.
-    /// Whether `drep` was registered as of the boundary the distribution
-    /// snapshot corresponds to — the one closing this epoch. Events at or
-    /// after `boundary_slot` happen in the epoch now opening and postdate the
-    /// snapshot; everything that happened during the closing epoch is in it,
-    /// so a DRep registered mid-epoch counts and one unregistered mid-epoch
-    /// does not.
-    fn legacy_drep_registered_as_of(drep: &DRepState, boundary_slot: BlockSlot) -> bool {
-        let registered = drep.registered_at.filter(|(slot, _)| *slot < boundary_slot);
-        let unregistered = drep
-            .unregistered_at
-            .filter(|(slot, _)| *slot < boundary_slot);
-
-        match (registered, unregistered) {
-            (Some(registered), Some(unregistered)) => registered > unregistered,
-            (Some(_), None) => true,
-            _ => false,
-        }
-    }
-
     pub(crate) fn load_drep_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let boundary_slot = self.chain_summary.epoch_start(self.ending_state.number + 1);
-
-        // The ratification snapshot sits one boundary back: the pulser
-        // ratified while closing epoch n was created when epoch n opened,
-        // so its registered set and expiries cut off at the start of the
-        // closing epoch.
-        let ratify_slot = self.chain_summary.epoch_start(self.ending_state.number);
-        let ratify_expiry_epoch = self.ending_state.number.saturating_sub(1);
 
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
 
         for record in dreps {
             let (id, drep) = record?;
 
-            let credential = match &drep.identifier {
-                DRep::Key(hash) => Some(StakeCredential::AddrKeyhash(*hash)),
-                DRep::Script(hash) => Some(StakeCredential::ScriptHash(*hash)),
-                DRep::Abstain | DRep::NoConfidence => None,
-            };
             if Self::is_drep_registered_at_boundary(&drep, boundary_slot) {
                 self.snapshot_registered_dreps.insert(id);
-                if let Some(credential) = credential.clone() {
+
+                let credential = match &drep.identifier {
+                    DRep::Key(hash) => Some(StakeCredential::AddrKeyhash(*hash)),
+                    DRep::Script(hash) => Some(StakeCredential::ScriptHash(*hash)),
+                    DRep::Abstain | DRep::NoConfidence => None,
+                };
+
+                if let Some(credential) = credential {
                     self.boundary_dreps.insert(
                         credential,
                         crate::DRepSnapshotEntry {
@@ -775,29 +745,6 @@ impl BoundaryWork {
                             unregistered_at: drep.unregistered_at,
                         },
                     );
-                }
-            }
-
-            if self
-                .gov
-                .drep_snapshot
-                .as_ref()
-                .is_none_or(|snapshot| snapshot.closing_epoch != ratify_expiry_epoch)
-                && Self::legacy_drep_registered_as_of(&drep, ratify_slot)
-            {
-                let credential = match &drep.identifier {
-                    DRep::Key(hash) => Some(StakeCredential::AddrKeyhash(*hash)),
-                    DRep::Script(hash) => Some(StakeCredential::ScriptHash(*hash)),
-                    DRep::Abstain | DRep::NoConfidence => None,
-                };
-
-                if let Some(credential) = credential {
-                    let expiry = drep
-                        .expiry
-                        .as_ref()
-                        .and_then(|expiry| expiry.as_of(ratify_expiry_epoch));
-
-                    self.ratify_dreps.insert(credential, expiry);
                 }
             }
 
@@ -1110,8 +1057,9 @@ impl BoundaryWork {
 
     /// Assemble the pure ratification input for the boundary closing this
     /// epoch, or `None` when the engine cannot run: governance inactive,
-    /// or the previous boundary's distributions missing/incomplete (the
-    /// degraded case warns and self-heals one boundary later).
+    /// or the previous boundary's distributions or DRep snapshot
+    /// missing/incomplete (the degraded case warns and self-heals one
+    /// boundary later).
     fn build_ratify_input<D: Domain>(
         &self,
         state: &D::State,
@@ -1126,40 +1074,22 @@ impl BoundaryWork {
             return Ok(None);
         }
 
-        let Some(prev_distr) = self
-            .gov
-            .prev_distr
-            .as_ref()
-            .filter(|distr| distr.is_complete_for(closing - 1))
-        else {
+        let (Some(prev_distr), Some(snapshot)) = (
+            self.gov
+                .prev_distr
+                .as_ref()
+                .filter(|distr| distr.is_complete_for(closing - 1)),
+            self.gov
+                .drep_snapshot
+                .as_ref()
+                .filter(|snapshot| snapshot.closing_epoch == closing - 1),
+        ) else {
             tracing::warn!(
                 epoch = closing,
-                "previous boundary's stake distributions missing or incomplete; \
-                 skipping shadow ratification"
+                "previous boundary's stake distributions or DRep snapshot missing \
+                 or incomplete; skipping shadow ratification"
             );
             return Ok(None);
-        };
-
-        let snapshot = self
-            .gov
-            .drep_snapshot
-            .as_ref()
-            .filter(|snapshot| snapshot.closing_epoch == closing - 1);
-        let ratify_dreps = if let Some(snapshot) = snapshot {
-            snapshot
-                .dreps
-                .iter()
-                .map(|(credential, entry)| (credential.clone(), entry.expiry))
-                .collect()
-        } else {
-            if !self
-                .drep_snapshot_warned
-                .swap(true, std::sync::atomic::Ordering::Relaxed)
-            {
-                tracing::warn!(epoch = closing,
-                    "DRep boundary snapshot missing or stale; using legacy reconstruction; doctor rebuild-state recovers exact history");
-            }
-            self.ratify_dreps.clone()
         };
 
         let cutoff = self.ratify_cutoff_slot();
@@ -1222,10 +1152,7 @@ impl BoundaryWork {
                 expires_after,
                 order: (proposal.slot, proposal.tx, proposal.idx),
                 cc_votes: proposal.cc_votes_as_of(cutoff),
-                drep_votes: snapshot.map_or_else(
-                    || proposal.drep_votes_as_of(cutoff),
-                    |snapshot| proposal.drep_votes_at_snapshot(cutoff, snapshot),
-                ),
+                drep_votes: proposal.drep_votes_at_snapshot(cutoff, snapshot),
                 spo_votes: proposal.spo_votes_as_of(cutoff),
             });
         }
@@ -1278,7 +1205,11 @@ impl BoundaryWork {
             drep_distr: prev_distr.drep_distr.clone(),
             pool_distr: prev_distr.pool_distr.clone(),
             pool_total: prev_distr.pool_total,
-            dreps: ratify_dreps,
+            dreps: snapshot
+                .dreps
+                .iter()
+                .map(|(credential, entry)| (credential.clone(), entry.expiry))
+                .collect(),
             pool_default_votes,
             proposals,
         }))
@@ -1967,7 +1898,7 @@ mod tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
-            drep_vote_positions: None,
+            drep_vote_positions: Default::default(),
         };
 
         // a second live proposal, submitted *during* the closing epoch: the
@@ -2112,7 +2043,7 @@ mod tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
-            drep_vote_positions: None,
+            drep_vote_positions: Default::default(),
         };
 
         // ratified at the previous boundary: out of the forest, refunded
@@ -2838,10 +2769,13 @@ mod ratification_tests {
                 .map(|vote| BTreeMap::from([(hot(), vec![(1u64, vote)])]))
                 .unwrap_or_default(),
             drep_votes: votes
+                .clone()
                 .map(|vote| BTreeMap::from([(drep_cred(), vec![(1u64, vote)])]))
                 .unwrap_or_default(),
             spo_votes: Default::default(),
-            drep_vote_positions: None,
+            drep_vote_positions: votes
+                .map(|_| BTreeMap::from([(drep_cred(), vec![0])]))
+                .unwrap_or_default(),
         }
     }
 
@@ -3004,32 +2938,23 @@ mod ratification_tests {
         // Each tuple is (history, latest removal, whether the latest vote
         // survives). All positions precede the seeded ratification cutoff.
         for (history, removed, survives) in [
-            (vec![(10, Some(0), Vote::Yes)], (20, 0), false),
-            (vec![(20, Some(2), Vote::Yes)], (20, 0), true),
-            (vec![(20, Some(0), Vote::Yes)], (20, 0), false),
-            (vec![(20, Some(0), Vote::Yes)], (20, 1), false),
-            (vec![(15, Some(0), Vote::Yes)], (20, 0), false),
-            (
-                vec![(10, Some(0), Vote::No), (21, Some(0), Vote::Yes)],
-                (20, 0),
-                true,
-            ),
-            (vec![(20, None, Vote::Yes)], (20, 0), false),
-            (vec![(21, None, Vote::Yes)], (20, 0), true),
-            (vec![(20, Some(0), Vote::No)], (20, 1), false),
-            (vec![(20, Some(0), Vote::Abstain)], (20, 1), false),
+            (vec![(10, 0, Vote::Yes)], (20, 0), false),
+            (vec![(20, 2, Vote::Yes)], (20, 0), true),
+            (vec![(20, 0, Vote::Yes)], (20, 0), false),
+            (vec![(20, 0, Vote::Yes)], (20, 1), false),
+            (vec![(15, 0, Vote::Yes)], (20, 0), false),
+            (vec![(10, 0, Vote::No), (21, 0, Vote::Yes)], (20, 0), true),
+            (vec![(20, 0, Vote::No)], (20, 1), false),
+            (vec![(20, 0, Vote::Abstain)], (20, 1), false),
         ] {
             let mut proposal = withdrawal(1, Some(Vote::Yes), CLOSING + 10);
             proposal.drep_votes.clear();
+            proposal.drep_vote_positions.clear();
             let mut entity = Some(proposal);
             for (slot, order, vote) in history {
                 let voter = Voter::DRepKey([0xd7; 28].into());
-                if let Some(order) = order {
-                    crate::VoteCastV2::new([1; 32].into(), 0, voter, vote, slot, order)
-                        .apply(&mut entity);
-                } else {
-                    crate::VoteCast::new([1; 32].into(), 0, voter, vote, slot).apply(&mut entity);
-                }
+                crate::VoteCast::new([1; 32].into(), 0, voter, vote, slot, order)
+                    .apply(&mut entity);
             }
             let proposal = entity.unwrap();
             let domain = seed(std::slice::from_ref(&proposal));
@@ -3276,11 +3201,10 @@ mod ratification_tests {
             .unwrap()
             .unwrap();
         assert_eq!(input.dreps[&drep_cred()], Some(CLOSING + 10));
-        assert!(boundary.ratify_dreps.is_empty());
     }
 
     #[test]
-    fn missing_or_stale_drep_snapshot_uses_legacy_input_and_warns_once() {
+    fn missing_or_stale_drep_snapshot_resolves_nothing() {
         for stale in [None, Some(CLOSING - 2)] {
             let domain = seed(&[]);
             let mut gov = crate::load_gov::<ToyDomain>(domain.state()).unwrap();
@@ -3296,14 +3220,10 @@ mod ratification_tests {
             writer.commit().unwrap();
             let boundary =
                 BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
-            let input = boundary
+            assert!(boundary
                 .build_ratify_input::<ToyDomain>(domain.state())
                 .unwrap()
-                .unwrap();
-            assert_eq!(input.dreps, BTreeMap::from([(drep_cred(), None)]));
-            assert!(boundary
-                .drep_snapshot_warned
-                .load(std::sync::atomic::Ordering::Relaxed));
+                .is_none());
         }
     }
 

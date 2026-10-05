@@ -267,8 +267,6 @@ pub enum CardanoDelta {
     ProposalResolved(Box<ProposalResolved>),
     GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
     GovDRepSnapshot(Box<GovDRepSnapshot>),
-    NewProposalV3(Box<NewProposalV3>),
-    VoteCastV2(Box<VoteCastV2>),
 }
 
 impl CardanoDelta {
@@ -356,9 +354,7 @@ delta_from!(EpochTransitionV2);
 delta_from!(EpochWrapUpV3);
 delta_from!(DRepAnchorUpdate);
 delta_from!(NewProposalV2);
-delta_from!(NewProposalV3);
 delta_from!(VoteCast);
-delta_from!(VoteCastV2);
 delta_from!(DRepExpiryUpdate);
 delta_from!(DRepDormancyRelease);
 delta_from!(GovGenesisInit);
@@ -405,9 +401,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NoncesUpdate(x) => x.key(),
             Self::NewProposal(x) => x.key(),
             Self::NewProposalV2(x) => x.key(),
-            Self::NewProposalV3(x) => x.key(),
             Self::VoteCast(x) => x.key(),
-            Self::VoteCastV2(x) => x.key(),
             Self::DRepExpiryUpdate(x) => x.key(),
             Self::DRepDormancyRelease(x) => x.key(),
             Self::GovGenesisInit(x) => x.key(),
@@ -477,9 +471,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NoncesUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NewProposal(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NewProposalV2(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::NewProposalV3(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::VoteCast(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::VoteCastV2(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepExpiryUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepDormancyRelease(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovGenesisInit(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -549,9 +541,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NoncesUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NewProposal(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NewProposalV2(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::NewProposalV3(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::VoteCast(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::VoteCastV2(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepExpiryUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepDormancyRelease(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovGenesisInit(x) => Self::downcast_undo(x.as_ref(), entity),
