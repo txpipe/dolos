@@ -3798,7 +3798,6 @@ mod tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
-            drep_vote_positions: Default::default(),
         }
     }
 
@@ -3870,7 +3869,6 @@ mod tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
-            drep_vote_positions: Default::default(),
         };
 
         let writer = domain
@@ -3946,7 +3944,6 @@ mod tests {
                 cc_votes: Default::default(),
                 drep_votes: Default::default(),
                 spo_votes: Default::default(),
-                drep_vote_positions: Default::default(),
             };
 
             let writer = domain

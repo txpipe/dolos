@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use dolos_core::{BlockSlot, EntityKey, NsKey, TxOrder};
+use dolos_core::{BlockSlot, EntityKey, NsKey};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
@@ -176,13 +176,6 @@ pub struct ProposalState {
     #[n(15)]
     #[cbor(default)]
     pub spo_votes: BTreeMap<PoolHash, VoteHistory>,
-
-    /// Transaction index of each DRep vote, aligned with the voter's
-    /// `drep_votes` history. The slot is read from the corresponding history
-    /// entry.
-    #[n(16)]
-    #[cbor(default)]
-    pub drep_vote_positions: BTreeMap<StakeCredential, Vec<TxOrder>>,
 }
 
 entity_boilerplate!(ProposalState, "proposals");
@@ -256,11 +249,6 @@ pub(crate) mod testing {
             drep_votes in prop::collection::btree_map(root::any_stake_credential(), any_vote_history(), 0..3),
             spo_votes in prop::collection::btree_map(root::any_hash_28(), any_vote_history(), 0..3),
         ) -> ProposalState {
-            let drep_vote_positions = drep_votes
-                .iter()
-                .map(|(drep, history)| (drep.clone(), vec![0; history.len()]))
-                .collect();
-
             ProposalState {
                 slot,
                 tx,
@@ -278,7 +266,6 @@ pub(crate) mod testing {
                 cc_votes,
                 drep_votes,
                 spo_votes,
-                drep_vote_positions,
             }
         }
     }
@@ -314,15 +301,7 @@ fn history_or_default<K: Ord>(
     (created, map.entry(key).or_default())
 }
 
-fn drep_credential(voter: &Voter) -> Option<StakeCredential> {
-    match voter {
-        Voter::DRepKey(hash) => Some(StakeCredential::AddrKeyhash(*hash)),
-        Voter::DRepScript(hash) => Some(StakeCredential::ScriptHash(*hash)),
-        _ => None,
-    }
-}
-
-fn history_pop<K: Ord, T>(map: &mut BTreeMap<K, Vec<T>>, key: &K, created: bool) {
+fn history_pop<K: Ord>(map: &mut BTreeMap<K, VoteHistory>, key: &K, created: bool) {
     if let Some(history) = map.get_mut(key) {
         history.pop();
     }
@@ -333,34 +312,6 @@ fn history_pop<K: Ord, T>(map: &mut BTreeMap<K, Vec<T>>, key: &K, created: bool)
 }
 
 impl ProposalState {
-    /// Resolve the pulser's DRep votes without deleting historical votes.
-    /// GOV removes a vote when the DRep deregisters in the same or a later
-    /// transaction.
-    pub fn drep_votes_at_snapshot(
-        &self,
-        cutoff: BlockSlot,
-        snapshot: &super::DRepSnapshot,
-    ) -> BTreeMap<StakeCredential, Vote> {
-        self.drep_votes
-            .iter()
-            .filter_map(|(credential, history)| {
-                let drep = snapshot.dreps.get(credential)?;
-                let (index, (slot, vote)) = history
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, (slot, _))| *slot <= cutoff)?;
-                let removed = drep.unregistered_at.is_some_and(|unregistered| {
-                    (*slot, self.drep_vote_positions[credential][index]) <= unregistered
-                });
-                if removed {
-                    return None;
-                }
-                Some((credential.clone(), vote.clone()))
-            })
-            .collect()
-    }
-
     pub fn key(&self) -> EntityKey {
         Self::build_entity_key(self.tx, self.idx)
     }
@@ -629,7 +580,6 @@ impl dolos_core::EntityDelta for NewProposal {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
-            drep_vote_positions: Default::default(),
         };
 
         let _ = entity.insert(state);
@@ -742,7 +692,6 @@ impl dolos_core::EntityDelta for NewProposalV2 {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
-            drep_vote_positions: Default::default(),
         };
 
         let _ = entity.insert(state);
@@ -757,8 +706,7 @@ impl dolos_core::EntityDelta for NewProposalV2 {
 /// (constitutional committee, DRep, or stake-pool operator).
 ///
 /// Appends `(slot, vote)` to the voter's history on the target
-/// [`ProposalState`], plus a DRep vote's tx index to `drep_vote_positions`;
-/// undo pops exactly the appended entries. The history is
+/// [`ProposalState`]; undo pops exactly the appended entry. The history is
 /// append-only — the last entry is the effective vote — so epoch-boundary
 /// tallies can read the votes as of a past slot even if the voter re-voted
 /// since.
@@ -769,7 +717,6 @@ pub struct VoteCast {
     pub(crate) voter: Voter,
     pub(crate) vote: Vote,
     pub(crate) slot: BlockSlot,
-    pub(crate) txorder: TxOrder,
 
     // undo
     pub(crate) applied: bool,
@@ -783,7 +730,6 @@ impl VoteCast {
         voter: Voter,
         vote: Vote,
         slot: BlockSlot,
-        txorder: TxOrder,
     ) -> Self {
         Self {
             proposal_tx,
@@ -791,7 +737,6 @@ impl VoteCast {
             voter,
             vote,
             slot,
-            txorder,
             applied: false,
             created_entry: false,
         }
@@ -828,14 +773,6 @@ impl dolos_core::EntityDelta for VoteCast {
         let (created, history) = state.vote_history_mut(&self.voter);
         history.push((self.slot, self.vote.clone()));
 
-        if let Some(drep) = drep_credential(&self.voter) {
-            state
-                .drep_vote_positions
-                .entry(drep)
-                .or_default()
-                .push(self.txorder);
-        }
-
         self.applied = true;
         self.created_entry = created;
     }
@@ -850,10 +787,6 @@ impl dolos_core::EntityDelta for VoteCast {
         };
 
         state.vote_history_pop(&self.voter, self.created_entry);
-
-        if let Some(drep) = drep_credential(&self.voter) {
-            history_pop(&mut state.drep_vote_positions, &drep, self.created_entry);
-        }
     }
 }
 
@@ -1080,7 +1013,6 @@ mod compat_tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
-            drep_vote_positions: Default::default(),
         };
 
         state.cc_votes.insert(
@@ -1162,24 +1094,16 @@ mod prop_tests {
             voter in root::any_voter(),
             vote in root::any_vote(),
             slot in root::any_slot(),
-            txorder in 0usize..16,
         ) -> VoteCast {
-            VoteCast::new(proposal_tx, proposal_idx, voter, vote, slot, txorder)
+            VoteCast::new(proposal_tx, proposal_idx, voter, vote, slot)
         }
     }
 
     /// A vote cast targeting a proposal that exists, aimed at the entity the
     /// strategy pairs it with (`any_proposal_state` fixes tx/idx per sample).
     fn any_matching_vote_cast(tx: Hash<32>, idx: u32) -> impl Strategy<Value = VoteCast> {
-        (
-            root::any_voter(),
-            root::any_vote(),
-            root::any_slot(),
-            0usize..16,
-        )
-            .prop_map(move |(voter, vote, slot, txorder)| {
-                VoteCast::new(tx, idx, voter, vote, slot, txorder)
-            })
+        (root::any_voter(), root::any_vote(), root::any_slot())
+            .prop_map(move |(voter, vote, slot)| VoteCast::new(tx, idx, voter, vote, slot))
     }
 
     proptest! {
@@ -1314,13 +1238,12 @@ mod prop_tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
-            drep_vote_positions: Default::default(),
         });
 
         let voter = Voter::DRepKey([5u8; 28].into());
 
-        let mut first = VoteCast::new([1u8; 32].into(), 0, voter.clone(), Vote::No, 100, 0);
-        let mut second = VoteCast::new([1u8; 32].into(), 0, voter.clone(), Vote::Yes, 200, 1);
+        let mut first = VoteCast::new([1u8; 32].into(), 0, voter.clone(), Vote::No, 100);
+        let mut second = VoteCast::new([1u8; 32].into(), 0, voter.clone(), Vote::Yes, 200);
 
         use dolos_core::EntityDelta as _;
 
@@ -1335,17 +1258,12 @@ mod prop_tests {
 
         // Append-only history: both votes retained, last one effective.
         assert_eq!(history, &vec![(100, Vote::No), (200, Vote::Yes)]);
-        assert_eq!(
-            state.drep_vote_positions[&StakeCredential::AddrKeyhash([5u8; 28].into())],
-            vec![0, 1]
-        );
 
         second.undo(&mut entity);
         first.undo(&mut entity);
 
         let state = entity.as_ref().unwrap();
         assert!(state.drep_votes.is_empty());
-        assert!(state.drep_vote_positions.is_empty());
     }
 
     proptest! {
@@ -1363,7 +1281,7 @@ mod prop_tests {
             let mut expected = state.vote_history(&voter).cloned().unwrap_or_default();
             expected.push((slot, vote.clone()));
 
-            let mut delta = VoteCast::new(state.tx, state.idx, voter.clone(), vote, slot, 0);
+            let mut delta = VoteCast::new(state.tx, state.idx, voter.clone(), vote, slot);
             let mut entity = Some(state);
             delta.apply(&mut entity);
 
@@ -1396,7 +1314,6 @@ mod resolution_tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
-            drep_vote_positions: Default::default(),
         }
     }
 

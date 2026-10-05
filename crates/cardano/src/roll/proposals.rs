@@ -305,7 +305,6 @@ pub struct ProposalVisitor {
     network_magic: Option<u32>,
     protocol: Option<u16>,
     pending_votes: Vec<VoteCast>,
-    tx_count: dolos_core::TxOrder,
 }
 
 impl BlockVisitor for ProposalVisitor {
@@ -319,7 +318,6 @@ impl BlockVisitor for ProposalVisitor {
         _: u64,
         protocol: u16,
     ) -> Result<(), ChainError> {
-        self.tx_count = 0;
         self.validity_period = pparams.governance_action_validity_period();
         self.current_epoch = Some(epoch);
         self.network_magic = Some(genesis.network_magic());
@@ -335,7 +333,6 @@ impl BlockVisitor for ProposalVisitor {
         tx: &MultiEraTx,
         _: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
-        self.tx_count += 1;
         let MultiEraTx::Conway(conway_tx) = tx else {
             return Ok(());
         };
@@ -358,7 +355,6 @@ impl BlockVisitor for ProposalVisitor {
                     voter.clone(),
                     procedure.vote.clone(),
                     block.slot(),
-                    self.tx_count - 1,
                 ));
             }
         }

@@ -422,10 +422,7 @@ pub fn gov_state() -> GovState {
             closing_epoch: 508,
             dreps: BTreeMap::from([(
                 StakeCredential::AddrKeyhash(hash28(0xdc)),
-                dolos_cardano::DRepSnapshotEntry {
-                    expiry: Some(530),
-                    unregistered_at: Some((123_000, 2)),
-                },
+                dolos_cardano::DRepSnapshotEntry { expiry: Some(530) },
             )]),
         }),
     }
@@ -566,10 +563,6 @@ pub fn proposal_state() -> ProposalState {
         spo_votes: BTreeMap::from([
             (hash28(0x1e), vote_history(5)),
             (hash28(0x1f), vote_history(6)),
-        ]),
-        drep_vote_positions: BTreeMap::from([
-            (StakeCredential::AddrKeyhash(hash28(0x1c)), vec![0, 3, 1]),
-            (StakeCredential::ScriptHash(hash28(0x1d)), vec![2, 0, 4]),
         ]),
     }
 }
