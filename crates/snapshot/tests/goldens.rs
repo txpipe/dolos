@@ -19,7 +19,7 @@
 //!
 //! - the twenty-one media types
 //! - the tag string
-//! - the names of the twelve archive dimensions
+//! - the names of the sixteen archive dimensions
 //! - the literals of the three exact-record kinds
 //! - the three `log-{ns}` kind strings and the fifteen `state-{ns}` kind
 //!   strings
@@ -57,9 +57,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 44] = [
     ),
     (
         INDEXES,
-        "sha256:557948cad9dec8605fbde96912db9b6421b47f2ded4c00886ed59f1638b4678c",
-        16,
-        431,
+        "sha256:be485ff209757934d6336a169d8608b36fdbf11e98ac03a3ff33fd07cc50350c",
+        20,
+        531,
     ),
     (
         "log-account-epochs",
@@ -317,7 +317,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 44] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:db770e49120251a2a01a93339c9d9f6116bf2d519db78d805ab07c223be557c4";
+    "sha256:b48d21323bfff18d1cb30735413db2a76f1fa90f4a1a0c6ebc954ac32f11187e";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -520,9 +520,9 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106","kind":"blocks","#,
     r#""mediaType":"application/vnd.dolos.stele.blocks.v1+zstd","records":4,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":167},"#,
-    r#"{"diffId":"sha256:557948cad9dec8605fbde96912db9b6421b47f2ded4c00886ed59f1638b4678c","kind":"indexes","#,
-    r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":16,"#,
-    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":431},"#,
+    r#"{"diffId":"sha256:be485ff209757934d6336a169d8608b36fdbf11e98ac03a3ff33fd07cc50350c","kind":"indexes","#,
+    r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":20,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":531},"#,
     r#"{"diffId":"sha256:be63f933f87028f2650741a6964a8a0e1bae9a12f73e012f0854a4c568a23055","kind":"log-account-epochs","#,
     r#""mediaType":"application/vnd.dolos.stele.log-account-epochs.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":102},"#,
@@ -651,7 +651,7 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#""scope":{"lastImmutable":3},"uncompressedSize":250}"#,
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"gov":1,"leader-rewards":0,"member-rewards":0,"metadata-labels":1,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":0,"pools":1,"proposals":1,"stakes":1,"utxos":1},"#,
+    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"gov":2,"leader-rewards":0,"member-rewards":0,"metadata-labels":1,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":0,"pools":1,"proposals":1,"stakes":1,"utxos":1},"#,
     r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"gov":1,"metadata-labels":1,"pending_mirs":1,"pending_rewards":1,"pools":1,"proposals":1,"stakes":1,"utxos":16},"#,
     r#""stateEpochs":[4]"#,
     r#"},"position":{"#,

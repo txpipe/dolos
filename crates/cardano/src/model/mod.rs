@@ -273,6 +273,7 @@ pub enum CardanoDelta {
     GovDistrRotate(Box<GovDistrRotate>),
     ProposalResolved(Box<ProposalResolved>),
     GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
+    GovDRepSnapshot(Box<GovDRepSnapshot>),
     MetadataLabelTxInc(Box<MetadataLabelTxInc>),
 }
 
@@ -376,6 +377,7 @@ delta_from!(DRepPowerUpdate);
 delta_from!(GovDormancyTick);
 delta_from!(CommitteeGc);
 delta_from!(GovDistrRotate);
+delta_from!(GovDRepSnapshot);
 delta_from!(GovDistrBoundaryCredit);
 delta_from!(ProposalResolved);
 delta_from!(MetadataLabelTxInc);
@@ -423,6 +425,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDormancyTick(x) => x.key(),
             Self::CommitteeGc(x) => x.key(),
             Self::GovDistrRotate(x) => x.key(),
+            Self::GovDRepSnapshot(x) => x.key(),
             Self::GovDistrBoundaryCredit(x) => x.key(),
             Self::ProposalResolved(x) => x.key(),
             Self::AssignRewards(x) => x.key(),
@@ -493,6 +496,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDormancyTick(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::CommitteeGc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDistrRotate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::GovDRepSnapshot(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDistrBoundaryCredit(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::ProposalResolved(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::AssignRewards(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -563,6 +567,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDormancyTick(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::CommitteeGc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDistrRotate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::GovDRepSnapshot(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDistrBoundaryCredit(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::ProposalResolved(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::AssignRewards(x) => Self::downcast_undo(x.as_ref(), entity),

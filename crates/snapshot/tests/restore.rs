@@ -889,7 +889,7 @@ fn a_restored_fjall_archive_is_frames_and_keeps_working() {
 
     // Prune to the last slot only: whatever the fixture spans, what remains
     // is a suffix of the history and still frames.
-    blank.archive.prune_history(1, None).unwrap();
+    blank.archive.prune_history(1, None, None).unwrap();
     let pruned = blocks_of(&blank.archive);
     assert!(!pruned.is_empty());
     assert!(restored.ends_with(&pruned), "pruning keeps a suffix");
