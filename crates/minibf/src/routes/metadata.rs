@@ -267,16 +267,30 @@ where
     // the labels in numeric order. The store cannot iterate backwards, so a
     // descending page first collects the keys alone, then reads its values.
     let page: Vec<(u64, u64)> = match pagination.order {
-        Order::Asc => domain
-            .iter_cardano_entities::<MetadataLabelState>(None)?
-            .skip(pagination.skip())
-            .take(pagination.count)
-            .map(|item| {
-                let (key, state) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Order::Asc => {
+            let mut page = Vec::with_capacity(pagination.count);
+            let mut skipped = 0;
 
-                Ok((metadata_label_from_entity_key(&key), state.tx_count))
-            })
-            .collect::<Result<_, StatusCode>>()?,
+            // Every item is checked, including the skipped ones. `Iterator::skip`
+            // would drop an error in the skipped prefix along with the item.
+            for item in domain.iter_cardano_entities::<MetadataLabelState>(None)? {
+                if page.len() == pagination.count {
+                    break;
+                }
+
+                let (key, state) =
+                    item.map_err(log_and_500("failed to iterate metadata labels"))?;
+
+                if skipped < pagination.skip() {
+                    skipped += 1;
+                    continue;
+                }
+
+                page.push((metadata_label_from_entity_key(&key), state.tx_count));
+            }
+
+            page
+        }
         Order::Desc => {
             let keys = domain
                 .state()
@@ -295,13 +309,19 @@ where
                 .read_entities_typed::<MetadataLabelState>(MetadataLabelState::NS, &page_keys)
                 .map_err(log_and_500("failed to read metadata labels"))?;
 
+            // The keys and the values come from two snapshots. A rollback in
+            // between can remove a label the scan saw. A short page would
+            // shift the pages after it, so the request fails and the client
+            // retries.
             page_keys
                 .into_iter()
                 .zip(states)
-                .filter_map(|(key, state)| {
-                    Some((metadata_label_from_entity_key(key), state?.tx_count))
+                .map(|(key, state)| {
+                    let state = state.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                    Ok((metadata_label_from_entity_key(key), state.tx_count))
                 })
-                .collect()
+                .collect::<Result<_, StatusCode>>()?
         }
     };
 
