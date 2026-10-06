@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use dolos_core::{ChainError, Genesis, TxoRef};
+use dolos_core::{ChainError, Genesis, TxOrder, TxoRef};
 use pallas::{
     codec::utils::Bytes,
     ledger::{
@@ -306,6 +306,10 @@ pub struct ProposalVisitor {
     network_magic: Option<u32>,
     protocol: Option<u16>,
     pending_votes: Vec<VoteCast>,
+
+    /// Transactions of the block visited so far, invalid ones included, so
+    /// the current one's index matches the crawl's `order`.
+    txs_seen: TxOrder,
 }
 
 impl BlockVisitor for ProposalVisitor {
@@ -335,6 +339,9 @@ impl BlockVisitor for ProposalVisitor {
         tx: &MultiEraTx,
         _: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
+        let order = self.txs_seen;
+        self.txs_seen += 1;
+
         let MultiEraTx::Conway(conway_tx) = tx else {
             return Ok(());
         };
@@ -357,6 +364,7 @@ impl BlockVisitor for ProposalVisitor {
                     voter.clone(),
                     procedure.vote.clone(),
                     block.slot(),
+                    order,
                     self.epoch_start.expect("value set in root"),
                 ));
             }

@@ -422,7 +422,10 @@ pub fn gov_state() -> GovState {
             closing_epoch: 508,
             dreps: BTreeMap::from([(
                 StakeCredential::AddrKeyhash(hash28(0xdc)),
-                dolos_cardano::DRepSnapshotEntry { expiry: Some(530) },
+                dolos_cardano::DRepSnapshotEntry {
+                    expiry: Some(530),
+                    unregistered_at: Some((55_444_333, 7)),
+                },
             )]),
         }),
     }
@@ -523,6 +526,8 @@ fn vote_entry(seed: u8) -> VoteEntry {
     VoteEntry {
         newest: (600_000u64 + seed as u64, Vote::Abstain),
         standing: Some((400_000u64 + seed as u64, Vote::Yes)),
+        newest_order: 10 + seed as usize,
+        standing_order: 20 + seed as usize,
     }
 }
 

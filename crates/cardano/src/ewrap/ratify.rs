@@ -1624,6 +1624,8 @@ mod tests {
             VoteEntry {
                 newest: (200, Vote::Yes),
                 standing: Some((100, Vote::No)),
+                newest_order: 0,
+                standing_order: 0,
             },
         );
 
