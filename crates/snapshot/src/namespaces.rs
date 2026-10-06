@@ -82,6 +82,7 @@ pub const NAMESPACES: [Namespace; 26] = [
 /// `epochs`, `eras`, `first-mints`, `gov`, `pool-epochs`, `pools`,
 /// `proposals` and `staged-first-mints` stopped being padded or truncated to a
 /// fixed width (decision 0051), and each of those moved one revision for it.
+/// `dreps` then reached 3 when `DRepState::first_seen_at` was appended.
 /// Kept beside [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
 pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
@@ -91,7 +92,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
     (AddressStats::NS, 1),
     (AssetState::NS, 1),
     (DatumState::NS, 1),
-    (DRepState::NS, 2),
+    (DRepState::NS, 3),
     (EpochState::NS, 3),
     (EraState::NS, 2),
     (FirstMintChunk::NS, 2),

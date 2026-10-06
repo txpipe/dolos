@@ -190,6 +190,12 @@ pub fn registry() -> Vec<Entry> {
                     rev: 2,
                     hex: include_str!("goldens/dreps.rev2.hex"),
                 },
+                // Revision 3 appends `first_seen_at` (index 9); revision 1 and 2
+                // rows predate the field and must keep decoding.
+                Pinned {
+                    rev: 3,
+                    hex: include_str!("goldens/dreps.rev3.hex"),
+                },
             ]
         ),
         entity_entry!(
