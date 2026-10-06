@@ -888,7 +888,7 @@ mod tests {
     use pallas::ledger::primitives::conway::Anchor;
 
     use super::*;
-    use crate::{PParamValue, ProposalState};
+    use crate::{PParamValue, ProposalState, VoteEntry};
 
     fn rational(numerator: u64, denominator: u64) -> RationalNumber {
         RationalNumber {
@@ -1619,9 +1619,13 @@ mod tests {
             spo_votes: Default::default(),
         };
 
-        state
-            .drep_votes
-            .insert(cred(1), vec![(100, Vote::No), (200, Vote::Yes)]);
+        state.drep_votes.insert(
+            cred(1),
+            VoteEntry {
+                newest: (200, Vote::Yes),
+                standing: Some((100, Vote::No)),
+            },
+        );
 
         assert_eq!(state.drep_votes_as_of(150).get(&cred(1)), Some(&Vote::No));
         assert_eq!(state.drep_votes_as_of(250).get(&cred(1)), Some(&Vote::Yes));

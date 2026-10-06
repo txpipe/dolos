@@ -2633,7 +2633,7 @@ mod ratification_tests {
     use crate::{
         model::credential_to_key, Committee, CommitteeAuthorization, EpochState, EpochValue,
         GovDistr, GovState, PParamValue, PParamsSet, ProposalAction, ProposalState,
-        SingletonEntity as _,
+        SingletonEntity as _, VoteEntry,
     };
 
     const CLOSING: Epoch = 100;
@@ -2743,6 +2743,14 @@ mod ratification_tests {
         }
     }
 
+    /// A single vote, cast at slot 1.
+    fn voted(vote: Vote) -> VoteEntry {
+        VoteEntry {
+            newest: (1, vote),
+            standing: None,
+        }
+    }
+
     /// A treasury withdrawal — the action whose acceptance turns purely on
     /// the committee and DRep tallies (SPOs have no say, and it belongs to
     /// no lineage tree, so no root has to match).
@@ -2763,10 +2771,10 @@ mod ratification_tests {
             anchor: None,
             cc_votes: votes
                 .clone()
-                .map(|vote| BTreeMap::from([(hot(), vec![(1u64, vote)])]))
+                .map(|vote| BTreeMap::from([(hot(), voted(vote))]))
                 .unwrap_or_default(),
             drep_votes: votes
-                .map(|vote| BTreeMap::from([(drep_cred(), vec![(1u64, vote)])]))
+                .map(|vote| BTreeMap::from([(drep_cred(), voted(vote))]))
                 .unwrap_or_default(),
             spo_votes: Default::default(),
         }
