@@ -104,6 +104,10 @@ impl MetadataHistoryModelBuilder {
         let block = MultiEraBlock::decode(cbor).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         for tx in block.txs() {
+            if !tx.is_valid() {
+                continue;
+            }
+
             let meta = tx.metadata();
 
             if let Some(label_content) = meta.find(self.label) {
@@ -690,5 +694,51 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
         )
         .await;
+    }
+
+    #[test]
+    fn label_scan_skips_invalid_transactions() {
+        let scanned = |valid: bool| {
+            let (_, raw) = dolos_testing::blocks::make_conway_block_with_metadata(
+                1_000,
+                vec![(674, Metadatum::Text("x".to_string()))],
+                valid,
+            );
+
+            let mut builder = MetadataHistoryModelBuilder::new(674, 10, 1);
+            builder.scan_block(&raw).unwrap();
+            builder.items.len()
+        };
+
+        assert_eq!(scanned(true), 1);
+        assert_eq!(scanned(false), 0);
+    }
+
+    #[test]
+    fn tx_metadata_is_empty_for_invalid_transactions() {
+        use blockfrost_openapi::models::{
+            tx_content_metadata_cbor_inner::TxContentMetadataCborInner,
+            tx_content_metadata_inner::TxContentMetadataInner,
+        };
+
+        use crate::mapping::TxModelBuilder;
+
+        let counts = |valid: bool| {
+            let (_, raw) = dolos_testing::blocks::make_conway_block_with_metadata(
+                1_000,
+                vec![(674, Metadatum::Text("x".to_string()))],
+                valid,
+            );
+
+            let json: Vec<TxContentMetadataInner> =
+                TxModelBuilder::new(&raw, 0).unwrap().into_model().unwrap();
+            let cbor: Vec<TxContentMetadataCborInner> =
+                TxModelBuilder::new(&raw, 0).unwrap().into_model().unwrap();
+
+            (json.len(), cbor.len())
+        };
+
+        assert_eq!(counts(true), (1, 1));
+        assert_eq!(counts(false), (0, 0));
     }
 }

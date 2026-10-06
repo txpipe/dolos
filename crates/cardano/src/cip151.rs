@@ -45,7 +45,17 @@ pub enum Cip151Error {
     InvalidCalidusKeyLength(usize),
 }
 
+/// Returns the CIP-151 metadatum of `tx`, or `None` if `tx` has no CIP-151
+/// metadatum.
+///
+/// For a phase-2-invalid transaction, this function returns `None`. The ledger
+/// applies only the collateral of that transaction. Thus, its metadata does not
+/// register a key.
 pub fn cip151_metadata_for_tx(tx: &MultiEraTx) -> Option<Metadatum> {
+    if !tx.is_valid() {
+        return None;
+    }
+
     tx.metadata().find(CIP151_METADATA_LABEL).cloned()
 }
 
@@ -339,6 +349,24 @@ mod tests {
             hex::encode(calidus_key_id_bytes(&pub_key)),
             "a1171983a1178a55b02afacfd6ad6b516da375469fd7dbcf54a2f95823"
         );
+    }
+
+    #[test]
+    fn invalid_transactions_carry_no_registration() {
+        let metadatum = |valid: bool| {
+            let (_, raw) = dolos_testing::blocks::make_conway_block_with_metadata(
+                1_000,
+                vec![(CIP151_METADATA_LABEL, valid_metadata([0x57; 32]))],
+                valid,
+            );
+            let block = pallas::ledger::traverse::MultiEraBlock::decode(&raw).unwrap();
+            let tx = block.txs().remove(0);
+
+            cip151_metadata_for_tx(&tx)
+        };
+
+        assert_eq!(metadatum(true), Some(valid_metadata([0x57; 32])));
+        assert_eq!(metadatum(false), None);
     }
 
     #[test]

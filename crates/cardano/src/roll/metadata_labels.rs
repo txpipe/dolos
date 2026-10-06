@@ -59,49 +59,20 @@ impl BlockVisitor for MetadataLabelVisitor {
 #[cfg(test)]
 mod tests {
     use dolos_core::NsKey;
-    use pallas::codec::utils::Set;
-    use pallas::ledger::primitives::{alonzo, conway::TransactionBody};
+    use pallas::ledger::primitives::alonzo;
 
     use super::*;
     use crate::{CardanoDelta, FixedNamespace as _, MetadataLabelState, OwnedMultiEraBlock};
 
-    fn tx_body() -> TransactionBody<'static> {
-        TransactionBody {
-            inputs: Set::from(vec![]),
-            outputs: vec![],
-            fee: 170_000,
-            ttl: None,
-            certificates: None,
-            withdrawals: None,
-            auxiliary_data_hash: None,
-            validity_interval_start: None,
-            mint: None,
-            script_data_hash: None,
-            collateral: None,
-            required_signers: None,
-            network_id: None,
-            collateral_return: None,
-            total_collateral: None,
-            reference_inputs: None,
-            voting_procedures: None,
-            proposal_procedures: None,
-            treasury_value: None,
-            donation: None,
-        }
-    }
-
     /// Makes a block with one transaction that has `labels` in its metadata.
     fn block(labels: &[u64], valid: bool) -> OwnedMultiEraBlock {
-        let aux = alonzo::AuxiliaryData::ShelleyMa(alonzo::ShelleyMaAuxiliaryData {
-            transaction_metadata: labels
-                .iter()
-                .map(|label| (*label, alonzo::Metadatum::Text("x".to_string())))
-                .collect(),
-            auxiliary_scripts: None,
-        });
+        let metadata = labels
+            .iter()
+            .map(|label| (*label, alonzo::Metadatum::Text("x".to_string())))
+            .collect();
 
         let (_, raw) =
-            dolos_testing::blocks::make_conway_block_with_tx(1_000, tx_body(), Some(aux), valid);
+            dolos_testing::blocks::make_conway_block_with_metadata(1_000, metadata, valid);
 
         OwnedMultiEraBlock::decode(raw).unwrap()
     }
