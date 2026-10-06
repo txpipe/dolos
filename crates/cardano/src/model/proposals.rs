@@ -1185,8 +1185,7 @@ mod prop_tests {
 
             let expected = history
                 .iter()
-                .filter(|(slot, _)| *slot <= cutoff)
-                .next_back()
+                .rfind(|(slot, _)| *slot <= cutoff)
                 .map(|(_, vote)| vote.clone());
 
             prop_assert_eq!(

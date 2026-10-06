@@ -7,19 +7,23 @@
 //! store).
 
 use dolos_core::{
-    ArchiveIndexDelta, BlockSlot, EraCbor, Tag, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSetDelta,
+    ArchiveIndexDelta, BlockSlot, EraCbor, Tag, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap,
+    UtxoSetDelta,
 };
 use pallas::{
     codec::minicbor,
     ledger::{
         addresses::Address,
-        primitives::{alonzo::InstantaneousRewardTarget, conway::DatumOption},
-        traverse::{MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraValue},
+        primitives::{
+            alonzo::InstantaneousRewardTarget,
+            conway::{DatumOption, VotingProcedures},
+        },
+        traverse::{MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraValue},
     },
 };
 
 use super::dimensions::{archive, utxo};
-use crate::pallas_extras;
+use crate::{model::ProposalState, pallas_extras};
 
 /// Builder for constructing index deltas from Cardano block data.
 ///
@@ -272,6 +276,18 @@ impl CardanoIndexDeltaBuilder {
                 .tags
                 .push(Tag::new(archive::POOL_CERTS, cert.operator.to_vec()));
         }
+
+        let drep = pallas_extras::cert_as_drep_registration(cert)
+            .map(|x| x.cred)
+            .or_else(|| pallas_extras::cert_as_drep_unregistration(cert).map(|x| x.cred))
+            .or_else(|| pallas_extras::cert_as_drep_update(cert));
+
+        if let Some(cred) = drep {
+            self.current_block().tags.push(Tag::new(
+                archive::DREP_CERTS,
+                pallas_extras::drep_id_bytes(&cred),
+            ));
+        }
     }
 
     /// Add withdrawal tags to the current block.
@@ -279,6 +295,49 @@ impl CardanoIndexDeltaBuilder {
         self.current_block()
             .tags
             .push(Tag::new(archive::ACCOUNT_WITHDRAWALS, account.to_vec()));
+    }
+
+    /// Tag the current block with the pool that minted it.
+    pub fn add_block_issuer(&mut self, vkey: &[u8]) {
+        use pallas::crypto::hash::Hasher;
+
+        // The same derivation as the minted-block counter uses, so the
+        // tag key equals the `PoolState` entity key.
+        let operator = Hasher::<224>::hash(vkey);
+
+        self.current_block()
+            .tags
+            .push(Tag::new(archive::POOL_BLOCKS, operator.to_vec()));
+    }
+
+    /// Tag the current block with the voters and the actions of a
+    /// transaction's votes.
+    ///
+    /// A voter or action already tagged in this block is not tagged again, so
+    /// a block holding many votes of one voter carries its tag once.
+    pub fn add_votes(&mut self, procedures: &VotingProcedures) {
+        for (voter, ballot) in procedures {
+            self.add_vote_tag(archive::VOTER_VOTES, pallas_extras::voter_id_bytes(voter));
+
+            for action in ballot.keys() {
+                let key =
+                    ProposalState::build_entity_key(action.transaction_id, action.action_index);
+                self.add_vote_tag(archive::ACTION_VOTES, key.as_ref().to_vec());
+            }
+        }
+    }
+
+    fn add_vote_tag(&mut self, dimension: TagDimension, key: Vec<u8>) {
+        let block = self.current_block();
+
+        let tagged = block
+            .tags
+            .iter()
+            .any(|tag| tag.dimension == dimension && tag.key == key);
+
+        if !tagged {
+            block.tags.push(Tag::new(dimension, key));
+        }
     }
 
     /// Add a metadata label to the current block.
@@ -292,8 +351,8 @@ impl CardanoIndexDeltaBuilder {
     ///
     /// Calls `start_block`, then iterates all transactions adding
     /// tx hashes, metadata, inputs (with resolved UTxO lookups),
-    /// outputs (with script refs), witness scripts/datums, certs, and
-    /// redeemers.
+    /// outputs (with script refs), witness scripts/datums, certs,
+    /// redeemers, and governance votes.
     pub fn index_block(
         &mut self,
         block: &pallas::ledger::traverse::MultiEraBlock<'_>,
@@ -305,6 +364,11 @@ impl CardanoIndexDeltaBuilder {
         };
 
         self.start_block(block.slot(), block.hash().to_vec(), Some(block.number()));
+
+        // Byron blocks carry no issuer key, so they stay untagged.
+        if let Some(vkey) = block.header().issuer_vkey() {
+            self.add_block_issuer(vkey);
+        }
 
         for tx in block.txs() {
             self.add_tx_hash(tx.hash().to_vec());
@@ -384,6 +448,13 @@ impl CardanoIndexDeltaBuilder {
 
             for redeemer in tx.redeemers() {
                 self.add_datum_hash(redeemer.data().compute_hash().to_vec());
+            }
+
+            // Votes in phase-2-invalid txs are tagged too; readers skip them.
+            if let MultiEraTx::Conway(tx) = &tx {
+                if let Some(procedures) = &tx.transaction_body.voting_procedures {
+                    self.add_votes(procedures);
+                }
             }
         }
     }
@@ -472,6 +543,7 @@ mod tests {
     use pallas::ledger::addresses::{
         Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
     };
+    use pallas::ledger::primitives::conway::{GovActionId, Vote, VotingProcedure};
     use std::collections::BTreeSet;
 
     fn test_shelley_address() -> Address {
@@ -646,6 +718,170 @@ mod tests {
 
         // METADATA
         builder.add_metadata_label(674);
+
+        // DREP_CERTS
+        let drep_update =
+            Certificate::UpdateDRepCert(StakeCredential::AddrKeyhash(Hash::new([0x88; 28])), None);
+        builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(drep_update))));
+
+        // POOL_BLOCKS
+        builder.add_block_issuer(&[0x88; 32]);
+
+        // VOTER_VOTES, ACTION_VOTES
+        builder.add_votes(&BTreeMap::from([(
+            pallas::ledger::primitives::conway::Voter::StakePoolKey(Hash::new([0x99; 28])),
+            BTreeMap::from([(gov_action(0xaa, 0), voting_procedure(Vote::Yes))]),
+        )]));
+    }
+
+    fn gov_action(tx: u8, index: u32) -> GovActionId {
+        GovActionId {
+            transaction_id: Hash::new([tx; 32]),
+            action_index: index,
+        }
+    }
+
+    fn voting_procedure(vote: Vote) -> VotingProcedure {
+        VotingProcedure { vote, anchor: None }
+    }
+
+    fn sorted_keys(block: &ArchiveIndexDelta, dimension: TagDimension) -> Vec<Vec<u8>> {
+        let mut keys: Vec<Vec<u8>> = block
+            .tags
+            .iter()
+            .filter(|tag| tag.dimension == dimension)
+            .map(|tag| tag.key.clone())
+            .collect();
+
+        keys.sort();
+        keys
+    }
+
+    /// Every vote tags its block by voter and by action, once per key. DRep
+    /// voters are keyed by their CIP-129 DRep id, committee voters by their
+    /// CIP-129 committee-hot id and pools by their pool hash; actions by their
+    /// proposal entity key. A re-vote in the same block adds no tag, and one
+    /// in a later block tags that block.
+    #[test]
+    fn votes_tag_voters_and_actions() {
+        use pallas::ledger::primitives::conway::Voter;
+        use pallas::ledger::traverse::MultiEraBlock;
+        use std::collections::BTreeMap;
+
+        let drep = Voter::DRepKey(Hash::new([0x01; 28]));
+        let committee = Voter::ConstitutionalCommitteeScript(Hash::new([0x02; 28]));
+        let pool = Voter::StakePoolKey(Hash::new([0x03; 28]));
+
+        // The DRep votes on two actions in one tx.
+        let mut body = empty_tx_body();
+        body.voting_procedures = Some(BTreeMap::from([
+            (
+                drep.clone(),
+                BTreeMap::from([
+                    (gov_action(0xa0, 0), voting_procedure(Vote::Yes)),
+                    (gov_action(0xa0, 1), voting_procedure(Vote::No)),
+                ]),
+            ),
+            (
+                committee,
+                BTreeMap::from([(gov_action(0xa0, 0), voting_procedure(Vote::Yes))]),
+            ),
+            (
+                pool,
+                BTreeMap::from([(gov_action(0xa0, 1), voting_procedure(Vote::Abstain))]),
+            ),
+        ]));
+
+        let (_, raw) = dolos_testing::blocks::make_conway_block_with_tx(100, body, None, true);
+        let block = MultiEraBlock::decode(&raw).unwrap();
+
+        let revote = BTreeMap::from([(
+            drep,
+            BTreeMap::from([(gov_action(0xa0, 0), voting_procedure(Vote::No))]),
+        )]);
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.index_block(&block, &std::collections::HashMap::new());
+
+        // a later tx of the same block
+        builder.add_votes(&revote);
+
+        builder.start_block(101, vec![1; 32], Some(51));
+        builder.add_votes(&revote);
+
+        let archive = builder.build();
+
+        let drep_id = [&[0x22u8][..], &[0x01; 28]].concat();
+        let committee_id = [&[0x03u8][..], &[0x02; 28]].concat();
+        let pool_id = vec![0x03; 28];
+
+        let first = ProposalState::build_entity_key(Hash::new([0xa0; 32]), 0)
+            .as_ref()
+            .to_vec();
+        let second = ProposalState::build_entity_key(Hash::new([0xa0; 32]), 1)
+            .as_ref()
+            .to_vec();
+
+        let mut voters = vec![drep_id.clone(), committee_id, pool_id];
+        voters.sort();
+        let mut actions = vec![first.clone(), second];
+        actions.sort();
+
+        assert_eq!(sorted_keys(&archive[0], archive::VOTER_VOTES), voters);
+        assert_eq!(sorted_keys(&archive[0], archive::ACTION_VOTES), actions);
+
+        assert_eq!(sorted_keys(&archive[1], archive::VOTER_VOTES), [drep_id]);
+        assert_eq!(sorted_keys(&archive[1], archive::ACTION_VOTES), [first]);
+    }
+
+    /// Every DRep certificate kind tags the DRep under its CIP-129 id bytes,
+    /// the key that the endpoint parses from a `drep1…` id. A key and a script
+    /// credential with the same hash get different keys.
+    #[test]
+    fn drep_certificates_tag_the_cip129_drep_id() {
+        use crate::model::drep_to_entity_key;
+        use pallas::ledger::primitives::{
+            conway::{Certificate, DRep},
+            StakeCredential,
+        };
+        use std::borrow::Cow;
+
+        let hash = Hash::new([0x99; 28]);
+        let key = StakeCredential::AddrKeyhash(hash);
+        let script = StakeCredential::ScriptHash(hash);
+
+        let certs = [
+            Certificate::RegDRepCert(key.clone(), 500, None),
+            Certificate::UnRegDRepCert(key, 500),
+            Certificate::UpdateDRepCert(script, None),
+        ];
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.start_block(100, vec![0; 32], Some(50));
+
+        for cert in certs {
+            builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(cert))));
+        }
+
+        let keys: Vec<Vec<u8>> = builder
+            .build()
+            .remove(0)
+            .tags
+            .into_iter()
+            .filter(|tag| tag.dimension == archive::DREP_CERTS)
+            .map(|tag| tag.key)
+            .collect();
+
+        let key_id = [&[0x22u8][..], hash.as_slice()].concat();
+        let script_id = [&[0x23u8][..], hash.as_slice()].concat();
+
+        assert_eq!(keys, [key_id.clone(), key_id.clone(), script_id]);
+
+        // the same bytes the dreps namespace keys its entities by
+        assert_eq!(
+            &drep_to_entity_key(&DRep::Key(hash)).as_ref()[..29],
+            key_id.as_slice()
+        );
     }
 
     /// The dimension registry has to hold every dimension this builder emits.
@@ -688,5 +924,81 @@ mod tests {
              test stops covering the ones it misses: {:?} are unexercised",
             &registered - &produced,
         );
+    }
+
+    /// A minimal Conway body, so a block carries one transaction and nothing
+    /// else that produces tags.
+    fn empty_tx_body() -> pallas::ledger::primitives::conway::TransactionBody<'static> {
+        use pallas::codec::utils::Set;
+
+        pallas::ledger::primitives::conway::TransactionBody {
+            inputs: Set::from(vec![]),
+            outputs: vec![],
+            fee: 0,
+            ttl: None,
+            certificates: None,
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: None,
+            proposal_procedures: None,
+            treasury_value: None,
+            donation: None,
+        }
+    }
+
+    /// A block is tagged under the pool that minted it. The tag key is the
+    /// hash of the issuer key, which is the pool id.
+    #[test]
+    fn index_block_tags_the_issuer_pool() {
+        use pallas::crypto::hash::Hasher;
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        let (_, raw) =
+            dolos_testing::blocks::make_conway_block_with_tx(100, empty_tx_body(), None, true);
+        let block = MultiEraBlock::decode(&raw).unwrap();
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.index_block(&block, &std::collections::HashMap::new());
+
+        let archive = builder.build();
+        assert_eq!(archive.len(), 1);
+
+        let tags: Vec<&Tag> = archive[0]
+            .tags
+            .iter()
+            .filter(|tag| tag.dimension == archive::POOL_BLOCKS)
+            .collect();
+
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].key, Hasher::<224>::hash(&[0x10, 0x11]).to_vec());
+    }
+
+    /// Byron blocks carry no issuer key, so they stay untagged.
+    #[test]
+    fn index_block_skips_byron_issuer() {
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        let (_, raw) = dolos_testing::blocks::make_byron_ebb(1, Hash::new([0x00; 32]));
+        let block = MultiEraBlock::decode(&raw).unwrap();
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.index_block(&block, &std::collections::HashMap::new());
+
+        let archive = builder.build();
+        assert_eq!(archive.len(), 1);
+
+        assert!(archive[0]
+            .tags
+            .iter()
+            .all(|tag| tag.dimension != archive::POOL_BLOCKS));
     }
 }

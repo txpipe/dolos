@@ -335,7 +335,7 @@ fn prune_history<B: Backend>() {
     writer.commit().unwrap();
 
     // Tip is 864_100; keeping 500_000 slots prunes before 364_100.
-    let done = store.prune_history(500_000, None).unwrap();
+    let done = store.prune_history(500_000, None, None).unwrap();
     assert!(done, "unbatched prune must finish in one call");
 
     assert_eq!(store.get_block_by_slot(&100).unwrap(), None);
@@ -361,7 +361,7 @@ fn prune_history_no_excess_is_noop<B: Backend>() {
     }
     writer.commit().unwrap();
 
-    let done = store.prune_history(1_000, Some(10)).unwrap();
+    let done = store.prune_history(1_000, Some(10), Some(100_000)).unwrap();
     assert!(done, "no-excess prune must report done");
     assert_eq!(stored_slots(&store), vec![100, 200, 300], "nothing removed");
 }
@@ -380,7 +380,9 @@ fn prune_history_batched_converges<B: Backend>() {
     let max_slots = 100;
     let max_prune = 150;
 
-    let done = store.prune_history(max_slots, Some(max_prune)).unwrap();
+    let done = store
+        .prune_history(max_slots, Some(max_prune), Some(100_000))
+        .unwrap();
     assert!(!done, "large backlog should not finish in one batch");
     let after_first = stored_slots(&store);
     assert_eq!(
@@ -397,7 +399,9 @@ fn prune_history_batched_converges<B: Backend>() {
     let mut done = false;
     let mut rounds = 1;
     while !done {
-        done = store.prune_history(max_slots, Some(max_prune)).unwrap();
+        done = store
+            .prune_history(max_slots, Some(max_prune), Some(100_000))
+            .unwrap();
         rounds += 1;
         assert!(rounds < 100, "batched pruning did not converge");
     }
@@ -799,7 +803,7 @@ fn remove_before_prunes_every_block_at_a_slot<B: Backend>() {
     }
     writer.commit().unwrap();
 
-    store.prune_history(1, None).unwrap();
+    store.prune_history(1, None, None).unwrap();
 
     assert_eq!(
         stored_slots(&store),
@@ -971,7 +975,7 @@ fn prune_keeps_logs_at_the_cutoff_slot<B: Backend>() {
     // Start 0, tip 1000, window 500: prune before slot 500. A log row's
     // temporal prefix at exactly the cutoff survives; anything before it
     // goes.
-    let done = store.prune_history(500, None).unwrap();
+    let done = store.prune_history(500, None, None).unwrap();
     assert!(done);
 
     let walked: Vec<LogKey> = store
@@ -1200,10 +1204,10 @@ fn write_indexed_blocks<S: CoreArchiveStore>(store: &S, slots: &[u64]) {
     writer.commit().unwrap();
 }
 
-/// Whether every exact lookup of the block at `slot` still resolves.
+/// Check retained entries or fully cleaned expired entries.
 ///
-/// The three answer together or not at all: a block's entries are pruned
-/// as one, so a split answer is a defect this helper would hide.
+/// Exact kinds may disappear in different chunks during multi-call cleanup;
+/// this helper does not assert atomicity across an in-progress sweep.
 fn exact_entries_present<S: CoreArchiveStore>(store: &S, slot: u64) -> bool {
     let delta = slot_delta(slot);
     let answers = [
@@ -1229,7 +1233,7 @@ fn prune_history_drops_tags_and_exact_below_the_cutoff<B: Backend>() {
     write_indexed_blocks(&store, &slots);
 
     // Start 0, tip 1000, window 500: prune before slot 500.
-    let done = store.prune_history(500, None).unwrap();
+    let done = store.prune_history(500, None, None).unwrap();
     assert!(done);
 
     for &slot in &slots {
@@ -1261,7 +1265,7 @@ fn prune_keeps_index_entries_at_the_cutoff_slot<B: Backend>() {
     write_indexed_blocks(&store, &[0, 499, 500, 501, 1_000]);
 
     // Start 0, tip 1000, window 500: prune before slot 500.
-    let done = store.prune_history(500, None).unwrap();
+    let done = store.prune_history(500, None, None).unwrap();
     assert!(done);
 
     assert!(!exact_entries_present(&store, 0));
@@ -1286,7 +1290,7 @@ fn slots_by_tag_after_prune_answers_only_retained_slots<B: Backend>() {
     write_indexed_blocks(&store, &slots);
 
     // Start 0, tip 1000, window 300: prune before slot 700.
-    let done = store.prune_history(300, None).unwrap();
+    let done = store.prune_history(300, None, None).unwrap();
     assert!(done);
 
     assert_eq!(tagged_slots(&store, &SHARED_TAG_KEY, 100, 800), [700, 800]);
@@ -1297,10 +1301,10 @@ fn slots_by_tag_after_prune_answers_only_retained_slots<B: Backend>() {
     );
 }
 
-/// The fjall backend sweeps its index keyspaces only when the cutoff has
-/// advanced by a sixteenth of the window since the last sweep, so between
-/// sweeps a pruned block's entries linger; the memory backend has no such
-/// cadence, which is why this is not a conformance case.
+/// Under an index row budget, the fjall backend sweeps its index keyspaces
+/// only when the cutoff has advanced by a sixteenth of the window since the
+/// last sweep, so between sweeps a pruned block's entries linger; the memory
+/// backend has no such cadence, which is why this is not a conformance case.
 ///
 /// Window 1600 makes the threshold 100 slots; each round prunes 40. The
 /// first prune after open always sweeps, the next two fall inside the
@@ -1314,17 +1318,24 @@ fn fjall_index_sweep_is_amortized_across_prune_rounds() {
     write_indexed_blocks(&store, &slots);
 
     let max_slots = 1_600;
-    let max_prune = Some(40);
+    let max_prune_slots = Some(40);
+    let max_prune_index_rows = Some(100_000);
 
     // Round 1: cutoff 40, first sweep after open.
-    assert!(!store.prune_history(max_slots, max_prune).unwrap());
+    assert!(!store
+        .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
+        .unwrap());
     assert!(!exact_entries_present(&store, 30));
     assert!(exact_entries_present(&store, 40));
 
     // Rounds 2 and 3: cutoffs 80 and 120, inside the threshold. The blocks
     // are gone, their entries are not yet.
-    assert!(!store.prune_history(max_slots, max_prune).unwrap());
-    assert!(!store.prune_history(max_slots, max_prune).unwrap());
+    assert!(!store
+        .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
+        .unwrap());
+    assert!(!store
+        .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
+        .unwrap());
     assert_eq!(store.get_block_by_slot(&40).unwrap(), None);
     assert_eq!(store.get_block_by_slot(&110).unwrap(), None);
     assert!(exact_entries_present(&store, 40));
@@ -1335,12 +1346,35 @@ fn fjall_index_sweep_is_amortized_across_prune_rounds() {
     );
 
     // Round 4: cutoff 160, past the threshold: everything below it goes.
-    assert!(!store.prune_history(max_slots, max_prune).unwrap());
+    assert!(!store
+        .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
+        .unwrap());
     assert!(!exact_entries_present(&store, 40));
     assert!(!exact_entries_present(&store, 110));
     assert!(!exact_entries_present(&store, 150));
     assert!(exact_entries_present(&store, 160));
     assert_eq!(tagged_slots(&store, &SHARED_TAG_KEY, 0, 170), [160, 170]);
+}
+
+#[test]
+fn fjall_pruning_finishes_indexes_after_sparse_block_catchup() {
+    let (store, _guard) = Fjall::open();
+    write_indexed_blocks(&store, &[0, 10, 20, 3_000]);
+
+    let mut done = false;
+    for _ in 0..20 {
+        done = store.prune_history(1_600, Some(1), Some(100_000)).unwrap();
+        assert!(exact_entries_present(&store, 3_000));
+        if done {
+            break;
+        }
+    }
+    assert!(done, "sparse pruning must converge without new blocks");
+    assert_eq!(stored_slots(&store), [3_000]);
+    assert_eq!(tagged_slots(&store, &SHARED_TAG_KEY, 0, u64::MAX), [3_000]);
+    for slot in [0, 10, 20] {
+        assert!(!exact_entries_present(&store, slot));
+    }
 }
 
 // ---------------------------------------------------------------------------
