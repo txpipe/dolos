@@ -74,7 +74,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 14] = [
     (DRepState::NS, 1),
     (EpochState::NS, 2),
     (EraSummary::NS, 1),
-    (GovState::NS, 1),
+    (GovState::NS, 2),
     (PendingMirState::NS, 1),
     (PendingRewardState::NS, 1),
     (PoolState::NS, 1),
