@@ -186,7 +186,7 @@ pub fn registry() -> Vec<Entry> {
             enc_epochs,
             EpochState,
             canaries::epoch_state,
-            // The one namespace whose history has moved. Revision 1 is
+            // A history that moved without a field append. Revision 1 is
             // retained as a decode witness and nothing more: it is *one* of
             // the orderings pre-fix code could emit for
             // `RollingStats::registered_pools`, which was a hash container and
