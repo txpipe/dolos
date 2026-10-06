@@ -260,10 +260,19 @@ pub fn registry() -> Vec<Entry> {
             enc_proposals,
             ProposalState,
             canaries::proposal_state,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/proposals.rev1.hex"),
-            }]
+            // Revision 2 retires the vote histories at indexes 13..=15 for
+            // bounded entries at 16..=18. Revision 1 still decodes, its
+            // histories skipped.
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/proposals.rev1.hex"),
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/proposals.rev2.hex"),
+                }
+            ]
         ),
         entity_entry!(
             enc_stakes,

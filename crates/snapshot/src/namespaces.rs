@@ -78,7 +78,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 14] = [
     (PendingMirState::NS, 1),
     (PendingRewardState::NS, 1),
     (PoolState::NS, 1),
-    (ProposalState::NS, 1),
+    (ProposalState::NS, 2),
     (StakeLog::NS, 1),
     (UTXOS, 1),
 ];

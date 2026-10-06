@@ -27,7 +27,7 @@ use dolos_cardano::{
         EpochValue, EraBoundary, EraSummary, GovDistr, GovRoots, GovState, Nonces, PParamValue,
         PParamsSet, PendingMirState, PendingRewardState, PoolDelegation, PoolParams, PoolSnapshot,
         PoolState, ProposalAction, ProposalState, RollingStats, ShardProgress, Stake, StakeLog,
-        VoteHistory,
+        VoteEntry,
     },
     pallas::{
         codec::utils::Bytes,
@@ -519,12 +519,11 @@ pub fn pool_state() -> PoolState {
     }
 }
 
-fn vote_history(seed: u8) -> VoteHistory {
-    vec![
-        (400_000u64 + seed as u64, Vote::Yes),
-        (500_000u64 + seed as u64, Vote::No),
-        (600_000u64 + seed as u64, Vote::Abstain),
-    ]
+fn vote_entry(seed: u8) -> VoteEntry {
+    VoteEntry {
+        newest: (600_000u64 + seed as u64, Vote::Abstain),
+        standing: Some((400_000u64 + seed as u64, Vote::Yes)),
+    }
 }
 
 pub fn proposal_state() -> ProposalState {
@@ -553,17 +552,14 @@ pub fn proposal_state() -> ProposalState {
         purpose: Some(dolos_cardano::model::GovPurpose::Committee),
         anchor: Some(anchor(0x19)),
         cc_votes: BTreeMap::from([
-            (StakeCredential::AddrKeyhash(hash28(0x1a)), vote_history(1)),
-            (StakeCredential::ScriptHash(hash28(0x1b)), vote_history(2)),
+            (StakeCredential::AddrKeyhash(hash28(0x1a)), vote_entry(1)),
+            (StakeCredential::ScriptHash(hash28(0x1b)), vote_entry(2)),
         ]),
         drep_votes: BTreeMap::from([
-            (StakeCredential::AddrKeyhash(hash28(0x1c)), vote_history(3)),
-            (StakeCredential::ScriptHash(hash28(0x1d)), vote_history(4)),
+            (StakeCredential::AddrKeyhash(hash28(0x1c)), vote_entry(3)),
+            (StakeCredential::ScriptHash(hash28(0x1d)), vote_entry(4)),
         ]),
-        spo_votes: BTreeMap::from([
-            (hash28(0x1e), vote_history(5)),
-            (hash28(0x1f), vote_history(6)),
-        ]),
+        spo_votes: BTreeMap::from([(hash28(0x1e), vote_entry(5)), (hash28(0x1f), vote_entry(6))]),
     }
 }
 
