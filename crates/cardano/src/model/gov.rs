@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use dolos_core::{BlockSlot, NsKey};
+use dolos_core::{BlockSlot, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     ledger::primitives::{
@@ -189,6 +189,11 @@ impl GovRoots {
 pub struct DRepSnapshotEntry {
     #[n(0)]
     pub expiry: Option<Epoch>,
+
+    /// The DRep's newest deregistration as of the snapshot. The ledger
+    /// removed every vote cast at or before it.
+    #[n(1)]
+    pub unregistered_at: Option<(BlockSlot, TxOrder)>,
 }
 
 /// Bounded counterpart of the ledger's `dpDRepState`, paired with `prev_distr`.
@@ -1324,7 +1329,10 @@ mod tests {
             closing_epoch: 100,
             dreps: BTreeMap::from([(
                 StakeCredential::AddrKeyhash([7; 28].into()),
-                DRepSnapshotEntry { expiry: Some(120) },
+                DRepSnapshotEntry {
+                    expiry: Some(120),
+                    unregistered_at: Some((90, 2)),
+                },
             )]),
         };
         for prev in [None, Some(snapshot.clone())] {

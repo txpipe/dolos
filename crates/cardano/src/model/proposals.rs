@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use dolos_core::{BlockSlot, EntityKey, NsKey};
+use dolos_core::{BlockSlot, EntityKey, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
@@ -101,8 +101,12 @@ pub enum GovPurpose {
     Constitution,
 }
 
+/// Where a vote was cast: its block's slot and its transaction's index in
+/// that block, the order the ledger's deregistration cleanup compares.
+pub type VotePosition = (BlockSlot, TxOrder);
+
 /// One voter's votes on one proposal, bounded to the two a tally can need,
-/// each with the slot it was cast at.
+/// each with the position it was cast at.
 ///
 /// The ledger keeps one vote per voter (newest wins) and freezes the vote
 /// maps when an epoch starts, so the tally closing epoch `n` reads the vote
@@ -118,37 +122,64 @@ pub struct VoteEntry {
     /// had not voted on the proposal before that epoch.
     #[n(1)]
     pub standing: Option<(BlockSlot, Vote)>,
+
+    /// Transaction index of `newest` in its block.
+    #[n(2)]
+    #[cbor(default)]
+    pub newest_order: TxOrder,
+
+    /// Transaction index of `standing` in its block; zero without one.
+    #[n(3)]
+    #[cbor(default)]
+    pub standing_order: TxOrder,
 }
 
 impl VoteEntry {
-    /// The entry after `vote` is cast at `slot`, in the epoch starting at
-    /// `epoch_start`.
-    fn cast(prev: Option<&Self>, slot: BlockSlot, vote: Vote, epoch_start: BlockSlot) -> Self {
-        let standing = match prev {
-            None => None,
-            Some(prev) if prev.newest.0 < epoch_start => Some(prev.newest.clone()),
-            Some(prev) => prev.standing.clone(),
+    /// The entry after `vote` is cast at `position`, in the epoch starting
+    /// at `epoch_start`.
+    fn cast(
+        prev: Option<&Self>,
+        position: VotePosition,
+        vote: Vote,
+        epoch_start: BlockSlot,
+    ) -> Self {
+        let (standing, standing_order) = match prev {
+            None => (None, 0),
+            Some(prev) if prev.newest.0 < epoch_start => {
+                (Some(prev.newest.clone()), prev.newest_order)
+            }
+            Some(prev) => (prev.standing.clone(), prev.standing_order),
         };
+
+        let (slot, order) = position;
 
         Self {
             newest: (slot, vote),
             standing,
+            newest_order: order,
+            standing_order,
         }
     }
 
-    /// The vote standing at `cutoff`: the newest vote if cast by then,
-    /// otherwise the standing vote if cast by then. Exact when `cutoff` is
-    /// the slot before some epoch starts and the newest vote is no later
-    /// than that epoch.
-    fn as_of(&self, cutoff: BlockSlot) -> Option<&Vote> {
-        if self.newest.0 <= cutoff {
-            return Some(&self.newest.1);
+    /// The vote standing at `cutoff` with its position: the newest vote if
+    /// cast by then, otherwise the standing vote if cast by then. Exact when
+    /// `cutoff` is the slot before some epoch starts and the newest vote is
+    /// no later than that epoch.
+    pub fn cast_as_of(&self, cutoff: BlockSlot) -> Option<(VotePosition, &Vote)> {
+        let (slot, vote) = &self.newest;
+
+        if *slot <= cutoff {
+            return Some(((*slot, self.newest_order), vote));
         }
 
         self.standing
             .as_ref()
             .filter(|(slot, _)| *slot <= cutoff)
-            .map(|(_, vote)| vote)
+            .map(|(slot, vote)| ((*slot, self.standing_order), vote))
+    }
+
+    fn as_of(&self, cutoff: BlockSlot) -> Option<&Vote> {
+        self.cast_as_of(cutoff).map(|(_, vote)| vote)
     }
 }
 
@@ -275,8 +306,19 @@ pub(crate) mod testing {
         (
             (root::any_slot(), root::any_vote()),
             prop::option::of((root::any_slot(), root::any_vote())),
+            any::<TxOrder>(),
+            any::<TxOrder>(),
         )
-            .prop_map(|(newest, standing)| VoteEntry { newest, standing })
+            .prop_map(|(newest, standing, newest_order, standing_order)| {
+                let standing_order = standing.as_ref().map_or(0, |_| standing_order);
+
+                VoteEntry {
+                    newest,
+                    standing,
+                    newest_order,
+                    standing_order,
+                }
+            })
     }
 
     prop_compose! {
@@ -732,10 +774,10 @@ impl dolos_core::EntityDelta for NewProposalV2 {
 /// A vote cast on a live proposal by any of the three voter classes
 /// (constitutional committee, DRep, or stake-pool operator).
 ///
-/// Makes `(slot, vote)` the newest vote of the voter's [`VoteEntry`] on the
-/// target [`ProposalState`]. When the replaced newest vote predates
-/// `epoch_start`, it becomes the standing vote. Undo restores the entry's
-/// pre-image.
+/// Makes `vote`, at `(slot, order)`, the newest vote of the voter's
+/// [`VoteEntry`] on the target [`ProposalState`]. When the replaced newest vote
+/// predates `epoch_start`, it becomes the standing vote. Undo restores the
+/// entry's pre-image.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoteCast {
     pub(crate) proposal_tx: Hash<32>,
@@ -743,6 +785,9 @@ pub struct VoteCast {
     pub(crate) voter: Voter,
     pub(crate) vote: Vote,
     pub(crate) slot: BlockSlot,
+
+    /// Index of the casting transaction in its block.
+    pub(crate) order: TxOrder,
 
     /// First slot of the epoch `slot` belongs to.
     pub(crate) epoch_start: BlockSlot,
@@ -759,6 +804,7 @@ impl VoteCast {
         voter: Voter,
         vote: Vote,
         slot: BlockSlot,
+        order: TxOrder,
         epoch_start: BlockSlot,
     ) -> Self {
         Self {
@@ -767,6 +813,7 @@ impl VoteCast {
             voter,
             vote,
             slot,
+            order,
             epoch_start,
             applied: false,
             prev: None,
@@ -803,7 +850,7 @@ impl dolos_core::EntityDelta for VoteCast {
 
         let next = VoteEntry::cast(
             state.vote_entry(&self.voter),
-            self.slot,
+            (self.slot, self.order),
             self.vote.clone(),
             self.epoch_start,
         );
@@ -1055,6 +1102,8 @@ mod compat_tests {
             VoteEntry {
                 newest: (200, Vote::No),
                 standing: Some((100, Vote::Yes)),
+                newest_order: 3,
+                standing_order: 1,
             },
         );
         state.drep_votes.insert(
@@ -1062,6 +1111,8 @@ mod compat_tests {
             VoteEntry {
                 newest: (150, Vote::Abstain),
                 standing: None,
+                newest_order: 2,
+                standing_order: 0,
             },
         );
         state.spo_votes.insert(
@@ -1069,6 +1120,8 @@ mod compat_tests {
             VoteEntry {
                 newest: (160, Vote::Yes),
                 standing: None,
+                newest_order: 0,
+                standing_order: 0,
             },
         );
 
@@ -1145,19 +1198,24 @@ mod prop_tests {
             voter in root::any_voter(),
             vote in root::any_vote(),
             (slot, epoch_start) in any_slot_in_epoch(),
+            order in 0usize..64,
         ) -> VoteCast {
-            VoteCast::new(proposal_tx, proposal_idx, voter, vote, slot, epoch_start)
+            VoteCast::new(proposal_tx, proposal_idx, voter, vote, slot, order, epoch_start)
         }
     }
 
     /// A vote cast targeting a proposal that exists, aimed at the entity the
     /// strategy pairs it with (`any_proposal_state` fixes tx/idx per sample).
     fn any_matching_vote_cast(tx: Hash<32>, idx: u32) -> impl Strategy<Value = VoteCast> {
-        (root::any_voter(), root::any_vote(), any_slot_in_epoch()).prop_map(
-            move |(voter, vote, (slot, epoch_start))| {
-                VoteCast::new(tx, idx, voter, vote, slot, epoch_start)
-            },
+        (
+            root::any_voter(),
+            root::any_vote(),
+            any_slot_in_epoch(),
+            0usize..64,
         )
+            .prop_map(move |(voter, vote, (slot, epoch_start), order)| {
+                VoteCast::new(tx, idx, voter, vote, slot, order, epoch_start)
+            })
     }
 
     proptest! {
@@ -1281,14 +1339,14 @@ mod prop_tests {
     /// The reference: every vote, per voter, in the map its class reads.
     #[derive(Default)]
     struct History {
-        cc: BTreeMap<StakeCredential, Vec<(BlockSlot, Vote)>>,
-        drep: BTreeMap<StakeCredential, Vec<(BlockSlot, Vote)>>,
-        spo: BTreeMap<PoolHash, Vec<(BlockSlot, Vote)>>,
+        cc: BTreeMap<StakeCredential, Vec<(VotePosition, Vote)>>,
+        drep: BTreeMap<StakeCredential, Vec<(VotePosition, Vote)>>,
+        spo: BTreeMap<PoolHash, Vec<(VotePosition, Vote)>>,
     }
 
     impl History {
-        fn push(&mut self, voter: &Voter, slot: BlockSlot, vote: Vote) {
-            let cast = (slot, vote);
+        fn push(&mut self, voter: &Voter, position: VotePosition, vote: Vote) {
+            let cast = (position, vote);
 
             match voter {
                 Voter::ConstitutionalCommitteeKey(hash) => self
@@ -1316,25 +1374,50 @@ mod prop_tests {
         }
     }
 
-    /// The last vote at or before `cutoff`, per voter.
+    /// The last vote at or before `cutoff`, with its position, per voter.
     fn history_as_of<K: Ord + Clone>(
-        votes: &BTreeMap<K, Vec<(BlockSlot, Vote)>>,
+        votes: &BTreeMap<K, Vec<(VotePosition, Vote)>>,
         cutoff: BlockSlot,
-    ) -> BTreeMap<K, Vote> {
+    ) -> BTreeMap<K, (VotePosition, Vote)> {
         votes
             .iter()
             .filter_map(|(voter, history)| {
                 history
                     .iter()
-                    .rfind(|(slot, _)| *slot <= cutoff)
-                    .map(|(_, vote)| (voter.clone(), vote.clone()))
+                    .rfind(|((slot, _), _)| *slot <= cutoff)
+                    .map(|cast| (voter.clone(), cast.clone()))
             })
+            .collect()
+    }
+
+    /// The bounded read at `cutoff`, with positions, per voter.
+    fn entries_as_of<K: Ord + Clone>(
+        votes: &BTreeMap<K, VoteEntry>,
+        cutoff: BlockSlot,
+    ) -> BTreeMap<K, (VotePosition, Vote)> {
+        votes
+            .iter()
+            .filter_map(|(voter, entry)| {
+                entry
+                    .cast_as_of(cutoff)
+                    .map(|(position, vote)| (voter.clone(), (position, vote.clone())))
+            })
+            .collect()
+    }
+
+    fn without_positions<K: Ord + Clone>(
+        casts: &BTreeMap<K, (VotePosition, Vote)>,
+    ) -> BTreeMap<K, Vote> {
+        casts
+            .iter()
+            .map(|(voter, (_, vote))| (voter.clone(), vote.clone()))
             .collect()
     }
 
     proptest! {
         /// Done criterion: at every epoch's tally cutoff, the bounded read
-        /// equals the read over the full history, for every voter class.
+        /// equals the read over the full history, positions included, for
+        /// every voter class.
         #[test]
         fn bounded_votes_match_full_history_at_every_tally_cutoff(
             votes in any_vote_sequence(),
@@ -1343,28 +1426,45 @@ mod prop_tests {
 
             let mut entity = Some(proposal());
             let mut history = History::default();
-            let mut votes = votes.into_iter().peekable();
+            let mut votes = votes.into_iter().enumerate().peekable();
 
             for epoch in 1..=EPOCHS {
                 let epoch_start = epoch * EPOCH_LENGTH;
                 let next_start = epoch_start + EPOCH_LENGTH;
 
-                while let Some((voter, slot, vote)) =
-                    votes.next_if(|(_, slot, _)| *slot < next_start)
+                // the sequence index stands in for the tx index: it orders
+                // votes that share a slot
+                while let Some((order, (voter, slot, vote))) =
+                    votes.next_if(|(_, (_, slot, _))| *slot < next_start)
                 {
-                    let mut delta =
-                        VoteCast::new(TX.into(), 0, voter.clone(), vote.clone(), slot, epoch_start);
+                    let mut delta = VoteCast::new(
+                        TX.into(),
+                        0,
+                        voter.clone(),
+                        vote.clone(),
+                        slot,
+                        order,
+                        epoch_start,
+                    );
                     delta.apply(&mut entity);
-                    history.push(&voter, slot, vote);
+                    history.push(&voter, (slot, order), vote);
                 }
 
                 // the boundary closing `epoch`
                 let cutoff = epoch_start - 1;
                 let state = entity.as_ref().unwrap();
 
-                prop_assert_eq!(state.cc_votes_as_of(cutoff), history_as_of(&history.cc, cutoff));
-                prop_assert_eq!(state.drep_votes_as_of(cutoff), history_as_of(&history.drep, cutoff));
-                prop_assert_eq!(state.spo_votes_as_of(cutoff), history_as_of(&history.spo, cutoff));
+                let cc = history_as_of(&history.cc, cutoff);
+                let drep = history_as_of(&history.drep, cutoff);
+                let spo = history_as_of(&history.spo, cutoff);
+
+                prop_assert_eq!(entries_as_of(&state.cc_votes, cutoff), cc.clone());
+                prop_assert_eq!(entries_as_of(&state.drep_votes, cutoff), drep.clone());
+                prop_assert_eq!(entries_as_of(&state.spo_votes, cutoff), spo.clone());
+
+                prop_assert_eq!(state.cc_votes_as_of(cutoff), without_positions(&cc));
+                prop_assert_eq!(state.drep_votes_as_of(cutoff), without_positions(&drep));
+                prop_assert_eq!(state.spo_votes_as_of(cutoff), without_positions(&spo));
             }
         }
     }
@@ -1379,29 +1479,36 @@ mod prop_tests {
 
         // epochs of 100 slots: two votes in epoch 1, two in epoch 2
         let mut casts = [
-            (110, Vote::No, 100),
-            (150, Vote::Yes, 100),
-            (220, Vote::Abstain, 200),
-            (250, Vote::No, 200),
+            (110, 4, Vote::No, 100),
+            (150, 1, Vote::Yes, 100),
+            (220, 0, Vote::Abstain, 200),
+            (250, 2, Vote::No, 200),
         ]
-        .map(|(slot, vote, epoch_start)| {
-            VoteCast::new(TX.into(), 0, voter.clone(), vote, slot, epoch_start)
+        .map(|(slot, order, vote, epoch_start)| {
+            VoteCast::new(TX.into(), 0, voter.clone(), vote, slot, order, epoch_start)
         });
 
         let expected = [
-            ((110, Vote::No), None),
-            ((150, Vote::Yes), None),
-            ((220, Vote::Abstain), Some((150, Vote::Yes))),
-            ((250, Vote::No), Some((150, Vote::Yes))),
+            ((110, Vote::No), 4, None, 0),
+            ((150, Vote::Yes), 1, None, 0),
+            ((220, Vote::Abstain), 0, Some((150, Vote::Yes)), 1),
+            ((250, Vote::No), 2, Some((150, Vote::Yes)), 1),
         ];
 
-        for (cast, (newest, standing)) in casts.iter_mut().zip(expected) {
+        for (cast, (newest, newest_order, standing, standing_order)) in
+            casts.iter_mut().zip(expected)
+        {
             cast.apply(&mut entity);
 
             let state = entity.as_ref().unwrap();
             assert_eq!(
                 state.drep_votes.get(&key),
-                Some(&VoteEntry { newest, standing })
+                Some(&VoteEntry {
+                    newest,
+                    standing,
+                    newest_order,
+                    standing_order,
+                })
             );
         }
 
@@ -1421,6 +1528,7 @@ mod prop_tests {
             voter in root::any_voter(),
             vote in root::any_vote(),
             (slot, epoch_start) in any_slot_in_epoch(),
+            order in 0usize..64,
         ) {
             use dolos_core::EntityDelta as _;
 
@@ -1430,6 +1538,7 @@ mod prop_tests {
                 voter.clone(),
                 vote.clone(),
                 slot,
+                order,
                 epoch_start,
             );
             let mut entity = Some(state);
@@ -1437,6 +1546,7 @@ mod prop_tests {
 
             let entry = entity.as_ref().unwrap().vote_entry(&voter);
             prop_assert_eq!(entry.map(|entry| &entry.newest), Some(&(slot, vote)));
+            prop_assert_eq!(entry.map(|entry| entry.newest_order), Some(order));
         }
     }
 }
