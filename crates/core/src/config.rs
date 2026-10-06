@@ -787,6 +787,8 @@ pub struct MinibfConfig {
     max_scan_items: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ipfs_gateways: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_offchain_cache_mb: Option<u64>,
 }
 
 impl MinibfConfig {
@@ -798,6 +800,7 @@ impl MinibfConfig {
             url: None,
             max_scan_items: None,
             ipfs_gateways: None,
+            max_offchain_cache_mb: None,
         }
     }
 
@@ -817,6 +820,19 @@ impl MinibfConfig {
 
     pub fn max_scan_items(&self) -> u64 {
         self.max_scan_items.unwrap_or(default_max_scan_items())
+    }
+
+    pub fn with_max_offchain_cache_mb(mut self, max_offchain_cache_mb: u64) -> Self {
+        self.max_offchain_cache_mb = Some(max_offchain_cache_mb);
+        self
+    }
+
+    /// Disk the off-chain metadata cache may occupy, in MB. Zero turns the
+    /// on-disk cache off, leaving the in-process one.
+    pub fn max_offchain_cache_bytes(&self) -> u64 {
+        self.max_offchain_cache_mb
+            .unwrap_or(default_max_offchain_cache_mb())
+            .saturating_mul(1024 * 1024)
     }
 
     /// These are the base URLs of the HTTP gateways, in order. The gateways
@@ -903,6 +919,10 @@ impl TrpConfig {
 
 fn default_max_optimize_rounds() -> u8 {
     10
+}
+
+fn default_max_offchain_cache_mb() -> u64 {
+    256
 }
 
 fn default_max_scan_items() -> u64 {
