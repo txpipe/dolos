@@ -10,9 +10,9 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, SlotOrder},
-    model::{metadata_label_from_entity_key, MetadataLabelState},
+    model::{metadata_label_from_entity_key, FixedNamespace as _, MetadataLabelState},
 };
-use dolos_core::Domain;
+use dolos_core::{Domain, EntityKey, StateStore as _};
 use futures_util::StreamExt;
 use pallas::{
     codec::minicbor,
@@ -25,6 +25,7 @@ use pallas::{
 
 use crate::{
     error::Error,
+    log_and_500,
     mapping::IntoModel,
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
@@ -250,25 +251,50 @@ where
 {
     let pagination = Pagination::try_from(params)?;
 
-    let mut labels = domain
-        .iter_cardano_entities::<MetadataLabelState>(None)?
-        .map(|item| {
-            let (key, state) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // The entity key is the label in big-endian order, so the store iterates
+    // the labels in numeric order. The store cannot iterate backwards, so a
+    // descending page first collects the keys alone, then reads its values.
+    let page: Vec<(u64, u64)> = match pagination.order {
+        Order::Asc => domain
+            .iter_cardano_entities::<MetadataLabelState>(None)?
+            .skip(pagination.skip())
+            .take(pagination.count)
+            .map(|item| {
+                let (key, state) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-            Ok((metadata_label_from_entity_key(&key), state.tx_count))
-        })
-        .collect::<Result<Vec<_>, StatusCode>>()?;
+                Ok((metadata_label_from_entity_key(&key), state.tx_count))
+            })
+            .collect::<Result<_, StatusCode>>()?,
+        Order::Desc => {
+            let keys = domain
+                .state()
+                .iter_entities(MetadataLabelState::NS, EntityKey::full_range())
+                .map_err(log_and_500("failed to iterate metadata labels"))?
+                .map(|item| item.map(|(key, _)| key))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(log_and_500("failed to iterate metadata labels"))?;
 
-    labels.sort_unstable_by_key(|(label, _)| *label);
+            let end = keys.len().saturating_sub(pagination.skip());
+            let start = end.saturating_sub(pagination.count);
+            let page_keys: Vec<&EntityKey> = keys[start..end].iter().rev().collect();
 
-    if matches!(pagination.order, Order::Desc) {
-        labels.reverse();
-    }
+            let states = domain
+                .state()
+                .read_entities_typed::<MetadataLabelState>(MetadataLabelState::NS, &page_keys)
+                .map_err(log_and_500("failed to read metadata labels"))?;
 
-    let page = labels
+            page_keys
+                .into_iter()
+                .zip(states)
+                .filter_map(|(key, state)| {
+                    Some((metadata_label_from_entity_key(key), state?.tx_count))
+                })
+                .collect()
+        }
+    };
+
+    let page = page
         .into_iter()
-        .skip(pagination.skip())
-        .take(pagination.count)
         .map(|(label, tx_count)| {
             TxMetadataLabelsInner::new(
                 label.to_string(),
@@ -653,6 +679,33 @@ mod tests {
 
         let beyond = get_labels(&app, "/metadata/txs/labels?page=21474836").await;
         assert!(beyond.is_empty());
+
+        let desc_beyond = get_labels(&app, "/metadata/txs/labels?page=21474836&order=desc").await;
+        assert!(desc_beyond.is_empty());
+    }
+
+    #[tokio::test]
+    async fn metadata_labels_desc_pages_are_the_reverse_of_asc_pages() {
+        let app = labels_app();
+
+        let asc = get_labels(&app, "/metadata/txs/labels?count=100").await;
+        let desc = get_labels(&app, "/metadata/txs/labels?count=100&order=desc").await;
+
+        let mut reversed = asc.clone();
+        reversed.reverse();
+        assert_eq!(desc, reversed);
+
+        // Every descending page of one is the matching ascending item, with its
+        // count: the keys and the values come from two reads of the store.
+        for (i, item) in asc.iter().enumerate() {
+            let page = asc.len() - i;
+            let desc_page = get_labels(
+                &app,
+                &format!("/metadata/txs/labels?count=1&page={page}&order=desc"),
+            )
+            .await;
+            assert_eq!(desc_page, std::slice::from_ref(item), "page {page}");
+        }
     }
 
     #[tokio::test]
