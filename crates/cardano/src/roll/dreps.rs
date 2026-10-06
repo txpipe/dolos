@@ -16,7 +16,7 @@ use crate::{
     pallas_extras::{self, stake_cred_to_drep},
     roll::BlockVisitor,
     DRepActivity, DRepAnchorUpdate, DRepDormancyRelease, DRepExpiryUpdate, DRepRegistration,
-    DRepUnRegistration, GovDormancyReset, PParamsSet,
+    DRepSeen, DRepUnRegistration, GovDormancyReset, PParamsSet,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -29,6 +29,14 @@ fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
         },
         _ => None,
     }
+}
+
+/// The DRep a certificate puts on chain, as db-sync's `drep_hash` records it:
+/// the target of a vote delegation or the subject of a DRep certificate.
+fn cert_sighting(cert: &MultiEraCert) -> Option<DRep> {
+    pallas_extras::cert_as_vote_delegation(cert)
+        .map(|delegation| delegation.drep)
+        .or_else(|| cert_drep(cert))
 }
 
 /// Governance-bookkeeping context the roll visitors need from state:
@@ -226,6 +234,13 @@ impl BlockVisitor for DRepStateVisitor {
                 resign.anchor,
                 block.slot(),
             ));
+        }
+
+        // Sightings mirror db-sync's `drep_hash` rows, which db-sync only
+        // writes for certs of valid txs; the crawl above already gates the
+        // certificate fan-out on `tx.is_valid()`.
+        if let Some(drep) = cert_sighting(cert) {
+            deltas.add_for_entity(DRepSeen::new(drep, block.slot(), *order));
         }
 
         let Some(drep) = cert_drep(cert) else {
