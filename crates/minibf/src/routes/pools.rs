@@ -1064,34 +1064,185 @@ where
     Ok(Json(out))
 }
 
-fn select_retiring_pools(
+/// The place of the latest retirement certificate of a pool on chain: the
+/// slot, the transaction index in the block, and the certificate index in the
+/// transaction.
+type RetirementPosition = (BlockSlot, usize, usize);
+
+fn retiring_candidates(
     pools: impl IntoIterator<Item = PoolState>,
     current_epoch: u64,
-    pagination: &Pagination,
 ) -> Vec<(u64, PoolHash)> {
-    let mut retiring: Vec<(u64, BlockSlot, PoolHash)> = pools
+    pools
         .into_iter()
         .filter_map(|pool| {
             let retiring_epoch = pool.retiring_epoch?;
-            (retiring_epoch > current_epoch).then_some((
-                retiring_epoch,
-                pool.register_slot,
-                pool.operator,
-            ))
+            (retiring_epoch > current_epoch).then_some((retiring_epoch, pool.operator))
         })
-        .collect();
+        .collect()
+}
 
-    retiring.sort_unstable_by_key(|(epoch, slot, operator)| (*epoch, *slot, *operator));
+fn retired_candidates(pools: impl IntoIterator<Item = PoolState>) -> Vec<(u64, PoolHash)> {
+    pools
+        .into_iter()
+        .filter_map(|pool| {
+            let is_retired = pool.snapshot.live().map(|x| x.is_retired).unwrap_or(false);
+            let retiring_epoch = pool.retiring_epoch?;
+            is_retired.then_some((retiring_epoch, pool.operator))
+        })
+        .collect()
+}
+
+/// Returns the epochs that the page touches and that have more than one pool.
+/// Only the pools of these epochs need a retirement position.
+fn tied_epochs_on_page(list: &[(u64, PoolHash)], pagination: &Pagination) -> HashSet<u64> {
+    let mut epochs: Vec<u64> = list.iter().map(|(epoch, _)| *epoch).collect();
+    epochs.sort_unstable();
 
     if matches!(pagination.order, crate::pagination::Order::Desc) {
-        retiring.reverse();
+        epochs.reverse();
     }
 
-    retiring
+    let sizes = epochs.iter().counts();
+
+    epochs
+        .iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .filter(|epoch| sizes[*epoch] > 1)
+        .copied()
+        .collect()
+}
+
+/// Reads the retirement position of each pool in `pools`.
+///
+/// A registration cancels an earlier retirement. So the newest certificate of
+/// a retiring or retired pool is its latest retirement. The pool certificate
+/// index gives the slot of that certificate without a block read. Pools with
+/// the same slot also need the transaction index, so the function reads that
+/// block once.
+fn retirement_positions<D: Domain>(
+    domain: &D,
+    pools: &[PoolHash],
+    tip: BlockSlot,
+) -> Result<HashMap<PoolHash, RetirementPosition>, StatusCode> {
+    let archive = domain.archive();
+    let mut by_slot: HashMap<BlockSlot, Vec<PoolHash>> = HashMap::new();
+
+    for pool in pools {
+        let slot = archive
+            .slots_by_pool_certs(pool.as_slice(), 0, tip)
+            .map_err(log_and_500("failed to read the pool certs index"))?
+            .next_back()
+            .transpose()
+            .map_err(log_and_500("failed to read the pool certs index"))?;
+
+        // A pruned archive can lack the certificate. Then the pool gets no
+        // position.
+        if let Some(slot) = slot {
+            by_slot.entry(slot).or_default().push(*pool);
+        }
+    }
+
+    let mut out = HashMap::new();
+
+    for (slot, shared) in by_slot {
+        if let [pool] = shared.as_slice() {
+            out.insert(*pool, (slot, 0, 0));
+            continue;
+        }
+
+        let Some(body) = archive
+            .get_block_by_slot(&slot)
+            .map_err(log_and_500("failed to read a pool certs block"))?
+        else {
+            continue;
+        };
+
+        let block = MultiEraBlock::decode(&body)
+            .map_err(log_and_500("failed to decode a pool certs block"))?;
+
+        for (tx_index, tx) in block.txs().iter().enumerate() {
+            for (cert_index, cert) in tx.certs().iter().enumerate() {
+                let Some(cert) = pallas_extras::cert_as_pool_retirement(cert) else {
+                    continue;
+                };
+
+                // A later certificate replaces an earlier one. So the map
+                // keeps the latest retirement in the block.
+                if shared.contains(&cert.operator) {
+                    out.insert(cert.operator, (slot, tx_index, cert_index));
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Sorts the list by epoch, then by retirement position, then by operator.
+/// Returns one page of the result.
+///
+/// A pool without a position sorts first in its epoch. A pool gets no
+/// position when a pruned archive lacks its certificate. Then its retirement
+/// is older than the kept history, so it is older than the other retirements.
+fn order_page(
+    list: Vec<(u64, PoolHash)>,
+    positions: &HashMap<PoolHash, RetirementPosition>,
+    pagination: &Pagination,
+) -> Vec<(u64, PoolHash)> {
+    let mut keyed: Vec<(u64, Option<RetirementPosition>, PoolHash)> = list
+        .into_iter()
+        .map(|(epoch, pool)| (epoch, positions.get(&pool).copied(), pool))
+        .collect();
+
+    keyed.sort_unstable();
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        keyed.reverse();
+    }
+
+    keyed
         .into_iter()
         .skip(pagination.skip())
         .take(pagination.count)
-        .map(|(retiring_epoch, _, operator)| (retiring_epoch, operator))
+        .map(|(epoch, _, pool)| (epoch, pool))
+        .collect()
+}
+
+/// Orders the list like Blockfrost and returns one page.
+///
+/// Blockfrost sorts the pools by retirement epoch. Inside one epoch, it sorts
+/// them by the transaction of the latest retirement certificate. Blockfrost
+/// gives no order to pools that retire in one transaction. Here the
+/// certificate index orders them.
+fn page_retirements<D: Domain>(
+    domain: &D,
+    list: Vec<(u64, PoolHash)>,
+    pagination: &Pagination,
+    tip: BlockSlot,
+) -> Result<Vec<(u64, PoolHash)>, StatusCode> {
+    let tied = tied_epochs_on_page(&list, pagination);
+
+    let pools: Vec<PoolHash> = list
+        .iter()
+        .filter(|(epoch, _)| tied.contains(epoch))
+        .map(|(_, pool)| *pool)
+        .collect();
+
+    let positions = retirement_positions(domain, &pools, tip)?;
+
+    Ok(order_page(list, &positions, pagination))
+}
+
+fn retire_list_model(list: Vec<(u64, PoolHash)>) -> Result<Vec<PoolListRetireInner>, StatusCode> {
+    list.into_iter()
+        .map(|(retiring_epoch, operator)| {
+            Ok(PoolListRetireInner {
+                pool_id: bech32_pool(operator)?,
+                epoch: retiring_epoch as i32,
+            })
+        })
         .collect()
 }
 
@@ -1115,44 +1266,10 @@ where
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let out = select_retiring_pools(pools, current_epoch, &pagination)
-        .into_iter()
-        .map(|(retiring_epoch, operator)| {
-            Ok(PoolListRetireInner {
-                pool_id: bech32_pool(operator)?,
-                epoch: retiring_epoch as i32,
-            })
-        })
-        .collect::<Result<Vec<_>, StatusCode>>()?;
+    let list = retiring_candidates(pools, current_epoch);
+    let page = page_retirements(&domain.inner, list, &pagination, tip)?;
 
-    Ok(Json(out))
-}
-
-fn select_retired_pools(
-    pools: impl IntoIterator<Item = PoolState>,
-    pagination: &Pagination,
-) -> Vec<(u64, PoolHash)> {
-    let mut retired: Vec<(u64, BlockSlot, PoolHash)> = pools
-        .into_iter()
-        .filter_map(|pool| {
-            let is_retired = pool.snapshot.live().map(|x| x.is_retired).unwrap_or(false);
-            let retiring_epoch = pool.retiring_epoch?;
-            is_retired.then_some((retiring_epoch, pool.register_slot, pool.operator))
-        })
-        .collect();
-
-    retired.sort_unstable_by_key(|(epoch, slot, operator)| (*epoch, *slot, *operator));
-
-    if matches!(pagination.order, crate::pagination::Order::Desc) {
-        retired.reverse();
-    }
-
-    retired
-        .into_iter()
-        .skip(pagination.skip())
-        .take(pagination.count)
-        .map(|(retiring_epoch, _, operator)| (retiring_epoch, operator))
-        .collect()
+    Ok(Json(retire_list_model(page)?))
 }
 
 pub async fn all_retired<D: Domain>(
@@ -1163,6 +1280,7 @@ where
     Option<PoolState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
+    let tip = domain.get_tip_slot()?;
 
     let pools = domain
         .iter_cardano_entities::<PoolState>(None)
@@ -1171,17 +1289,10 @@ where
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let out = select_retired_pools(pools, &pagination)
-        .into_iter()
-        .map(|(retiring_epoch, operator)| {
-            Ok(PoolListRetireInner {
-                pool_id: bech32_pool(operator)?,
-                epoch: retiring_epoch as i32,
-            })
-        })
-        .collect::<Result<Vec<_>, StatusCode>>()?;
+    let list = retired_candidates(pools);
+    let page = page_retirements(&domain.inner, list, &pagination, tip)?;
 
-    Ok(Json(out))
+    Ok(Json(retire_list_model(page)?))
 }
 
 pub async fn by_id_metadata<D: Domain>(
@@ -1619,6 +1730,7 @@ mod tests {
     };
     use dolos_cardano::cip151;
     use dolos_cardano::model::{DRepDelegation, EpochValue, PoolParams, PoolSnapshot, Stake};
+    use dolos_core::{StateStore as _, StateWriter as _};
     use dolos_testing::synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote};
     use pallas::{
         codec::utils::Bytes,
@@ -2263,67 +2375,198 @@ mod tests {
     }
 
     #[test]
-    fn select_retiring_pools_filters_and_orders() {
+    fn retiring_candidates_keep_future_retirements() {
         let pools = vec![
-            // scheduled in the past/current: excluded
+            // The retirement epoch is past or current, so the pool is left out.
             retiring_pool([1u8; 28], 10, Some(5)),
             retiring_pool([2u8; 28], 20, Some(10)),
-            // not retiring: excluded
+            // The pool does not retire, so it is left out.
             retiring_pool([3u8; 28], 30, None),
-            // future retirements: included
+            // The retirement epoch is in the future, so the pool stays.
             retiring_pool([4u8; 28], 40, Some(12)),
             retiring_pool([5u8; 28], 50, Some(11)),
-            // same epoch as above, later register_slot -> stable tie-break
-            retiring_pool([6u8; 28], 60, Some(11)),
         ];
 
-        let pagination = Pagination::default();
-        let selected = select_retiring_pools(pools.clone(), 10, &pagination);
+        let mut selected = retiring_candidates(pools, 10);
+        selected.sort_unstable();
 
         assert_eq!(
             selected,
-            vec![
-                (11, Hash::from([5u8; 28])),
-                (11, Hash::from([6u8; 28])),
-                (12, Hash::from([4u8; 28])),
-            ]
-        );
-
-        // Descending order reverses the listing.
-        let desc = Pagination {
-            order: crate::pagination::Order::Desc,
-            ..Pagination::default()
-        };
-        let selected_desc = select_retiring_pools(pools, 10, &desc);
-        assert_eq!(
-            selected_desc,
-            vec![
-                (12, Hash::from([4u8; 28])),
-                (11, Hash::from([6u8; 28])),
-                (11, Hash::from([5u8; 28])),
-            ]
+            vec![(11, Hash::from([5u8; 28])), (12, Hash::from([4u8; 28]))]
         );
     }
 
     #[test]
-    fn select_retiring_pools_paginates() {
-        let pools = vec![
-            retiring_pool([1u8; 28], 10, Some(11)),
-            retiring_pool([2u8; 28], 20, Some(12)),
-            retiring_pool([3u8; 28], 30, Some(13)),
-        ];
+    fn tied_epochs_on_page_selects_tie_groups_in_the_window() {
+        // Ascending epochs: 5, 10, 10, 10, 11, 12, 12.
+        let list: Vec<(u64, PoolHash)> = [5, 10, 10, 10, 11, 12, 12]
+            .into_iter()
+            .enumerate()
+            .map(|(i, epoch)| (epoch, Hash::from([i as u8; 28])))
+            .collect();
 
-        let params = PaginationParameters {
-            count: Some("1".to_string()),
-            page: Some("2".to_string()),
-            order: None,
-            from: None,
-            to: None,
+        let page = |page: u64, count: usize, order: crate::pagination::Order| Pagination {
+            page,
+            count,
+            order,
+            ..Pagination::default()
         };
-        let pagination = Pagination::try_from(params).expect("valid pagination");
+        let asc = crate::pagination::Order::Asc;
+        let desc = crate::pagination::Order::Desc;
 
-        let selected = select_retiring_pools(pools, 10, &pagination);
-        assert_eq!(selected, vec![(12, Hash::from([2u8; 28]))]);
+        assert_eq!(
+            tied_epochs_on_page(&list, &Pagination::default()),
+            HashSet::from([10, 12])
+        );
+        // The window holds epochs 5 and 10. Epoch 5 has one pool.
+        assert_eq!(
+            tied_epochs_on_page(&list, &page(1, 2, asc)),
+            HashSet::from([10])
+        );
+        // The window holds epochs 11 and 12. Epoch 11 has one pool.
+        assert_eq!(
+            tied_epochs_on_page(&list, &page(3, 2, asc)),
+            HashSet::from([12])
+        );
+        // In descending order, the first window holds epoch 12 only.
+        assert_eq!(
+            tied_epochs_on_page(&list, &page(1, 2, desc)),
+            HashSet::from([12])
+        );
+        // The window holds epoch 5 only, which has one pool.
+        assert!(tied_epochs_on_page(&list, &page(1, 1, asc)).is_empty());
+    }
+
+    #[test]
+    fn order_page_sorts_an_epoch_by_retirement_position() {
+        let pool = |byte: u8| Hash::from([byte; 28]);
+        let list = vec![
+            (10, pool(1)),
+            (10, pool(2)),
+            (10, pool(3)),
+            (10, pool(4)),
+            (10, pool(6)),
+            (5, pool(5)),
+        ];
+        // Pool 4 has no position, and pool 5 is alone in its epoch.
+        let positions = HashMap::from([
+            (pool(1), (200, 0, 0)),
+            (pool(2), (100, 1, 0)),
+            (pool(3), (100, 0, 1)),
+            (pool(6), (100, 0, 0)),
+        ]);
+
+        let asc = order_page(list.clone(), &positions, &Pagination::default());
+        let expected = vec![
+            (5, pool(5)),
+            // No position sorts first.
+            (10, pool(4)),
+            // Slot 100, transaction 0: the certificate index decides.
+            (10, pool(6)),
+            (10, pool(3)),
+            // Slot 100, transaction 1.
+            (10, pool(2)),
+            (10, pool(1)),
+        ];
+        assert_eq!(asc, expected);
+
+        let desc = Pagination {
+            order: crate::pagination::Order::Desc,
+            ..Pagination::default()
+        };
+        let reversed: Vec<_> = expected.iter().rev().copied().collect();
+        assert_eq!(order_page(list.clone(), &positions, &desc), reversed);
+
+        let second_page = Pagination {
+            count: 2,
+            page: 2,
+            ..Pagination::default()
+        };
+        assert_eq!(
+            order_page(list, &positions, &second_page),
+            vec![(10, pool(6)), (10, pool(3))]
+        );
+    }
+
+    const RETIRE_ORDER_POOLS: [[u8; 28]; 4] = [[0x11; 28], [0x44; 28], [0x33; 28], [0x22; 28]];
+
+    /// Builds a chain where four pools retire in epoch 100.
+    ///
+    /// Pools B and C retire in block 1, in transaction 0 and transaction 1.
+    /// Pool A retires in block 0. Pool A then retires again in block 2, in the
+    /// transaction where pool D retires, after pool D. So Blockfrost lists B,
+    /// C, D, A. The register slots give the order A, D, C, B, and the operator
+    /// hashes give the same order. So only the retirement position gives the
+    /// expected order.
+    fn retirement_order_app(is_retired: bool) -> TestApp {
+        use pallas::ledger::primitives::conway::Certificate;
+
+        let [a, b, c, d] = RETIRE_ORDER_POOLS;
+        let retire = |pool: [u8; 28]| Certificate::PoolRetirement(Hash::from(pool), 100);
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            extra_certs_by_block: vec![
+                vec![vec![retire(a)], vec![]],
+                vec![vec![retire(b)], vec![retire(c)]],
+                vec![vec![retire(d), retire(a)], vec![]],
+            ],
+            ..Default::default()
+        };
+
+        TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
+            let writer = domain.state().start_writer().expect("state writer");
+
+            for (register_slot, operator) in [a, d, c, b].into_iter().enumerate() {
+                let pool = retired_pool(operator, register_slot as u64, Some(100), is_retired);
+                writer
+                    .write_entity_typed(&EntityKey::from(operator.as_slice()), &pool)
+                    .expect("failed to write pool state");
+            }
+
+            writer.commit().expect("failed to commit pool state");
+        })
+    }
+
+    async fn assert_retirement_order(app: &TestApp, path: &str) {
+        let [a, b, c, d] = RETIRE_ORDER_POOLS;
+        let expected: Vec<PoolListRetireInner> = [b, c, d, a]
+            .into_iter()
+            .map(|operator| PoolListRetireInner {
+                pool_id: bech32_pool(Hash::from(operator)).expect("bech32 pool id"),
+                epoch: 100,
+            })
+            .collect();
+
+        for (query, expected) in [
+            ("", expected.clone()),
+            ("?order=desc", expected.into_iter().rev().collect()),
+        ] {
+            let (status, bytes) = app.get_bytes(&format!("{path}{query}")).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "unexpected status {status} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+
+            let rows: Vec<PoolListRetireInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse pool list retire");
+            assert_eq!(rows, expected, "{path}{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn pools_retiring_orders_an_epoch_by_retirement_position() {
+        let app = retirement_order_app(false);
+        assert_retirement_order(&app, "/pools/retiring").await;
+    }
+
+    #[tokio::test]
+    async fn pools_retired_orders_an_epoch_by_retirement_position() {
+        let app = retirement_order_app(true);
+        assert_retirement_order(&app, "/pools/retired").await;
     }
 
     #[tokio::test]
@@ -2376,69 +2619,25 @@ mod tests {
     }
 
     #[test]
-    fn select_retired_pools_filters_and_orders() {
+    fn retired_candidates_keep_retired_pools() {
         let pools = vec![
-            // These pools are retired. The sort key is
-            // (retiring_epoch, register_slot, operator).
+            // The pools are retired, so they stay.
             retired_pool([1u8; 28], 10, Some(5), true),
             retired_pool([2u8; 28], 20, Some(10), true),
-            // This pool has the same epoch but a later register_slot.
-            // The register_slot makes the tie-break stable.
-            retired_pool([6u8; 28], 60, Some(10), true),
-            // This pool has a retirement epoch but is not retired. The scan
-            // removes it.
+            // The pool has a retirement epoch but is not retired yet, so it is
+            // left out.
             retired_pool([3u8; 28], 30, Some(12), false),
-            // This pool has no retirement. The scan removes it.
+            // The pool does not retire, so it is left out.
             retired_pool([4u8; 28], 40, None, false),
         ];
 
-        let pagination = Pagination::default();
-        let selected = select_retired_pools(pools.clone(), &pagination);
+        let mut selected = retired_candidates(pools);
+        selected.sort_unstable();
 
         assert_eq!(
             selected,
-            vec![
-                (5, Hash::from([1u8; 28])),
-                (10, Hash::from([2u8; 28])),
-                (10, Hash::from([6u8; 28])),
-            ]
+            vec![(5, Hash::from([1u8; 28])), (10, Hash::from([2u8; 28]))]
         );
-
-        // A descending order reverses the list.
-        let desc = Pagination {
-            order: crate::pagination::Order::Desc,
-            ..Pagination::default()
-        };
-        let selected_desc = select_retired_pools(pools, &desc);
-        assert_eq!(
-            selected_desc,
-            vec![
-                (10, Hash::from([6u8; 28])),
-                (10, Hash::from([2u8; 28])),
-                (5, Hash::from([1u8; 28])),
-            ]
-        );
-    }
-
-    #[test]
-    fn select_retired_pools_paginates() {
-        let pools = vec![
-            retired_pool([1u8; 28], 10, Some(11), true),
-            retired_pool([2u8; 28], 20, Some(12), true),
-            retired_pool([3u8; 28], 30, Some(13), true),
-        ];
-
-        let params = PaginationParameters {
-            count: Some("1".to_string()),
-            page: Some("2".to_string()),
-            order: None,
-            from: None,
-            to: None,
-        };
-        let pagination = Pagination::try_from(params).expect("valid pagination");
-
-        let selected = select_retired_pools(pools, &pagination);
-        assert_eq!(selected, vec![(12, Hash::from([2u8; 28]))]);
     }
 
     #[tokio::test]
