@@ -1,6 +1,6 @@
 mod mapping;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 
 use self::mapping::description_json;
 
@@ -848,19 +848,6 @@ where
     Ok(Json(page))
 }
 
-/// A vote from the proposal namespace.
-struct VoteRow {
-    slot: BlockSlot,
-    proposal_tx: Hash<32>,
-    proposal_idx: u32,
-    vote: Vote,
-
-    /// The transaction that contains the vote and its index in that
-    /// transaction. These values stay empty until `settle_casts` processes the
-    /// row group.
-    cast: Option<(Hash<32>, u32)>,
-}
-
 /// A vote and the transaction that contains the vote.
 pub(crate) struct CastVote {
     /// The hash of the transaction that contains the vote.
@@ -896,203 +883,108 @@ fn vote_model(vote: &Vote) -> drep_votes_inner::Vote {
     }
 }
 
-/// This function returns proposal IDs in Blockfrost index order.
+/// This function returns the votes of one voter in one block, in Blockfrost
+/// order: the position of the transaction first, then the index of the vote in
+/// the ballot of the voter. A repeated vote on the same proposal is a separate
+/// row.
 ///
 /// `cert_index` is the index in one voter ballot. db-sync restarts this value
 /// for each voter. The ledger stores each ballot in a map that uses governance
 /// action IDs as keys. Thus, the order uses the proposal transaction hash
 /// first and the action index second.
-fn ballot(tx: &MultiEraTx, voter: &Voter) -> Vec<(Hash<32>, u32)> {
-    let MultiEraTx::Conway(tx) = tx else {
-        return Vec::new();
-    };
-
-    let Some(procedures) = &tx.transaction_body.voting_procedures else {
-        return Vec::new();
-    };
-
-    let Some(ballot) = procedures.get(voter) else {
-        return Vec::new();
-    };
-
-    ballot
-        .keys()
-        .map(|id| (id.transaction_id, id.action_index))
-        .collect()
-}
-
-/// This function finds the transaction and index for each vote in one block.
-/// It also sorts vote rows by transaction position and ballot index.
 ///
-/// The proposal state stores the vote slot, but it does not store transaction
-/// data. The archived block supplies the transaction hash and ballot index.
-///
-/// If the archive does not contain the block, rows keep their provisional
-/// order and have no cast data. `voter_casts` removes these rows.
-///
-/// If the archive contains the block but the block has no matching cast, the
-/// state and the archive disagree. This function logs a warning for that row.
-fn settle_casts<D: Domain>(
-    domain: &D,
-    voter: &Voter,
-    slot: BlockSlot,
-    rows: &mut Vec<VoteRow>,
-) -> Result<(), Error> {
-    let Some(body) = domain
-        .archive()
-        .get_block_by_slot(&slot)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    else {
-        return Ok(());
-    };
+/// The ledger ignores the votes of a phase-2-invalid transaction, so the
+/// function skips those transactions.
+fn voter_casts_in_block(block: &MultiEraBlock, voter: &Voter) -> Vec<CastVote> {
+    let mut out = Vec::new();
 
-    let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // The map stores ballot casts for this voter. The keys are target
-    // proposals. The values preserve block order. A later transaction can
-    // cast another vote for the same proposal.
-    type CastsByProposal = HashMap<(Hash<32>, u32), VecDeque<(usize, Hash<32>, u32)>>;
-    let mut casts = CastsByProposal::new();
-
-    for (position, tx) in block.txs().iter().enumerate() {
-        // The ledger ignores governance procedures in phase-2-invalid txs.
+    for tx in block.txs() {
         if !tx.is_valid() {
             continue;
         }
 
-        for (cert_index, target) in ballot(tx, voter).into_iter().enumerate() {
-            casts
-                .entry(target)
-                .or_default()
-                .push_back((position, tx.hash(), cert_index as u32));
-        }
-    }
-
-    // Proposal history stores rows in cast order. Each removal takes the first
-    // matching cast in block order.
-    let mut settled: Vec<((usize, u32), VoteRow)> = rows
-        .drain(..)
-        .map(|row| {
-            match casts
-                .get_mut(&(row.proposal_tx, row.proposal_idx))
-                .and_then(VecDeque::pop_front)
-            {
-                Some((position, tx, cert_index)) => (
-                    (position, cert_index),
-                    VoteRow {
-                        cast: Some((tx, cert_index)),
-                        ..row
-                    },
-                ),
-                None => {
-                    // The archive contains this block, so the block must
-                    // contain the ballot. A missing cast means that the state
-                    // and the archive disagree.
-                    tracing::warn!(
-                        slot,
-                        voter = ?voter,
-                        proposal_tx = %row.proposal_tx,
-                        proposal_idx = row.proposal_idx,
-                        "The state has a vote that is not in the archived block. \
-                         The response will not contain this vote."
-                    );
-
-                    ((usize::MAX, u32::MAX), row)
-                }
-            }
-        })
-        .collect();
-
-    settled.sort_by_key(|(order, _)| *order);
-    rows.extend(settled.into_iter().map(|(_, row)| row));
-
-    Ok(())
-}
-
-/// This function reads the votes of one voter from the state. The archived
-/// blocks supply the transaction hash and the ballot index of each vote on the
-/// requested page. The votes on the page are in chain order, or in the
-/// opposite order for `Order::Desc`. Chain order is the order of the blocks,
-/// then the position of the transaction in the block, then the ballot index. A
-/// repeated vote on the same proposal is a separate row.
-///
-/// The proposal that receives a vote stores that vote. Thus, this function
-/// scans the proposal namespace for the voter. The namespace contains one row
-/// for each submitted governance action. Every action requires a deposit.
-/// `/governance/proposals` scans the same namespace without a budget. The
-/// archive reads are the cost of a request. `enforce_max_scan_limit` limits
-/// that cost. `page_slot_groups` reads a block only for a group that overlaps
-/// the requested page.
-///
-/// If the archive does not contain the block of a vote, the vote leaves its
-/// page. The other history endpoints return the same short page under
-/// `sync.max_history`. The offsets stay the same as in Blockfrost.
-pub(crate) fn voter_casts<D: Domain>(
-    domain: &D,
-    voter: &Voter,
-    pagination: &Pagination,
-) -> Result<Vec<CastVote>, Error> {
-    let mut rows = Vec::new();
-
-    let entities = domain
-        .state()
-        .iter_entities_typed::<ProposalState>(ProposalState::NS, None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    for entry in entities {
-        let (_, state) = entry.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let Some(history) = state.vote_history(voter) else {
+        let MultiEraTx::Conway(conway) = &tx else {
             continue;
         };
 
-        for (slot, vote) in history {
-            rows.push(VoteRow {
-                slot: *slot,
-                proposal_tx: state.tx,
-                proposal_idx: state.idx,
-                vote: vote.clone(),
-                cast: None,
+        let Some(ballot) = conway
+            .transaction_body
+            .voting_procedures
+            .as_ref()
+            .and_then(|procedures| procedures.get(voter))
+        else {
+            continue;
+        };
+
+        for (cert_index, (action, procedure)) in ballot.iter().enumerate() {
+            out.push(CastVote {
+                tx: tx.hash(),
+                cert_index: cert_index as u32,
+                proposal_tx: action.transaction_id,
+                proposal_idx: action.action_index,
+                vote: procedure.vote.clone(),
             });
         }
     }
 
-    // This sort orders rows by slot, then by governance action ID. The stable
-    // sort keeps the cast order for repeated votes on the same proposal.
-    rows.sort_by_key(|row| (row.slot, row.proposal_tx, row.proposal_idx));
+    out
+}
 
-    let page = page_slot_groups(
-        rows,
-        |row| row.slot,
-        pagination,
-        |slot, group| settle_casts(domain, voter, slot, group),
-    )?;
+/// This function reads the vote blocks of one voter from the archive, in the
+/// requested order, and returns the votes on the requested page. The votes
+/// are in chain order, or in the opposite order for `Order::Desc`. Chain order
+/// is the order of the blocks, then the position of the transaction in the
+/// block, then the ballot index.
+///
+/// The `voter_votes` archive dimension gives the blocks that hold votes of the
+/// voter. The function reads blocks only until the page is full, and at most
+/// `budget` of them. Votes are listed up to `tip`, the state cursor.
+///
+/// A block that the archive no longer holds leaves the list, and the votes
+/// after it move up. The other history endpoints do the same under
+/// `sync.max_history`.
+pub(crate) fn voter_casts<D: Domain>(
+    domain: &D,
+    voter: &Voter,
+    tip: BlockSlot,
+    pagination: &Pagination,
+    budget: usize,
+) -> Result<Vec<CastVote>, Error> {
+    let archive = domain.archive();
 
-    // A row without archive data has no transaction hash and no ballot index.
-    // The filter removes the row from its page. The rows after this row stay
-    // on their pages.
-    Ok(page
+    let slots = archive
+        .slots_by_voter_votes(&pallas_extras::voter_id_bytes(voter), 0, tip)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let descending = matches!(pagination.order, Order::Desc);
+
+    let slots: Box<dyn Iterator<Item = _>> = if descending {
+        Box::new(slots.rev())
+    } else {
+        Box::new(slots)
+    };
+
+    let blocks = slots.map(|slot| archive.get_block_by_slot(&slot?));
+
+    let rows = collect_block_rows(blocks, descending, pagination.to(), budget, |block| {
+        Ok(voter_casts_in_block(block, voter))
+    })?;
+
+    Ok(rows
         .into_iter()
-        .filter_map(|row| {
-            let (tx, cert_index) = row.cast?;
-
-            Some(CastVote {
-                tx,
-                cert_index,
-                proposal_tx: row.proposal_tx,
-                proposal_idx: row.proposal_idx,
-                vote: row.vote,
-            })
-        })
+        .skip(pagination.skip())
+        .take(pagination.count)
         .collect())
 }
 
 fn vote_page<D: Domain>(
     domain: &D,
     voter: &Voter,
+    tip: BlockSlot,
     pagination: &Pagination,
+    budget: usize,
 ) -> Result<Vec<DrepVotesInner>, Error> {
-    voter_casts(domain, voter, pagination)?
+    voter_casts(domain, voter, tip, pagination, budget)?
         .into_iter()
         .map(|cast| {
             Ok(DrepVotesInner {
@@ -1114,8 +1006,8 @@ fn vote_page<D: Domain>(
 /// If a DRep does not exist or has no votes, the endpoint returns an empty
 /// list. It does not return 404.
 ///
-/// `max_scan_items` limits the page depth. The other endpoints that read a
-/// block for each row use the same limit.
+/// `max_scan_items` limits both the page depth and the number of blocks that
+/// one request reads.
 pub async fn drep_votes<D>(
     Path(drep_id): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -1136,10 +1028,12 @@ where
     }
 
     let voter = drep_voter(&EntityKey::from(drep_bytes))?;
+    let tip = domain.get_tip_slot()?;
+    let budget = domain.config.max_scan_items() as usize;
 
     let page = domain
         .query()
-        .run_blocking(move |domain| Ok(vote_page(&domain, &voter, &pagination)))
+        .run_blocking(move |domain| Ok(vote_page(&domain, &voter, tip, &pagination, budget)))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
@@ -1196,20 +1090,20 @@ fn drep_updates_in_block(
     Ok(out)
 }
 
-/// This function reads the certificate blocks of one DRep in order and
-/// returns its updates until it has `needed` rows.
+/// This function reads tagged blocks in order and returns the rows that
+/// `rows_in_block` finds in them until it has `needed` rows.
 ///
-/// A tagged block can hold no update of the DRep, for example when its
-/// certificate sits in a phase-2-invalid transaction. Such a block costs a
-/// read but adds no row. So the function stops with `ScanBudgetExceeded` when
-/// it has read `budget` blocks and still needs another one.
-fn collect_drep_updates(
+/// A tagged block can hold no row, for example when its certificate or vote
+/// sits in a phase-2-invalid transaction. Such a block costs a read but adds
+/// no row. So the function stops with `ScanBudgetExceeded` when it has read
+/// `budget` blocks and still needs another one.
+fn collect_block_rows<T>(
     mut blocks: impl Iterator<Item = Result<Option<BlockBody>, ArchiveError>>,
-    drep: &[u8],
     descending: bool,
     needed: usize,
     budget: usize,
-) -> Result<Vec<DrepUpdatesInner>, Error> {
+    mut rows_in_block: impl FnMut(&MultiEraBlock) -> Result<Vec<T>, StatusCode>,
+) -> Result<Vec<T>, Error> {
     let mut rows = Vec::new();
     let mut scanned = 0;
 
@@ -1232,7 +1126,7 @@ fn collect_drep_updates(
 
         let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let mut block_rows = drep_updates_in_block(&block, drep)?;
+        let mut block_rows = rows_in_block(&block)?;
 
         // The blocks come from the tip backward in descending order. The rows
         // of each block are reversed too, so that the list is the exact
@@ -1271,7 +1165,9 @@ fn read_drep_updates<D: Domain>(
 
     let blocks = slots.map(|slot| archive.get_block_by_slot(&slot?));
 
-    collect_drep_updates(blocks, drep, descending, needed, budget)
+    collect_block_rows(blocks, descending, needed, budget, |block| {
+        drep_updates_in_block(block, drep)
+    })
 }
 
 /// `GET /governance/dreps/{drep_id}/updates` lists the registration,
@@ -2583,16 +2479,15 @@ mod tests {
         assert!(get_drep_votes(&app, drep, "?page=9").await.is_empty());
     }
 
-    /// A pruned block removes its votes from their page. The pages after it
-    /// do not move. The other history endpoints return the same short page
-    /// under `sync.max_history`. Thus, a client that reads all pages gets the
-    /// same offsets as from Blockfrost.
+    /// A pruned block takes its votes out of the listing, and the retained
+    /// votes move up to fill the pages. The other history endpoints return
+    /// the same under `sync.max_history`.
     ///
     /// The test prunes the archive to one slot. Only the last block remains.
-    /// The three votes of block 1 are gone. The one vote of block 2 keeps
-    /// offset 3.
+    /// The three votes of block 1 are gone. The one vote of block 2 is the
+    /// first row.
     #[tokio::test]
-    async fn governance_drep_votes_skips_pruned_rows_without_shifting_offsets() {
+    async fn governance_drep_votes_paginates_retained_rows() {
         let app = TestApp::new_with_cfg_and_setup(drep_votes_config(), |domain, _| {
             domain
                 .archive()
@@ -2601,16 +2496,45 @@ mod tests {
         });
         let drep = &app.vectors().drep_id;
 
-        assert!(get_drep_votes(&app, drep, "?count=1").await.is_empty());
-        assert!(get_drep_votes(&app, drep, "?count=1&page=3")
-            .await
-            .is_empty());
-
-        let rows = get_drep_votes(&app, drep, "?count=1&page=4").await;
+        let rows = get_drep_votes(&app, drep, "?count=1").await;
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tx_hash, app.vectors().blocks[2].tx_hashes[0]);
         assert_eq!(rows[0].vote, drep_votes_inner::Vote::No);
+
+        assert!(get_drep_votes(&app, drep, "?count=1&page=2")
+            .await
+            .is_empty());
+        assert!(get_drep_votes(&app, drep, "?count=1&page=4")
+            .await
+            .is_empty());
+    }
+
+    /// The ledger ignores the votes of a phase-2-invalid tx, so they are not
+    /// listed, although their block is tagged for the voter.
+    #[tokio::test]
+    async fn governance_drep_votes_skip_invalid_transactions() {
+        let voter = Voter::DRepKey(Hash::from([7u8; 28]));
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 2,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information], vec![]], vec![]],
+            votes_by_block: vec![
+                vec![],
+                vec![
+                    vec![synthetic_vote(voter.clone(), 0, 0, 0, Vote::Yes)],
+                    vec![synthetic_vote(voter, 0, 0, 0, Vote::No)],
+                ],
+            ],
+            invalid_txs_by_block: vec![vec![], vec![1]],
+            ..Default::default()
+        });
+
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "").await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, app.vectors().blocks[1].tx_hashes[0]);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::Yes);
     }
 
     /// One DRep votes two times on one proposal in one block. The cast queue
@@ -4565,6 +4489,7 @@ mod tests {
     #[test]
     fn drep_updates_scan_stops_at_the_budget() {
         let drep = drep_updates_test_drep();
+        let updates = |block: &MultiEraBlock| drep_updates_in_block(block, &drep);
 
         let blocks = || {
             [false, false, true]
@@ -4574,19 +4499,19 @@ mod tests {
 
         // two empty blocks spend a budget of two before the row appears
         assert!(matches!(
-            collect_drep_updates(blocks(), &drep, false, 1, 2),
+            collect_block_rows(blocks(), false, 1, 2, updates),
             Err(Error::ScanBudgetExceeded)
         ));
 
         // a budget of three reaches the block that holds the row
-        let rows = collect_drep_updates(blocks(), &drep, false, 1, 3).unwrap();
+        let rows = collect_block_rows(blocks(), false, 1, 3, updates).unwrap();
         assert_eq!(rows.len(), 1);
 
         // a full page stops the scan before the budget matters
         let blocks = [true, false, false]
             .into_iter()
             .map(|valid| Ok(Some(drep_registration_block(valid))));
-        let rows = collect_drep_updates(blocks, &drep, false, 1, 1).unwrap();
+        let rows = collect_block_rows(blocks, false, 1, 1, updates).unwrap();
         assert_eq!(rows.len(), 1);
     }
 

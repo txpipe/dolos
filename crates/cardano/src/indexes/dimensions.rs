@@ -118,6 +118,15 @@ pub mod archive {
 
         /// Pool hash of the block issuer.
         POOL_BLOCKS = "pool_blocks";
+
+        /// Governance votes by voter id bytes: the CIP-129 DRep id, the
+        /// CIP-129 committee-hot id, or the pool hash
+        /// (`pallas_extras::voter_id_bytes`).
+        VOTER_VOTES = "voter_votes";
+
+        /// Governance votes by the proposal entity key of the action voted on
+        /// (`ProposalState::build_entity_key`).
+        ACTION_VOTES = "action_votes";
     }
 }
 
@@ -158,6 +167,8 @@ mod tests {
                 "metadata",
                 "drep_certs",
                 "pool_blocks",
+                "voter_votes",
+                "action_votes",
             ]
         );
     }
