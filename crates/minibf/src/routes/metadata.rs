@@ -177,6 +177,7 @@ where
     let label: u64 = label.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let pagination = Pagination::try_from(pagination)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
+    let budget = domain.config.max_scan_items() as usize;
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(domain).await?;
     let stream = domain.query().blocks_by_metadata_stream(
@@ -190,11 +191,22 @@ where
         MetadataHistoryModelBuilder::new(label, pagination.count, pagination.page as usize);
 
     let mut stream = Box::pin(stream);
+    let mut scanned = 0;
 
     while let Some(res) = stream.next().await {
         if !builder.needs_more() {
             break;
         }
+
+        // A tagged block can hold no row when the label sits in a
+        // phase-2-invalid transaction. Such a block costs a read but adds no
+        // row, so the request stops when it has read `budget` blocks and
+        // still needs another one.
+        if scanned == budget {
+            return Err(Error::ScanBudgetExceeded);
+        }
+
+        scanned += 1;
 
         let (_slot, maybe) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if let Some(cbor) = maybe {
@@ -765,6 +777,56 @@ mod tests {
 
         assert_eq!(scanned(true), 1);
         assert_eq!(scanned(false), 0);
+    }
+
+    /// Only the first tx of a synthetic block carries metadata. When that tx
+    /// is phase-2-invalid, the block is in the metadata index but adds no
+    /// row. Enough of those blocks stop the request instead of letting it
+    /// read without end.
+    #[tokio::test]
+    async fn label_scan_stops_at_the_budget() {
+        let app_with_budget = |budget: u64| {
+            TestApp::new_with_scan_limit(
+                SyntheticBlockConfig {
+                    block_count: 3,
+                    txs_per_block: 1,
+                    invalid_txs_by_block: vec![vec![0], vec![0], vec![]],
+                    ..Default::default()
+                },
+                budget,
+            )
+        };
+
+        // two empty blocks spend a budget of two before the row appears
+        let app = app_with_budget(2);
+        let label = app.vectors().metadata_label.clone();
+        let path = format!("/metadata/txs/labels/{label}?count=1");
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+
+        // a budget of three reaches the block that holds the row
+        let app = app_with_budget(3);
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let rows: Vec<TxMetadataLabelJsonInner> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, app.vectors().blocks[2].tx_hashes[0]);
+
+        // from the tip, the row fills the page before the budget matters
+        let app = app_with_budget(1);
+        let (status, bytes) = app.get_bytes(&format!("{path}&order=desc")).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let rows: Vec<TxMetadataLabelJsonInner> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]
