@@ -312,7 +312,8 @@ fn history() -> Vec<HistoryEntry> {
     ]
 }
 
-/// Write the whole fixture stele into `root`: thirty layers and an inscription.
+/// Write the whole fixture stele into `root`: forty-two layers and an
+/// inscription.
 fn write_stele(root: &std::path::Path) -> (Inscription, Digest) {
     let stele = SteleDir::create(root).unwrap();
 

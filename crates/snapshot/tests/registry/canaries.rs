@@ -1,4 +1,4 @@
-//! The seventeen canaries: one fully-populated value per namespace.
+//! The fourteen canaries: one fully-populated value per namespace.
 //!
 //! A canary is a value in which **every field is present and distinctive** —
 //! every `Option` is `Some`, every collection is non-empty, every nested type
