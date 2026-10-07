@@ -317,17 +317,25 @@ impl CardanoIndexDeltaBuilder {
     /// a block holding many votes of one voter carries its tag once.
     pub fn add_votes(&mut self, procedures: &VotingProcedures) {
         for (voter, ballot) in procedures {
-            self.add_vote_tag(archive::VOTER_VOTES, pallas_extras::voter_id_bytes(voter));
+            self.add_tag_once(archive::VOTER_VOTES, pallas_extras::voter_id_bytes(voter));
 
             for action in ballot.keys() {
                 let key =
                     ProposalState::build_entity_key(action.transaction_id, action.action_index);
-                self.add_vote_tag(archive::ACTION_VOTES, key.as_ref().to_vec());
+                self.add_tag_once(archive::ACTION_VOTES, key.as_ref().to_vec());
             }
         }
     }
 
-    fn add_vote_tag(&mut self, dimension: TagDimension, key: Vec<u8>) {
+    /// Tag the current block with a minted or burned asset subject (policy
+    /// id + asset name).
+    ///
+    /// A subject already tagged in this block is not tagged again.
+    pub fn add_asset_mint(&mut self, subject: Vec<u8>) {
+        self.add_tag_once(archive::ASSET_MINTS, subject);
+    }
+
+    fn add_tag_once(&mut self, dimension: TagDimension, key: Vec<u8>) {
         let block = self.current_block();
 
         let tagged = block
@@ -352,7 +360,7 @@ impl CardanoIndexDeltaBuilder {
     /// Calls `start_block`, then iterates all transactions adding
     /// tx hashes, metadata, inputs (with resolved UTxO lookups),
     /// outputs (with script refs), witness scripts/datums, certs,
-    /// redeemers, and governance votes.
+    /// redeemers, asset mints, and governance votes.
     pub fn index_block(
         &mut self,
         block: &pallas::ledger::traverse::MultiEraBlock<'_>,
@@ -448,6 +456,17 @@ impl CardanoIndexDeltaBuilder {
 
             for redeemer in tx.redeemers() {
                 self.add_datum_hash(redeemer.data().compute_hash().to_vec());
+            }
+
+            // A phase-2-invalid tx mints nothing, so it adds no tag: every
+            // tagged block holds a mint or burn of the subject.
+            if tx.is_valid() {
+                for policy_assets in tx.mints() {
+                    for asset in policy_assets.assets() {
+                        let subject = [policy_assets.policy().as_slice(), asset.name()].concat();
+                        self.add_asset_mint(subject);
+                    }
+                }
             }
 
             // Votes in phase-2-invalid txs are tagged too; readers skip them.
@@ -727,6 +746,9 @@ mod tests {
         // POOL_BLOCKS
         builder.add_block_issuer(&[0x88; 32]);
 
+        // ASSET_MINTS
+        builder.add_asset_mint([&[0x11; 28][..], &[0xaa; 4]].concat());
+
         // VOTER_VOTES, ACTION_VOTES
         builder.add_votes(&BTreeMap::from([(
             pallas::ledger::primitives::conway::Voter::StakePoolKey(Hash::new([0x99; 28])),
@@ -755,6 +777,52 @@ mod tests {
 
         keys.sort();
         keys
+    }
+
+    /// A valid tx tags its block with every subject it mints or burns, once
+    /// per subject however many txs of the block touch it. A phase-2-invalid
+    /// tx mints nothing and tags nothing.
+    #[test]
+    fn mints_tag_assets_of_valid_txs() {
+        use pallas::ledger::primitives::NonZeroInt;
+        use pallas::ledger::traverse::MultiEraBlock;
+        use std::collections::BTreeMap;
+
+        let mint = |names: &[(&[u8], i64)]| {
+            let assets = names
+                .iter()
+                .map(|(name, quantity)| {
+                    let quantity = NonZeroInt::try_from(*quantity).expect("non-zero quantity");
+                    (name.to_vec().into(), quantity)
+                })
+                .collect();
+
+            let mut body = empty_tx_body();
+            body.mint = Some(BTreeMap::from([(Hash::new([0x11; 28]), assets)]));
+            body
+        };
+
+        let (_, raw) = dolos_testing::blocks::make_conway_block_with_txs(
+            100,
+            vec![
+                (mint(&[(b"A", 5), (b"B", -2)]), true),
+                (mint(&[(b"A", -1)]), true),
+                (mint(&[(b"C", 1)]), false),
+            ],
+            None,
+        );
+        let block = MultiEraBlock::decode(&raw).unwrap();
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.index_block(&block, &std::collections::HashMap::new());
+        let archive = builder.build();
+
+        let subject = |name: &[u8]| [&[0x11; 28][..], name].concat();
+
+        assert_eq!(
+            sorted_keys(&archive[0], archive::ASSET_MINTS),
+            [subject(b"A"), subject(b"B")]
+        );
     }
 
     /// Every vote tags its block by voter and by action, once per key. DRep
