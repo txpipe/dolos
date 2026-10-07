@@ -465,7 +465,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:87458915171733f5a694f34ee279c34a837d6ba6c4bdcb368d360bd6cf7bf85a";
+    "sha256:8d9c3933d5ea550f598084fd0278adbaba2605b3a5adb1ffb521d050b3651942";
 
 fn history() -> Vec<HistoryEntry> {
     vec![

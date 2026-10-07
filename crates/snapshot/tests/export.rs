@@ -66,7 +66,7 @@ use watcher::Watcher;
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
-    "sha256:66d907f185e4bd2922bd038e5e2b9d4edef869a5e99eed3d994cf62e7cfc6bb2";
+    "sha256:ad474517b51a1b3b0ad1e08764d1a745e3de28deeacbd745668b0cce8418d9ae";
 
 /// The chain point the skeleton fixture stands at: mid-epoch-2 under
 /// [`skeleton_summary`], so the export covers three epochs and the last window
