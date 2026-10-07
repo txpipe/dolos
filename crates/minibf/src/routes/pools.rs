@@ -1262,20 +1262,22 @@ where
     Option<PoolState>: From<D::Entity>,
     F: FnOnce(Vec<PoolState>) -> Vec<(u64, PoolHash)> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
+    let page = tokio::task::spawn_blocking(move || {
         let pools = domain
             .iter_cardano_entities::<PoolState>(None)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(log_and_500("failed to scan the pool states"))?
             .map(|item| item.map(|(_, pool)| pool))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(log_and_500("failed to scan the pool states"))?;
 
         let page = page_retirements(&domain.inner, select(pools), &pagination)?;
 
         retire_list_model(page)
     })
     .await
-    .map_err(log_and_500("failed to join the retirement page task"))?
+    .map_err(log_and_500("failed to join the retirement page task"))??;
+
+    Ok(page)
 }
 
 pub async fn all_retiring<D: Domain>(
@@ -2506,16 +2508,17 @@ mod tests {
         );
     }
 
-    const RETIRE_ORDER_POOLS: [[u8; 28]; 4] = [[0x11; 28], [0x44; 28], [0x33; 28], [0x22; 28]];
+    const RETIRE_ORDER_POOLS: [[u8; 28]; 4] = [[0x11; 28], [0x33; 28], [0x44; 28], [0x22; 28]];
 
     /// Builds a chain where four pools retire in epoch 100.
     ///
     /// Pools B and C retire in block 1, in transaction 0 and transaction 1.
     /// Pool A retires in block 0. Pool A then retires again in block 2, in the
     /// transaction where pool D retires, after pool D. So Blockfrost lists B,
-    /// C, D, A. The register slots give the order A, D, C, B, and the operator
-    /// hashes give the same order. So only the retirement position gives the
-    /// expected order.
+    /// C, D, A. The register slots give the order C, A, D, B, and the operator
+    /// hashes give the order A, D, B, C. Neither order gives B, C, D, A in
+    /// either direction. So only the retirement position gives the expected
+    /// order.
     fn retirement_order_app(is_retired: bool) -> TestApp {
         use pallas::ledger::primitives::conway::Certificate;
 
@@ -2536,7 +2539,7 @@ mod tests {
         TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
             let writer = domain.state().start_writer().expect("state writer");
 
-            for (register_slot, operator) in [a, d, c, b].into_iter().enumerate() {
+            for (register_slot, operator) in [c, a, d, b].into_iter().enumerate() {
                 let pool = retired_pool(operator, register_slot as u64, Some(100), is_retired);
                 writer
                     .write_entity_typed(&EntityKey::from(operator.as_slice()), &pool)
