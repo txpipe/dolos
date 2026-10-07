@@ -160,9 +160,11 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/governance/proposals/{gov_action_id}`                    | Get governance proposal by CIP-129 action id             |
 | `/governance/proposals/{gov_action_id}/metadata`           | Get metadata of a proposal by CIP-129 id                 |
 | `/governance/proposals/{gov_action_id}/parameters`         | Get parameter change of a proposal by CIP-129 id         |
+| `/governance/proposals/{gov_action_id}/votes`              | Get votes of a proposal by CIP-129 id                    |
 | `/governance/proposals/{gov_action_id}/withdrawals`        | Get withdrawals of a proposal by CIP-129 id              |
 | `/governance/proposals/{tx_hash}/{cert_index}/metadata`    | Get metadata of a specific proposal                      |
 | `/governance/proposals/{tx_hash}/{cert_index}/parameters`  | Get parameter change of a specific proposal              |
+| `/governance/proposals/{tx_hash}/{cert_index}/votes`       | Get votes of a specific proposal                         |
 | `/governance/proposals/{tx_hash}/{cert_index}/withdrawals` | Get withdrawals of a specific proposal                   |
 | `/metadata/txs/labels/{label}`                             | Get metadata for transactions with a specific label      |
 | `/metadata/txs/labels/{label}/cbor`                        | Get CBOR metadata for transactions with a specific label |
