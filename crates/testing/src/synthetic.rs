@@ -72,6 +72,9 @@ pub struct SyntheticBlockConfig {
     /// resolvable input, which is what the endpoints reading the spent side of
     /// a tx need.
     pub spend_previous_outputs: bool,
+    /// Indices of the phase-2-invalid txs in each block. Each outer entry
+    /// represents one block; an empty list leaves every tx valid.
+    pub invalid_txs_by_block: Vec<Vec<u32>>,
 }
 
 /// Build a testnet Shelley address with both payment and stake key parts.
@@ -133,6 +136,7 @@ impl Default for SyntheticBlockConfig {
             extra_certs_by_block: vec![],
             proposal_deposit: 100_000_000,
             spend_previous_outputs: false,
+            invalid_txs_by_block: vec![],
         }
     }
 }
@@ -508,13 +512,17 @@ pub fn build_synthetic_blocks(
             ));
         }
 
-        let (block, hashes) = sample_block(
+        let (mut block, hashes) = sample_block(
             block_number,
             slot,
             prev_block_hash,
             tx_specs,
             Some(aux_data),
         );
+
+        if let Some(invalid) = cfg.invalid_txs_by_block.get(offset) {
+            block.invalid_transactions = (!invalid.is_empty()).then(|| invalid.clone());
+        }
 
         for (idx, hash) in hashes.iter().enumerate() {
             let tx_hash = hex::encode(hash.as_ref());

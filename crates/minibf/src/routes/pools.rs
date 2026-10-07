@@ -1556,8 +1556,8 @@ fn pool_vote_model(vote: &Vote) -> pool_votes_inner::Vote {
 /// not return 404 for a retired pool. If the pool registered but has no votes,
 /// the endpoint returns an empty list.
 ///
-/// `max_scan_items` is the limit for the page depth. The other endpoints that
-/// read a block for each row use the same limit.
+/// `max_scan_items` limits both the page depth and the number of blocks that
+/// one request reads.
 ///
 /// The endpoint does the checks in the same order as Blockfrost. The order is
 /// the query string, then the pool ID, then the registration of the pool.
@@ -1584,10 +1584,12 @@ where
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
     let voter = Voter::StakePoolKey(pool);
+    let tip = domain.get_tip_slot()?;
+    let budget = domain.config.max_scan_items() as usize;
 
     let casts = domain
         .query()
-        .run_blocking(move |domain| Ok(voter_casts(&domain, &voter, &pagination)))
+        .run_blocking(move |domain| Ok(voter_casts(&domain, &voter, tip, &pagination, budget)))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 

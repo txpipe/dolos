@@ -218,6 +218,9 @@ pub fn registry() -> Vec<Entry> {
             enc_gov,
             GovState,
             canaries::gov_state,
+            // Revision 3 appends each snapshot DRep's newest deregistration.
+            // Revision 4 appends `committee_auth_archive`, the authorization
+            // histories that the EPOCH rule removed from `committee_auths`.
             &[
                 Pinned {
                     rev: 1,
@@ -226,6 +229,14 @@ pub fn registry() -> Vec<Entry> {
                 Pinned {
                     rev: 2,
                     hex: include_str!("goldens/gov.rev2.hex"),
+                },
+                Pinned {
+                    rev: 3,
+                    hex: include_str!("goldens/gov.rev3.hex"),
+                },
+                Pinned {
+                    rev: 4,
+                    hex: include_str!("goldens/gov.rev4.hex"),
                 },
             ]
         ),
@@ -260,10 +271,24 @@ pub fn registry() -> Vec<Entry> {
             enc_proposals,
             ProposalState,
             canaries::proposal_state,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/proposals.rev1.hex"),
-            }]
+            // Revision 2 retires the vote histories at indexes 13..=15 for
+            // bounded entries at 16..=18. Revision 1 still decodes, its
+            // histories skipped. Revision 3 appends each vote's transaction
+            // index to the bounded entries.
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/proposals.rev1.hex"),
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/proposals.rev2.hex"),
+                },
+                Pinned {
+                    rev: 3,
+                    hex: include_str!("goldens/proposals.rev3.hex"),
+                }
+            ]
         ),
         entity_entry!(
             enc_stakes,

@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use dolos_core::{BlockSlot, NsKey};
+use dolos_core::{BlockSlot, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     ledger::primitives::{
@@ -184,6 +184,27 @@ impl GovRoots {
     }
 }
 
+/// One DRep frozen by the boundary that opens the next epoch.
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DRepSnapshotEntry {
+    #[n(0)]
+    pub expiry: Option<Epoch>,
+
+    /// The DRep's newest deregistration as of the snapshot. The ledger
+    /// removed every vote cast at or before it.
+    #[n(1)]
+    pub unregistered_at: Option<(BlockSlot, TxOrder)>,
+}
+
+/// Bounded counterpart of the ledger's `dpDRepState`, paired with `prev_distr`.
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DRepSnapshot {
+    #[n(0)]
+    pub closing_epoch: Epoch,
+    #[n(1)]
+    pub dreps: BTreeMap<StakeCredential, DRepSnapshotEntry>,
+}
+
 #[derive(Debug, Encode, Decode, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GovState {
     /// The enacted constitution. `None` before governance activates
@@ -248,11 +269,17 @@ pub struct GovState {
     #[cbor(default)]
     pub prev_distr: Option<GovDistr>,
 
+    /// DRep state captured alongside `prev_distr` at EWRAP finalize, before
+    /// any block of the opening epoch.
+    #[n(8)]
+    #[cbor(default)]
+    pub drep_snapshot: Option<DRepSnapshot>,
+
     /// The authorization histories that the EPOCH rule removed from
     /// `committee_auths`. This archive is not ledger-effective state. The
     /// Blockfrost API reads it to find the former hot credentials of a cold
     /// credential.
-    #[n(8)]
+    #[n(9)]
     #[cbor(default)]
     pub committee_auth_archive: BTreeMap<StakeCredential, AuthHistory>,
 }
@@ -1136,6 +1163,40 @@ impl dolos_core::EntityDelta for GovDistrRotate {
     }
 }
 
+/// Replace the DRep snapshot once, in the finalize commit after ratification
+/// has consumed the previous copy. Its pre-image makes rollback exact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovDRepSnapshot {
+    pub snapshot: DRepSnapshot,
+    pub(crate) prev: Option<DRepSnapshot>,
+}
+
+impl GovDRepSnapshot {
+    pub fn new(snapshot: DRepSnapshot) -> Self {
+        Self {
+            snapshot,
+            prev: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for GovDRepSnapshot {
+    type Entity = GovState;
+
+    fn key(&self) -> NsKey {
+        GovState::ns_key()
+    }
+
+    fn apply(&mut self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+        self.prev = state.drep_snapshot.replace(self.snapshot.clone());
+    }
+
+    fn undo(&self, entity: &mut Option<GovState>) {
+        entity.as_mut().expect(GOV_MUST_EXIST).drep_snapshot = self.prev.clone();
+    }
+}
+
 /// Fold the boundary-paid credits into the completed DRep-distribution
 /// accumulator: enacted treasury withdrawals and pool-deposit refunds land
 /// in the rewards UMap before the ledger takes the fresh DRep pulser
@@ -1319,6 +1380,7 @@ pub(crate) mod testing {
                 active_since,
                 distr,
                 prev_distr,
+                drep_snapshot: None,
             }
         }
     }
@@ -1327,6 +1389,37 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_delta_restores_both_missing_and_existing_preimages() {
+        use dolos_core::EntityDelta as _;
+        let snapshot = DRepSnapshot {
+            closing_epoch: 100,
+            dreps: BTreeMap::from([(
+                StakeCredential::AddrKeyhash([7; 28].into()),
+                DRepSnapshotEntry {
+                    expiry: Some(120),
+                    unregistered_at: Some((90, 2)),
+                },
+            )]),
+        };
+        for prev in [None, Some(snapshot.clone())] {
+            let before = Some(GovState {
+                drep_snapshot: prev,
+                ..Default::default()
+            });
+            let mut entity = before.clone();
+            let mut replacement = snapshot.clone();
+            replacement.closing_epoch += 1;
+            let mut delta = GovDRepSnapshot::new(replacement.clone());
+            delta.apply(&mut entity);
+            assert_eq!(entity.as_ref().unwrap().drep_snapshot, Some(replacement));
+            let bytes = bincode::serialize(&delta).unwrap();
+            let delta: GovDRepSnapshot = bincode::deserialize(&bytes).unwrap();
+            delta.undo(&mut entity);
+            assert_eq!(entity, before);
+        }
+    }
 
     #[test]
     fn entity_roundtrip() {
@@ -1397,6 +1490,7 @@ mod tests {
                 pool_distr: BTreeMap::from([([8u8; 28].into(), 5_000_000)]),
                 pool_total: 5_000_000,
             }),
+            drep_snapshot: None,
         };
 
         let bytes = minicbor::to_vec(&state).unwrap();

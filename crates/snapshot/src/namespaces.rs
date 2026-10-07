@@ -64,7 +64,7 @@ pub const NAMESPACES: [Namespace; 14] = [
 ///
 /// `epochs` is at 2: `RollingStats::registered_pools` was a `HashSet`, whose
 /// per-instance iteration order made the namespace's bytes irreproducible
-/// across publishers of identical state. `gov` is at 2: `GovState` carries
+/// across publishers of identical state. `gov` is at 4: `GovState` carries
 /// `committee_auth_archive`, which keeps the committee authorization
 /// histories that the EPOCH rule removes. Kept beside [`NAMESPACES`], in the
 /// same order, and held to it by `every_namespace_has_a_schema_rev` below.
@@ -76,11 +76,11 @@ pub const SCHEMA_REVS: [(Namespace, u64); 14] = [
     (DRepState::NS, 1),
     (EpochState::NS, 2),
     (EraSummary::NS, 1),
-    (GovState::NS, 2),
+    (GovState::NS, 4),
     (PendingMirState::NS, 1),
     (PendingRewardState::NS, 1),
     (PoolState::NS, 1),
-    (ProposalState::NS, 1),
+    (ProposalState::NS, 3),
     (StakeLog::NS, 1),
     (UTXOS, 1),
 ];
