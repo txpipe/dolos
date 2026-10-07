@@ -576,8 +576,8 @@ pub async fn by_number_stakes<D: Domain>(
             // The merged row exists for anything an account did in the epoch,
             // so a row with no stake leg is a reward-only account and not part
             // of the distribution at all. The log also keeps zero-stake
-            // delegators (so row counts match `StakeLog.delegators_count`),
-            // while Blockfrost's epoch_stake excludes them — both filtered
+            // delegators, while Blockfrost's epoch_stake (and with it
+            // `StakeLog.delegators_count`) excludes them — both filtered
             // before paginating, for parity.
             iter.filter(
                 |entry| !matches!(entry, Ok((_, log)) if log.active_stake.unwrap_or(0) == 0),
