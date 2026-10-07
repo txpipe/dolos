@@ -72,6 +72,12 @@ pub struct SyntheticBlockConfig {
     /// resolvable input, which is what the endpoints reading the spent side of
     /// a tx need.
     pub spend_previous_outputs: bool,
+    /// Indices of the phase-2-invalid txs in each block. Each outer entry
+    /// represents one block; an empty list leaves every tx valid.
+    pub invalid_txs_by_block: Vec<Vec<u32>>,
+    /// Blocks whose txs mint nothing and pay lovelace only. Each entry
+    /// represents one block; a missing entry keeps the asset.
+    pub ada_only_by_block: Vec<bool>,
     /// Opt-in mint redeemer execution. `None` keeps the default chain
     /// byte-identical, which many endpoint tests assert.
     pub mint_redeemer: Option<MintRedeemerConfig>,
@@ -171,6 +177,8 @@ impl Default for SyntheticBlockConfig {
             extra_certs_by_block: vec![],
             proposal_deposit: 100_000_000,
             spend_previous_outputs: false,
+            invalid_txs_by_block: vec![],
+            ada_only_by_block: vec![],
             mint_redeemer: None,
         }
     }
@@ -430,6 +438,7 @@ pub fn build_synthetic_blocks(
         let slot = cfg.slot + offset as u64;
         let block_number = cfg.start_block + offset as u64;
         let asset_name = Bytes::from(asset_name.as_bytes().to_vec());
+        let ada_only = cfg.ada_only_by_block.get(offset).copied().unwrap_or(false);
         let mut tx_specs: Vec<SyntheticTxSpec> = Vec::with_capacity(txs_per_block);
         let mut tx_hashes = Vec::with_capacity(txs_per_block);
         let mut withdrawal_amounts = Vec::with_capacity(txs_per_block);
@@ -560,6 +569,7 @@ pub fn build_synthetic_blocks(
                 asset_name.clone(),
                 cfg.asset_amount,
                 cfg.mint_amount,
+                ada_only,
                 stake_cred.clone(),
                 pool_keyhash,
                 cfg.pool_relays.clone(),
@@ -590,13 +600,17 @@ pub fn build_synthetic_blocks(
             withdrawal_amounts.push(None);
         }
 
-        let (block, hashes) = sample_block(
+        let (mut block, hashes) = sample_block(
             block_number,
             slot,
             prev_block_hash,
             tx_specs,
             Some(aux_data),
         );
+
+        if let Some(invalid) = cfg.invalid_txs_by_block.get(offset) {
+            block.invalid_transactions = (!invalid.is_empty()).then(|| invalid.clone());
+        }
 
         for (idx, hash) in hashes.iter().enumerate() {
             let tx_hash = hex::encode(hash.as_ref());
@@ -607,8 +621,9 @@ pub fn build_synthetic_blocks(
             }
         }
 
-        if cfg.mint_redeemer.is_some() {
-            // the first tx of every block carries the mint redeemer
+        if cfg.mint_redeemer.is_some() && !ada_only {
+            // the first tx of every block carries the mint redeemer. an
+            // ADA-only block mints nothing, so it carries no redeemer.
             redeemer_tx_hashes.push(tx_hashes[0].clone());
         }
 
@@ -984,6 +999,7 @@ fn sample_transaction(
     asset_name: Bytes,
     asset_amount: u64,
     mint_amount: i64,
+    ada_only: bool,
     stake_cred: StakeCredential,
     pool_keyhash: Hash<28>,
     pool_relays: Vec<Relay>,
@@ -1003,33 +1019,45 @@ fn sample_transaction(
         index: 0,
     };
 
-    let mint_amount = NonZeroInt::try_from(mint_amount).expect("mint amount must be non-zero");
-    let mut mint_assets = BTreeMap::new();
-    mint_assets.insert(asset_name.clone(), mint_amount);
-    let mut mint = BTreeMap::new();
-    mint.insert(policy_id, mint_assets);
+    // an ADA-only tx mints nothing, so it carries no mint redeemer either
+    let (value, mint, redeemer) = if ada_only {
+        (Value::Coin(lovelace), None, None)
+    } else {
+        let mint_amount = NonZeroInt::try_from(mint_amount).expect("mint amount must be non-zero");
+        let mut mint_assets = BTreeMap::new();
+        mint_assets.insert(asset_name.clone(), mint_amount);
+        let mut mint = BTreeMap::new();
+        mint.insert(policy_id, mint_assets);
 
-    // the opt-in execution mints one extra asset under the redeemer policy
-    let redeemer = mint_redeemer_cfg.map(|mr| {
-        let policy = Hash::from(mr.policy_id);
-        let amount = NonZeroInt::try_from(1).expect("non-zero mint amount");
-        mint.entry(policy)
-            .or_default()
-            .insert(Bytes::from(b"REDEEM".to_vec()), amount);
+        // the opt-in execution mints one extra asset under the redeemer policy
+        let redeemer = mint_redeemer_cfg.map(|mr| {
+            let policy = Hash::from(mr.policy_id);
+            let amount = NonZeroInt::try_from(1).expect("non-zero mint amount");
+            mint.entry(policy)
+                .or_default()
+                .insert(Bytes::from(b"REDEEM".to_vec()), amount);
 
-        let index = mint
-            .keys()
-            .position(|k| *k == policy)
-            .expect("redeemer policy in mint set") as u32;
+            let index = mint
+                .keys()
+                .position(|k| *k == policy)
+                .expect("redeemer policy in mint set") as u32;
 
-        mint_redeemer(index)
-    });
+            mint_redeemer(index)
+        });
 
-    let asset_amount = PositiveCoin::try_from(asset_amount).expect("asset amount must be non-zero");
-    let mut output_assets = BTreeMap::new();
-    output_assets.insert(asset_name.clone(), asset_amount);
-    let mut output_multiasset = BTreeMap::new();
-    output_multiasset.insert(policy_id, output_assets);
+        let asset_amount =
+            PositiveCoin::try_from(asset_amount).expect("asset amount must be non-zero");
+        let mut output_assets = BTreeMap::new();
+        output_assets.insert(asset_name.clone(), asset_amount);
+        let mut output_multiasset = BTreeMap::new();
+        output_multiasset.insert(policy_id, output_assets);
+
+        (
+            Value::Multiasset(lovelace, output_multiasset),
+            Some(mint),
+            redeemer,
+        )
+    };
 
     let datum_option = extras.map(|extras| KeepRaw::from(DatumOption::Hash(extras.datum_hash)));
     let script_ref = extras.map(|extras| {
@@ -1040,7 +1068,7 @@ fn sample_transaction(
 
     let output = PostAlonzoTransactionOutput {
         address,
-        value: Value::Multiasset(lovelace, output_multiasset),
+        value,
         datum_option,
         script_ref,
     };
@@ -1119,7 +1147,7 @@ fn sample_transaction(
         withdrawals,
         auxiliary_data_hash,
         validity_interval_start: Some(5),
-        mint: Some(mint),
+        mint,
         script_data_hash: None,
         collateral: None,
         required_signers: Some(

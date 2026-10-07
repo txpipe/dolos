@@ -882,6 +882,119 @@ mod tests {
         assert_eq!(stats.tx_count, 1);
     }
 
+    /// A body with nothing in it but a fee, which keeps tx hashes apart.
+    fn bare_tx_body(fee: u64) -> TransactionBody<'static> {
+        TransactionBody {
+            inputs: Set::from(vec![]),
+            outputs: vec![],
+            fee,
+            ttl: None,
+            certificates: None,
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: None,
+            proposal_procedures: None,
+            treasury_value: None,
+            donation: None,
+        }
+    }
+
+    /// The ledger's cleanup compares a vote's position with its DRep's
+    /// deregistration, so both carry the transaction's index in the block,
+    /// phase-2-invalid transactions counted.
+    #[test]
+    fn votes_and_drep_certificates_carry_the_block_tx_index() {
+        let drep = StakeCredential::AddrKeyhash(Hash::<28>::from([0x66u8; 28]));
+
+        let unreg = TransactionBody {
+            certificates: Some(
+                NonEmptySet::try_from(vec![Certificate::UnRegDRepCert(drep.clone(), 500_000_000)])
+                    .unwrap(),
+            ),
+            ..bare_tx_body(2)
+        };
+
+        let reg = TransactionBody {
+            certificates: Some(
+                NonEmptySet::try_from(vec![Certificate::RegDRepCert(drep, 500_000_000, None)])
+                    .unwrap(),
+            ),
+            ..bare_tx_body(3)
+        };
+
+        let vote = TransactionBody {
+            voting_procedures: loaded_tx_body().voting_procedures,
+            ..bare_tx_body(4)
+        };
+
+        let (_, raw) = dolos_testing::blocks::make_conway_block_with_txs(
+            SLOT,
+            vec![
+                (bare_tx_body(1), false),
+                (unreg, true),
+                (reg, true),
+                (vote, true),
+            ],
+            None,
+        );
+
+        let mut work = WorkBlock::new(OwnedMultiEraBlock::decode(raw).unwrap());
+        let genesis = Arc::new(crate::load_test_genesis("preview"));
+        let pparams = test_pparams();
+        let utxos = HashMap::new();
+
+        DeltaBuilder::new(
+            genesis,
+            10,
+            &pparams,
+            EPOCH,
+            EPOCH_START,
+            &mut work,
+            &utxos,
+            DormancyContext::default(),
+        )
+        .crawl()
+        .unwrap();
+
+        let deltas: Vec<_> = work.deltas.entities.values().flatten().collect();
+
+        let votes: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                CardanoDelta::VoteCast(vote) => Some((vote.slot, vote.order)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(votes, vec![(SLOT, 3)]);
+
+        let unregistrations: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                CardanoDelta::DRepUnRegistration(cert) => Some((cert.slot, cert.txorder)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unregistrations, vec![(SLOT, 1)]);
+
+        let registrations: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                CardanoDelta::DRepRegistration(cert) => Some((cert.slot, cert.txorder)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(registrations, vec![(SLOT, 2)]);
+    }
+
     #[test]
     fn valid_tx_contributes_entity_state() {
         let deltas = crawl_single_tx_block(true);

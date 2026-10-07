@@ -214,6 +214,35 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
         self.slots_by_tag(archive::POOL_BLOCKS, pool, start, end)
     }
 
+    /// Iterate over slots of blocks containing governance votes cast by a
+    /// voter.
+    ///
+    /// The key is `pallas_extras::voter_id_bytes` of the voter. Blocks whose
+    /// only votes of the voter sit in phase-2-invalid transactions are listed
+    /// too.
+    fn slots_by_voter_votes(
+        &self,
+        voter: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(archive::VOTER_VOTES, voter, start, end)
+    }
+
+    /// Iterate over slots of blocks containing governance votes on an action.
+    ///
+    /// The key is the proposal entity key of the action
+    /// (`ProposalState::build_entity_key`). Blocks whose only votes on the
+    /// action sit in phase-2-invalid transactions are listed too.
+    fn slots_by_action_votes(
+        &self,
+        action: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(archive::ACTION_VOTES, action, start, end)
+    }
+
     // ============ Bulk Export ============
 
     /// Iterate every archive tag record in `slots`, across every Cardano
