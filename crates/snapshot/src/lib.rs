@@ -109,7 +109,7 @@ pub use stelae::{dir, inscription, transport, SteleReader};
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
     FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
-    StakeLog,
+    ScriptSeqState, ScriptState, StakeLog,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -175,13 +175,13 @@ pub const LOG_KINDS: [(&str, Namespace); 3] = [
 /// rename cannot silently rename a published kind. The derivation is a test,
 /// not a constructor (`state_kinds_derive_from_their_namespaces`).
 ///
-/// The shard count is **specification, never tuning**: the four namespaces
-/// whose populations are chain-scale — the UTxO set, accounts, assets and
-/// datums — shard sixteen ways by the first key nibble, and every other
+/// The shard count is **specification, never tuning**: the five namespaces
+/// whose populations are chain-scale — the UTxO set, accounts, assets, datums
+/// and scripts — shard sixteen ways by the first key nibble, and every other
 /// namespace is a single blob. Re-sharding a namespace is a media-type-version
 /// event for that namespace's kind, decided by the format's owner; it is not a
 /// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 14] = [
+pub const STATE_KINDS: [(&str, Namespace, u8); 16] = [
     ("state-account-epochs", AccountEpochLog::NS, 1),
     ("state-accounts", AccountState::NS, 16),
     ("state-assets", AssetState::NS, 16),
@@ -194,13 +194,15 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 14] = [
     ("state-pending-rewards", PendingRewardState::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
+    ("state-script-seqs", ScriptSeqState::NS, 1),
+    ("state-scripts", ScriptState::NS, 16),
     ("state-stakes", StakeLog::NS, 1),
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 
-/// The fourteen state kind names alone: what [`StateScope`] answers for
+/// The sixteen state kind names alone: what [`StateScope`] answers for
 /// [`Scope::kinds`].
-pub const STATE_KIND_NAMES: [&str; 14] = [
+pub const STATE_KIND_NAMES: [&str; 16] = [
     STATE_KINDS[0].0,
     STATE_KINDS[1].0,
     STATE_KINDS[2].0,
@@ -215,6 +217,8 @@ pub const STATE_KIND_NAMES: [&str; 14] = [
     STATE_KINDS[11].0,
     STATE_KINDS[12].0,
     STATE_KINDS[13].0,
+    STATE_KINDS[14].0,
+    STATE_KINDS[15].0,
 ];
 
 /// The kind carrying `ns`'s state tip, or `None` where the namespace is not one
@@ -239,7 +243,7 @@ pub fn state_ns_for(kind: &str) -> Option<Namespace> {
         .map(|(_, ns, _)| ns)
 }
 
-/// Whether `kind` is one of the fourteen state kinds — the tip predicate the
+/// Whether `kind` is one of the sixteen state kinds — the tip predicate the
 /// driver's staging arithmetic sums under, reaching it through
 /// [`stelae_driver::DriverProfile::is_state_kind`].
 pub fn is_state_kind(kind: &str) -> bool {
@@ -255,7 +259,7 @@ pub fn shards_for(ns: Namespace) -> Option<u8> {
         .map(|(_, _, shards)| shards)
 }
 
-/// How many state layers every publish writes: the shard counts summed — 74
+/// How many state layers every publish writes: the shard counts summed — 91
 /// today. Every shard of every namespace kind is written even when empty, so
 /// tip completeness stays structural rather than data-dependent.
 pub const fn state_layer_count() -> usize {
@@ -392,8 +396,8 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
 /// [`registry::preview`] is made of.
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
-/// The twenty layer kinds, in the order the inscription lists them.
-pub const KINDS: [&str; 20] = [
+/// The twenty-two layer kinds, in the order the inscription lists them.
+pub const KINDS: [&str; 22] = [
     BLOCKS,
     INDEXES,
     LOG_KINDS[0].0,
@@ -413,6 +417,8 @@ pub const KINDS: [&str; 20] = [
     STATE_KIND_NAMES[11],
     STATE_KIND_NAMES[12],
     STATE_KIND_NAMES[13],
+    STATE_KIND_NAMES[14],
+    STATE_KIND_NAMES[15],
     DIGESTS,
 ];
 
