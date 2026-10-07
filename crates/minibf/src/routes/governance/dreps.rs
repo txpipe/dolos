@@ -91,11 +91,17 @@ pub fn parse_drep_id(drep_id: &str) -> Result<ParsedDRep, StatusCode> {
     }
 }
 
-/// Blockfrost's `retired` flag: the latest lifecycle event is an
-/// unregistration. Special DReps never hold a `registered_at`, so they never
-/// read as retired.
+/// Blockfrost's `retired` flag: the latest lifecycle certificate is an
+/// unregistration, down to the certificate order within a transaction, as
+/// db-sync orders them. The stamps name no certificate, so when both share a
+/// transaction the deposit breaks the tie the way the epoch boundary does: an
+/// unregistration refunds it, a registration takes one. Zero-deposit devnets
+/// degrade at this tie. Special DReps never hold a `registered_at`, so they
+/// never read as retired.
 pub fn drep_is_retired(state: &DRepState) -> bool {
-    state.is_unregistered()
+    let same_tx = state.registered_at.is_some() && state.registered_at == state.unregistered_at;
+
+    state.is_unregistered() || (same_tx && state.deposit == 0)
 }
 
 /// Blockfrost's `expired` flag.
@@ -153,12 +159,7 @@ impl<'a> DrepModelBuilder<'a> {
             return None;
         }
 
-        if self
-            .state
-            .as_ref()
-            .map(|x| x.is_unregistered())
-            .unwrap_or(true)
-        {
+        if self.state.as_ref().map(drep_is_retired).unwrap_or(true) {
             return None;
         }
 
@@ -296,6 +297,35 @@ mod tests {
     fn encode_id(hrp: &str, payload: &[u8]) -> String {
         let hrp = Hrp::parse_unchecked(hrp);
         bech32::encode::<Bech32>(hrp, payload).expect("failed to encode bech32 id")
+    }
+
+    #[test]
+    fn drep_is_retired_follows_same_tx_certificate_order() {
+        use dolos_cardano::{DRepRegistration, DRepUnRegistration};
+        use dolos_core::EntityDelta as _;
+
+        let drep = DRep::Key([7u8; 28].into());
+
+        let replay = |certs: &[bool]| {
+            let mut entity = None;
+            DRepRegistration::new(drep.clone(), 10, 0, 500, None).apply(&mut entity);
+
+            // one tx, its certificates in order: `true` registers
+            for registers in certs {
+                if *registers {
+                    DRepRegistration::new(drep.clone(), 20, 1, 500, None).apply(&mut entity);
+                } else {
+                    DRepUnRegistration::new(drep.clone(), 20, 1).apply(&mut entity);
+                }
+            }
+
+            entity.unwrap()
+        };
+
+        assert!(drep_is_retired(&replay(&[false])));
+        assert!(!drep_is_retired(&replay(&[true])));
+        assert!(drep_is_retired(&replay(&[true, false])));
+        assert!(!drep_is_retired(&replay(&[false, true])));
     }
 
     #[test]

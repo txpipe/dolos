@@ -212,11 +212,4 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 
 ## DRep listing on stores synced by an older release
 
-`/governance/dreps` lists every DRep a certificate ever referenced, vote-delegation targets included, in the order of its first appearance on chain. A state store synced by a release without this listing never recorded those first appearances: it misses the DReps that were only ever delegated to, and orders the rest by their latest registration. Syncing forward does not recover what is behind the cursor. With the node stopped, run:
-
-```sh
-dolos doctor backfill-drep-sightings            # dry run: reports what it would write
-dolos doctor backfill-drep-sightings --execute
-```
-
-The command replays the certificates of the archived Conway blocks, so it needs an archive that reaches back to the start of Conway. It refuses to run on an archive pruned past that point by `sync.max_history`; bootstrap such an instance from a snapshot instead.
+`/governance/dreps` lists every DRep a certificate ever referenced, vote-delegation targets included, in the order of its first appearance on chain. A state store synced by a release without this listing never recorded those first appearances: it misses the DReps that were only ever delegated to, and orders the rest by their lifecycle stamps until their next certificate records the sighting. Syncing forward does not recover what is behind the cursor; resync the instance, or bootstrap it from a snapshot published by a release with this listing, to get the full list in its exact order.

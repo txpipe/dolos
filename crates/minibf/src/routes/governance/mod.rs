@@ -4,7 +4,7 @@ mod metadata;
 
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex},
+    future::Future,
     time::Duration,
 };
 
@@ -30,7 +30,7 @@ use blockfrost_openapi::models::{
     proposal_parameters_parameters::ProposalParametersParameters,
     proposal_withdrawals_inner::ProposalWithdrawalsInner,
     proposals_inner::{GovernanceType, ProposalsInner},
-    DrepsInner, DrepsInnerMetadataError,
+    DrepsInner, DrepsInnerMetadata, DrepsInnerMetadataError,
 };
 use dolos_cardano::{
     indexes::CardanoArchiveIndexExt as _,
@@ -47,15 +47,15 @@ use dolos_core::{
     TxOrder,
 };
 use dreps::{drep_is_expired, drep_is_retired, drep_list_item, parse_drep_id, DrepModelBuilder};
-use futures::{future::BoxFuture, stream, FutureExt as _, StreamExt as _};
+use futures::{stream, FutureExt as _, StreamExt as _};
 use itertools::Itertools;
-use metadata::{fetch_drep_metadata, unfetched, OffchainStore};
+use metadata::{cached_drep_metadata, fetch_drep_metadata, unfetched, OffchainStore, OnOverload};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
         addresses::Network,
         primitives::{
-            conway::{DRep, GovAction, Vote, Voter},
+            conway::{Anchor, DRep, GovAction, Vote, Voter},
             Coin, Epoch, StakeCredential,
         },
         traverse::{MultiEraBlock, MultiEraTx},
@@ -76,60 +76,84 @@ use crate::{
     Facade,
 };
 
-/// How many anchor fetches one page runs at a time. A page asks for up to
-/// 100 rows and every miss costs a round trip capped at the fetch timeout,
-/// so the bound keeps a slow page from opening 100 outbound connections at
-/// once while a cached row still costs nothing.
+/// How many anchors one page loads at a time. A page asks for up to 100 rows
+/// and every miss costs a round trip capped at the fetch timeout, so the bound
+/// keeps a slow page from queueing all of them at once while a cached row
+/// still costs nothing. Outbound requests have their own process-wide bound
+/// (`metadata::MAX_CONCURRENT_FETCHES`), shared by every page.
 const MAX_CONCURRENT_METADATA_FETCHES: usize = 8;
 
 /// How long a page waits for the anchors it misses. A cold page of 100 rows
 /// behind dead hosts would otherwise wait out one fetch timeout per wave of
-/// [`MAX_CONCURRENT_METADATA_FETCHES`]. A fetch still running at the deadline
-/// keeps going in the background and fills the caches for the next request;
-/// its row goes out unfetched, the way Blockfrost serves a DRep whose metadata
-/// db-sync has not fetched yet.
+/// [`MAX_CONCURRENT_METADATA_FETCHES`]. A load the page started before the
+/// deadline keeps going in the background and fills the caches for the next
+/// request; one it had not started yet is dropped. Either way its row goes out
+/// unfetched, the way Blockfrost serves a DRep whose metadata db-sync has not
+/// fetched yet.
 const PAGE_METADATA_DEADLINE: Duration = Duration::from_secs(3);
 
-/// Runs `loads` in the background, at most `concurrency` at a time, and
-/// returns, in order, what each one settled to within `deadline`: `None` for a
-/// load still running. The loads left running keep going after the return.
-async fn settle_within<T: Send + 'static>(
-    loads: Vec<BoxFuture<'static, T>>,
+/// Runs `loads`, at most `concurrency` at a time, and returns, in order, what
+/// each one settled to within `deadline`: `None` for a load still running or
+/// never started. Every load is dropped at the deadline, so one that should
+/// outlive it has to detach its own work, the way `fetch_drep_metadata` does.
+async fn settle_within<F: Future>(
+    loads: Vec<F>,
     concurrency: usize,
     deadline: Duration,
-) -> Vec<Option<T>> {
-    let settled: Arc<Mutex<Vec<Option<T>>>> =
-        Arc::new(Mutex::new(loads.iter().map(|_| None).collect()));
+) -> Vec<Option<F::Output>> {
+    let mut settled: Vec<_> = loads.iter().map(|_| None).collect();
 
-    let driver = {
-        let settled = settled.clone();
+    let mut running = stream::iter(loads.into_iter().enumerate())
+        .map(|(index, load)| load.map(move |value| (index, value)))
+        .buffer_unordered(concurrency);
 
-        stream::iter(loads.into_iter().enumerate()).for_each_concurrent(
-            concurrency,
-            move |(index, load)| {
-                let settled = settled.clone();
+    let _ = tokio::time::timeout(deadline, async {
+        while let Some((index, value)) = running.next().await {
+            settled[index] = Some(value);
+        }
+    })
+    .await;
 
-                async move {
-                    let value = load.await;
+    settled
+}
 
-                    settled
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())[index] = Some(value);
-                }
-            },
-        )
-    };
+/// The metadata of each anchor of a page, in page order. What `cached` holds
+/// is answered up front, outside the fetch slots: only the misses go to
+/// `load`, through [`settle_within`], so slow hosts early in the page never
+/// keep a later row that is already at hand from going out.
+async fn page_metadata<'a, C, L>(
+    anchors: &'a [Anchor],
+    cached: impl Fn(&'a Anchor) -> C,
+    load: impl Fn(&'a Anchor) -> L,
+    deadline: Duration,
+) -> Vec<DrepsInnerMetadata>
+where
+    C: Future<Output = Option<DrepsInnerMetadata>>,
+    L: Future<Output = DrepsInnerMetadata>,
+{
+    let cached = futures::future::join_all(anchors.iter().map(cached)).await;
 
-    // a spawned driver outlives the timeout, which only drops its handle
-    let _ = tokio::time::timeout(deadline, tokio::spawn(driver)).await;
+    let loads = anchors
+        .iter()
+        .zip(&cached)
+        .filter(|(_, cached)| cached.is_none())
+        .map(|(anchor, _)| load(anchor))
+        .collect();
 
-    let mut settled = settled
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut settled = settle_within(loads, MAX_CONCURRENT_METADATA_FETCHES, deadline)
+        .await
+        .into_iter();
 
-    // taking each slot keeps the vector's length, so a load that settles
-    // later still has its slot to write to
-    settled.iter_mut().map(Option::take).collect()
+    anchors
+        .iter()
+        .zip(cached)
+        .map(|(anchor, cached)| {
+            // `settled` holds the misses alone, in page order
+            cached
+                .or_else(|| settled.next().flatten())
+                .unwrap_or_else(|| unfetched(anchor))
+        })
+        .collect()
 }
 
 fn chain_context<D: Domain>(
@@ -235,9 +259,11 @@ where
 
         // A row from before `first_seen_at` sorts by its lifecycle stamps
         // until its next sighting backfills the field; one with no stamp at
-        // all goes last. `dolos doctor backfill-drep-sightings` restores the
-        // exact order, and the DReps such a store never wrote a row for.
-        let appeared_at = state.first_seen().unwrap_or((u64::MAX, usize::MAX));
+        // all goes last. A resync restores the exact order, and the DReps
+        // such a store never wrote a row for.
+        let appeared_at = state
+            .first_seen()
+            .unwrap_or((u64::MAX, usize::MAX, usize::MAX));
 
         dreps.push((appeared_at, key, state));
     }
@@ -312,26 +338,22 @@ where
         .flat_map(|state| state.anchor.clone())
         .collect();
 
-    let loads = anchors
-        .iter()
-        .map(|anchor| {
+    // a page shows what it has rather than wait on a backlog of loads
+    let on_overload = OnOverload::Unfetched;
+
+    let metadata = page_metadata(
+        &anchors,
+        |anchor| cached_drep_metadata(&store, anchor),
+        |anchor| {
             let (store, gateways, anchor) = (store.clone(), gateways.clone(), anchor.clone());
 
-            async move { fetch_drep_metadata(&store, &gateways, &anchor).await }.boxed()
-        })
-        .collect();
-
-    let settled = settle_within(
-        loads,
-        MAX_CONCURRENT_METADATA_FETCHES,
+            async move { fetch_drep_metadata(&store, &gateways, &anchor, on_overload).await }
+        },
         PAGE_METADATA_DEADLINE,
     )
     .await;
 
-    let mut metadata = anchors
-        .iter()
-        .zip(settled)
-        .map(|(anchor, settled)| settled.unwrap_or_else(|| unfetched(anchor)));
+    let mut metadata = metadata.into_iter();
 
     let page = states
         .into_iter()
@@ -430,7 +452,7 @@ where
 
     // the cache the list fills, so one anchor reads alike on both endpoints
     // and a verified body is fetched once
-    let metadata = fetch_drep_metadata(&store, &gateways, anchor).await;
+    let metadata = fetch_drep_metadata(&store, &gateways, anchor, OnOverload::Inline).await;
 
     Ok(Json(DrepMetadata {
         drep_id: parsed.drep_id,
@@ -526,7 +548,7 @@ where
         None
     } else {
         match domain.read_cardano_entity::<DRepState>(drep_key)? {
-            Some(state) if !state.is_unregistered() => state.registered_at,
+            Some(state) if !drep_is_retired(&state) => state.registered_at,
             // Blockfrost returns an empty list for an unknown or retired DRep.
             _ => return Ok(Json(vec![])),
         }
@@ -1340,7 +1362,7 @@ where
 async fn proposal_metadata_parts(
     tx: &Hash<32>,
     idx: u32,
-    anchor: &pallas::ledger::primitives::conway::Anchor,
+    anchor: &Anchor,
     ipfs_gateways: &[String],
 ) -> Result<
     (
@@ -2215,32 +2237,87 @@ mod tests {
         assert!(model.error.is_none());
     }
 
-    /// A page answers by its deadline: a slow load leaves its row unsettled
-    /// and keeps running in the background, so its answer still reaches the
-    /// caches for the next request.
+    /// A page answers by its deadline: a slow load leaves its row unsettled,
+    /// and the deadline drops it along with every load not started yet, so a
+    /// page leaves nothing of its own running once it has answered.
     #[tokio::test]
-    async fn settle_within_answers_by_the_deadline_and_keeps_slow_loads_running() {
-        let (release, released) = tokio::sync::oneshot::channel::<()>();
-        let (finish, finished) = tokio::sync::oneshot::channel();
+    async fn settle_within_answers_by_the_deadline_and_drops_the_rest() {
+        let (_release, released) = tokio::sync::oneshot::channel::<()>();
+        let (dropped, was_dropped) = tokio::sync::oneshot::channel::<()>();
 
         let slow = async move {
-            released.await.unwrap();
-            finish.send(()).unwrap();
+            // dropped with the load, which closes the channel
+            let _dropped = dropped;
+            let _ = released.await;
             2
+        }
+        .boxed();
+
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let queued = {
+            let started = started.clone();
+
+            async move {
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
+                3
+            }
+            .boxed()
         };
 
-        let loads = vec![async { 1 }.boxed(), slow.boxed(), async { 3 }.boxed()];
+        // one at a time: the slow load holds the only slot past the deadline
+        let loads = vec![async { 1 }.boxed(), slow, queued];
 
-        let settled = settle_within(loads, 2, Duration::from_millis(100)).await;
+        let settled = settle_within(loads, 1, Duration::from_millis(100)).await;
 
-        assert_eq!(settled, vec![Some(1), None, Some(3)]);
+        assert_eq!(settled, vec![Some(1), None, None]);
 
-        // the deadline dropped only the wait, not the load
-        release.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), finished)
-            .await
-            .expect("the slow load ran to its end")
-            .unwrap();
+        // the deadline dropped the slow load rather than leaving it running,
+        // and the queued one never started
+        assert!(was_dropped.await.is_err());
+        assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A row already at hand goes out with its metadata however many slow
+    /// misses come before it on the page: only the misses wait for a fetch
+    /// slot, and only they can run out the deadline.
+    #[tokio::test]
+    async fn page_metadata_answers_held_rows_past_slow_misses() {
+        let anchor = |name: &str| Anchor {
+            url: format!("https://example.invalid/{name}"),
+            content_hash: Hasher::<256>::hash(name.as_bytes()),
+        };
+
+        // every fetch slot taken by a miss that outlasts the deadline, then
+        // a row the caches hold
+        let mut anchors: Vec<_> = (0..MAX_CONCURRENT_METADATA_FETCHES)
+            .map(|index| anchor(&format!("slow-{index}")))
+            .collect();
+        anchors.push(anchor("held"));
+
+        let held = |anchor: &Anchor| {
+            let mut out = unfetched(anchor);
+            out.bytes = Some("\\x00".to_string());
+            out
+        };
+
+        let metadata = page_metadata(
+            &anchors,
+            |anchor| {
+                let hit = anchor.url.ends_with("held").then(|| held(anchor));
+                async move { hit }
+            },
+            |_| futures::future::pending(),
+            Duration::from_millis(100),
+        )
+        .await;
+
+        let fetched: Vec<_> = metadata.iter().map(|x| x.bytes.is_some()).collect();
+        let mut expected = vec![false; MAX_CONCURRENT_METADATA_FETCHES];
+        expected.push(true);
+
+        assert_eq!(fetched, expected);
+        assert_eq!(metadata.last(), Some(&held(&anchors[anchors.len() - 1])));
     }
 
     /// The list and `/governance/dreps/{drep_id}/metadata` fetch through the
@@ -2446,7 +2523,7 @@ mod tests {
 
                 let mut state = DRepState::new(identifier.clone());
                 state.registered_at = Some((seen, 0));
-                state.first_seen_at = Some((seen, 0));
+                state.first_seen_at = Some((seen, 0, 0));
                 state.voting_power = power;
                 state.expiry = Some(DRepExpiry::new(u64::MAX, 0));
 
@@ -2514,8 +2591,8 @@ mod tests {
         let rows = [
             (0x01u8, None, None),
             (0x02, None, Some((15, 0))),
-            (0xe5, Some((10, 0)), Some((10, 0))),
-            (0xf6, Some((20, 0)), Some((20, 0))),
+            (0xe5, Some((10, 0, 0)), Some((10, 0))),
+            (0xf6, Some((20, 0, 0)), Some((20, 0))),
         ];
 
         let app =
@@ -2552,6 +2629,45 @@ mod tests {
         );
     }
 
+    /// DReps one transaction names first keep the order of its certificates,
+    /// the order db-sync inserts their `drep_hash` rows in, whatever order
+    /// their keys sort in.
+    #[tokio::test]
+    async fn governance_dreps_list_keeps_certificate_order_within_a_tx() {
+        // the larger key is named by the earlier certificate
+        let rows = [(0xf7u8, 1usize), (0xe8, 2)];
+
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), move |domain, _| {
+                let writer = domain
+                    .state()
+                    .start_writer()
+                    .expect("failed to start writer");
+
+                for (byte, cert) in rows {
+                    let identifier = DRep::Key([byte; 28].into());
+
+                    let mut state = DRepState::new(identifier.clone());
+                    state.first_seen_at = Some((40, 0, cert));
+
+                    writer
+                        .write_entity_typed(&drep_to_entity_key(&identifier), &state)
+                        .expect("failed to write drep");
+                }
+
+                writer.commit().expect("failed to commit dreps");
+            });
+
+        let id = |byte: u8| bech32_drep(&DRep::Key([byte; 28].into())).expect("failed to encode");
+        let seeded = rows.map(|(byte, _)| id(byte)).to_vec();
+
+        let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
+        assert_eq!(listed_ids(&models, &seeded), vec![id(0xf7), id(0xe8)]);
+
+        let models = get_dreps_list(&app, "/governance/dreps?count=100&order=desc").await;
+        assert_eq!(listed_ids(&models, &seeded), vec![id(0xe8), id(0xf7)]);
+    }
+
     /// A DRep that never registered and never voted — a vote-delegation
     /// target the chain only ever mentioned — has no last-active epoch, and
     /// Blockfrost's SQL sends that row to the `ELSE FALSE` arm however old
@@ -2573,7 +2689,7 @@ mod tests {
                 // seen at the very first slot and silent ever since, with the
                 // ledger expiry the boundary would have long since tripped
                 let mut state = DRepState::new(identifier.clone());
-                state.first_seen_at = Some((0, 0));
+                state.first_seen_at = Some((0, 0, 0));
                 state.expiry = Some(DRepExpiry::new(0, 0));
                 state.expired = true;
 

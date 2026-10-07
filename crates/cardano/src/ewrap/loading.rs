@@ -2924,7 +2924,7 @@ mod ratification_tests {
             identifier: drep(),
             anchor: None,
             expiry: None,
-            first_seen_at: Some((0, 0)),
+            first_seen_at: Some((0, 0, 0)),
         };
 
         writer
@@ -2982,7 +2982,7 @@ mod ratification_tests {
                 expired: false,
                 anchor: None,
                 expiry: Some(crate::DRepExpiry::new(CLOSING + 100, CLOSING)),
-                first_seen_at: Some((0, 0)),
+                first_seen_at: Some((0, 0, 0)),
             };
             if reregister {
                 row.registered_at = Some((slot + 1, 0));

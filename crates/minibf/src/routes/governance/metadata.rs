@@ -17,6 +17,7 @@ use std::{
     },
     time::{Duration, Instant, SystemTime},
 };
+use tokio::sync::Semaphore;
 
 use crate::mapping::{anchor_metadata_from_body, anchor_offchain_body};
 
@@ -33,6 +34,15 @@ use crate::mapping::{anchor_metadata_from_body, anchor_offchain_body};
 const FAILURE_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_CACHE_ENTRIES: usize = 4096;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// How many anchor fetches the whole process runs at a time, whichever
+/// requests asked for them. A page answers by its deadline and leaves the
+/// fetches it started running, so without this bound pages served back to
+/// back could stack outbound connections well past what any one page opens.
+/// Cache and disk hits never wait on it.
+pub const MAX_CONCURRENT_FETCHES: usize = 16;
+
+static FETCH_PERMITS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_FETCHES);
 
 type CacheKey = (String, Hash<32>);
 
@@ -115,43 +125,103 @@ fn cache() -> MutexGuard<'static, MetadataCache> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-type InFlight = Shared<BoxFuture<'static, DrepsInnerMetadata>>;
+type InFlight = Shared<BoxFuture<'static, Option<DrepsInnerMetadata>>>;
 
-/// Runs `load` for `key` unless a load of that key is already running, in
-/// which case it awaits that one instead. Rows of one page, and pages served
-/// at once, often miss on the same anchor before its first fetch is back; this
-/// keeps them to one outbound request and one write.
-async fn coalesced<F>(key: CacheKey, load: F) -> DrepsInnerMetadata
-where
-    F: Future<Output = DrepsInnerMetadata> + Send + 'static,
-{
-    static IN_FLIGHT: OnceLock<Mutex<HashMap<CacheKey, InFlight>>> = OnceLock::new();
+/// How many anchor loads the whole process keeps under way, waiting for a
+/// fetch permit included. A load outlives the page that started it, so
+/// without this bound pages served back to back, each missing on other
+/// anchors, would pile up detached loads faster than
+/// [`MAX_CONCURRENT_FETCHES`] drains them. A miss past it starts no detached
+/// load, and its caller decides what it gets instead ([`OnOverload`]); a miss
+/// on an anchor already under way still joins that load.
+pub const MAX_PENDING_LOADS: usize = 4 * MAX_CONCURRENT_FETCHES;
 
-    fn in_flight() -> MutexGuard<'static, HashMap<CacheKey, InFlight>> {
-        IN_FLIGHT
-            .get_or_init(Default::default)
+/// The anchor loads under way, by key.
+struct Loads {
+    in_flight: Mutex<HashMap<CacheKey, InFlight>>,
+    max: usize,
+}
+
+impl Loads {
+    fn new(max: usize) -> Self {
+        Self {
+            in_flight: Mutex::default(),
+            max,
+        }
+    }
+
+    fn global() -> &'static Self {
+        static LOADS: OnceLock<Loads> = OnceLock::new();
+
+        LOADS.get_or_init(|| Self::new(MAX_PENDING_LOADS))
+    }
+
+    fn in_flight(&self) -> MutexGuard<'_, HashMap<CacheKey, InFlight>> {
+        self.in_flight
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    let shared = in_flight()
-        .entry(key.clone())
-        .or_insert_with(|| {
-            async move {
-                let metadata = load.await;
+    /// Runs `load` for `key` unless a load of that key is already running, in
+    /// which case it awaits that one instead. Rows of one page, and pages
+    /// served at once, often miss on the same anchor before its first fetch
+    /// is back; this keeps them to one outbound request and one write.
+    ///
+    /// The load runs on its own task, so it reaches its end, and fills the
+    /// caches, whether or not anyone still waits for it: a page past its
+    /// deadline, or a client that hung up, drops only its wait. `Ok(None)` if
+    /// the load panicked. When `max` loads are already under way and none of
+    /// them is this key's, nothing starts and `load` comes back untouched.
+    async fn run<F>(&'static self, key: CacheKey, load: F) -> Result<Option<DrepsInnerMetadata>, F>
+    where
+        F: Future<Output = DrepsInnerMetadata> + Send + 'static,
+    {
+        // The load retires itself, so the next miss after it starts afresh
+        // even when nobody awaited this one to its end, or it panicked.
+        struct Retire(&'static Loads, CacheKey);
 
-                // whoever polls the load to its end retires it, so the next
-                // miss after it starts afresh
-                in_flight().remove(&key);
-
-                metadata
+        impl Drop for Retire {
+            fn drop(&mut self) {
+                self.0.in_flight().remove(&self.1);
             }
-            .boxed()
-            .shared()
-        })
-        .clone();
+        }
 
-    shared.await
+        let shared = {
+            let mut in_flight = self.in_flight();
+
+            match in_flight.get(&key) {
+                Some(shared) => shared.clone(),
+                None if in_flight.len() >= self.max => return Err(load),
+                None => {
+                    let retire = Retire(self, key.clone());
+
+                    let task = tokio::spawn(async move {
+                        let _retire = retire;
+
+                        load.await
+                    });
+
+                    let shared = async move { task.await.ok() }.boxed().shared();
+                    in_flight.insert(key, shared.clone());
+                    shared
+                }
+            }
+        };
+
+        Ok(shared.await)
+    }
+}
+
+/// What a miss gets while [`MAX_PENDING_LOADS`] loads are already under way.
+#[derive(Debug, Clone, Copy)]
+pub enum OnOverload {
+    /// Its anchor alone, unfetched, the way a list row past its page deadline
+    /// goes out: a page shows what it has rather than wait on a backlog.
+    Unfetched,
+    /// The load all the same, run within the caller's own request rather than
+    /// detached, so it lasts no longer than the request does: an endpoint
+    /// that serves one anchor owes its client the fetch or its error.
+    Inline,
 }
 
 fn errored(mut out: DrepsInnerMetadata, error: DrepsInnerMetadataError) -> DrepsInnerMetadata {
@@ -225,7 +295,16 @@ impl OffchainStore {
     /// immediate. Age is the order the files were written, not the order
     /// they were last read: the anchor hash pins each body for good, so no
     /// entry is worth more than another and only the bound matters.
+    ///
+    /// One walk at a time: writes that cross the threshold together would
+    /// otherwise weigh the same directory, each set out to remove the same
+    /// excess, and a walk whose file another had already taken would keep
+    /// going into newer ones.
     async fn enforce_budget(&self) {
+        static WALK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+        let _walk = WALK.lock().await;
+
         let dir = self.dir.clone();
         let budget = self.budget;
 
@@ -349,6 +428,28 @@ pub fn unfetched(anchor: &Anchor) -> DrepsInnerMetadata {
     }
 }
 
+/// The metadata of `anchor` if this process holds it already: from the
+/// in-process cache, else from the store on disk, which then fills the cache.
+/// It never goes to the network, so a page answers these rows without
+/// spending a fetch slot on them.
+pub async fn cached_drep_metadata(
+    store: &OffchainStore,
+    anchor: &Anchor,
+) -> Option<DrepsInnerMetadata> {
+    let key = (anchor.url.clone(), anchor.content_hash);
+
+    if let Some(cached) = cache().get(&key, Instant::now()) {
+        return Some(cached);
+    }
+
+    let body = store.read(anchor.content_hash).await?;
+    let metadata = verified(unfetched(anchor), &body);
+
+    cache().insert(key, metadata.clone(), Instant::now());
+
+    Some(metadata)
+}
+
 /// The metadata of `anchor`, as both `/governance/dreps` and
 /// `/governance/dreps/{drep_id}/metadata` serve it: from the in-process cache,
 /// else from the store on disk, else fetched and kept in both.
@@ -356,6 +457,7 @@ pub async fn fetch_drep_metadata(
     store: &OffchainStore,
     ipfs_gateways: &[String],
     anchor: &Anchor,
+    on_overload: OnOverload,
 ) -> DrepsInnerMetadata {
     let key = (anchor.url.clone(), anchor.content_hash);
 
@@ -365,7 +467,15 @@ pub async fn fetch_drep_metadata(
 
     let load = load_drep_metadata(store.clone(), ipfs_gateways.to_vec(), anchor.clone());
 
-    coalesced(key, load).await
+    let loaded = match Loads::global().run(key, load).await {
+        Ok(loaded) => loaded,
+        Err(load) => match on_overload {
+            OnOverload::Unfetched => None,
+            OnOverload::Inline => Some(load.await),
+        },
+    };
+
+    loaded.unwrap_or_else(|| unfetched(anchor))
 }
 
 async fn load_drep_metadata(
@@ -376,28 +486,25 @@ async fn load_drep_metadata(
     let key = (anchor.url.clone(), anchor.content_hash);
 
     // a load that finished between the caller's miss and this one has
-    // already left its answer here
-    if let Some(cached) = cache().get(&key, Instant::now()) {
+    // already left its answer in the cache
+    if let Some(cached) = cached_drep_metadata(&store, &anchor).await {
         return cached;
     }
 
     let out = unfetched(&anchor);
 
-    let metadata = match store.read(anchor.content_hash).await {
-        Some(body) => verified(out, &body),
-        None => {
-            let fetched =
-                anchor_offchain_body(&anchor.url, anchor.content_hash.as_ref(), &ipfs_gateways)
-                    .await;
+    // the semaphore is never closed, so the permit always comes
+    let _permit = FETCH_PERMITS.acquire().await;
 
-            match fetched {
-                Ok(body) => {
-                    store.write(anchor.content_hash, body.clone()).await;
-                    verified(out, &body)
-                }
-                Err(error) => errored(out, error),
-            }
+    let fetched =
+        anchor_offchain_body(&anchor.url, anchor.content_hash.as_ref(), &ipfs_gateways).await;
+
+    let metadata = match fetched {
+        Ok(body) => {
+            store.write(anchor.content_hash, body.clone()).await;
+            verified(out, &body)
         }
+        Err(error) => errored(out, error),
     };
 
     cache().insert(key, metadata.clone(), Instant::now());
@@ -523,6 +630,50 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// Walks started together each weigh the directory the one before them
+    /// left, so between them they remove the excess once, not once each.
+    #[tokio::test]
+    async fn concurrent_walks_evict_the_excess_once() {
+        let root = temp_root("concurrent");
+        // ten bodies of 100 bytes against room for six: the walk takes the
+        // store to 480 bytes, so four stay
+        let store = OffchainStore::new(&root, 600);
+        std::fs::create_dir_all(root.join(OffchainStore::DIR)).unwrap();
+
+        let mut written = vec![];
+
+        for age in (1..=10u64).rev() {
+            let body = vec![age as u8; 100];
+            let hash = Hasher::<256>::hash(&body);
+
+            // written beside the store, so no write starts a walk of its own
+            std::fs::write(store.path(&hash), &body).unwrap();
+
+            let file = std::fs::File::options()
+                .write(true)
+                .open(store.path(&hash))
+                .unwrap();
+            file.set_modified(SystemTime::now() - Duration::from_secs(age))
+                .unwrap();
+
+            written.push(hash);
+        }
+
+        futures::future::join_all((0..8).map(|_| store.enforce_budget())).await;
+
+        assert_eq!(stored_bytes(&root), 400);
+
+        for (index, hash) in written.iter().enumerate() {
+            assert_eq!(
+                store.read(*hash).await.is_some(),
+                index >= 6,
+                "body {index}"
+            );
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// The bytes the store keeps under `root`.
     fn stored_bytes(root: &Path) -> u64 {
         // the bodies live under the store's own directory; `root` holds only
@@ -556,6 +707,17 @@ mod tests {
         assert!(total <= 2048, "{total} bytes left behind");
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// [`Loads::run`] on the process-wide loads, which never fill up here.
+    async fn coalesced<F>(key: CacheKey, load: F) -> Option<DrepsInnerMetadata>
+    where
+        F: Future<Output = DrepsInnerMetadata> + Send + 'static,
+    {
+        Loads::global()
+            .run(key, load)
+            .await
+            .unwrap_or_else(|_| panic!("the process-wide loads are full"))
     }
 
     /// Misses on one anchor while its load is out wait for that load rather
@@ -592,6 +754,79 @@ mod tests {
 
         coalesced(key, load()).await;
         assert_eq!(loads.load(Ordering::SeqCst), 2);
+    }
+
+    /// A load outlives every wait on it: the page that started it can pass
+    /// its deadline, and the load still reaches its end and retires, so the
+    /// next miss starts a fresh one.
+    #[tokio::test]
+    async fn a_load_runs_on_after_its_waiters_drop() {
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+
+        let key = key("detached");
+
+        let load = async move {
+            let _ = gate.await;
+            finish.send(()).unwrap();
+            metadata("detached", None)
+        };
+
+        let waited =
+            tokio::time::timeout(Duration::from_millis(50), coalesced(key.clone(), load)).await;
+        assert!(waited.is_err());
+
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), finished)
+            .await
+            .expect("the load ran to its end")
+            .unwrap();
+
+        let fresh = coalesced(key, async { metadata("fresh", None) }).await;
+        assert_eq!(fresh.map(|x| x.url).as_deref(), Some("fresh"));
+    }
+
+    /// Once `max` loads are under way, a miss on another anchor starts
+    /// nothing and gets its load back to run itself, while one on an anchor
+    /// under way still joins its load; a load that retires frees its slot.
+    #[tokio::test]
+    async fn misses_past_the_pending_bound_start_nothing() {
+        let loads: &'static Loads = Box::leak(Box::new(Loads::new(1)));
+        let started = std::sync::Arc::new(AtomicU64::new(0));
+        let (release, gate) = futures::channel::oneshot::channel::<()>();
+        let gate = gate.shared();
+
+        let load = |url: &'static str| {
+            let started = started.clone();
+            let gate = gate.clone();
+
+            async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                let _ = gate.await;
+                metadata(url, None)
+            }
+        };
+
+        let mut held = Box::pin(loads.run(key("held"), load("held")));
+        assert!(futures::poll!(&mut held).is_pending());
+
+        let Err(refused) = loads.run(key("refused"), load("refused")).await else {
+            panic!("a load started past the bound");
+        };
+
+        let mut joined = Box::pin(loads.run(key("held"), load("held")));
+        assert!(futures::poll!(&mut joined).is_pending());
+
+        release.send(()).unwrap();
+        assert_eq!(held.await.ok(), joined.await.ok());
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+
+        // the refused load is whole, for its caller to run
+        assert_eq!(refused.await.url, "refused");
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+
+        let fresh = loads.run(key("fresh"), load("fresh")).await.ok().flatten();
+        assert_eq!(fresh.map(|x| x.url).as_deref(), Some("fresh"));
     }
 
     /// A zero budget leaves nothing on disk, bodies an earlier run kept

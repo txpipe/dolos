@@ -212,7 +212,7 @@ pub fn drep_state() -> DRepState {
             updated_in: 409,
             prev: Some(400),
         }),
-        first_seen_at: Some((44_444, 2)),
+        first_seen_at: Some((44_444, 2, 1)),
     }
 }
 

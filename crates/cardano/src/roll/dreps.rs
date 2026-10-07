@@ -1,9 +1,6 @@
 use std::{collections::HashMap, ops::Deref as _, sync::Arc};
 
-use dolos_core::{
-    BlockSlot, ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _, TxOrder,
-    TxoRef,
-};
+use dolos_core::{ChainError, EntityKey, Genesis, TxOrder, TxoRef};
 use pallas::ledger::{
     primitives::{
         conway::{self, DRep, Voter},
@@ -14,12 +11,12 @@ use pallas::ledger::{
 
 use super::WorkDeltas;
 use crate::{
-    drep_to_entity_key, load_era_summary,
+    drep_to_entity_key,
     owned::OwnedMultiEraOutput,
     pallas_extras::{self, stake_cred_to_drep},
     roll::BlockVisitor,
     DRepActivity, DRepAnchorUpdate, DRepDormancyRelease, DRepExpiryUpdate, DRepRegistration,
-    DRepSeen, DRepState, DRepUnRegistration, FixedNamespace as _, GovDormancyReset, PParamsSet,
+    DRepSeen, DRepUnRegistration, GovDormancyReset, PParamsSet,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -91,6 +88,9 @@ pub struct DRepStateVisitor {
     protocol: u16,
     drep_activity: Option<u64>,
     dormancy: DormancyContext,
+    // position of the next certificate within the current tx; the crawl
+    // visits a tx before its certificates, in body order
+    cert_index: usize,
 }
 
 impl DRepStateVisitor {
@@ -155,6 +155,8 @@ impl BlockVisitor for DRepStateVisitor {
         tx: &MultiEraTx,
         _: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
+        self.cert_index = 0;
+
         let MultiEraTx::Conway(conway_tx) = tx else {
             return Ok(());
         };
@@ -239,11 +241,14 @@ impl BlockVisitor for DRepStateVisitor {
             ));
         }
 
+        let cert_index = self.cert_index;
+        self.cert_index += 1;
+
         // Sightings mirror db-sync's `drep_hash` rows, which db-sync only
         // writes for certs of valid txs; the crawl above already gates the
         // certificate fan-out on `tx.is_valid()`.
         if let Some(drep) = cert_sighting(cert) {
-            deltas.add_for_entity(DRepSeen::new(drep, block.slot(), *order));
+            deltas.add_for_entity(DRepSeen::new(drep, (block.slot(), *order, cert_index)));
         }
 
         let Some(drep) = cert_drep(cert) else {
@@ -312,130 +317,6 @@ impl BlockVisitor for DRepStateVisitor {
     }
 }
 
-/// The first sighting of every DRep in a run of blocks, for repairing a state
-/// store that a binary without [`DRepSeen`] built
-/// (`dolos doctor backfill-drep-sightings`).
-///
-/// Such a store recorded no sighting. It has no row for a DRep that only ever
-/// appeared as a vote-delegation target, and its other rows fall back to their
-/// lifecycle stamps, which can be later than the first delegation to them.
-/// Visiting the archived blocks through the same [`cert_sighting`] the roll
-/// uses recovers both, so the repair writes what a sync from genesis would
-/// have.
-#[derive(Debug, Default)]
-pub struct DRepSightings {
-    earliest: HashMap<EntityKey, (DRep, (BlockSlot, TxOrder))>,
-}
-
-impl DRepSightings {
-    /// The slot a scan starts at: the first Conway slot, since no earlier
-    /// certificate can name a DRep. `None` on a store that has not reached
-    /// Conway yet.
-    pub fn scan_start<D: Domain>(state: &D::State) -> Result<Option<BlockSlot>, ChainError> {
-        let summary = load_era_summary::<D>(state)?;
-
-        Ok(summary
-            .first_conway_epoch()
-            .map(|epoch| summary.epoch_start(epoch)))
-    }
-
-    /// Records the sightings of one block. Blocks can come in any order: only
-    /// the earliest sighting of each DRep stays.
-    pub fn visit_block(&mut self, block: &MultiEraBlock) {
-        for (order, tx) in block.txs().iter().enumerate() {
-            // the roll gates the certificate fan-out the same way
-            if !tx.is_valid() {
-                continue;
-            }
-
-            for cert in tx.certs() {
-                let Some(drep) = cert_sighting(&cert) else {
-                    continue;
-                };
-
-                let seen = (block.slot(), order);
-
-                self.earliest
-                    .entry(drep_to_entity_key(&drep))
-                    .and_modify(|(_, earliest)| *earliest = (*earliest).min(seen))
-                    .or_insert((drep, seen));
-            }
-        }
-    }
-
-    /// How many distinct DReps the visited blocks reference.
-    pub fn len(&self) -> usize {
-        self.earliest.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.earliest.is_empty()
-    }
-
-    /// The rows the repair writes, in key order: a new row for each DRep the
-    /// store lacks, and the earlier first sighting for each row that records
-    /// none or a later one. A row that already holds the earliest sighting is
-    /// left out, so a repaired store yields nothing.
-    pub fn repairs<D: Domain>(
-        &self,
-        state: &D::State,
-    ) -> Result<Vec<(EntityKey, DRepState)>, ChainError> {
-        let mut sightings: Vec<_> = self.earliest.iter().collect();
-        sightings.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-        let keys: Vec<&EntityKey> = sightings.iter().map(|(key, _)| *key).collect();
-        let rows = state.read_entities_typed::<DRepState>(DRepState::NS, &keys)?;
-
-        let mut out = Vec::new();
-
-        for ((key, (drep, seen)), row) in sightings.into_iter().zip(rows) {
-            let repaired = match row {
-                None => DRepState {
-                    first_seen_at: Some(*seen),
-                    ..DRepState::new(drep.clone())
-                },
-                Some(mut row) => {
-                    // the lifecycle stamps are sightings too, so a scan that
-                    // misses none never ends up later than them; the min
-                    // only guards a row the scan cannot fully explain
-                    let earliest = row.first_seen().map_or(*seen, |stamp| stamp.min(*seen));
-
-                    if row.first_seen_at == Some(earliest) {
-                        continue;
-                    }
-
-                    row.first_seen_at = Some(earliest);
-                    row
-                }
-            };
-
-            out.push((key.clone(), repaired));
-        }
-
-        Ok(out)
-    }
-
-    /// Writes `repairs` in one batch.
-    pub fn apply<D: Domain>(
-        state: &D::State,
-        repairs: &[(EntityKey, DRepState)],
-    ) -> Result<(), ChainError> {
-        if repairs.is_empty() {
-            return Ok(());
-        }
-
-        let writer = state.start_writer()?;
-
-        for (key, row) in repairs {
-            writer.write_entity_typed(key, row)?;
-        }
-
-        writer.commit()?;
-
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,18 +338,17 @@ mod tests {
     }
 
     mod sightings {
-        use dolos_core::{Domain as _, StateStore as _, StateWriter as _};
-        use dolos_testing::{
-            synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
-            toy_domain::ToyDomain,
-        };
+        use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
         use pallas::ledger::primitives::{conway::Certificate, StakeCredential};
 
         use super::*;
+        use crate::{DRepState, FixedNamespace as _};
 
         const REGISTERED: [u8; 28] = [0xd1; 28];
-        const DELEGATED_ONLY: [u8; 28] = [0xd2; 28];
-        const INVALID_ONLY: [u8; 28] = [0xd3; 28];
+        // named by one tx, the larger key first: certificate order and key
+        // order disagree
+        const NAMED_FIRST: [u8; 28] = [0xd5; 28];
+        const NAMED_SECOND: [u8; 28] = [0xd4; 28];
 
         fn delegation(target: [u8; 28]) -> Certificate {
             Certificate::VoteDeleg(
@@ -477,106 +357,68 @@ mod tests {
             )
         }
 
-        /// Three blocks of two txs. Every synthetic tx registers `REGISTERED`
-        /// and delegates to it; block 1 tx 1 also delegates to
-        /// `DELEGATED_ONLY`, and block 2 tx 0, which is phase-2 invalid, to
-        /// `INVALID_ONLY`.
-        fn visited() -> (DRepSightings, Vec<BlockSlot>) {
+        /// One block of two txs. Every synthetic tx registers `REGISTERED` in
+        /// its certificate 3 and delegates to it in its certificate 4; extra
+        /// certificates follow from 5 on. Tx 0 also delegates to
+        /// `NAMED_FIRST` and then `NAMED_SECOND`.
+        fn block() -> Vec<u8> {
             let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
-                block_count: 3,
+                block_count: 1,
                 txs_per_block: 2,
                 drep_keyhash: REGISTERED,
-                extra_certs_by_block: vec![
-                    vec![],
-                    vec![vec![], vec![delegation(DELEGATED_ONLY)]],
-                    vec![vec![delegation(INVALID_ONLY)]],
-                ],
-                invalid_txs_by_block: vec![vec![], vec![], vec![0]],
+                extra_certs_by_block: vec![vec![vec![
+                    delegation(NAMED_FIRST),
+                    delegation(NAMED_SECOND),
+                ]]],
                 ..Default::default()
             });
 
-            let mut sightings = DRepSightings::default();
-            let mut slots = Vec::new();
-
-            // newest first: the earliest sighting wins whatever the order
-            for raw in blocks.iter().rev() {
-                let block = MultiEraBlock::decode(raw).unwrap();
-                slots.push(block.slot());
-                sightings.visit_block(&block);
-            }
-
-            slots.reverse();
-
-            (sightings, slots)
+            blocks[0].to_vec()
         }
 
         fn key(hash: [u8; 28]) -> EntityKey {
             drep_to_entity_key(&DRep::Key(hash.into()))
         }
 
+        /// Each sighting the roll records carries its certificate's place in
+        /// its transaction.
         #[test]
-        fn repairs_create_delegation_only_rows_and_backfill_legacy_ones() {
-            let (sightings, slots) = visited();
-            assert_eq!(sightings.len(), 2);
+        fn roll_sightings_carry_the_certificate_position() {
+            let raw = block();
+            let block = MultiEraBlock::decode(&raw).unwrap();
 
-            // a row an older binary wrote: registered in the last block, no
-            // sighting recorded
-            let domain = ToyDomain::new(None, None);
-            let mut legacy = DRepState::new(DRep::Key(REGISTERED.into()));
-            legacy.registered_at = Some((slots[2], 1));
+            let mut visitor = DRepStateVisitor::default();
+            let mut deltas = WorkDeltas::default();
 
-            let writer = domain.state().start_writer().unwrap();
-            writer
-                .write_entity_typed(&key(REGISTERED), &legacy)
-                .unwrap();
-            writer.commit().unwrap();
+            for (order, tx) in block.txs().iter().enumerate() {
+                visitor
+                    .visit_tx(&mut deltas, &block, tx, &HashMap::new())
+                    .unwrap();
 
-            let repairs = sightings.repairs::<ToyDomain>(domain.state()).unwrap();
-            let by_key: HashMap<_, _> = repairs.iter().cloned().collect();
+                for cert in tx.certs() {
+                    visitor
+                        .visit_cert(&mut deltas, &block, tx, &order, &cert)
+                        .unwrap();
+                }
+            }
 
-            assert_eq!(repairs.len(), 2);
-            assert_eq!(by_key[&key(REGISTERED)].first_seen_at, Some((slots[0], 0)));
-            assert_eq!(by_key[&key(REGISTERED)].registered_at, Some((slots[2], 1)));
-            assert_eq!(
-                by_key[&key(DELEGATED_ONLY)].first_seen_at,
-                Some((slots[1], 1))
-            );
-            assert_eq!(by_key[&key(DELEGATED_ONLY)].registered_at, None);
-            assert!(!by_key.contains_key(&key(INVALID_ONLY)));
+            let first_seen = |hash: [u8; 28]| {
+                let ns_key = dolos_core::NsKey::from((DRepState::NS, key(hash)));
 
-            DRepSightings::apply::<ToyDomain>(domain.state(), &repairs).unwrap();
+                deltas.entities[&ns_key]
+                    .iter()
+                    .filter_map(|delta| match delta {
+                        crate::CardanoDelta::DRepSeen(seen) => Some(seen.at),
+                        _ => None,
+                    })
+                    .min()
+            };
 
-            // a repaired store needs nothing more
-            let again = sightings.repairs::<ToyDomain>(domain.state()).unwrap();
-            assert!(again.is_empty());
-        }
+            let slot = block.slot();
 
-        #[test]
-        fn repairs_keep_a_recorded_earlier_sighting() {
-            let (sightings, _) = visited();
-
-            let domain = ToyDomain::new(None, None);
-            let mut row = DRepState::new(DRep::Key(REGISTERED.into()));
-            row.first_seen_at = Some((0, 0));
-
-            let writer = domain.state().start_writer().unwrap();
-            writer.write_entity_typed(&key(REGISTERED), &row).unwrap();
-            writer.commit().unwrap();
-
-            let repairs = sightings.repairs::<ToyDomain>(domain.state()).unwrap();
-
-            assert_eq!(repairs.len(), 1);
-            assert_eq!(repairs[0].0, key(DELEGATED_ONLY));
-        }
-
-        #[test]
-        fn scan_starts_at_the_first_conway_slot() {
-            // devnet force-starts at protocol 9, so Conway opens at slot 0
-            let domain = ToyDomain::new(None, None);
-
-            let start = DRepSightings::scan_start::<ToyDomain>(domain.state()).unwrap();
-
-            assert_eq!(start, Some(0));
+            assert_eq!(first_seen(REGISTERED), Some((slot, 0, 3)));
+            assert_eq!(first_seen(NAMED_FIRST), Some((slot, 0, 5)));
+            assert_eq!(first_seen(NAMED_SECOND), Some((slot, 0, 6)));
         }
     }
 }

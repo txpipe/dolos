@@ -24,6 +24,11 @@ pub fn drep_encoded_bytes(value: &DRep) -> Vec<u8> {
     }
 }
 
+/// Where a certificate sits on chain: the slot of its block, the position of
+/// its transaction in the block, and its own position among that
+/// transaction's certificates. Sorting by it is the chain's certificate order.
+pub type CertPosition = (BlockSlot, TxOrder, usize);
+
 pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
     EntityKey::from(drep_encoded_bytes(value))
 }
@@ -155,10 +160,12 @@ pub struct DRepState {
 
     // Backward-compatible addition: absent in pre-existing rows, decodes as
     // `None`. First on-chain reference by any certificate, vote delegations
-    // included; mirrors db-sync's `drep_hash` insertion order. Index 9 must
-    // not be reused for anything else.
+    // included, down to the certificate's position in its transaction, so
+    // DReps first named by one transaction keep their certificate order;
+    // mirrors db-sync's `drep_hash` insertion order. Index 9 must not be
+    // reused for anything else.
     #[n(9)]
-    pub first_seen_at: Option<(BlockSlot, TxOrder)>,
+    pub first_seen_at: Option<CertPosition>,
 }
 
 impl DRepState {
@@ -194,14 +201,16 @@ impl DRepState {
 
     /// When the DRep first appeared on chain, as far as this row can tell. A
     /// row written before `first_seen_at` existed falls back to its earliest
-    /// lifecycle stamp, the closest on-chain reference it kept; a row with
-    /// neither has no answer.
-    pub fn first_seen(&self) -> Option<(BlockSlot, TxOrder)> {
+    /// lifecycle stamp, the closest on-chain reference it kept; a stamp names
+    /// no certificate, so it stands for the first one of its transaction. A
+    /// row with neither has no answer.
+    pub fn first_seen(&self) -> Option<CertPosition> {
         self.first_seen_at.or_else(|| {
             [self.registered_at, self.unregistered_at]
                 .into_iter()
                 .flatten()
                 .min()
+                .map(|(slot, order)| (slot, order, 0))
         })
     }
 }
@@ -235,7 +244,9 @@ pub(crate) mod testing {
             deposit in root::any_lovelace(),
             anchor in prop::option::of(root::any_anchor()),
             expiry in prop::option::of(any_drep_expiry()),
-            first_seen_at in prop::option::of((root::any_slot(), root::any_tx_order())),
+            first_seen_at in prop::option::of(
+                (root::any_slot(), root::any_tx_order(), any::<u16>().prop_map(usize::from)),
+            ),
         ) -> DRepState {
             DRepState {
                 identifier,
@@ -388,20 +399,18 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepSeen {
     pub(crate) drep: DRep,
-    pub(crate) slot: BlockSlot,
-    pub(crate) txorder: TxOrder,
+    pub(crate) at: CertPosition,
 
     // undo
-    pub(crate) prev_first_seen_at: Option<(BlockSlot, TxOrder)>,
+    pub(crate) prev_first_seen_at: Option<CertPosition>,
     pub(crate) was_new: bool,
 }
 
 impl DRepSeen {
-    pub fn new(drep: DRep, slot: BlockSlot, txorder: TxOrder) -> Self {
+    pub fn new(drep: DRep, at: CertPosition) -> Self {
         Self {
             drep,
-            slot,
-            txorder,
+            at,
             prev_first_seen_at: None,
             was_new: false,
         }
@@ -427,7 +436,7 @@ impl dolos_core::EntityDelta for DRepSeen {
         // field, so its lifecycle stamps are earlier on-chain references than
         // any new sighting
         if entity.first_seen_at.is_none() {
-            entity.first_seen_at = [entity.first_seen(), Some((self.slot, self.txorder))]
+            entity.first_seen_at = [entity.first_seen(), Some(self.at)]
                 .into_iter()
                 .flatten()
                 .min();
@@ -930,8 +939,9 @@ mod prop_tests {
             drep in root::any_drep(),
             slot in root::any_slot(),
             txorder in root::any_tx_order(),
+            cert in any::<u16>().prop_map(usize::from),
         ) -> DRepSeen {
-            DRepSeen::new(drep, slot, txorder)
+            DRepSeen::new(drep, (slot, txorder, cert))
         }
     }
 
@@ -1056,12 +1066,14 @@ mod prop_tests {
         let drep = DRep::Key([1u8; 28].into());
         let mut entity = None;
 
-        DRepSeen::new(drep.clone(), 100, 3).apply(&mut entity);
-        assert_eq!(entity.as_ref().unwrap().first_seen_at, Some((100, 3)));
+        DRepSeen::new(drep.clone(), (100, 3, 1)).apply(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().first_seen_at, Some((100, 3, 1)));
 
-        // a later sighting must not move the first appearance
-        DRepSeen::new(drep, 200, 1).apply(&mut entity);
-        assert_eq!(entity.unwrap().first_seen_at, Some((100, 3)));
+        // a later sighting must not move the first appearance, not even a
+        // later certificate of the same transaction
+        DRepSeen::new(drep.clone(), (100, 3, 2)).apply(&mut entity);
+        DRepSeen::new(drep, (200, 1, 0)).apply(&mut entity);
+        assert_eq!(entity.unwrap().first_seen_at, Some((100, 3, 1)));
     }
 
     #[test]
@@ -1075,9 +1087,9 @@ mod prop_tests {
         legacy.registered_at = Some((100, 0));
         let mut entity = Some(legacy);
 
-        let mut seen = DRepSeen::new(drep, 200, 0);
+        let mut seen = DRepSeen::new(drep, (200, 0, 0));
         seen.apply(&mut entity);
-        assert_eq!(entity.as_ref().unwrap().first_seen_at, Some((100, 0)));
+        assert_eq!(entity.as_ref().unwrap().first_seen_at, Some((100, 0, 0)));
 
         seen.undo(&mut entity);
         assert_eq!(entity.unwrap().first_seen_at, None);
@@ -1089,14 +1101,14 @@ mod prop_tests {
         assert_eq!(state.first_seen(), None);
 
         // a legacy row: re-registered after a retirement, so the earliest
-        // stamp is the unregistration
+        // stamp is the unregistration, standing for its tx's first cert
         state.registered_at = Some((300, 0));
         state.unregistered_at = Some((200, 1));
-        assert_eq!(state.first_seen(), Some((200, 1)));
+        assert_eq!(state.first_seen(), Some((200, 1, 0)));
 
         // once recorded, the sighting wins over any stamp
-        state.first_seen_at = Some((100, 2));
-        assert_eq!(state.first_seen(), Some((100, 2)));
+        state.first_seen_at = Some((100, 2, 4));
+        assert_eq!(state.first_seen(), Some((100, 2, 4)));
     }
 }
 
@@ -1302,7 +1314,7 @@ mod compat_tests {
             updated_in: 500,
             prev: Some(510),
         });
-        state.first_seen_at = Some((100, 1));
+        state.first_seen_at = Some((100, 1, 2));
 
         let bytes = minicbor::to_vec(&state).unwrap();
         let decoded: DRepState = minicbor::decode(&bytes).unwrap();
