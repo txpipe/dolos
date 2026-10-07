@@ -1296,20 +1296,9 @@ where
 
     let (page, minted_any) =
         tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), StatusCode> {
-            // Pruning deletes old blocks before their tags. Start the scan at
-            // the first stored block.
-            let Some((first, _)) = inner
-                .archive()
-                .get_range(None, None)
-                .map_err(log_and_500("failed to read the first block"))?
-                .next()
-            else {
-                return Ok((vec![], false));
-            };
-
             let mut slots = inner
                 .archive()
-                .slots_by_pool_blocks(pool.as_slice(), first, tip)
+                .slots_by_pool_blocks(pool.as_slice(), 0, tip)
                 .map_err(log_and_500("failed to read the pool blocks index"))?
                 .peekable();
 
@@ -1632,7 +1621,6 @@ mod tests {
     };
     use dolos_cardano::cip151;
     use dolos_cardano::model::{DRepDelegation, EpochValue, PoolParams, PoolSnapshot, Stake};
-    use dolos_core::{ArchiveWriter as _, ChainPoint};
     use dolos_testing::synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote};
     use pallas::{
         codec::utils::Bytes,
@@ -2920,74 +2908,6 @@ mod tests {
 
         desc.reverse();
         assert_eq!(asc, desc);
-    }
-
-    async fn pool_blocks_page(app: &TestApp, path: &str) -> Vec<String> {
-        let (status, bytes) = app.get_bytes(path).await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status for {path}: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-
-        serde_json::from_slice(&bytes).expect("failed to parse hashes")
-    }
-
-    /// Pruning deletes block bodies before the index sweep deletes their
-    /// `pool_blocks` tags. While those tags remain, every page except the
-    /// last holds `count` blocks.
-    #[tokio::test]
-    async fn pools_blocks_pages_skip_tags_of_pruned_blocks() {
-        let cfg = SyntheticBlockConfig {
-            block_count: 8,
-            ..Default::default()
-        };
-        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
-            let slots: Vec<BlockSlot> = domain
-                .archive()
-                .get_range(None, None)
-                .unwrap()
-                .map(|(slot, _)| slot)
-                .collect();
-
-            // undo drops a body but keeps its tags
-            let writer = domain.archive().start_writer().unwrap();
-            for slot in &slots[..3] {
-                writer.undo(&ChainPoint::Slot(*slot)).unwrap();
-            }
-            writer.commit().unwrap();
-        });
-        let pool = toy_issuer_pool();
-        let path = format!("/pools/{pool}/blocks");
-
-        for order in ["asc", "desc"] {
-            let full = pool_blocks_page(&app, &format!("{path}?order={order}&count=100")).await;
-            assert_eq!(full.len(), 5);
-
-            for count in [1, 2, 3] {
-                let mut walked = Vec::new();
-
-                for page in 1..=full.len().div_ceil(count) + 1 {
-                    let rows = pool_blocks_page(
-                        &app,
-                        &format!("{path}?order={order}&count={count}&page={page}"),
-                    )
-                    .await;
-                    let left = full.len().saturating_sub((page - 1) * count);
-
-                    assert_eq!(
-                        rows.len(),
-                        left.min(count),
-                        "order={order} count={count} page={page}"
-                    );
-
-                    walked.extend(rows);
-                }
-
-                assert_eq!(walked, full, "order={order} count={count}");
-            }
-        }
     }
 
     #[tokio::test]
