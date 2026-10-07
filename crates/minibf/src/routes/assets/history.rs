@@ -74,11 +74,11 @@ fn collect_mint_events(
 /// `GET /assets/{asset}/history`: the mints and burns of an asset in chain
 /// order, the rows ryo reads from `ma_tx_mint`.
 ///
-/// Every mint or burn moves the asset through an output or a spent input, so
-/// the archive's asset tag finds the blocks. The asset state bounds the walk
-/// on both ends: nothing happens before `initial_slot`, and `mint_tx_count`
-/// says how many rows exist, so the scan stops once it has them all and a
-/// page past the last one answers without a scan.
+/// The archive tags every block whose valid txs mint or burn the asset, so
+/// each block the walk reads holds at least one row and a page never costs
+/// more blocks than it has rows. `mint_tx_count` says how many rows exist, so
+/// the walk stops once it has them all and a page past the last one answers
+/// without reading a block.
 pub async fn by_subject_history<D>(
     Path(subject): Path<String>,
     Query(mut params): Query<PaginationParameters>,
@@ -109,15 +109,13 @@ where
 
     let start_slot = state.initial_slot.unwrap_or_default();
     let end_slot = domain.get_tip_slot()?;
+    let order = SlotOrder::from(pagination.order);
 
-    let stream = domain.query().blocks_by_asset_stream(
-        &subject,
-        start_slot,
-        end_slot,
-        SlotOrder::from(pagination.order),
+    let mut stream = Box::pin(
+        domain
+            .query()
+            .blocks_by_asset_mints_stream(&subject, start_slot, end_slot, order),
     );
-    let mut stream = Box::pin(stream);
-
     let mut found = Vec::new();
 
     while let Some(res) = stream.next().await {
@@ -147,7 +145,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{TestApp, TestDomainBuilder, TestFault};
+    use dolos_cardano::indexes::CardanoArchiveIndexExt;
+    use dolos_core::ArchiveStore as _;
     use dolos_testing::synthetic::SyntheticBlockConfig;
     use itertools::Itertools;
 
@@ -285,6 +285,88 @@ mod tests {
 
         // a page past the last row needs no scan, so the limit does not apply
         assert!(get_history(&app, "?count=3&page=3").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_history_skips_transfers() {
+        // block 1 mints `ONCE`, block 2 only spends it
+        let cfg = SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 1,
+            asset_names_by_block: ["ONCE", "OTHER", "OTHER"]
+                .iter()
+                .map(|x| (*x).to_string())
+                .collect(),
+            spend_previous_outputs: true,
+            ..Default::default()
+        };
+
+        // the asset tag marks both blocks, the mint tag only the first
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg.clone()).finish();
+        let subject = hex::decode(format!("{}{}", vectors.policy_id, hex::encode("ONCE"))).unwrap();
+        let archive = domain.archive();
+        let asset_slots: Vec<_> = archive
+            .slots_by_asset(&subject, 0, u64::MAX)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let mint_slots: Vec<_> = archive
+            .slots_by_asset_mints(&subject, 0, u64::MAX)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            asset_slots,
+            [vectors.blocks[0].slot, vectors.blocks[1].slot]
+        );
+        assert_eq!(mint_slots, [vectors.blocks[0].slot]);
+
+        // so a scan limit of one row is enough for a page of one in either
+        // order: the walk never reads the transfer's block
+        let app = TestApp::new_with_scan_limit(cfg, 1);
+        let unit = format!("{}{}", app.vectors().policy_id, hex::encode("ONCE"));
+        let mint = app.vectors().blocks[0].tx_hashes[0].clone();
+
+        for order in ["asc", "desc"] {
+            let path = format!("/assets/{unit}/history?order={order}&count=1");
+            let (status, bytes) = app.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK, "order={order}");
+            let rows: Vec<AssetHistoryInner> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(hashes(&rows), std::slice::from_ref(&mint), "order={order}");
+        }
+    }
+
+    /// A pruned block takes its rows out of the history, and the retained rows
+    /// move up to fill the pages. `mint_tx_count` still counts the pruned
+    /// rows, so a page between the retained and the counted rows walks the
+    /// retained blocks and comes back empty.
+    ///
+    /// The test prunes the archive to one slot. Only the last block remains,
+    /// with two of the six mints.
+    #[tokio::test]
+    async fn assets_by_subject_history_paginates_retained_rows() {
+        let app = TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+            domain
+                .archive()
+                .prune_history(0, None, None)
+                .expect("The archive did not prune its history.");
+        });
+        let retained = app.vectors().blocks[2].tx_hashes.clone();
+        assert_eq!(chain_txs(&app).len(), 6);
+
+        assert_eq!(hashes(&get_history(&app, "").await), retained);
+
+        let desc = retained.iter().rev().cloned().collect_vec();
+        assert_eq!(hashes(&get_history(&app, "?order=desc").await), desc);
+
+        let rows = get_history(&app, "?count=1&page=2").await;
+        assert_eq!(hashes(&rows), retained[1..]);
+
+        // past the retained rows, below the counted ones
+        assert!(get_history(&app, "?count=2&page=2").await.is_empty());
+
+        // past the counted rows
+        assert!(get_history(&app, "?count=2&page=4").await.is_empty());
     }
 
     #[tokio::test]

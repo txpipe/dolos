@@ -16,7 +16,7 @@
 //! never a re-pin.
 //!
 //! Between them these freeze: the thirty-eight media types, the tag string, the
-//! nineteen archive dimension names, the three exact-record kind literals, the
+//! twenty archive dimension names, the three exact-record kind literals, the
 //! nine `log-{ns}` and twenty-six `state-{ns}` kind strings — which is where
 //! the twenty-six namespace strings live now that neither record names one —
 //! the layer header and scope shapes, and the `position`/`parameters` key
@@ -49,9 +49,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
     ),
     (
         INDEXES,
-        "sha256:a0179ae003b2f11abfb41885369b6cd1a6c8996630fa49aa3bed238a74d1b433",
-        23,
-        619,
+        "sha256:e87d3991f67f0c5b9431103850d365321e5b8189ae826700986e309075005529",
+        24,
+        644,
     ),
     (
         "log-account-epochs",
@@ -465,7 +465,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:87458915171733f5a694f34ee279c34a837d6ba6c4bdcb368d360bd6cf7bf85a";
+    "sha256:f8605a48e5b146f3ebe0dc029d894508d60dbe16bf1f33c1637477daecdc2e0c";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -667,9 +667,9 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106","kind":"blocks","#,
     r#""mediaType":"application/vnd.dolos.stele.blocks.v1+zstd","records":4,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":167},"#,
-    r#"{"diffId":"sha256:a0179ae003b2f11abfb41885369b6cd1a6c8996630fa49aa3bed238a74d1b433","kind":"indexes","#,
-    r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":23,"#,
-    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":619},"#,
+    r#"{"diffId":"sha256:e87d3991f67f0c5b9431103850d365321e5b8189ae826700986e309075005529","kind":"indexes","#,
+    r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":24,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":644},"#,
     r#"{"diffId":"sha256:3df20da5471b0991ffdaf69fa45f759fb8341c2d4e2d751fd5cba6ee8827c6b8","kind":"log-account-epochs","#,
     r#""mediaType":"application/vnd.dolos.stele.log-account-epochs.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":102},"#,
