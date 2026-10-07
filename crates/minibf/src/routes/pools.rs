@@ -1121,17 +1121,19 @@ fn tied_epochs_on_page(list: &[(u64, PoolHash)], pagination: &Pagination) -> Has
 /// index gives the slot of that certificate without a block read. Pools with
 /// the same slot also need the transaction index, so the function reads that
 /// block once.
+///
+/// The lookup has no upper slot bound. So it also finds a certificate from a
+/// block that the state store applied after the request started.
 fn retirement_positions<D: Domain>(
     domain: &D,
     pools: &[PoolHash],
-    tip: BlockSlot,
 ) -> Result<HashMap<PoolHash, RetirementPosition>, StatusCode> {
     let archive = domain.archive();
     let mut by_slot: HashMap<BlockSlot, Vec<PoolHash>> = HashMap::new();
 
     for pool in pools {
         let slot = archive
-            .slots_by_pool_certs(pool.as_slice(), 0, tip)
+            .slots_by_pool_certs(pool.as_slice(), 0, BlockSlot::MAX)
             .map_err(log_and_500("failed to read the pool certs index"))?
             .next_back()
             .transpose()
@@ -1220,7 +1222,6 @@ fn page_retirements<D: Domain>(
     domain: &D,
     list: Vec<(u64, PoolHash)>,
     pagination: &Pagination,
-    tip: BlockSlot,
 ) -> Result<Vec<(u64, PoolHash)>, StatusCode> {
     let tied = tied_epochs_on_page(&list, pagination);
 
@@ -1230,7 +1231,7 @@ fn page_retirements<D: Domain>(
         .map(|(_, pool)| *pool)
         .collect();
 
-    let positions = retirement_positions(domain, &pools, tip)?;
+    let positions = retirement_positions(domain, &pools)?;
 
     Ok(order_page(list, &positions, pagination))
 }
@@ -1246,6 +1247,37 @@ fn retire_list_model(list: Vec<(u64, PoolHash)>) -> Result<Vec<PoolListRetireInn
         .collect()
 }
 
+/// Reads every pool state and returns one page of the pools that `select`
+/// keeps.
+///
+/// The function scans the state store and reads the archive, so it runs on
+/// the blocking pool.
+async fn load_retirement_page<D, F>(
+    domain: Facade<D>,
+    pagination: Pagination,
+    select: F,
+) -> Result<Vec<PoolListRetireInner>, StatusCode>
+where
+    D: Domain,
+    Option<PoolState>: From<D::Entity>,
+    F: FnOnce(Vec<PoolState>) -> Vec<(u64, PoolHash)> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let pools = domain
+            .iter_cardano_entities::<PoolState>(None)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map(|item| item.map(|(_, pool)| pool))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let page = page_retirements(&domain.inner, select(pools), &pagination)?;
+
+        retire_list_model(page)
+    })
+    .await
+    .map_err(log_and_500("failed to join the retirement page task"))?
+}
+
 pub async fn all_retiring<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
@@ -1259,17 +1291,12 @@ where
     let summary = domain.get_chain_summary()?;
     let (current_epoch, _) = summary.slot_epoch(tip);
 
-    let pools = domain
-        .iter_cardano_entities::<PoolState>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(|item| item.map(|(_, pool)| pool))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let out = load_retirement_page(domain, pagination, move |pools| {
+        retiring_candidates(pools, current_epoch)
+    })
+    .await?;
 
-    let list = retiring_candidates(pools, current_epoch);
-    let page = page_retirements(&domain.inner, list, &pagination, tip)?;
-
-    Ok(Json(retire_list_model(page)?))
+    Ok(Json(out))
 }
 
 pub async fn all_retired<D: Domain>(
@@ -1280,19 +1307,10 @@ where
     Option<PoolState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    let tip = domain.get_tip_slot()?;
 
-    let pools = domain
-        .iter_cardano_entities::<PoolState>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(|item| item.map(|(_, pool)| pool))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let out = load_retirement_page(domain, pagination, retired_candidates).await?;
 
-    let list = retired_candidates(pools);
-    let page = page_retirements(&domain.inner, list, &pagination, tip)?;
-
-    Ok(Json(retire_list_model(page)?))
+    Ok(Json(out))
 }
 
 pub async fn by_id_metadata<D: Domain>(
