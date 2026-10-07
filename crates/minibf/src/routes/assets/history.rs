@@ -143,3 +143,180 @@ where
 
     Ok(Json(page))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{TestApp, TestFault};
+    use dolos_testing::synthetic::SyntheticBlockConfig;
+    use itertools::Itertools;
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} for {path} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    async fn get_history(app: &TestApp, query: &str) -> Vec<AssetHistoryInner> {
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}/history{query}");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} for {path} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes).expect("failed to parse asset history")
+    }
+
+    fn hashes(rows: &[AssetHistoryInner]) -> Vec<String> {
+        rows.iter().map(|x| x.tx_hash.clone()).collect()
+    }
+
+    /// Every tx of the synthetic chain mints the asset, in chain order.
+    fn chain_txs(app: &TestApp) -> Vec<String> {
+        app.vectors()
+            .blocks
+            .iter()
+            .flat_map(|block| block.tx_hashes.iter().cloned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_history_happy_path() {
+        let app = TestApp::new();
+
+        let rows = get_history(&app, "").await;
+        assert_eq!(hashes(&rows), chain_txs(&app));
+        assert!(rows
+            .iter()
+            .all(|x| x.action == Action::Minted && x.amount == "1"));
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_history_order_desc() {
+        let app = TestApp::new();
+
+        let rows = get_history(&app, "?order=desc").await;
+        let expected = chain_txs(&app).into_iter().rev().collect_vec();
+        assert_eq!(hashes(&rows), expected);
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_history_paginated() {
+        let app = TestApp::new();
+        let txs = chain_txs(&app);
+
+        // pages cut across block boundaries in both orders
+        let rows = get_history(&app, "?page=2&count=4").await;
+        assert_eq!(hashes(&rows), txs[4..8]);
+
+        let rows = get_history(&app, "?order=desc&page=2&count=4").await;
+        let desc = txs.iter().rev().cloned().collect_vec();
+        assert_eq!(hashes(&rows), desc[4..8]);
+
+        // the last page is short, the one after it is empty
+        let rows = get_history(&app, "?page=4&count=4").await;
+        assert_eq!(hashes(&rows), txs[12..]);
+
+        let rows = get_history(&app, "?page=5&count=4").await;
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_history_burns() {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            mint_amount: -3,
+            ..Default::default()
+        });
+
+        let rows = get_history(&app, "").await;
+        assert_eq!(hashes(&rows), chain_txs(&app));
+        assert!(rows
+            .iter()
+            .all(|x| x.action == Action::Burned && x.amount == "-3"));
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_history_skips_invalid_txs() {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            invalid_txs_by_block: vec![vec![], vec![1]],
+            ..Default::default()
+        });
+
+        // a phase-2 failure applies no mint, so it has no history row
+        let invalid = app.vectors().blocks[1].tx_hashes[1].clone();
+        let expected = chain_txs(&app)
+            .into_iter()
+            .filter(|x| *x != invalid)
+            .collect_vec();
+
+        let rows = get_history(&app, "").await;
+        assert_eq!(hashes(&rows), expected);
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_history_ignores_from_to() {
+        let app = TestApp::new();
+        let all = get_history(&app, "").await;
+
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let query = format!("?from={0}&to={0}", block.block_number);
+        assert_eq!(get_history(&app, &query).await, all);
+
+        // a malformed range is ignored as well, never validated
+        assert_eq!(get_history(&app, "?from=not-a-number").await, all);
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_history_scan_limit() {
+        let app = TestApp::new_with_scan_limit(SyntheticBlockConfig::default(), 2);
+        let asset = app.vectors().asset_unit.as_str();
+
+        assert_eq!(get_history(&app, "?count=2").await.len(), 2);
+
+        let path = format!("/assets/{asset}/history?count=3");
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+
+        // a page past the last row needs no scan, so the limit does not apply
+        assert!(get_history(&app, "?count=3&page=3").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_history_bad_request() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+
+        for subject in ["not-hex-asset", "abcd", &"f".repeat(122), &"z".repeat(56)] {
+            let path = format!("/assets/{subject}/history");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
+
+        for query in ["?count=0", "?page=x", "?order=sideways"] {
+            let path = format!("/assets/{asset}/history{query}");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_history_not_found() {
+        let app = TestApp::new();
+        let path = format!("/assets/{}/history", "f".repeat(84));
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_history_internal_error() {
+        for fault in [TestFault::StateStoreError, TestFault::ArchiveStoreError] {
+            let app = TestApp::new_with_fault(Some(fault));
+            let asset = app.vectors().asset_unit.as_str();
+            let path = format!("/assets/{asset}/history");
+            assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+        }
+    }
+}
