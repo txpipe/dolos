@@ -38,8 +38,8 @@ use dolos_cardano::{
     pallas_extras, ChainSummary, PParamsSet,
 };
 use dolos_core::{
-    ArchiveError, ArchiveStore as _, BlockBody, BlockSlot, Domain, EntityKey, StateStore as _,
-    TxOrder,
+    ArchiveError, ArchiveStore as _, BlockBody, BlockSlot, ChainPoint, Domain, EntityKey,
+    StateStore as _, TxOrder,
 };
 use itertools::Itertools;
 use pallas::{
@@ -1803,6 +1803,29 @@ fn proposal_votes_in_block(block: &MultiEraBlock, action: &GovActionId) -> Vec<P
     out
 }
 
+const STABLE_CURSOR_ATTEMPTS: usize = 3;
+
+/// Runs `read` between two reads of the state cursor, and repeats it while
+/// the cursor moves. Returns the cursor that `read` saw.
+///
+/// The state commits the cursor and its entities in one batch, so an
+/// unchanged cursor shows that `read` saw the state at that cursor.
+fn read_at_stable_cursor<T>(
+    mut read_cursor: impl FnMut() -> Result<ChainPoint, StatusCode>,
+    mut read: impl FnMut() -> Result<T, StatusCode>,
+) -> Result<(ChainPoint, T), StatusCode> {
+    for _ in 0..STABLE_CURSOR_ATTEMPTS {
+        let before = read_cursor()?;
+        let value = read()?;
+
+        if read_cursor()? == before {
+            return Ok((before, value));
+        }
+    }
+
+    Err(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 /// One page of a proposal's votes.
 ///
 /// The listing is a vote history, not a tally: when a voter votes again,
@@ -1828,10 +1851,25 @@ fn read_votes<D: Domain>(
 ) -> Result<Vec<ProposalVotesInner>, Error> {
     let key = ProposalState::build_entity_key(tx, idx);
 
-    let state = domain
-        .state()
-        .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // The `counted` flags compare the archive rows with the proposal row, so
+    // the row must belong to the state at the cursor that bounds the listing.
+    let (cursor, state) = read_at_stable_cursor(
+        || {
+            domain
+                .state()
+                .read_cursor()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+        },
+        || {
+            domain
+                .state()
+                .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        },
+    )?;
+
+    let cursor = cursor.slot();
 
     // Blockfrost joins against db-sync and sends whatever rows come back, so
     // an unknown proposal is an empty listing rather than a 404.
@@ -1844,8 +1882,7 @@ fn read_votes<D: Domain>(
     // can be ahead of the archive, and the archive can hold blocks that a
     // rollback already took out of the state. The listing and the
     // deregistration reads stay at or below the lower tip, so one response
-    // reads one consistent chain; only the newest-vote check reads the state
-    // as the cursor has it.
+    // reads one consistent chain.
     let Some((archive_tip, _)) = domain
         .archive()
         .get_tip()
@@ -1853,13 +1890,6 @@ fn read_votes<D: Domain>(
     else {
         return Ok(vec![]);
     };
-
-    let cursor = domain
-        .state()
-        .read_cursor()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-        .slot();
 
     let visible = archive_tip.min(cursor);
 
@@ -5750,5 +5780,66 @@ mod tests {
             .collect_vec();
 
         assert_eq!(actual, expected);
+    }
+
+    /// Plays `cursors` as the successive cursor reads and counts the reads of
+    /// the value between them.
+    fn stable_cursor_read(cursors: &[ChainPoint]) -> (Result<ChainPoint, StatusCode>, usize) {
+        use std::cell::Cell;
+
+        let next_cursor = Cell::new(0);
+        let reads = Cell::new(0);
+
+        let result = read_at_stable_cursor(
+            || {
+                let i = next_cursor.get();
+                next_cursor.set(i + 1);
+                Ok(cursors[i].clone())
+            },
+            || {
+                reads.set(reads.get() + 1);
+                Ok(reads.get())
+            },
+        );
+
+        let result = result.map(|(cursor, read)| {
+            assert_eq!(read, reads.get(), "the result comes from the last read");
+            cursor
+        });
+
+        (result, reads.get())
+    }
+
+    /// The sync can commit a block between the read of a proposal row and the
+    /// read of the cursor. The row then belongs to another chain than the
+    /// listing, so the read runs again until the cursor holds still.
+    #[test]
+    fn stable_cursor_read_repeats_while_the_cursor_moves() {
+        let point = |slot: u64, hash: u8| ChainPoint::Specific(slot, Hash::from([hash; 32]));
+
+        // a still cursor needs one read
+        let (cursor, reads) = stable_cursor_read(&[point(10, 1), point(10, 1)]);
+        assert_eq!((cursor, reads), (Ok(point(10, 1)), 1));
+
+        // a roll-forward during the first read
+        let (cursor, reads) =
+            stable_cursor_read(&[point(10, 1), point(11, 2), point(11, 2), point(11, 2)]);
+        assert_eq!((cursor, reads), (Ok(point(11, 2)), 2));
+
+        // a rollback to another block at the same slot
+        let (cursor, reads) =
+            stable_cursor_read(&[point(11, 2), point(11, 3), point(11, 3), point(11, 3)]);
+        assert_eq!((cursor, reads), (Ok(point(11, 3)), 2));
+
+        // a cursor that never holds still fails the request
+        let moving = (0..6).map(|slot| point(slot, slot as u8)).collect_vec();
+        let (cursor, reads) = stable_cursor_read(&moving);
+        assert_eq!(
+            (cursor, reads),
+            (
+                Err(StatusCode::INTERNAL_SERVER_ERROR),
+                STABLE_CURSOR_ATTEMPTS
+            )
+        );
     }
 }
