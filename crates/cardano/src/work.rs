@@ -535,6 +535,21 @@ mod tests {
             ewrap_pos < estart_pos,
             "Ewrap (close half) must precede Estart (open half)"
         );
+        assert_eq!(
+            units.iter().map(tag_from_internal).collect::<Vec<_>>(),
+            vec![
+                WorkTag::Blocks {
+                    first: 90,
+                    last: 90
+                },
+                WorkTag::EWrap(110),
+                WorkTag::EStart(110),
+                WorkTag::Blocks {
+                    first: 110,
+                    last: 110
+                },
+            ]
+        );
     }
 
     // ---------------------------------------------------------------

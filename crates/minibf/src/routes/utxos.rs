@@ -15,6 +15,30 @@ use crate::{
     Facade,
 };
 
+/// The outputs that a UTxO listing returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UtxoFilter {
+    /// Every output.
+    All,
+    /// Only outputs without native assets, the rows that Blockfrost lists for
+    /// the `lovelace` asset.
+    AdaOnly,
+}
+
+impl UtxoFilter {
+    /// Returns `true` when the listing returns `output`.
+    pub fn keeps(self, output: &MultiEraOutput<'_>) -> bool {
+        match self {
+            UtxoFilter::All => true,
+            UtxoFilter::AdaOnly => output
+                .value()
+                .assets()
+                .iter()
+                .all(|policy| policy.assets().is_empty()),
+        }
+    }
+}
+
 /// Loads, sorts and paginates the page of UTxO models for `refs`.
 ///
 /// `from` / `to` must be cleared by the caller: Blockfrost does not read them
@@ -24,6 +48,7 @@ pub async fn load_utxo_models<D, T>(
     domain: &Facade<D>,
     refs: HashSet<TxoRef>,
     pagination: Pagination,
+    filter: UtxoFilter,
 ) -> Result<Vec<T>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
@@ -32,7 +57,7 @@ where
 {
     let retention = Retention::read(domain).await?;
 
-    load_utxo_models_in_slot_range(domain, refs, pagination, retention, None).await
+    load_utxo_models_in_slot_range(domain, refs, pagination, retention, None, filter).await
 }
 
 /// Like [`load_utxo_models`] but honours `from` / `to` as an inclusive block
@@ -117,7 +142,15 @@ where
         edges,
     };
 
-    load_utxo_models_in_slot_range(domain, refs, pagination, retention, Some(bounds)).await
+    load_utxo_models_in_slot_range(
+        domain,
+        refs,
+        pagination,
+        retention,
+        Some(bounds),
+        UtxoFilter::All,
+    )
+    .await
 }
 
 /// The slot span of a height range, plus the edge zones whose rows may still
@@ -286,6 +319,7 @@ async fn load_utxo_models_in_slot_range<D, T>(
     pagination: Pagination,
     retention: Retention,
     bounds: Option<SlotBounds>,
+    filter: UtxoFilter,
 ) -> Result<Vec<T>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
@@ -333,9 +367,19 @@ where
     }
 
     let slots: Vec<Option<u64>> = rows.iter().map(|(slot, _)| *slot).collect();
-    let mut window = slot_window(&slots, pagination.skip(), pagination.count);
+    let filtering = filter == UtxoFilter::AdaOnly;
+    let mut window = slot_window(
+        &slots,
+        if filtering { 0 } else { pagination.skip() },
+        pagination.count,
+    );
     // rows of the window that sit before the page
-    let mut to_skip = pagination.skip() - window.start;
+    let mut to_skip = if filtering {
+        0
+    } else {
+        pagination.skip() - window.start
+    };
+    let mut matching_to_skip = if filtering { pagination.skip() } else { 0 };
 
     // A row can vanish between this request's tag scan and the reads below:
     // its block pruned or its UTxO spent. A vanished row of the page is
@@ -360,6 +404,61 @@ where
         positioned.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
         if let Order::Desc = pagination.order {
             positioned.reverse();
+        }
+
+        if filtering {
+            for batch in positioned.chunks(pagination.count) {
+                let refs: Vec<_> = batch
+                    .iter()
+                    .map(|(_, txo_ref, _)| (*txo_ref).clone())
+                    .collect();
+                let utxos = domain
+                    .state()
+                    .get_utxos(refs)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                for (_, txo_ref, meta) in batch {
+                    let Some(cbor) = utxos.get(txo_ref) else {
+                        continue;
+                    };
+                    let output = MultiEraOutput::try_from(cbor.as_ref())
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    if !filter.keeps(&output) {
+                        continue;
+                    }
+                    if matching_to_skip > 0 {
+                        matching_to_skip -= 1;
+                        continue;
+                    }
+
+                    let builder = UtxoOutputModelBuilder::from_output(txo_ref.0, txo_ref.1, output);
+                    let builder = match meta {
+                        Some(meta) => {
+                            let block_time = chain.slot_time(meta.slot);
+                            builder
+                                .with_block_data(meta.clone())
+                                .with_block_time(block_time)
+                        }
+                        None => builder,
+                    };
+                    out.push(<UtxoOutputModelBuilder<'_> as IntoModel<T>>::into_model(
+                        builder,
+                    )?);
+                    if out.len() == pagination.count {
+                        break;
+                    }
+                }
+                if out.len() == pagination.count {
+                    break;
+                }
+            }
+
+            if out.len() == pagination.count {
+                break;
+            }
+
+            window = slot_window(&slots, window.end, pagination.count);
+            continue;
         }
 
         let skipped = to_skip.min(positioned.len());

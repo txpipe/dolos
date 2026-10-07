@@ -554,7 +554,9 @@ where
         .utxos_by_stake(&account_key.address.to_vec())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let utxos = super::utxos::load_utxo_models(&domain, refs, pagination).await?;
+    let utxos =
+        super::utxos::load_utxo_models(&domain, refs, pagination, super::utxos::UtxoFilter::All)
+            .await?;
 
     Ok(Json(utxos))
 }

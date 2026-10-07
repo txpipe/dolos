@@ -120,10 +120,10 @@ fn the_golden_indexes_layer_covers_every_dimension_and_kind() {
         "the golden indexes layer no longer freezes every dimension name"
     );
 
-    // Thirteen, as the module documentation of `tests/goldens.rs` states.
+    // Sixteen, as the module documentation of `tests/goldens.rs` states.
     // Pinned here so that prose cannot go stale while every other test still
     // passes.
-    assert_eq!(expected.len(), 13);
+    assert_eq!(expected.len(), 16);
 
     let kinds: BTreeSet<ExactKind> = records
         .iter()

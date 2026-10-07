@@ -22,7 +22,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use dolos_core::Domain;
 use serde::{Deserialize, Serialize};
 
-use crate::{Facade, MinibfConfig};
+use crate::{error::Error, Facade, MinibfConfig};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RootResponse {
@@ -49,4 +49,10 @@ pub async fn root<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<RootResponse>, StatusCode> {
     Ok(Json(RootResponse::from(&domain.config)))
+}
+
+/// Answers every path that matches no route the way Blockfrost does: a
+/// global `400` with an "Invalid path" body, rather than an empty `404`.
+pub async fn invalid_path() -> Error {
+    Error::InvalidPath
 }
