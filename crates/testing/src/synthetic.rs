@@ -75,6 +75,9 @@ pub struct SyntheticBlockConfig {
     /// Indices of the phase-2-invalid txs in each block. Each outer entry
     /// represents one block; an empty list leaves every tx valid.
     pub invalid_txs_by_block: Vec<Vec<u32>>,
+    /// Blocks whose txs mint nothing and pay lovelace only. Each entry
+    /// represents one block; a missing entry keeps the asset.
+    pub ada_only_by_block: Vec<bool>,
 }
 
 /// Build a testnet Shelley address with both payment and stake key parts.
@@ -137,6 +140,7 @@ impl Default for SyntheticBlockConfig {
             proposal_deposit: 100_000_000,
             spend_previous_outputs: false,
             invalid_txs_by_block: vec![],
+            ada_only_by_block: vec![],
         }
     }
 }
@@ -372,6 +376,7 @@ pub fn build_synthetic_blocks(
         let slot = cfg.slot + offset as u64;
         let block_number = cfg.start_block + offset as u64;
         let asset_name = Bytes::from(asset_name.as_bytes().to_vec());
+        let ada_only = cfg.ada_only_by_block.get(offset).copied().unwrap_or(false);
         let mut tx_specs: Vec<SyntheticTxSpec> = Vec::with_capacity(txs_per_block);
         let mut tx_hashes = Vec::with_capacity(txs_per_block);
         let mut withdrawal_amounts = Vec::with_capacity(txs_per_block);
@@ -496,6 +501,7 @@ pub fn build_synthetic_blocks(
                 asset_name.clone(),
                 cfg.asset_amount,
                 cfg.mint_amount,
+                ada_only,
                 stake_cred.clone(),
                 pool_keyhash,
                 cfg.pool_relays.clone(),
@@ -803,6 +809,7 @@ fn sample_transaction(
     asset_name: Bytes,
     asset_amount: u64,
     mint_amount: i64,
+    ada_only: bool,
     stake_cred: StakeCredential,
     pool_keyhash: Hash<28>,
     pool_relays: Vec<Relay>,
@@ -821,17 +828,24 @@ fn sample_transaction(
         index: 0,
     };
 
-    let mint_amount = NonZeroInt::try_from(mint_amount).expect("mint amount must be non-zero");
-    let mut mint_assets = BTreeMap::new();
-    mint_assets.insert(asset_name.clone(), mint_amount);
-    let mut mint = BTreeMap::new();
-    mint.insert(policy_id, mint_assets);
+    let (value, mint) = if ada_only {
+        (Value::Coin(lovelace), None)
+    } else {
+        let mint_amount = NonZeroInt::try_from(mint_amount).expect("mint amount must be non-zero");
+        let mut mint_assets = BTreeMap::new();
+        mint_assets.insert(asset_name.clone(), mint_amount);
+        let mut mint = BTreeMap::new();
+        mint.insert(policy_id, mint_assets);
 
-    let asset_amount = PositiveCoin::try_from(asset_amount).expect("asset amount must be non-zero");
-    let mut output_assets = BTreeMap::new();
-    output_assets.insert(asset_name.clone(), asset_amount);
-    let mut output_multiasset = BTreeMap::new();
-    output_multiasset.insert(policy_id, output_assets);
+        let asset_amount =
+            PositiveCoin::try_from(asset_amount).expect("asset amount must be non-zero");
+        let mut output_assets = BTreeMap::new();
+        output_assets.insert(asset_name.clone(), asset_amount);
+        let mut output_multiasset = BTreeMap::new();
+        output_multiasset.insert(policy_id, output_assets);
+
+        (Value::Multiasset(lovelace, output_multiasset), Some(mint))
+    };
 
     let datum_option = extras.map(|extras| KeepRaw::from(DatumOption::Hash(extras.datum_hash)));
     let script_ref = extras.map(|extras| {
@@ -842,7 +856,7 @@ fn sample_transaction(
 
     let output = PostAlonzoTransactionOutput {
         address,
-        value: Value::Multiasset(lovelace, output_multiasset),
+        value,
         datum_option,
         script_ref,
     };
@@ -921,7 +935,7 @@ fn sample_transaction(
         withdrawals,
         auxiliary_data_hash,
         validity_interval_start: Some(5),
-        mint: Some(mint),
+        mint,
         script_data_hash: None,
         collateral: None,
         required_signers: Some(
