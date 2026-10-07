@@ -221,14 +221,24 @@ impl BoundaryWork {
 
     /// The DRep an account's weight counts toward in the boundary stake
     /// distribution, or `None` when it counts toward none: accumulation
-    /// inactive, the account not delegated as of the snapshot, or the
-    /// target a key/script DRep outside the snapshot's registered set.
-    /// `AlwaysAbstain` / `AlwaysNoConfidence` are always in — the
-    /// ratification tallies need both.
+    /// inactive, the account not delegated as of the snapshot, the
+    /// delegation one this boundary clears, or the target a key/script DRep
+    /// outside the snapshot's registered set. `AlwaysAbstain` /
+    /// `AlwaysNoConfidence` are always in — the ratification tallies need
+    /// both.
+    ///
+    /// A cleared delegation is still live here: the drop this boundary
+    /// schedules lands in the opening epoch. The ledger cleared it at the
+    /// certificate, so it counts toward nothing even when the DRep
+    /// registered again before the boundary.
     fn snapshot_drep_of(&self, account: &AccountState) -> Option<DRep> {
         let snapshot_epoch = self.distr_snapshot_epoch()?;
 
         let drep = account.delegated_drep_at(snapshot_epoch)?;
+
+        if self.clears_drep_delegation(drep, account) {
+            return None;
+        }
 
         let in_snapshot = match drep {
             DRep::Abstain | DRep::NoConfidence => true,
@@ -2428,6 +2438,158 @@ mod tests {
         assert!(delegation_dropped(&domain, &oldest));
         assert!(delegation_dropped(&domain, &mid_cycle));
         assert!(!delegation_dropped(&domain, &newest));
+    }
+
+    fn weighted_delegator(
+        byte: u8,
+        weight: u64,
+        drep: DRep,
+        vote_delegated_at: (BlockSlot, TxOrder),
+    ) -> crate::AccountState {
+        crate::AccountState {
+            vote_delegated_at: Some(vote_delegated_at),
+            ..snapshot_account(byte, weight, Some(drep), None)
+        }
+    }
+
+    /// The drop a deregistration owes lands in the opening epoch, but the
+    /// ledger cleared the delegation at the certificate, so the distribution
+    /// this boundary builds must already leave it out — also when the DRep
+    /// registered again before the boundary (the preview closing-932
+    /// clear-lag). Each DRep below registers at slot 10 of the closing epoch
+    /// and deregisters at slot 100.
+    #[test]
+    fn a_cleared_delegation_counts_toward_no_drep() {
+        let domain = ToyDomain::new(None, None);
+        let at = |offset| closing_epoch_slot(&domain, offset);
+
+        let rereg = DRep::Key([0x11; 28].into());
+        let gone = DRep::Key([0x12; 28].into());
+        let redelegated = DRep::Key([0x13; 28].into());
+        let same_tx = DRep::Key([0x14; 28].into());
+
+        let dreps = [
+            // registers again at slot 200
+            replay_drep_certs(
+                rereg.clone(),
+                &[
+                    Cert::Reg(at(10), 0),
+                    Cert::UnReg(at(100), 0),
+                    Cert::Reg(at(200), 0),
+                ],
+            ),
+            // stays deregistered
+            replay_drep_certs(
+                gone.clone(),
+                &[Cert::Reg(at(10), 0), Cert::UnReg(at(100), 0)],
+            ),
+            // registers again at slot 200, and its delegator returns at 300
+            replay_drep_certs(
+                redelegated.clone(),
+                &[
+                    Cert::Reg(at(10), 0),
+                    Cert::UnReg(at(100), 0),
+                    Cert::Reg(at(200), 0),
+                ],
+            ),
+            // deregisters, registers and is delegated to in one transaction
+            replay_drep_certs(
+                same_tx.clone(),
+                &[
+                    Cert::Reg(at(10), 0),
+                    Cert::UnReg(at(100), 0),
+                    Cert::Reg(at(100), 0),
+                ],
+            ),
+        ];
+
+        let rereg_cleared = weighted_delegator(0xa1, 1, rereg.clone(), (at(50), 0));
+        let rereg_kept = weighted_delegator(0xa2, 2, rereg.clone(), (at(300), 0));
+        let gone_cleared = weighted_delegator(0xb1, 4, gone.clone(), (at(50), 0));
+        let returned = weighted_delegator(0xc1, 8, redelegated.clone(), (at(300), 0));
+        let same_tx_cleared = weighted_delegator(0xd1, 16, same_tx.clone(), (at(50), 0));
+        let same_tx_kept = weighted_delegator(0xd2, 32, same_tx.clone(), (at(100), 0));
+
+        let accounts = [
+            rereg_cleared,
+            rereg_kept,
+            gone_cleared,
+            returned,
+            same_tx_cleared,
+            same_tx_kept,
+        ];
+        let domain = seed_delegation_domain(&dreps, &accounts);
+
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+
+        let distr = read_distr(&domain);
+        assert!(distr.is_complete_for(CLOSING_EPOCH));
+        assert_eq!(
+            distr.drep_distr,
+            BTreeMap::from([
+                (rereg.clone(), 2),
+                (redelegated.clone(), 8),
+                (same_tx.clone(), 32)
+            ])
+        );
+
+        // the drop itself still runs at this boundary
+        let [rereg_cleared, rereg_kept, gone_cleared, returned, same_tx_cleared, same_tx_kept] =
+            &accounts;
+        assert!(delegation_dropped(&domain, rereg_cleared));
+        assert!(delegation_dropped(&domain, gone_cleared));
+        assert!(delegation_dropped(&domain, same_tx_cleared));
+        assert!(!delegation_dropped(&domain, rereg_kept));
+        assert!(!delegation_dropped(&domain, returned));
+        assert!(!delegation_dropped(&domain, same_tx_kept));
+
+        let mut boundary =
+            BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+        boundary
+            .commit_finalize::<ToyDomain>(domain.state(), domain.archive())
+            .unwrap();
+
+        assert_eq!(read_drep_power(&domain, &rereg), 2);
+        assert_eq!(read_drep_power(&domain, &redelegated), 8);
+        assert_eq!(read_drep_power(&domain, &same_tx), 32);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_cleared_delegation_has_no_snapshot_drep(
+            account in crate::model::accounts::testing::any_account_state(),
+            rotations_back in 0u64..4,
+            unregistered_at in (
+                crate::model::testing::any_slot(),
+                crate::model::testing::any_tx_order(),
+            ),
+            retiring in proptest::prelude::any::<bool>(),
+            registered in proptest::prelude::any::<bool>(),
+        ) {
+            let domain = ToyDomain::new(None, None);
+            let mut boundary =
+                BoundaryWork::new_empty::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+
+            boundary.ending_state.number =
+                account.drep.epoch().unwrap().saturating_sub(rotations_back);
+            let snapshot_epoch = boundary.distr_snapshot_epoch().unwrap();
+
+            if let Some(drep) = account.delegated_drep_at(snapshot_epoch) {
+                if retiring {
+                    boundary.retiring_dreps.push((drep.clone(), unregistered_at));
+                }
+
+                if registered {
+                    boundary.snapshot_registered_dreps.insert(drep_to_entity_key(drep));
+                }
+
+                if boundary.clears_drep_delegation(drep, &account) {
+                    proptest::prop_assert_eq!(boundary.snapshot_drep_of(&account), None);
+                }
+            }
+        }
     }
 
     const STAKE_EPOCH: Epoch = 5;
