@@ -134,11 +134,12 @@ impl StakeSnapshot {
         // Same reasoning for the delegator count, which `finalize` reports in
         // the per-pool `StakeLog`: counting it here (the globals pass sees
         // every account) keeps it correct after a mid-RUPD restart, which a
-        // per-shard tally would not be.
-        self.pool_delegator_counts
-            .entry(pool_id)
-            .and_modify(|x| *x += 1)
-            .or_insert(1);
+        // per-shard tally would not be. A delegator with no stake is not
+        // counted: db-sync leaves it out of `epoch_stake`, which is what
+        // Blockfrost counts.
+        if stake > 0 {
+            *self.pool_delegator_counts.entry(pool_id).or_default() += 1;
+        }
 
         self.active_stake_sum += stake;
 
@@ -598,5 +599,34 @@ impl crate::rewards::RewardsContext for RupdWork {
         };
         let key = credential_to_key(account);
         ranges.iter().any(|r| key >= r.start && key < r.end)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pallas::crypto::hash::Hash;
+
+    use super::*;
+
+    /// A zero-stake delegator adds nothing to the pool: no stake and no count.
+    /// db-sync leaves it out of `epoch_stake`, so Blockfrost's
+    /// `delegators_count` does not see it either.
+    #[test]
+    fn zero_stake_delegators_are_not_counted() {
+        let pool = Hash::from([7; 28]);
+        let credential = |byte| StakeCredential::AddrKeyhash(Hash::from([byte; 28]));
+
+        let mut snapshot = StakeSnapshot::empty();
+        snapshot
+            .track_stake(&credential(1), pool, 500, true)
+            .unwrap();
+        snapshot.track_stake(&credential(2), pool, 0, true).unwrap();
+        snapshot
+            .track_stake(&credential(3), pool, 250, true)
+            .unwrap();
+
+        assert_eq!(snapshot.get_pool_delegator_count(&pool), 2);
+        assert_eq!(snapshot.get_pool_stake(&pool), 750);
+        assert_eq!(snapshot.active_stake_sum, 750);
     }
 }

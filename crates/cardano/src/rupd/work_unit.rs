@@ -82,6 +82,80 @@ fn aggregate_pending_pool_rewards<S: StateStore>(
     Ok(out)
 }
 
+/// `numerator / denominator` as Blockfrost reports a pool's `active_size`.
+///
+/// db-sync divides the two stakes as Postgres `numeric` and casts the
+/// quotient to `float8`. The division rounds half up to a scale Postgres
+/// picks for at least sixteen significant digits (`select_div_scale`), so the
+/// float is the one nearest that decimal rather than the exact ratio, and a
+/// plain `f64` division of the stakes misses it by an ulp about a quarter of
+/// the time. A zero denominator gives zero.
+fn numeric_ratio(numerator: u64, denominator: u64) -> f64 {
+    if numerator == 0 || denominator == 0 {
+        return 0.0;
+    }
+
+    // Postgres stores numerics in base-10000 digits: the weight is the index
+    // of the leading digit, counted from the units digit.
+    let leading = |mut value: u64| {
+        let mut weight = 0i32;
+        while value >= 10_000 {
+            value /= 10_000;
+            weight += 1;
+        }
+        (weight, value)
+    };
+
+    let (weight1, first1) = leading(numerator);
+    let (weight2, first2) = leading(denominator);
+
+    let mut qweight = weight1 - weight2;
+    if first1 <= first2 {
+        qweight -= 1;
+    }
+
+    let scale = (16 - qweight * 4).clamp(0, 1000) as usize;
+
+    // Long division to `scale` decimals; the remainder stays below the
+    // denominator, so ten times it fits a u128.
+    let divisor = denominator as u128;
+    let mut integer = numerator as u128 / divisor;
+    let mut remainder = numerator as u128 % divisor;
+    let mut decimals = Vec::with_capacity(scale);
+
+    for _ in 0..scale {
+        remainder *= 10;
+        decimals.push((remainder / divisor) as u8);
+        remainder %= divisor;
+    }
+
+    // Round half up, carrying through the decimals into the integer part.
+    if remainder * 2 >= divisor {
+        let mut carry = true;
+        for digit in decimals.iter_mut().rev() {
+            if *digit == 9 {
+                *digit = 0;
+            } else {
+                *digit += 1;
+                carry = false;
+                break;
+            }
+        }
+        if carry {
+            integer += 1;
+        }
+    }
+
+    let decimals: String = decimals
+        .iter()
+        .map(|digit| char::from(b'0' + digit))
+        .collect();
+
+    format!("{integer}.{decimals}")
+        .parse()
+        .expect("a decimal literal parses as f64")
+}
+
 /// Sharded work unit for computing rewards at the stability window.
 pub struct RupdWorkUnit {
     slot: BlockSlot,
@@ -266,11 +340,7 @@ impl RupdWorkUnit {
         for (pool_hash, pool_state) in snapshot.pools.iter() {
             let pool_id = EntityKey::from(pool_hash.as_slice());
             let pool_stake = snapshot.get_pool_stake(pool_hash);
-            let relative_size = if snapshot.active_stake_sum > 0 {
-                (pool_stake as f64) / snapshot.active_stake_sum as f64
-            } else {
-                0.0
-            };
+            let relative_size = numeric_ratio(pool_stake, snapshot.active_stake_sum);
             let params = pool_state.go().map(|x| &x.params);
             let declared_pledge = params.map(|x| x.pledge).unwrap_or(0);
             let fixed_cost = params.map(|x| x.cost).unwrap_or(0);
@@ -480,7 +550,9 @@ mod tests {
                 .accounts_by_pool
                 .insert(*pool, credential.clone(), *stake);
             *snapshot.pool_stake.entry(*pool).or_default() += *stake;
-            *snapshot.pool_delegator_counts.entry(*pool).or_default() += 1;
+            if *stake > 0 {
+                *snapshot.pool_delegator_counts.entry(*pool).or_default() += 1;
+            }
             snapshot.active_stake_sum += *stake;
         }
 
@@ -564,6 +636,35 @@ mod tests {
         unit.commit_shard(domain.state(), 0).expect("commit_shard");
 
         assert_eq!(committed_shards(&domain), Some(1));
+    }
+
+    /// Pool stake, epoch stake and the `active_size` Blockfrost reports, from
+    /// mainnet (pool1pu5jlj…, epochs 212, 214, 229) and preview (pool1a7h89…,
+    /// epochs 42, 58). A plain `f64` division misses all but the last.
+    #[test]
+    fn numeric_ratio_matches_blockfrost() {
+        let cases = [
+            (76778927458702, 12106602864871837, 0.006341905183119658),
+            (76957913014111, 13382718156097189, 0.0057505442553946965),
+            (13375523282499, 19510155416091834, 0.0006855672339476581),
+            (2663056412603, 375970644528781, 0.0070831498452245244),
+            (1536346314736, 384837670103602, 0.003992193161138307),
+        ];
+
+        for (numerator, denominator, expected) in cases {
+            assert_eq!(numeric_ratio(numerator, denominator), expected);
+        }
+
+        assert_ne!(76778927458702.0 / 12106602864871837.0, 0.006341905183119658);
+    }
+
+    #[test]
+    fn numeric_ratio_edges() {
+        assert_eq!(numeric_ratio(0, 100), 0.0);
+        assert_eq!(numeric_ratio(5, 0), 0.0);
+        assert_eq!(numeric_ratio(7, 7), 1.0);
+        assert_eq!(numeric_ratio(1, 3), 1.0 / 3.0);
+        assert_eq!(numeric_ratio(u64::MAX, u64::MAX), 1.0);
     }
 
     // --- per-pool StakeLog figures survive a mid-RUPD restart ---
