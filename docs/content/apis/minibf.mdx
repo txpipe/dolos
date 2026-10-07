@@ -111,12 +111,14 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/accounts/{stake_address}/addresses/total`                | Get lifetime received/sent totals for a stake address    |
 | `/accounts/{stake_address}/delegations`                    | Get delegations for a stake address                      |
 | `/accounts/{stake_address}/history`                        | Get the per-epoch stake history for a stake address      |
+| `/accounts/{stake_address}/mirs`                           | Get MIRs for a stake address                             |
 | `/accounts/{stake_address}/registrations`                  | Get registrations for a stake address                    |
 | `/accounts/{stake_address}/rewards`                        | Get rewards for a stake address                          |
 | `/accounts/{stake_address}/transactions`                   | Get transactions for a stake address                     |
 | `/accounts/{stake_address}/utxos`                          | Get UTXOs for a stake address                            |
 | `/accounts/{stake_address}/withdrawals`                    | Get withdrawals for a stake address                      |
 | `/addresses/{address}`                                     | Get general information for a specific address           |
+| `/addresses/{address}/extended`                            | Get address information with extended asset data         |
 | `/addresses/{address}/total`                               | Get lifetime received/sent totals for a specific address |
 | `/addresses/{address}/transactions`                        | Get transactions for a specific address                  |
 | `/addresses/{address}/txs`                                 | Alias of `/addresses/{address}/transactions`             |
@@ -150,8 +152,12 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/epochs/{epoch}/stakes`                                   | Get epoch stake distribution                             |
 | `/epochs/{epoch}/stakes/{pool_id}`                         | Get epoch stake distribution for a specific pool         |
 | `/genesis`                                                 | Get genesis information                                  |
+| `/governance/committee`                                    | Get the current constitutional committee                 |
 | `/governance/dreps/{drep_id}`                              | Get DRep information                                     |
+| `/governance/dreps/{drep_id}/delegators`                   | Get delegators for a specific DRep                       |
 | `/governance/dreps/{drep_id}/metadata`                     | Get DRep metadata                                        |
+| `/governance/dreps/{drep_id}/updates`                      | Get certificate updates of a DRep                        |
+| `/governance/dreps/{drep_id}/votes`                        | Get votes cast by a DRep                                 |
 | `/governance/proposals`                                    | Get list of governance proposals                         |
 | `/governance/proposals/{tx_hash}/{cert_index}`             | Get governance proposal information                      |
 | `/governance/proposals/{gov_action_id}`                    | Get governance proposal by CIP-129 action id             |
@@ -170,11 +176,13 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/pools/retired`                                           | Get list of retired pools                                |
 | `/pools/retiring`                                          | Get list of retiring pools                               |
 | `/pools/{id}`                                              | Get information for a specific pool                      |
+| `/pools/{id}/blocks`                                       | Get blocks minted by a specific pool                     |
 | `/pools/{id}/delegators`                                   | Get delegators for a specific pool                       |
 | `/pools/{id}/history`                                      | Get history for a specific pool                          |
 | `/pools/{id}/metadata`                                     | Get metadata for a specific pool                         |
 | `/pools/{id}/relays`                                       | Get relays for a specific pool                           |
 | `/pools/{id}/updates`                                      | Get certificate updates for a specific pool              |
+| `/pools/{id}/votes`                                        | Get votes cast by a specific pool                        |
 | `/scripts/{script_hash}`                                   | Get script information                                   |
 | `/scripts/{script_hash}/json`                              | Get script JSON                                          |
 | `/scripts/{script_hash}/cbor`                              | Get script CBOR                                          |

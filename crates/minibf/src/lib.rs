@@ -6,7 +6,8 @@ use axum::{
 };
 use dolos_cardano::{
     model::{
-        AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState, ProposalState,
+        gov::GovState, AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState,
+        ProposalState,
     },
     ChainSummary, PParamsSet, StakeLog,
 };
@@ -353,6 +354,7 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
+    Option<GovState>: From<D::Entity>,
 {
     build_router_with_facade(Facade::<D> {
         inner: domain,
@@ -370,6 +372,7 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
+    Option<GovState>: From<D::Entity>,
 {
     let permissive_cors = facade.config.permissive_cors();
     let base_path = facade.config.base_path();
@@ -418,6 +421,10 @@ where
             get(routes::accounts::by_stake_rewards::<D>),
         )
         .route(
+            "/accounts/{stake_address}/mirs",
+            get(routes::accounts::by_stake_mirs::<D>),
+        )
+        .route(
             "/accounts/{stake_address}/withdrawals",
             get(routes::accounts::by_stake_withdrawals::<D>),
         )
@@ -428,6 +435,10 @@ where
         .route(
             "/addresses/{address}",
             get(routes::addresses::by_address::<D>),
+        )
+        .route(
+            "/addresses/{address}/extended",
+            get(routes::addresses::extended::<D>),
         )
         .route(
             "/addresses/{address}/utxos",
@@ -610,6 +621,7 @@ where
             "/metadata/txs/labels/{label}/cbor",
             get(routes::metadata::by_label_cbor::<D>),
         )
+        .route("/pools/{id}/blocks", get(routes::pools::by_id_blocks::<D>))
         .route(
             "/pools/{id}/delegators",
             get(routes::pools::by_id_delegators::<D>),
@@ -627,11 +639,16 @@ where
             "/pools/{id}/updates",
             get(routes::pools::by_id_updates::<D>),
         )
+        .route("/pools/{id}/votes", get(routes::pools::by_id_votes::<D>))
         .route("/pools/extended", get(routes::pools::all_extended::<D>))
         .route("/pools/retiring", get(routes::pools::all_retiring::<D>))
         .route("/pools/retired", get(routes::pools::all_retired::<D>))
         .route("/pools", get(routes::pools::all::<D>))
         .route("/pools/{id}", get(routes::pools::by_id::<D>))
+        .route(
+            "/governance/committee",
+            get(routes::governance::committee::<D>),
+        )
         .route(
             "/governance/dreps/{drep_id}",
             get(routes::governance::drep_by_id::<D>),
@@ -639,6 +656,18 @@ where
         .route(
             "/governance/dreps/{drep_id}/metadata",
             get(routes::governance::drep_metadata::<D>),
+        )
+        .route(
+            "/governance/dreps/{drep_id}/delegators",
+            get(routes::governance::drep_delegators::<D>),
+        )
+        .route(
+            "/governance/dreps/{drep_id}/votes",
+            get(routes::governance::drep_votes::<D>),
+        )
+        .route(
+            "/governance/dreps/{drep_id}/updates",
+            get(routes::governance::drep_updates::<D>),
         )
         .route(
             "/governance/proposals",
@@ -676,6 +705,7 @@ where
             "/governance/proposals/{gov_action_id}/parameters",
             get(routes::governance::proposal_parameters_by_gov_action::<D>),
         )
+        .fallback(routes::invalid_path)
         .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()
@@ -716,13 +746,11 @@ where
         None => app,
     };
 
-    // NormalizePath must receive the request before the router matches a route.
-    // Then NormalizePath can remove a trailing slash from the path. A layer
-    // added with `Router::layer` runs after the route match. Thus, a request
-    // with a trailing slash does not match a route. The code sets the normalized
-    // router as the fallback service of an empty router. As a result, every request
-    // goes to this fallback service, and the public return type remains
-    // `Router`.
+    // Added via `Router::layer`, NormalizePathLayer runs *after* route matching
+    // and never trims before routing (`/blocks/latest/` would miss its route).
+    // Wrap the router with it and nest that behind an outer `Router` via
+    // `fallback_service`, so trimming happens before routing while the public
+    // return type stays `Router` (the wrapped type is an implementation detail).
     let normalized = NormalizePathLayer::trim_trailing_slash().layer(router);
     Router::new().fallback_service(normalized)
 }
@@ -736,6 +764,7 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
+    Option<GovState>: From<D::Entity>,
 {
     type Config = MinibfConfig;
 
@@ -806,5 +835,72 @@ mod base_path_tests {
             StatusCode::OK,
             "the base path with a trailing slash did not resolve to the root route"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use serde_json::{json, Value};
+
+    use crate::test_support::TestApp;
+
+    /// These paths match no route. The first five paths are from issue #1323:
+    /// unknown endpoints and paths with too few segments. The sixth path
+    /// contains an empty segment in the middle. `NormalizePathLayer` removes
+    /// only the slashes at the start and at the end of a path. As a result,
+    /// the router receives `/blocks//latest` unchanged.
+    const UNMATCHED_PATHS: &[&str] = &[
+        "/nonexistent",
+        "/foo/bar/baz",
+        "/txs",
+        "/blocks/latest/nope",
+        "/blocks/epoch/2/slot",
+        "/blocks//latest",
+    ];
+
+    #[tokio::test]
+    async fn unmatched_paths_answer_with_blockfrost_invalid_path() {
+        let app = TestApp::new();
+
+        for path in UNMATCHED_PATHS {
+            let (status, bytes) = app.get_bytes(path).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "unexpected status {status} for {path} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+
+            let body: Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| panic!("no json body for {path}"));
+            assert_eq!(
+                body,
+                json!({
+                    "status_code": 400,
+                    "error": "Bad Request",
+                    "message": "Invalid path.",
+                }),
+                "unexpected body for {path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_is_trimmed_before_routing() {
+        let app = TestApp::new();
+
+        // `/blocks/latest/` normalizes to `/blocks/latest` and resolves, the
+        // same 200 Blockfrost returns — a regression guard for the layer order.
+        let (status, _) = app.get_bytes("/blocks/latest/").await;
+        assert_eq!(status, StatusCode::OK);
+
+        // `/blocks/slot/` normalizes to `/blocks/slot`, which the
+        // `/blocks/{hash_or_number}` route rejects as a malformed hash (the
+        // same 400 Blockfrost returns), not the invalid-path fallback.
+        let (status, bytes) = app.get_bytes("/blocks/slot/").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body: Value = serde_json::from_slice(&bytes).expect("json body for /blocks/slot/");
+        assert_eq!(body["message"], json!("Missing or malformed block hash."));
     }
 }

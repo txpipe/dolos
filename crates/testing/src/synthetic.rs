@@ -23,9 +23,10 @@ use pallas::{
         primitives::{
             alonzo,
             conway::{
-                Anchor, Certificate, DatumOption, GovAction, PlutusData,
-                PostAlonzoTransactionOutput, ProposalProcedure, ScriptRef, TransactionBody,
-                TransactionOutput, Value, WitnessSet,
+                Anchor, Certificate, DRep, DatumOption, GovAction, GovActionId, PlutusData,
+                PlutusScript, PostAlonzoTransactionOutput, ProposalProcedure, ScriptRef,
+                TransactionBody, TransactionOutput, Value, Vote, Voter, VotingProcedure,
+                VotingProcedures, WitnessSet,
             },
             AddrKeyhash, Bytes, NonEmptySet, NonZeroInt, PositiveCoin, Relay, Set, StakeCredential,
             TransactionInput, VrfKeyhash,
@@ -57,6 +58,10 @@ pub struct SyntheticBlockConfig {
     pub drep_keyhash: [u8; 28],
     pub drep_deposit: u64,
     pub gov_actions_by_block: Vec<BlockGovActions>,
+    pub votes_by_block: Vec<BlockVotes>,
+    /// Certificates to append to each tx, after the ones every synthetic tx
+    /// carries.
+    pub extra_certs_by_block: Vec<BlockCerts>,
     pub proposal_deposit: u64,
     /// Fund each tx from the previous block's tx at the same index instead of
     /// from a fresh `seed_address` UTxO.
@@ -67,6 +72,12 @@ pub struct SyntheticBlockConfig {
     /// resolvable input, which is what the endpoints reading the spent side of
     /// a tx need.
     pub spend_previous_outputs: bool,
+    /// Indices of the phase-2-invalid txs in each block. Each outer entry
+    /// represents one block; an empty list leaves every tx valid.
+    pub invalid_txs_by_block: Vec<Vec<u32>>,
+    /// Blocks whose txs mint nothing and pay lovelace only. Each entry
+    /// represents one block; a missing entry keeps the asset.
+    pub ada_only_by_block: Vec<bool>,
 }
 
 /// Build a testnet Shelley address with both payment and stake key parts.
@@ -124,13 +135,42 @@ impl Default for SyntheticBlockConfig {
             drep_keyhash: [7u8; 28],
             drep_deposit: 1000,
             gov_actions_by_block: vec![],
+            votes_by_block: vec![],
+            extra_certs_by_block: vec![],
             proposal_deposit: 100_000_000,
             spend_previous_outputs: false,
+            invalid_txs_by_block: vec![],
+            ada_only_by_block: vec![],
         }
     }
 }
 
 pub type BlockGovActions = Vec<Vec<GovAction>>;
+
+/// A synthetic vote identifies its target by block index, transaction index,
+/// and action index. These indices identify the action location in the chain.
+/// Transaction hashes do not exist until the block build is complete.
+#[derive(Clone, Copy, Debug)]
+pub struct SyntheticProposalRef {
+    pub block: usize,
+    pub tx: usize,
+    pub action: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct SyntheticVote {
+    pub voter: Voter,
+    pub proposal: SyntheticProposalRef,
+    pub vote: Vote,
+}
+
+/// Votes in each transaction of a block. Each outer entry represents one
+/// transaction.
+pub type BlockVotes = Vec<Vec<SyntheticVote>>;
+
+/// Extra certificates in each transaction of a block. Each outer entry
+/// represents one transaction.
+pub type BlockCerts = Vec<Vec<Certificate>>;
 
 #[derive(Clone, Debug)]
 pub struct SyntheticVectors {
@@ -146,6 +186,7 @@ pub struct SyntheticVectors {
     pub datum_cbor_hex: String,
     pub script_hash: String,
     pub script_cbor_hex: String,
+    pub plutus_script_hash: String,
     pub blocks: Vec<BlockVectors>,
     pub account_addresses: Vec<String>,
     pub account_address_blocks: Vec<(String, u64)>,
@@ -193,6 +234,8 @@ struct SyntheticFixtureExtras {
     script: pallas::ledger::primitives::alonzo::NativeScript,
     script_hash: Hash<28>,
     script_cbor: Vec<u8>,
+    plutus_script: PlutusScript<2>,
+    plutus_script_hash: Hash<28>,
 }
 
 struct SyntheticTxSpec {
@@ -264,6 +307,28 @@ pub fn build_synthetic_blocks(
         );
         cfg.gov_actions_by_block.clone()
     };
+
+    let votes_by_block = if cfg.votes_by_block.is_empty() {
+        vec![vec![]; block_count]
+    } else {
+        assert_eq!(
+            cfg.votes_by_block.len(),
+            block_count,
+            "The length of votes_by_block must equal the block count."
+        );
+        cfg.votes_by_block.clone()
+    };
+
+    let extra_certs_by_block = if cfg.extra_certs_by_block.is_empty() {
+        vec![vec![]; block_count]
+    } else {
+        assert_eq!(
+            cfg.extra_certs_by_block.len(),
+            block_count,
+            "The length of extra_certs_by_block must equal the block count."
+        );
+        cfg.extra_certs_by_block.clone()
+    };
     let policy_id_hex = hex::encode(cfg.policy_id);
     let asset_name_hex = hex::encode(asset_names[0].as_bytes());
     let fixture_extras = Some(build_datum_and_script_fixture());
@@ -305,12 +370,14 @@ pub fn build_synthetic_blocks(
     });
     let mut prev_block_hash: Option<Hash<32>> = None;
     let mut prev_block_tx_hashes: Vec<Hash<32>> = Vec::new();
+    let mut built_tx_hashes: Vec<Vec<Hash<32>>> = Vec::with_capacity(block_count);
 
     for (offset, asset_name) in asset_names.iter().enumerate() {
         let slot = cfg.slot + offset as u64;
         let block_number = cfg.start_block + offset as u64;
         let asset_name = Bytes::from(asset_name.as_bytes().to_vec());
-        let mut tx_specs = Vec::with_capacity(txs_per_block);
+        let ada_only = cfg.ada_only_by_block.get(offset).copied().unwrap_or(false);
+        let mut tx_specs: Vec<SyntheticTxSpec> = Vec::with_capacity(txs_per_block);
         let mut tx_hashes = Vec::with_capacity(txs_per_block);
         let mut withdrawal_amounts = Vec::with_capacity(txs_per_block);
 
@@ -389,6 +456,43 @@ pub fn build_synthetic_blocks(
                 .cloned()
                 .unwrap_or_default();
 
+            let voting_procedures = votes_by_block[offset]
+                .get(tx_offset)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .fold(VotingProcedures::new(), |mut procedures, vote| {
+                    assert!(
+                        vote.proposal.block < offset
+                            || (vote.proposal.block == offset && vote.proposal.tx < tx_offset),
+                        "A synthetic vote must target an earlier transaction."
+                    );
+
+                    let proposal_tx = if vote.proposal.block == offset {
+                        tx_specs[vote.proposal.tx].body.compute_hash()
+                    } else {
+                        built_tx_hashes[vote.proposal.block][vote.proposal.tx]
+                    };
+                    procedures.entry(vote.voter).or_default().insert(
+                        GovActionId {
+                            transaction_id: proposal_tx,
+                            action_index: vote.proposal.action,
+                        },
+                        VotingProcedure {
+                            vote: vote.vote,
+                            anchor: None,
+                        },
+                    );
+                    procedures
+                });
+
+            let voting_procedures = (!voting_procedures.is_empty()).then_some(voting_procedures);
+
+            let extra_certs = extra_certs_by_block[offset]
+                .get(tx_offset)
+                .cloned()
+                .unwrap_or_default();
+
             tx_specs.push(sample_transaction(
                 Bytes::from(output_address),
                 cfg.lovelace,
@@ -397,6 +501,7 @@ pub fn build_synthetic_blocks(
                 asset_name.clone(),
                 cfg.asset_amount,
                 cfg.mint_amount,
+                ada_only,
                 stake_cred.clone(),
                 pool_keyhash,
                 cfg.pool_relays.clone(),
@@ -406,17 +511,23 @@ pub fn build_synthetic_blocks(
                 if tx_offset == 0 { Some(aux_hash) } else { None },
                 extras,
                 gov_actions,
+                voting_procedures,
+                extra_certs,
                 cfg.proposal_deposit,
             ));
         }
 
-        let (block, hashes) = sample_block(
+        let (mut block, hashes) = sample_block(
             block_number,
             slot,
             prev_block_hash,
             tx_specs,
             Some(aux_data),
         );
+
+        if let Some(invalid) = cfg.invalid_txs_by_block.get(offset) {
+            block.invalid_transactions = (!invalid.is_empty()).then(|| invalid.clone());
+        }
 
         for (idx, hash) in hashes.iter().enumerate() {
             let tx_hash = hex::encode(hash.as_ref());
@@ -430,6 +541,7 @@ pub fn build_synthetic_blocks(
         let block_hash = block.header.compute_hash();
         prev_block_hash = Some(block_hash);
         prev_block_tx_hashes = hashes.clone();
+        built_tx_hashes.push(hashes.clone());
         let wrapper = (7, block);
         let raw_block = Arc::new(minicbor::to_vec(wrapper).unwrap());
 
@@ -506,6 +618,10 @@ pub fn build_synthetic_blocks(
             .as_ref()
             .map(|x| hex::encode(&x.script_cbor))
             .unwrap_or_default(),
+        plutus_script_hash: fixture_extras
+            .as_ref()
+            .map(|x| x.plutus_script_hash.to_string())
+            .unwrap_or_default(),
         blocks: block_vectors,
         account_addresses,
         account_address_blocks,
@@ -528,6 +644,10 @@ fn build_datum_and_script_fixture() -> SyntheticFixtureExtras {
     let script_hash = script.compute_hash();
     let script_cbor = minicbor::to_vec(&script).expect("failed to encode synthetic script");
 
+    // Any bytes hash as a script; the fixture never evaluates it.
+    let plutus_script = PlutusScript::<2>(Bytes::from(vec![0x4d, 0x01, 0x00, 0x00, 0x22]));
+    let plutus_script_hash = plutus_script.compute_hash();
+
     SyntheticFixtureExtras {
         datum,
         datum_hash,
@@ -535,6 +655,8 @@ fn build_datum_and_script_fixture() -> SyntheticFixtureExtras {
         script,
         script_hash,
         script_cbor,
+        plutus_script,
+        plutus_script_hash,
     }
 }
 
@@ -687,6 +809,7 @@ fn sample_transaction(
     asset_name: Bytes,
     asset_amount: u64,
     mint_amount: i64,
+    ada_only: bool,
     stake_cred: StakeCredential,
     pool_keyhash: Hash<28>,
     pool_relays: Vec<Relay>,
@@ -696,6 +819,8 @@ fn sample_transaction(
     auxiliary_data_hash: Option<Hash<32>>,
     extras: Option<&SyntheticFixtureExtras>,
     gov_actions: Vec<GovAction>,
+    voting_procedures: Option<VotingProcedures>,
+    extra_certs: Vec<Certificate>,
     proposal_deposit: u64,
 ) -> SyntheticTxSpec {
     let input = TransactionInput {
@@ -703,17 +828,24 @@ fn sample_transaction(
         index: 0,
     };
 
-    let mint_amount = NonZeroInt::try_from(mint_amount).expect("mint amount must be non-zero");
-    let mut mint_assets = BTreeMap::new();
-    mint_assets.insert(asset_name.clone(), mint_amount);
-    let mut mint = BTreeMap::new();
-    mint.insert(policy_id, mint_assets);
+    let (value, mint) = if ada_only {
+        (Value::Coin(lovelace), None)
+    } else {
+        let mint_amount = NonZeroInt::try_from(mint_amount).expect("mint amount must be non-zero");
+        let mut mint_assets = BTreeMap::new();
+        mint_assets.insert(asset_name.clone(), mint_amount);
+        let mut mint = BTreeMap::new();
+        mint.insert(policy_id, mint_assets);
 
-    let asset_amount = PositiveCoin::try_from(asset_amount).expect("asset amount must be non-zero");
-    let mut output_assets = BTreeMap::new();
-    output_assets.insert(asset_name.clone(), asset_amount);
-    let mut output_multiasset = BTreeMap::new();
-    output_multiasset.insert(policy_id, output_assets);
+        let asset_amount =
+            PositiveCoin::try_from(asset_amount).expect("asset amount must be non-zero");
+        let mut output_assets = BTreeMap::new();
+        output_assets.insert(asset_name.clone(), asset_amount);
+        let mut output_multiasset = BTreeMap::new();
+        output_multiasset.insert(policy_id, output_assets);
+
+        (Value::Multiasset(lovelace, output_multiasset), Some(mint))
+    };
 
     let datum_option = extras.map(|extras| KeepRaw::from(DatumOption::Hash(extras.datum_hash)));
     let script_ref = extras.map(|extras| {
@@ -724,7 +856,7 @@ fn sample_transaction(
 
     let output = PostAlonzoTransactionOutput {
         address,
-        value: Value::Multiasset(lovelace, output_multiasset),
+        value,
         datum_option,
         script_ref,
     };
@@ -775,13 +907,24 @@ fn sample_transaction(
     };
 
     let delegation = Certificate::StakeDelegation(stake_cred.clone(), pool_keyhash);
-    let registration = Certificate::StakeRegistration(stake_cred);
+    let registration = Certificate::StakeRegistration(stake_cred.clone());
 
     let drep_cred = StakeCredential::AddrKeyhash(AddrKeyhash::from(drep_keyhash));
     let drep_cert = Certificate::RegDRepCert(drep_cred, drep_deposit, None);
+    // The stake credential delegates its vote to the DRep in the same tx that
+    // registers the DRep.
+    let vote_delegation = Certificate::VoteDeleg(stake_cred, DRep::Key(drep_keyhash.into()));
 
-    let certificates = NonEmptySet::try_from(vec![registration, delegation, pool_cert, drep_cert])
-        .expect("non-empty certificates");
+    let mut certificates = vec![
+        registration,
+        delegation,
+        pool_cert,
+        drep_cert,
+        vote_delegation,
+    ];
+    certificates.extend(extra_certs);
+
+    let certificates = NonEmptySet::try_from(certificates).expect("non-empty certificates");
 
     let body = TransactionBody {
         inputs: Set::from(vec![input]),
@@ -792,7 +935,7 @@ fn sample_transaction(
         withdrawals,
         auxiliary_data_hash,
         validity_interval_start: Some(5),
-        mint: Some(mint),
+        mint,
         script_data_hash: None,
         collateral: None,
         required_signers: Some(
@@ -803,7 +946,7 @@ fn sample_transaction(
         collateral_return: None,
         total_collateral: None,
         reference_inputs: None,
-        voting_procedures: None,
+        voting_procedures,
         proposal_procedures,
         treasury_value: None,
         donation: None,
@@ -821,7 +964,10 @@ fn sample_transaction(
             )
         }),
         redeemer: None,
-        plutus_v2_script: None,
+        plutus_v2_script: extras.map(|extras| {
+            NonEmptySet::try_from(vec![extras.plutus_script.clone()])
+                .expect("non-empty plutus script set")
+        }),
         plutus_v3_script: None,
     };
 
@@ -891,6 +1037,93 @@ fn sample_block(
     };
 
     (block, body_hashes)
+}
+
+/// A minimal Alonzo block holding one tx that carries the given
+/// certificates.
+///
+/// MIR certificates exist only in pre-Conway eras, so a test that needs one
+/// appends this block to a synthetic chain. `input` must name a live UTxO of
+/// that chain — the roll pipeline resolves every input it applies. Returns
+/// the raw block, its hash and the tx hash.
+pub fn sample_alonzo_cert_block(
+    block_number: u64,
+    slot: u64,
+    prev_hash: Option<Hash<32>>,
+    input: TransactionInput,
+    certificates: Vec<alonzo::Certificate>,
+) -> (RawBlock, Hash<32>, Hash<32>) {
+    let body = alonzo::TransactionBody {
+        inputs: vec![input],
+        outputs: vec![],
+        fee: 7,
+        ttl: None,
+        certificates: Some(certificates),
+        withdrawals: None,
+        update: None,
+        auxiliary_data_hash: None,
+        validity_interval_start: None,
+        mint: None,
+        script_data_hash: None,
+        collateral: None,
+        required_signers: None,
+        network_id: None,
+    };
+
+    let tx_hash = body.compute_hash();
+
+    let header = alonzo::Header {
+        header_body: alonzo::HeaderBody {
+            block_number,
+            slot,
+            prev_hash,
+            issuer_vkey: Bytes::from(vec![0x10, 0x11]),
+            vrf_vkey: Bytes::from(vec![0x12, 0x13]),
+            // the nonce evolution reads the eta VRF output, which has to be
+            // 32 or 64 bytes
+            nonce_vrf: pallas::ledger::primitives::VrfCert(
+                Bytes::from(vec![0x14; 32]),
+                Bytes::from(vec![0x15]),
+            ),
+            leader_vrf: pallas::ledger::primitives::VrfCert(
+                Bytes::from(vec![0x14; 32]),
+                Bytes::from(vec![0x15]),
+            ),
+            block_body_size: 0,
+            block_body_hash: Hash::from([0u8; 32]),
+            operational_cert_hot_vkey: Bytes::from(vec![0x16]),
+            operational_cert_sequence_number: 1,
+            operational_cert_kes_period: 0,
+            operational_cert_sigma: Bytes::from(vec![0x17]),
+            protocol_major: 6,
+            protocol_minor: 0,
+        },
+        body_signature: Bytes::from(vec![0x18]),
+    };
+
+    let block_hash = header.compute_hash();
+
+    let witness_set = alonzo::WitnessSet {
+        vkeywitness: None,
+        native_script: None,
+        bootstrap_witness: None,
+        plutus_script: None,
+        plutus_data: None,
+        redeemer: None,
+    };
+
+    let block = alonzo::Block {
+        header: KeepRaw::from(header),
+        transaction_bodies: vec![KeepRaw::from(body)],
+        transaction_witness_sets: vec![KeepRaw::from(witness_set)],
+        auxiliary_data_set: BTreeMap::new(),
+        invalid_transactions: None,
+    };
+
+    let wrapper = (5, block);
+    let raw = Arc::new(minicbor::to_vec(wrapper).expect("failed to encode alonzo block"));
+
+    (raw, block_hash, tx_hash)
 }
 
 fn pool_keyhash_from_bech32(pool_id: &str) -> Result<Hash<28>, bech32::Error> {

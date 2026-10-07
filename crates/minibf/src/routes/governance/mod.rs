@@ -1,6 +1,6 @@
 mod mapping;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use self::mapping::description_json;
 
@@ -10,7 +10,13 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
+    committee::Committee,
+    committee_members_inner::{CommitteeMembersInner, Status},
+    committee_quorum::CommitteeQuorum,
+    drep_delegators_inner::DrepDelegatorsInner,
     drep_metadata::DrepMetadata,
+    drep_updates_inner::{self, DrepUpdatesInner},
+    drep_votes_inner::{self, DrepVotesInner},
     proposal::{self, Proposal},
     proposal_metadata::ProposalMetadata,
     proposal_metadata_v2::ProposalMetadataV2,
@@ -21,24 +27,39 @@ use blockfrost_openapi::models::{
     DrepsInnerMetadataError,
 };
 use dolos_cardano::{
-    model::{DRepState, FixedNamespace as _, ProposalAction, ProposalState},
+    indexes::CardanoArchiveIndexExt as _,
+    model::{
+        drep_from_entity_key,
+        gov::{CommitteeAuthorization, GovState},
+        AccountState, DRepState, FixedNamespace as _, ProposalAction, ProposalState,
+        SingletonEntity as _,
+    },
     pallas_extras, ChainSummary, PParamsSet,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
+use dolos_core::{
+    ArchiveError, ArchiveStore as _, BlockBody, BlockSlot, Domain, EntityKey, StateStore as _,
+    TxOrder,
+};
+use itertools::Itertools;
 use pallas::{
     crypto::hash::Hash,
     ledger::{
         addresses::Network,
-        primitives::{conway::GovAction, Coin, Epoch, StakeCredential},
+        primitives::{
+            conway::{DRep, GovAction, Vote, Voter},
+            Coin, Epoch, StakeCredential,
+        },
         traverse::{MultiEraBlock, MultiEraTx},
     },
 };
 
 use crate::{
     error::Error,
+    log_and_500,
     mapping::{
-        anchor_offchain_metadata, bech32, bech32_gov_action, i32_or_500, parse_gov_action_id,
-        rational_to_f64_unrounded, stake_cred_to_address, AnchorMetadata, IntoModel, Unrounded,
+        anchor_offchain_metadata, bech32, bech32_committee_cold, bech32_committee_hot,
+        bech32_gov_action, i32_or_500, parse_gov_action_id, rational_to_f64_unrounded,
+        stake_cred_to_address, AnchorMetadata, IntoModel, Unrounded,
     },
     pagination::{Order, Pagination, PaginationParameters},
     routes::epochs::mapping::{map_cost_models_raw, protocol_params_model},
@@ -323,6 +344,274 @@ where
     }))
 }
 
+struct DrepDelegatorModelBuilder {
+    delegator: StakeCredential,
+    live_stake: u64,
+    network: Network,
+}
+
+impl IntoModel<DrepDelegatorsInner> for DrepDelegatorModelBuilder {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<DrepDelegatorsInner, StatusCode> {
+        let address = stake_cred_to_address(&self.delegator, self.network)
+            .to_bech32()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(DrepDelegatorsInner {
+            address,
+            amount: self.live_stake.to_string(),
+        })
+    }
+}
+
+/// One account that delegates its vote to the requested DRep.
+struct DrepDelegatorRow {
+    delegated_at: Option<(BlockSlot, TxOrder)>,
+    key: EntityKey,
+    delegator: StakeCredential,
+    live_stake: u64,
+}
+
+impl DrepDelegatorRow {
+    fn new(key: EntityKey, account: AccountState) -> Self {
+        Self {
+            delegated_at: account.vote_delegated_at,
+            key,
+            live_stake: account.live_stake(),
+            delegator: account.credential,
+        }
+    }
+
+    /// Blockfrost orders delegators by their latest vote delegation.
+    fn sort_key(&self) -> (Option<(BlockSlot, TxOrder)>, &EntityKey) {
+        (self.delegated_at, &self.key)
+    }
+}
+
+/// Whether Blockfrost counts `account` as a delegator of `drep`.
+///
+/// A delegation made before the DRep's latest registration does not count.
+fn delegates_to(
+    account: &AccountState,
+    drep: &DRep,
+    registered_at: Option<(BlockSlot, TxOrder)>,
+) -> bool {
+    if account.delegated_drep_live() != Some(drep) {
+        return false;
+    }
+
+    match registered_at {
+        Some(cutoff) => account.vote_delegated_at.is_some_and(|at| at >= cutoff),
+        None => true,
+    }
+}
+
+pub async fn drep_delegators<D>(
+    Path(drep_id): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<DrepDelegatorsInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<AccountState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
+{
+    let (_, drep_key, _, is_special_case) = parse_drep_id(&drep_id)?;
+    let pagination = Pagination::try_from(params)?;
+
+    let drep_key = EntityKey::from(drep_key);
+    let drep = drep_from_entity_key(&drep_key).ok_or(StatusCode::BAD_REQUEST)?;
+
+    let registered_at = if is_special_case {
+        None
+    } else {
+        match domain.read_cardano_entity::<DRepState>(drep_key)? {
+            Some(state) if !state.is_unregistered() => state.registered_at,
+            // Blockfrost returns an empty list for an unknown or retired DRep.
+            _ => return Ok(Json(vec![])),
+        }
+    };
+
+    let network = domain.get_network_id()?;
+
+    let scan = domain.clone();
+    let mut rows =
+        tokio::task::spawn_blocking(move || -> Result<Vec<DrepDelegatorRow>, StatusCode> {
+            scan.iter_cardano_entities::<AccountState>(None)?
+                .filter_ok(|(_, account)| delegates_to(account, &drep, registered_at))
+                .map_ok(|(key, account)| DrepDelegatorRow::new(key, account))
+                .collect::<Result<_, _>>()
+                .map_err(log_and_500("failed to scan drep delegators"))
+        })
+        .await
+        .map_err(log_and_500("drep delegators scan task failed"))??;
+
+    rows.sort_unstable_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+
+    if matches!(pagination.order, Order::Desc) {
+        rows.reverse();
+    }
+
+    let page = rows
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|row| {
+            DrepDelegatorModelBuilder {
+                delegator: row.delegator,
+                live_stake: row.live_stake,
+                network,
+            }
+            .into_model()
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(page))
+}
+
+/// This function returns the 28-byte credential hash as hex and a script flag.
+/// Blockfrost serves this pair (`cc_*_hex` and `cc_*_has_script`) beside each
+/// CIP-129 committee ID.
+fn committee_credential_parts(cred: &StakeCredential) -> (String, bool) {
+    match cred {
+        StakeCredential::AddrKeyhash(key) => (hex::encode(key), false),
+        StakeCredential::ScriptHash(key) => (hex::encode(key), true),
+    }
+}
+
+/// This function resolves one committee member against its hot-key
+/// authorization history.
+///
+/// The code uses the last event in the authorization history to select the
+/// status. There are three possible events:
+///
+/// - No event: the member never authorized a hot key (`not_authorized`).
+/// - A resignation: the hot key is gone (`resigned`).
+/// - A hot credential: the member can vote now (`authorized`).
+///
+/// The `cc_hot_*` fields carry the hot credential only for the `authorized`
+/// status. For the other two statuses, these fields are null. This behavior is
+/// the same as Blockfrost.
+fn committee_member(
+    gov: &GovState,
+    cold: &StakeCredential,
+    expiry: Epoch,
+) -> Result<CommitteeMembersInner, StatusCode> {
+    let (cc_cold_hex, cc_cold_has_script) = committee_credential_parts(cold);
+
+    let (status, hot) = match gov.committee_auth(cold) {
+        None => (Status::NotAuthorized, None),
+        Some(CommitteeAuthorization::Resigned(_)) => (Status::Resigned, None),
+        Some(CommitteeAuthorization::HotCredential(hot)) => (Status::Authorized, Some(hot)),
+    };
+
+    let (cc_hot_id, cc_hot_hex, cc_hot_has_script) = match hot {
+        Some(hot) => {
+            let (hex, is_script) = committee_credential_parts(hot);
+            (Some(bech32_committee_hot(hot)?), Some(hex), Some(is_script))
+        }
+        None => (None, None, None),
+    };
+
+    Ok(CommitteeMembersInner {
+        cc_cold_id: bech32_committee_cold(cold)?,
+        cc_cold_hex,
+        cc_cold_has_script,
+        cc_hot_id,
+        cc_hot_hex,
+        cc_hot_has_script,
+        status,
+        expiration_epoch: i32_or_500(expiry)?,
+    })
+}
+
+/// This function resolves all committee members against their authorization
+/// history. It orders the members by the raw cold-hash hex, as Blockfrost does.
+fn committee_members(
+    gov: &GovState,
+    members: &BTreeMap<StakeCredential, Epoch>,
+) -> Result<Vec<CommitteeMembersInner>, StatusCode> {
+    let mut rows = members
+        .iter()
+        .map(|(cold, expiry)| committee_member(gov, cold, *expiry))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    rows.sort_by(|a, b| a.cc_cold_hex.cmp(&b.cc_cold_hex));
+
+    Ok(rows)
+}
+
+/// The `GET /governance/committee` endpoint returns the constitutional
+/// committee in force. The response gives the members, the hot-key
+/// authorization status of each member, the vote threshold, and the
+/// `NewCommittee` action that seated the committee.
+///
+/// Dolos keeps three items in the governance singleton: the enacted
+/// committee, the per-member authorization history, and the root of the
+/// previous committee action. This is the same data that Blockfrost
+/// reconstructs from the db-sync tables `committee`, `committee_member`, and
+/// `committee_registration` or `_de_registration`. The Conway-genesis
+/// committee has no seating action. Its `gov_action_id`, `proposal_tx_hash`,
+/// and `proposal_index` are null.
+///
+/// A `NoConfidence` enactment dissolves the committee. Dolos does not keep the
+/// last-seated members. It sets the committee value to null. As a result, a
+/// dissolved committee has `is_dissolved` true, an empty member list, and a
+/// zero quorum. Blockfrost is different. It still returns the historical
+/// members.
+///
+/// The `is_dissolved` flag depends on evidence of a committee lineage action,
+/// not on governance activation. A previous committee action on record makes a
+/// null committee a dissolution. A null committee with no such action is not a
+/// dissolution.
+///
+/// A store migrated across the in-place upgrade gap has an unknown enact-state:
+/// a null committee with no lineage root. The endpoint does not report this
+/// state as a dissolution. A fresh sync recovers the true state. If governance
+/// is not active (`active_since` unset), no committee exists. The endpoint then
+/// returns 404 instead of an empty committee.
+pub async fn committee<D>(State(domain): State<Facade<D>>) -> Result<Json<Committee>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<GovState>: From<D::Entity>,
+{
+    let gov = domain
+        .read_cardano_entity::<GovState>(GovState::singleton_key())?
+        .filter(|gov| gov.active_since.is_some())
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let (gov_action_id, proposal_tx_hash, proposal_index) =
+        match gov.prev_gov_action_ids.committee.as_ref() {
+            Some(id) => (
+                Some(bech32_gov_action(&id.transaction_id, id.action_index)?),
+                Some(hex::encode(id.transaction_id)),
+                Some(i32_or_500(id.action_index)?),
+            ),
+            None => (None, None, None),
+        };
+
+    let (quorum, members) = match gov.committee.as_ref() {
+        Some(committee) => (
+            CommitteeQuorum {
+                numerator: i32_or_500(committee.threshold.numerator)?,
+                denominator: i32_or_500(committee.threshold.denominator)?,
+            },
+            committee_members(&gov, &committee.members)?,
+        ),
+        None => (CommitteeQuorum::default(), Vec::new()),
+    };
+
+    Ok(Json(Committee {
+        gov_action_id,
+        proposal_tx_hash,
+        proposal_index,
+        is_dissolved: gov.committee.is_none() && gov.prev_gov_action_ids.committee.is_some(),
+        quorum: Box::new(quorum),
+        members,
+    }))
+}
+
 struct ProposalRow {
     slot: BlockSlot,
     tx: Hash<32>,
@@ -398,25 +687,27 @@ fn order_within_block<D: Domain>(
     Ok(())
 }
 
-/// Order the listing the way Blockfrost does — by the order the chain saw the
-/// proposals — and cut it down to the requested page.
+/// This function selects a page from a listing that uses slots as its primary
+/// order.
 ///
-/// Proposals of one block form a group whose place in the listing the slot
-/// already fixes, so the block behind a group is only read once the page
-/// reaches it: a page costs at most as many block reads as it has rows, and
-/// only for blocks that proposed more than once.
-fn select_proposals<D: Domain>(
-    domain: &D,
-    mut proposals: Vec<ProposalRow>,
+/// Rows with the same slot form a group. The slot determines the position of
+/// the group. `settle` reads blocks only for groups that overlap the requested
+/// page. Thus, the page reads no more blocks than it contains rows.
+///
+/// The caller supplies `rows` in ascending slot order. It also supplies a
+/// deterministic order for rows with the same slot. If the archive does not
+/// contain a block, the group keeps this order.
+fn page_slot_groups<T>(
+    rows: Vec<T>,
+    slot_of: impl Fn(&T) -> BlockSlot,
     pagination: &Pagination,
-) -> Result<Vec<ProposalRow>, Error> {
-    proposals.sort_unstable_by_key(|row| (row.slot, row.tx, row.idx));
+    mut settle: impl FnMut(BlockSlot, &mut Vec<T>) -> Result<(), Error>,
+) -> Result<Vec<T>, Error> {
+    let mut groups: Vec<Vec<T>> = Vec::new();
 
-    let mut groups: Vec<Vec<ProposalRow>> = Vec::new();
-
-    for row in proposals {
+    for row in rows {
         match groups.last_mut() {
-            Some(group) if group[0].slot == row.slot => group.push(row),
+            Some(group) if slot_of(&group[0]) == slot_of(&row) => group.push(row),
             _ => groups.push(vec![row]),
         }
     }
@@ -445,7 +736,7 @@ fn select_proposals<D: Domain>(
             break;
         }
 
-        order_within_block(domain, group[0].slot, &mut group)?;
+        settle(slot_of(&group[0]), &mut group)?;
 
         // desc is the whole asc listing read backwards, group order included
         if descending {
@@ -462,6 +753,23 @@ fn select_proposals<D: Domain>(
     }
 
     Ok(out)
+}
+
+/// This function orders proposals by chain order and selects the requested
+/// page.
+fn select_proposals<D: Domain>(
+    domain: &D,
+    mut proposals: Vec<ProposalRow>,
+    pagination: &Pagination,
+) -> Result<Vec<ProposalRow>, Error> {
+    proposals.sort_unstable_by_key(|row| (row.slot, row.tx, row.idx));
+
+    page_slot_groups(
+        proposals,
+        |row| row.slot,
+        pagination,
+        |slot, group| order_within_block(domain, slot, group),
+    )
 }
 
 /// The page of `GET /governance/proposals`, read off the state and ordered
@@ -536,6 +844,390 @@ where
         .run_blocking(move |domain| Ok(read_page(&domain, &pagination)))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    Ok(Json(page))
+}
+
+/// A vote and the transaction that contains the vote.
+pub(crate) struct CastVote {
+    /// The hash of the transaction that contains the vote.
+    pub tx: Hash<32>,
+
+    /// The index of the vote in the ballot of the voter in `tx`.
+    pub cert_index: u32,
+
+    pub proposal_tx: Hash<32>,
+    pub proposal_idx: u32,
+    pub vote: Vote,
+}
+
+/// This function converts a DRep ID to the voter key of its ballots.
+///
+/// `parse_drep_id` builds the same bytes that `drep_to_entity_key` writes.
+/// Thus, `drep_from_entity_key` reads them back. The CIP-129 header rule
+/// stays in `dolos-cardano`, next to the writer.
+fn drep_voter(drep_key: &EntityKey) -> Result<Voter, StatusCode> {
+    match drep_from_entity_key(drep_key) {
+        Some(DRep::Key(hash)) => Ok(Voter::DRepKey(hash)),
+        Some(DRep::Script(hash)) => Ok(Voter::DRepScript(hash)),
+        Some(DRep::Abstain | DRep::NoConfidence) | None => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+/// This function converts a ledger vote to a Blockfrost value.
+fn vote_model(vote: &Vote) -> drep_votes_inner::Vote {
+    match vote {
+        Vote::Yes => drep_votes_inner::Vote::Yes,
+        Vote::No => drep_votes_inner::Vote::No,
+        Vote::Abstain => drep_votes_inner::Vote::Abstain,
+    }
+}
+
+/// This function returns the votes of one voter in one block, in Blockfrost
+/// order: the position of the transaction first, then the index of the vote in
+/// the ballot of the voter. A repeated vote on the same proposal is a separate
+/// row.
+///
+/// `cert_index` is the index in one voter ballot. db-sync restarts this value
+/// for each voter. The ledger stores each ballot in a map that uses governance
+/// action IDs as keys. Thus, the order uses the proposal transaction hash
+/// first and the action index second.
+///
+/// The ledger ignores the votes of a phase-2-invalid transaction, so the
+/// function skips those transactions.
+fn voter_casts_in_block(block: &MultiEraBlock, voter: &Voter) -> Vec<CastVote> {
+    let mut out = Vec::new();
+
+    for tx in block.txs() {
+        if !tx.is_valid() {
+            continue;
+        }
+
+        let MultiEraTx::Conway(conway) = &tx else {
+            continue;
+        };
+
+        let Some(ballot) = conway
+            .transaction_body
+            .voting_procedures
+            .as_ref()
+            .and_then(|procedures| procedures.get(voter))
+        else {
+            continue;
+        };
+
+        for (cert_index, (action, procedure)) in ballot.iter().enumerate() {
+            out.push(CastVote {
+                tx: tx.hash(),
+                cert_index: cert_index as u32,
+                proposal_tx: action.transaction_id,
+                proposal_idx: action.action_index,
+                vote: procedure.vote.clone(),
+            });
+        }
+    }
+
+    out
+}
+
+/// This function reads the vote blocks of one voter from the archive, in the
+/// requested order, and returns the votes on the requested page. The votes
+/// are in chain order, or in the opposite order for `Order::Desc`. Chain order
+/// is the order of the blocks, then the position of the transaction in the
+/// block, then the ballot index.
+///
+/// The `voter_votes` archive dimension gives the blocks that hold votes of the
+/// voter. The function reads blocks only until the page is full, and at most
+/// `budget` of them. Votes are listed up to `tip`, the state cursor.
+///
+/// A block that the archive no longer holds leaves the list, and the votes
+/// after it move up. The other history endpoints do the same under
+/// `sync.max_history`.
+pub(crate) fn voter_casts<D: Domain>(
+    domain: &D,
+    voter: &Voter,
+    tip: BlockSlot,
+    pagination: &Pagination,
+    budget: usize,
+) -> Result<Vec<CastVote>, Error> {
+    let archive = domain.archive();
+
+    let slots = archive
+        .slots_by_voter_votes(&pallas_extras::voter_id_bytes(voter), 0, tip)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let descending = matches!(pagination.order, Order::Desc);
+
+    let slots: Box<dyn Iterator<Item = _>> = if descending {
+        Box::new(slots.rev())
+    } else {
+        Box::new(slots)
+    };
+
+    let blocks = slots.map(|slot| archive.get_block_by_slot(&slot?));
+
+    let rows = collect_block_rows(blocks, descending, pagination.to(), budget, |block| {
+        Ok(voter_casts_in_block(block, voter))
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect())
+}
+
+fn vote_page<D: Domain>(
+    domain: &D,
+    voter: &Voter,
+    tip: BlockSlot,
+    pagination: &Pagination,
+    budget: usize,
+) -> Result<Vec<DrepVotesInner>, Error> {
+    voter_casts(domain, voter, tip, pagination, budget)?
+        .into_iter()
+        .map(|cast| {
+            Ok(DrepVotesInner {
+                tx_hash: hex::encode(cast.tx),
+                cert_index: i32_or_500(cast.cert_index)?,
+                proposal_id: bech32_gov_action(&cast.proposal_tx, cast.proposal_idx)?,
+                proposal_tx_hash: hex::encode(cast.proposal_tx),
+                proposal_cert_index: i32_or_500(cast.proposal_idx)?,
+                vote: vote_model(&cast.vote),
+            })
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()
+        .map_err(Error::from)
+}
+
+/// `GET /governance/dreps/{drep_id}/votes` lists all votes from a DRep in
+/// oldest-first order.
+///
+/// If a DRep does not exist or has no votes, the endpoint returns an empty
+/// list. It does not return 404.
+///
+/// `max_scan_items` limits both the page depth and the number of blocks that
+/// one request reads.
+pub async fn drep_votes<D>(
+    Path(drep_id): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<DrepVotesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
+
+    let (_, drep_bytes, _, is_special_case) = parse_drep_id(&drep_id)?;
+
+    // The two special DReps are delegation targets, not voters. They cannot
+    // cast votes.
+    if is_special_case {
+        return Ok(Json(Vec::new()));
+    }
+
+    let voter = drep_voter(&EntityKey::from(drep_bytes))?;
+    let tip = domain.get_tip_slot()?;
+    let budget = domain.config.max_scan_items() as usize;
+
+    let page = domain
+        .query()
+        .run_blocking(move |domain| Ok(vote_page(&domain, &voter, tip, &pagination, budget)))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    Ok(Json(page))
+}
+
+/// This function returns the certificates of one DRep in one block, in
+/// Blockfrost order: the position of the transaction first, then the position
+/// of the certificate in the transaction.
+///
+/// The ledger does not apply the certificates of a phase-2-invalid
+/// transaction, so the function skips those transactions.
+fn drep_updates_in_block(
+    block: &MultiEraBlock,
+    drep: &[u8],
+) -> Result<Vec<DrepUpdatesInner>, StatusCode> {
+    use drep_updates_inner::Action;
+
+    let mut out = Vec::new();
+
+    for tx in block.txs() {
+        if !tx.is_valid() {
+            continue;
+        }
+
+        for (cert_index, cert) in tx.certs().iter().enumerate() {
+            let update = if let Some(reg) = pallas_extras::cert_as_drep_registration(cert) {
+                Some((reg.cred, Action::Registered, Some(reg.deposit.to_string())))
+            } else if let Some(unreg) = pallas_extras::cert_as_drep_unregistration(cert) {
+                Some((unreg.cred, Action::Deregistered, None))
+            } else {
+                pallas_extras::cert_as_drep_update(cert).map(|cred| (cred, Action::Updated, None))
+            };
+
+            let Some((cred, action, deposit)) = update else {
+                continue;
+            };
+
+            // A block that is tagged for this DRep can also hold the
+            // certificates of other DReps.
+            if pallas_extras::drep_id_bytes(&cred) != drep {
+                continue;
+            }
+
+            out.push(DrepUpdatesInner {
+                tx_hash: tx.hash().to_string(),
+                cert_index: i32_or_500(cert_index)?,
+                action,
+                deposit,
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+/// This function reads tagged blocks in order and returns the rows that
+/// `rows_in_block` finds in them until it has `needed` rows.
+///
+/// A tagged block can hold no row, for example when its certificate or vote
+/// sits in a phase-2-invalid transaction. Such a block costs a read but adds
+/// no row. So the function stops with `ScanBudgetExceeded` when it has read
+/// `budget` blocks and still needs another one.
+fn collect_block_rows<T>(
+    mut blocks: impl Iterator<Item = Result<Option<BlockBody>, ArchiveError>>,
+    descending: bool,
+    needed: usize,
+    budget: usize,
+    mut rows_in_block: impl FnMut(&MultiEraBlock) -> Result<Vec<T>, StatusCode>,
+) -> Result<Vec<T>, Error> {
+    let mut rows = Vec::new();
+    let mut scanned = 0;
+
+    while rows.len() < needed {
+        let Some(body) = blocks.next() else {
+            break;
+        };
+
+        if scanned == budget {
+            return Err(Error::ScanBudgetExceeded);
+        }
+
+        scanned += 1;
+
+        // A block that the archive no longer has leaves the list. The other
+        // history endpoints do the same under `sync.max_history`.
+        let Some(body) = body.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? else {
+            continue;
+        };
+
+        let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let mut block_rows = rows_in_block(&block)?;
+
+        // The blocks come from the tip backward in descending order. The rows
+        // of each block are reversed too, so that the list is the exact
+        // reverse of the ascending list.
+        if descending {
+            block_rows.reverse();
+        }
+
+        rows.append(&mut block_rows);
+    }
+
+    Ok(rows)
+}
+
+/// This function reads the certificate blocks of one DRep from the archive, in
+/// the requested order, and returns its first `needed` updates.
+fn read_drep_updates<D: Domain>(
+    domain: &D,
+    drep: &[u8],
+    tip: BlockSlot,
+    descending: bool,
+    needed: usize,
+    budget: usize,
+) -> Result<Vec<DrepUpdatesInner>, Error> {
+    let archive = domain.archive();
+
+    let slots = archive
+        .slots_by_drep_certs(drep, 0, tip)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let slots: Box<dyn Iterator<Item = _>> = if descending {
+        Box::new(slots.rev())
+    } else {
+        Box::new(slots)
+    };
+
+    let blocks = slots.map(|slot| archive.get_block_by_slot(&slot?));
+
+    collect_block_rows(blocks, descending, needed, budget, |block| {
+        drep_updates_in_block(block, drep)
+    })
+}
+
+/// `GET /governance/dreps/{drep_id}/updates` lists the registration,
+/// deregistration and update certificates of a DRep in chain order.
+///
+/// Blockfrost has no existence check on this endpoint. An unknown DRep, and
+/// the two special DReps that have no certificates, return an empty list. They
+/// do not return 404.
+///
+/// The `drep_certs` archive dimension gives the blocks that hold certificates
+/// of the DRep. The endpoint reads blocks only until the requested page is
+/// full. `max_scan_items` limits both the page depth and the number of blocks
+/// that one request reads.
+pub async fn drep_updates<D>(
+    Path(drep_id): Path<String>,
+    Query(mut params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<DrepUpdatesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    // Drop `from`/`to` before validation: Blockfrost never reads them here,
+    // so a malformed or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
+    let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
+
+    let (_, drep_bytes, _, is_special_case) = parse_drep_id(&drep_id)?;
+
+    if is_special_case {
+        return Ok(Json(Vec::new()));
+    }
+
+    let tip = domain.get_tip_slot()?;
+    let descending = matches!(pagination.order, Order::Desc);
+    let needed = pagination.to();
+    let budget = domain.config.max_scan_items() as usize;
+
+    let rows = domain
+        .query()
+        .run_blocking(move |domain| {
+            Ok(read_drep_updates(
+                &domain,
+                &drep_bytes,
+                tip,
+                descending,
+                needed,
+                budget,
+            ))
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    let page = rows
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect();
 
     Ok(Json(page))
 }
@@ -1146,14 +1838,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mapping::bech32_drep;
     use crate::test_support::{TestApp, TestFault};
     use bech32::{Bech32, Hrp};
-    use dolos_cardano::model::GovPurpose;
+    use dolos_cardano::model::{drep_to_entity_key, DRepDelegation, EpochValue, GovPurpose, Stake};
     use dolos_core::StateWriter as _;
-    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
+    use dolos_testing::{
+        synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote},
+        toy_domain::ToyDomain,
+    };
     use itertools::Itertools;
     use pallas::{
-        codec::utils::Bytes,
+        codec::{minicbor, utils::Bytes},
         ledger::primitives::{
             conway::{
                 CostModels, DRepVotingThresholds, ExUnitPrices, GovAction, GovActionId,
@@ -1222,7 +1918,7 @@ mod tests {
     /// endpoint reads. The synthetic chain imported a registration with no
     /// anchor, and this function replaces it.
     fn seed_drep_anchor(domain: &ToyDomain, drep_bytes: Vec<u8>) {
-        use pallas::ledger::primitives::conway::{Anchor, DRep};
+        use pallas::ledger::primitives::conway::Anchor;
 
         // This code builds the identifier from the same bytes as the entity
         // key. If the keyhash of the synthetic vector changes, the identifier
@@ -1339,6 +2035,612 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}/metadata");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    fn drep_delegators_path(drep: &str) -> String {
+        format!("/governance/dreps/{drep}/delegators")
+    }
+
+    async fn get_drep_delegators(app: &TestApp, path: &str) -> Vec<DrepDelegatorsInner> {
+        let (status, body) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        serde_json::from_slice(&body).expect("failed to parse drep delegators")
+    }
+
+    fn synthetic_drep() -> DRep {
+        DRep::Key(SyntheticBlockConfig::default().drep_keyhash.into())
+    }
+
+    /// Overwrites the synthetic DRep state with the given registration bounds.
+    fn seed_drep(
+        domain: &ToyDomain,
+        registered_at: Option<(BlockSlot, TxOrder)>,
+        unregistered_at: Option<(BlockSlot, TxOrder)>,
+    ) {
+        let drep = synthetic_drep();
+        let mut state = DRepState::new(drep.clone());
+        state.registered_at = registered_at;
+        state.unregistered_at = unregistered_at;
+
+        let writer = domain
+            .state()
+            .start_writer()
+            .expect("failed to start writer");
+        writer
+            .write_entity_typed(&drep_to_entity_key(&drep), &state)
+            .expect("failed to write drep");
+        writer.commit().expect("failed to commit drep");
+    }
+
+    /// Slot and tx order of the synthetic account's latest vote delegation.
+    /// Every synthetic tx carries the delegation, so it is the last tx of the
+    /// last block.
+    fn last_vote_delegation(
+        vectors: &dolos_testing::synthetic::SyntheticVectors,
+    ) -> (BlockSlot, TxOrder) {
+        let last = vectors.blocks.last().expect("synthetic chain has blocks");
+        (last.slot, last.tx_hashes.len() - 1)
+    }
+
+    fn tip_epoch(domain: &ToyDomain) -> Epoch {
+        let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+            .expect("era summary");
+        let tip = domain
+            .state()
+            .read_cursor()
+            .expect("cursor read failed")
+            .expect("missing tip")
+            .slot();
+        summary.slot_epoch(tip).0
+    }
+
+    fn seeded_credential(seed: u8) -> StakeCredential {
+        StakeCredential::AddrKeyhash([seed; 28].into())
+    }
+
+    fn seeded_stake_address(seed: u8) -> String {
+        stake_cred_to_address(&seeded_credential(seed), Network::Testnet)
+            .to_bech32()
+            .expect("failed to encode stake address")
+    }
+
+    /// Writes an account that holds `utxo_sum` lovelace and delegates its
+    /// vote to `drep` at `delegated_at`.
+    fn seed_delegator(
+        domain: &ToyDomain,
+        seed: u8,
+        drep: DRep,
+        delegated_at: (BlockSlot, TxOrder),
+        utxo_sum: u64,
+    ) {
+        let epoch = tip_epoch(domain);
+        let credential = seeded_credential(seed);
+
+        let mut account = AccountState::new(epoch, credential.clone());
+        account.registered_at = Some(delegated_at.0);
+        account.stake = EpochValue::with_live(
+            epoch,
+            Stake {
+                utxo_sum,
+                ..Default::default()
+            },
+        );
+        account.drep = EpochValue::with_live(epoch, DRepDelegation::Delegated(drep));
+        account.vote_delegated_at = Some(delegated_at);
+
+        let key = EntityKey::from(minicbor::to_vec(&credential).expect("encode credential"));
+        let writer = domain
+            .state()
+            .start_writer()
+            .expect("failed to start writer");
+        writer
+            .write_entity_typed(&key, &account)
+            .expect("failed to write account");
+        writer.commit().expect("failed to commit account");
+    }
+
+    fn delegator(seed: u8, amount: u64) -> DrepDelegatorsInner {
+        DrepDelegatorsInner {
+            address: seeded_stake_address(seed),
+            amount: amount.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_drep_delegators_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+
+        let (status, body) = app.get_bytes(&format!("/accounts/{stake_address}")).await;
+        assert_eq!(status, StatusCode::OK);
+        let account: blockfrost_openapi::models::account_content::AccountContent =
+            serde_json::from_slice(&body).expect("failed to parse account");
+
+        let legacy = get_drep_delegators(&app, &drep_delegators_path(&app.vectors().drep_id)).await;
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].address, stake_address);
+        assert_eq!(legacy[0].amount, account.controlled_amount);
+
+        let cip129_id = bech32_drep(&synthetic_drep()).expect("failed to encode drep id");
+        let cip129 = get_drep_delegators(&app, &drep_delegators_path(&cip129_id)).await;
+        assert_eq!(cip129, legacy);
+    }
+
+    /// Three seeded delegators join the synthetic one, each at a later
+    /// position. A fourth one delegated before the DRep registration and
+    /// must not appear.
+    #[tokio::test]
+    async fn governance_drep_delegators_paginated() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let (slot, _) = last_vote_delegation(vectors);
+            let drep = synthetic_drep();
+            seed_delegator(domain, 0x41, drep.clone(), (slot - 1, 0), 1_000);
+            seed_delegator(domain, 0x42, drep.clone(), (slot + 1, 0), 2_000);
+            seed_delegator(domain, 0x43, drep.clone(), (slot + 1, 1), 3_000);
+            seed_delegator(domain, 0x44, drep, (slot + 2, 0), 4_000);
+        });
+        let base = drep_delegators_path(&app.vectors().drep_id);
+
+        let asc = get_drep_delegators(&app, &base).await;
+        assert_eq!(asc.len(), 4);
+        assert_eq!(asc[0].address, app.vectors().stake_address);
+        assert_eq!(
+            asc[1..],
+            [
+                delegator(0x42, 2_000),
+                delegator(0x43, 3_000),
+                delegator(0x44, 4_000)
+            ]
+        );
+
+        let page_1 = get_drep_delegators(&app, &format!("{base}?count=3&page=1")).await;
+        let page_2 = get_drep_delegators(&app, &format!("{base}?count=3&page=2")).await;
+        let page_3 = get_drep_delegators(&app, &format!("{base}?count=3&page=3")).await;
+        assert_eq!(page_1, asc[..3]);
+        assert_eq!(page_2, asc[3..]);
+        assert!(page_3.is_empty());
+
+        let desc = get_drep_delegators(&app, &format!("{base}?order=desc")).await;
+        let reversed: Vec<_> = asc.iter().rev().cloned().collect();
+        assert_eq!(desc, reversed);
+
+        let desc_page_2 =
+            get_drep_delegators(&app, &format!("{base}?order=desc&count=3&page=2")).await;
+        assert_eq!(desc_page_2, reversed[3..]);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_delegators_bad_request() {
+        let app = TestApp::new();
+        let path = drep_delegators_path(invalid_drep());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+
+        let path = format!("{}?count=0", drep_delegators_path(&app.vectors().drep_id));
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    /// Blockfrost answers `200 []` for a well-formed DRep id it has never seen.
+    #[tokio::test]
+    async fn governance_drep_delegators_unknown_drep_is_empty() {
+        let app = TestApp::new();
+        let rows = get_drep_delegators(&app, &drep_delegators_path(&missing_drep())).await;
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_drep_delegators_special_dreps() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let (slot, _) = last_vote_delegation(vectors);
+            seed_delegator(domain, 0x51, DRep::Abstain, (slot, 0), 5_000);
+            seed_delegator(domain, 0x52, DRep::NoConfidence, (slot, 1), 6_000);
+        });
+
+        let abstain = get_drep_delegators(&app, &drep_delegators_path("drep_always_abstain")).await;
+        assert_eq!(abstain, [delegator(0x51, 5_000)]);
+
+        let no_confidence =
+            get_drep_delegators(&app, &drep_delegators_path("drep_always_no_confidence")).await;
+        assert_eq!(no_confidence, [delegator(0x52, 6_000)]);
+
+        // The seeded accounts do not leak into a regular DRep's list.
+        let regular =
+            get_drep_delegators(&app, &drep_delegators_path(&app.vectors().drep_id)).await;
+        assert_eq!(regular.len(), 1);
+        assert_eq!(regular[0].address, app.vectors().stake_address);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_delegators_retired_drep_is_empty() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
+            seed_drep(domain, Some((1, 0)), Some((2, 0)))
+        });
+
+        let rows = get_drep_delegators(&app, &drep_delegators_path(&app.vectors().drep_id)).await;
+        assert!(rows.is_empty());
+    }
+
+    /// A delegation in the same tx as the DRep registration counts. One made
+    /// before the DRep's latest registration does not.
+    #[tokio::test]
+    async fn governance_drep_delegators_honor_registration_cutoff() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+
+        let same_tx = TestApp::new_with_cfg_and_setup(cfg.clone(), |domain, vectors| {
+            seed_drep(domain, Some(last_vote_delegation(vectors)), None)
+        });
+        let rows =
+            get_drep_delegators(&same_tx, &drep_delegators_path(&same_tx.vectors().drep_id)).await;
+        assert_eq!(rows.len(), 1);
+
+        let reregistered = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let (slot, order) = last_vote_delegation(vectors);
+            seed_drep(domain, Some((slot, order + 1)), None)
+        });
+        let rows = get_drep_delegators(
+            &reregistered,
+            &drep_delegators_path(&reregistered.vectors().drep_id),
+        )
+        .await;
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_drep_delegators_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let path = drep_delegators_path(&app.vectors().drep_id);
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    fn synthetic_vote(
+        voter: Voter,
+        block: usize,
+        tx: usize,
+        action: u32,
+        vote: Vote,
+    ) -> SyntheticVote {
+        SyntheticVote {
+            voter,
+            proposal: SyntheticProposalRef { block, tx, action },
+            vote,
+        }
+    }
+
+    /// Transaction 0 in block 0 proposes two actions. Transaction 1 in block 0
+    /// proposes one action. Two transactions in block 1 cast votes on all
+    /// three actions. Block 2 changes the first vote. A script DRep also votes
+    /// in block 1. Thus, one chain covers both CIP-129 credential variants.
+    fn drep_votes_config() -> SyntheticBlockConfig {
+        let key_voter = Voter::DRepKey(Hash::from([7u8; 28]));
+        let script_voter = Voter::DRepScript(Hash::from([8u8; 28]));
+
+        SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![
+                vec![
+                    vec![GovAction::Information, GovAction::Information],
+                    vec![GovAction::Information],
+                ],
+                vec![],
+                vec![],
+            ],
+            votes_by_block: vec![
+                vec![],
+                vec![
+                    vec![
+                        // The transaction map sorts these votes by action.
+                        synthetic_vote(key_voter.clone(), 0, 0, 1, Vote::No),
+                        synthetic_vote(key_voter.clone(), 0, 0, 0, Vote::Yes),
+                        synthetic_vote(script_voter, 0, 0, 1, Vote::Abstain),
+                    ],
+                    vec![synthetic_vote(key_voter.clone(), 0, 1, 0, Vote::Abstain)],
+                ],
+                vec![vec![synthetic_vote(key_voter, 0, 0, 0, Vote::No)]],
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn drep_votes_app() -> TestApp {
+        TestApp::new_with_cfg(drep_votes_config())
+    }
+
+    async fn get_drep_votes(app: &TestApp, drep: &str, query: &str) -> Vec<DrepVotesInner> {
+        let path = format!("/governance/dreps/{drep}/votes{query}");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "The request to {path} returned status {status}. The response body was {}.",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes).expect("The DRep vote response did not contain valid JSON.")
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_happy_path() {
+        let app = drep_votes_app();
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "").await;
+        let blocks = &app.vectors().blocks;
+
+        assert_eq!(rows.len(), 4);
+
+        assert_eq!(rows[0].tx_hash, blocks[1].tx_hashes[0]);
+        assert_eq!(rows[0].cert_index, 0);
+        assert_eq!(rows[0].proposal_tx_hash, blocks[0].tx_hashes[0]);
+        assert_eq!(rows[0].proposal_cert_index, 0);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::Yes);
+
+        assert_eq!(rows[1].tx_hash, blocks[1].tx_hashes[0]);
+        assert_eq!(rows[1].cert_index, 1);
+        assert_eq!(rows[1].proposal_tx_hash, blocks[0].tx_hashes[0]);
+        assert_eq!(rows[1].proposal_cert_index, 1);
+        assert_eq!(rows[1].vote, drep_votes_inner::Vote::No);
+
+        assert_eq!(rows[2].tx_hash, blocks[1].tx_hashes[1]);
+        assert_eq!(rows[2].cert_index, 0);
+        assert_eq!(rows[2].proposal_tx_hash, blocks[0].tx_hashes[1]);
+        assert_eq!(rows[2].proposal_cert_index, 0);
+        assert_eq!(rows[2].vote, drep_votes_inner::Vote::Abstain);
+
+        assert_eq!(rows[3].tx_hash, blocks[2].tx_hashes[0]);
+        assert_eq!(rows[3].cert_index, 0);
+        assert_eq!(rows[3].proposal_tx_hash, blocks[0].tx_hashes[0]);
+        assert_eq!(rows[3].proposal_cert_index, 0);
+        assert_eq!(rows[3].vote, drep_votes_inner::Vote::No);
+
+        for row in rows {
+            let proposal_tx: Hash<32> = row.proposal_tx_hash.parse().unwrap();
+            assert_eq!(
+                row.proposal_id,
+                bech32_gov_action(&proposal_tx, row.proposal_cert_index as u32).unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_for_same_block_proposal() {
+        let voter = Voter::DRepKey(Hash::from([7u8; 28]));
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information], vec![]]],
+            votes_by_block: vec![vec![
+                vec![],
+                vec![synthetic_vote(voter, 0, 0, 0, Vote::Yes)],
+            ]],
+            ..Default::default()
+        });
+
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "").await;
+        let block = &app.vectors().blocks[0];
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, block.tx_hashes[1]);
+        assert_eq!(rows[0].cert_index, 0);
+        assert_eq!(rows[0].proposal_tx_hash, block.tx_hashes[0]);
+        assert_eq!(rows[0].proposal_cert_index, 0);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::Yes);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_orders_and_paginates() {
+        let app = drep_votes_app();
+        let drep = &app.vectors().drep_id;
+        let ascending = get_drep_votes(&app, drep, "").await;
+        let descending = get_drep_votes(&app, drep, "?order=desc").await;
+
+        assert_eq!(
+            descending
+                .iter()
+                .map(|row| (&row.tx_hash, row.cert_index, &row.proposal_id))
+                .collect_vec(),
+            ascending
+                .iter()
+                .rev()
+                .map(|row| (&row.tx_hash, row.cert_index, &row.proposal_id))
+                .collect_vec()
+        );
+
+        let page = get_drep_votes(&app, drep, "?count=2&page=2").await;
+        assert_eq!(
+            page.iter().map(|row| &row.proposal_id).collect_vec(),
+            ascending[2..]
+                .iter()
+                .map(|row| &row.proposal_id)
+                .collect_vec()
+        );
+
+        assert!(get_drep_votes(&app, drep, "?page=9").await.is_empty());
+    }
+
+    /// A pruned block takes its votes out of the listing, and the retained
+    /// votes move up to fill the pages. The other history endpoints return
+    /// the same under `sync.max_history`.
+    ///
+    /// The test prunes the archive to one slot. Only the last block remains.
+    /// The three votes of block 1 are gone. The one vote of block 2 is the
+    /// first row.
+    #[tokio::test]
+    async fn governance_drep_votes_paginates_retained_rows() {
+        let app = TestApp::new_with_cfg_and_setup(drep_votes_config(), |domain, _| {
+            domain
+                .archive()
+                .prune_history(0, None, None)
+                .expect("The archive did not prune its history.");
+        });
+        let drep = &app.vectors().drep_id;
+
+        let rows = get_drep_votes(&app, drep, "?count=1").await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, app.vectors().blocks[2].tx_hashes[0]);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::No);
+
+        assert!(get_drep_votes(&app, drep, "?count=1&page=2")
+            .await
+            .is_empty());
+        assert!(get_drep_votes(&app, drep, "?count=1&page=4")
+            .await
+            .is_empty());
+    }
+
+    /// The ledger ignores the votes of a phase-2-invalid tx, so they are not
+    /// listed, although their block is tagged for the voter.
+    #[tokio::test]
+    async fn governance_drep_votes_skip_invalid_transactions() {
+        let voter = Voter::DRepKey(Hash::from([7u8; 28]));
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 2,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information], vec![]], vec![]],
+            votes_by_block: vec![
+                vec![],
+                vec![
+                    vec![synthetic_vote(voter.clone(), 0, 0, 0, Vote::Yes)],
+                    vec![synthetic_vote(voter, 0, 0, 0, Vote::No)],
+                ],
+            ],
+            invalid_txs_by_block: vec![vec![], vec![1]],
+            ..Default::default()
+        });
+
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "").await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, app.vectors().blocks[1].tx_hashes[0]);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::Yes);
+    }
+
+    /// One DRep votes two times on one proposal in one block. The cast queue
+    /// for each proposal exists for this case. Both rows have the same slot
+    /// and the same proposal. Only the position of the vote transaction
+    /// separates them.
+    #[tokio::test]
+    async fn governance_drep_votes_pairs_repeated_votes_within_one_block() {
+        let voter = Voter::DRepKey(Hash::from([7u8; 28]));
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 2,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information], vec![]], vec![]],
+            votes_by_block: vec![
+                vec![],
+                vec![
+                    vec![synthetic_vote(voter.clone(), 0, 0, 0, Vote::Yes)],
+                    vec![synthetic_vote(voter, 0, 0, 0, Vote::No)],
+                ],
+            ],
+            ..Default::default()
+        });
+
+        let rows = get_drep_votes(&app, &app.vectors().drep_id, "").await;
+        let votes = &app.vectors().blocks[1];
+
+        assert_eq!(rows.len(), 2);
+
+        // The first transaction of the block gives the first row.
+        assert_eq!(rows[0].tx_hash, votes.tx_hashes[0]);
+        assert_eq!(rows[0].cert_index, 0);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::Yes);
+
+        assert_eq!(rows[1].tx_hash, votes.tx_hashes[1]);
+        assert_eq!(rows[1].cert_index, 0);
+        assert_eq!(rows[1].vote, drep_votes_inner::Vote::No);
+
+        // Both rows name the same proposal. Only the transaction hash orders
+        // them.
+        assert_eq!(rows[0].proposal_id, rows[1].proposal_id);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_rejects_deep_page() {
+        let app = TestApp::new_with_scan_limit(drep_votes_config(), 3);
+        let path = format!(
+            "/governance/dreps/{}/votes?count=2&page=2",
+            app.vectors().drep_id
+        );
+
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn governance_script_drep_votes() {
+        let app = drep_votes_app();
+        let drep = bech32(
+            Hrp::parse("drep").unwrap(),
+            [vec![pallas_extras::DREP_SCRIPT_PREFIX], vec![8u8; 28]].concat(),
+        )
+        .unwrap();
+        let rows = get_drep_votes(&app, &drep, "").await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cert_index, 0);
+        assert_eq!(rows[0].proposal_cert_index, 1);
+        assert_eq!(rows[0].vote, drep_votes_inner::Vote::Abstain);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_without_rows() {
+        let app = drep_votes_app();
+
+        assert!(get_drep_votes(&app, &missing_drep(), "").await.is_empty());
+        assert!(get_drep_votes(&app, "drep_always_abstain", "")
+            .await
+            .is_empty());
+        assert!(get_drep_votes(&app, "drep_always_no_confidence", "")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_bad_request() {
+        let app = drep_votes_app();
+        let base = format!("/governance/dreps/{}/votes", app.vectors().drep_id);
+
+        assert_status(&app, &format!("{base}?count=0"), StatusCode::BAD_REQUEST).await;
+        assert_status(
+            &app,
+            &format!("{base}?order=sideways"),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/dreps/not-a-drep/votes",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_votes_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let path = format!("/governance/dreps/{}/votes", app.vectors().drep_id);
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
@@ -2359,9 +3661,9 @@ mod tests {
     }
 
     /// CIP-129: the id is the proposing tx hash with the action index
-    /// trailing it. The first two vectors come from the Blockfrost spec kept
-    /// in `crates/minibf/openapi.yaml`; the last one pins the minimal
-    /// big-endian rule Blockfrost encodes the index with.
+    /// trailing it. The first two vectors come from the upstream Blockfrost
+    /// OpenAPI spec (see the crate README for the pinned link); the last one
+    /// pins the minimal big-endian rule Blockfrost encodes the index with.
     #[test]
     fn gov_action_id_follows_cip129() {
         let tx = Hash::<32>::from([0x11u8; 32]);
@@ -2703,5 +4005,530 @@ mod tests {
         let id = bech32_gov_action(&proposal_tx(), 0).expect("failed to encode gov action id");
         let path = format!("/governance/proposals/{id}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    fn cc_cold_key(byte: u8) -> StakeCredential {
+        StakeCredential::AddrKeyhash(Hash::from([byte; 28]))
+    }
+
+    fn cc_cold_script(byte: u8) -> StakeCredential {
+        StakeCredential::ScriptHash(Hash::from([byte; 28]))
+    }
+
+    /// This function overwrites the governance singleton with the given state.
+    fn seed_gov(domain: &ToyDomain, state: GovState) {
+        let writer = domain
+            .state()
+            .start_writer()
+            .expect("The state store cannot start a writer.");
+        writer
+            .write_entity_typed(&GovState::singleton_key(), &state)
+            .expect("The state writer cannot write the governance state.");
+        writer
+            .commit()
+            .expect("The state writer cannot commit the governance state.");
+    }
+
+    /// This function writes an active-governance committee, its per-member
+    /// authorization history, and its action root to the governance singleton.
+    /// The endpoint reads this data. The `seed_drep_anchor` helper writes
+    /// equivalent data for a DRep registration.
+    fn seed_committee(
+        domain: &ToyDomain,
+        committee: Option<dolos_cardano::model::gov::Committee>,
+        auths: BTreeMap<StakeCredential, Vec<(BlockSlot, CommitteeAuthorization)>>,
+        seating_action: Option<GovActionId>,
+    ) {
+        seed_gov(
+            domain,
+            GovState {
+                committee,
+                committee_auths: auths,
+                prev_gov_action_ids: dolos_cardano::model::gov::GovRoots {
+                    committee: seating_action,
+                    ..Default::default()
+                },
+                active_since: Some(0),
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn committee_credential_ids_follow_cip0129() {
+        // For a cold key, the high nibble is 0x1 (cold), and the low nibble is 0x2
+        // (key).
+        let cold =
+            bech32_committee_cold(&cc_cold_key(1)).expect("The encoder cannot encode the cold ID.");
+        let (hrp, payload) = bech32::decode(&cold).expect("The decoder cannot decode the cold ID.");
+        assert_eq!(hrp.as_str(), "cc_cold");
+        assert_eq!(payload[0], 0x12);
+        assert_eq!(&payload[1..], &[1u8; 28]);
+
+        // For a cold script, the low nibble is 0x3 (script).
+        let cold_script = bech32_committee_cold(&cc_cold_script(3))
+            .expect("The encoder cannot encode the cold-script ID.");
+        let (_, payload) =
+            bech32::decode(&cold_script).expect("The decoder cannot decode the cold-script ID.");
+        assert_eq!(payload[0], 0x13);
+
+        // For a hot key, the high nibble is 0x0 (hot), and the low nibble is 0x2 (key).
+        let hot =
+            bech32_committee_hot(&cc_cold_key(11)).expect("The encoder cannot encode the hot ID.");
+        let (hrp, payload) = bech32::decode(&hot).expect("The decoder cannot decode the hot ID.");
+        assert_eq!(hrp.as_str(), "cc_hot");
+        assert_eq!(payload[0], 0x02);
+
+        // For a hot script, the low nibble is 0x3 (script).
+        let hot_script = bech32_committee_hot(&cc_cold_script(9))
+            .expect("The encoder cannot encode the hot-script ID.");
+        let (_, payload) =
+            bech32::decode(&hot_script).expect("The decoder cannot decode the hot-script ID.");
+        assert_eq!(payload[0], 0x03);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_happy_path() {
+        let seating = GovActionId {
+            transaction_id: Hash::from([7u8; 32]),
+            action_index: 3,
+        };
+        let seating_for_setup = seating.clone();
+
+        let app = TestApp::new_with_cfg_and_setup(
+            SyntheticBlockConfig::default(),
+            move |domain, _vectors| {
+                let committee = dolos_cardano::model::gov::Committee {
+                    members: BTreeMap::from([
+                        (cc_cold_key(1), 100),
+                        (cc_cold_key(2), 200),
+                        (cc_cold_script(3), 300),
+                    ]),
+                    threshold: RationalNumber {
+                        numerator: 2,
+                        denominator: 3,
+                    },
+                };
+
+                let auths = BTreeMap::from([
+                    (
+                        cc_cold_key(1),
+                        vec![(10, CommitteeAuthorization::HotCredential(cc_cold_key(11)))],
+                    ),
+                    (
+                        cc_cold_script(3),
+                        vec![(20, CommitteeAuthorization::Resigned(None))],
+                    ),
+                ]);
+
+                seed_committee(domain, Some(committee), auths, Some(seating_for_setup));
+            },
+        );
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        assert_eq!(
+            model.gov_action_id,
+            Some(bech32_gov_action(&seating.transaction_id, seating.action_index).unwrap())
+        );
+        assert_eq!(model.proposal_tx_hash, Some(hex::encode([7u8; 32])));
+        assert_eq!(model.proposal_index, Some(3));
+        assert!(!model.is_dissolved);
+        assert_eq!(model.quorum.numerator, 2);
+        assert_eq!(model.quorum.denominator, 3);
+        assert_eq!(model.members.len(), 3);
+
+        // The endpoint orders the members by the raw cold-hash hex.
+        let hexes: Vec<_> = model
+            .members
+            .iter()
+            .map(|m| m.cc_cold_hex.clone())
+            .collect();
+        let mut sorted = hexes.clone();
+        sorted.sort();
+        assert_eq!(hexes, sorted);
+
+        let authorized = &model.members[0];
+        assert_eq!(authorized.cc_cold_hex, hex::encode([1u8; 28]));
+        assert!(!authorized.cc_cold_has_script);
+        assert!(authorized.cc_cold_id.starts_with("cc_cold1"));
+        assert_eq!(authorized.status, Status::Authorized);
+        assert_eq!(authorized.cc_hot_hex, Some(hex::encode([11u8; 28])));
+        assert_eq!(authorized.cc_hot_has_script, Some(false));
+        assert!(authorized
+            .cc_hot_id
+            .as_ref()
+            .expect("The authorized member has no hot ID.")
+            .starts_with("cc_hot1"));
+        assert_eq!(authorized.expiration_epoch, 100);
+
+        let unauthorized = &model.members[1];
+        assert_eq!(unauthorized.status, Status::NotAuthorized);
+        assert!(unauthorized.cc_hot_id.is_none());
+        assert!(unauthorized.cc_hot_hex.is_none());
+        assert!(unauthorized.cc_hot_has_script.is_none());
+        assert_eq!(unauthorized.expiration_epoch, 200);
+
+        let resigned = &model.members[2];
+        assert_eq!(resigned.status, Status::Resigned);
+        assert!(resigned.cc_cold_has_script);
+        assert!(resigned.cc_hot_id.is_none());
+        assert!(resigned.cc_hot_hex.is_none());
+        assert!(resigned.cc_hot_has_script.is_none());
+        assert_eq!(resigned.expiration_epoch, 300);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_genesis_has_no_seating_action() {
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                let committee = dolos_cardano::model::gov::Committee {
+                    members: BTreeMap::from([(cc_cold_key(1), 100)]),
+                    threshold: RationalNumber {
+                        numerator: 1,
+                        denominator: 2,
+                    },
+                };
+
+                seed_committee(domain, Some(committee), BTreeMap::new(), None);
+            });
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        // The Conway-genesis committee has no seating action.
+        assert!(model.gov_action_id.is_none());
+        assert!(model.proposal_tx_hash.is_none());
+        assert!(model.proposal_index.is_none());
+        assert!(!model.is_dissolved);
+        assert_eq!(model.members.len(), 1);
+        assert_eq!(model.members[0].status, Status::NotAuthorized);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_migration_gap_is_not_dissolved() {
+        // A store migrated across the in-place upgrade gap has an unknown
+        // enact-state: a null committee with no lineage root. This state is not
+        // a dissolution. The endpoint reports `is_dissolved` false and does not
+        // read the null committee as no-confidence.
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                seed_committee(domain, None, BTreeMap::new(), None);
+            });
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        assert!(!model.is_dissolved);
+        assert!(model.members.is_empty());
+        assert_eq!(model.quorum.numerator, 0);
+        assert_eq!(model.quorum.denominator, 0);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_no_confidence_is_dissolved() {
+        // A NoConfidence enactment clears the committee and writes the committee
+        // lineage root. These two changes are the evidence of a dissolution.
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                let action = GovActionId {
+                    transaction_id: Hash::from([9u8; 32]),
+                    action_index: 1,
+                };
+                seed_committee(domain, None, BTreeMap::new(), Some(action));
+            });
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        assert!(model.is_dissolved);
+        assert!(model.members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_committee_pre_conway_returns_not_found() {
+        // Before governance activates, the singleton exists but `active_since`
+        // is unset. No committee exists, so the endpoint returns 404 instead of
+        // an empty committee.
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                seed_gov(domain, GovState::default());
+            });
+
+        assert_status(&app, "/governance/committee", StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn governance_committee_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(
+            &app,
+            "/governance/committee",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+    }
+
+    /// Three blocks with one tx each. Every synthetic tx registers the DRep in
+    /// certificate 3. The tx of block 1 also updates the DRep, and the tx of
+    /// block 2 also deregisters it, both in certificate 5.
+    fn drep_updates_app() -> TestApp {
+        use pallas::ledger::primitives::conway::Certificate;
+
+        let cred = StakeCredential::AddrKeyhash(Hash::from([7u8; 28]));
+
+        TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 1,
+            extra_certs_by_block: vec![
+                vec![],
+                vec![vec![Certificate::UpdateDRepCert(cred.clone(), None)]],
+                vec![vec![Certificate::UnRegDRepCert(cred, 1000)]],
+            ],
+            ..Default::default()
+        })
+    }
+
+    fn expected_drep_updates(app: &TestApp) -> Vec<DrepUpdatesInner> {
+        use drep_updates_inner::Action;
+
+        let row = |block: usize, cert_index: i32, action: Action, deposit: Option<&str>| {
+            DrepUpdatesInner {
+                tx_hash: tx_hash_of_block(app, block),
+                cert_index,
+                action,
+                deposit: deposit.map(str::to_string),
+            }
+        };
+
+        vec![
+            row(0, 3, Action::Registered, Some("1000")),
+            row(1, 3, Action::Registered, Some("1000")),
+            row(1, 5, Action::Updated, None),
+            row(2, 3, Action::Registered, Some("1000")),
+            row(2, 5, Action::Deregistered, None),
+        ]
+    }
+
+    async fn get_drep_updates(app: &TestApp, drep: &str, query: &str) -> Vec<DrepUpdatesInner> {
+        let path = format!("/governance/dreps/{drep}/updates{query}");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "The request to {path} returned status {status}. The response body was {}.",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes)
+            .expect("The DRep update response did not contain valid JSON.")
+    }
+
+    #[tokio::test]
+    async fn governance_drep_updates_happy_path() {
+        let app = drep_updates_app();
+        let drep = app.vectors().drep_id.clone();
+
+        assert_eq!(
+            get_drep_updates(&app, &drep, "").await,
+            expected_drep_updates(&app)
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_drep_updates_orders_and_paginates() {
+        let app = drep_updates_app();
+        let drep = app.vectors().drep_id.clone();
+        let expected = expected_drep_updates(&app);
+        let reversed = expected.iter().rev().cloned().collect_vec();
+
+        // desc is the exact reverse of asc, inside a tx too
+        assert_eq!(get_drep_updates(&app, &drep, "?order=desc").await, reversed);
+
+        assert_eq!(
+            get_drep_updates(&app, &drep, "?count=2&page=2").await,
+            expected[2..4].to_vec()
+        );
+        assert_eq!(
+            get_drep_updates(&app, &drep, "?count=2&page=1&order=desc").await,
+            reversed[..2].to_vec()
+        );
+        assert_eq!(
+            get_drep_updates(&app, &drep, "?count=2&page=3").await,
+            expected[4..].to_vec()
+        );
+
+        // a page past the end is empty, not an error
+        assert!(get_drep_updates(&app, &drep, "?count=2&page=4")
+            .await
+            .is_empty());
+    }
+
+    /// Blockfrost has no existence check on this endpoint, so every
+    /// well-formed id without certificates gets an empty list. That includes a
+    /// script DRep with the same hash as the registered key DRep.
+    #[tokio::test]
+    async fn governance_drep_updates_without_rows() {
+        let app = drep_updates_app();
+        let script_drep = bech32_drep(&DRep::Script(Hash::from([7u8; 28]))).unwrap();
+
+        for drep in [
+            missing_drep(),
+            script_drep,
+            "drep_always_abstain".to_string(),
+            "drep_always_no_confidence".to_string(),
+        ] {
+            assert!(
+                get_drep_updates(&app, &drep, "").await.is_empty(),
+                "{drep} must list no updates"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_drep_updates_bad_request() {
+        let app = drep_updates_app();
+        let base = format!("/governance/dreps/{}/updates", app.vectors().drep_id);
+
+        assert_status(&app, &format!("{base}?count=0"), StatusCode::BAD_REQUEST).await;
+        assert_status(
+            &app,
+            &format!("{base}?order=sideways"),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/dreps/not-a-drep/updates",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+
+        // Blockfrost decodes the id as bech32 only, so a hex id is a 400
+        let hex_id = hex::encode([&[0x22u8][..], &[7u8; 28]].concat());
+        let path = format!("/governance/dreps/{hex_id}/updates");
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_updates_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let path = format!("/governance/dreps/{}/updates", app.vectors().drep_id);
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// A block with one tx, which registers the DRep with key hash `[7; 28]`.
+    fn drep_registration_block(valid: bool) -> BlockBody {
+        use pallas::codec::utils::{NonEmptySet, Set};
+        use pallas::ledger::primitives::conway::{Certificate, TransactionBody};
+
+        let cred = StakeCredential::AddrKeyhash(Hash::from([7u8; 28]));
+
+        let body = TransactionBody {
+            inputs: Set::from(vec![]),
+            outputs: vec![],
+            fee: 0,
+            ttl: None,
+            certificates: Some(
+                NonEmptySet::try_from(vec![Certificate::RegDRepCert(cred, 500, None)]).unwrap(),
+            ),
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: None,
+            proposal_procedures: None,
+            treasury_value: None,
+            donation: None,
+        };
+
+        let (_, raw) = dolos_testing::blocks::make_conway_block_with_tx(100, body, None, valid);
+        (*raw).clone()
+    }
+
+    fn drep_updates_test_drep() -> Vec<u8> {
+        pallas_extras::drep_id_bytes(&StakeCredential::AddrKeyhash(Hash::from([7u8; 28])))
+    }
+
+    /// The ledger does not apply the certificates of a phase-2-invalid tx,
+    /// so its DRep certificates are not updates.
+    #[test]
+    fn drep_updates_skip_invalid_transactions() {
+        let rows = |valid: bool| {
+            let body = drep_registration_block(valid);
+            let block = MultiEraBlock::decode(&body).unwrap();
+            drep_updates_in_block(&block, &drep_updates_test_drep()).unwrap()
+        };
+
+        assert_eq!(rows(true).len(), 1);
+        assert!(rows(false).is_empty());
+    }
+
+    /// A tagged block whose DRep certificate sits in a phase-2-invalid tx adds
+    /// no row, but the scan still counts it. Enough of those blocks stop the
+    /// request instead of letting it read without end.
+    #[test]
+    fn drep_updates_scan_stops_at_the_budget() {
+        let drep = drep_updates_test_drep();
+        let updates = |block: &MultiEraBlock| drep_updates_in_block(block, &drep);
+
+        let blocks = || {
+            [false, false, true]
+                .into_iter()
+                .map(|valid| Ok(Some(drep_registration_block(valid))))
+        };
+
+        // two empty blocks spend a budget of two before the row appears
+        assert!(matches!(
+            collect_block_rows(blocks(), false, 1, 2, updates),
+            Err(Error::ScanBudgetExceeded)
+        ));
+
+        // a budget of three reaches the block that holds the row
+        let rows = collect_block_rows(blocks(), false, 1, 3, updates).unwrap();
+        assert_eq!(rows.len(), 1);
+
+        // a full page stops the scan before the budget matters
+        let blocks = [true, false, false]
+            .into_iter()
+            .map(|valid| Ok(Some(drep_registration_block(valid))));
+        let rows = collect_block_rows(blocks, false, 1, 1, updates).unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    /// Blockfrost declares no `from`/`to` for this endpoint, so a malformed
+    /// or reversed window is ignored, not rejected.
+    #[tokio::test]
+    async fn governance_drep_updates_ignores_from_and_to() {
+        let app = drep_updates_app();
+        let drep = app.vectors().drep_id.clone();
+        let expected = expected_drep_updates(&app);
+
+        for query in ["?from=bad", "?to=bad", "?from=200&to=100"] {
+            assert_eq!(
+                get_drep_updates(&app, &drep, query).await,
+                expected,
+                "{query} must be ignored"
+            );
+        }
     }
 }

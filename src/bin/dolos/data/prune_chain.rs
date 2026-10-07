@@ -30,9 +30,11 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     info!(max_slots, "prunning to max slots");
 
+    // Nothing waits on this command, so index cleanup runs to completion;
+    // `--max-prune` bounds only the slots.
     stores
         .archive
-        .prune_history(max_slots, args.max_prune)
+        .prune_history(max_slots, args.max_prune, None)
         .into_diagnostic()
         .context("removing range from chain")?;
 

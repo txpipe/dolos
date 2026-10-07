@@ -22,14 +22,16 @@ pub enum Error {
     InvalidXpub,
     InvalidDerivationRole,
     InvalidDerivationIndex,
-    /// An archive scan ran out of block budget before covering the page.
+    /// A request scan stops when it reaches its item limit.
     ///
-    /// The budget is a fixed property of the node, so the same request always
-    /// runs out at the same point: it is the page that has to shrink, not the
-    /// node that has to recover.
+    /// The node uses a fixed limit. Thus, the same request always stops at the
+    /// same point.
     ScanBudgetExceeded,
     InvalidCertIndex,
     InvalidGovActionId,
+    /// The path matched no route. Blockfrost answers those with a global
+    /// `400`, not a `404`.
+    InvalidPath,
 }
 
 #[derive(Serialize)]
@@ -172,7 +174,7 @@ impl IntoResponse for Error {
                 Json(ErrorBody::new(
                     400,
                     "Bad Request",
-                    "The requested page needs more archive blocks than this node is willing to scan, reduce page number or count.",
+                    "The request exceeds the scan limit of this node. Reduce the page number or the count.",
                 )),
             )
                 .into_response(),
@@ -191,6 +193,15 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "Invalid or malformed gov action id.",
+                )),
+            )
+                .into_response(),
+            Error::InvalidPath => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Invalid path.",
                 )),
             )
                 .into_response(),

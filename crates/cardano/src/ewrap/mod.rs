@@ -233,12 +233,6 @@ pub struct BoundaryWork {
     /// finalize pass that rules on the boundary as a whole.
     pub pv10_migration: bool,
 
-    /// DReps registered as of the boundary that *opened* the closing epoch
-    /// — the ratification snapshot's `reDRepState` — keyed by DRep
-    /// credential, with the stored expiry as of the end of the previous
-    /// epoch (`None` on pre-upgrade rows without the epoch-based field).
-    pub ratify_dreps: BTreeMap<StakeCredential, Option<Epoch>>,
-
     /// The boundary's ruling on the live governance forest: which proposals
     /// this boundary removes and why. `None` until the finalize pass runs
     /// the engine — and on the shard passes, which never need it.
@@ -250,9 +244,14 @@ pub struct BoundaryWork {
     /// as the pulser's `proposalDeposits` snapshot field is.
     pub proposal_deposits: HashMap<StakeCredential, u64>,
 
-    /// Entity keys of the DReps registered as of the previous boundary — the
-    /// distribution accumulation skips delegations to any other target
-    /// (`AlwaysAbstain` / `AlwaysNoConfidence` excepted).
+    /// Ordered DRep state at the boundary closing this epoch. Built from
+    /// the same predicate as `snapshot_registered_dreps`, persisted only in
+    /// finalize.
+    pub boundary_dreps: BTreeMap<StakeCredential, crate::DRepSnapshotEntry>,
+
+    /// Entity keys of the DReps registered at this boundary, which opens the
+    /// next epoch. Distribution accumulation skips delegations to any other
+    /// target (`AlwaysAbstain` / `AlwaysNoConfidence` excepted).
     pub snapshot_registered_dreps: HashSet<EntityKey>,
 
     // computed via visitors

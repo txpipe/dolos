@@ -597,7 +597,12 @@ impl ArchiveStore for MemoryArchiveStore {
         Ok(tip)
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
+    fn prune_history(
+        &self,
+        max_slots: u64,
+        max_prune_slots: Option<u64>,
+        _max_prune_index_rows: Option<u64>,
+    ) -> Result<bool, ArchiveError> {
         let mut tables = self.tables.write().map_err(|_| poisoned())?;
 
         let Some((&first, _)) = tables.blocks.first_key_value() else {
@@ -614,7 +619,7 @@ impl ArchiveStore for MemoryArchiveStore {
             return Ok(true);
         }
 
-        let (done, capped) = match max_prune {
+        let (done, capped) = match max_prune_slots {
             Some(max) => (excess <= max, core::cmp::min(excess, max)),
             None => (true, excess),
         };

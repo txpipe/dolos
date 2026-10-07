@@ -112,6 +112,7 @@ impl TestApp {
                 datum_cbor_hex: String::new(),
                 script_hash: String::new(),
                 script_cbor_hex: String::new(),
+                plutus_script_hash: String::new(),
                 blocks: vec![],
                 account_addresses: vec![],
                 account_address_blocks: vec![],
