@@ -2125,6 +2125,11 @@ impl IntoModel<Vec<TxContentMetadataInner>> for TxModelBuilder<'_> {
 
     fn into_model(self) -> Result<Vec<TxContentMetadataInner>, StatusCode> {
         let tx = self.tx()?;
+
+        if !tx.is_valid() {
+            return Ok(vec![]);
+        }
+
         let metadata = tx.metadata();
 
         let entries: Vec<_> = metadata.collect();
@@ -2149,6 +2154,11 @@ impl IntoModel<Vec<TxContentMetadataCborInner>> for TxModelBuilder<'_> {
 
     fn into_model(self) -> Result<Vec<TxContentMetadataCborInner>, StatusCode> {
         let tx = self.tx()?;
+
+        if !tx.is_valid() {
+            return Ok(vec![]);
+        }
+
         let metadata = tx.metadata();
 
         let entries: Vec<_> = metadata.collect();

@@ -1,22 +1,23 @@
 //! The closed set of state namespaces a Dolos stele carries.
 //!
-//! ADR-004 defines state as one uniform key-value space: the thirteen entity
-//! namespaces of `dolos_cardano::model::build_schema()` plus [`UTXOS`], which
-//! is the UTxO set wearing the same shape as everything else. That uniformity
-//! is deliberate — it means the format has one state record, and the planned
-//! refactor folding UTxOs into the entity system (#1042) is invisible to it.
+//! ADR-004 defines the state as one key-value space, and all namespaces in it
+//! have the same shape. The space contains the fourteen entity namespaces of
+//! `dolos_cardano::model::build_schema()` and [`UTXOS`], which is the UTxO set.
+//! That uniformity is deliberate — it means the format has one state record,
+//! and the planned refactor folding UTxOs into the entity system (#1042) is
+//! invisible to it.
 //!
-//! The names are not spelled here. Thirteen of them are read off the entity
-//! types' own `FixedNamespace::NS`, and `utxos` is defined here because nothing
-//! else in the tree defines it. A namespace that exists in `build_schema` and
-//! not in [`NAMESPACES`] would be silently dropped from every published stele,
-//! so `namespace_registry_matches_build_schema` in `tests/coverage.rs` makes
-//! that a build failure instead.
+//! The names are not spelled here. Fourteen names come from the
+//! `FixedNamespace::NS` constants of the entity types. This file defines
+//! `utxos`, because no other part of the tree defines it. A namespace that
+//! exists in `build_schema` and not in [`NAMESPACES`] would be silently dropped
+//! from every published stele, so `namespace_registry_matches_build_schema` in
+//! `tests/coverage.rs` makes that a build failure instead.
 
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
-    StakeLog,
+    FixedNamespace, GovState, MetadataLabelState, PendingMirState, PendingRewardState, PoolState,
+    ProposalState, StakeLog,
 };
 use dolos_core::Namespace;
 
@@ -34,7 +35,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against `build_schema()` directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 14] = [
+pub const NAMESPACES: [Namespace; 15] = [
     AccountEpochLog::NS,
     AccountState::NS,
     AssetState::NS,
@@ -43,6 +44,7 @@ pub const NAMESPACES: [Namespace; 14] = [
     EpochState::NS,
     EraSummary::NS,
     GovState::NS,
+    MetadataLabelState::NS,
     PendingMirState::NS,
     PendingRewardState::NS,
     PoolState::NS,
@@ -66,7 +68,7 @@ pub const NAMESPACES: [Namespace; 14] = [
 /// per-instance iteration order made the namespace's bytes irreproducible
 /// across publishers of identical state. Kept beside [`NAMESPACES`], in the
 /// same order, and held to it by `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 14] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 15] = [
     (AccountEpochLog::NS, 1),
     (AccountState::NS, 1),
     (AssetState::NS, 1),
@@ -75,6 +77,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 14] = [
     (EpochState::NS, 2),
     (EraSummary::NS, 1),
     (GovState::NS, 3),
+    (MetadataLabelState::NS, 1),
     (PendingMirState::NS, 1),
     (PendingRewardState::NS, 1),
     (PoolState::NS, 1),

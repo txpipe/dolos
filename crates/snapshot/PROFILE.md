@@ -49,7 +49,11 @@ Framing is the protocol's (SPEC.md, "Layer format"): zstd-compressed CBOR sequen
 [format_version = 1, profile: tstr, kind: tstr, scope: any]
 ```
 
-`scope` is opaque to the protocol. The Dolos profile encodes `[network_magic, epoch, start_slot, end_slot]` for epoch layers, `[network_magic, epoch, shard]` for every state layer — one shape across all fourteen kinds, single-blob namespaces included, whose one layer is shard 0 — and `[network_magic, epoch, last_immutable]` for the digests layer.
+`scope` is opaque to the protocol. The Dolos profile encodes these scopes:
+
+- `[network_magic, epoch, start_slot, end_slot]` for epoch layers.
+- `[network_magic, epoch, shard]` for each state layer. All fifteen state kinds use this shape. A single-blob namespace has one layer, which is shard 0.
+- `[network_magic, epoch, last_immutable]` for the digests layer.
 
 The state layers carry **two roles over that one header shape**, and only the *descriptor* scope tells them apart: a tip is `{"shard": n}`, a retained dump is `{"epoch": E, "shard": n}`. The header is deliberately blind to the distinction, and that is what makes the dump a publish cuts at `sequence == E` the tip's own bytes rather than a copy of them — same header, same records, one `diffId`, one blob under two descriptors. See "State history" below.
 
@@ -65,9 +69,16 @@ Content records per kind (Dolos profile):
 
 One exception to the tag hashing rule is normative for `indexes` v1: records in dimension `metadata` carry the logical u64 metadata label **verbatim** (big-endian) in `key_hash`, never hashed. The stores keep metadata labels as raw labels rather than hashes, and the layer ships the stored form — that is the whole point of the pre-hashed design. `parameters.indexKeyHash` therefore describes every dimension *except* `metadata`. A publisher that hashes metadata labels produces structurally valid records that restore cleanly but can never be matched by a metadata query; conformance tooling must check this dimension specifically (#1149 tracks whether a future media-type version unifies the rule).
 
-State namespaces: the thirteen entity namespaces from `dolos_cardano::model::build_schema()` (key = 32-byte `EntityKey` verbatim, value = stored minicbor verbatim) plus `utxos` (key = `tx_hash(32) ‖ output_index(4, BE)`, value = CBOR `[era: uint, body: bytes]`). The chain point lives in the inscription's `position`, not in a layer. Live-UTxO tags (`utxo::*`) are not shipped; they are rebuilt at restore into the state store via `utxo_index_delta_from_utxo_delta`.
+State namespaces:
 
-State kinds: one per state namespace, and the set is closed — 14 of them, spelled `state-` followed by the namespace with `_` rewritten to `-`, by the same rule and for the same reasons as the log kinds below. The namespace is therefore **not** in the record — it is the layer — which is what puts the fail-closed edge of a breaking change on exactly the namespace that broke, and lets a reader skip a namespace this profile does not define at the transport rather than choking on one shared layer. The shard count is **specification, never tuning**: `utxos`, `accounts`, `assets` and `datums` split 16 ways, every other namespace is a single blob, and `parameters.shards` reports the map so a reader never has to discover it from the data. Re-sharding a namespace is a media-type-version event for that namespace's kind. Every shard of every kind is published, empty ones included, so tip completeness is structural: a restore requires all 14 kinds and, per kind, exactly the shards its count promises.
+- The fourteen entity namespaces from `dolos_cardano::model::build_schema()`. The key is the 32-byte `EntityKey`, and the value is the stored minicbor. The profile copies both without change.
+- `utxos`. The key is `tx_hash(32) ‖ output_index(4, BE)`, and the value is the CBOR `[era: uint, body: bytes]`.
+
+The chain point lives in the inscription's `position`, not in a layer. Live-UTxO tags (`utxo::*`) are not shipped; they are rebuilt at restore into the state store via `utxo_index_delta_from_utxo_delta`.
+
+State kinds: each state namespace has one state kind, and the set of 15 state kinds is closed. The name of a state kind is `state-` and then the namespace, with each `_` changed to `-`. The log kinds below use the same rule, for the same reasons. The namespace is therefore **not** in the record — it is the layer — which is what puts the fail-closed edge of a breaking change on exactly the namespace that broke, and lets a reader skip a namespace this profile does not define at the transport rather than choking on one shared layer. The shard count is **specification, never tuning**: `utxos`, `accounts`, `assets` and `datums` split 16 ways, every other namespace is a single blob, and `parameters.shards` reports the map so a reader never has to discover it from the data. Re-sharding a namespace is a media-type-version event for that namespace's kind.
+
+Each publish writes every shard of every kind, also the empty shards. As a result, the list of layers alone shows if the tip is complete. A restore requires all 15 kinds. For each kind, the restore requires exactly the number of shards that the shard map gives.
 
 **State history: retained dumps at configured epochs, plus the moving tip.** A stele's state is the tip — the ledger as of `sequence`, swapped whole by every publish — and, for each epoch a publisher retains, an immutable **dump** of the state as of that epoch. The two are the same kinds, the same records and the same shard geometry; a dump differs from a tip in its descriptor scope, which names the epoch, and in nothing else.
 
@@ -149,7 +160,9 @@ and the meaning of `sequence`:
      "scope": {"lastImmutable": 6187}} ] }
 ```
 
-`parameters` is the profile's compatibility declaration. Three of its four values are a consequence of publisher code rather than a free choice: `indexKeyHash` names the hash behind the pre-hashed index keys; `shards` is the per-namespace shard map above; and `schemas` is a per-namespace revision of the *record content* — the stored minicbor a `state-{ns}` or `log-{ns}` layer carries verbatim — which moves when that namespace's stored shape changes, plus one entry at revision `0` per retired namespace, per the removed-kind rule above. Thirteen of the fourteen live revisions are 1; `epochs` is at 2, the first bump the format has taken (ADR-004, Limitations), and the four retired namespaces sit alongside them at 0. Every live revision is pinned by a canary in `crates/snapshot/tests/field_registry.rs`, which fails the build when a record's field table moves without its revision, or the other way round. The split between the two is deliberate: a change to how a layer is *framed* moves that kind's media type and fails closed at the transport, while a change to what a record *contains* moves its schema revision, which a reader consults to decide whether it can interpret what it can already parse. The fourth, `stateEpochs`, is the exception that proves the rule: it is the publisher's configured retained set, and it is here precisely *because* it is a choice — declaring it is what turns a configuration difference between two publishers into a visible parameters difference instead of a silently divergent history.
+`parameters` is the profile's compatibility declaration. Three of its four values are a consequence of publisher code rather than a free choice: `indexKeyHash` names the hash behind the pre-hashed index keys; `shards` is the per-namespace shard map above; and `schemas` is a per-namespace revision of the *record content* — the stored minicbor a `state-{ns}` or `log-{ns}` layer carries verbatim — which moves when that namespace's stored shape changes, plus one entry at revision `0` per retired namespace, per the removed-kind rule above. Twelve of the fifteen live revisions are 1. The revision of `epochs` is 2, and this was the first revision increase in the format (ADR-004, Limitations). The revisions of `gov` and `proposals` are 3. The four retired namespaces are also in `schemas`, at revision 0.
+
+Every live revision is pinned by a canary in `crates/snapshot/tests/field_registry.rs`, which fails the build when a record's field table moves without its revision, or the other way round. The split between the two is deliberate: a change to how a layer is *framed* moves that kind's media type and fails closed at the transport, while a change to what a record *contains* moves its schema revision, which a reader consults to decide whether it can interpret what it can already parse. The fourth, `stateEpochs`, is the exception that proves the rule: it is the publisher's configured retained set, and it is here precisely *because* it is a choice — declaring it is what turns a configuration difference between two publishers into a visible parameters difference instead of a silently divergent history.
 
 `sequence` is the protocol's ordering key; this profile sets it to the epoch. The three opaque objects are canonicalized by JCS like every generic key (SPEC.md), so determinism holds without the protocol interpreting them — which is why every value in them must itself be deterministic, the property the compatibility contract above enforces.
 
@@ -158,18 +171,27 @@ and the meaning of `sequence`:
 The 4 MiB ceiling and its measurement are the protocol's (SPEC.md, "The
 manifest size ceiling"); what is profile-owned is the arithmetic that keeps a Dolos stele inside the
 ceiling, and it stays here: a descriptor with its annotations costs ~350
-bytes, so the ceiling falls near 12,000 layers. A mainnet stele is bounded
-above by ~600 epochs × 5 per-epoch kinds (`blocks`, `indexes` and the three
-`log-{ns}`), plus the state tip's 74 layers (4 namespaces × 16 shards + 10
-single blobs), plus 74 more for every retained state dump — at 20 retained
-epochs, the ceiling of what a publisher is expected to configure, that is
-~4,554 layers and a manifest of roughly 1.6 MB, comfortably inside. The
-bound is loose in the direction that helps: the log kinds are omitted when
-empty, and Byron's ~200 epochs carry no reward or stake logs at all, so the
-realized count sits near ~4,150. **This is the arithmetic that bounds the
-retained list**, and the reason per-epoch dumps were rejected: ~580 of them
-would be ~43,000 state layers on their own, more than three times the
-ceiling. (The Rationale's "~1,700 manifest descriptors" is decision-time
+bytes, so the ceiling falls near 12,000 layers. The maximum number of layers
+in a mainnet stele is the sum of these items:
+
+- ~600 epochs × 5 per-epoch kinds (`blocks`, `indexes` and the three
+  `log-{ns}`)
+- the 75 layers of the state tip (4 namespaces × 16 shards + 11 single
+  blobs)
+- 75 more layers for each retained state dump
+
+This profile expects a maximum of 20 retained epochs in a publisher
+configuration. With 20 retained epochs, the maximum is ~4,575 layers and a
+manifest of approximately 1.6 MB. This manifest size is much less than the
+4 MiB ceiling.
+
+The real count is less than this maximum. If a log layer of an epoch is
+empty, the stele does not include that layer. The ~200 Byron epochs have no
+reward logs and no stake logs. As a result, the real count is ~4,175.
+
+**This is the arithmetic that bounds the retained list**, and the reason
+per-epoch dumps were rejected: ~580 of them would be ~43,000 state layers on
+their own, more than three times the ceiling. (The Rationale's "~1,700 manifest descriptors" is decision-time
 sizing of the pre-split artifact; this paragraph is the authoritative count,
 and it counts layers rather than epochs.)
 

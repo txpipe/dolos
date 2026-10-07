@@ -7,20 +7,20 @@
 //! The namespace is not in the record: it is the layer's *kind*, one per state
 //! namespace (`crate::STATE_KINDS`), so a shape change to one namespace's
 //! records costs that namespace's kind a media-type move and leaves the other
-//! sixteen alone — and a namespace a reader does not know is skippable at the
+//! fourteen alone — and a namespace a reader does not know is skippable at the
 //! transport instead of poisoning one shared layer. Which is also why this
-//! module has one codec rather than seventeen — the kinds differ in what they
+//! module has one codec rather than fifteen — the kinds differ in what they
 //! carry, never in how a record is written — and why its refusals name the
 //! record shape, `state`, rather than a layer.
 //!
 //! ## One record shape, including for UTxOs
 //!
-//! ADR-004 treats the UTxO set as namespace [`crate::UTXOS`] beside the
-//! thirteen entity namespaces, rather than as a special layer kind. That is
-//! what keeps the format's state vocabulary to a single record, and it makes
-//! the planned refactor folding UTxOs into the entity system (#1042) invisible
-//! from outside: the day `utxos` becomes an ordinary namespace, nothing in this
-//! file changes.
+//! ADR-004 puts the UTxO set in the namespace [`crate::UTXOS`], next to the
+//! fourteen entity namespaces. The UTxO set does not have a special layer kind.
+//! That is what keeps the format's state vocabulary to a single record, and it
+//! makes the planned refactor folding UTxOs into the entity system (#1042)
+//! invisible from outside: the day `utxos` becomes an ordinary namespace,
+//! nothing in this file changes.
 //!
 //! The namespace still governs the *codec parameters* — the key width above
 //! all — so [`encode`] and [`decode`] take it as an argument, derived by the
@@ -55,7 +55,7 @@ use stelae::codec::{blob, close, open, uint};
 
 /// The name this codec refuses under.
 ///
-/// One record shape serves all seventeen `state-{ns}` kinds, so an error names
+/// One record shape serves all fifteen `state-{ns}` kinds, so an error names
 /// the shape rather than a layer — the layer is already in the message the
 /// caller wraps it in.
 const STATE: &str = "state";

@@ -699,7 +699,7 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
 /// a record codec, and the scope is the only field that tells them apart.
 ///
 /// Completeness is structural, in both dimensions — **for the tip**. Every one
-/// of the seventeen kinds must be there, and per kind exactly the shards its
+/// of the fifteen kinds must be there, and per kind exactly the shards its
 /// spec'd count promises, empty ones included. A missing piece is a missing
 /// slice of the ledger that no later step would notice — the write path
 /// dispatches on the kind, not the shard — so it is refused rather than
@@ -1679,7 +1679,7 @@ mod tests {
         let err = select_state(&inscription(short)).unwrap_err();
         assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
 
-        // An absent kind: tip completeness is all seventeen, not "what's there".
+        // An absent kind: tip completeness is all fifteen, not "what's there".
         let absent: Vec<LayerDescriptor> = state_layers()
             .into_iter()
             .filter(|layer| layer.kind != "state-epochs")
@@ -2016,7 +2016,7 @@ mod tests {
 
         // The two halves of the rule compose: a `state-{ns}` this build has no
         // namespace for is skipped like any other unknown kind, and the tip is
-        // still complete, because completeness is counted over the seventeen
+        // still complete, because completeness is counted over the fifteen
         // kinds this profile defines rather than over the state layers present.
         assert_eq!(select_state(&stele).unwrap().tip.len(), STATE_KINDS.len());
 

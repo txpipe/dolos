@@ -45,10 +45,10 @@ fn namespace_registry_matches_build_schema() {
         "the profile's state namespaces have drifted from build_schema()"
     );
 
-    // ADR-004 says thirteen entity namespaces plus `utxos`. If that count
-    // moves, the sentence in the ADR moves with it.
-    assert_eq!(entities.len(), 13);
-    assert_eq!(NAMESPACES.len(), 14);
+    // ADR-004 gives the count: fourteen entity namespaces and `utxos`. If
+    // that count moves, the sentence in the ADR moves with it.
+    assert_eq!(entities.len(), 14);
+    assert_eq!(NAMESPACES.len(), 15);
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn the_golden_state_layers_cover_every_namespace() {
     }
 }
 
-/// Every state kind appears in the golden stele, so all seventeen kind strings
+/// Every state kind appears in the golden stele, so all fifteen kind strings
 /// are frozen by a published digest — the state half of
 /// `the_golden_stele_covers_every_log_kind`.
 #[test]
@@ -354,7 +354,7 @@ fn state_kinds_derive_from_their_namespaces() {
     }
 
     // Nothing else is a state kind — `state`, above all, which is what these
-    // seventeen replaced.
+    // fifteen replaced.
     for absent in ["state", "state-", "state-logs", "blocks", "", "state_utxos"] {
         assert!(state_ns_for(absent).is_none(), "{absent:?}");
     }

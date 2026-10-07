@@ -82,7 +82,7 @@ pub fn state_scope(shard: u8) -> StateScope {
 ///
 /// Below [`EPOCH`] rather than equal to it, and that is the interesting
 /// choice: a dump cut at the sequence *is* the tip, byte for byte, so a
-/// fixture that used one would write seventeen kinds' worth of layers whose
+/// fixture that used one would write fifteen kinds' worth of layers whose
 /// digests are already pinned and freeze nothing new. A past epoch's dump has
 /// its own header, its own `diffId`, and the descriptor shape decision 0026
 /// added — which is what a golden is for.
@@ -179,7 +179,7 @@ pub fn logs(ns: Namespace) -> Vec<LogRecord> {
 /// One layer per namespace now, rather than sixteen layers carrying all
 /// eighteen namespaces between them, so a kind's shards are the shards its
 /// spec'd count allows: both of [`SHARDS`] for the four sixteen-way kinds, and
-/// shard 0 alone for the fourteen single blobs. Twenty-two layers, and every
+/// shard 0 alone for the eleven single blobs. Nineteen layers, and every
 /// namespace among them — which is what
 /// `the_golden_state_layers_cover_every_namespace` holds this to.
 pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
@@ -290,7 +290,7 @@ pub fn write_layer(
 /// The fixture's kinds, encoded, in inscription order.
 ///
 /// Every log kind and every state kind appears, which is what makes the goldens
-/// freeze all twenty-three namespace-bearing kind strings: the namespace lives
+/// freeze all eighteen namespace-bearing kind strings: the namespace lives
 /// in the layer header now, and nowhere else on the wire. A sixteen-way state
 /// kind appears twice — one layer per populated shard — which is the normal
 /// case for this profile rather than an edge one.

@@ -10,10 +10,11 @@
 //! ## What is pinned
 //!
 //! Per namespace, a **canary**: a fully-populated value ([`canaries`]) and the
-//! hex of its encoding at the current `SCHEMA_REVS` revision. The encoding is
-//! taken through the production path — `Entity::encode_entity` for the
-//! thirteen entity namespaces, `layers::state::encode_utxo_value` for `utxos`,
-//! the one namespace whose value this profile builds rather than carries.
+//! hex of its encoding at the current `SCHEMA_REVS` revision. The tests get the
+//! encoding through the production path. `Entity::encode_entity` encodes the
+//! fourteen entity namespaces. `layers::state::encode_utxo_value` encodes
+//! `utxos`, which is the only namespace with values that this profile builds.
+//! For the other namespaces, the profile copies the stored values.
 //!
 //! ## Append-only history
 //!
@@ -57,8 +58,8 @@ pub mod ground_rules;
 
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
-    StakeLog,
+    FixedNamespace, GovState, MetadataLabelState, PendingMirState, PendingRewardState, PoolState,
+    ProposalState, StakeLog,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -186,7 +187,7 @@ pub fn registry() -> Vec<Entry> {
             enc_epochs,
             EpochState,
             canaries::epoch_state,
-            // The one namespace whose history has moved. Revision 1 is
+            // A history that moved without a field append. Revision 1 is
             // retained as a decode witness and nothing more: it is *one* of
             // the orderings pre-fix code could emit for
             // `RollingStats::registered_pools`, which was a hash container and
@@ -233,6 +234,15 @@ pub fn registry() -> Vec<Entry> {
                     hex: include_str!("goldens/gov.rev3.hex"),
                 }
             ]
+        ),
+        entity_entry!(
+            enc_metadata_labels,
+            MetadataLabelState,
+            canaries::metadata_label_state,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/metadata-labels.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_pending_mirs,
