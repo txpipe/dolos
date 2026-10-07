@@ -1185,9 +1185,9 @@ fn retirement_positions<D: Domain>(
 /// Sorts the list by epoch, then by retirement position, then by operator.
 /// Returns one page of the result.
 ///
-/// A pool without a position sorts first in its epoch. A pool gets no
-/// position when a pruned archive lacks its certificate. Then its retirement
-/// is older than the kept history, so it is older than the other retirements.
+/// A pool without a position counts as the oldest retirement in its epoch.
+/// A pool gets no position when a pruned archive lacks its certificate. Then
+/// its retirement is older than the kept history.
 fn order_page(
     list: Vec<(u64, PoolHash)>,
     positions: &HashMap<PoolHash, RetirementPosition>,
