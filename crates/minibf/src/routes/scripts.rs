@@ -163,7 +163,9 @@ where
         return Ok(Json(vec![]));
     }
 
-    let items = super::utxos::load_utxo_models(&domain, refs, pagination).await?;
+    let items =
+        super::utxos::load_utxo_models(&domain, refs, pagination, super::utxos::UtxoFilter::All)
+            .await?;
 
     Ok(Json(items))
 }

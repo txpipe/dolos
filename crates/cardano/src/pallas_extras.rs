@@ -7,7 +7,7 @@ use pallas::ledger::addresses::{
 };
 use pallas::ledger::primitives::alonzo::MoveInstantaneousReward;
 use pallas::ledger::primitives::conway::{
-    CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds, ScriptRef,
+    CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds, ScriptRef, Voter,
 };
 use pallas::ledger::primitives::{
     alonzo::Certificate as AlonzoCert, conway::Certificate as ConwayCert, PoolMetadata,
@@ -170,6 +170,17 @@ pub fn cert_as_drep_unregistration(cert: &MultiEraCert) -> Option<MultiEraDRepUn
                 cred: cred.clone(),
                 deposit: *deposit,
             }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Returns the credential of a DRep update certificate.
+pub fn cert_as_drep_update(cert: &MultiEraCert) -> Option<StakeCredential> {
+    match cert {
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::UpdateDRepCert(cred, _) => Some(cred.clone()),
             _ => None,
         },
         _ => None,
@@ -456,6 +467,40 @@ pub const DREP_SCRIPT_PREFIX: u8 = 0b00100011;
 pub fn drep_id_is_script(drep_id: &[u8]) -> bool {
     let first = drep_id.first().unwrap();
     first & 0b00001111 == 0b00000011
+}
+
+/// Returns the CIP-129 id bytes of a DRep credential: the key or script header
+/// byte, then the 28-byte hash. These are the bytes that `drep_to_entity_key`
+/// writes before its padding.
+pub fn drep_id_bytes(cred: &StakeCredential) -> Vec<u8> {
+    match cred {
+        StakeCredential::AddrKeyhash(hash) => [&[DREP_KEY_PREFIX][..], hash.as_slice()].concat(),
+        StakeCredential::ScriptHash(hash) => [&[DREP_SCRIPT_PREFIX][..], hash.as_slice()].concat(),
+    }
+}
+
+pub const CC_HOT_KEY_PREFIX: u8 = 0b00000010;
+pub const CC_HOT_SCRIPT_PREFIX: u8 = 0b00000011;
+
+/// Returns the bytes that identify a governance voter.
+///
+/// DReps get their CIP-129 DRep id bytes, as [`drep_id_bytes`] builds them.
+/// Committee members get their CIP-129 committee-hot id bytes: the hot-role
+/// key or script header, then the hot credential hash. Pools get their 28-byte
+/// pool hash. The three shapes never collide: the DRep and committee headers
+/// differ, and a pool hash is a byte shorter.
+pub fn voter_id_bytes(voter: &Voter) -> Vec<u8> {
+    match voter {
+        Voter::DRepKey(hash) => [&[DREP_KEY_PREFIX][..], hash.as_slice()].concat(),
+        Voter::DRepScript(hash) => [&[DREP_SCRIPT_PREFIX][..], hash.as_slice()].concat(),
+        Voter::ConstitutionalCommitteeKey(hash) => {
+            [&[CC_HOT_KEY_PREFIX][..], hash.as_slice()].concat()
+        }
+        Voter::ConstitutionalCommitteeScript(hash) => {
+            [&[CC_HOT_SCRIPT_PREFIX][..], hash.as_slice()].concat()
+        }
+        Voter::StakePoolKey(hash) => hash.to_vec(),
+    }
 }
 
 pub fn stake_cred_to_drep(cred: &StakeCredential) -> DRep {
