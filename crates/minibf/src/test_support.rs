@@ -12,7 +12,8 @@ use dolos_cardano::periods::stats::TOTALS;
 use dolos_core::{
     config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig, RoutePrefix},
     import::ImportExt as _,
-    CacheStore as _, Domain, StateStore,
+    ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _, CacheStore as _, ChainPoint, Domain,
+    RawBlock, StateStore,
 };
 use dolos_testing::{
     synthetic::{
@@ -22,6 +23,7 @@ use dolos_testing::{
     toy_domain::{MemoryStores, ToyDomain, ToyStores},
 };
 use http_body_util::BodyExt;
+use pallas::ledger::traverse::MultiEraBlock;
 use tower::util::ServiceExt;
 
 use crate::{build_router_with_facade, Facade};
@@ -504,7 +506,7 @@ impl<B: ToyStores> TestDomainBuilder<B> {
 pub struct TestApp {
     router: Router,
     facade: Facade<dolos_testing::faults::FaultyToyDomain>,
-    vectors: SyntheticVectors,
+    vectors: Option<SyntheticVectors>,
 }
 
 impl TestApp {
@@ -563,7 +565,7 @@ impl TestApp {
 
     fn build(cfg: SyntheticBlockConfig, fault: Option<TestFault>, minibf: MinibfConfig) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(domain, vectors, fault, minibf)
+        Self::from_domain(domain, Some(vectors), fault, minibf)
     }
 
     pub fn new_with_cfg_and_setup(
@@ -573,7 +575,7 @@ impl TestApp {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         setup(&domain, &vectors);
         let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        Self::from_domain(domain, vectors, None, minibf)
+        Self::from_domain(domain, Some(vectors), None, minibf)
     }
 
     /// App over `cfg`'s chain on the domain `adjust` returns, for a domain
@@ -584,7 +586,7 @@ impl TestApp {
     ) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        Self::from_domain(adjust(domain), vectors, None, minibf)
+        Self::from_domain(adjust(domain), Some(vectors), None, minibf)
     }
 
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
@@ -593,12 +595,49 @@ impl TestApp {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
             .with_max_scan_items(max_scan_items);
-        Self::from_domain(domain, vectors, None, minibf)
+        Self::from_domain(domain, Some(vectors), None, minibf)
+    }
+
+    /// App over a fresh domain for `genesis` whose archive holds `blocks`,
+    /// written and indexed the way the roll pipeline files them, a Byron
+    /// epoch-boundary block under its chain difficulty included. No ledger
+    /// logic runs over them, so this is for routes that read the archive only.
+    pub fn new_with_archived_blocks(genesis: dolos_core::Genesis, blocks: &[RawBlock]) -> Self {
+        let domain = ToyDomain::new_with_genesis_and_config(
+            Arc::new(genesis),
+            dolos_cardano::CardanoLogicConfig::default(),
+            None,
+            None,
+        );
+
+        let writer = domain.archive().start_writer().expect("archive writer");
+        let mut deltas = Vec::new();
+
+        for raw in blocks {
+            let block = MultiEraBlock::decode(raw).expect("archived block decodes");
+            let point = ChainPoint::Specific(block.slot(), block.hash());
+
+            writer.apply(&point, raw).expect("archive block");
+
+            deltas.push(ArchiveIndexDelta {
+                slot: block.slot(),
+                block_hash: block.hash().to_vec(),
+                block_number: Some(block.number()),
+                tx_hashes: block.txs().iter().map(|tx| tx.hash().to_vec()).collect(),
+                tags: Vec::new(),
+            });
+        }
+
+        writer.apply_index(&deltas).expect("index archived blocks");
+        writer.commit().expect("commit archived blocks");
+
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        Self::from_domain(domain, None, None, minibf)
     }
 
     fn from_domain(
         domain: ToyDomain,
-        vectors: SyntheticVectors,
+        vectors: Option<SyntheticVectors>,
         fault: Option<TestFault>,
         minibf: MinibfConfig,
     ) -> Self {
@@ -686,7 +725,9 @@ impl TestApp {
     }
 
     pub fn vectors(&self) -> &SyntheticVectors {
-        &self.vectors
+        self.vectors
+            .as_ref()
+            .expect("app built from synthetic blocks")
     }
 
     /// The entries the totals cache holds in memory, if it is registered.
@@ -823,7 +864,7 @@ pub fn replicated_app_with_fault(fault: Option<TestFault>) -> TestApp {
     replicate_accounts_and_pools(&domain, 4);
 
     let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-    TestApp::from_domain(domain, vectors, fault, minibf)
+    TestApp::from_domain(domain, Some(vectors), fault, minibf)
 }
 
 /// The body of a totals route with the totals cache off, then on and keeping
@@ -946,6 +987,6 @@ impl TestAppBuilder {
             .finish();
 
         let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        TestApp::from_domain(domain, vectors, None, minibf)
+        TestApp::from_domain(domain, Some(vectors), None, minibf)
     }
 }
