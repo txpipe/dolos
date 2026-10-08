@@ -4,18 +4,19 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::block_content::BlockContent;
-use dolos_core::{archive::Skippable as _, ArchiveStore as _, Domain};
+use dolos_core::{archive::Skippable as _, Domain};
 use futures::future::try_join_all;
 use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::{
     error::Error,
-    pagination::{Order, Pagination, PaginationParameters},
+    pagination::{Pagination, PaginationParameters},
     Facade,
 };
 
 use super::{
-    build_block_model, genesis, load_block_by_hash_or_number, parse_hash_or_number, tip_block,
+    blocks_before, build_block_model, genesis, load_block_by_hash_or_number, names_genesis,
+    parse_hash_or_number, tip_block,
 };
 
 pub async fn by_hash_or_number_previous<D>(
@@ -29,33 +30,44 @@ where
     let pagination = Pagination::try_from(params)?;
 
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
+
+    if names_genesis(&domain, &hash_or_number)? {
+        return Ok(Json(Vec::new()));
+    }
+
     let curr = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
-    let curr = MultiEraBlock::decode(&curr).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let curr_slot = curr.slot();
-    let curr_number = curr.number() as usize;
+    // walking back, the page starts `from` blocks before the reference block
+    // and the genesis block closes the chain
+    let (bodies, reaches_genesis) = {
+        let curr = MultiEraBlock::decode(&curr).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut iter = blocks_before(&domain, &curr)?;
 
-    let from = pagination.from();
-    let actual_count = curr_number.saturating_sub(from).min(pagination.count);
+        let from = pagination.from();
 
-    let bodies = if actual_count > 0 {
-        let mut iter = domain
-            .archive()
-            .get_range(None, Some(curr_slot))
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        // key-only skip; the block before the page tells whether it starts at all
+        let starts = match from {
+            0 => true,
+            _ => {
+                iter.skip_backward(from - 1);
+                iter.next_back().is_some()
+            }
+        };
 
-        // key-only skip, no block data read
-        iter.skip_backward(from);
+        match starts {
+            true => {
+                let bodies: Vec<_> = iter
+                    .rev()
+                    .take(pagination.count)
+                    .map(|(_, body)| body)
+                    .collect();
+                let reaches_genesis = bodies.len() < pagination.count;
 
-        iter.rev()
-            .take(actual_count)
-            .map(|(_, body)| body)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
+                (bodies, reaches_genesis)
+            }
+            false => (Vec::new(), false),
+        }
     };
-
-    drop(curr);
 
     let tip = tip_block(&domain)?;
     let chain = domain.get_chain_summary()?;
@@ -65,28 +77,18 @@ where
         .map(|body| build_block_model(&domain, body, &tip, &chain));
     let mut output = try_join_all(futures).await?;
 
-    let mut block_0 = genesis::genesis_block(&domain).map_err(Error::Code)?;
+    for block in output.iter_mut() {
+        genesis::set_genesis_previous_block(&domain, block);
+    }
 
-    if let Some(_genesis) = block_0.as_ref() {
-        for block in output.iter_mut() {
-            genesis::set_genesis_previous_block(&domain, block);
-        }
-
-        let to = from.saturating_add(pagination.count);
-        let genesis_index = curr_number;
-        let genesis_in_range = from <= genesis_index && genesis_index < to;
-
-        if genesis_in_range {
-            if let Some(genesis) = block_0.take() {
-                output.push(genesis);
-            }
+    if reaches_genesis {
+        if let Some(genesis) = genesis::genesis_block(&domain).map_err(Error::Code)? {
+            output.push(genesis);
         }
     }
 
-    let output = match pagination.order {
-        Order::Asc => output.into_iter().rev().collect(),
-        Order::Desc => output,
-    };
+    // walked back, served ascending; Blockfrost takes no `order` here
+    output.reverse();
 
     Ok(Json(output))
 }
@@ -116,7 +118,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blocks_previous_order_desc() {
+    async fn blocks_previous_ignores_order() {
         let app = TestApp::new();
         let vectors = &app.vectors().blocks;
         let last = vectors.last().expect("missing block vectors");
@@ -128,9 +130,7 @@ mod tests {
         )
         .await;
 
-        let mut reversed = asc;
-        reversed.reverse();
-        assert_eq!(desc, reversed);
+        assert_eq!(desc, asc);
     }
 
     #[tokio::test]
@@ -183,5 +183,37 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn blocks_previous_steps_over_boundary_siblings() {
+        let chain = mainnet_byron_chain(true);
+        let main = |slot: u64| chain.main[&slot].hash.as_str();
+        let genesis = crate::hacks::GENESIS_HASH_MAINNET;
+
+        // boundary block 0 sits on the same slot, before the main block
+        let path = format!("/blocks/{}/previous", main(0));
+        let blocks = get_blocks(&chain.app, &path).await;
+        assert_eq!(hashes(&blocks), [genesis, chain.ebb_0.hash.as_str()]);
+
+        let path = format!("/blocks/{}/previous?count=2", main(21600));
+        let blocks = get_blocks(&chain.app, &path).await;
+        assert_eq!(hashes(&blocks), [main(21599), chain.ebb_1.hash.as_str()]);
+
+        // pages count back from the reference block, genesis closing the chain
+        let page = |page: u32| format!("/blocks/{}/previous?count=2&page={page}", main(1));
+        let blocks = get_blocks(&chain.app, &page(1)).await;
+        assert_eq!(hashes(&blocks), [chain.ebb_0.hash.as_str(), main(0)]);
+        let blocks = get_blocks(&chain.app, &page(2)).await;
+        assert_eq!(hashes(&blocks), [genesis]);
+        let blocks = get_blocks(&chain.app, &page(3)).await;
+        assert!(blocks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn blocks_previous_of_genesis_is_empty() {
+        let app = TestApp::new();
+        let blocks = get_blocks(&app, &format!("/blocks/{GENESIS_HASH}/previous")).await;
+        assert!(blocks.is_empty());
     }
 }

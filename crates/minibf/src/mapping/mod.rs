@@ -93,6 +93,44 @@ where
     })
 }
 
+/// Text in the order db-sync's Postgres collation (`en_US.UTF-8`) sorts it,
+/// which Blockfrost's address listings follow: case-insensitively, the
+/// lowercase spelling first on a tie. Byte order would put every Byron
+/// base58 address starting with an uppercase letter first.
+pub fn collated(a: &str, b: &str) -> std::cmp::Ordering {
+    a.to_lowercase()
+        .cmp(&b.to_lowercase())
+        .then_with(|| b.cmp(a))
+}
+
+#[cfg(test)]
+mod collated_tests {
+    use super::collated;
+
+    #[test]
+    fn collated_ignores_case_before_the_tie_break() {
+        let mut addresses = vec![
+            "DdzFFzCqrhsjZHKn8Y9Txr4B9PaEtYcYp8TGa4gQTfJfjvuNLqvB",
+            "addr1q9m3e9ps3xmxv9tn0x3nmhjzxp2sqm5d8f3nz4g7snjsxtxd",
+            "Ae2tdPwUPEZ6RAwsZ4RqHnB3LjhEbyAGVbJFLKpwuGYHRB2WY6mZ",
+            "ae2tdPwUPEZ6RAwsZ4RqHnB3LjhEbyAGVbJFLKpwuGYHRB2WY6mZ",
+            "37btjrVyb4KEB2STADSsj3MYSAdj52X5FrFWpw2r7Wmj2GDzXjFRsHWuZqrw7zSkwopv8Ci",
+        ];
+        addresses.sort_by(|a, b| collated(a, b));
+
+        assert_eq!(
+            addresses,
+            [
+                "37btjrVyb4KEB2STADSsj3MYSAdj52X5FrFWpw2r7Wmj2GDzXjFRsHWuZqrw7zSkwopv8Ci",
+                "addr1q9m3e9ps3xmxv9tn0x3nmhjzxp2sqm5d8f3nz4g7snjsxtxd",
+                "ae2tdPwUPEZ6RAwsZ4RqHnB3LjhEbyAGVbJFLKpwuGYHRB2WY6mZ",
+                "Ae2tdPwUPEZ6RAwsZ4RqHnB3LjhEbyAGVbJFLKpwuGYHRB2WY6mZ",
+                "DdzFFzCqrhsjZHKn8Y9Txr4B9PaEtYcYp8TGa4gQTfJfjvuNLqvB",
+            ]
+        );
+    }
+}
+
 pub fn round_f64<const DECIMALS: u8>(val: f64) -> f64 {
     let multiplier = 10_f64.powi(DECIMALS as i32);
     (val * multiplier).round() / multiplier

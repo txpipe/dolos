@@ -25,12 +25,6 @@ where
     let block = match load_block_by_hash_or_number(&domain, &hash_or_number).await {
         Ok(block) => block,
         Err(Error::Code(StatusCode::NOT_FOUND)) => {
-            if Either::Right(0) == hash_or_number {
-                if let Some(block) = genesis::genesis_block(&domain).map_err(Error::Code)? {
-                    return Ok(Json(block));
-                }
-            }
-
             if let Either::Left(hash) = &hash_or_number {
                 if genesis::is_genesis_hash(&domain, hash).map_err(Error::Code)? {
                     if let Some(block) = genesis::genesis_block(&domain).map_err(Error::Code)? {
@@ -83,6 +77,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blocks_by_hash_or_number_wrong_hash_length_bad_request() {
+        let app = TestApp::new();
+        let short = &missing_block()[2..];
+        let long = format!("{}00", missing_block());
+
+        for hash in [short, long.as_str()] {
+            for route in ["", "/next", "/previous", "/txs", "/txs/cbor", "/addresses"] {
+                let path = format!("/blocks/{hash}{route}");
+                assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn blocks_by_hash_or_number_not_found() {
         let app = TestApp::new();
         let path = format!("/blocks/{}", missing_block());
@@ -101,20 +109,62 @@ mod tests {
         let app = TestApp::new();
         let first = app.vectors().blocks.first().expect("missing block vectors");
 
-        for path in ["/blocks/0".to_string(), format!("/blocks/{GENESIS_HASH}")] {
-            let (status, bytes) = app.get_bytes(&path).await;
-            assert_eq!(status, StatusCode::OK);
+        let (status, bytes) = app.get_bytes(&format!("/blocks/{GENESIS_HASH}")).await;
+        assert_eq!(status, StatusCode::OK);
 
-            let genesis: BlockContent =
-                serde_json::from_slice(&bytes).expect("failed to parse genesis block");
-            assert_eq!(genesis.hash, GENESIS_HASH);
-            assert_eq!(genesis.height, None);
-            assert_eq!(genesis.previous_block, None);
-        }
+        let genesis: BlockContent =
+            serde_json::from_slice(&bytes).expect("failed to parse genesis block");
+        assert_eq!(genesis.hash, GENESIS_HASH);
+        assert_eq!(genesis.height, None);
+        assert_eq!(genesis.previous_block, None);
+
+        // the genesis block has no number, so block 0 is only ever a real block
+        assert_status(&app, "/blocks/0", StatusCode::NOT_FOUND).await;
 
         // the first real block links back to genesis
         let block = get_blocks(&app, &format!("/blocks/{}/next", GENESIS_HASH)).await;
         assert_eq!(block[0].hash, first.block_hash);
         assert_eq!(block[0].previous_block.as_deref(), Some(GENESIS_HASH));
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_byron_slots_and_heights() {
+        let chain = mainnet_byron_chain(true);
+
+        // a main block keeps a zero slot and epoch slot
+        let block = get_block(&chain.app, &format!("/blocks/{}", chain.main[&0].hash)).await;
+        assert_eq!(block.slot, Some(0));
+        assert_eq!(block.epoch_slot, Some(0));
+        assert_eq!(block.height, Some(1));
+
+        // a boundary block has none, wherever it sits
+        for ebb in [&chain.ebb_0, &chain.ebb_1] {
+            let block = get_block(&chain.app, &format!("/blocks/{}", ebb.hash)).await;
+            assert_eq!(block.slot, None);
+            assert_eq!(block.epoch_slot, None);
+            assert_eq!(block.height, None);
+            assert_eq!(block.slot_leader, "Epoch boundary slot leader");
+        }
+    }
+
+    #[tokio::test]
+    async fn blocks_by_number_skips_boundary_blocks() {
+        let chain = mainnet_byron_chain(true);
+
+        // boundary block 0 holds number 0, which db-sync gives no block
+        assert_status(&chain.app, "/blocks/0", StatusCode::NOT_FOUND).await;
+
+        let block = get_block(&chain.app, "/blocks/1").await;
+        assert_eq!(block.hash, chain.main[&0].hash);
+
+        // boundary block 1 repeats the number of the block before it
+        let last = &chain.main[&21599];
+        assert_eq!(chain.ebb_1.number, last.number);
+
+        let block = get_block(&chain.app, &format!("/blocks/{}", last.number)).await;
+        assert_eq!(block.hash, last.hash);
+
+        let block = get_block(&chain.app, &format!("/blocks/{}", last.number + 1)).await;
+        assert_eq!(block.hash, chain.main[&21600].hash);
     }
 }

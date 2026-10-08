@@ -8,7 +8,8 @@ use axum::{
 use dolos_core::{
     config::{CardanoConfig, MinibfConfig},
     import::ImportExt as _,
-    Domain, StateStore,
+    ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _, ChainPoint, Domain, RawBlock,
+    StateStore,
 };
 use dolos_testing::{
     synthetic::{
@@ -18,6 +19,7 @@ use dolos_testing::{
     toy_domain::ToyDomain,
 };
 use http_body_util::BodyExt;
+use pallas::ledger::traverse::MultiEraBlock;
 use tower::util::ServiceExt;
 
 use crate::{build_router_with_facade, Facade};
@@ -276,7 +278,7 @@ impl TestDomainBuilder {
 pub struct TestApp {
     router: Router,
     _domain: dolos_testing::faults::FaultyToyDomain,
-    vectors: SyntheticVectors,
+    vectors: Option<SyntheticVectors>,
 }
 
 impl TestApp {
@@ -299,7 +301,7 @@ impl TestApp {
 
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(domain, vectors, fault, None)
+        Self::from_domain(domain, Some(vectors), fault, None)
     }
 
     pub fn new_with_cfg_and_setup(
@@ -308,19 +310,55 @@ impl TestApp {
     ) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         setup(&domain, &vectors);
-        Self::from_domain(domain, vectors, None, None)
+        Self::from_domain(domain, Some(vectors), None, None)
     }
 
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
     /// can be exercised without building a chain of thousands of blocks.
     pub fn new_with_scan_limit(cfg: SyntheticBlockConfig, max_scan_items: u64) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(domain, vectors, None, Some(max_scan_items))
+        Self::from_domain(domain, Some(vectors), None, Some(max_scan_items))
+    }
+
+    /// App over a fresh domain for `genesis` whose archive holds `blocks`,
+    /// written and indexed the way the roll pipeline files them, a Byron
+    /// epoch-boundary block under its chain difficulty included. No ledger
+    /// logic runs over them, so this is for routes that read the archive only.
+    pub fn new_with_archived_blocks(genesis: dolos_core::Genesis, blocks: &[RawBlock]) -> Self {
+        let domain = ToyDomain::new_with_genesis_and_config(
+            Arc::new(genesis),
+            CardanoConfig::default(),
+            None,
+            None,
+        );
+
+        let writer = domain.archive().start_writer().expect("archive writer");
+        let mut deltas = Vec::new();
+
+        for raw in blocks {
+            let block = MultiEraBlock::decode(raw).expect("archived block decodes");
+            let point = ChainPoint::Specific(block.slot(), block.hash());
+
+            writer.apply(&point, raw).expect("archive block");
+
+            deltas.push(ArchiveIndexDelta {
+                slot: block.slot(),
+                block_hash: block.hash().to_vec(),
+                block_number: Some(block.number()),
+                tx_hashes: block.txs().iter().map(|tx| tx.hash().to_vec()).collect(),
+                tags: Vec::new(),
+            });
+        }
+
+        writer.apply_index(&deltas).expect("index archived blocks");
+        writer.commit().expect("commit archived blocks");
+
+        Self::from_domain(domain, None, None, None)
     }
 
     fn from_domain(
         domain: ToyDomain,
-        vectors: SyntheticVectors,
+        vectors: Option<SyntheticVectors>,
         fault: Option<TestFault>,
         max_scan_items: Option<u64>,
     ) -> Self {
@@ -411,7 +449,9 @@ impl TestApp {
     }
 
     pub fn vectors(&self) -> &SyntheticVectors {
-        &self.vectors
+        self.vectors
+            .as_ref()
+            .expect("app built from synthetic blocks")
     }
 
     /// Epoch at the domain's tip. Only usable on fault-free apps — fault
