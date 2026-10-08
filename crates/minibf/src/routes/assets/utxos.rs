@@ -27,8 +27,9 @@ use crate::{
 /// the row requires block data the node no longer has.
 ///
 /// `max_scan_items` caps the page depth, as on `/assets` and
-/// `/assets/{asset}/transactions`. It is a depth guard only: every UTxO of
-/// the asset still costs one index lookup, whatever the page.
+/// `/assets/{asset}/transactions`, and the live set: every UTxO of the asset
+/// costs one index lookup whatever the page, so an asset held by more live
+/// UTxOs than the budget is refused rather than scanned.
 pub async fn by_subject_utxos<D>(
     Path(subject): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -46,6 +47,10 @@ where
         .state()
         .utxos_by_asset(&asset)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if refs.len() as u64 > domain.config.max_scan_items() {
+        return Err(Error::LiveUtxoSetTooLarge);
+    }
 
     let utxos =
         crate::routes::utxos::load_utxo_models_in_height_range(&domain, refs, pagination).await?;
@@ -232,32 +237,24 @@ mod tests {
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
-    /// A bound Blockfrost does not read as one (more than two `:` parts) is
-    /// ignored, not rejected; empty parts default.
+    /// Bounds Blockfrost rejects (empty parts, a third part, a number past
+    /// `i32::MAX`) are a 400, not ignored.
     #[tokio::test]
     async fn assets_by_subject_utxos_bounds_parse_like_blockfrost() {
         let app = TestApp::new();
         let asset = app.vectors().asset_unit.as_str();
-        let get = |query: &str| {
-            let app = &app;
+
+        for query in [
+            "from=10:2:garbage",
+            "to=1:2:3",
+            "from=10:",
+            "from=:2",
+            "from=",
+            "from=99999999999",
+        ] {
             let path = format!("/assets/{asset}/utxos?{query}");
-            async move {
-                let (status, bytes) = app.get_bytes(&path).await;
-                assert_eq!(status, StatusCode::OK, "{path}");
-                parse_utxos(&bytes)
-            }
-        };
-
-        let all = get("").await;
-        let height = all.last().expect("rows").block_height;
-
-        assert_eq!(get("from=10:2:garbage").await, all);
-        assert_eq!(get("to=1:2:3&order=asc").await, all);
-        assert_eq!(
-            get(&format!("from={height}:")).await,
-            get(&format!("from={height}")).await
-        );
-        assert_eq!(get("from=:2").await, all);
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
     }
 
     /// A Byron epoch-boundary block takes the height of the main block
@@ -630,22 +627,45 @@ mod tests {
 
     #[tokio::test]
     async fn assets_by_subject_utxos_scan_limit() {
+        // fifteen live UTxOs carry the asset, as many as the budget allows
         let app = TestApp::new_with_scan_limit(
             SyntheticBlockConfig {
                 block_count: 5,
                 txs_per_block: 3,
                 ..Default::default()
             },
-            3,
+            15,
         );
         let asset = app.vectors().asset_unit.as_str();
 
         // a page within the budget is served
-        let path = format!("/assets/{asset}/utxos?count=3&page=1");
+        let path = format!("/assets/{asset}/utxos?count=15&page=1");
         assert_status(&app, &path, StatusCode::OK).await;
 
         // one reaching past it is refused, not cut short
-        let path = format!("/assets/{asset}/utxos?count=2&page=2");
+        let path = format!("/assets/{asset}/utxos?count=8&page=2");
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    /// Every live UTxO of the asset costs an index lookup whatever the page,
+    /// so a set past the budget is refused outright, however small the page.
+    #[tokio::test]
+    async fn assets_by_subject_utxos_refuses_a_set_past_the_budget() {
+        let cfg = || SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 1,
+            ..Default::default()
+        };
+
+        // five live UTxOs carry the asset, one per block
+        let app = TestApp::new_with_scan_limit(cfg(), 5);
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}/utxos?count=1&page=1");
+        assert_status(&app, &path, StatusCode::OK).await;
+
+        let app = TestApp::new_with_scan_limit(cfg(), 4);
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}/utxos?count=1&page=1");
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 }
