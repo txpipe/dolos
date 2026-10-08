@@ -533,12 +533,17 @@ where
 
 pub async fn by_stake_utxos<D>(
     Path(address): Path<String>,
-    Query(params): Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    // Blockfrost does not read `from` / `to` here, so a malformed
+    // or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
     let pagination = Pagination::try_from(params)?;
 
     let network = domain.get_network_id()?;

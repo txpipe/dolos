@@ -132,13 +132,18 @@ where
 
 pub async fn by_hash_utxos<D>(
     Path(script_hash): Path<String>,
-    Query(params): Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<ScriptUtxosInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = parse_script_hash(&script_hash)?;
+    // Blockfrost does not read `from` / `to` here, so a malformed
+    // or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
     let pagination = Pagination::try_from(params)?;
 
     let refs = domain

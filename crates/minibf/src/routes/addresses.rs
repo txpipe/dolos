@@ -354,6 +354,16 @@ where
         .any(|(_, block)| block.is_some()))
 }
 
+/// Blockfrost validates `from` / `to` on the address UTxO lists, so a
+/// malformed or reversed window is a 400, but it does not filter on them, so
+/// a valid window is dropped after the check.
+fn utxo_list_pagination(params: PaginationParameters) -> Result<Pagination, Error> {
+    let mut pagination = Pagination::try_from(params)?;
+    pagination.from = None;
+    pagination.to = None;
+    Ok(pagination)
+}
+
 pub async fn utxos<D>(
     Path(address): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -362,7 +372,7 @@ pub async fn utxos<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let pagination = Pagination::try_from(params)?;
+    let pagination = utxo_list_pagination(params)?;
 
     let refs = refs_for_address(&domain, &address)?;
 
@@ -389,7 +399,7 @@ pub async fn utxos_with_asset<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let pagination = Pagination::try_from(params)?;
+    let pagination = utxo_list_pagination(params)?;
 
     // `lovelace` lists the outputs without native assets. Any other asset
     // narrows the refs to the outputs that hold it.
@@ -1459,5 +1469,95 @@ mod tests {
         let addr = "invalid_address";
         let parsed = parse_address(addr);
         assert!(matches!(parsed, Err(Error::InvalidAddress)));
+    }
+
+    /// The address UTxO list has no height range, so a UTxO whose creation
+    /// block was pruned stays listed and sorts first, as the oldest.
+    #[tokio::test]
+    async fn addresses_utxos_keep_pruned_rows() {
+        let full = TestApp::new();
+        let address = full.vectors().address.clone();
+        let (status, bytes) = full.get_bytes(&format!("/addresses/{address}/utxos")).await;
+        assert_eq!(status, StatusCode::OK);
+        let all: Vec<AddressUtxoContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse utxos");
+
+        // the first two blocks are pruned, their UTxOs stay live
+        let pruned = TestApp::new_pruned();
+        let pruned_txs: std::collections::HashSet<&str> = pruned.vectors().blocks[..2]
+            .iter()
+            .flat_map(|b| b.tx_hashes.iter().map(String::as_str))
+            .collect();
+
+        let (status, bytes) = pruned
+            .get_bytes(&format!("/addresses/{address}/utxos"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let listed: Vec<AddressUtxoContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse utxos");
+
+        assert_eq!(listed.len(), all.len(), "pruning must not drop rows here");
+
+        let is_pruned = |x: &AddressUtxoContentInner| pruned_txs.contains(x.tx_hash.as_str());
+
+        let retained: Vec<_> = listed.iter().filter(|x| !is_pruned(x)).cloned().collect();
+        let expected: Vec<_> = all.iter().filter(|x| !is_pruned(x)).cloned().collect();
+        assert_eq!(retained, expected, "retained rows keep chain order");
+
+        // the pruned rows come first
+        let pruned_rows = listed.len() - retained.len();
+        assert!(pruned_rows > 0, "fixture needs pruned rows");
+        assert!(listed[..pruned_rows].iter().all(is_pruned));
+
+        // paging one row at a time crosses the pruned / retained boundary in
+        // the same order, both ways
+        for order in ["asc", "desc"] {
+            let mut expected = listed.clone();
+            if order == "desc" {
+                expected.reverse();
+            }
+
+            let mut walked = Vec::new();
+            for page in 1..=listed.len() + 1 {
+                let (status, bytes) = pruned
+                    .get_bytes(&format!(
+                        "/addresses/{address}/utxos?order={order}&count=1&page={page}"
+                    ))
+                    .await;
+                assert_eq!(status, StatusCode::OK);
+                let rows: Vec<AddressUtxoContentInner> =
+                    serde_json::from_slice(&bytes).expect("failed to parse utxos");
+                walked.extend(rows);
+            }
+            assert_eq!(walked, expected, "{order}");
+        }
+    }
+
+    /// Blockfrost validates `from` / `to` on the address UTxO lists without
+    /// filtering on them: a malformed or reversed window is a 400, a valid
+    /// one returns the unbounded list.
+    #[tokio::test]
+    async fn addresses_utxos_validate_but_ignore_from_to() {
+        let app = TestApp::new();
+        let address = app.vectors().address.clone();
+
+        for path in [
+            format!("/addresses/{address}/utxos"),
+            format!("/addresses/{address}/utxos/lovelace"),
+        ] {
+            let (status, bytes) = app.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+
+            for query in ["from=abc", "from=20&to=10", "to=x:y", "from=:2"] {
+                let (status, _) = app.get_bytes(&format!("{path}?{query}")).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{path}?{query}");
+            }
+
+            for query in ["from=999999", "to=0", "from=1:5&to=2"] {
+                let (status, with_bounds) = app.get_bytes(&format!("{path}?{query}")).await;
+                assert_eq!(status, StatusCode::OK, "{path}?{query}");
+                assert_eq!(with_bounds, bytes, "{path}?{query}");
+            }
+        }
     }
 }

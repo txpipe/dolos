@@ -65,30 +65,31 @@ pub struct PaginationNumberAndIndex {
     pub index: Option<usize>,
 }
 
-impl TryFrom<String> for PaginationNumberAndIndex {
-    type Error = PaginationError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        let mut parts = value.split(':');
-        let Some(number) = parts.next() else {
-            return Err(PaginationError::InvalidFromTo);
-        };
-        let Ok(number) = number.parse() else {
-            return Err(PaginationError::InvalidFromTo);
+impl PaginationNumberAndIndex {
+    /// Parses a `from` / `to` value the way Blockfrost does: `height[:index]`,
+    /// each part plain decimal digits within the `i32` range. An empty part,
+    /// a sign, a third part or a number past `i32::MAX` is rejected.
+    fn parse(value: &str) -> Result<Self, PaginationError> {
+        let (number, index) = match value.split_once(':') {
+            Some((number, index)) => (number, Some(index)),
+            None => (value, None),
         };
 
-        let index = if let Some(index) = parts.next() {
-            Some(
-                index
-                    .parse::<usize>()
-                    .map_err(|_| PaginationError::InvalidFromTo)?,
-            )
-        } else {
-            None
-        };
-
-        Ok(Self { number, index })
+        Ok(Self {
+            number: parse_bound_part(number)?.into(),
+            index: index.map(parse_bound_part).transpose()?.map(|x| x as usize),
+        })
     }
+}
+
+fn parse_bound_part(part: &str) -> Result<u32, PaginationError> {
+    if part.is_empty() || !part.bytes().all(|x| x.is_ascii_digit()) {
+        return Err(PaginationError::InvalidFromTo);
+    }
+
+    part.parse::<i32>()
+        .map(|x| x as u32)
+        .map_err(|_| PaginationError::InvalidFromTo)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,15 +166,17 @@ impl TryFrom<PaginationParameters> for Pagination {
             None => Default::default(),
         };
 
-        let from: Option<PaginationNumberAndIndex> = match value.from {
-            Some(x) => Some(x.try_into()?),
-            None => None,
-        };
+        let from = value
+            .from
+            .as_deref()
+            .map(PaginationNumberAndIndex::parse)
+            .transpose()?;
 
-        let to: Option<PaginationNumberAndIndex> = match value.to {
-            Some(x) => Some(x.try_into()?),
-            None => None,
-        };
+        let to = value
+            .to
+            .as_deref()
+            .map(PaginationNumberAndIndex::parse)
+            .transpose()?;
 
         if let (Some(from), Some(to)) = (from.as_ref(), to.as_ref()) {
             if from.number > to.number {
@@ -218,20 +221,8 @@ impl Pagination {
         (self.count as u64 * self.page) as usize
     }
 
-    pub fn includes(&self, i: usize) -> bool {
-        i >= self.from() && i < self.to()
-    }
-
     pub fn skip(&self) -> usize {
         self.from()
-    }
-
-    pub fn as_included_item<T>(&self, i: usize, item: T) -> Option<T> {
-        if self.includes(i) {
-            Some(item)
-        } else {
-            None
-        }
     }
 
     pub fn should_skip(&self, number: u64, index: usize) -> bool {
@@ -314,6 +305,46 @@ mod tests {
         assert!(!pagination.should_skip(124, 1));
         assert!(!pagination.should_skip(124, 3));
         assert!(pagination.should_skip(124, 4));
+    }
+
+    /// Bounds parse like Blockfrost: `height[:index]` in plain digits, both
+    /// within the `i32` range, anything else is an error.
+    #[test]
+    fn number_and_index_parse_like_blockfrost() {
+        let parse =
+            |value: &str| PaginationNumberAndIndex::parse(value).map(|x| (x.number, x.index));
+
+        assert_eq!(parse("10:2").unwrap(), (10, Some(2)));
+        assert_eq!(parse("10").unwrap(), (10, None));
+        assert_eq!(parse("010:00").unwrap(), (10, Some(0)));
+        assert_eq!(
+            parse("2147483647:2147483647").unwrap(),
+            (2147483647, Some(2147483647))
+        );
+
+        for value in [
+            "",
+            ":",
+            ":2",
+            "10:",
+            "10:2:garbage",
+            "10:2:3",
+            "10::",
+            "abc",
+            "10:x",
+            "-1",
+            "10:-1",
+            "+5",
+            "10:+2",
+            " 10",
+            "1e3",
+            "0x10",
+            "2147483648",
+            "10:2147483648",
+            "99999999999",
+        ] {
+            assert!(parse(value).is_err(), "{value:?} parsed");
+        }
     }
 
     #[tokio::test]
