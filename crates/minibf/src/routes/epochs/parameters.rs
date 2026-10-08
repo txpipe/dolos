@@ -13,7 +13,7 @@ use crate::{
     Facade,
 };
 
-use super::{current_epoch, load_epoch_state};
+use super::{current_epoch, ensure_epoch_in_range, load_epoch_state};
 
 pub async fn by_number_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
@@ -22,6 +22,8 @@ pub async fn by_number_parameters<D: Domain>(
 where
     Option<EpochState>: From<D::Entity>,
 {
+    ensure_epoch_in_range(epoch)?;
+
     let (chain, current) = current_epoch(&domain)?;
     let state = load_epoch_state(&domain, &chain, current, epoch)?;
 
@@ -77,5 +79,24 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let path = "/epochs/0/parameters";
         assert_status(&app, path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_parameters_out_of_range() {
+        // Past the `i32` range Blockfrost serves, the epoch is malformed, not
+        // missing.
+        let app = TestApp::new();
+        assert_status(
+            &app,
+            "/epochs/2147483648/parameters",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/epochs/18446744073709551615/parameters",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
     }
 }

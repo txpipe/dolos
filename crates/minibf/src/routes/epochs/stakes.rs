@@ -13,7 +13,7 @@ use crate::{
     Facade,
 };
 
-use super::{current_epoch, stake_distribution_page};
+use super::{current_epoch, ensure_epoch_in_range, stake_distribution_page};
 
 pub async fn by_number_stakes<D: Domain>(
     Path(epoch): Path<u64>,
@@ -21,6 +21,7 @@ pub async fn by_number_stakes<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<EpochStakeContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
+    ensure_epoch_in_range(epoch)?;
 
     let (chain, current) = current_epoch(&domain)?;
 
@@ -149,5 +150,19 @@ mod tests {
     async fn epochs_stakes_archive_error() {
         let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         assert_status(&app, "/epochs/0/stakes", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_stakes_out_of_range() {
+        // Past the `i32` range Blockfrost serves, the epoch is malformed, not
+        // missing.
+        let app = TestApp::new();
+        assert_status(&app, "/epochs/2147483648/stakes", StatusCode::BAD_REQUEST).await;
+        assert_status(
+            &app,
+            "/epochs/18446744073709551615/stakes",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
     }
 }

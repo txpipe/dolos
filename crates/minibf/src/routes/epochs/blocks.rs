@@ -12,7 +12,7 @@ use crate::{
     Facade,
 };
 
-use super::epoch_slot_range;
+use super::{ensure_epoch_in_range, epoch_slot_range};
 
 pub async fn by_number_blocks<D: Domain>(
     Path(epoch): Path<u64>,
@@ -21,6 +21,8 @@ pub async fn by_number_blocks<D: Domain>(
 ) -> Result<Json<Vec<String>>, Error> {
     let chain = domain.get_chain_summary()?;
     let pagination = Pagination::try_from(params)?;
+    ensure_epoch_in_range(epoch)?;
+
     let (start, end) = epoch_slot_range(&chain, epoch);
 
     let mut iter = domain
@@ -157,5 +159,19 @@ mod tests {
     async fn epochs_blocks_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         assert_status(&app, "/epochs/0/blocks", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_out_of_range() {
+        // Past the `i32` range Blockfrost serves, the epoch is malformed, not
+        // missing.
+        let app = TestApp::new();
+        assert_status(&app, "/epochs/2147483648/blocks", StatusCode::BAD_REQUEST).await;
+        assert_status(
+            &app,
+            "/epochs/18446744073709551615/blocks",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
     }
 }
