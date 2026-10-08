@@ -127,6 +127,12 @@ pub mod archive {
         /// Governance votes by the proposal entity key of the action voted on
         /// (`ProposalState::build_entity_key`).
         ACTION_VOTES = "action_votes";
+
+        /// Script hash of every script that a redeemer executed, resolved at
+        /// index time. Unlike SCRIPT, this tags executions that carry no
+        /// script bytes (reference scripts) and covers all purposes,
+        /// including vote and propose.
+        SCRIPT_REDEEMERS = "script_redeemers";
     }
 }
 
@@ -169,6 +175,7 @@ mod tests {
                 "pool_blocks",
                 "voter_votes",
                 "action_votes",
+                "script_redeemers",
             ]
         );
     }
