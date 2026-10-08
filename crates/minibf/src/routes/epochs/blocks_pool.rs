@@ -101,10 +101,8 @@ where
         .await
         .map_err(log_and_500("epoch block scan task failed"))??;
 
-    // Blockfrost 404s a pool that db-sync never saw. The `PoolState` entity
-    // covers every pool that registered on chain, and a pool must register
-    // before it can mint. The scan result acts as a second proof of
-    // existence, for any issuer that has no entity.
+    // Blockfrost 404s a pool db-sync never saw. A pool registers before it
+    // mints, so a block found here proves it as well as a `PoolState` does.
     if !minted_here && !domain.cardano_entity_exists::<PoolState>(hash)? {
         return Err(StatusCode::NOT_FOUND.into());
     }

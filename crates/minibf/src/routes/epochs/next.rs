@@ -33,8 +33,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    // Collect the epochs after `epoch`, up to and including the current epoch,
-    // in ascending order. The pagination selects the window.
+    // Ascending, up to and including the current epoch.
     let epochs: Vec<Epoch> = ((epoch + 1)..=current)
         .skip(pagination.skip())
         .take(pagination.count)

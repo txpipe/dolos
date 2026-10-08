@@ -24,9 +24,8 @@ pub async fn by_number_stakes<D: Domain>(
 
     let (chain, current) = current_epoch(&domain)?;
 
-    // Blockfrost 404s epochs that don't exist yet; an epoch within range
-    // that simply has no logged distribution (pre-upgrade history, current
-    // epoch before its RUPD ran) returns an empty page instead.
+    // Blockfrost 404s future epochs; an epoch with no logged distribution is
+    // an empty page.
     if epoch > current {
         return Err(StatusCode::NOT_FOUND.into());
     }

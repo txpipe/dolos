@@ -32,12 +32,12 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    // Collect the epochs before `epoch`, from `epoch - 1` backward. The result
-    // is always in ascending order, the same as the reference implementation.
+    // Pages count back from `epoch - 1`, but each page is ascending, like
+    // Blockfrost's.
     let count = pagination.count as u64;
     let skip = pagination.skip() as u64;
 
-    // The highest and lowest epoch in the page. Both bounds are inclusive.
+    // Inclusive bounds of the page.
     let high = epoch.saturating_sub(1 + skip);
     let low = high.saturating_sub(count.saturating_sub(1));
 

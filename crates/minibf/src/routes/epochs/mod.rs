@@ -76,24 +76,16 @@ fn build_epoch_content<D: Domain>(
     mut state: EpochState,
     active_stake: Option<u64>,
 ) -> Result<EpochContentModelBuilder, StatusCode> {
-    // Use the epoch from the caller, not `state.number`. The live `EpochState`
-    // of the current epoch can hold a number that differs from the number that
-    // the tip resolves.
+    // The live state of the current epoch can carry another number than the
+    // one the tip resolves to, so the caller's epoch wins.
     state.number = epoch;
 
     let start_time = chain.slot_time(chain.epoch_start(epoch));
     let end_time = chain.slot_time(chain.epoch_start(epoch + 1));
 
-    // The roll pipeline precomputes the block aggregates on `RollingStats`, so
-    // this request needs no block scan. The first and last block times are
-    // slots, and this function converts them here. A zero slot means the epoch
-    // had no block.
-    //
-    // A Byron epoch boundary block (EBB) does not pass through the roll
-    // pipeline. So `first_block_slot` is the first *regular* block of the epoch.
-    // Every Byron epoch opens with an EBB. For these epochs, Blockfrost reports
-    // the time of the EBB, so `first_block_time` differs. See the systemic EBB
-    // omission tracked for `/epochs/{n}/blocks` and `/blocks/{block}`.
+    // Block aggregates come precomputed on `RollingStats`; a zero slot means
+    // no block. Byron EBBs skip the roll pipeline, so for Byron epochs this is
+    // the first regular block, not the EBB Blockfrost reports.
     let rolling = state.rolling.live().cloned().unwrap_or_default();
     let first_block_time = if rolling.first_block_slot == 0 {
         0
@@ -106,10 +98,8 @@ fn build_epoch_content<D: Domain>(
         chain.slot_time(rolling.last_block_slot)
     };
 
-    // The early history of preprod has a gap in the stake snapshot. The
-    // reference reports `null` active stake for epochs 13-28. The value can
-    // come from the current-epoch snapshot or the StakeLogs. This override
-    // resets those epochs to `null` in both cases (see `null_active_stake`).
+    // Blockfrost reads `null` for the epochs this hack lists, wherever the
+    // value came from.
     let active_stake =
         if crate::hacks::null_active_stake::contains(domain.genesis().network_magic(), epoch) {
             None
@@ -137,11 +127,8 @@ async fn derive_current_active_stake<D: Domain>(
     chain: &ChainSummary,
     current: Epoch,
 ) -> Result<u64, StatusCode> {
-    // A stake distribution becomes active three epoch boundaries after it is
-    // live (live -> mark -> set -> go). So the active stake for epoch E is the
-    // stake that was live at E-2. RUPD applies this same offset one epoch back
-    // (it scores E-1 from the snapshot at E-3); here we target the current
-    // epoch, so we read the snapshot at `current - 2`.
+    // A distribution goes live -> mark -> set -> go, so the active stake of
+    // epoch E is the stake live at E-2.
     let stake_epoch = current.saturating_sub(2);
     let protocol = EraProtocol::from(chain.era_for_epoch(stake_epoch.saturating_add(1)).protocol);
     let domain = domain.clone();
@@ -240,17 +227,10 @@ async fn stake_distribution_page<D: Domain>(
                 .iter_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, Some(range))
                 .map_err(log_and_500("failed to iterate account epoch logs"))?;
 
-            // The merged row exists for anything an account did in the epoch,
-            // so a row with no stake leg is a reward-only account and not part
-            // of the distribution at all. The log also keeps zero-stake
-            // delegators (so row counts match `StakeLog.delegators_count`),
-            // while Blockfrost's epoch_stake excludes them — both filtered
-            // before paginating, for parity.
-            //
-            // The pool lives in the value, not the key, so narrowing to one
-            // pool scans the epoch and filters — the credential-keyed layout
-            // keeps per-account history a point read instead (see the note on
-            // `AccountEpochLog`).
+            // Reward-only rows and zero-stake delegators are not in
+            // Blockfrost's epoch_stake, so they go before the page is cut. The
+            // pool sits in the value, not the key, so one pool is a filtered
+            // scan of the whole epoch.
             iter.filter(|entry| match entry {
                 Ok((_, log)) => {
                     log.active_stake.unwrap_or(0) > 0
@@ -304,9 +284,8 @@ pub(crate) fn decode_block_header(body: &[u8]) -> Result<Option<MultiEraHeader<'
         return Ok(None);
     }
 
-    // A stored block is `[era_tag, [header, tx_bodies, ...]]`. Open the
-    // wrapper array, skip the era tag, open the block array. The next item
-    // is the header.
+    // `[era_tag, [header, tx_bodies, ...]]`: the header is the first item of
+    // the inner array.
     let mut d = minicbor::Decoder::new(body);
     let header = (|| -> Result<_, minicbor::decode::Error> {
         d.array()?;
@@ -361,13 +340,8 @@ mod tests {
     use dolos_testing::synthetic::SyntheticBlockConfig;
     use pallas::{crypto::hash::Hasher, ledger::traverse::MultiEraBlock};
 
-    /// A caller can pass a computed active stake for an epoch. The builder
-    /// resets that value to null inside the preprod gap and keeps it elsewhere.
-    /// This test calls the real builder for epochs inside the gap, on the
-    /// bounds, and on each side. It also uses a preview epoch and a mainnet
-    /// epoch, so the reset depends on the network magic. The `next` and
-    /// `previous` handlers build each array item through this same builder, so
-    /// this test covers them too.
+    /// The builder nulls a passed active stake inside the preprod gap, only on
+    /// preprod. `next` and `previous` build their items through it too.
     #[test]
     fn build_epoch_content_nulls_active_stake_across_the_preprod_gap() {
         use std::sync::Arc;
@@ -377,9 +351,8 @@ mod tests {
 
         use crate::mapping::IntoModel as _;
 
-        // This helper builds a minibf facade over a fresh domain for one
-        // network. The genesis work unit runs during construction, so the era
-        // summary and the base epoch load without an imported block.
+        // Genesis runs on construction, so the era summary and the base epoch
+        // load without an imported block.
         fn facade_for(genesis: dolos_core::Genesis) -> Facade<ToyDomain> {
             let domain = ToyDomain::new_with_genesis_and_config(
                 Arc::new(genesis),
@@ -394,13 +367,10 @@ mod tests {
             }
         }
 
-        // This value is a non-null figure. The builder keeps it outside the gap
-        // and resets it to null inside the gap. The value matches the genesis
-        // stake sum of preprod.
+        // Preprod's genesis stake sum.
         const ACTIVE_STAKE: u64 = 300_000_000_000_000;
 
-        // This helper resolves one epoch through the real builder. It returns
-        // the mapped `active_stake`, exactly as a handler serializes it.
+        // `active_stake` as a handler would serialize it.
         fn active_stake_for(facade: &Facade<ToyDomain>, epoch: Epoch) -> Option<String> {
             let chain = facade.get_chain_summary().expect("era summary");
             let state =
@@ -416,10 +386,7 @@ mod tests {
 
         let preprod = facade_for(dolos_cardano::include::preprod::load());
 
-        // The gap runs from epoch 13 to epoch 28. Epochs 5 and 12 are before
-        // the gap. Epochs 29 and 100 are after it. All of these epochs keep the
-        // value. Epochs 13, 20, and 28 are inside the gap, so they reset to
-        // null.
+        // The gap is epochs 13-28.
         assert_eq!(active_stake_for(&preprod, 5), with_value());
         assert_eq!(active_stake_for(&preprod, 12), with_value());
         assert_eq!(active_stake_for(&preprod, 13), None);
@@ -428,17 +395,15 @@ mod tests {
         assert_eq!(active_stake_for(&preprod, 29), with_value());
         assert_eq!(active_stake_for(&preprod, 100), with_value());
 
-        // Preview shares the endpoint but has no gap, so the same epoch keeps
-        // its value.
+        // Preview and mainnet have no gap.
         let preview = facade_for(dolos_cardano::include::preview::load());
         assert_eq!(active_stake_for(&preview, 20), with_value());
 
-        // Mainnet also has no gap, so the same epoch keeps its value.
         let mainnet = facade_for(dolos_cardano::include::mainnet::load());
         assert_eq!(active_stake_for(&mainnet, 20), with_value());
 
-        // The archive fault proves that gap epochs do not read the StakeLogs.
-        // The builder still returns null when the caller supplies no value.
+        // With no value passed, a gap epoch is null without reading the
+        // StakeLogs (the archive fault would 500).
         let faulty_preprod = Facade {
             inner: dolos_testing::faults::FaultyToyDomain::new(
                 preprod.inner.clone(),

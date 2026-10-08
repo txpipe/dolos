@@ -13,8 +13,7 @@ where
 {
     let (chain, current) = current_epoch(&domain)?;
 
-    // The current epoch always has a live `EpochState`, so this never returns a
-    // 404 error.
+    // The current epoch always has a live `EpochState`, so no 404 here.
     let state = load_epoch_state(&domain, &chain, current, current)?;
     let active_stake = derive_current_active_stake(&domain, &chain, current).await?;
     let model = build_epoch_content(&domain, &chain, current, state, Some(active_stake))?;
