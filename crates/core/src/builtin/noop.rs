@@ -192,7 +192,8 @@ impl ArchiveStore for NoOpArchiveStore {
     fn prune_history(
         &self,
         _max_slots: u64,
-        _max_prune: Option<u64>,
+        _max_prune_slots: Option<u64>,
+        _max_prune_index_rows: Option<u64>,
     ) -> Result<bool, ArchiveError> {
         // Nothing to prune, always "done"
         Ok(true)

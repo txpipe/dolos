@@ -13,10 +13,37 @@ use crate::{
     Facade,
 };
 
+/// The outputs that a UTxO listing returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UtxoFilter {
+    /// Every output.
+    All,
+    /// Only outputs without native assets, the rows that Blockfrost lists for
+    /// the `lovelace` asset.
+    AdaOnly,
+}
+
+impl UtxoFilter {
+    /// Returns `true` when the listing returns `output`.
+    pub fn keeps(self, output: &MultiEraOutput<'_>) -> bool {
+        match self {
+            UtxoFilter::All => true,
+            UtxoFilter::AdaOnly => output
+                .value()
+                .assets()
+                .iter()
+                .all(|policy| policy.assets().is_empty()),
+        }
+    }
+}
+
+/// Loads one page of the UTxOs in `refs` that `filter` keeps. Only the last
+/// page can have fewer than `count` rows.
 pub async fn load_utxo_models<D, T>(
     domain: &Facade<D>,
     refs: HashSet<TxoRef>,
     pagination: Pagination,
+    filter: UtxoFilter,
 ) -> Result<Vec<T>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
@@ -34,10 +61,11 @@ where
         .get_utxos(window.refs)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // decoded
+    // decoded, and filtered before the sort and the page cut
     let utxos: HashMap<_, _> = utxos
         .iter()
         .map(|(k, v)| MultiEraOutput::try_from(v.as_ref()).map(|x| (k, x)))
+        .filter_ok(|(_, output)| filter.keeps(output))
         .try_collect()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

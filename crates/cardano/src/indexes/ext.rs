@@ -168,6 +168,19 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
         self.slots_by_tag(archive::POOL_CERTS, pool, start, end)
     }
 
+    /// Iterate over slots of blocks containing certificates for a DRep.
+    ///
+    /// The key is the CIP-129 DRep id bytes: the key-or-script header, then
+    /// the credential hash.
+    fn slots_by_drep_certs(
+        &self,
+        drep: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(archive::DREP_CERTS, drep, start, end)
+    }
+
     /// Iterate over slots of blocks containing withdrawals for an account.
     fn slots_by_account_withdrawals(
         &self,
@@ -187,6 +200,47 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
         end: BlockSlot,
     ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::METADATA, &label.to_be_bytes(), start, end)
+    }
+
+    /// Iterate over slots of blocks that a pool minted.
+    ///
+    /// The key is the pool operator hash. Byron blocks are never listed.
+    fn slots_by_pool_blocks(
+        &self,
+        pool: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(archive::POOL_BLOCKS, pool, start, end)
+    }
+
+    /// Iterate over slots of blocks containing governance votes cast by a
+    /// voter.
+    ///
+    /// The key is `pallas_extras::voter_id_bytes` of the voter. Blocks whose
+    /// only votes of the voter sit in phase-2-invalid transactions are listed
+    /// too.
+    fn slots_by_voter_votes(
+        &self,
+        voter: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(archive::VOTER_VOTES, voter, start, end)
+    }
+
+    /// Iterate over slots of blocks containing governance votes on an action.
+    ///
+    /// The key is the proposal entity key of the action
+    /// (`ProposalState::build_entity_key`). Blocks whose only votes on the
+    /// action sit in phase-2-invalid transactions are listed too.
+    fn slots_by_action_votes(
+        &self,
+        action: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(archive::ACTION_VOTES, action, start, end)
     }
 
     // ============ Bulk Export ============

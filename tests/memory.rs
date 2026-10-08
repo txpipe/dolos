@@ -359,8 +359,11 @@ fn seed_archive_tags<S: CoreArchiveStore>(store: &S) {
                     let dimension =
                         archive_dimensions::ALL[((b + t) as usize) % archive_dimensions::ALL.len()];
 
+                    // A metadata key is the label itself, so it has to vary
+                    // with `t` alone: the dimension can come round twice in
+                    // one block.
                     let key = if dimension == archive_dimensions::METADATA {
-                        (t % 8).to_be_bytes().to_vec()
+                        t.to_be_bytes().to_vec()
                     } else {
                         let mut key = vec![0x03u8; 32];
                         key[..8].copy_from_slice(&slot.to_be_bytes());
