@@ -50,22 +50,46 @@ where
     T: serde::Serialize,
     for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
 {
-    let window = page_window(domain, refs, &pagination).await?;
+    // A filter needs every output decoded, and the window loads only the
+    // page's outputs. Keep the refs that pass before the window is cut.
+    let refs = match filter {
+        UtxoFilter::All => refs,
+        _ => kept_refs(domain, refs, filter)?,
+    };
 
-    if window.refs.is_empty() {
-        return Ok(Vec::new());
-    }
+    let mut rows = page_rows(domain, refs, &pagination).await?;
 
-    let utxos = domain
-        .state()
-        .get_utxos(window.refs)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // A block can spend a listed UTxO after the caller read the tags. Drop the
+    // missing ref and select again, so that only the last page can be short.
+    let (window, utxos) = loop {
+        let window = select_window(&rows, &pagination);
 
-    // decoded, and filtered before the sort and the page cut
+        if window.refs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let utxos = domain
+            .state()
+            .get_utxos(window.refs.clone())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if utxos.len() == window.refs.len() {
+            break (window, utxos);
+        }
+
+        let missing: HashSet<_> = window
+            .refs
+            .iter()
+            .filter(|txo_ref| !utxos.contains_key(*txo_ref))
+            .collect();
+
+        rows.retain(|(_, txo_ref)| !missing.contains(txo_ref));
+    };
+
+    // decoded
     let utxos: HashMap<_, _> = utxos
         .iter()
         .map(|(k, v)| MultiEraOutput::try_from(v.as_ref()).map(|x| (k, x)))
-        .filter_ok(|(_, output)| filter.keeps(output))
         .try_collect()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -135,8 +159,29 @@ struct PageWindow {
     skip: usize,
 }
 
-/// Narrow `refs` to the rows one page needs before any UTxO is loaded or any
-/// block is fetched.
+/// The refs in `refs` whose output `filter` keeps.
+fn kept_refs<D: Domain>(
+    domain: &Facade<D>,
+    refs: HashSet<TxoRef>,
+    filter: UtxoFilter,
+) -> Result<HashSet<TxoRef>, StatusCode> {
+    let utxos = domain
+        .state()
+        .get_utxos(refs.into_iter().collect())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    utxos
+        .iter()
+        .filter_map(
+            |(txo_ref, cbor)| match MultiEraOutput::try_from(cbor.as_ref()) {
+                Ok(output) => filter.keeps(&output).then(|| Ok(txo_ref.clone())),
+                Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
+            },
+        )
+        .collect()
+}
+
+/// Every row of the listing as `(slot, ref)`, in page order.
 ///
 /// The page order (`page_sort_key`) needs each row's transaction index, and
 /// only decoding the row's block yields it. The slot does not: the archive's
@@ -144,11 +189,11 @@ struct PageWindow {
 /// slot first already puts every block's rows next to each other and in their
 /// final place relative to other blocks, so the page comes out exact once the
 /// blocks cut by its two edges are taken whole and re-ordered by the full key.
-async fn page_window<D>(
+async fn page_rows<D>(
     domain: &Facade<D>,
     refs: HashSet<TxoRef>,
     pagination: &Pagination,
-) -> Result<PageWindow, StatusCode>
+) -> Result<Vec<(Option<BlockSlot>, TxoRef)>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -168,28 +213,31 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let rows = refs
+    let mut rows: Vec<_> = refs
         .into_iter()
         .map(|txo_ref| (slots.get(&txo_ref.0).copied(), txo_ref))
         .collect();
 
-    Ok(select_window(rows, pagination))
+    sort_rows(&mut rows, pagination.order);
+
+    Ok(rows)
 }
 
-/// Pick the page out of `(slot, ref)` rows, widened at both edges to whole
-/// slots.
+/// Sort `(slot, ref)` rows into page order: slot, then `TxoRef`, rows without
+/// a slot first, and the whole order reversed for `order=desc`.
+fn sort_rows(rows: &mut [(Option<BlockSlot>, TxoRef)], order: Order) {
+    rows.sort();
+    if let Order::Desc = order {
+        rows.reverse();
+    }
+}
+
+/// Pick the page out of `(slot, ref)` rows in page order, widened at both
+/// edges to whole slots.
 ///
 /// Rows without a slot sort first, by `TxoRef`, which is already their final
 /// order, so the window never widens into them.
-fn select_window(
-    mut rows: Vec<(Option<BlockSlot>, TxoRef)>,
-    pagination: &Pagination,
-) -> PageWindow {
-    rows.sort();
-    if let Order::Desc = pagination.order {
-        rows.reverse();
-    }
-
+fn select_window(rows: &[(Option<BlockSlot>, TxoRef)], pagination: &Pagination) -> PageWindow {
     let from = pagination.from();
     let to = pagination.to().min(rows.len());
     if from >= to {
@@ -212,7 +260,10 @@ fn select_window(
     }
 
     PageWindow {
-        refs: rows.drain(start..end).map(|(_, txo_ref)| txo_ref).collect(),
+        refs: rows[start..end]
+            .iter()
+            .map(|(_, txo_ref)| txo_ref.clone())
+            .collect(),
         skip: from - start,
     }
 }
@@ -247,10 +298,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::TestApp;
+    use crate::test_support::{TestApp, TestDomainBuilder};
     use axum::body::Body;
     use axum::http::Request;
     use blockfrost_openapi::models::address_utxo_content_inner::AddressUtxoContentInner;
+    use dolos_cardano::indexes::CardanoStateIndexExt as _;
     use dolos_core::async_query::BlockRefMeta;
     use dolos_core::config::MinibfConfig;
     use dolos_core::import::ImportExt as _;
@@ -260,6 +312,7 @@ mod tests {
     use http_body_util::BodyExt as _;
     use pallas::codec::minicbor;
     use pallas::crypto::hash::Hash;
+    use pallas::ledger::addresses::Address;
     use pallas::ledger::primitives::conway::{PostAlonzoTransactionOutput, Value};
     use pallas::ledger::traverse::Era;
     use std::sync::Arc;
@@ -325,6 +378,12 @@ mod tests {
         }
     }
 
+    fn select(rows: &[(Option<BlockSlot>, TxoRef)], pagination: Pagination) -> PageWindow {
+        let mut rows = rows.to_vec();
+        sort_rows(&mut rows, pagination.order);
+        select_window(&rows, &pagination)
+    }
+
     /// A page edge inside a slot widens the window to the whole slot, so the
     /// block decode can still order that slot's rows by transaction index; an
     /// edge inside the slot-less group does not widen.
@@ -341,12 +400,12 @@ mod tests {
         ];
 
         // page 2 of count 2 covers sorted positions 2..4, cutting slot 10
-        let window = select_window(rows.clone(), &pagination(Order::Asc, 2, 2));
+        let window = select(&rows, pagination(Order::Asc, 2, 2));
         assert_eq!(window.refs, vec![txo(0x11, 0), txo(0x12, 0), txo(0x13, 0)]);
         assert_eq!(window.skip, 0);
 
         // page 3 of count 2 covers 4..6: the tail of slot 10 and half of 20
-        let window = select_window(rows.clone(), &pagination(Order::Asc, 2, 3));
+        let window = select(&rows, pagination(Order::Asc, 2, 3));
         assert_eq!(
             window.refs,
             vec![
@@ -360,21 +419,21 @@ mod tests {
         assert_eq!(window.skip, 2);
 
         // the slot-less group is final order already and never widens
-        let window = select_window(rows.clone(), &pagination(Order::Asc, 1, 1));
+        let window = select(&rows, pagination(Order::Asc, 1, 1));
         assert_eq!(window.refs, vec![txo(0x01, 0)]);
         assert_eq!(window.skip, 0);
 
         // descending mirrors the whole order, slot-less rows last
-        let window = select_window(rows.clone(), &pagination(Order::Desc, 1, 2));
+        let window = select(&rows, pagination(Order::Desc, 1, 2));
         assert_eq!(window.refs, vec![txo(0x21, 1), txo(0x21, 0)]);
         assert_eq!(window.skip, 1);
 
-        let window = select_window(rows.clone(), &pagination(Order::Desc, 2, 4));
+        let window = select(&rows, pagination(Order::Desc, 2, 4));
         assert_eq!(window.refs, vec![txo(0x01, 0)]);
         assert_eq!(window.skip, 0);
 
         // a page past the end is empty
-        let window = select_window(rows, &pagination(Order::Asc, 100, 2));
+        let window = select(&rows, pagination(Order::Asc, 100, 2));
         assert!(window.refs.is_empty());
     }
 
@@ -424,6 +483,47 @@ mod tests {
                 }
 
                 assert_eq!(walked, full, "order={order} count={count}");
+            }
+        }
+    }
+
+    /// A block can spend a listed UTxO between the caller's tag read and the
+    /// load. No page may come back shorter than the rows left from its offset,
+    /// since clients stop paging at the first short page.
+    #[tokio::test]
+    async fn a_ref_missing_from_the_set_does_not_shorten_a_page() {
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(SyntheticBlockConfig {
+            block_count: 6,
+            txs_per_block: 1,
+            ..Default::default()
+        })
+        .finish();
+        let address = Address::from_bech32(&vectors.address).unwrap().to_vec();
+        let live = domain.state().utxos_by_address(&address).unwrap();
+        let facade = Facade {
+            inner: domain,
+            config: MinibfConfig::new("[::]:0".parse().unwrap()),
+            cache: Default::default(),
+        };
+
+        let count = 2;
+        for spent in live.iter().map(|txo_ref| TxoRef(txo_ref.0, 7)) {
+            let mut refs = live.clone();
+            refs.insert(spent);
+
+            for page in 1..=live.len().div_ceil(count) as u64 {
+                let pagination = pagination(Order::Asc, count, page);
+                let left = live.len() - pagination.from();
+                let rows: Vec<AddressUtxoContentInner> =
+                    load_utxo_models(&facade, refs.clone(), pagination, UtxoFilter::All)
+                        .await
+                        .unwrap();
+
+                assert!(
+                    rows.len() >= count.min(left),
+                    "page {page} has {} rows",
+                    rows.len()
+                );
             }
         }
     }
