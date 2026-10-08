@@ -12,16 +12,21 @@ use crate::{
     Facade,
 };
 
-use super::{ensure_epoch_in_range, epoch_slot_range};
+use super::{current_epoch, ensure_epoch_in_range, epoch_slot_range};
 
 pub async fn by_number_blocks<D: Domain>(
     Path(epoch): Path<u64>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error> {
-    let chain = domain.get_chain_summary()?;
     let pagination = Pagination::try_from(params)?;
     ensure_epoch_in_range(epoch)?;
+
+    let (chain, current) = current_epoch(&domain)?;
+
+    if epoch > current {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
 
     let (start, end) = epoch_slot_range(&chain, epoch);
 
@@ -173,5 +178,13 @@ mod tests {
             StatusCode::BAD_REQUEST,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_future_epoch_not_found() {
+        let app = TestApp::new();
+        let path = format!("/epochs/{}/blocks", app.tip_epoch() + 1);
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+        assert_status(&app, "/epochs/999999/blocks", StatusCode::NOT_FOUND).await;
     }
 }
