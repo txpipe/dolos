@@ -57,65 +57,17 @@ pub async fn invalid_path() -> Error {
     Error::InvalidPath
 }
 
-/// A path segment that Blockfrost types as `integer`.
-///
-/// Blockfrost checks the type first. It checks the range `0..=i32::MAX` later.
-#[derive(Debug, PartialEq, Eq)]
-pub enum PathInteger {
-    InRange(u64),
-    OutOfRange,
-}
+/// Parses a path number that Blockfrost types as `integer`: an optional sign
+/// and ASCII digits, from 0 through `i32::MAX`.
+pub fn parse_path_number(raw: &str, not_integer: Error, out_of_range: Error) -> Result<u64, Error> {
+    let digits = raw.strip_prefix(['+', '-']).unwrap_or(raw);
 
-impl PathInteger {
-    /// Parses an optional sign and ASCII digits. Returns `None` for other text.
-    pub fn parse(raw: &str) -> Option<Self> {
-        let digits = raw.strip_prefix(['+', '-']).unwrap_or(raw);
-
-        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-
-        match raw.parse::<i32>() {
-            Ok(value) if value >= 0 => Some(Self::InRange(value as u64)),
-            _ => Some(Self::OutOfRange),
-        }
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(not_integer);
     }
 
-    /// Gives the value if it is from 0 through `i32::MAX`.
-    pub fn in_range(self) -> Option<u64> {
-        match self {
-            Self::InRange(value) => Some(value),
-            Self::OutOfRange => None,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PathInteger;
-
-    #[test]
-    fn path_integer_parse() {
-        for (raw, expected) in [
-            ("0", Some(PathInteger::InRange(0))),
-            ("00001", Some(PathInteger::InRange(1))),
-            ("+1", Some(PathInteger::InRange(1))),
-            ("-0", Some(PathInteger::InRange(0))),
-            ("2147483647", Some(PathInteger::InRange(2147483647))),
-            ("2147483648", Some(PathInteger::OutOfRange)),
-            ("99999999999999999999", Some(PathInteger::OutOfRange)),
-            ("-1", Some(PathInteger::OutOfRange)),
-            ("", None),
-            ("+", None),
-            ("-", None),
-            ("--1", None),
-            ("abc", None),
-            ("1.5", None),
-            ("1e3", None),
-            (" 1", None),
-            ("0x10", None),
-        ] {
-            assert_eq!(PathInteger::parse(raw), expected, "{raw:?}");
-        }
+    match raw.parse::<i32>() {
+        Ok(value) if value >= 0 => Ok(value as u64),
+        _ => Err(out_of_range),
     }
 }

@@ -10,8 +10,8 @@ use dolos_core::Domain;
 use crate::{error::Error, mapping::IntoModel as _, Facade};
 
 use super::{
-    build_epoch_content, current_epoch, derive_current_active_stake, parse_epoch_digits,
-    load_epoch_state,
+    build_epoch_content, current_epoch, derive_current_active_stake, load_epoch_state,
+    parse_epoch_digits,
 };
 
 pub async fn by_number<D: Domain>(

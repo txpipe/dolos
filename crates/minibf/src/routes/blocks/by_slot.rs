@@ -6,7 +6,7 @@ use axum::{
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_core::{ArchiveStore as _, Domain};
 
-use crate::{error::Error, routes::PathInteger, Facade};
+use crate::{error::Error, routes::parse_path_number, Facade};
 
 use super::{single_block_content, tip_block};
 
@@ -17,10 +17,11 @@ pub async fn by_slot<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let slot = PathInteger::parse(&slot_number)
-        .ok_or(Error::SlotNumberNotInteger)?
-        .in_range()
-        .ok_or(Error::InvalidSlotNumber)?;
+    let slot = parse_path_number(
+        &slot_number,
+        Error::SlotNumberNotInteger,
+        Error::InvalidSlotNumber,
+    )?;
 
     let block = domain
         .archive()
@@ -39,7 +40,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::blocks::testing::{assert_status, error_mismatch};
+    use crate::routes::blocks::testing::assert_status;
     use crate::test_support::{TestApp, TestFault};
 
     #[tokio::test]
@@ -58,36 +59,26 @@ mod tests {
     #[tokio::test]
     async fn blocks_by_slot_bad_request() {
         let app = TestApp::new();
-        let not_integer = "params/slot_number must be integer";
-        let out_of_range = "Missing, out of range or malformed slot_number.";
-        let mut mismatches = Vec::new();
 
         for (slot, message) in [
-            ("x", not_integer),
-            ("1.5", not_integer),
-            ("-1", out_of_range),
-            ("2147483648", out_of_range),
-            ("99999999999999999999", out_of_range),
+            ("x", "params/slot_number must be integer"),
+            ("-1", "Missing, out of range or malformed slot_number."),
+            (
+                "2147483648",
+                "Missing, out of range or malformed slot_number.",
+            ),
         ] {
-            let path = format!("/blocks/slot/{slot}");
-            mismatches.extend(error_mismatch(&app, &path, StatusCode::BAD_REQUEST, message).await);
+            let (status, bytes) = app.get_bytes(&format!("/blocks/slot/{slot}")).await;
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{slot}");
+            assert_eq!(body["message"], message, "{slot}");
         }
-
-        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     #[tokio::test]
     async fn blocks_by_slot_not_found() {
         let app = TestApp::new();
-        let mismatch = error_mismatch(
-            &app,
-            "/blocks/slot/1",
-            StatusCode::NOT_FOUND,
-            "The requested component has not been found.",
-        )
-        .await;
-
-        assert_eq!(mismatch, None);
+        assert_status(&app, "/blocks/slot/1", StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]

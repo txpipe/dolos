@@ -16,7 +16,7 @@ use crate::{
     Facade,
 };
 
-use super::{current_epoch, parse_epoch_integer, epoch_slot_range};
+use super::{current_epoch, epoch_slot_range, parse_epoch};
 
 pub async fn by_number_blocks_pool<D: Domain>(
     Path((number, pool_id)): Path<(String, String)>,
@@ -26,9 +26,8 @@ pub async fn by_number_blocks_pool<D: Domain>(
 where
     Option<PoolState>: From<D::Entity>,
 {
-    let number = parse_epoch_integer(&number)?;
     let pagination = Pagination::try_from(params)?;
-    let epoch = number.in_range().ok_or(Error::InvalidEpochNumber)?;
+    let epoch = parse_epoch(&number)?;
 
     let (chain, current) = current_epoch(&domain)?;
 

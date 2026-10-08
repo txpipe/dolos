@@ -12,7 +12,7 @@ use crate::{
     Facade,
 };
 
-use super::{current_epoch, parse_epoch_integer, load_epoch_state};
+use super::{current_epoch, load_epoch_state, parse_epoch};
 
 pub async fn by_number_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
@@ -21,9 +21,7 @@ pub async fn by_number_parameters<D: Domain>(
 where
     Option<EpochState>: From<D::Entity>,
 {
-    let epoch = parse_epoch_integer(&number)?
-        .in_range()
-        .ok_or(Error::InvalidEpochNumber)?;
+    let epoch = parse_epoch(&number)?;
 
     let (chain, current) = current_epoch(&domain)?;
     let state = load_epoch_state(&domain, &chain, current, epoch)?;

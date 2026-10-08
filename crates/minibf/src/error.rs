@@ -19,12 +19,8 @@ pub enum Error {
     InvalidBlockNumber,
     InvalidBlockHash,
     InvalidEpochNumber,
-    /// The `{number}` path segment is not an integer.
     NumberNotInteger,
-    /// The `{epoch_number}` path segment is not an integer.
-    EpochNumberNotInteger,
     InvalidSlotNumber,
-    /// The `{slot_number}` path segment is not an integer.
     SlotNumberNotInteger,
     InvalidXpub,
     InvalidDerivationRole,
@@ -155,15 +151,6 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "params/number must be integer",
-                )),
-            )
-                .into_response(),
-            Error::EpochNumberNotInteger => (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody::new(
-                    400,
-                    "Bad Request",
-                    "params/epoch_number must be integer",
                 )),
             )
                 .into_response(),
