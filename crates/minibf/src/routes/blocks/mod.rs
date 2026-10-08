@@ -278,7 +278,9 @@ where
 
     builder = builder.with_tip(tip)?;
 
-    builder = builder.with_chain(chain);
+    builder = builder
+        .with_chain(chain)
+        .with_genesis_delegates(&domain.genesis());
 
     builder.into_model()
 }

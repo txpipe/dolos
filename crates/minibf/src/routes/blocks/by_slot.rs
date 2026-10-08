@@ -82,4 +82,32 @@ mod tests {
         let chain = mainnet_byron_chain(false);
         assert_status(&chain.app, "/blocks/slot/0", StatusCode::NOT_FOUND).await;
     }
+    /// A genesis delegate keeps minting after the first Shelley epoch, until
+    /// the decentralisation parameter reaches zero. Leaders checked against
+    /// live Blockfrost on 2026-10-08.
+    #[tokio::test]
+    async fn blocks_by_slot_names_genesis_delegates_as_slot_leaders() {
+        let blocks: Vec<dolos_core::RawBlock> =
+            include_str!("../../../testdata/preview-shelley-blocks.txt")
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .map(|line| {
+                    let (_, cbor) = line.split_once(' ').unwrap();
+                    std::sync::Arc::new(hex::decode(cbor).unwrap())
+                })
+                .collect();
+
+        let app =
+            TestApp::new_with_archived_blocks(dolos_cardano::include::preview::load(), &blocks);
+
+        let block = get_block(&app, "/blocks/slot/86400").await;
+        assert_eq!(block.epoch, Some(1));
+        assert_eq!(block.slot_leader, "ShelleyGenesis-7c54a168c731f2f4");
+
+        let block = get_block(&app, "/blocks/slot/172836").await;
+        assert_eq!(
+            block.slot_leader,
+            "pool1grvqd4eu354qervmr62uew0nsrjqedx5kglldeqr4c29vv59rku"
+        );
+    }
 }
