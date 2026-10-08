@@ -1,4 +1,7 @@
-use dolos_cardano::{model::AccountState, EpochState, FixedNamespace as _, PoolState};
+use dolos_cardano::{
+    model::{AccountState, DRepState},
+    EpochState, FixedNamespace as _, PoolState,
+};
 use dolos_core::config::RootConfig;
 use miette::IntoDiagnostic;
 
@@ -32,6 +35,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         "epochs" => EpochState::NS,
         "accounts" => AccountState::NS,
         "pools" => PoolState::NS,
+        "dreps" => DRepState::NS,
         _ => return Err(miette::Error::msg("invalid namespace")),
     };
 
