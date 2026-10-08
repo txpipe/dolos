@@ -4,17 +4,16 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::epoch_stake_content_inner::EpochStakeContentInner;
-use dolos_cardano::model::{AccountEpochLog, FixedNamespace as _};
-use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, TemporalKey};
-use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
+use dolos_core::Domain;
 
 use crate::{
     error::Error,
-    log_and_500,
-    mapping::{bech32_pool, stake_cred_to_address},
+    mapping::bech32_pool,
     pagination::{Pagination, PaginationParameters},
     Facade,
 };
+
+use super::stake_distribution_page;
 
 pub async fn by_number_stakes<D: Domain>(
     Path(epoch): Path<u64>,
@@ -34,54 +33,11 @@ pub async fn by_number_stakes<D: Domain>(
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    let network = domain.get_network_id()?;
-
-    // Every row of an epoch's distribution shares the epoch-start temporal
-    // key, so the scan range is exactly one slot wide.
-    let start = summary.epoch_start(epoch);
-    let range = LogKey::from(TemporalKey::from(start))..LogKey::from(TemporalKey::from(start + 1));
-
-    let inner = domain.inner.clone();
-    let skip = pagination.skip();
-    let count = pagination.count;
-
-    let page = tokio::task::spawn_blocking(
-        move || -> Result<Vec<(LogKey, AccountEpochLog)>, StatusCode> {
-            let iter = inner
-                .archive()
-                .iter_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, Some(range))
-                .map_err(log_and_500("failed to iterate account epoch logs"))?;
-
-            // The merged row exists for anything an account did in the epoch,
-            // so a row with no stake leg is a reward-only account and not part
-            // of the distribution at all. The log also keeps zero-stake
-            // delegators (so row counts match `StakeLog.delegators_count`),
-            // while Blockfrost's epoch_stake excludes them — both filtered
-            // before paginating, for parity.
-            iter.filter(
-                |entry| !matches!(entry, Ok((_, log)) if log.active_stake.unwrap_or(0) == 0),
-            )
-            .skip(skip)
-            .take(count)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(log_and_500("failed to read account epoch log"))
-        },
-    )
-    .await
-    .map_err(log_and_500("account stake scan task failed"))??;
+    let page = stake_distribution_page(&domain, &summary, epoch, None, &pagination).await?;
 
     let out = page
         .into_iter()
-        .map(|(key, log)| {
-            let entity = EntityKey::from(key);
-            let credential: StakeCredential = minicbor::decode(entity.as_ref()).map_err(
-                log_and_500("failed to decode stake credential from log key"),
-            )?;
-
-            let stake_address = stake_cred_to_address(&credential, network)
-                .to_bech32()
-                .map_err(log_and_500("failed to encode stake address"))?;
-
+        .map(|(stake_address, log)| {
             let pool = log.pool_id.ok_or_else(|| {
                 tracing::error!("account epoch log carries stake with no pool");
                 StatusCode::INTERNAL_SERVER_ERROR

@@ -1,16 +1,24 @@
 use axum::{http::StatusCode, Json};
 use blockfrost_openapi::models::epoch_content::EpochContent;
-use dolos_cardano::{model::EpochState, rupd::StakeSnapshot, ChainSummary, EraProtocol};
-use dolos_core::Domain;
+use dolos_cardano::{
+    model::{AccountEpochLog, EpochState, FixedNamespace as _},
+    rupd::StakeSnapshot,
+    ChainSummary, EraProtocol, PoolHash,
+};
+use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, TemporalKey};
 use pallas::{
     codec::minicbor,
-    ledger::{primitives::Epoch, traverse::MultiEraHeader},
+    ledger::{
+        primitives::{Epoch, StakeCredential},
+        traverse::MultiEraHeader,
+    },
 };
 
 use crate::{
     error::Error,
     log_and_500,
-    mapping::{epochs::EpochContentModelBuilder, IntoModel as _},
+    mapping::{epochs::EpochContentModelBuilder, stake_cred_to_address, IntoModel as _},
+    pagination::Pagination,
     Facade,
 };
 
@@ -188,6 +196,76 @@ where
     }
 
     Ok(Json(out))
+}
+
+/// One page of the stake distribution of `epoch`, as stake address and log
+/// row, narrowed to the delegators of `pool` when one is given.
+async fn stake_distribution_page<D: Domain>(
+    domain: &Facade<D>,
+    chain: &ChainSummary,
+    epoch: Epoch,
+    pool: Option<PoolHash>,
+    pagination: &Pagination,
+) -> Result<Vec<(String, AccountEpochLog)>, StatusCode> {
+    let network = domain.get_network_id()?;
+
+    // Every row of an epoch's distribution shares the epoch-start temporal
+    // key, so the scan range is exactly one slot wide.
+    let start = chain.epoch_start(epoch);
+    let range = LogKey::from(TemporalKey::from(start))..LogKey::from(TemporalKey::from(start + 1));
+
+    let inner = domain.inner.clone();
+    let skip = pagination.skip();
+    let count = pagination.count;
+
+    let page = tokio::task::spawn_blocking(
+        move || -> Result<Vec<(LogKey, AccountEpochLog)>, StatusCode> {
+            let iter = inner
+                .archive()
+                .iter_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, Some(range))
+                .map_err(log_and_500("failed to iterate account epoch logs"))?;
+
+            // The merged row exists for anything an account did in the epoch,
+            // so a row with no stake leg is a reward-only account and not part
+            // of the distribution at all. The log also keeps zero-stake
+            // delegators (so row counts match `StakeLog.delegators_count`),
+            // while Blockfrost's epoch_stake excludes them — both filtered
+            // before paginating, for parity.
+            //
+            // The pool lives in the value, not the key, so narrowing to one
+            // pool scans the epoch and filters — the credential-keyed layout
+            // keeps per-account history a point read instead (see the note on
+            // `AccountEpochLog`).
+            iter.filter(|entry| match entry {
+                Ok((_, log)) => {
+                    log.active_stake.unwrap_or(0) > 0
+                        && pool.is_none_or(|pool| log.pool_id == Some(pool))
+                }
+                Err(_) => true,
+            })
+            .skip(skip)
+            .take(count)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(log_and_500("failed to read account epoch log"))
+        },
+    )
+    .await
+    .map_err(log_and_500("account epoch scan task failed"))??;
+
+    page.into_iter()
+        .map(|(key, log)| {
+            let entity = EntityKey::from(key);
+            let credential: StakeCredential = minicbor::decode(entity.as_ref()).map_err(
+                log_and_500("failed to decode stake credential from log key"),
+            )?;
+
+            let stake_address = stake_cred_to_address(&credential, network)
+                .to_bech32()
+                .map_err(log_and_500("failed to encode stake address"))?;
+
+            Ok((stake_address, log))
+        })
+        .collect()
 }
 
 /// Parses the header of a stored block without decoding the transactions.

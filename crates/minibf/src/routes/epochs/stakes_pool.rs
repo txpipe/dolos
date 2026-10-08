@@ -4,20 +4,17 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::epoch_stake_pool_content_inner::EpochStakePoolContentInner;
-use dolos_cardano::model::{AccountEpochLog, FixedNamespace as _, PoolState};
-use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, TemporalKey};
-use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
+use dolos_cardano::model::PoolState;
+use dolos_core::Domain;
 
 use crate::{
     error::Error,
-    log_and_500,
-    mapping::stake_cred_to_address,
     pagination::{Pagination, PaginationParameters},
     routes::pools::parse_pool_id_bounded,
     Facade,
 };
 
-use super::ensure_epoch_in_range;
+use super::{ensure_epoch_in_range, stake_distribution_page};
 
 pub async fn by_number_stakes_pool<D: Domain>(
     Path((epoch, pool_id)): Path<(u64, String)>,
@@ -45,57 +42,16 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    let network = domain.get_network_id()?;
-
-    let start = summary.epoch_start(epoch);
-    let range = LogKey::from(TemporalKey::from(start))..LogKey::from(TemporalKey::from(start + 1));
-
-    let inner = domain.inner.clone();
-    let skip = pagination.skip();
-    let count = pagination.count;
-
-    // The pool lives in the value, not the key, so this scans the epoch and
-    // filters — the credential-keyed layout keeps per-account history a point
-    // read instead (see the note on `AccountEpochLog`).
-    let page = tokio::task::spawn_blocking(
-        move || -> Result<Vec<(LogKey, AccountEpochLog)>, StatusCode> {
-            let iter = inner
-                .archive()
-                .iter_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, Some(range))
-                .map_err(log_and_500("failed to iterate account epoch logs"))?;
-
-            iter.filter(|entry| {
-                matches!(entry, Ok((_, log))
-                    if log.active_stake.unwrap_or(0) > 0 && log.pool_id == Some(operator))
-                    || entry.is_err()
-            })
-            .skip(skip)
-            .take(count)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(log_and_500("failed to read account epoch log"))
-        },
-    )
-    .await
-    .map_err(log_and_500("account epoch scan task failed"))??;
+    let page =
+        stake_distribution_page(&domain, &summary, epoch, Some(operator), &pagination).await?;
 
     let out = page
         .into_iter()
-        .map(|(key, log)| {
-            let entity = EntityKey::from(key);
-            let credential: StakeCredential = minicbor::decode(entity.as_ref()).map_err(
-                log_and_500("failed to decode stake credential from log key"),
-            )?;
-
-            let stake_address = stake_cred_to_address(&credential, network)
-                .to_bech32()
-                .map_err(log_and_500("failed to encode stake address"))?;
-
-            Ok(EpochStakePoolContentInner {
-                stake_address,
-                amount: log.active_stake.unwrap_or(0).to_string(),
-            })
+        .map(|(stake_address, log)| EpochStakePoolContentInner {
+            stake_address,
+            amount: log.active_stake.unwrap_or(0).to_string(),
         })
-        .collect::<Result<Vec<_>, StatusCode>>()?;
+        .collect();
 
     Ok(Json(out))
 }
