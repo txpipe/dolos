@@ -202,6 +202,17 @@ pub fn byron_ebb_slot(epoch: u64) -> BlockSlot {
 /// stakeholder list, and what the tests need from it is the shape the era
 /// probe and the header hash see.
 pub fn make_byron_ebb(epoch: u64, prev_hash: Hash<32>) -> (ChainPoint, RawBlock) {
+    make_byron_ebb_with_difficulty(epoch, prev_hash, epoch)
+}
+
+/// [`make_byron_ebb`] carrying `difficulty` as its chain difficulty. A real
+/// boundary block repeats the difficulty of the main block before it, so it
+/// reports that block's number as its own.
+pub fn make_byron_ebb_with_difficulty(
+    epoch: u64,
+    prev_hash: Hash<32>,
+    difficulty: u64,
+) -> (ChainPoint, RawBlock) {
     use pallas::codec::utils::{EmptyMap, MaybeIndefArray};
     use pallas::ledger::primitives::byron::{EbBlock, EbbCons, EbbHead};
 
@@ -211,7 +222,7 @@ pub fn make_byron_ebb(epoch: u64, prev_hash: Hash<32>) -> (ChainPoint, RawBlock)
         body_proof: Hash::new([0u8; 32]),
         consensus_data: EbbCons {
             epoch_id: epoch,
-            difficulty: MaybeIndefArray::Def(vec![epoch]),
+            difficulty: MaybeIndefArray::Def(vec![difficulty]),
         },
         extra_data: (EmptyMap,),
     });

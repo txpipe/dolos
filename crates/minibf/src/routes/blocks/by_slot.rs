@@ -4,11 +4,11 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::block_content::BlockContent;
-use dolos_core::{ArchiveStore as _, Domain};
+use dolos_core::Domain;
 
 use crate::Facade;
 
-use super::{single_block_content, tip_block};
+use super::{main_block_at_slot, single_block_content, tip_block};
 
 pub async fn by_slot<D>(
     Path(slot_number): Path<u64>,
@@ -17,11 +17,7 @@ pub async fn by_slot<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let block = domain
-        .archive()
-        .get_block_by_slot(&slot_number)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let block = main_block_at_slot(&domain, slot_number)?.ok_or(StatusCode::NOT_FOUND)?;
 
     let chain = domain.get_chain_summary()?;
 
@@ -34,7 +30,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::blocks::testing::assert_status;
+    use crate::routes::blocks::testing::{assert_status, get_block, mainnet_byron_chain};
     use crate::test_support::{TestApp, TestFault};
 
     #[tokio::test]
@@ -71,5 +67,19 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn blocks_by_slot_skips_boundary_blocks() {
+        let chain = mainnet_byron_chain(true);
+
+        for slot in [0, 21600] {
+            let block = get_block(&chain.app, &format!("/blocks/slot/{slot}")).await;
+            assert_eq!(block.hash, chain.main[&slot].hash);
+        }
+
+        // a boundary block alone at its slot leaves the slot empty
+        let chain = mainnet_byron_chain(false);
+        assert_status(&chain.app, "/blocks/slot/0", StatusCode::NOT_FOUND).await;
     }
 }
