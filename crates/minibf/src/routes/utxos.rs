@@ -2,7 +2,6 @@ use axum::http::StatusCode;
 use pallas::ledger::traverse::MultiEraOutput;
 use std::{collections::HashSet, sync::Arc};
 
-use dolos_cardano::indexes::AsyncCardanoQueryExt as _;
 use dolos_core::{Domain, StateStore as _, Tag, TagEntry, TagOrder, TagStart, TxoRef, UtxoValue};
 
 use crate::{
@@ -516,19 +515,6 @@ where
 
         let builder = if let Some(x) = block_deps.get(&tx_hash).cloned() {
             builder.with_block_data(x)
-        } else {
-            builder
-        };
-
-        let key: Vec<u8> = builder.txo_ref().into();
-        let consumed_by = domain
-            .query()
-            .tx_by_spent_txo(&key)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let builder = if let Some(consumed_by) = consumed_by {
-            builder.with_consumed_by(consumed_by)
         } else {
             builder
         };
