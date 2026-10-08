@@ -96,7 +96,7 @@ pub mod pointers {
 ///
 /// A legacy update proposal enacts at the boundary closing the epoch it
 /// names, and dolos derives that epoch from the epoch the proposal was
-/// submitted in. Three classes of proposal break that derivation, and this
+/// submitted in. Four classes of proposal break that derivation, and this
 /// is the observed answer for each:
 ///
 /// * **Shelley-era `ppup` targeting** — an update proposal carries the epoch
@@ -107,20 +107,28 @@ pub mod pointers {
 ///   endorse it and a stabilisation window passes, not at the next boundary.
 /// * **Quorum delay** — a hard-fork proposal waits for the genesis-key quorum,
 ///   which can take epochs (preview's v8→v9 waited until 645).
+/// * **No quorum** — a proposal that never reaches the genesis-key quorum never
+///   enacts. Its row moves it to the boundary that enacts an identical proposal
+///   (preview's epoch-3 cost model update).
 ///
-/// Reading the proposal's own target epoch and modelling Byron endorsement
-/// would replace all of this with a rule. That is new ledger semantics and
-/// belongs to its own plan; until then, deleting these rows would move
-/// every era boundary they set and shift every epoch number after it.
+/// Reading the proposal's own target epoch, counting the genesis-key quorum,
+/// and modelling Byron endorsement would replace all of this with a rule. That
+/// is new ledger semantics and belongs to its own plan; until then, deleting
+/// these rows would move every era boundary they set and shift every epoch
+/// number after it.
 pub mod pre_conway_updates {
     use pallas::ledger::primitives::Epoch;
 
     pub mod preview {
         use pallas::ledger::primitives::Epoch;
 
-        /// Two hard forks: v7→v8 with a two-epoch lag, v8→v9 held up by quorum.
+        /// Two hard forks (v7→v8 with a two-epoch lag, v8→v9 held up by
+        /// quorum) and one cost model update without quorum.
         pub fn enacts_at(proposal: &str) -> Option<Epoch> {
             let epoch = match proposal {
+                // cost model update without quorum (3 of 7 genesis keys); enacts
+                // with the identical epoch-8 proposal (effect at 9)
+                "edb991bbbfcb05dbccaea6660db60bbfe25c52dec086273cf131a6c21e923ed2#0" => 8,
                 // v7→v8 hard fork proposals (epoch 20, 2-epoch lag: effect at 22)
                 "cbc14ec74b2a20d6c4cc307e73b5a2465eb6cd68df64704f7bc844dac6018500#0" => 21,
                 "7722b914ab9ccab873cd70cb5c39e7ce3bb0f5daf72de8ece56dbc06807b5486#0" => 21,

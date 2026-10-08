@@ -4004,6 +4004,12 @@ mod ratification_tests {
         let d_param = "a6713824eeef48508bd35e851bcf4021a93b5995127feb9910b1e1b88de2c225#0";
         assert_eq!(enacts_at(764824073, d_param), Some(214));
 
+        // preview's cost model update without quorum, submitted in epoch 3:
+        // it enacts with the identical epoch-8 proposal, so epochs 4-8 keep
+        // the genesis cost models
+        let cost_models = "edb991bbbfcb05dbccaea6660db60bbfe25c52dec086273cf131a6c21e923ed2#0";
+        assert_eq!(enacts_at(2, cost_models), Some(8));
+
         // anything else derives its epoch from its own submission
         assert_eq!(enacts_at(1, &format!("{}#0", "ab".repeat(32))), None);
     }
