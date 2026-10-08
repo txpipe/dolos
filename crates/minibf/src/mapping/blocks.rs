@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use axum::http::StatusCode;
 use blockfrost_openapi::models::{
@@ -7,6 +7,7 @@ use blockfrost_openapi::models::{
     block_content_txs_cbor_inner::BlockContentTxsCborInner,
 };
 use dolos_cardano::ChainSummary;
+use dolos_core::Genesis;
 use itertools::Itertools as _;
 use pallas::{
     codec::minicbor,
@@ -24,6 +25,7 @@ pub struct BlockModelBuilder<'a> {
     next: Option<MultiEraBlock<'a>>,
     tip: Option<MultiEraBlock<'a>>,
     touched_addresses: Option<Vec<(String, BTreeSet<String>)>>,
+    genesis_delegates: Option<HashSet<Hash<28>>>,
 }
 
 impl<'a> BlockModelBuilder<'a> {
@@ -37,6 +39,7 @@ impl<'a> BlockModelBuilder<'a> {
             tip: None,
             chain: None,
             touched_addresses: None,
+            genesis_delegates: None,
         })
     }
 
@@ -63,6 +66,23 @@ impl<'a> BlockModelBuilder<'a> {
     pub fn with_chain(self, chain: &'a ChainSummary) -> Self {
         Self {
             chain: Some(chain),
+            ..self
+        }
+    }
+
+    /// The keys Shelley genesis delegates block production to, which db-sync
+    /// names `ShelleyGenesis-…` as slot leaders rather than as pools.
+    pub fn with_genesis_delegates(self, genesis: &Genesis) -> Self {
+        let delegates = genesis
+            .shelley
+            .gen_delegs
+            .iter()
+            .flatten()
+            .filter_map(|(_, x)| x.delegate.as_deref()?.parse().ok())
+            .collect();
+
+        Self {
+            genesis_delegates: Some(delegates),
             ..self
         }
     }
@@ -117,10 +137,7 @@ impl<'a> BlockModelBuilder<'a> {
     fn format_slot_leader(&self) -> Result<Option<String>, StatusCode> {
         let header = self.block.header();
 
-        let Some(use_bech32) = self.chain.map(|x| {
-            let epoch = x.slot_epoch(self.block.slot()).0;
-            epoch > x.first_shelley_epoch()
-        }) else {
+        let Some(genesis_delegates) = self.genesis_delegates.as_ref() else {
             return Ok(None);
         };
 
@@ -128,7 +145,9 @@ impl<'a> BlockModelBuilder<'a> {
             Some(key) => {
                 let hash: Hash<28> = Hasher::<224>::hash(key);
 
-                if use_bech32 {
+                // a genesis delegate can mint well past the first Shelley
+                // epoch, wherever the decentralisation parameter leaves it slots
+                if !genesis_delegates.contains(&hash) {
                     Ok(Some(bech32_pool(hash)?))
                 } else {
                     Ok(Some(format!(
