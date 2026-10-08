@@ -1135,11 +1135,14 @@ impl dolos_core::EntityDelta for GovDRepSnapshot {
     }
 }
 
-/// Fold the boundary-paid credits into the completed DRep-distribution
-/// accumulator: enacted treasury withdrawals and pool-deposit refunds land
-/// in the rewards UMap before the ledger takes the fresh DRep pulser
-/// snapshot at the same boundary, so their amounts count toward each
-/// recipient's snapshot DRep in the distribution this boundary publishes.
+/// Fold the boundary-paid amounts into the completed accumulator. Enacted
+/// treasury withdrawals and pool-deposit refunds land in the rewards UMap
+/// before the ledger takes the fresh DRep pulser snapshot at the same
+/// boundary, so their amounts count toward each recipient's snapshot DRep
+/// in the distribution this boundary publishes. Proposal-deposit refunds
+/// leave the pool leg: SNAP fixes the pool distribution first, and the
+/// pulser adds only the deposits of proposals still open after the
+/// boundary's removals.
 /// Emitted at a governance-active EWRAP finalize, before [`GovDistrRotate`],
 /// so the rotated copy the next boundary ratifies with carries them. An
 /// accumulator that is missing, incomplete, or belongs to another boundary
@@ -1148,6 +1151,7 @@ impl dolos_core::EntityDelta for GovDRepSnapshot {
 pub struct GovDistrBoundaryCredit {
     pub(crate) closing_epoch: Epoch,
     pub(crate) credits: BTreeMap<DRep, u64>,
+    pub(crate) pool_debits: BTreeMap<PoolHash, u64>,
 
     // undo — pre-image of `distr`, captured by `apply` only when state
     // was actually mutated.
@@ -1156,10 +1160,15 @@ pub struct GovDistrBoundaryCredit {
 }
 
 impl GovDistrBoundaryCredit {
-    pub fn new(closing_epoch: Epoch, credits: BTreeMap<DRep, u64>) -> Self {
+    pub fn new(
+        closing_epoch: Epoch,
+        credits: BTreeMap<DRep, u64>,
+        pool_debits: BTreeMap<PoolHash, u64>,
+    ) -> Self {
         Self {
             closing_epoch,
             credits,
+            pool_debits,
             applied: false,
             prev: None,
         }
@@ -1194,6 +1203,16 @@ impl dolos_core::EntityDelta for GovDistrBoundaryCredit {
 
         for (drep, credit) in &self.credits {
             *distr.drep_distr.entry(drep.clone()).or_default() += credit;
+        }
+
+        for (pool, debit) in &self.pool_debits {
+            let Some(stake) = distr.pool_distr.get_mut(pool) else {
+                continue;
+            };
+
+            let taken = (*debit).min(*stake);
+            *stake -= taken;
+            distr.pool_total = distr.pool_total.saturating_sub(taken);
         }
 
         self.applied = true;
@@ -1605,8 +1624,13 @@ mod prop_tests {
                 root::any_lovelace(),
                 0..4,
             ),
+            pool_debits in prop::collection::btree_map(
+                root::any_pool_hash(),
+                root::any_lovelace(),
+                0..4,
+            ),
         ) -> GovDistrBoundaryCredit {
-            GovDistrBoundaryCredit::new(closing_epoch, credits)
+            GovDistrBoundaryCredit::new(closing_epoch, credits, pool_debits)
         }
     }
 

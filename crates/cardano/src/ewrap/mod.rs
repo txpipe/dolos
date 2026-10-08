@@ -281,6 +281,14 @@ pub struct BoundaryWork {
     /// ledger's pool snapshot (SNAP) is taken before POOLREAP and ENACT.
     pub boundary_drep_credits: BTreeMap<DRep, u64>,
 
+    /// Deposits of the proposals this boundary removes, per pool their
+    /// return account delegates to as of the snapshot. The shard
+    /// accumulation added them to both legs; the ledger's pool leg never
+    /// had them (SNAP precedes `returnProposalDeposits`, and the pulser
+    /// adds only the deposits of proposals still open), so the finalize
+    /// pass takes them out via `GovDistrBoundaryCredit`.
+    pub boundary_pool_debits: BTreeMap<PoolHash, u64>,
+
     /// Enacted treasury withdrawals delivered to registered accounts
     /// (moved treasury → rewards at the boundary).
     pub effective_treasury_withdrawals: u64,
