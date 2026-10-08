@@ -5,7 +5,6 @@ use axum::{
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 use dolos_cardano::model::EpochState;
 use dolos_core::Domain;
-use pallas::ledger::primitives::Epoch;
 
 use crate::{
     error::Error,
@@ -13,16 +12,18 @@ use crate::{
     Facade,
 };
 
-use super::{current_epoch, ensure_epoch_in_range, load_epoch_state};
+use super::{current_epoch, parse_epoch_integer, load_epoch_state};
 
 pub async fn by_number_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
-    Path(epoch): Path<Epoch>,
+    Path(number): Path<String>,
 ) -> Result<Json<EpochParamContent>, Error>
 where
     Option<EpochState>: From<D::Entity>,
 {
-    ensure_epoch_in_range(epoch)?;
+    let epoch = parse_epoch_integer(&number)?
+        .in_range()
+        .ok_or(Error::InvalidEpochNumber)?;
 
     let (chain, current) = current_epoch(&domain)?;
     let state = load_epoch_state(&domain, &chain, current, epoch)?;

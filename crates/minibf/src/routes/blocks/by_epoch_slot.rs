@@ -6,7 +6,7 @@ use axum::{
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_core::{ArchiveStore as _, Domain};
 
-use crate::Facade;
+use crate::{error::Error, routes::PathInteger, Facade};
 
 use super::{single_block_content, tip_block};
 
@@ -15,23 +15,22 @@ use super::{single_block_content, tip_block};
 pub async fn by_epoch_slot<D>(
     Path((epoch_number, slot_number)): Path<(String, String)>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<BlockContent>, StatusCode>
+) -> Result<Json<BlockContent>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    // Blockfrost accepts both numbers only in the positive i32 range
-    let in_range =
-        |raw: &str| -> Option<u64> { raw.parse::<u64>().ok().filter(|x| *x <= i32::MAX as u64) };
-
-    let epoch = in_range(&epoch_number).ok_or(StatusCode::BAD_REQUEST)?;
-    let slot = in_range(&slot_number).ok_or(StatusCode::BAD_REQUEST)?;
+    // Blockfrost checks the type of both numbers before the range of either.
+    let epoch = PathInteger::parse(&epoch_number).ok_or(Error::EpochNumberNotInteger)?;
+    let slot = PathInteger::parse(&slot_number).ok_or(Error::SlotNumberNotInteger)?;
+    let epoch = epoch.in_range().ok_or(Error::InvalidEpochNumber)?;
+    let slot = slot.in_range().ok_or(Error::InvalidSlotNumber)?;
 
     let chain = domain.get_chain_summary()?;
 
     // a slot past the epoch end must not roll into the next epoch
     let epoch_length = chain.epoch_start(epoch + 1) - chain.epoch_start(epoch);
     if slot >= epoch_length {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::NOT_FOUND.into());
     }
 
     let absolute_slot = chain.epoch_start(epoch) + slot;
@@ -51,7 +50,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::blocks::testing::assert_status;
+    use crate::routes::blocks::testing::{assert_status, error_mismatch};
     use crate::test_support::{TestApp, TestFault};
 
     /// `/blocks/{hash}` gives the epoch and epoch-slot the test resolves.
@@ -99,19 +98,30 @@ mod tests {
     #[tokio::test]
     async fn blocks_by_epoch_slot_bad_request() {
         let app = TestApp::new();
+        let epoch_not_integer = "params/epoch_number must be integer";
+        let epoch_out_of_range = "Missing, out of range or malformed epoch_number.";
+        let slot_not_integer = "params/slot_number must be integer";
+        let slot_out_of_range = "Missing, out of range or malformed slot_number.";
+        let mut mismatches = Vec::new();
 
-        for (epoch, slot) in [
-            ("x", "0"),
-            ("2", "x"),
-            ("-1", "0"),
-            ("2", "-5"),
-            // past i32::MAX
-            ("2147483648", "0"),
-            ("2", "2147483648"),
+        for (epoch, slot, message) in [
+            ("x", "0", epoch_not_integer),
+            ("1.5", "0", epoch_not_integer),
+            ("2", "x", slot_not_integer),
+            ("-1", "0", epoch_out_of_range),
+            ("2", "-5", slot_out_of_range),
+            ("2147483648", "0", epoch_out_of_range),
+            ("2", "2147483648", slot_out_of_range),
+            // Blockfrost checks both types before either range.
+            ("x", "x", epoch_not_integer),
+            ("-1", "x", slot_not_integer),
+            ("-1", "-1", epoch_out_of_range),
         ] {
             let path = format!("/blocks/epoch/{epoch}/slot/{slot}");
-            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+            mismatches.extend(error_mismatch(&app, &path, StatusCode::BAD_REQUEST, message).await);
         }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     #[tokio::test]

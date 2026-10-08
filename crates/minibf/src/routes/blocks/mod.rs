@@ -206,6 +206,29 @@ mod testing {
         );
     }
 
+    /// Gives a text for each difference from the Blockfrost error body.
+    pub async fn error_mismatch(
+        app: &TestApp,
+        path: &str,
+        status: StatusCode,
+        message: &str,
+    ) -> Option<String> {
+        let (actual, bytes) = app.get_bytes(path).await;
+        let expected = serde_json::json!({
+            "status_code": status.as_u16(),
+            "error": status.canonical_reason(),
+            "message": message,
+        });
+        let body = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+
+        (actual != status || body.as_ref() != Some(&expected)).then(|| {
+            format!(
+                "{path}: expected {status} {message:?}, got {actual} {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    }
+
     /// Preview genesis hash, the network the test domain runs on.
     pub const GENESIS_HASH: &str = crate::hacks::GENESIS_HASH_PREVIEW;
 

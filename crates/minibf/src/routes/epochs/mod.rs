@@ -16,6 +16,7 @@ use crate::{
     log_and_500,
     mapping::{epochs::EpochContentModelBuilder, stake_cred_to_address, IntoModel as _},
     pagination::Pagination,
+    routes::PathInteger,
     Facade,
 };
 
@@ -41,8 +42,6 @@ pub use previous::by_number_previous;
 pub use stakes::by_number_stakes;
 pub use stakes_pool::by_number_stakes_pool;
 
-const MAX_EPOCH_NUMBER: Epoch = i32::MAX as Epoch;
-
 /// The chain summary and the epoch the tip is in.
 fn current_epoch<D: Domain>(domain: &Facade<D>) -> Result<(ChainSummary, Epoch), StatusCode> {
     let tip = domain.get_tip_slot()?;
@@ -58,12 +57,24 @@ fn epoch_slot_range(chain: &ChainSummary, epoch: Epoch) -> (BlockSlot, BlockSlot
     (chain.epoch_start(epoch), chain.epoch_start(epoch + 1))
 }
 
-fn ensure_epoch_in_range(epoch: Epoch) -> Result<(), Error> {
-    if epoch > MAX_EPOCH_NUMBER {
-        return Err(Error::InvalidEpochNumber);
+/// Parses `{number}` on `/epochs/{number}`, `/next` and `/previous`.
+///
+/// Blockfrost accepts only ASCII digits on these routes. It checks the type and
+/// the range after the query string.
+fn parse_epoch_digits(raw: &str) -> Result<Epoch, Error> {
+    if !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Error::NumberNotInteger);
     }
 
-    Ok(())
+    parse_epoch_integer(raw)?
+        .in_range()
+        .ok_or(Error::InvalidEpochNumber)
+}
+
+/// Checks that `{number}` is an integer. Blockfrost checks the range later,
+/// after the query string.
+fn parse_epoch_integer(raw: &str) -> Result<PathInteger, Error> {
+    PathInteger::parse(raw).ok_or(Error::NumberNotInteger)
 }
 
 fn build_epoch_content<D: Domain>(
@@ -309,6 +320,8 @@ mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MAX_EPOCH_NUMBER: Epoch = i32::MAX as Epoch;
     use crate::test_support::{pool_id_cases, PoolIdCase, TestApp, TestFault, REG_POOL_ID};
     use dolos_testing::synthetic::SyntheticBlockConfig;
 
@@ -537,4 +550,75 @@ mod tests {
 
         assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
+    const NOT_INTEGER: &str = "params/number must be integer";
+    const OUT_OF_RANGE: &str = "Missing, out of range or malformed epoch_number.";
+
+    /// Blockfrost accepts only digits on these routes, so `-1` is not an
+    /// integer.
+    const DIGIT_ROUTES: [&str; 3] = ["/epochs/{n}", "/epochs/{n}/next", "/epochs/{n}/previous"];
+
+    /// Blockfrost reads `-1` on these routes as an integer out of range.
+    const SIGNED_ROUTES: [&str; 5] = [
+        "/epochs/{n}/parameters",
+        "/epochs/{n}/blocks",
+        "/epochs/{n}/stakes",
+        "/epochs/{n}/blocks/{pool}",
+        "/epochs/{n}/stakes/{pool}",
+    ];
+
+    #[tokio::test]
+    async fn epoch_number_errors_match_blockfrost() {
+        let app = TestApp::new();
+        let mut mismatches = Vec::new();
+
+        for (number, digits, signed) in [
+            ("abc", NOT_INTEGER, NOT_INTEGER),
+            ("1.5", NOT_INTEGER, NOT_INTEGER),
+            ("-1", NOT_INTEGER, OUT_OF_RANGE),
+            ("2147483648", OUT_OF_RANGE, OUT_OF_RANGE),
+            ("99999999999999999999", OUT_OF_RANGE, OUT_OF_RANGE),
+        ] {
+            let routes = DIGIT_ROUTES
+                .iter()
+                .map(|route| (route, digits))
+                .chain(SIGNED_ROUTES.iter().map(|route| (route, signed)));
+
+            for (route, message) in routes {
+                let path = route.replace("{n}", number).replace("{pool}", REG_POOL_ID);
+                mismatches
+                    .extend(error_mismatch(&app, &path, StatusCode::BAD_REQUEST, message).await);
+            }
+        }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn epoch_number_checks_in_blockfrost_order() {
+        let app = TestApp::new();
+        let count = "querystring/count must be >= 1";
+        let mut mismatches = Vec::new();
+
+        // The digit routes check the query string before the epoch number.
+        for route in &DIGIT_ROUTES[1..] {
+            for number in ["abc", "-1"] {
+                let path = format!("{}?count=0", route.replace("{n}", number));
+                mismatches
+                    .extend(error_mismatch(&app, &path, StatusCode::BAD_REQUEST, count).await);
+            }
+        }
+
+        // The signed routes check the type, then the query string, then the range.
+        for route in &SIGNED_ROUTES[1..] {
+            for (number, message) in [("abc", NOT_INTEGER), ("-1", count)] {
+                let path = format!("{}?count=0", route.replace("{n}", number))
+                    .replace("{pool}", REG_POOL_ID);
+                mismatches
+                    .extend(error_mismatch(&app, &path, StatusCode::BAD_REQUEST, message).await);
+            }
+        }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
 }

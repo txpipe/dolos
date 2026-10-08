@@ -14,18 +14,19 @@ use crate::{
     Facade,
 };
 
-use super::{current_epoch, ensure_epoch_in_range, stake_distribution_page};
+use super::{current_epoch, parse_epoch_integer, stake_distribution_page};
 
 pub async fn by_number_stakes_pool<D: Domain>(
-    Path((epoch, pool_id)): Path<(u64, String)>,
+    Path((number, pool_id)): Path<(String, String)>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<EpochStakePoolContentInner>>, Error>
 where
     Option<PoolState>: From<D::Entity>,
 {
+    let number = parse_epoch_integer(&number)?;
     let pagination = Pagination::try_from(params)?;
-    ensure_epoch_in_range(epoch)?;
+    let epoch = number.in_range().ok_or(Error::InvalidEpochNumber)?;
 
     let (chain, current) = current_epoch(&domain)?;
 
