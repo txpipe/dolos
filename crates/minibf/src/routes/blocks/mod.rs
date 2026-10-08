@@ -305,16 +305,32 @@ where
 {
     let txs: Vec<T> = BlockModelBuilder::new(block)?.into_model()?;
 
-    let txs = match pagination.order {
-        Order::Asc => txs,
-        Order::Desc => txs.into_iter().rev().collect(),
+    Ok(paged(txs, pagination))
+}
+
+fn paged<T>(items: Vec<T>, pagination: &Pagination) -> Vec<T> {
+    let items = match pagination.order {
+        Order::Asc => items,
+        Order::Desc => items.into_iter().rev().collect(),
     };
 
-    Ok(txs
+    items
         .into_iter()
         .skip(pagination.skip())
         .take(pagination.count)
-        .collect())
+        .collect()
+}
+
+/// Whether the request names the genesis block, which the archive does not
+/// hold.
+fn names_genesis<D: Domain>(
+    domain: &Facade<D>,
+    hash_or_number: &HashOrNumber,
+) -> Result<bool, Error> {
+    match hash_or_number {
+        Either::Left(hash) => genesis::is_genesis_hash(domain, hash).map_err(Error::Code),
+        Either::Right(_) => Ok(false),
+    }
 }
 
 #[cfg(test)]

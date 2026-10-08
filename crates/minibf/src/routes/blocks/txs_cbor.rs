@@ -11,7 +11,7 @@ use crate::{
     Facade,
 };
 
-use super::{load_block_by_hash_or_number, paged_block_txs, parse_hash_or_number};
+use super::{load_block_by_hash_or_number, names_genesis, paged_block_txs, parse_hash_or_number};
 
 pub async fn by_hash_or_number_txs_cbor<D>(
     Path(hash_or_number): Path<String>,
@@ -23,6 +23,12 @@ where
 {
     let pagination = Pagination::try_from(params)?;
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
+
+    // genesis outputs come with no transaction body to serve
+    if names_genesis(&domain, &hash_or_number)? {
+        return Ok(Json(Vec::new()));
+    }
+
     let block = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
     Ok(Json(paged_block_txs(&block, &pagination)?))
@@ -119,5 +125,15 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_txs_cbor_of_genesis_is_empty() {
+        let app = TestApp::new();
+        let path = format!("/blocks/{}/txs/cbor", crate::hacks::GENESIS_HASH_PREVIEW);
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"[]");
     }
 }

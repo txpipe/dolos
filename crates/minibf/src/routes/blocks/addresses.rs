@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use axum::{
     extract::{Path, Query, State},
@@ -7,16 +7,20 @@ use axum::{
 };
 use blockfrost_openapi::models::block_content_addresses_inner::BlockContentAddressesInner;
 use dolos_core::Domain;
+use pallas::crypto::hash::Hash;
 
 use crate::{
     error::Error,
     inputs::{for_each_touched_output, InputDeps},
-    mapping::{blocks::BlockModelBuilder, IntoModel as _},
+    mapping::{
+        blocks::{touched_addresses_model, BlockModelBuilder},
+        IntoModel as _,
+    },
     pagination::{Pagination, PaginationParameters},
     Facade,
 };
 
-use super::{load_block_by_hash_or_number, parse_hash_or_number};
+use super::{genesis, load_block_by_hash_or_number, names_genesis, parse_hash_or_number};
 
 pub async fn by_hash_or_number_addresses<D>(
     Path(hash_or_number): Path<String>,
@@ -28,6 +32,21 @@ where
 {
     let pagination = Pagination::try_from(params)?;
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
+
+    if names_genesis(&domain, &hash_or_number)? {
+        let touched = genesis::genesis_txs(&domain.genesis())?
+            .into_iter()
+            .map(|tx| (tx.hash.to_string(), BTreeSet::from([tx.address])));
+
+        return Ok(Json(
+            touched_addresses_model(touched)
+                .into_iter()
+                .skip(pagination.skip())
+                .take(pagination.count)
+                .collect(),
+        ));
+    }
+
     let block = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
     let builder = BlockModelBuilder::new(&block)?;
@@ -39,10 +58,13 @@ where
         deps.prepare(&domain, txs.iter()).await?
     };
 
-    // Addresses of each tx's outputs plus the outputs it spends. Inputs
-    // missing from the archive are skipped, like /txs/{hash}/utxos.
-    // Phase-2-failed txs stay in: their collateral moves funds. Blockfrost
-    // drops them, which we treat as a BF bug.
+    // genesis outputs, by tx hash, the first time an input misses the archive
+    let mut genesis_outputs: Option<HashMap<Hash<32>, String>> = None;
+
+    // Addresses of each tx's outputs plus the outputs it spends. A spent
+    // genesis output is not in the archive, so it is read off the genesis
+    // config; any other input missing from the archive is skipped, like
+    // /txs/{hash}/utxos. Phase-2-failed txs stay in, as on Blockfrost.
     let builder = builder.collect_touched_addresses_with(|tx| {
         let mut addresses = BTreeSet::new();
 
@@ -55,6 +77,27 @@ where
 
             Ok(false)
         })?;
+
+        for input in tx.consumes() {
+            if resolver.resolve(&input)?.is_some() {
+                continue;
+            }
+
+            if genesis_outputs.is_none() {
+                let outputs = genesis::genesis_txs(&domain.genesis())?
+                    .into_iter()
+                    .map(|tx| (tx.hash, tx.address))
+                    .collect();
+
+                genesis_outputs = Some(outputs);
+            }
+
+            let spent = genesis_outputs.as_ref().and_then(|x| x.get(input.hash()));
+
+            if let Some(address) = spent {
+                addresses.insert(address.clone());
+            }
+        }
 
         Ok(addresses)
     })?;
@@ -256,5 +299,57 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_addresses_of_genesis() {
+        let app = TestApp::new();
+        let path = format!("/blocks/{}/addresses", crate::hacks::GENESIS_HASH_PREVIEW);
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let addresses: Vec<BlockContentAddressesInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses");
+
+        assert_eq!(addresses.len(), 8);
+        assert_eq!(
+            addresses[0].address,
+            "FHnt4NL7yPXjpZtYj1YUiX9QYYUZGXDT9gA2PJXQFkTSMx3EgawXK5BUrCHdhe2"
+        );
+        assert_eq!(
+            addresses[0].transactions[0].tx_hash,
+            "4ceb4298a5d404ad5400513bd57f93693350ee1f499bf5b116db67a49e7e33f9"
+        );
+    }
+
+    /// Checked against live Blockfrost on 2026-10-08.
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_addresses_include_spent_genesis_outputs() {
+        let (_, cbor) = include_str!("../../../testdata/preview-genesis-spend.txt")
+            .lines()
+            .find(|line| !line.starts_with('#'))
+            .and_then(|line| line.split_once(' '))
+            .unwrap();
+        let block = std::sync::Arc::new(hex::decode(cbor).unwrap());
+
+        let app =
+            TestApp::new_with_archived_blocks(dolos_cardano::include::preview::load(), &[block]);
+
+        let path =
+            "/blocks/e19690d1a8ab6cab8ba342970bac8bc530a21425e011df916b1b84235217558c/addresses";
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let addresses: Vec<BlockContentAddressesInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses");
+        let addresses: Vec<&str> = addresses.iter().map(|x| x.address.as_str()).collect();
+
+        assert_eq!(
+            addresses,
+            [
+                "addr_test1vp8cprhse9pnnv7f4l3n6pj0afq2hjm6f7r2205dz0583egagfjah",
+                "FHnt4NL7yPXvDWHa8bVs73UEUdJd64VxWXSFNqetECtYfTd9TtJguJ14Lu3feth",
+            ]
+        );
     }
 }
