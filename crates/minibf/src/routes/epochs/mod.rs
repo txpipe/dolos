@@ -315,6 +315,27 @@ mod testing {
 
     use crate::{mapping::bech32_pool, test_support::TestApp};
 
+    /// The body of a `200` response to `path`.
+    pub async fn get_ok<T: serde::de::DeserializeOwned>(app: &TestApp, path: &str) -> T {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        serde_json::from_slice(&bytes).expect("failed to parse response")
+    }
+
+    /// The epoch numbers of a `200` epoch listing.
+    pub async fn get_epochs(app: &TestApp, path: &str) -> Vec<i32> {
+        let content: Vec<blockfrost_openapi::models::epoch_content::EpochContent> =
+            get_ok(app, path).await;
+
+        content.into_iter().map(|x| x.epoch).collect()
+    }
+
     pub async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
         assert_eq!(

@@ -56,4 +56,11 @@ mod tests {
         let path = "/epochs/latest/parameters";
         assert_status(&app, path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
+
+    #[tokio::test]
+    async fn epochs_latest_parameters_is_the_tip_epoch() {
+        let app = TestApp::new();
+        let params: EpochParamContent = get_ok(&app, "/epochs/latest/parameters").await;
+        assert_eq!(params.epoch as u64, app.tip_epoch());
+    }
 }

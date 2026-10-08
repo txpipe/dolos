@@ -89,4 +89,27 @@ mod tests {
         let path = "/epochs/999999/next";
         assert_status(&app, path, StatusCode::NOT_FOUND).await;
     }
+
+    #[tokio::test]
+    async fn epochs_by_number_next_lists_up_to_the_current_epoch() {
+        let app = TestApp::new();
+        assert_eq!(get_epochs(&app, "/epochs/0/next").await, vec![1, 2]);
+        assert!(get_epochs(&app, "/epochs/2/next").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_next_paginated() {
+        let app = TestApp::new();
+        assert_eq!(
+            get_epochs(&app, "/epochs/0/next?count=1&page=1").await,
+            vec![1]
+        );
+        assert_eq!(
+            get_epochs(&app, "/epochs/0/next?count=1&page=2").await,
+            vec![2]
+        );
+        assert!(get_epochs(&app, "/epochs/0/next?count=1&page=3")
+            .await
+            .is_empty());
+    }
 }

@@ -56,7 +56,7 @@ pub async fn by_number_blocks<D: Domain>(
 mod tests {
     use super::*;
     use crate::routes::epochs::testing::*;
-    use crate::test_support::TestApp;
+    use crate::test_support::{TestApp, TestFault};
 
     /// Regression test: a block minted on the last slot of an epoch must
     /// appear when the endpoint lists that epoch's blocks.
@@ -94,5 +94,68 @@ mod tests {
             .await;
         let by_pool: Vec<String> = serde_json::from_slice(&bytes).unwrap();
         assert!(by_pool.contains(&boundary_hash));
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_happy_path() {
+        let app = TestApp::new();
+        let hashes: Vec<String> =
+            get_ok(&app, &format!("/epochs/{}/blocks", app.tip_epoch())).await;
+
+        // The synthetic chain mints every block in the tip epoch.
+        let expected: Vec<String> = app
+            .vectors()
+            .blocks
+            .iter()
+            .map(|x| x.block_hash.clone())
+            .collect();
+        assert_eq!(hashes, expected);
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_paginated() {
+        let app = TestApp::new();
+        let path = format!("/epochs/{}/blocks", app.tip_epoch());
+        let all: Vec<String> = get_ok(&app, &path).await;
+
+        let mut paged = Vec::new();
+        for page in 1..=3 {
+            let hashes: Vec<String> = get_ok(&app, &format!("{path}?count=2&page={page}")).await;
+            paged.extend(hashes);
+        }
+
+        assert_eq!(paged, all);
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_desc_is_reversed_asc() {
+        let app = TestApp::new();
+        let path = format!("/epochs/{}/blocks", app.tip_epoch());
+        let asc: Vec<String> = get_ok(&app, &format!("{path}?order=asc")).await;
+        let mut desc: Vec<String> = get_ok(&app, &format!("{path}?order=desc")).await;
+
+        desc.reverse();
+        assert!(!asc.is_empty());
+        assert_eq!(asc, desc);
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_empty_epoch() {
+        let app = TestApp::new();
+        let hashes: Vec<String> = get_ok(&app, "/epochs/0/blocks").await;
+        assert!(hashes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_bad_request() {
+        let app = TestApp::new();
+        assert_status(&app, "/epochs/not-a-number/blocks", StatusCode::BAD_REQUEST).await;
+        assert_status(&app, "/epochs/0/blocks?count=0", StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        assert_status(&app, "/epochs/0/blocks", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }

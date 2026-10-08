@@ -108,4 +108,26 @@ mod tests {
         let path = "/epochs/2/previous?page=0";
         assert_status(&app, path, StatusCode::BAD_REQUEST).await;
     }
+
+    #[tokio::test]
+    async fn epochs_by_number_previous_lists_the_epochs_before() {
+        let app = TestApp::new();
+        assert_eq!(get_epochs(&app, "/epochs/2/previous").await, vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_previous_pages_count_back() {
+        let app = TestApp::new();
+        assert_eq!(
+            get_epochs(&app, "/epochs/2/previous?count=1&page=1").await,
+            vec![1]
+        );
+        assert_eq!(
+            get_epochs(&app, "/epochs/2/previous?count=1&page=2").await,
+            vec![0]
+        );
+        assert!(get_epochs(&app, "/epochs/2/previous?count=1&page=3")
+            .await
+            .is_empty());
+    }
 }
