@@ -47,7 +47,9 @@ use crate::{
 };
 
 mod all;
+mod history;
 pub use all::all;
+pub use history::by_subject_history;
 
 struct OnchainMetadata {
     version: Option<OnchainMetadataStandard>,

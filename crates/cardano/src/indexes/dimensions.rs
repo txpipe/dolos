@@ -127,6 +127,10 @@ pub mod archive {
         /// Governance votes by the proposal entity key of the action voted on
         /// (`ProposalState::build_entity_key`).
         ACTION_VOTES = "action_votes";
+
+        /// Native asset subject (policy ID + asset name) of every mint or
+        /// burn in a valid transaction
+        ASSET_MINTS = "asset_mints";
     }
 }
 
@@ -169,6 +173,7 @@ mod tests {
                 "pool_blocks",
                 "voter_votes",
                 "action_votes",
+                "asset_mints",
             ]
         );
     }

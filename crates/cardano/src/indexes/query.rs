@@ -76,6 +76,15 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
         order: SlotOrder,
     ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
 
+    /// Blocks whose valid transactions mint or burn an asset.
+    fn blocks_by_asset_mints_stream(
+        &self,
+        asset: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+
     fn blocks_by_policy_stream(
         &self,
         policy: &[u8],
@@ -262,6 +271,24 @@ where
         blocks_by_tag_stream(
             (*self).clone(),
             archive::ASSET,
+            asset.to_vec(),
+            start_slot,
+            end_slot,
+            order,
+        )
+    }
+
+    fn blocks_by_asset_mints_stream(
+        &self,
+        asset: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    {
+        blocks_by_tag_stream(
+            (*self).clone(),
+            archive::ASSET_MINTS,
             asset.to_vec(),
             start_slot,
             end_slot,

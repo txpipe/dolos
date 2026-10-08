@@ -117,6 +117,17 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
         self.slots_by_tag(archive::ASSET, asset, start, end)
     }
 
+    /// Iterate over slots of blocks whose valid transactions mint or burn an
+    /// asset.
+    fn slots_by_asset_mints(
+        &self,
+        asset: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(archive::ASSET_MINTS, asset, start, end)
+    }
+
     /// Iterate over slots of blocks that contain transactions for assets of a
     /// policy.
     fn slots_by_policy(
