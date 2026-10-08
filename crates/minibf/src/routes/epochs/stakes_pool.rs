@@ -64,19 +64,8 @@ mod tests {
         let app = TestApp::new();
         let epoch = app.tip_epoch() - 1;
         let pool_id = app.vectors().pool_id.clone();
-        let (status, bytes) = app
-            .get_bytes(&format!("/epochs/{epoch}/stakes/{pool_id}"))
-            .await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-
         let stakes: Vec<EpochStakePoolContentInner> =
-            serde_json::from_slice(&bytes).expect("failed to parse epoch pool stakes");
+            get_ok(&app, &format!("/epochs/{epoch}/stakes/{pool_id}")).await;
 
         // Both non-zero seeded delegators point at the vectors' pool; the
         // zero-stake one is excluded.
@@ -93,20 +82,16 @@ mod tests {
         let epoch = app.tip_epoch() - 1;
         let pool_id = app.vectors().pool_id.clone();
 
-        let (status_1, bytes_1) = app
-            .get_bytes(&format!("/epochs/{epoch}/stakes/{pool_id}?count=1&page=1"))
-            .await;
-        let (status_2, bytes_2) = app
-            .get_bytes(&format!("/epochs/{epoch}/stakes/{pool_id}?count=1&page=2"))
-            .await;
-
-        assert_eq!(status_1, StatusCode::OK);
-        assert_eq!(status_2, StatusCode::OK);
-
-        let page_1: Vec<EpochStakePoolContentInner> =
-            serde_json::from_slice(&bytes_1).expect("failed to parse pool stakes page 1");
-        let page_2: Vec<EpochStakePoolContentInner> =
-            serde_json::from_slice(&bytes_2).expect("failed to parse pool stakes page 2");
+        let page_1: Vec<EpochStakePoolContentInner> = get_ok(
+            &app,
+            &format!("/epochs/{epoch}/stakes/{pool_id}?count=1&page=1"),
+        )
+        .await;
+        let page_2: Vec<EpochStakePoolContentInner> = get_ok(
+            &app,
+            &format!("/epochs/{epoch}/stakes/{pool_id}?count=1&page=2"),
+        )
+        .await;
 
         assert_eq!(page_1.len(), 1);
         assert_eq!(page_2.len(), 1);

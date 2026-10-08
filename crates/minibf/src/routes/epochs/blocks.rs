@@ -86,20 +86,15 @@ mod tests {
         });
 
         let final_slot = boundary - 1;
-        let (status, bytes) = app.get_bytes(&format!("/blocks/slot/{final_slot}")).await;
-        assert_eq!(status, StatusCode::OK, "expected a block on the final slot");
-        let block: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let block: serde_json::Value = get_ok(&app, &format!("/blocks/slot/{final_slot}")).await;
         let boundary_hash = block["hash"].as_str().unwrap().to_string();
 
-        let (_, bytes) = app.get_bytes("/epochs/2/blocks?count=100").await;
-        let all: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+        let all: Vec<String> = get_ok(&app, "/epochs/2/blocks?count=100").await;
         assert!(all.contains(&boundary_hash));
 
         let pool = toy_issuer_pool();
-        let (_, bytes) = app
-            .get_bytes(&format!("/epochs/2/blocks/{pool}?count=100"))
-            .await;
-        let by_pool: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+        let by_pool: Vec<String> =
+            get_ok(&app, &format!("/epochs/2/blocks/{pool}?count=100")).await;
         assert!(by_pool.contains(&boundary_hash));
     }
 

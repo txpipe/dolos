@@ -10,12 +10,13 @@ use pallas::crypto::hash::Hasher;
 use crate::{
     error::Error,
     log_and_500,
+    mapping::blocks::decode_block_header,
     pagination::{Order, Pagination, PaginationParameters},
     routes::pools::parse_pool_id_bounded,
     Facade,
 };
 
-use super::{current_epoch, decode_block_header, ensure_epoch_in_range, epoch_slot_range};
+use super::{current_epoch, ensure_epoch_in_range, epoch_slot_range};
 
 pub async fn by_number_blocks_pool<D: Domain>(
     Path((epoch, pool_id)): Path<(u64, String)>,
@@ -122,23 +123,11 @@ mod tests {
         let epoch = app.tip_epoch();
         let pool = toy_issuer_pool();
 
-        let (status, bytes) = app
-            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}"))
-            .await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-
-        let by_pool: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse hashes");
+        let by_pool: Vec<String> = get_ok(&app, &format!("/epochs/{epoch}/blocks/{pool}")).await;
 
         // The issuer pool minted every block, so the filtered list equals the
         // unfiltered sibling endpoint.
-        let (_, bytes) = app.get_bytes(&format!("/epochs/{epoch}/blocks")).await;
-        let all: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse hashes");
+        let all: Vec<String> = get_ok(&app, &format!("/epochs/{epoch}/blocks")).await;
 
         assert!(!by_pool.is_empty());
         assert_eq!(by_pool, all);
@@ -150,18 +139,16 @@ mod tests {
         let epoch = app.tip_epoch();
         let pool = toy_issuer_pool();
 
-        let (status_1, bytes_1) = app
-            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}?count=1&page=1"))
-            .await;
-        let (status_2, bytes_2) = app
-            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}?count=1&page=2"))
-            .await;
-
-        assert_eq!(status_1, StatusCode::OK);
-        assert_eq!(status_2, StatusCode::OK);
-
-        let page_1: Vec<String> = serde_json::from_slice(&bytes_1).unwrap();
-        let page_2: Vec<String> = serde_json::from_slice(&bytes_2).unwrap();
+        let page_1: Vec<String> = get_ok(
+            &app,
+            &format!("/epochs/{epoch}/blocks/{pool}?count=1&page=1"),
+        )
+        .await;
+        let page_2: Vec<String> = get_ok(
+            &app,
+            &format!("/epochs/{epoch}/blocks/{pool}?count=1&page=2"),
+        )
+        .await;
 
         assert_eq!(page_1.len(), 1);
         assert_eq!(page_2.len(), 1);
@@ -174,15 +161,10 @@ mod tests {
         let epoch = app.tip_epoch();
         let pool = toy_issuer_pool();
 
-        let (_, bytes_asc) = app
-            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}?order=asc"))
-            .await;
-        let (_, bytes_desc) = app
-            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}?order=desc"))
-            .await;
-
-        let asc: Vec<String> = serde_json::from_slice(&bytes_asc).unwrap();
-        let mut desc: Vec<String> = serde_json::from_slice(&bytes_desc).unwrap();
+        let asc: Vec<String> =
+            get_ok(&app, &format!("/epochs/{epoch}/blocks/{pool}?order=asc")).await;
+        let mut desc: Vec<String> =
+            get_ok(&app, &format!("/epochs/{epoch}/blocks/{pool}?order=desc")).await;
 
         desc.reverse();
         assert_eq!(asc, desc);
@@ -194,18 +176,7 @@ mod tests {
         let epoch = app.tip_epoch();
         let pool = app.vectors().pool_id.clone();
 
-        let (status, bytes) = app
-            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}"))
-            .await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-
-        let hashes: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+        let hashes: Vec<String> = get_ok(&app, &format!("/epochs/{epoch}/blocks/{pool}")).await;
         assert!(hashes.is_empty());
     }
 

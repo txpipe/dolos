@@ -52,17 +52,7 @@ mod tests {
     async fn epochs_by_number_next_happy_path() {
         let app = TestApp::new();
         let path = "/epochs/0/next";
-        let (status, bytes) = app.get_bytes(path).await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-
-        let content: Vec<EpochContent> =
-            serde_json::from_slice(&bytes).expect("failed to parse epoch content array");
+        let content: Vec<EpochContent> = get_ok(&app, path).await;
 
         // The result is in strict ascending order. Every epoch is greater than the
         // requested epoch.

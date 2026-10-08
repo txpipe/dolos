@@ -63,17 +63,7 @@ mod tests {
         let app = TestApp::new();
         let epoch = app.tip_epoch() - 1;
         let path = format!("/epochs/{epoch}/stakes");
-        let (status, bytes) = app.get_bytes(&path).await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-
-        let stakes: Vec<EpochStakeContentInner> =
-            serde_json::from_slice(&bytes).expect("failed to parse epoch stakes");
+        let stakes: Vec<EpochStakeContentInner> = get_ok(&app, &path).await;
 
         // The seeder writes the vectors' account plus one synthetic script
         // credential (both delegated to the vectors' pool) and one
@@ -96,20 +86,10 @@ mod tests {
         let app = TestApp::new();
         let epoch = app.tip_epoch() - 1;
 
-        let (status_1, bytes_1) = app
-            .get_bytes(&format!("/epochs/{epoch}/stakes?count=1&page=1"))
-            .await;
-        let (status_2, bytes_2) = app
-            .get_bytes(&format!("/epochs/{epoch}/stakes?count=1&page=2"))
-            .await;
-
-        assert_eq!(status_1, StatusCode::OK);
-        assert_eq!(status_2, StatusCode::OK);
-
         let page_1: Vec<EpochStakeContentInner> =
-            serde_json::from_slice(&bytes_1).expect("failed to parse stakes page 1");
+            get_ok(&app, &format!("/epochs/{epoch}/stakes?count=1&page=1")).await;
         let page_2: Vec<EpochStakeContentInner> =
-            serde_json::from_slice(&bytes_2).expect("failed to parse stakes page 2");
+            get_ok(&app, &format!("/epochs/{epoch}/stakes?count=1&page=2")).await;
 
         assert_eq!(page_1.len(), 1);
         assert_eq!(page_2.len(), 1);
@@ -120,11 +100,7 @@ mod tests {
     async fn epochs_stakes_empty_epoch() {
         let app = TestApp::new();
         // Epoch 0 is in range but nothing is seeded there.
-        let (status, bytes) = app.get_bytes("/epochs/0/stakes").await;
-
-        assert_eq!(status, StatusCode::OK);
-        let stakes: Vec<EpochStakeContentInner> =
-            serde_json::from_slice(&bytes).expect("failed to parse empty stakes");
+        let stakes: Vec<EpochStakeContentInner> = get_ok(&app, "/epochs/0/stakes").await;
         assert!(stakes.is_empty());
     }
 

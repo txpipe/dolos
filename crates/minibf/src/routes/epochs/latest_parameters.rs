@@ -38,16 +38,7 @@ mod tests {
     async fn epochs_latest_parameters_happy_path() {
         let app = TestApp::new();
         let path = "/epochs/latest/parameters";
-        let (status, bytes) = app.get_bytes(path).await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-        let _: EpochParamContent =
-            serde_json::from_slice(&bytes).expect("failed to parse epoch parameters");
+        let _: EpochParamContent = get_ok(&app, path).await;
     }
 
     #[tokio::test]

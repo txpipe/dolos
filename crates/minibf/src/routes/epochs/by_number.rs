@@ -51,17 +51,7 @@ mod tests {
     async fn epochs_by_number_happy_path() {
         let app = TestApp::new();
         let path = "/epochs/1";
-        let (status, bytes) = app.get_bytes(path).await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-
-        let content: EpochContent =
-            serde_json::from_slice(&bytes).expect("failed to parse epoch content");
+        let content: EpochContent = get_ok(&app, path).await;
         assert_eq!(content.epoch, 1);
         // The synthetic chain puts all blocks in epoch 2, so epoch 1 has no
         // block. Its aggregates and rolling stats are zero.
@@ -72,17 +62,7 @@ mod tests {
     async fn epochs_by_number_current_has_active_stake() {
         let app = TestApp::new();
         let path = "/epochs/2";
-        let (status, bytes) = app.get_bytes(path).await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-
-        let content: EpochContent =
-            serde_json::from_slice(&bytes).expect("failed to parse epoch content");
+        let content: EpochContent = get_ok(&app, path).await;
         assert!(content.active_stake.is_some());
     }
 

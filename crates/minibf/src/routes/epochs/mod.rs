@@ -8,10 +8,7 @@ use dolos_cardano::{
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey, LogKey, TemporalKey};
 use pallas::{
     codec::minicbor,
-    ledger::{
-        primitives::{Epoch, StakeCredential},
-        traverse::MultiEraHeader,
-    },
+    ledger::primitives::{Epoch, StakeCredential},
 };
 
 use crate::{
@@ -263,51 +260,6 @@ async fn stake_distribution_page<D: Domain>(
         .collect()
 }
 
-/// Parses the header of a stored block without decoding the transactions.
-/// Returns `None` for Byron blocks (no issuer).
-pub(crate) fn decode_block_header(body: &[u8]) -> Result<Option<MultiEraHeader<'_>>, StatusCode> {
-    use std::borrow::Cow;
-
-    use pallas::codec::utils::KeepRaw;
-    use pallas::ledger::primitives::{alonzo, babbage};
-    use pallas::ledger::traverse::{probe, Era};
-
-    let era = match probe::block_era(body) {
-        probe::Outcome::Matched(era) => era,
-        probe::Outcome::EpochBoundary => return Ok(None),
-        probe::Outcome::Inconclusive => {
-            return Err(log_and_500("failed to probe block era")("inconclusive"))
-        }
-    };
-
-    if era == Era::Byron {
-        return Ok(None);
-    }
-
-    // `[era_tag, [header, tx_bodies, ...]]`: the header is the first item of
-    // the inner array.
-    let mut d = minicbor::Decoder::new(body);
-    let header = (|| -> Result<_, minicbor::decode::Error> {
-        d.array()?;
-        d.u8()?;
-        d.array()?;
-
-        match era {
-            Era::Shelley | Era::Allegra | Era::Mary | Era::Alonzo => {
-                let header: KeepRaw<alonzo::Header> = d.decode()?;
-                Ok(MultiEraHeader::ShelleyCompatible(Cow::Owned(header)))
-            }
-            _ => {
-                let header: KeepRaw<babbage::Header> = d.decode()?;
-                Ok(MultiEraHeader::BabbageCompatible(Cow::Owned(header)))
-            }
-        }
-    })()
-    .map_err(log_and_500("failed to decode block header"))?;
-
-    Ok(Some(header))
-}
-
 #[cfg(test)]
 mod testing {
     use axum::http::StatusCode;
@@ -359,7 +311,6 @@ mod tests {
     use super::*;
     use crate::test_support::{pool_id_cases, PoolIdCase, TestApp, TestFault, REG_POOL_ID};
     use dolos_testing::synthetic::SyntheticBlockConfig;
-    use pallas::{crypto::hash::Hasher, ledger::traverse::MultiEraBlock};
 
     /// The builder nulls a passed active stake inside the preprod gap, only on
     /// preprod. `next` and `previous` build their items through it too.
@@ -443,73 +394,6 @@ mod tests {
             .into_model()
             .expect("map epoch content");
         assert_eq!(content.active_stake, None);
-    }
-
-    #[test]
-    fn decode_block_header_matches_full_decode() {
-        let (_, raw) = dolos_testing::blocks::make_conway_block(1234);
-
-        let header = decode_block_header(&raw).unwrap().expect("conway header");
-        let block = MultiEraBlock::decode(&raw).unwrap();
-
-        assert_eq!(header.hash(), block.hash());
-        assert_eq!(header.issuer_vkey(), block.header().issuer_vkey());
-    }
-
-    #[test]
-    fn decode_block_header_reads_the_shelley_header_shape() {
-        use pallas::ledger::primitives::alonzo;
-
-        let issuer_vkey = vec![0xAA; 32];
-        let header = alonzo::Header {
-            header_body: alonzo::HeaderBody {
-                block_number: 7,
-                slot: 42,
-                prev_hash: None,
-                issuer_vkey: issuer_vkey.clone().into(),
-                vrf_vkey: vec![].into(),
-                nonce_vrf: alonzo::VrfCert(vec![].into(), vec![].into()),
-                leader_vrf: alonzo::VrfCert(vec![].into(), vec![].into()),
-                block_body_size: 0,
-                block_body_hash: pallas::crypto::hash::Hash::from([0u8; 32]),
-                operational_cert_hot_vkey: vec![].into(),
-                operational_cert_sequence_number: 0,
-                operational_cert_kes_period: 0,
-                operational_cert_sigma: vec![].into(),
-                protocol_major: 6,
-                protocol_minor: 0,
-            },
-            body_signature: vec![].into(),
-        };
-        let header_cbor = minicbor::to_vec(&header).unwrap();
-
-        // Wrap as a stored alonzo block: `[5, [header]]`. The helper stops at
-        // the header, so the block needs no transaction sections.
-        let mut body = vec![0x82, 0x05, 0x81];
-        body.extend(&header_cbor);
-
-        let decoded = decode_block_header(&body).unwrap().expect("alonzo header");
-
-        assert!(matches!(decoded, MultiEraHeader::ShelleyCompatible(_)));
-        assert_eq!(decoded.issuer_vkey().unwrap(), issuer_vkey.as_slice());
-        assert_eq!(decoded.hash(), Hasher::<256>::hash(&header_cbor));
-    }
-
-    #[test]
-    fn decode_block_header_skips_byron_blocks() {
-        // `[0, []]` = epoch boundary block, `[1, []]` = byron main block.
-        assert!(decode_block_header(&[0x82, 0x00, 0x80]).unwrap().is_none());
-        assert!(decode_block_header(&[0x82, 0x01, 0x80]).unwrap().is_none());
-    }
-
-    #[test]
-    fn decode_block_header_rejects_malformed_bytes() {
-        // Not a block wrapper at all.
-        assert!(decode_block_header(&[0xff, 0x00]).is_err());
-
-        // A real block truncated inside the header.
-        let (_, raw) = dolos_testing::blocks::make_conway_block(1234);
-        assert!(decode_block_header(&raw[..raw.len() / 4]).is_err());
     }
 
     /// Gives a text for each difference from the Blockfrost error body.

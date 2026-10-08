@@ -32,17 +32,7 @@ mod tests {
     async fn epochs_latest_happy_path() {
         let app = TestApp::new();
         let path = "/epochs/latest";
-        let (status, bytes) = app.get_bytes(path).await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-
-        let content: EpochContent =
-            serde_json::from_slice(&bytes).expect("failed to parse epoch content");
+        let content: EpochContent = get_ok(&app, path).await;
         // The tip of the synthetic chain is in epoch 2, so `latest` resolves to
         // epoch 2.
         assert_eq!(content.epoch, 2);

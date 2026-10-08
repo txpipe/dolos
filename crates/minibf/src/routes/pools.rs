@@ -1463,7 +1463,7 @@ where
                     continue;
                 };
 
-                let Some(header) = super::epochs::decode_block_header(&body)? else {
+                let Some(header) = crate::mapping::blocks::decode_block_header(&body)? else {
                     tracing::warn!(slot, "pool blocks index points at a Byron block");
                     continue;
                 };
