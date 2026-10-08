@@ -55,6 +55,11 @@ fn parse_hash_or_number(hash_or_number: &str) -> Result<HashOrNumber, Error> {
     } else {
         let hash = hex::decode(hash_or_number).map_err(|_| Error::InvalidBlockHash)?;
 
+        // a hex string of any other length is malformed, not a missing block
+        if hash.len() != 32 {
+            return Err(Error::InvalidBlockHash);
+        }
+
         Ok(Either::Left(hash))
     }
 }
@@ -379,6 +384,28 @@ mod testing {
 
         serde_json::from_slice(&bytes).expect("failed to parse blocks")
     }
+
+    /// Asserts Blockfrost's JSON error body for `path`.
+    pub async fn assert_error(app: &TestApp, path: &str, status: StatusCode, message: &str) {
+        let (actual, bytes) = app.get_bytes(path).await;
+        let body: serde_json::Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| panic!("no json body for {path}: {bytes:?}"));
+
+        assert_eq!(actual, status, "{path}");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "status_code": status.as_u16(),
+                "error": status.canonical_reason(),
+                "message": message,
+            }),
+            "{path}"
+        );
+    }
+
+    pub const NOT_FOUND: &str = "The requested component has not been found.";
+    pub const SLOT_NOT_INTEGER: &str = "params/slot_number must be integer";
+    pub const BAD_SLOT: &str = "Missing, out of range or malformed slot_number.";
 
     pub async fn get_block(app: &TestApp, path: &str) -> BlockContent {
         let (status, bytes) = app.get_bytes(path).await;
