@@ -4,11 +4,11 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::block_content::BlockContent;
-use dolos_core::{ArchiveStore as _, Domain};
+use dolos_core::Domain;
 
 use crate::Facade;
 
-use super::{single_block_content, tip_block};
+use super::{main_block_at_slot, single_block_content, tip_block};
 
 /// Dolos stores blocks by absolute slot, so the epoch-relative pair is
 /// converted with the chain summary first.
@@ -36,11 +36,7 @@ where
 
     let absolute_slot = chain.epoch_start(epoch) + slot;
 
-    let block = domain
-        .archive()
-        .get_block_by_slot(&absolute_slot)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let block = main_block_at_slot(&domain, absolute_slot)?.ok_or(StatusCode::NOT_FOUND)?;
 
     let tip = tip_block(&domain)?;
     let model = single_block_content(&domain, &block, &tip, &chain).await?;
@@ -51,7 +47,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::blocks::testing::assert_status;
+    use crate::routes::blocks::testing::{assert_status, get_block, mainnet_byron_chain};
     use crate::test_support::{TestApp, TestFault};
 
     /// `/blocks/{hash}` gives the epoch and epoch-slot the test resolves.
@@ -123,5 +119,20 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn blocks_by_epoch_slot_skips_boundary_blocks() {
+        let chain = mainnet_byron_chain(true);
+
+        for (epoch, slot) in [(0, 0), (1, 21600)] {
+            let path = format!("/blocks/epoch/{epoch}/slot/0");
+            let block = get_block(&chain.app, &path).await;
+            assert_eq!(block.hash, chain.main[&slot].hash);
+        }
+
+        // a boundary block alone at its slot leaves the slot empty
+        let chain = mainnet_byron_chain(false);
+        assert_status(&chain.app, "/blocks/epoch/0/slot/0", StatusCode::NOT_FOUND).await;
     }
 }
