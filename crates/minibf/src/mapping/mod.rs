@@ -69,6 +69,7 @@ use crate::Facade;
 pub mod blocks;
 pub mod cost_models;
 pub mod epochs;
+pub mod protocol_params;
 
 macro_rules! try_into_or_500 {
     ($expr:expr) => {
