@@ -63,27 +63,34 @@ where
     let (window, utxos) = loop {
         let window = select_window(&rows, &pagination);
 
-        if window.refs.is_empty() {
+        if window.rows.is_empty() {
             return Ok(Vec::new());
         }
 
         let utxos = domain
             .state()
-            .get_utxos(window.refs.clone())
+            .get_utxos(window.refs())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        if utxos.len() == window.refs.len() {
+        if utxos.len() == window.rows.len() {
             break (window, utxos);
         }
 
         let missing: HashSet<_> = window
-            .refs
+            .rows
             .iter()
+            .map(|(_, txo_ref)| txo_ref)
             .filter(|txo_ref| !utxos.contains_key(*txo_ref))
             .collect();
 
         rows.retain(|(_, txo_ref)| !missing.contains(txo_ref));
     };
+
+    let PageWindow { rows, skip } = window;
+    let window_slots: HashMap<_, _> = rows
+        .into_iter()
+        .map(|(slot, txo_ref)| (txo_ref, slot))
+        .collect();
 
     // decoded
     let utxos: HashMap<_, _> = utxos
@@ -110,7 +117,14 @@ where
                 builder
             }
         })
-        .map(|x| (page_sort_key::<T>(&x), x))
+        // The window cut the page by its slot, so sort by that slot first. A
+        // block that `sync.max_history` pruned keeps its index slot until the
+        // sweep but has no block data, and `page_sort_key` alone would move its
+        // rows out of their slot and cut the page in a different place.
+        .map(|x| {
+            let slot = window_slots.get(&x.txo_ref()).copied().flatten();
+            ((slot, page_sort_key::<T>(&x)), x)
+        })
         .collect();
 
     match pagination.order {
@@ -127,7 +141,7 @@ where
     for builder in models
         .into_iter()
         .map(|(_, builder)| builder)
-        .skip(window.skip)
+        .skip(skip)
         .take(pagination.count)
     {
         out.push(<UtxoOutputModelBuilder<'_> as IntoModel<T>>::into_model(
@@ -141,8 +155,17 @@ where
 /// The rows that can land on the requested page, in page order, and the
 /// offset of the page's first row among them.
 struct PageWindow {
-    refs: Vec<TxoRef>,
+    rows: Vec<(Option<BlockSlot>, TxoRef)>,
     skip: usize,
+}
+
+impl PageWindow {
+    fn refs(&self) -> Vec<TxoRef> {
+        self.rows
+            .iter()
+            .map(|(_, txo_ref)| txo_ref.clone())
+            .collect()
+    }
 }
 
 /// The refs in `refs` whose output `filter` keeps.
@@ -228,7 +251,7 @@ fn select_window(rows: &[(Option<BlockSlot>, TxoRef)], pagination: &Pagination) 
     let to = pagination.to().min(rows.len());
     if from >= to {
         return PageWindow {
-            refs: Vec::new(),
+            rows: Vec::new(),
             skip: 0,
         };
     }
@@ -246,15 +269,13 @@ fn select_window(rows: &[(Option<BlockSlot>, TxoRef)], pagination: &Pagination) 
     }
 
     PageWindow {
-        refs: rows[start..end]
-            .iter()
-            .map(|(_, txo_ref)| txo_ref.clone())
-            .collect(),
+        rows: rows[start..end].to_vec(),
         skip: from - start,
     }
 }
 
-/// The page order for a UTxO model: chain position first, `TxoRef` second.
+/// The page order for UTxO models in the same window slot: chain position
+/// first, `TxoRef` second.
 ///
 /// Chain position is `None` for an output whose creation block was pruned by
 /// `sync.max_history` — the block that carries its slot no longer exists, so
@@ -292,6 +313,7 @@ mod tests {
     use dolos_core::async_query::BlockRefMeta;
     use dolos_core::config::MinibfConfig;
     use dolos_core::import::ImportExt as _;
+    use dolos_core::{ArchiveWriter as _, ChainPoint};
     use dolos_testing::measured::MeasuredStores;
     use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
     use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores as _};
@@ -387,13 +409,16 @@ mod tests {
 
         // page 2 of count 2 covers sorted positions 2..4, cutting slot 10
         let window = select(&rows, pagination(Order::Asc, 2, 2));
-        assert_eq!(window.refs, vec![txo(0x11, 0), txo(0x12, 0), txo(0x13, 0)]);
+        assert_eq!(
+            window.refs(),
+            vec![txo(0x11, 0), txo(0x12, 0), txo(0x13, 0)]
+        );
         assert_eq!(window.skip, 0);
 
         // page 3 of count 2 covers 4..6: the tail of slot 10 and half of 20
         let window = select(&rows, pagination(Order::Asc, 2, 3));
         assert_eq!(
-            window.refs,
+            window.refs(),
             vec![
                 txo(0x11, 0),
                 txo(0x12, 0),
@@ -406,21 +431,21 @@ mod tests {
 
         // the slot-less group is final order already and never widens
         let window = select(&rows, pagination(Order::Asc, 1, 1));
-        assert_eq!(window.refs, vec![txo(0x01, 0)]);
+        assert_eq!(window.refs(), vec![txo(0x01, 0)]);
         assert_eq!(window.skip, 0);
 
         // descending mirrors the whole order, slot-less rows last
         let window = select(&rows, pagination(Order::Desc, 1, 2));
-        assert_eq!(window.refs, vec![txo(0x21, 1), txo(0x21, 0)]);
+        assert_eq!(window.refs(), vec![txo(0x21, 1), txo(0x21, 0)]);
         assert_eq!(window.skip, 1);
 
         let window = select(&rows, pagination(Order::Desc, 2, 4));
-        assert_eq!(window.refs, vec![txo(0x01, 0)]);
+        assert_eq!(window.refs(), vec![txo(0x01, 0)]);
         assert_eq!(window.skip, 0);
 
         // a page past the end is empty
         let window = select(&rows, pagination(Order::Asc, 100, 2));
-        assert!(window.refs.is_empty());
+        assert!(window.rows.is_empty());
     }
 
     async fn utxo_page(app: &TestApp, stake_address: &str, query: &str) -> Vec<String> {
@@ -454,6 +479,50 @@ mod tests {
             assert!(full.len() > 3, "fixture too small to cut through a block");
 
             for count in [1, 2, 4] {
+                let mut walked = Vec::new();
+                for page in 1.. {
+                    let rows = utxo_page(
+                        &app,
+                        &stake_address,
+                        &format!("order={order}&count={count}&page={page}"),
+                    )
+                    .await;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    walked.extend(rows);
+                }
+
+                assert_eq!(walked, full, "order={order} count={count}");
+            }
+        }
+    }
+
+    /// On a `sync.max_history` node the archive index keeps a pruned block's
+    /// slot until the sweep, but the block's rows have no block data. Pages
+    /// must still slice the same sequence as the single full page.
+    #[tokio::test]
+    async fn pages_concatenate_while_the_index_outlives_pruned_blocks() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 8,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        // undo drops the bodies and keeps the index, as between two sweeps
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let writer = domain.archive().start_writer().unwrap();
+            for block in vectors.blocks.iter().take(3) {
+                writer.undo(&ChainPoint::Slot(block.slot)).unwrap();
+            }
+            writer.commit().unwrap();
+        });
+        let stake_address = app.vectors().stake_address.clone();
+
+        for order in ["asc", "desc"] {
+            let full = utxo_page(&app, &stake_address, &format!("order={order}&count=100")).await;
+            assert_eq!(full.len(), 24, "the pruned blocks' rows must stay listed");
+
+            for count in [1, 2, 4, 5] {
                 let mut walked = Vec::new();
                 for page in 1.. {
                     let rows = utxo_page(
