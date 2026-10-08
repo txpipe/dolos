@@ -1,0 +1,200 @@
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    Json,
+};
+use blockfrost_openapi::models::epoch_stake_content_inner::EpochStakeContentInner;
+use dolos_cardano::model::{AccountEpochLog, FixedNamespace as _};
+use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, TemporalKey};
+use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
+
+use crate::{
+    error::Error,
+    log_and_500,
+    mapping::{bech32_pool, stake_cred_to_address},
+    pagination::{Pagination, PaginationParameters},
+    Facade,
+};
+
+pub async fn by_number_stakes<D: Domain>(
+    Path(epoch): Path<u64>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<EpochStakeContentInner>>, Error> {
+    let pagination = Pagination::try_from(params)?;
+
+    let tip = domain.get_tip_slot()?;
+    let summary = domain.get_chain_summary()?;
+    let (current, _) = summary.slot_epoch(tip);
+
+    // Blockfrost 404s epochs that don't exist yet; an epoch within range
+    // that simply has no logged distribution (pre-upgrade history, current
+    // epoch before its RUPD ran) returns an empty page instead.
+    if epoch > current {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    let network = domain.get_network_id()?;
+
+    // Every row of an epoch's distribution shares the epoch-start temporal
+    // key, so the scan range is exactly one slot wide.
+    let start = summary.epoch_start(epoch);
+    let range = LogKey::from(TemporalKey::from(start))..LogKey::from(TemporalKey::from(start + 1));
+
+    let inner = domain.inner.clone();
+    let skip = pagination.skip();
+    let count = pagination.count;
+
+    let page = tokio::task::spawn_blocking(
+        move || -> Result<Vec<(LogKey, AccountEpochLog)>, StatusCode> {
+            let iter = inner
+                .archive()
+                .iter_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, Some(range))
+                .map_err(log_and_500("failed to iterate account epoch logs"))?;
+
+            // The merged row exists for anything an account did in the epoch,
+            // so a row with no stake leg is a reward-only account and not part
+            // of the distribution at all. The log also keeps zero-stake
+            // delegators (so row counts match `StakeLog.delegators_count`),
+            // while Blockfrost's epoch_stake excludes them — both filtered
+            // before paginating, for parity.
+            iter.filter(
+                |entry| !matches!(entry, Ok((_, log)) if log.active_stake.unwrap_or(0) == 0),
+            )
+            .skip(skip)
+            .take(count)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(log_and_500("failed to read account epoch log"))
+        },
+    )
+    .await
+    .map_err(log_and_500("account stake scan task failed"))??;
+
+    let out = page
+        .into_iter()
+        .map(|(key, log)| {
+            let entity = EntityKey::from(key);
+            let credential: StakeCredential = minicbor::decode(entity.as_ref()).map_err(
+                log_and_500("failed to decode stake credential from log key"),
+            )?;
+
+            let stake_address = stake_cred_to_address(&credential, network)
+                .to_bech32()
+                .map_err(log_and_500("failed to encode stake address"))?;
+
+            let pool = log.pool_id.ok_or_else(|| {
+                tracing::error!("account epoch log carries stake with no pool");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+            Ok(EpochStakeContentInner {
+                stake_address,
+                pool_id: bech32_pool(pool)?,
+                amount: log.active_stake.unwrap_or(0).to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routes::epochs::testing::*;
+    use crate::test_support::{TestApp, TestFault};
+
+    #[tokio::test]
+    async fn epochs_stakes_happy_path() {
+        let app = TestApp::new();
+        let epoch = app.tip_epoch() - 1;
+        let path = format!("/epochs/{epoch}/stakes");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let stakes: Vec<EpochStakeContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse epoch stakes");
+
+        // The seeder writes the vectors' account plus one synthetic script
+        // credential (both delegated to the vectors' pool) and one
+        // zero-stake credential, which must be excluded for Blockfrost
+        // parity.
+        assert_eq!(stakes.len(), 2);
+        assert!(stakes.iter().all(|x| x.amount != "0"));
+
+        let seeded = stakes
+            .iter()
+            .find(|x| x.stake_address == app.vectors().stake_address)
+            .expect("seeded stake address missing from distribution");
+
+        assert_eq!(seeded.pool_id, app.vectors().pool_id);
+        assert_eq!(seeded.amount, "7000000");
+    }
+
+    #[tokio::test]
+    async fn epochs_stakes_paginated() {
+        let app = TestApp::new();
+        let epoch = app.tip_epoch() - 1;
+
+        let (status_1, bytes_1) = app
+            .get_bytes(&format!("/epochs/{epoch}/stakes?count=1&page=1"))
+            .await;
+        let (status_2, bytes_2) = app
+            .get_bytes(&format!("/epochs/{epoch}/stakes?count=1&page=2"))
+            .await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+
+        let page_1: Vec<EpochStakeContentInner> =
+            serde_json::from_slice(&bytes_1).expect("failed to parse stakes page 1");
+        let page_2: Vec<EpochStakeContentInner> =
+            serde_json::from_slice(&bytes_2).expect("failed to parse stakes page 2");
+
+        assert_eq!(page_1.len(), 1);
+        assert_eq!(page_2.len(), 1);
+        assert_ne!(page_1[0].stake_address, page_2[0].stake_address);
+    }
+
+    #[tokio::test]
+    async fn epochs_stakes_empty_epoch() {
+        let app = TestApp::new();
+        // Epoch 0 is in range but nothing is seeded there.
+        let (status, bytes) = app.get_bytes("/epochs/0/stakes").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let stakes: Vec<EpochStakeContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse empty stakes");
+        assert!(stakes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn epochs_stakes_bad_request() {
+        let app = TestApp::new();
+        assert_status(&app, "/epochs/not-a-number/stakes", StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_stakes_not_found() {
+        let app = TestApp::new();
+        assert_status(&app, "/epochs/999999/stakes", StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_stakes_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(&app, "/epochs/0/stakes", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_stakes_archive_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        assert_status(&app, "/epochs/0/stakes", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+}
