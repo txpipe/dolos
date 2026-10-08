@@ -8,14 +8,12 @@ use crate::{
     Facade,
 };
 
+use super::current_epoch;
+
 pub async fn latest_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<EpochParamContent>, Error> {
-    let tip = domain.get_tip_slot()?;
-
-    let summary = domain.get_chain_summary()?;
-
-    let (epoch, _) = summary.slot_epoch(tip);
+    let (_, epoch) = current_epoch(&domain)?;
 
     let state = dolos_cardano::load_epoch::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

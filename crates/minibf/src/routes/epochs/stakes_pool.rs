@@ -14,7 +14,7 @@ use crate::{
     Facade,
 };
 
-use super::{ensure_epoch_in_range, stake_distribution_page};
+use super::{current_epoch, ensure_epoch_in_range, stake_distribution_page};
 
 pub async fn by_number_stakes_pool<D: Domain>(
     Path((epoch, pool_id)): Path<(u64, String)>,
@@ -27,9 +27,7 @@ where
     let pagination = Pagination::try_from(params)?;
     ensure_epoch_in_range(epoch)?;
 
-    let tip = domain.get_tip_slot()?;
-    let summary = domain.get_chain_summary()?;
-    let (current, _) = summary.slot_epoch(tip);
+    let (chain, current) = current_epoch(&domain)?;
 
     if epoch > current {
         return Err(StatusCode::NOT_FOUND.into());
@@ -42,8 +40,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    let page =
-        stake_distribution_page(&domain, &summary, epoch, Some(operator), &pagination).await?;
+    let page = stake_distribution_page(&domain, &chain, epoch, Some(operator), &pagination).await?;
 
     let out = page
         .into_iter()

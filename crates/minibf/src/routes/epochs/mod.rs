@@ -5,7 +5,7 @@ use dolos_cardano::{
     rupd::StakeSnapshot,
     ChainSummary, EraProtocol, PoolHash,
 };
-use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, TemporalKey};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey, LogKey, TemporalKey};
 use pallas::{
     codec::minicbor,
     ledger::{
@@ -45,6 +45,21 @@ pub use stakes::by_number_stakes;
 pub use stakes_pool::by_number_stakes_pool;
 
 const MAX_EPOCH_NUMBER: Epoch = i32::MAX as Epoch;
+
+/// The chain summary and the epoch the tip is in.
+fn current_epoch<D: Domain>(domain: &Facade<D>) -> Result<(ChainSummary, Epoch), StatusCode> {
+    let tip = domain.get_tip_slot()?;
+    let chain = domain.get_chain_summary()?;
+    let (current, _) = chain.slot_epoch(tip);
+
+    Ok((chain, current))
+}
+
+/// The slots of `epoch` as `get_range` bounds. The upper bound is exclusive,
+/// so it is the next epoch's start.
+fn epoch_slot_range(chain: &ChainSummary, epoch: Epoch) -> (BlockSlot, BlockSlot) {
+    (chain.epoch_start(epoch), chain.epoch_start(epoch + 1))
+}
 
 fn ensure_epoch_in_range(epoch: Epoch) -> Result<(), Error> {
     if epoch > MAX_EPOCH_NUMBER {

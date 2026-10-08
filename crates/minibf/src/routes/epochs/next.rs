@@ -14,7 +14,7 @@ use crate::{
     Facade,
 };
 
-use super::{collect_epoch_contents, ensure_epoch_in_range};
+use super::{collect_epoch_contents, current_epoch, ensure_epoch_in_range};
 
 pub async fn by_number_next<D: Domain>(
     State(domain): State<Facade<D>>,
@@ -26,9 +26,7 @@ where
 {
     let pagination = Pagination::try_from(params)?;
     ensure_epoch_in_range(epoch)?;
-    let tip = domain.get_tip_slot()?;
-    let chain = domain.get_chain_summary()?;
-    let (current, _) = chain.slot_epoch(tip);
+    let (chain, current) = current_epoch(&domain)?;
 
     // The reference epoch must exist for the listing to be valid.
     if epoch > current {

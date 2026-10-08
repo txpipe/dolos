@@ -13,7 +13,7 @@ use crate::{
     Facade,
 };
 
-use super::stake_distribution_page;
+use super::{current_epoch, stake_distribution_page};
 
 pub async fn by_number_stakes<D: Domain>(
     Path(epoch): Path<u64>,
@@ -22,9 +22,7 @@ pub async fn by_number_stakes<D: Domain>(
 ) -> Result<Json<Vec<EpochStakeContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
 
-    let tip = domain.get_tip_slot()?;
-    let summary = domain.get_chain_summary()?;
-    let (current, _) = summary.slot_epoch(tip);
+    let (chain, current) = current_epoch(&domain)?;
 
     // Blockfrost 404s epochs that don't exist yet; an epoch within range
     // that simply has no logged distribution (pre-upgrade history, current
@@ -33,7 +31,7 @@ pub async fn by_number_stakes<D: Domain>(
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    let page = stake_distribution_page(&domain, &summary, epoch, None, &pagination).await?;
+    let page = stake_distribution_page(&domain, &chain, epoch, None, &pagination).await?;
 
     let out = page
         .into_iter()

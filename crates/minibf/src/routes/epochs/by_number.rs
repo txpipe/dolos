@@ -11,7 +11,8 @@ use pallas::ledger::primitives::Epoch;
 use crate::{error::Error, mapping::IntoModel as _, Facade};
 
 use super::{
-    build_epoch_content, derive_current_active_stake, ensure_epoch_in_range, load_epoch_state,
+    build_epoch_content, current_epoch, derive_current_active_stake, ensure_epoch_in_range,
+    load_epoch_state,
 };
 
 pub async fn by_number<D: Domain>(
@@ -23,9 +24,7 @@ where
 {
     ensure_epoch_in_range(epoch)?;
 
-    let tip = domain.get_tip_slot()?;
-    let chain = domain.get_chain_summary()?;
-    let (current, _) = chain.slot_epoch(tip);
+    let (chain, current) = current_epoch(&domain)?;
 
     if epoch > current {
         return Err(StatusCode::NOT_FOUND.into());

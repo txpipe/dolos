@@ -1,9 +1,9 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     Json,
 };
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
+use dolos_cardano::model::EpochState;
 use dolos_core::Domain;
 use pallas::ledger::primitives::Epoch;
 
@@ -13,28 +13,23 @@ use crate::{
     Facade,
 };
 
+use super::{current_epoch, load_epoch_state};
+
 pub async fn by_number_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
     Path(epoch): Path<Epoch>,
-) -> Result<Json<EpochParamContent>, Error> {
-    let tip = domain.get_tip_slot()?;
-    let summary = domain.get_chain_summary()?;
-    let (curr, _) = summary.slot_epoch(tip);
-
-    let epoch = if epoch == curr {
-        dolos_cardano::load_epoch::<D>(domain.state())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    } else {
-        domain
-            .get_epoch_log(epoch, &summary)?
-            .ok_or(StatusCode::NOT_FOUND)?
-    };
+) -> Result<Json<EpochParamContent>, Error>
+where
+    Option<EpochState>: From<D::Entity>,
+{
+    let (chain, current) = current_epoch(&domain)?;
+    let state = load_epoch_state(&domain, &chain, current, epoch)?;
 
     let model = ParametersModelBuilder {
-        epoch: epoch.number,
-        params: epoch.pparams.live().cloned().unwrap_or_default(),
+        epoch: state.number,
+        params: state.pparams.live().cloned().unwrap_or_default(),
         genesis: &domain.genesis(),
-        nonce: epoch.nonces.map(|x| x.active.to_string()),
+        nonce: state.nonces.map(|x| x.active.to_string()),
     };
 
     Ok(model.into_response()?)
@@ -45,6 +40,7 @@ mod tests {
     use super::*;
     use crate::routes::epochs::testing::*;
     use crate::test_support::{TestApp, TestFault};
+    use axum::http::StatusCode;
 
     #[tokio::test]
     async fn epochs_by_number_parameters_happy_path() {

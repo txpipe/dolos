@@ -15,7 +15,7 @@ use crate::{
     Facade,
 };
 
-use super::{decode_block_header, ensure_epoch_in_range};
+use super::{current_epoch, decode_block_header, ensure_epoch_in_range, epoch_slot_range};
 
 pub async fn by_number_blocks_pool<D: Domain>(
     Path((epoch, pool_id)): Path<(u64, String)>,
@@ -28,9 +28,7 @@ where
     let pagination = Pagination::try_from(params)?;
     ensure_epoch_in_range(epoch)?;
 
-    let tip = domain.get_tip_slot()?;
-    let summary = domain.get_chain_summary()?;
-    let (current, _) = summary.slot_epoch(tip);
+    let (chain, current) = current_epoch(&domain)?;
 
     // Blockfrost 404s epochs that don't exist yet.
     if epoch > current {
@@ -40,10 +38,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
 
-    let start = summary.epoch_start(epoch);
-    // `get_range` treats the upper bound as exclusive, so the next epoch's
-    // start is the bound that still covers this epoch's final slot.
-    let end = summary.epoch_start(epoch + 1);
+    let (start, end) = epoch_slot_range(&chain, epoch);
 
     let inner = domain.inner.clone();
     let issuer = hash;

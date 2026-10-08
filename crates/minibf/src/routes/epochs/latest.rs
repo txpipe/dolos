@@ -5,15 +5,13 @@ use dolos_core::Domain;
 
 use crate::{error::Error, mapping::IntoModel as _, Facade};
 
-use super::{build_epoch_content, derive_current_active_stake, load_epoch_state};
+use super::{build_epoch_content, current_epoch, derive_current_active_stake, load_epoch_state};
 
 pub async fn latest<D: Domain>(State(domain): State<Facade<D>>) -> Result<Json<EpochContent>, Error>
 where
     Option<EpochState>: From<D::Entity>,
 {
-    let tip = domain.get_tip_slot()?;
-    let chain = domain.get_chain_summary()?;
-    let (current, _) = chain.slot_epoch(tip);
+    let (chain, current) = current_epoch(&domain)?;
 
     // The current epoch always has a live `EpochState`, so this never returns a
     // 404 error.

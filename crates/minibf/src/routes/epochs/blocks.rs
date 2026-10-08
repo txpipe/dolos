@@ -12,6 +12,8 @@ use crate::{
     Facade,
 };
 
+use super::epoch_slot_range;
+
 pub async fn by_number_blocks<D: Domain>(
     Path(epoch): Path<u64>,
     Query(params): Query<PaginationParameters>,
@@ -19,10 +21,7 @@ pub async fn by_number_blocks<D: Domain>(
 ) -> Result<Json<Vec<String>>, Error> {
     let chain = domain.get_chain_summary()?;
     let pagination = Pagination::try_from(params)?;
-    let start = chain.epoch_start(epoch);
-    // `get_range` treats the upper bound as exclusive, so the next epoch's
-    // start is the bound that still covers this epoch's final slot.
-    let end = chain.epoch_start(epoch + 1);
+    let (start, end) = epoch_slot_range(&chain, epoch);
 
     let mut iter = domain
         .archive()
