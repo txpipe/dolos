@@ -27,8 +27,10 @@ where
     let (chain, current) = current_epoch(&domain)?;
     let state = load_epoch_state(&domain, &chain, current, epoch)?;
 
+    // Like `build_epoch_content`: the live state of the current epoch can
+    // carry another number than the one requested.
     let model = ParametersModelBuilder {
-        epoch: state.number,
+        epoch,
         params: state.pparams.live().cloned().unwrap_or_default(),
         genesis: &domain.genesis(),
         nonce: state.nonces.map(|x| x.active.to_string()),
@@ -98,5 +100,13 @@ mod tests {
             StatusCode::BAD_REQUEST,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_parameters_of_the_current_epoch() {
+        let app = TestApp::new();
+        let epoch = app.tip_epoch();
+        let params: EpochParamContent = get_ok(&app, &format!("/epochs/{epoch}/parameters")).await;
+        assert_eq!(params.epoch as u64, epoch);
     }
 }
