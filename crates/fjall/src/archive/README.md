@@ -84,4 +84,4 @@ both traversals share.
 
 ## Pruning
 
-Neither `prune_history` nor `truncate_front` touches the two index keyspaces today: a rollback removes their entries through `ArchiveWriter::undo_index`, and pruning them under a sliding history window is not done yet.
+`prune_history` removes whole slots below `tip - max_slots`, oldest first across the blocks and every log namespace, until the caller's row budget is spent; a batch closes only at a slot boundary, so a call can exceed its budget by one slot. Once no expired slot remains, the leftover budget sweeps the two index keyspaces below the first block left, in resumable chunks amortized over a sixteenth of the window. `truncate_front` does not touch the index keyspaces: a rollback removes their entries through `ArchiveWriter::undo_index`.

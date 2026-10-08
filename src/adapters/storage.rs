@@ -1131,25 +1131,15 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     fn prune_history(
         &self,
         max_slots: u64,
-        max_prune_slots: Option<u64>,
-        max_prune_index_rows: Option<u64>,
+        max_prune_rows: Option<u64>,
     ) -> Result<bool, ArchiveError> {
         match self {
-            Self::Memory(s) => {
-                CoreArchiveStore::prune_history(s, max_slots, max_prune_slots, max_prune_index_rows)
+            Self::Memory(s) => CoreArchiveStore::prune_history(s, max_slots, max_prune_rows),
+            Self::LogsOnly(inner) => {
+                CoreArchiveStore::prune_history(inner.as_ref(), max_slots, max_prune_rows)
             }
-            Self::LogsOnly(inner) => CoreArchiveStore::prune_history(
-                inner.as_ref(),
-                max_slots,
-                max_prune_slots,
-                max_prune_index_rows,
-            ),
-            Self::Fjall(s) => {
-                CoreArchiveStore::prune_history(s, max_slots, max_prune_slots, max_prune_index_rows)
-            }
-            Self::NoOp(s) => {
-                CoreArchiveStore::prune_history(s, max_slots, max_prune_slots, max_prune_index_rows)
-            }
+            Self::Fjall(s) => CoreArchiveStore::prune_history(s, max_slots, max_prune_rows),
+            Self::NoOp(s) => CoreArchiveStore::prune_history(s, max_slots, max_prune_rows),
         }
     }
 

@@ -1556,11 +1556,9 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
     fn prune_history(
         &self,
         max_slots: u64,
-        max_prune_slots: Option<u64>,
-        max_prune_index_rows: Option<u64>,
+        max_prune_rows: Option<u64>,
     ) -> Result<bool, ArchiveError> {
-        self.inner
-            .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
+        self.inner.prune_history(max_slots, max_prune_rows)
     }
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {

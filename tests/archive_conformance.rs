@@ -335,7 +335,7 @@ fn prune_history<B: Backend>() {
     writer.commit().unwrap();
 
     // Tip is 864_100; keeping 500_000 slots prunes before 364_100.
-    let done = store.prune_history(500_000, None, None).unwrap();
+    let done = store.prune_history(500_000, None).unwrap();
     assert!(done, "unbatched prune must finish in one call");
 
     assert_eq!(store.get_block_by_slot(&100).unwrap(), None);
@@ -361,7 +361,7 @@ fn prune_history_no_excess_is_noop<B: Backend>() {
     }
     writer.commit().unwrap();
 
-    let done = store.prune_history(1_000, Some(10), Some(100_000)).unwrap();
+    let done = store.prune_history(1_000, Some(10)).unwrap();
     assert!(done, "no-excess prune must report done");
     assert_eq!(stored_slots(&store), vec![100, 200, 300], "nothing removed");
 }
@@ -377,12 +377,11 @@ fn prune_history_batched_converges<B: Backend>() {
     }
     writer.commit().unwrap();
 
+    // Tip 500, window 100: slots 0 to 300 have expired, one row each.
     let max_slots = 100;
-    let max_prune = 150;
+    let max_prune_rows = Some(2);
 
-    let done = store
-        .prune_history(max_slots, Some(max_prune), Some(100_000))
-        .unwrap();
+    let done = store.prune_history(max_slots, max_prune_rows).unwrap();
     assert!(!done, "large backlog should not finish in one batch");
     let after_first = stored_slots(&store);
     assert_eq!(
@@ -399,9 +398,7 @@ fn prune_history_batched_converges<B: Backend>() {
     let mut done = false;
     let mut rounds = 1;
     while !done {
-        done = store
-            .prune_history(max_slots, Some(max_prune), Some(100_000))
-            .unwrap();
+        done = store.prune_history(max_slots, max_prune_rows).unwrap();
         rounds += 1;
         assert!(rounds < 100, "batched pruning did not converge");
     }
@@ -803,7 +800,7 @@ fn remove_before_prunes_every_block_at_a_slot<B: Backend>() {
     }
     writer.commit().unwrap();
 
-    store.prune_history(1, None, None).unwrap();
+    store.prune_history(1, None).unwrap();
 
     assert_eq!(
         stored_slots(&store),
@@ -975,7 +972,7 @@ fn prune_keeps_logs_at_the_cutoff_slot<B: Backend>() {
     // Start 0, tip 1000, window 500: prune before slot 500. A log row's
     // temporal prefix at exactly the cutoff survives; anything before it
     // goes.
-    let done = store.prune_history(500, None, None).unwrap();
+    let done = store.prune_history(500, None).unwrap();
     assert!(done);
 
     let walked: Vec<LogKey> = store
@@ -984,6 +981,135 @@ fn prune_keeps_logs_at_the_cutoff_slot<B: Backend>() {
         .map(|r| r.unwrap().0)
         .collect();
     assert_eq!(walked, vec![log_key(500, 0x01), log_key(501, 0x01)]);
+}
+
+/// Slots of the rows a log namespace holds, in key order.
+fn logged_slots<S: CoreArchiveStore>(store: &S, ns: &'static str) -> Vec<BlockSlot> {
+    store
+        .iter_logs(ns, LogKey::full_range())
+        .unwrap()
+        .map(|row| {
+            let key = row.unwrap().0;
+            BlockSlot::from_be_bytes(key.as_ref()[..8].try_into().unwrap())
+        })
+        .collect()
+}
+
+/// Write blocks and `(namespace, slot, entity)` log rows in one commit.
+fn seed_history<S: CoreArchiveStore>(store: &S, blocks: &[u64], logs: &[(&'static str, u64, u8)]) {
+    let writer = store.start_writer().unwrap();
+    for &slot in blocks {
+        writer
+            .apply(&point(slot), &Arc::new(fake_block(slot)))
+            .unwrap();
+    }
+    for &(ns, slot, entity) in logs {
+        writer
+            .write_log(ns, &log_key(slot, entity), &vec![entity])
+            .unwrap();
+    }
+    writer.commit().unwrap();
+}
+
+/// A budgeted prune takes whole slots, oldest first across the blocks and
+/// every log namespace, and overshoots its budget rather than split a slot.
+fn prune_budget_takes_whole_slots_in_global_order<B: Backend>() {
+    let (store, _guard) = B::open();
+    seed_history(
+        &store,
+        &[0, 100, 200, 300, 1_000],
+        &[
+            (NS_A, 50, 1),
+            (NS_A, 50, 2),
+            (NS_A, 50, 3),
+            (NS_A, 100, 1),
+            (NS_A, 600, 1),
+            (NS_B, 100, 1),
+            (NS_B, 100, 2),
+            (NS_B, 250, 1),
+            (NS_B, 500, 1),
+        ],
+    );
+
+    // Tip 1000, window 500: everything below slot 500 expires. Slot 0 (one
+    // block) and slot 50 (three rows) spend the budget of three.
+    assert!(!store.prune_history(500, Some(3)).unwrap());
+    assert_eq!(stored_slots(&store), [100, 200, 300, 1_000]);
+    assert_eq!(logged_slots(&store, NS_A), [100, 600]);
+    assert_eq!(logged_slots(&store, NS_B), [100, 100, 250, 500]);
+
+    // Slot 100 holds four rows across the block and both namespaces; it goes
+    // whole, one over the budget.
+    assert!(!store.prune_history(500, Some(3)).unwrap());
+    assert_eq!(stored_slots(&store), [200, 300, 1_000]);
+    assert_eq!(logged_slots(&store, NS_A), [600]);
+    assert_eq!(logged_slots(&store, NS_B), [250, 500]);
+
+    assert!(store.prune_history(500, Some(3)).unwrap());
+    assert_eq!(stored_slots(&store), [1_000]);
+    assert_eq!(logged_slots(&store, NS_A), [600]);
+    assert_eq!(logged_slots(&store, NS_B), [500]);
+}
+
+/// Log rows below the target go even when no block has expired.
+fn prune_drops_logs_below_the_target_without_block_excess<B: Backend>() {
+    for budget in [Some(100_000), None] {
+        let (store, _guard) = B::open();
+        seed_history(
+            &store,
+            &[500, 1_000],
+            &[
+                (NS_A, 300, 1),
+                (NS_B, 399, 1),
+                (NS_A, 400, 1),
+                (NS_B, 450, 1),
+            ],
+        );
+
+        // Tip 1000, window 600: the blocks fit, the rows below 400 do not.
+        assert!(store.prune_history(600, budget).unwrap());
+        assert_eq!(stored_slots(&store), [500, 1_000]);
+        assert_eq!(logged_slots(&store, NS_A), [400]);
+        assert_eq!(logged_slots(&store, NS_B), [450]);
+    }
+}
+
+/// A log row written below the front after it settled is the oldest expired
+/// slot, so the next budgeted call takes it before any block.
+fn late_logs_below_the_front_are_pruned_first<B: Backend>() {
+    let (store, _guard) = B::open();
+    seed_history(&store, &[0, 100, 200, 1_000], &[]);
+    assert!(store.prune_history(900, None).unwrap());
+    assert_eq!(stored_slots(&store), [100, 200, 1_000]);
+
+    seed_history(&store, &[1_100], &[(NS_A, 50, 1)]);
+
+    // Tip 1100, window 900: slots 50 and 100 have expired.
+    assert!(!store.prune_history(900, Some(1)).unwrap());
+    assert!(logged_slots(&store, NS_A).is_empty());
+    assert_eq!(stored_slots(&store), [100, 200, 1_000, 1_100]);
+
+    assert!(store.prune_history(900, Some(1)).unwrap());
+    assert_eq!(stored_slots(&store), [200, 1_000, 1_100]);
+}
+
+/// A zero budget still takes the oldest expired slot, whole.
+fn a_zero_budget_still_takes_a_whole_slot<B: Backend>() {
+    let (store, _guard) = B::open();
+    seed_history(
+        &store,
+        &[0, 100, 200, 1_000],
+        &[(NS_A, 100, 1), (NS_A, 100, 2)],
+    );
+
+    // Tip 1000, window 850: slots 0 and 100 have expired.
+    assert!(!store.prune_history(850, Some(0)).unwrap());
+    assert_eq!(stored_slots(&store), [100, 200, 1_000]);
+    assert_eq!(logged_slots(&store, NS_A), [100, 100]);
+
+    assert!(store.prune_history(850, Some(0)).unwrap());
+    assert_eq!(stored_slots(&store), [200, 1_000]);
+    assert!(logged_slots(&store, NS_A).is_empty());
 }
 
 fn truncate_front_drops_logs_at_the_cut_slot<B: Backend>() {
@@ -1233,7 +1359,7 @@ fn prune_history_drops_tags_and_exact_below_the_cutoff<B: Backend>() {
     write_indexed_blocks(&store, &slots);
 
     // Start 0, tip 1000, window 500: prune before slot 500.
-    let done = store.prune_history(500, None, None).unwrap();
+    let done = store.prune_history(500, None).unwrap();
     assert!(done);
 
     for &slot in &slots {
@@ -1265,7 +1391,7 @@ fn prune_keeps_index_entries_at_the_cutoff_slot<B: Backend>() {
     write_indexed_blocks(&store, &[0, 499, 500, 501, 1_000]);
 
     // Start 0, tip 1000, window 500: prune before slot 500.
-    let done = store.prune_history(500, None, None).unwrap();
+    let done = store.prune_history(500, None).unwrap();
     assert!(done);
 
     assert!(!exact_entries_present(&store, 0));
@@ -1290,7 +1416,7 @@ fn slots_by_tag_after_prune_answers_only_retained_slots<B: Backend>() {
     write_indexed_blocks(&store, &slots);
 
     // Start 0, tip 1000, window 300: prune before slot 700.
-    let done = store.prune_history(300, None, None).unwrap();
+    let done = store.prune_history(300, None).unwrap();
     assert!(done);
 
     assert_eq!(tagged_slots(&store, &SHARED_TAG_KEY, 100, 800), [700, 800]);
@@ -1301,15 +1427,16 @@ fn slots_by_tag_after_prune_answers_only_retained_slots<B: Backend>() {
     );
 }
 
-/// Under an index row budget, the fjall backend sweeps its index keyspaces
-/// only when the cutoff has advanced by a sixteenth of the window since the
+/// Under a row budget, the fjall backend sweeps its index keyspaces only when
+/// the first block left has advanced by a sixteenth of the window since the
 /// last sweep, so between sweeps a pruned block's entries linger; the memory
 /// backend has no such cadence, which is why this is not a conformance case.
 ///
-/// Window 1600 makes the threshold 100 slots; each round prunes 40. The
-/// first prune after open always sweeps, the next two fall inside the
-/// threshold and leave the entries of the blocks they pruned in place, and
-/// the fourth crosses it and removes them.
+/// Window 1600 makes the threshold 100 slots. The first prune after open
+/// catches up and sweeps; then each round adds four blocks, moving the front
+/// by 40. The first two rounds fall inside the threshold and leave the
+/// entries of the blocks they pruned in place, and the third crosses it and
+/// removes them.
 #[test]
 fn fjall_index_sweep_is_amortized_across_prune_rounds() {
     let (store, _guard) = Fjall::open();
@@ -1318,42 +1445,38 @@ fn fjall_index_sweep_is_amortized_across_prune_rounds() {
     write_indexed_blocks(&store, &slots);
 
     let max_slots = 1_600;
-    let max_prune_slots = Some(40);
-    let max_prune_index_rows = Some(100_000);
+    let max_prune_rows = Some(100_000);
 
-    // Round 1: cutoff 40, first sweep after open.
-    assert!(!store
-        .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
-        .unwrap());
-    assert!(!exact_entries_present(&store, 30));
-    assert!(exact_entries_present(&store, 40));
+    // Catch-up: front 1400, first sweep after open.
+    assert!(store.prune_history(max_slots, max_prune_rows).unwrap());
+    assert!(!exact_entries_present(&store, 1_390));
+    assert!(exact_entries_present(&store, 1_400));
 
-    // Rounds 2 and 3: cutoffs 80 and 120, inside the threshold. The blocks
-    // are gone, their entries are not yet.
-    assert!(!store
-        .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
-        .unwrap());
-    assert!(!store
-        .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
-        .unwrap());
-    assert_eq!(store.get_block_by_slot(&40).unwrap(), None);
-    assert_eq!(store.get_block_by_slot(&110).unwrap(), None);
-    assert!(exact_entries_present(&store, 40));
-    assert!(exact_entries_present(&store, 110));
+    // Fronts 1440 and 1480, inside the threshold. The blocks are gone,
+    // their entries are not yet.
+    write_indexed_blocks(&store, &[3_010, 3_020, 3_030, 3_040]);
+    assert!(store.prune_history(max_slots, max_prune_rows).unwrap());
+    write_indexed_blocks(&store, &[3_050, 3_060, 3_070, 3_080]);
+    assert!(store.prune_history(max_slots, max_prune_rows).unwrap());
+    assert_eq!(store.get_block_by_slot(&1_400).unwrap(), None);
+    assert_eq!(store.get_block_by_slot(&1_470).unwrap(), None);
+    assert!(exact_entries_present(&store, 1_400));
+    assert!(exact_entries_present(&store, 1_470));
     assert_eq!(
-        tagged_slots(&store, &SHARED_TAG_KEY, 0, 120),
-        [40, 50, 60, 70, 80, 90, 100, 110, 120]
+        tagged_slots(&store, &SHARED_TAG_KEY, 0, 1_480),
+        [1_400, 1_410, 1_420, 1_430, 1_440, 1_450, 1_460, 1_470, 1_480]
     );
 
-    // Round 4: cutoff 160, past the threshold: everything below it goes.
-    assert!(!store
-        .prune_history(max_slots, max_prune_slots, max_prune_index_rows)
-        .unwrap());
-    assert!(!exact_entries_present(&store, 40));
-    assert!(!exact_entries_present(&store, 110));
-    assert!(!exact_entries_present(&store, 150));
-    assert!(exact_entries_present(&store, 160));
-    assert_eq!(tagged_slots(&store, &SHARED_TAG_KEY, 0, 170), [160, 170]);
+    // Front 1520, past the threshold: everything below it goes.
+    write_indexed_blocks(&store, &[3_090, 3_100, 3_110, 3_120]);
+    assert!(store.prune_history(max_slots, max_prune_rows).unwrap());
+    assert!(!exact_entries_present(&store, 1_400));
+    assert!(!exact_entries_present(&store, 1_510));
+    assert!(exact_entries_present(&store, 1_520));
+    assert_eq!(
+        tagged_slots(&store, &SHARED_TAG_KEY, 0, 1_530),
+        [1_520, 1_530]
+    );
 }
 
 #[test]
@@ -1361,9 +1484,10 @@ fn fjall_pruning_finishes_indexes_after_sparse_block_catchup() {
     let (store, _guard) = Fjall::open();
     write_indexed_blocks(&store, &[0, 10, 20, 3_000]);
 
+    // One expired block per call, then the index rows one at a time.
     let mut done = false;
-    for _ in 0..20 {
-        done = store.prune_history(1_600, Some(1), Some(100_000)).unwrap();
+    for _ in 0..100 {
+        done = store.prune_history(1_600, Some(1)).unwrap();
         assert!(exact_entries_present(&store, 3_000));
         if done {
             break;
@@ -1418,6 +1542,82 @@ fn backends_agree_on_identical_writes() {
         "the walk must return the seeded rows"
     );
     assert_eq!(from_memory, from_fjall);
+}
+
+/// Fed the same history, both backends draw the same front for every budget,
+/// one call at a time: the memory backend's cost model is the disk backend's.
+#[test]
+fn backends_agree_on_the_prune_front_for_every_budget() {
+    // Dense and sparse runs of blocks, a slot holding two blocks, and log
+    // rows at slots with and without a block.
+    let blocks = [0, 1, 2, 3, 40, 41, 300, 2_000];
+    let logs = [
+        (NS_A, 1, 1),
+        (NS_A, 1, 2),
+        (NS_B, 1, 1),
+        (NS_A, 20, 1),
+        (NS_B, 41, 1),
+        (NS_B, 41, 2),
+        (NS_A, 150, 1),
+        (NS_A, 150, 2),
+        (NS_A, 150, 3),
+        (NS_B, 999, 1),
+        (NS_A, 1_000, 1),
+    ];
+
+    for budget in [0, 1, 2, 3, 5, 8] {
+        let (memory, _g1) = Memory::open();
+        let (fjall, _g2) = Fjall::open();
+        seed_history(&memory, &blocks, &logs);
+        seed_history(&fjall, &blocks, &logs);
+        second_block_at(&memory, 41);
+        second_block_at(&fjall, 41);
+
+        // Tip 2000, window 1000: everything below slot 1000 expires.
+        let mut rounds = 0;
+        loop {
+            let done = memory.prune_history(1_000, Some(budget)).unwrap();
+            assert_eq!(
+                fjall.prune_history(1_000, Some(budget)).unwrap(),
+                done,
+                "budget {budget}, round {rounds}: done"
+            );
+            assert_eq!(
+                memory.get_range(None, None).unwrap().collect::<Vec<_>>(),
+                fjall.get_range(None, None).unwrap().collect::<Vec<_>>(),
+                "budget {budget}, round {rounds}: blocks"
+            );
+            for ns in [NS_A, NS_B] {
+                assert_eq!(
+                    logged_slots(&memory, ns),
+                    logged_slots(&fjall, ns),
+                    "budget {budget}, round {rounds}: {ns}"
+                );
+            }
+
+            rounds += 1;
+            if done {
+                break;
+            }
+            assert!(rounds < 50, "budget {budget} did not converge");
+        }
+
+        assert_eq!(stored_slots(&fjall), [2_000]);
+        assert_eq!(logged_slots(&fjall, NS_A), [1_000]);
+        assert!(logged_slots(&fjall, NS_B).is_empty());
+    }
+}
+
+/// Write a second block at `slot`, in its own commit.
+fn second_block_at<S: CoreArchiveStore>(store: &S, slot: u64) {
+    let writer = store.start_writer().unwrap();
+    writer
+        .apply(
+            &point(slot),
+            &Arc::new(format!("second_at_slot_{slot}").into_bytes()),
+        )
+        .unwrap();
+    writer.commit().unwrap();
 }
 
 /// Object-safe helper so the agreement test writes through both backends
@@ -1492,6 +1692,10 @@ macro_rules! full_suite {
                 the_last_write_to_a_log_key_wins,
                 an_unknown_namespace_is_refused,
                 prune_keeps_logs_at_the_cutoff_slot,
+                prune_budget_takes_whole_slots_in_global_order,
+                prune_drops_logs_below_the_target_without_block_excess,
+                late_logs_below_the_front_are_pruned_first,
+                a_zero_budget_still_takes_a_whole_slot,
                 truncate_front_drops_logs_at_the_cut_slot,
                 logs_and_blocks_share_one_writer_commit,
                 apply_index_then_slot_by_tx_hash_resolves,

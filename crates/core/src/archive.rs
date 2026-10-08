@@ -372,20 +372,22 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
 
     /// Prune history outside the retained slot window.
     ///
-    /// `max_slots` is the retained window, from the first block to the tip.
-    /// `max_prune_slots` caps slot advancement per call.
-    /// `max_prune_index_rows` caps the index rows examined per call by
-    /// backends that clean indexes apart from their blocks; other backends
-    /// ignore it. `true` means block pruning and all active or currently due
-    /// index maintenance are complete. A capped index budget can leave
-    /// expired entries until a later pass is due.
-    /// Repeat capped calls until `true` to finish active or currently due work.
-    /// A `None` limit completes that part of the cleanup synchronously.
+    /// `max_slots` is the retained window: everything below `tip - max_slots`
+    /// expires. `max_prune_rows` bounds the work of one call, counting block
+    /// slots, log rows, and index rows examined. Slots go whole and oldest
+    /// first across blocks and logs, so a call can exceed the budget by its
+    /// last slot; a zero budget still takes one. Backends that clean indexes
+    /// apart from their blocks spend what is left once no expired slot
+    /// remains, so expired index entries can outlive their blocks until a
+    /// later pass is due.
+    ///
+    /// `true` means no expired slot remains and no index pass is active or
+    /// currently due; repeat budgeted calls until then. `None` finishes all
+    /// of it in one call.
     fn prune_history(
         &self,
         max_slots: u64,
-        max_prune_slots: Option<u64>,
-        max_prune_index_rows: Option<u64>,
+        max_prune_rows: Option<u64>,
     ) -> Result<bool, ArchiveError>;
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError>;

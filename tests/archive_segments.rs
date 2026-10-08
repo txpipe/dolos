@@ -447,9 +447,49 @@ fn pruning_drops_whole_segments_and_survives_a_reopen() {
     // The history spans slots 1 .. 3·SEGMENT+1; keeping two segments' worth
     // moves the cutoff into segment 1, which prunes segment 0 whole.
     let max_slots = 2 * SLOTS_PER_SEGMENT;
-    assert!(pair.fjall().prune_history(max_slots, None, None).unwrap());
-    assert!(pair.memory.prune_history(max_slots, None, None).unwrap());
+    assert!(pair.fjall().prune_history(max_slots, None).unwrap());
+    assert!(pair.memory.prune_history(max_slots, None).unwrap());
     pair.assert_agree("after pruning");
+    assert_eq!(
+        pair.segment_files(),
+        vec!["000001.segment", "000002.segment", "000003.segment"]
+    );
+
+    pair.reopen();
+    pair.assert_agree("after reopening");
+}
+
+#[test]
+fn a_budgeted_prune_keeps_the_segment_its_front_stops_in() {
+    let mut pair = Pair::new();
+    let max_slots = 2 * SLOTS_PER_SEGMENT;
+
+    // One row of budget takes slot(0, 1); the front stops at slot(0, 5),
+    // inside segment 0, whose other blocks still need it.
+    assert!(!pair.fjall().prune_history(max_slots, Some(1)).unwrap());
+    assert!(!pair.memory.prune_history(max_slots, Some(1)).unwrap());
+    pair.assert_agree("after one budgeted call");
+    assert_eq!(
+        pair.segment_files(),
+        vec![
+            "000000.segment",
+            "000001.segment",
+            "000002.segment",
+            "000003.segment"
+        ]
+    );
+
+    let mut rounds = 0;
+    loop {
+        let done = pair.fjall().prune_history(max_slots, Some(1)).unwrap();
+        assert_eq!(pair.memory.prune_history(max_slots, Some(1)).unwrap(), done);
+        pair.assert_agree("during budgeted pruning");
+        rounds += 1;
+        if done {
+            break;
+        }
+        assert!(rounds < 20, "budgeted pruning did not converge");
+    }
     assert_eq!(
         pair.segment_files(),
         vec!["000001.segment", "000002.segment", "000003.segment"]
