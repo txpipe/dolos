@@ -3,7 +3,6 @@ use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraOutput;
 use std::collections::{HashMap, HashSet};
 
-use dolos_cardano::indexes::AsyncCardanoQueryExt;
 use dolos_core::async_query::BlockMetaResolver;
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _, TxHash, TxoIdx, TxoRef};
 
@@ -131,19 +130,6 @@ where
         .skip(window.skip)
         .take(pagination.count)
     {
-        let key: Vec<u8> = builder.txo_ref().into();
-        let consumed_by = domain
-            .query()
-            .tx_by_spent_txo(&key)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let builder = if let Some(consumed_by) = consumed_by {
-            builder.with_consumed_by(consumed_by)
-        } else {
-            builder
-        };
-
         out.push(<UtxoOutputModelBuilder<'_> as IntoModel<T>>::into_model(
             builder,
         )?);
