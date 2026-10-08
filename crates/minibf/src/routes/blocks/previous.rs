@@ -15,8 +15,8 @@ use crate::{
 };
 
 use super::{
-    blocks_before, build_block_model, genesis, load_block_by_hash_or_number, parse_hash_or_number,
-    tip_block,
+    blocks_before, build_block_model, genesis, load_block_by_hash_or_number, names_genesis,
+    parse_hash_or_number, tip_block,
 };
 
 pub async fn by_hash_or_number_previous<D>(
@@ -30,6 +30,11 @@ where
     let pagination = Pagination::try_from(params)?;
 
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
+
+    if names_genesis(&domain, &hash_or_number)? {
+        return Ok(Json(Vec::new()));
+    }
+
     let curr = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
     // walking back, the page starts `from` blocks before the reference block
@@ -202,6 +207,13 @@ mod tests {
         let blocks = get_blocks(&chain.app, &page(2)).await;
         assert_eq!(hashes(&blocks), [genesis]);
         let blocks = get_blocks(&chain.app, &page(3)).await;
+        assert!(blocks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn blocks_previous_of_genesis_is_empty() {
+        let app = TestApp::new();
+        let blocks = get_blocks(&app, &format!("/blocks/{GENESIS_HASH}/previous")).await;
         assert!(blocks.is_empty());
     }
 }

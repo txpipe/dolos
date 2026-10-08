@@ -14,7 +14,7 @@ use pallas::{
     ledger::traverse::{MultiEraBlock, MultiEraHeader, MultiEraTx},
 };
 
-use super::{bech32_pool, IntoModel};
+use super::{bech32_pool, collated, IntoModel};
 use crate::log_and_500;
 
 pub struct BlockModelBuilder<'a> {
@@ -328,28 +328,37 @@ impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-        // sorted by address like Blockfrost; hashes stay in block order
-        let mut by_address: BTreeMap<String, Vec<String>> = BTreeMap::new();
-
-        for (tx_hash, touched_by_tx) in touched_addresses {
-            for address in touched_by_tx {
-                by_address.entry(address).or_default().push(tx_hash.clone());
-            }
-        }
-
-        let addresses = by_address
-            .into_iter()
-            .map(|(address, tx_hashes)| BlockContentAddressesInner {
-                address,
-                transactions: tx_hashes
-                    .into_iter()
-                    .map(|tx_hash| BlockContentAddressesInnerTransactionsInner { tx_hash })
-                    .collect(),
-            })
-            .collect();
-
-        Ok(addresses)
+        Ok(touched_addresses_model(touched_addresses))
     }
+}
+
+/// Each address the transactions touch, with the transactions that touch it,
+/// from `(tx hash, addresses)` pairs in block order. Sorted by address like
+/// Blockfrost (see `collated`); the hashes stay in block order.
+pub fn touched_addresses_model(
+    touched_addresses: impl IntoIterator<Item = (String, BTreeSet<String>)>,
+) -> Vec<BlockContentAddressesInner> {
+    let mut by_address: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for (tx_hash, touched_by_tx) in touched_addresses {
+        for address in touched_by_tx {
+            by_address.entry(address).or_default().push(tx_hash.clone());
+        }
+    }
+
+    let mut by_address: Vec<_> = by_address.into_iter().collect();
+    by_address.sort_by(|(a, _), (b, _)| collated(a, b));
+
+    by_address
+        .into_iter()
+        .map(|(address, tx_hashes)| BlockContentAddressesInner {
+            address,
+            transactions: tx_hashes
+                .into_iter()
+                .map(|tx_hash| BlockContentAddressesInnerTransactionsInner { tx_hash })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Parses the header of a stored block without decoding the transactions.
