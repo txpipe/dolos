@@ -77,6 +77,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blocks_by_hash_or_number_wrong_hash_length_bad_request() {
+        let app = TestApp::new();
+        let short = &missing_block()[2..];
+        let long = format!("{}00", missing_block());
+
+        for hash in [short, long.as_str()] {
+            for route in ["", "/next", "/previous", "/txs", "/txs/cbor", "/addresses"] {
+                let path = format!("/blocks/{hash}{route}");
+                assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn blocks_by_hash_or_number_not_found() {
         let app = TestApp::new();
         let path = format!("/blocks/{}", missing_block());
