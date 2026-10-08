@@ -118,6 +118,16 @@ macro_rules! conformance_suite {
             fn consumed_refs_leave_the_tag() {
                 super::consumed_refs_leave_the_tag::<$backend>();
             }
+
+            #[test]
+            fn utxos_by_tag_limited_stops_at_the_limit() {
+                super::utxos_by_tag_limited_stops_at_the_limit::<$backend>();
+            }
+
+            #[test]
+            fn a_lookup_key_that_prefixes_another_is_its_own_tag() {
+                super::a_lookup_key_that_prefixes_another_is_its_own_tag::<$backend>();
+            }
         }
     };
 }
@@ -198,6 +208,110 @@ fn by_tag<S: CoreStateStore>(store: &S, dimension: &'static str, key: u8) -> Utx
 
 fn refs(items: &[TxoRef]) -> UtxoSet {
     items.iter().cloned().collect()
+}
+
+fn limited<S: CoreStateStore>(
+    store: &S,
+    dimension: &'static str,
+    key: u8,
+    limit: usize,
+) -> Vec<TxoRef> {
+    store
+        .utxos_by_tag_limited(dimension, &[key; 4], limit)
+        .expect("utxos_by_tag_limited failed")
+}
+
+/// The bounded read answers the first `limit` refs of a tag in ref order, the
+/// whole tag when it is shorter, and stays inside its dimension and key.
+fn utxos_by_tag_limited_stops_at_the_limit<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![
+                tagged(3, 5, &[(ADDRESS, 1)]),
+                tagged(1, 1, &[(ADDRESS, 1)]),
+                tagged(2, 0, &[(ADDRESS, 1), (POLICY, 9)]),
+                tagged(1, 0, &[(ADDRESS, 1), (POLICY, 9)]),
+            ],
+            consumed: vec![],
+        },
+    );
+
+    let mut whole: Vec<TxoRef> = by_tag(&store, ADDRESS, 1).into_iter().collect();
+    whole.sort();
+    assert_eq!(whole, vec![txo(1, 0), txo(1, 1), txo(2, 0), txo(3, 5)]);
+
+    assert_eq!(limited(&store, ADDRESS, 1, usize::MAX), whole);
+    assert_eq!(
+        limited(&store, ADDRESS, 1, 5),
+        whole,
+        "a limit past the tag"
+    );
+    assert_eq!(limited(&store, ADDRESS, 1, 4), whole, "a limit at the tag");
+    assert_eq!(limited(&store, ADDRESS, 1, 2), whole[..2]);
+    assert_eq!(limited(&store, ADDRESS, 1, 1), whole[..1]);
+    assert!(limited(&store, ADDRESS, 1, 0).is_empty());
+    assert!(limited(&store, ADDRESS, 3, 10).is_empty());
+
+    // the other dimension is its own tag
+    let mut policy: Vec<TxoRef> = by_tag(&store, POLICY, 9).into_iter().collect();
+    policy.sort();
+    assert_eq!(policy, vec![txo(1, 0), txo(2, 0)]);
+    assert_eq!(limited(&store, POLICY, 9, usize::MAX), policy);
+    assert_eq!(limited(&store, POLICY, 9, 1), policy[..1]);
+}
+
+/// Lookup keys vary in length, and one may be a prefix of another: an asset
+/// with an empty name is the prefix of every asset of its policy. Each is its
+/// own tag, whole or bounded, on every backend.
+fn a_lookup_key_that_prefixes_another_is_its_own_tag<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let short: Vec<u8> = vec![1, 1];
+    let long: Vec<u8> = vec![1, 1, 2];
+    let longer: Vec<u8> = vec![1, 1, 2, 3];
+
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![
+                (txo(1, 0), vec![Tag::new(ADDRESS, short.clone())]),
+                (txo(2, 0), vec![Tag::new(ADDRESS, long.clone())]),
+                (txo(2, 1), vec![Tag::new(ADDRESS, long.clone())]),
+                (txo(3, 0), vec![Tag::new(ADDRESS, longer.clone())]),
+            ],
+            consumed: vec![],
+        },
+    );
+
+    let whole = |key: &[u8]| -> Vec<TxoRef> {
+        let mut refs: Vec<TxoRef> = store
+            .utxos_by_tag(ADDRESS, key)
+            .expect("utxos_by_tag failed")
+            .into_iter()
+            .collect();
+        refs.sort();
+        refs
+    };
+    let bounded = |key: &[u8], limit| -> Vec<TxoRef> {
+        store
+            .utxos_by_tag_limited(ADDRESS, key, limit)
+            .expect("utxos_by_tag_limited failed")
+    };
+
+    assert_eq!(whole(&short), vec![txo(1, 0)]);
+    assert_eq!(whole(&long), vec![txo(2, 0), txo(2, 1)]);
+    assert_eq!(whole(&longer), vec![txo(3, 0)]);
+    assert!(whole(&[1]).is_empty(), "a prefix of every key is no tag");
+
+    assert_eq!(bounded(&short, usize::MAX), vec![txo(1, 0)]);
+    assert_eq!(bounded(&short, 1), vec![txo(1, 0)]);
+    assert_eq!(bounded(&long, usize::MAX), vec![txo(2, 0), txo(2, 1)]);
+    assert_eq!(bounded(&long, 1), vec![txo(2, 0)]);
+    assert_eq!(bounded(&longer, 2), vec![txo(3, 0)]);
+    assert!(bounded(&[1], 10).is_empty());
 }
 
 /// A produced ref answers under every tag it carries, and only there.
@@ -678,6 +792,36 @@ fn consumption_wins_within_one_delta<B: Backend>() {
             .collect::<Vec<_>>(),
         vec![txo(2, 0)]
     );
+}
+
+/// The two live backends have to agree on a bounded tag read, whatever the
+/// limit: it is the same prefix of the same order on either.
+#[test]
+fn backends_agree_on_limited_tag_reads() {
+    let (fjall, _guard) = Fjall::open();
+    let (memory, _) = Memory::open();
+
+    let delta = UtxoIndexDelta {
+        produced: vec![
+            tagged(7, 3, &[(ADDRESS, 1)]),
+            tagged(1, 0, &[(ADDRESS, 1)]),
+            tagged(7, 0, &[(ADDRESS, 1)]),
+            tagged(4, 9, &[(ADDRESS, 1)]),
+            tagged(2, 2, &[(ADDRESS, 1)]),
+        ],
+        consumed: vec![],
+    };
+
+    apply_tags(&fjall, &delta);
+    apply_tags(&memory, &delta);
+
+    for limit in 0..=6 {
+        assert_eq!(
+            limited(&fjall, ADDRESS, 1, limit),
+            limited(&memory, ADDRESS, 1, limit),
+            "limit {limit}"
+        );
+    }
 }
 
 /// The two live backends have to agree on the UTxO set the same delta produces,

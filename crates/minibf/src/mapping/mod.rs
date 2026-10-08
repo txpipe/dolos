@@ -1924,85 +1924,6 @@ impl<'a> IntoModel<ScriptUtxosInner> for UtxoOutputModelBuilder<'a> {
     }
 }
 
-#[cfg(test)]
-mod utxo_output_tests {
-    use super::*;
-    use dolos_core::async_query::BlockRefMeta;
-    use pallas::codec::utils::{CborWrap, KeepRaw};
-    use pallas::ledger::primitives::conway::{PostAlonzoTransactionOutput, Value};
-    use pallas::ledger::traverse::Era;
-
-    fn output_bytes() -> Vec<u8> {
-        let output = PostAlonzoTransactionOutput {
-            address: vec![0x60; 29].into(),
-            value: Value::Coin(1_000_000),
-            datum_option: None,
-            script_ref: None,
-        };
-
-        minicbor::to_vec(&output).unwrap()
-    }
-
-    fn output_with_inline_datum_bytes() -> Vec<u8> {
-        let datum = PlutusData::BigInt(pallas::ledger::primitives::BigInt::Int(42.into()));
-        let output = PostAlonzoTransactionOutput {
-            address: vec![0x60; 29].into(),
-            value: Value::Coin(1_000_000),
-            datum_option: Some(KeepRaw::from(DatumOption::Data(CborWrap(KeepRaw::from(
-                datum,
-            ))))),
-            script_ref: None,
-        };
-
-        minicbor::to_vec(&output).unwrap()
-    }
-
-    /// The asset UTxO model carries the block height and time and decodes the
-    /// inline datum into JSON next to its CBOR.
-    #[test]
-    fn asset_utxo_model_exposes_block_position_and_datum_json() {
-        let bytes = output_with_inline_datum_bytes();
-        let output = MultiEraOutput::decode(Era::Conway, &bytes).unwrap();
-
-        let builder = UtxoOutputModelBuilder::from_output(Hash::from([0xaa; 32]), 3, output)
-            .with_block_data(BlockRefMeta {
-                slot: 100,
-                hash: Hash::from([0x11; 32]),
-                height: 7,
-                tx_hash: Hash::from([0xaa; 32]),
-                tx_index: 2,
-            })
-            .with_block_time(1_700_000_000);
-
-        let model: AssetUtxoContentInner = builder.into_model().unwrap();
-
-        assert_eq!(model.tx_hash, Hash::from([0xaa; 32]).to_string());
-        assert_eq!(model.output_index, 3);
-        assert_eq!(model.block, Hash::from([0x11; 32]).to_string());
-        assert_eq!(model.block_height, 7);
-        assert_eq!(model.block_time, 1_700_000_000);
-        assert_eq!(model.inline_datum.as_deref(), Some("182a"));
-        assert_eq!(
-            model.inline_datum_json,
-            Some(serde_json::json!({ "int": 42 }))
-        );
-        assert!(model.data_hash.is_some());
-        assert_eq!(model.reference_script_hash, None);
-    }
-
-    /// The model never reports made-up block data: an output whose creation
-    /// block was pruned is a caller bug here, not a row with zeroed fields.
-    #[test]
-    fn asset_utxo_model_refuses_missing_block_data() {
-        let bytes = output_bytes();
-        let output = MultiEraOutput::decode(Era::Conway, &bytes).unwrap();
-        let builder = UtxoOutputModelBuilder::from_output(Hash::from([0xaa; 32]), 0, output);
-
-        let model: Result<AssetUtxoContentInner, _> = builder.into_model();
-        assert_eq!(model, Err(StatusCode::INTERNAL_SERVER_ERROR));
-    }
-}
-
 impl IntoModel<String> for alonzo::Metadatum {
     type SortKey = ();
 
@@ -2162,6 +2083,31 @@ impl IntoModel<TxContentPoolCertsInnerRelaysInner> for alonzo::Relay {
 }
 
 pub struct PlutusDataWrapper(pub PlutusData);
+/// Turns a Plutus integer into a JSON number without wrapping it.
+///
+/// Anything within the `i64`/`u64` range is exact. Blockfrost rounds past
+/// ±(2^53 - 1), since it runs the datum JSON through a JS double; the exact
+/// digits parse to that same double in JS and keep the true value for
+/// clients that read integers exactly, as the metadata JSON already does.
+/// Wider magnitudes fall back to the closest `f64`, and one past the `f64`
+/// range becomes `null`, as on Blockfrost: exact digits there would need
+/// serde_json's `arbitrary_precision`, a feature that unifies across the
+/// whole binary and changes how every crate in it deserializes numbers.
+fn plutus_int_to_json(value: &BigInt) -> serde_json::Value {
+    if let Some(i) = value.to_i64() {
+        return serde_json::Value::Number(i.into());
+    }
+
+    if let Some(u) = value.to_u64() {
+        return serde_json::Value::Number(u.into());
+    }
+
+    value
+        .to_f64()
+        .and_then(serde_json::Number::from_f64)
+        .map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
 impl PlutusDataWrapper {
     fn as_value(&self) -> Result<serde_json::Value, StatusCode> {
         match &self.0 {

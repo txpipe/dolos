@@ -372,6 +372,22 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     /// in typed lookups (address, payment credential, asset, …).
     fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, StateError>;
 
+    /// The first `limit` live refs of one tag, in `TxoRef` order. A result
+    /// shorter than `limit` is the whole tag.
+    ///
+    /// The bounded form of [`Self::utxos_by_tag`]: a caller that will not
+    /// serve more than `n` refs asks for `n + 1` and knows from the length
+    /// whether the tag fits, without the whole tag ever being in memory. A
+    /// backend reads no further than the `limit`th live entry of the tag.
+    ///
+    /// Backends without live-UTxO tags return [`StateError::Unsupported`].
+    fn utxos_by_tag_limited(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        limit: usize,
+    ) -> Result<Vec<TxoRef>, StateError>;
+
     /// Iterate the whole UTxO set.
     ///
     /// The iterator must be lazy: neither construction nor iteration may

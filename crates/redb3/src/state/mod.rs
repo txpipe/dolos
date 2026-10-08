@@ -349,6 +349,16 @@ impl dolos_core::StateStore for StateStore {
         Err(StateError::Unsupported("utxos_by_tag"))
     }
 
+    /// Not implemented on this backend; see `StateWriter::apply_utxo_tags`.
+    fn utxos_by_tag_limited(
+        &self,
+        _dimension: TagDimension,
+        _key: &[u8],
+        _limit: usize,
+    ) -> Result<Vec<TxoRef>, StateError> {
+        Err(StateError::Unsupported("utxos_by_tag_limited"))
+    }
+
     /// Not implemented on this backend.
     ///
     /// Full UTxO-set iteration exists for the snapshot export and live-UTxO

@@ -341,6 +341,18 @@ impl CoreStateStore for StateStore {
         tags::get_by_key(&snapshot, &self.tags, dimension, key).map_err(StateError::from)
     }
 
+    fn utxos_by_tag_limited(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        limit: usize,
+    ) -> Result<Vec<TxoRef>, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        tags::get_by_key_limited(&snapshot, &self.tags, dimension, key, limit)
+            .map_err(StateError::from)
+    }
+
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();

@@ -67,33 +67,29 @@ pub struct PaginationNumberAndIndex {
 
 impl PaginationNumberAndIndex {
     /// Parses a `from` / `to` value the way Blockfrost does: `height[:index]`,
-    /// with an empty height read as `0` and an empty index as none. A value
-    /// with more than two `:` parts is no bound at all: Blockfrost ignores it
-    /// rather than rejecting the request, so it comes back as `None`.
-    fn parse(value: &str) -> Result<Option<Self>, PaginationError> {
-        let parts: Vec<&str> = value.split(':').collect();
-        let (number, index) = match parts.as_slice() {
-            [number] => (*number, None),
-            [number, index] => (*number, Some(*index)),
-            _ => return Ok(None),
+    /// each part plain decimal digits within the `i32` range. An empty part,
+    /// a sign, a third part or a number past `i32::MAX` is rejected.
+    fn parse(value: &str) -> Result<Self, PaginationError> {
+        let (number, index) = match value.split_once(':') {
+            Some((number, index)) => (number, Some(index)),
+            None => (value, None),
         };
 
-        let number = match number {
-            "" => 0,
-            number => number.parse().map_err(|_| PaginationError::InvalidFromTo)?,
-        };
-
-        let index = match index {
-            None | Some("") => None,
-            Some(index) => Some(
-                index
-                    .parse::<usize>()
-                    .map_err(|_| PaginationError::InvalidFromTo)?,
-            ),
-        };
-
-        Ok(Some(Self { number, index }))
+        Ok(Self {
+            number: parse_bound_part(number)?.into(),
+            index: index.map(parse_bound_part).transpose()?.map(|x| x as usize),
+        })
     }
+}
+
+fn parse_bound_part(part: &str) -> Result<u32, PaginationError> {
+    if part.is_empty() || !part.bytes().all(|x| x.is_ascii_digit()) {
+        return Err(PaginationError::InvalidFromTo);
+    }
+
+    part.parse::<i32>()
+        .map(|x| x as u32)
+        .map_err(|_| PaginationError::InvalidFromTo)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -170,15 +166,17 @@ impl TryFrom<PaginationParameters> for Pagination {
             None => Default::default(),
         };
 
-        let from = match value.from {
-            Some(x) => PaginationNumberAndIndex::parse(&x)?,
-            None => None,
-        };
+        let from = value
+            .from
+            .as_deref()
+            .map(PaginationNumberAndIndex::parse)
+            .transpose()?;
 
-        let to = match value.to {
-            Some(x) => PaginationNumberAndIndex::parse(&x)?,
-            None => None,
-        };
+        let to = value
+            .to
+            .as_deref()
+            .map(PaginationNumberAndIndex::parse)
+            .transpose()?;
 
         if let (Some(from), Some(to)) = (from.as_ref(), to.as_ref()) {
             if from.number > to.number {
@@ -309,46 +307,44 @@ mod tests {
         assert!(pagination.should_skip(124, 4));
     }
 
-    /// Bounds parse like Blockfrost's `getAdditionalParametersFromRequest`:
-    /// empty parts default, a value with more than two parts is ignored, and
-    /// only a part that is not a number is an error.
+    /// Bounds parse like Blockfrost: `height[:index]` in plain digits, both
+    /// within the `i32` range, anything else is an error.
     #[test]
     fn number_and_index_parse_like_blockfrost() {
-        let parse = |value: &str| {
-            PaginationNumberAndIndex::parse(value).map(|x| x.map(|x| (x.number, x.index)))
-        };
+        let parse =
+            |value: &str| PaginationNumberAndIndex::parse(value).map(|x| (x.number, x.index));
 
-        assert_eq!(parse("10:2").unwrap(), Some((10, Some(2))));
-        assert_eq!(parse("10").unwrap(), Some((10, None)));
-        assert_eq!(parse("10:").unwrap(), Some((10, None)));
-        assert_eq!(parse(":2").unwrap(), Some((0, Some(2))));
-        assert_eq!(parse("").unwrap(), Some((0, None)));
+        assert_eq!(parse("10:2").unwrap(), (10, Some(2)));
+        assert_eq!(parse("10").unwrap(), (10, None));
+        assert_eq!(parse("010:00").unwrap(), (10, Some(0)));
+        assert_eq!(
+            parse("2147483647:2147483647").unwrap(),
+            (2147483647, Some(2147483647))
+        );
 
-        for value in ["10:2:garbage", "10:2:", "10:2:3", "10::", "::"] {
-            assert_eq!(parse(value).unwrap(), None, "{value} is a bound");
+        for value in [
+            "",
+            ":",
+            ":2",
+            "10:",
+            "10:2:garbage",
+            "10:2:3",
+            "10::",
+            "abc",
+            "10:x",
+            "-1",
+            "10:-1",
+            "+5",
+            "10:+2",
+            " 10",
+            "1e3",
+            "0x10",
+            "2147483648",
+            "10:2147483648",
+            "99999999999",
+        ] {
+            assert!(parse(value).is_err(), "{value:?} parsed");
         }
-
-        for value in ["abc", "10:x", "-1", "10:-1"] {
-            assert!(parse(value).is_err(), "{value} parsed");
-        }
-    }
-
-    /// An ignored bound is not checked against the other one.
-    #[test]
-    fn ignored_bound_skips_the_order_check() {
-        let params = |from: &str, to: &str| PaginationParameters {
-            count: None,
-            page: None,
-            order: None,
-            from: Some(from.to_string()),
-            to: Some(to.to_string()),
-        };
-
-        let pagination = Pagination::try_from(params("20:1:x", "10")).unwrap();
-        assert!(pagination.from.is_none());
-        assert_eq!(pagination.to.map(|x| x.number), Some(10));
-
-        assert!(Pagination::try_from(params("20", "10")).is_err());
     }
 
     #[tokio::test]

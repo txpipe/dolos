@@ -413,9 +413,13 @@ where
                     .map(|(_, txo_ref, _)| (*txo_ref).clone())
                     .collect();
                 let utxos = domain
-                    .state()
-                    .get_utxos(refs)
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    .blocking(move |domain| {
+                        domain
+                            .state()
+                            .get_utxos(refs)
+                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                    })
+                    .await?;
 
                 for (_, txo_ref, meta) in batch {
                     let Some(cbor) = utxos.get(txo_ref) else {
@@ -480,9 +484,13 @@ where
                 .collect();
 
             let utxos = domain
-                .state()
-                .get_utxos(live)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .blocking(move |domain| {
+                    domain
+                        .state()
+                        .get_utxos(live)
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                })
+                .await?;
 
             for (_, txo_ref, meta) in batch {
                 let Some(cbor) = utxos.get(txo_ref) else {

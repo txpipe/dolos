@@ -30,6 +30,10 @@ pub enum Error {
     /// The node uses a fixed limit. Thus, the same request always stops at the
     /// same point.
     ScanBudgetExceeded,
+    /// The asset's live UTxO set is past the scan budget: listing any page
+    /// of it costs an index lookup per UTxO, so none is served. The read
+    /// gives up at the first ref past the budget, before the set is in memory.
+    LiveUtxoSetTooLarge,
     InvalidCertIndex,
     InvalidGovActionId,
     InvalidCommitteeId,
@@ -206,6 +210,15 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "The request exceeds the scan limit of this node. Reduce the page number or the count.",
+                )),
+            )
+                .into_response(),
+            Error::LiveUtxoSetTooLarge => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "The asset has more live UTxOs than this node is willing to scan.",
                 )),
             )
                 .into_response(),

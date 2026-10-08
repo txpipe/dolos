@@ -37,8 +37,9 @@ pub enum TestFault {
     /// stop a work unit between the two commits of a phase, whichever store
     /// that phase commits first.
     CrashAfterCommits(u32),
-    /// [`StateStore::utxos_by_tag`] and [`StateStore::get_utxos`] sleep this
-    /// long before answering, as a heavy lookup on a large store would.
+    /// [`StateStore::utxos_by_tag`], [`StateStore::utxos_by_tag_limited`] and
+    /// [`StateStore::get_utxos`] sleep this long before answering, as a heavy
+    /// lookup on a large store would.
     SlowUtxoReads(Duration),
     /// [`StateStore::iter_entities`] sleeps this long before answering, as a
     /// scan of a large store would.
@@ -216,6 +217,19 @@ impl StateStore for FaultyStateStore {
         }
         self.slow_utxo_read();
         self.inner.utxos_by_tag(dimension, key)
+    }
+
+    fn utxos_by_tag_limited(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        limit: usize,
+    ) -> Result<Vec<dolos_core::TxoRef>, StateError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.slow_utxo_read();
+        self.inner.utxos_by_tag_limited(dimension, key, limit)
     }
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {

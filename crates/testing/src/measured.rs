@@ -348,6 +348,19 @@ impl<Inner: StateStore> StateStore for MeasuredState<Inner> {
         Ok(refs)
     }
 
+    fn utxos_by_tag_limited(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        limit: usize,
+    ) -> Result<Vec<TxoRef>, StateError> {
+        let refs = self.inner.utxos_by_tag_limited(dimension, key, limit)?;
+        self.counters
+            .utxo_refs
+            .fetch_add(refs.len() as u64, Ordering::Relaxed);
+        Ok(refs)
+    }
+
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         self.inner.iter_utxos()
     }

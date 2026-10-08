@@ -346,6 +346,28 @@ impl StateStore for MemoryStateStore {
         Ok(found)
     }
 
+    fn utxos_by_tag_limited(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        limit: usize,
+    ) -> Result<Vec<TxoRef>, StateError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        // the whole set, sorted, is this backend's trade: it serves tests and
+        // ephemeral nodes, and the caller still sees at most `limit`
+        let mut refs: Vec<TxoRef> = tables
+            .utxo_tags
+            .get(&(dimension, key.to_vec()))
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default();
+
+        refs.sort();
+        refs.truncate(limit);
+
+        Ok(refs)
+    }
+
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         let tables = self.tables.read().map_err(|_| poisoned())?;
 

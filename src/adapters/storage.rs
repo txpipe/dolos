@@ -766,6 +766,19 @@ impl CoreStateStore for StateStoreBackend {
         }
     }
 
+    fn utxos_by_tag_limited(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        limit: usize,
+    ) -> Result<Vec<TxoRef>, StateError> {
+        match self {
+            Self::Redb(s) => s.utxos_by_tag_limited(dimension, key, limit),
+            Self::Fjall(s) => s.utxos_by_tag_limited(dimension, key, limit),
+            Self::Memory(s) => s.utxos_by_tag_limited(dimension, key, limit),
+        }
+    }
+
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         match self {
             Self::Redb(s) => s.iter_utxos().map(StateUtxoIterBackend::Redb),

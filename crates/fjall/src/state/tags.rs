@@ -137,6 +137,11 @@ pub fn undo(
 /// Uses the `Readable` trait to support both direct keyspace access and
 /// snapshot-based reads. Snapshot-based reads avoid potential deadlocks with
 /// concurrent writes by using MVCC (Multi-Version Concurrency Control).
+///
+/// Lookup keys vary in length and one may be a prefix of another (an asset
+/// with an empty name and every asset of its policy, say), so the prefix
+/// scan also meets the longer keys' entries: only an entry of exactly the
+/// looked-up key's length belongs to it.
 pub fn get_by_key<R: Readable>(
     readable: &R,
     keyspace: &Keyspace,
@@ -147,20 +152,59 @@ pub fn get_by_key<R: Readable>(
 
     // Build prefix: [dim_hash:8][lookup_key]
     let prefix = build_utxo_tag_prefix(dimension, lookup_key);
+    let entry_len = DIM_HASH_SIZE + lookup_key.len() + TXO_REF_SIZE;
 
     // Prefix scan: all keys starting with prefix
     for guard in readable.prefix(keyspace, prefix) {
         let key = guard.key()?;
 
         // Key format: [dim_hash:8][lookup_key:var][txo_ref:36]
-        // Minimum length: DIM_HASH_SIZE + lookup_key.len() + TXO_REF_SIZE
-        if key.len() >= DIM_HASH_SIZE + lookup_key.len() + TXO_REF_SIZE {
+        if key.len() == entry_len {
             let txo_ref = decode_utxo_tag_txo(&key);
             result.insert(txo_ref);
         }
     }
 
     Ok(result)
+}
+
+/// The first `limit` refs of one tag, in key order.
+///
+/// The prefix iterator is lazy, so the scan stops at the `limit`th live
+/// entry and the prefix is never walked further than the caller is willing
+/// to hold; the entries it passes on the way are the tag's live keys, those
+/// of the longer lookup keys it is a prefix of, and, until compaction, the
+/// tombstones of its spent ones. The key rule is [`get_by_key`]'s: only an
+/// entry of exactly the looked-up key's length counts.
+pub fn get_by_key_limited<R: Readable>(
+    readable: &R,
+    keyspace: &Keyspace,
+    dimension: &str,
+    lookup_key: &[u8],
+    limit: usize,
+) -> Result<Vec<TxoRef>, Error> {
+    let mut out = Vec::new();
+
+    if limit == 0 {
+        return Ok(out);
+    }
+
+    let prefix = build_utxo_tag_prefix(dimension, lookup_key);
+    let entry_len = DIM_HASH_SIZE + lookup_key.len() + TXO_REF_SIZE;
+
+    for guard in readable.prefix(keyspace, prefix) {
+        let key = guard.key()?;
+
+        if key.len() == entry_len {
+            out.push(decode_utxo_tag_txo(&key));
+
+            if out.len() == limit {
+                break;
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 #[cfg(test)]
