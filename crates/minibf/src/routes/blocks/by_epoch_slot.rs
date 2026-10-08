@@ -6,32 +6,37 @@ use axum::{
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_core::Domain;
 
-use crate::Facade;
+use crate::{error::Error, Facade};
 
-use super::{main_block_at_slot, single_block_content, tip_block};
+use super::{main_block_at_slot, single_block_content, tip_block, PathNumber};
 
 /// Dolos stores blocks by absolute slot, so the epoch-relative pair is
 /// converted with the chain summary first.
 pub async fn by_epoch_slot<D>(
     Path((epoch_number, slot_number)): Path<(String, String)>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<BlockContent>, StatusCode>
+) -> Result<Json<BlockContent>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    // Blockfrost accepts both numbers only in the positive i32 range
-    let in_range =
-        |raw: &str| -> Option<u64> { raw.parse::<u64>().ok().filter(|x| *x <= i32::MAX as u64) };
+    let epoch = PathNumber::parse(&epoch_number);
+    let slot = PathNumber::parse(&slot_number);
 
-    let epoch = in_range(&epoch_number).ok_or(StatusCode::BAD_REQUEST)?;
-    let slot = in_range(&slot_number).ok_or(StatusCode::BAD_REQUEST)?;
+    // Blockfrost checks that both are integers before it checks either range
+    let (epoch, slot) = match (epoch, slot) {
+        (PathNumber::NotInteger, _) => return Err(Error::EpochNumberNotInteger),
+        (_, PathNumber::NotInteger) => return Err(Error::SlotNumberNotInteger),
+        (PathNumber::OutOfRange, _) => return Err(Error::InvalidEpochNumber),
+        (_, PathNumber::OutOfRange) => return Err(Error::InvalidSlotNumber),
+        (PathNumber::Value(epoch), PathNumber::Value(slot)) => (epoch, slot),
+    };
 
     let chain = domain.get_chain_summary()?;
 
     // a slot past the epoch end must not roll into the next epoch
     let epoch_length = chain.epoch_start(epoch + 1) - chain.epoch_start(epoch);
     if slot >= epoch_length {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::NOT_FOUND.into());
     }
 
     let absolute_slot = chain.epoch_start(epoch) + slot;
@@ -47,7 +52,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::blocks::testing::{assert_status, get_block, mainnet_byron_chain};
+    use crate::routes::blocks::testing::*;
     use crate::test_support::{TestApp, TestFault};
 
     /// `/blocks/{hash}` gives the epoch and epoch-slot the test resolves.
@@ -134,5 +139,33 @@ mod tests {
         // a boundary block alone at its slot leaves the slot empty
         let chain = mainnet_byron_chain(false);
         assert_status(&chain.app, "/blocks/epoch/0/slot/0", StatusCode::NOT_FOUND).await;
+    }
+
+    /// Blockfrost checks that both numbers are integers before it checks
+    /// either range. Bodies checked against live Blockfrost on 2026-10-08.
+    #[tokio::test]
+    async fn blocks_by_epoch_slot_errors_match_blockfrost() {
+        let app = TestApp::new();
+        let bad = StatusCode::BAD_REQUEST;
+        let epoch_not_integer = "params/epoch_number must be integer";
+        let bad_epoch = "Missing, out of range or malformed epoch_number.";
+
+        let cases = [
+            ("abc", "abc", epoch_not_integer),
+            ("abc", "-1", epoch_not_integer),
+            ("-1", "abc", SLOT_NOT_INTEGER),
+            ("-1", "-1", bad_epoch),
+            ("2147483648", "2147483648", bad_epoch),
+            ("0", "2147483648", BAD_SLOT),
+        ];
+
+        for (epoch, slot, message) in cases {
+            let path = format!("/blocks/epoch/{epoch}/slot/{slot}");
+            assert_error(&app, &path, bad, message).await;
+        }
+
+        for path in ["/blocks/epoch/0/slot/1", "/blocks/epoch/0/slot/432000"] {
+            assert_error(&app, path, StatusCode::NOT_FOUND, NOT_FOUND).await;
+        }
     }
 }

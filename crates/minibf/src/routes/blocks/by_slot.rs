@@ -6,17 +6,23 @@ use axum::{
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_core::Domain;
 
-use crate::Facade;
+use crate::{error::Error, Facade};
 
-use super::{main_block_at_slot, single_block_content, tip_block};
+use super::{main_block_at_slot, single_block_content, tip_block, PathNumber};
 
 pub async fn by_slot<D>(
-    Path(slot_number): Path<u64>,
+    Path(slot_number): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<BlockContent>, StatusCode>
+) -> Result<Json<BlockContent>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    let slot_number = match PathNumber::parse(&slot_number) {
+        PathNumber::NotInteger => return Err(Error::SlotNumberNotInteger),
+        PathNumber::OutOfRange => return Err(Error::InvalidSlotNumber),
+        PathNumber::Value(x) => x,
+    };
+
     let block = main_block_at_slot(&domain, slot_number)?.ok_or(StatusCode::NOT_FOUND)?;
 
     let chain = domain.get_chain_summary()?;
@@ -30,7 +36,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::blocks::testing::{assert_status, get_block, mainnet_byron_chain};
+    use crate::routes::blocks::testing::*;
     use crate::test_support::{TestApp, TestFault};
 
     #[tokio::test]
@@ -82,6 +88,21 @@ mod tests {
         let chain = mainnet_byron_chain(false);
         assert_status(&chain.app, "/blocks/slot/0", StatusCode::NOT_FOUND).await;
     }
+
+    /// Bodies checked against live Blockfrost on 2026-10-08.
+    #[tokio::test]
+    async fn blocks_by_slot_errors_match_blockfrost() {
+        let app = TestApp::new();
+        let bad = StatusCode::BAD_REQUEST;
+
+        assert_error(&app, "/blocks/slot/abc", bad, SLOT_NOT_INTEGER).await;
+        assert_error(&app, "/blocks/slot/1.5", bad, SLOT_NOT_INTEGER).await;
+        assert_error(&app, "/blocks/slot/-1", bad, BAD_SLOT).await;
+        assert_error(&app, "/blocks/slot/2147483648", bad, BAD_SLOT).await;
+        assert_error(&app, "/blocks/slot/99999999999999999999", bad, BAD_SLOT).await;
+        assert_error(&app, "/blocks/slot/1", StatusCode::NOT_FOUND, NOT_FOUND).await;
+    }
+
     /// A genesis delegate keeps minting after the first Shelley epoch, until
     /// the decentralisation parameter reaches zero. Leaders checked against
     /// live Blockfrost on 2026-10-08.
