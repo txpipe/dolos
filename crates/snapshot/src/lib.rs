@@ -3,7 +3,7 @@
 //! [`stelae`] is the protocol: framing, canonicalization, digests and the
 //! naming rules that let vendors coexist in one registry. It knows nothing
 //! about Cardano. This crate is the other half — the *profile* — and it says
-//! what a Dolos stele actually contains: twenty-six layer kinds, their media
+//! what a Dolos stele actually contains: twenty layer kinds, their media
 //! types,
 //! the tag a sequence renders as, what goes in `position`, `parameters` and
 //! each layer's `scope`, and the byte-exact codec for every record shape.
@@ -1161,7 +1161,7 @@ pub enum StateRole {
 
 /// Scope of one shard of one state kind, in one of its two roles.
 ///
-/// Uniform across all seventeen kinds, single-blob namespaces included — their
+/// Uniform across all fourteen kinds, single-blob namespaces included — their
 /// one layer is shard 0 — so the header and descriptor shapes stay one shape
 /// and a reader never dispatches on the kind to parse a scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

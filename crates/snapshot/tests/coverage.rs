@@ -171,7 +171,7 @@ fn the_golden_state_layers_cover_every_namespace() {
     }
 }
 
-/// Every state kind appears in the golden stele, so all seventeen kind strings
+/// Every state kind appears in the golden stele, so all fourteen kind strings
 /// are frozen by a published digest — the state half of
 /// `the_golden_stele_covers_every_log_kind`.
 #[test]
@@ -354,7 +354,7 @@ fn state_kinds_derive_from_their_namespaces() {
     }
 
     // Nothing else is a state kind — `state`, above all, which is what these
-    // seventeen replaced.
+    // fourteen replaced.
     for absent in ["state", "state-", "state-logs", "blocks", "", "state_utxos"] {
         assert!(state_ns_for(absent).is_none(), "{absent:?}");
     }
