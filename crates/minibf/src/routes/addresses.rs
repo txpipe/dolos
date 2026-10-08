@@ -354,20 +354,25 @@ where
         .any(|(_, block)| block.is_some()))
 }
 
+/// Blockfrost validates `from` / `to` on the address UTxO lists, so a
+/// malformed or reversed window is a 400, but it does not filter on them, so
+/// a valid window is dropped after the check.
+fn utxo_list_pagination(params: PaginationParameters) -> Result<Pagination, Error> {
+    let mut pagination = Pagination::try_from(params)?;
+    pagination.from = None;
+    pagination.to = None;
+    Ok(pagination)
+}
+
 pub async fn utxos<D>(
     Path(address): Path<String>,
-    Query(mut params): Query<PaginationParameters>,
+    Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    // Blockfrost does not read `from` / `to` here, so a malformed
-    // or reversed window is ignored rather than rejected.
-    params.from = None;
-    params.to = None;
-
-    let pagination = Pagination::try_from(params)?;
+    let pagination = utxo_list_pagination(params)?;
 
     let refs = refs_for_address(&domain, &address)?;
 
@@ -388,18 +393,13 @@ where
 
 pub async fn utxos_with_asset<D>(
     Path((address, asset)): Path<(String, String)>,
-    Query(mut params): Query<PaginationParameters>,
+    Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    // Blockfrost does not read `from` / `to` here, so a malformed
-    // or reversed window is ignored rather than rejected.
-    params.from = None;
-    params.to = None;
-
-    let pagination = Pagination::try_from(params)?;
+    let pagination = utxo_list_pagination(params)?;
 
     // `lovelace` lists the outputs without native assets. Any other asset
     // narrows the refs to the outputs that hold it.
@@ -1533,21 +1533,31 @@ mod tests {
         }
     }
 
-    /// Blockfrost does not read `from` / `to` on the UTxO list, so a bound it
-    /// would reject elsewhere is ignored here rather than answered with a 400.
+    /// Blockfrost validates `from` / `to` on the address UTxO lists without
+    /// filtering on them: a malformed or reversed window is a 400, a valid
+    /// one returns the unbounded list.
     #[tokio::test]
-    async fn addresses_utxos_ignore_from_to() {
+    async fn addresses_utxos_validate_but_ignore_from_to() {
         let app = TestApp::new();
         let address = app.vectors().address.clone();
-        let path = format!("/addresses/{address}/utxos");
 
-        let (status, bytes) = app.get_bytes(&path).await;
-        assert_eq!(status, StatusCode::OK);
+        for path in [
+            format!("/addresses/{address}/utxos"),
+            format!("/addresses/{address}/utxos/lovelace"),
+        ] {
+            let (status, bytes) = app.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
 
-        for query in ["from=abc", "from=20&to=10", "to=x:y"] {
-            let (status, with_bounds) = app.get_bytes(&format!("{path}?{query}")).await;
-            assert_eq!(status, StatusCode::OK, "{query}");
-            assert_eq!(with_bounds, bytes, "{query}");
+            for query in ["from=abc", "from=20&to=10", "to=x:y", "from=:2"] {
+                let (status, _) = app.get_bytes(&format!("{path}?{query}")).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{path}?{query}");
+            }
+
+            for query in ["from=999999", "to=0", "from=1:5&to=2"] {
+                let (status, with_bounds) = app.get_bytes(&format!("{path}?{query}")).await;
+                assert_eq!(status, StatusCode::OK, "{path}?{query}");
+                assert_eq!(with_bounds, bytes, "{path}?{query}");
+            }
         }
     }
 }

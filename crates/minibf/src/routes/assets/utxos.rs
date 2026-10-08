@@ -232,32 +232,24 @@ mod tests {
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
-    /// A bound Blockfrost does not read as one (more than two `:` parts) is
-    /// ignored, not rejected; empty parts default.
+    /// Bounds Blockfrost rejects (empty parts, a third part, a number past
+    /// `i32::MAX`) are a 400, not ignored.
     #[tokio::test]
     async fn assets_by_subject_utxos_bounds_parse_like_blockfrost() {
         let app = TestApp::new();
         let asset = app.vectors().asset_unit.as_str();
-        let get = |query: &str| {
-            let app = &app;
+
+        for query in [
+            "from=10:2:garbage",
+            "to=1:2:3",
+            "from=10:",
+            "from=:2",
+            "from=",
+            "from=99999999999",
+        ] {
             let path = format!("/assets/{asset}/utxos?{query}");
-            async move {
-                let (status, bytes) = app.get_bytes(&path).await;
-                assert_eq!(status, StatusCode::OK, "{path}");
-                parse_utxos(&bytes)
-            }
-        };
-
-        let all = get("").await;
-        let height = all.last().expect("rows").block_height;
-
-        assert_eq!(get("from=10:2:garbage").await, all);
-        assert_eq!(get("to=1:2:3&order=asc").await, all);
-        assert_eq!(
-            get(&format!("from={height}:")).await,
-            get(&format!("from={height}")).await
-        );
-        assert_eq!(get("from=:2").await, all);
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
     }
 
     /// A Byron epoch-boundary block takes the height of the main block
