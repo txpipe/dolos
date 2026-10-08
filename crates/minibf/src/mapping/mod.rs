@@ -67,6 +67,8 @@ use dolos_core::{async_query::BlockRefMeta, Domain, EraCbor, TxHash, TxOrder, Tx
 use crate::Facade;
 
 pub mod blocks;
+pub mod cost_models;
+pub mod epochs;
 
 macro_rules! try_into_or_500 {
     ($expr:expr) => {

@@ -27,13 +27,14 @@ use dolos_core::{archive::Skippable as _, ArchiveStore, Domain, EntityKey, LogKe
 use crate::{
     error::Error,
     log_and_500,
-    mapping::{bech32_pool, stake_cred_to_address, IntoModel as _},
+    mapping::{
+        bech32_pool,
+        epochs::{EpochContentModelBuilder, ParametersModelBuilder},
+        stake_cred_to_address, IntoModel as _,
+    },
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
-
-pub mod cost_models;
-pub mod mapping;
 
 const MAX_EPOCH_NUMBER: Epoch = i32::MAX as Epoch;
 
@@ -51,7 +52,7 @@ fn build_epoch_content<D: Domain>(
     epoch: Epoch,
     mut state: EpochState,
     active_stake: Option<u64>,
-) -> Result<mapping::EpochContentModelBuilder, StatusCode> {
+) -> Result<EpochContentModelBuilder, StatusCode> {
     // Use the epoch from the caller, not `state.number`. The live `EpochState`
     // of the current epoch can hold a number that differs from the number that
     // the tip resolves.
@@ -96,7 +97,7 @@ fn build_epoch_content<D: Domain>(
             }
         };
 
-    Ok(mapping::EpochContentModelBuilder {
+    Ok(EpochContentModelBuilder {
         state,
         start_time,
         end_time,
@@ -313,7 +314,7 @@ pub async fn latest_parameters<D: Domain>(
     let state = dolos_cardano::load_epoch::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let model = mapping::ParametersModelBuilder {
+    let model = ParametersModelBuilder {
         epoch,
         params: state.pparams.live().cloned().unwrap_or_default(),
         genesis: &domain.genesis(),
@@ -340,7 +341,7 @@ pub async fn by_number_parameters<D: Domain>(
             .ok_or(StatusCode::NOT_FOUND)?
     };
 
-    let model = mapping::ParametersModelBuilder {
+    let model = ParametersModelBuilder {
         epoch: epoch.number,
         params: epoch.pparams.live().cloned().unwrap_or_default(),
         genesis: &domain.genesis(),
