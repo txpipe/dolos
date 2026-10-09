@@ -94,10 +94,20 @@ impl ChainSummary {
     ) -> pallas::ledger::validate::phase2::script_context::SlotConfig {
         let edge = self.edge();
 
+        // Slots convert linearly back to the start of the first era with the
+        // slot length of the edge. A slot before the last hard fork converts too.
+        let anchor = self
+            .past
+            .iter()
+            .rev()
+            .take_while(|era| era.slot_length == edge.slot_length)
+            .last()
+            .unwrap_or(edge);
+
         pallas::ledger::validate::phase2::script_context::SlotConfig {
             slot_length: edge.slot_length * MS_PER_SECOND,
-            zero_slot: edge.start.slot,
-            zero_time: edge.start.timestamp * MS_PER_SECOND,
+            zero_slot: anchor.start.slot,
+            zero_time: anchor.start.timestamp * MS_PER_SECOND,
         }
     }
 
@@ -341,6 +351,59 @@ mod tests {
         assert_eq!(sc.slot_length, 1_000);
         assert_eq!(sc.zero_slot, 4_492_800);
         assert_eq!(sc.zero_time, 1_596_059_091_000);
+    }
+
+    #[test]
+    fn slot_config_starts_at_the_first_era_with_the_edge_slot_length() {
+        // Mainnet: Byron has 20-second slots, Shelley and later 1-second slots.
+        let mut byron = EraSummary {
+            start: EraBoundary {
+                epoch: 0,
+                slot: 0,
+                timestamp: 1_506_203_091,
+            },
+            end: None,
+            epoch_length: 21_600,
+            slot_length: 20,
+            protocol: 0,
+        };
+        byron.define_end(208);
+
+        let mut shelley = EraSummary {
+            start: byron.end.clone().unwrap(),
+            end: None,
+            epoch_length: 432_000,
+            slot_length: 1,
+            protocol: 2,
+        };
+        shelley.define_end(507);
+
+        let conway = EraSummary {
+            start: shelley.end.clone().unwrap(),
+            end: None,
+            epoch_length: 432_000,
+            slot_length: 1,
+            protocol: 9,
+        };
+
+        let mut summary = ChainSummary::default();
+        summary.append_era(0, byron);
+        summary.append_era(2, shelley);
+        summary.append_era(9, conway);
+
+        let sc = summary.to_pallas_slot_config();
+        let shelley_start = 208 * 21_600;
+
+        assert_eq!(sc.zero_slot, shelley_start);
+        assert_eq!(
+            sc.zero_time,
+            summary.slot_time(shelley_start) * MS_PER_SECOND
+        );
+
+        // A slot before the Conway edge converts like the summary does.
+        let babbage_slot = summary.edge().start.slot - 1;
+        let converted = sc.zero_time + (babbage_slot - sc.zero_slot) * sc.slot_length;
+        assert_eq!(converted, summary.slot_time(babbage_slot) * MS_PER_SECOND);
     }
 
     fn era(protocol: u16, start_epoch: u64) -> EraSummary {

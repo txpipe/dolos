@@ -1474,6 +1474,7 @@ dependencies = [
 name = "dolos-cardano"
 version = "2.0.0-alpha.0"
 dependencies = [
+ "amaru-uplc",
  "async-stream",
  "async-trait",
  "bech32 0.11.1",
@@ -1556,6 +1557,7 @@ version = "2.0.0-alpha.0"
 dependencies = [
  "axum 0.8.4",
  "base58",
+ "base64 0.22.1",
  "bech32 0.11.1",
  "blockfrost-openapi",
  "chrono",
@@ -1584,6 +1586,7 @@ dependencies = [
  "tower 0.4.13",
  "tower-http 0.6.8",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
