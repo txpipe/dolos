@@ -618,6 +618,22 @@ pub fn drep_id_bytes(cred: &StakeCredential) -> Vec<u8> {
 pub const CC_HOT_KEY_PREFIX: u8 = 0b00000010;
 pub const CC_HOT_SCRIPT_PREFIX: u8 = 0b00000011;
 
+pub const CC_COLD_KEY_PREFIX: u8 = 0b00010010;
+pub const CC_COLD_SCRIPT_PREFIX: u8 = 0b00010011;
+
+/// This function returns the CIP-129 committee-cold id bytes of a cold
+/// credential. The bytes are the cold-role header byte (key or script), then
+/// the 28-byte hash. These bytes are the key of the `committee_certs` archive
+/// dimension.
+pub fn committee_cold_id_bytes(cold: &StakeCredential) -> Vec<u8> {
+    match cold {
+        StakeCredential::AddrKeyhash(hash) => [&[CC_COLD_KEY_PREFIX][..], hash.as_slice()].concat(),
+        StakeCredential::ScriptHash(hash) => {
+            [&[CC_COLD_SCRIPT_PREFIX][..], hash.as_slice()].concat()
+        }
+    }
+}
+
 /// Returns the bytes that identify a governance voter.
 ///
 /// DReps get their CIP-129 DRep id bytes, as [`drep_id_bytes`] builds them.

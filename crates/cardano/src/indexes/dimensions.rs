@@ -133,7 +133,22 @@ pub mod archive {
         /// script bytes (reference scripts) and covers all purposes,
         /// including vote and propose.
         SCRIPT_REDEEMERS = "script_redeemers";
+
+        /// This dimension lists the blocks that hold a committee certificate
+        /// (a hot-key authorization or a cold-key resignation). The key is
+        /// the CIP-129 committee-cold id bytes of the cold credential
+        /// (`pallas_extras::committee_cold_id_bytes`).
+        COMMITTEE_CERTS = "committee_certs";
+
+        /// This dimension lists the blocks that hold a
+        /// constitutional-committee vote. The only key is
+        /// [`COMMITTEE_VOTES_KEY`]. Thus, one scan finds every such block,
+        /// and a per-voter lookup is not necessary.
+        COMMITTEE_VOTES = "committee_votes";
     }
+
+    /// This constant is the only key of the [`COMMITTEE_VOTES`] dimension.
+    pub const COMMITTEE_VOTES_KEY: &[u8] = b"committee";
 }
 
 #[cfg(test)]
@@ -176,6 +191,8 @@ mod tests {
                 "voter_votes",
                 "action_votes",
                 "script_redeemers",
+                "committee_certs",
+                "committee_votes",
             ]
         );
     }

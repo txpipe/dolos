@@ -243,6 +243,41 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
         self.slots_by_tag(archive::ACTION_VOTES, action, start, end)
     }
 
+    /// This method returns an iterator over the slots of the blocks that
+    /// contain the committee certificates (hot-key authorizations and
+    /// cold-key resignations) of a cold credential.
+    ///
+    /// The key is the output of `pallas_extras::committee_cold_id_bytes` for
+    /// the cold credential. The iterator also includes a block in which every
+    /// certificate of the credential is in a phase-2-invalid transaction.
+    fn slots_by_committee_certs(
+        &self,
+        cold: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(archive::COMMITTEE_CERTS, cold, start, end)
+    }
+
+    /// This method returns an iterator over the slots of the blocks that
+    /// contain a governance vote of a constitutional-committee member.
+    ///
+    /// The dimension has one key. Thus, one scan covers the whole committee.
+    /// The iterator also includes a block in which every committee vote is in
+    /// a phase-2-invalid transaction.
+    fn slots_by_committee_votes(
+        &self,
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(
+            archive::COMMITTEE_VOTES,
+            archive::COMMITTEE_VOTES_KEY,
+            start,
+            end,
+        )
+    }
+
     // ============ Bulk Export ============
 
     /// Iterate every archive tag record in `slots`, across every Cardano
