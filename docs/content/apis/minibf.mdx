@@ -204,6 +204,28 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/txs/{tx_hash}/utxos`                                     | Get UTXOs for a specific transaction                     |
 | `/txs/{tx_hash}/withdrawals`                               | Get withdrawals for a specific transaction               |
 | `/utils/addresses/xpub/{xpub}/{role}/{index}`              | Derive an address from an xpub                           |
+| `/utils/txs/evaluate`                                      | Evaluate the execution units of a transaction (Ogmios)   |
+| `/utils/txs/evaluate/utxos`                                | Same, with additional UTxOs (Ogmios)                     |
+
+## Transaction evaluation
+
+`POST /utils/txs/evaluate` and `POST /utils/txs/evaluate/utxos` need an Ogmios v6 endpoint, set with `serve.minibf.ogmios_url`. Without it, they answer `501`. Like Blockfrost, Dolos sends each request to Ogmios and answers in the Ogmios v5 format, or with the Ogmios v6 response for `?version=6`.
+
+Ogmios must connect to a cardano-node:
+
+```sh
+ogmios --node-socket /path/to/node.socket --node-config /path/to/config.json --host 0.0.0.0 --port 1337
+```
+
+```toml
+[serve.minibf]
+listen_address = "[::]:3000"
+ogmios_url = "http://localhost:1337"
+```
+
+Ogmios cannot evaluate through the Dolos node-to-client socket yet.
+
+`additionalUtxoSet` takes Ogmios v5 `[TxIn, TxOut]` pairs, which Dolos converts to Ogmios v6 entries. When a script fails, the v5 format reports it as `validatorFailed`, with the error and the traces.
 
 ## Lifetime totals and `sync.max_history`
 

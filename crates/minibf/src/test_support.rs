@@ -299,7 +299,7 @@ impl TestApp {
 
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(domain, vectors, fault, None)
+        Self::from_domain(domain, vectors, fault, |cfg| cfg)
     }
 
     pub fn new_with_cfg_and_setup(
@@ -308,32 +308,43 @@ impl TestApp {
     ) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         setup(&domain, &vectors);
-        Self::from_domain(domain, vectors, None, None)
+        Self::from_domain(domain, vectors, None, |cfg| cfg)
     }
 
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
     /// can be exercised without building a chain of thousands of blocks.
     pub fn new_with_scan_limit(cfg: SyntheticBlockConfig, max_scan_items: u64) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(domain, vectors, None, Some(max_scan_items))
+        Self::from_domain(domain, vectors, None, |cfg| {
+            cfg.with_max_scan_items(max_scan_items)
+        })
+    }
+
+    /// App whose minibf config sends transaction evaluations to `ogmios_url`.
+    pub fn new_with_ogmios_url(ogmios_url: &str) -> Self {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        Self::from_domain(domain, vectors, None, |cfg| cfg.with_ogmios_url(ogmios_url))
     }
 
     fn from_domain(
         domain: ToyDomain,
         vectors: SyntheticVectors,
         fault: Option<TestFault>,
-        max_scan_items: Option<u64>,
+        configure: impl FnOnce(MinibfConfig) -> MinibfConfig,
     ) -> Self {
         let domain = match fault {
             Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
             None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
         };
 
-        let cfg = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        let cfg = match max_scan_items {
-            Some(max) => cfg.with_max_scan_items(max),
-            None => cfg,
-        };
+        let cfg = configure(MinibfConfig::new(
+            "[::]:0".parse().expect("invalid listen address"),
+        ));
 
         let facade = Facade {
             inner: domain.clone(),
@@ -386,12 +397,13 @@ impl TestApp {
         content_type: &str,
         body: Vec<u8>,
     ) -> (StatusCode, Vec<u8>) {
-        let req = Request::builder()
-            .method(Method::POST)
-            .uri(path)
-            .header("content-type", content_type)
-            .body(Body::from(body))
-            .expect("failed to build request");
+        // An empty content type sends no Content-Type header.
+        let mut req = Request::builder().method(Method::POST).uri(path);
+        if !content_type.is_empty() {
+            req = req.header("content-type", content_type);
+        }
+
+        let req = req.body(Body::from(body)).expect("failed to build request");
 
         let res = self
             .router

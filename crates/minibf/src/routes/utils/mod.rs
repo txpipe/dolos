@@ -12,6 +12,10 @@ use pallas::{
 
 use crate::{error::Error, Facade};
 
+mod evaluate;
+
+pub use evaluate::{txs_evaluate, txs_evaluate_utxos};
+
 /// This value is the first index in the hardened range. Public (soft)
 /// BIP32-Ed25519 derivation uses only indices that are less than this value.
 const HARDENED_OFFSET: u32 = 0x8000_0000;

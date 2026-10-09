@@ -787,6 +787,8 @@ pub struct MinibfConfig {
     max_scan_items: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ipfs_gateways: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ogmios_url: Option<String>,
 }
 
 impl MinibfConfig {
@@ -798,6 +800,7 @@ impl MinibfConfig {
             url: None,
             max_scan_items: None,
             ipfs_gateways: None,
+            ogmios_url: None,
         }
     }
 
@@ -830,6 +833,17 @@ impl MinibfConfig {
         self.ipfs_gateways
             .clone()
             .unwrap_or_else(default_ipfs_gateways)
+    }
+
+    pub fn with_ogmios_url(mut self, ogmios_url: impl Into<String>) -> Self {
+        self.ogmios_url = Some(ogmios_url.into());
+        self
+    }
+
+    /// The Ogmios v6 HTTP endpoint that evaluates transactions. Without it,
+    /// the evaluation endpoints are not available.
+    pub fn ogmios_url(&self) -> Option<&str> {
+        self.ogmios_url.as_deref()
     }
 }
 
