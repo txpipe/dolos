@@ -58,33 +58,33 @@ where
 
     let mut rows = page_rows(domain, refs, &pagination).await?;
 
-    // A block can spend a listed UTxO after the caller read the tags. Drop the
-    // missing ref and select again, so that only the last page can be short.
-    let (window, utxos) = loop {
-        let window = select_window(&rows, &pagination);
+    let mut window = select_window(&rows, &pagination);
+    if window.rows.is_empty() {
+        return Ok(Vec::new());
+    }
 
-        if window.rows.is_empty() {
-            return Ok(Vec::new());
-        }
+    let mut utxos = domain
+        .state()
+        .get_utxos(window.refs())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let utxos = domain
-            .state()
-            .get_utxos(window.refs())
+    // Refresh once if a block spent listed refs after the tag read.
+    if utxos.len() != window.rows.len() {
+        let pagination = pagination.clone();
+        (window, utxos) = domain
+            .query()
+            .run_blocking(move |domain| {
+                let refs = rows.iter().map(|(_, txo_ref)| txo_ref.clone()).collect();
+                let mut utxos = domain.state().get_utxos(refs)?;
+                rows.retain(|(_, txo_ref)| utxos.contains_key(txo_ref));
+                let window = select_window(&rows, &pagination);
+                let refs: HashSet<_> = window.refs().into_iter().collect();
+                utxos.retain(|txo_ref, _| refs.contains(txo_ref));
+                Ok((window, utxos))
+            })
+            .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        if utxos.len() == window.rows.len() {
-            break (window, utxos);
-        }
-
-        let missing: HashSet<_> = window
-            .rows
-            .iter()
-            .map(|(_, txo_ref)| txo_ref)
-            .filter(|txo_ref| !utxos.contains_key(*txo_ref))
-            .collect();
-
-        rows.retain(|(_, txo_ref)| !missing.contains(txo_ref));
-    };
+    }
 
     let PageWindow { rows, skip } = window;
     let window_slots: HashMap<_, _> = rows
@@ -313,7 +313,7 @@ mod tests {
     use dolos_core::async_query::BlockRefMeta;
     use dolos_core::config::MinibfConfig;
     use dolos_core::import::ImportExt as _;
-    use dolos_core::{ArchiveWriter as _, ChainPoint};
+    use dolos_core::{ArchiveWriter as _, ChainPoint, StateWriter as _, UtxoSetDelta};
     use dolos_testing::measured::MeasuredStores;
     use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
     use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores as _};
@@ -579,6 +579,71 @@ mod tests {
                     "page {page} has {} rows",
                     rows.len()
                 );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn many_spent_refs_need_only_one_refresh() {
+        let (blocks, vectors, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 500,
+            txs_per_block: 1,
+            slot: 1,
+            ..Default::default()
+        });
+        let domain = ToyDomain::with_stores(
+            Arc::new(dolos_cardano::include::preview::load()),
+            chain_config,
+            None,
+            None,
+            MeasuredStores::new(MemoryStores::open()),
+        );
+        domain.import_blocks(blocks).unwrap();
+        let address = Address::from_bech32(&vectors.address).unwrap().to_vec();
+        let refs = domain.state().utxos_by_address(&address).unwrap();
+        assert_eq!(refs.len(), 500);
+        let facade = Facade {
+            inner: domain,
+            config: MinibfConfig::new("[::]:0".parse().unwrap()),
+            cache: Default::default(),
+        };
+        let rows = page_rows(&facade, refs.clone(), &pagination(Order::Asc, 100, 1))
+            .await
+            .unwrap();
+        let spent: Vec<_> = rows[99..499]
+            .iter()
+            .map(|(_, txo_ref)| txo_ref.clone())
+            .collect();
+        let writer = facade.state().start_writer().unwrap();
+        writer
+            .apply_utxoset(&UtxoSetDelta {
+                consumed_utxo: facade.state().get_utxos(spent.clone()).unwrap(),
+                ..Default::default()
+            })
+            .unwrap();
+        writer.commit().unwrap();
+        let mut live = refs.clone();
+        for txo_ref in spent {
+            live.remove(&txo_ref);
+        }
+
+        for order in [Order::Asc, Order::Desc] {
+            for (count, page) in [(100, 1), (99, 2)] {
+                let pagination = pagination(order, count, page);
+                let expected: Vec<AddressUtxoContentInner> =
+                    load_utxo_models(&facade, live.clone(), pagination.clone(), UtxoFilter::All)
+                        .await
+                        .unwrap();
+                facade.state().counters.reset();
+                let actual: Vec<AddressUtxoContentInner> =
+                    load_utxo_models(&facade, refs.clone(), pagination, UtxoFilter::All)
+                        .await
+                        .unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(actual.len(), if page == 1 { 100 } else { 1 });
+                let work = facade.state().counters.snapshot();
+                assert_eq!(work.utxo_reads, (refs.len() + count) as u64);
+                assert_eq!(work.block_reads, actual.len() as u64);
             }
         }
     }
