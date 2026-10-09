@@ -128,6 +128,12 @@ pub mod archive {
         /// (`ProposalState::build_entity_key`).
         ACTION_VOTES = "action_votes";
 
+        /// Script hash of every script that a redeemer executed, resolved at
+        /// index time. Unlike SCRIPT, this tags executions that carry no
+        /// script bytes (reference scripts) and covers all purposes,
+        /// including vote and propose.
+        SCRIPT_REDEEMERS = "script_redeemers";
+
         /// This dimension lists the blocks that hold a committee certificate
         /// (a hot-key authorization or a cold-key resignation). The key is
         /// the CIP-129 committee-cold id bytes of the cold credential
@@ -184,6 +190,7 @@ mod tests {
                 "pool_blocks",
                 "voter_votes",
                 "action_votes",
+                "script_redeemers",
                 "committee_certs",
                 "committee_votes",
             ]

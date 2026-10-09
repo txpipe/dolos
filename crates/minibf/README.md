@@ -77,7 +77,7 @@ without running a full node:
 
 The reference spec is the upstream Blockfrost OpenAPI document at the version
 pinned by the `blockfrost-openapi` dependency in `Cargo.toml`:
-<https://github.com/blockfrost/openapi/blob/v0.1.91/openapi.yaml>. Bump the
+<https://github.com/blockfrost/openapi/blob/v0.1.92/openapi.yaml>. Bump the
 link together with the dependency.
 
 Key modules:

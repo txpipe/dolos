@@ -162,9 +162,11 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/governance/proposals/{gov_action_id}`                    | Get governance proposal by CIP-129 action id             |
 | `/governance/proposals/{gov_action_id}/metadata`           | Get metadata of a proposal by CIP-129 id                 |
 | `/governance/proposals/{gov_action_id}/parameters`         | Get parameter change of a proposal by CIP-129 id         |
+| `/governance/proposals/{gov_action_id}/votes`              | Get votes of a proposal by CIP-129 id                    |
 | `/governance/proposals/{gov_action_id}/withdrawals`        | Get withdrawals of a proposal by CIP-129 id              |
 | `/governance/proposals/{tx_hash}/{cert_index}/metadata`    | Get metadata of a specific proposal                      |
 | `/governance/proposals/{tx_hash}/{cert_index}/parameters`  | Get parameter change of a specific proposal              |
+| `/governance/proposals/{tx_hash}/{cert_index}/votes`       | Get votes of a specific proposal                         |
 | `/governance/proposals/{tx_hash}/{cert_index}/withdrawals` | Get withdrawals of a specific proposal                   |
 | `/metadata/txs/labels/{label}`                             | Get metadata for transactions with a specific label      |
 | `/metadata/txs/labels/{label}/cbor`                        | Get CBOR metadata for transactions with a specific label |
@@ -186,6 +188,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/scripts/{script_hash}/json`                              | Get script JSON                                          |
 | `/scripts/{script_hash}/cbor`                              | Get script CBOR                                          |
 | `/scripts/{script_hash}/utxos`                             | Get live UTxOs that hold the script as a reference       |
+| `/scripts/{script_hash}/redeemers`                         | Get redeemers of a specific script                       |
 | `/scripts/datum/{datum_hash}`                              | Get datum by hash                                        |
 | `/scripts/datum/{datum_hash}/cbor`                         | Get datum CBOR by hash                                   |
 | `/tx/submit`                                               | Submit a transaction                                     |
