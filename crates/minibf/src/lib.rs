@@ -375,6 +375,7 @@ where
     Option<GovState>: From<D::Entity>,
 {
     let permissive_cors = facade.config.permissive_cors();
+    let base_path = facade.config.base_path();
     let app = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
@@ -749,12 +750,20 @@ where
         } else {
             CorsLayer::new()
         });
+
+    // `MinibfConfig::validate` runs at config-parse time. It rejects a
+    // malformed `base_path`. Thus the nest operation here cannot fail.
+    let router = match &base_path {
+        Some(base_path) => Router::new().nest(base_path, app),
+        None => app,
+    };
+
     // Added via `Router::layer`, NormalizePathLayer runs *after* route matching
     // and never trims before routing (`/blocks/latest/` would miss its route).
     // Wrap the router with it and nest that behind an outer `Router` via
     // `fallback_service`, so trimming happens before routing while the public
     // return type stays `Router` (the wrapped type is an implementation detail).
-    let normalized = NormalizePathLayer::trim_trailing_slash().layer(app);
+    let normalized = NormalizePathLayer::trim_trailing_slash().layer(router);
     Router::new().fallback_service(normalized)
 }
 
@@ -784,6 +793,60 @@ where
             .map_err(ServeError::ShutdownError)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod base_path_tests {
+    use axum::http::StatusCode;
+
+    use crate::test_support::TestApp;
+
+    #[tokio::test]
+    async fn routes_resolve_under_configured_base_path() {
+        let app = TestApp::new_with_base_path("/api/v0");
+
+        let (status, _) = app.get_bytes("/api/v0/network").await;
+        assert_eq!(status, StatusCode::OK, "prefixed route should resolve");
+
+        let (status, _) = app.get_bytes("/network").await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "root route should 404 when base_path is set"
+        );
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_in_base_path_config_is_trimmed() {
+        // The router removes a trailing slash from `base_path` before it nests the
+        // routes.
+        let app = TestApp::new_with_base_path("/api/v0/");
+
+        let (status, _) = app.get_bytes("/api/v0/network").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_in_request_is_normalized() {
+        let app = TestApp::new_with_base_path("/api/v0");
+
+        // The router removes a trailing slash from the request path before route
+        // matching.
+        let (status, _) = app.get_bytes("/api/v0/network/").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the router did not remove the trailing slash from the request path"
+        );
+
+        // The base path resolves to the root route of the nested router.
+        let (status, _) = app.get_bytes("/api/v0/").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the base path with a trailing slash did not resolve to the root route"
+        );
     }
 }
 
