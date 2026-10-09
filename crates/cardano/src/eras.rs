@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, ChainError, Domain, LogKey, StateStore, TemporalKey};
+use dolos_core::{BlockSlot, ChainError, Domain, Genesis, LogKey, StateStore, TemporalKey};
 use pallas::ledger::primitives::Epoch;
 
 use crate::{model::EraSummary, EraBoundary, EraProtocol, FixedNamespace as _};
@@ -312,6 +312,231 @@ pub fn load_active_era<D: Domain>(
     }
 }
 
+/// Same as [`load_era_summary`], but keeps each era tagged with its raw
+/// protocol number instead of folding them into a [`ChainSummary`] — the
+/// shape [`pad_era_history`] takes as input.
+pub fn load_era_summary_with_protocols<D: Domain>(
+    state: &D::State,
+) -> Result<Vec<(u16, EraSummary)>, ChainError> {
+    let eras = state.iter_entities_typed::<EraSummary>(EraSummary::NS, None)?;
+
+    eras.map(|result| {
+        let (key, era) = result?;
+        let protocol = EraProtocol::from(key);
+        Ok((protocol.into(), era))
+    })
+    .collect()
+}
+
+/// Groups a raw protocol-major number by the era name it reports, mirroring
+/// `protocol_to_era_name`'s ranges in the gRPC/Ogmios mapping code: 5 and 6
+/// both report "alonzo", 7 and 8 both report "babbage", 9 and 10 both
+/// report "conway". The group id is the lowest protocol number in the
+/// range, except it is *not* assumed to be the one a node actually recorded
+/// first — some genesis files (e.g. Preview's) start directly at the upper
+/// value of a range (protocol 6), so callers must dedupe by this group
+/// rather than filtering for a fixed set of "opening" literals.
+fn era_group(protocol: u16) -> u16 {
+    match protocol {
+        0..=1 => 0,
+        5..=6 => 5,
+        7..=8 => 7,
+        9..=10 => 9,
+        other => other,
+    }
+}
+
+fn parse_system_start(genesis: &Genesis) -> Result<u64, ChainError> {
+    genesis
+        .shelley
+        .system_start
+        .as_ref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp() as u64)
+        .ok_or_else(|| ChainError::GenesisFieldMissing("shelley.system_start".into()))
+}
+
+/// A single hardcoded era row spanning `[start_epoch, end_epoch)`, with
+/// absolute timestamps derived from `system_start` — used for Byron and,
+/// on Preview, the zero-width placeholders for the eras its genesis
+/// skips entirely.
+fn hardcoded_era(
+    protocol: u16,
+    system_start: u64,
+    epoch_length: u64,
+    slot_length: u64,
+    start_epoch: u64,
+    end_epoch: u64,
+) -> EraSummary {
+    EraSummary {
+        start: EraBoundary {
+            epoch: start_epoch,
+            slot: start_epoch * epoch_length,
+            timestamp: system_start + start_epoch * epoch_length * slot_length,
+        },
+        end: Some(EraBoundary {
+            epoch: end_epoch,
+            slot: end_epoch * epoch_length,
+            timestamp: system_start + end_epoch * epoch_length * slot_length,
+        }),
+        epoch_length,
+        slot_length,
+        protocol,
+    }
+}
+
+/// Rebuilds the full historical era table (Byron through the current tip)
+/// from whatever era-boundary records the backing node has itself
+/// locally processed since it started tracking chain state.
+///
+/// Mainnet/preprod nodes never observe Byron (protocol 0/1) as tracked
+/// on-chain state, and Preview's genesis jumps straight past
+/// Shelley/Allegra/Mary into Alonzo — so `eras` alone is a partial table.
+/// This pads in the missing early eras from well-known per-network
+/// constants, the same hardcode minibf's Blockfrost-compatible
+/// `/network/eras` route already applies for its own clients, so gRPC
+/// and Ogmios consumers see the same complete table
+/// (`#1331`).
+pub fn pad_era_history(
+    eras: &[(u16, EraSummary)],
+    tip: BlockSlot,
+    genesis: &Genesis,
+) -> Result<Vec<EraSummary>, ChainError> {
+    let system_start = parse_system_start(genesis)?;
+
+    let mut out = Vec::new();
+
+    // Dedupe once up front: an unknown/custom network (below) seeds
+    // `previous` from the first entry and feeds the rest to the loop, so
+    // both need to agree on what counts as one era.
+    let deduped: Vec<&(u16, EraSummary)> = {
+        let mut last_group: Option<u16> = None;
+        eras.iter()
+            .filter(|(protocol, _)| {
+                let group = era_group(*protocol);
+                let is_new_era = last_group != Some(group);
+                last_group = Some(group);
+                is_new_era
+            })
+            .collect()
+    };
+
+    let mut remaining = deduped.as_slice();
+
+    let mut previous =
+        match genesis.shelley.network_magic {
+            Some(764824073) => hardcoded_era(0, system_start, 21600, 20, 0, 208),
+            Some(1) => hardcoded_era(0, system_start, 21600, 20, 0, 4),
+            Some(2) => {
+                let placeholder = hardcoded_era(0, system_start, 4320, 20, 0, 0);
+                out.push(placeholder.clone());
+
+                let epoch_length =
+                    genesis.shelley.epoch_length.ok_or_else(|| {
+                        ChainError::GenesisFieldMissing("shelley.epoch_length".into())
+                    })? as u64;
+                let slot_length =
+                    genesis.shelley.slot_length.ok_or_else(|| {
+                        ChainError::GenesisFieldMissing("shelley.slot_length".into())
+                    })? as u64;
+
+                // Preview's genesis skips Shelley, Allegra and Mary entirely —
+                // pad in one zero-width placeholder row per skipped era so the
+                // table still names them before the first real recorded entry.
+                // Shelley and Allegra are pushed directly here; Mary is left as
+                // `previous` so the main loop below chains its `end` to the
+                // first real recorded era instead of leaving it zero-width.
+                let mut skipped = placeholder;
+                skipped.epoch_length = epoch_length;
+                skipped.slot_length = slot_length;
+
+                for protocol in [2u16, 3] {
+                    let mut row = skipped.clone();
+                    row.protocol = protocol;
+                    out.push(row);
+                }
+
+                skipped.protocol = 4;
+                skipped
+            }
+            Some(_) | None => {
+                // Custom/private networks (devnets, local test chains) have
+                // no well-known Byron-era boundary to hardcode — unlike
+                // mainnet/preprod/preview, they don't predate the chain's
+                // own genesis, since `force_protocol` makes their very
+                // first era start at slot 0. Seed `previous` from the
+                // earliest real recorded era instead of fabricating a
+                // placeholder, so custom networks still get an accurate
+                // (if unpadded) table instead of a hard failure.
+                let (first, rest) = remaining.split_first().ok_or_else(|| {
+                    ChainError::GenesisFieldMissing(
+                        "no recorded eras to build history for unrecognized network magic".into(),
+                    )
+                })?;
+                let (protocol, era) = *first;
+                remaining = rest;
+
+                // No known "next" boundary either, so treat it the same as
+                // the loop's own open (last) row: bounded by `tip`, clamped
+                // so it never precedes its own start.
+                let open_end_slot = tip.max(era.start.slot);
+
+                EraSummary {
+                    start: era.start.clone(),
+                    end: Some(EraBoundary {
+                        epoch: era.slot_epoch(open_end_slot).0,
+                        slot: open_end_slot,
+                        timestamp: era.slot_time(open_end_slot),
+                    }),
+                    epoch_length: era.epoch_length,
+                    slot_length: era.slot_length,
+                    protocol: *protocol,
+                }
+            }
+        };
+
+    for (protocol, era) in remaining {
+        let start_time = era.slot_time(era.start.slot);
+
+        // A rollback can leave `tip` behind an era's own recorded start
+        // (the era summary was written for a point the chain has since
+        // receded from). Clamp so the open end never precedes its start —
+        // worst case this era reports zero width instead of a negative one.
+        let open_end_slot = tip.max(era.start.slot);
+        let end_epoch = era.slot_epoch(open_end_slot).0;
+        let end_time = era.slot_time(open_end_slot);
+
+        previous.end = Some(EraBoundary {
+            epoch: era.start.epoch,
+            slot: era.start.slot,
+            timestamp: start_time,
+        });
+
+        let current = EraSummary {
+            start: EraBoundary {
+                epoch: era.start.epoch,
+                slot: era.start.slot,
+                timestamp: start_time,
+            },
+            end: Some(EraBoundary {
+                epoch: end_epoch,
+                slot: open_end_slot,
+                timestamp: end_time,
+            }),
+            epoch_length: era.epoch_length,
+            slot_length: era.slot_length,
+            protocol: *protocol,
+        };
+
+        out.push(previous);
+        previous = current;
+    }
+
+    out.push(previous);
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +634,219 @@ mod tests {
         recent.append_era(6, era(6, 0));
         recent.append_era(9, era(9, 100));
         assert_eq!(recent.first_mary_epoch(), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod pad_era_history_tests {
+    use super::*;
+
+    fn era(
+        protocol: u16,
+        start_epoch: u64,
+        start_slot: u64,
+        start_timestamp: u64,
+        epoch_length: u64,
+        slot_length: u64,
+    ) -> (u16, EraSummary) {
+        (
+            protocol,
+            EraSummary {
+                start: EraBoundary {
+                    epoch: start_epoch,
+                    slot: start_slot,
+                    timestamp: start_timestamp,
+                },
+                end: None,
+                epoch_length,
+                slot_length,
+                protocol,
+            },
+        )
+    }
+
+    #[test]
+    fn pads_byron_for_mainnet_and_chains_to_the_first_recorded_era() {
+        let genesis = crate::include::mainnet::load();
+        let system_start = parse_system_start(&genesis).unwrap();
+        let tip = 200_000_000;
+
+        // Byron -> Shelley on mainnet: epoch 208, slot 4_492_800. The
+        // node only ever recorded Shelley onward as on-chain state.
+        let shelley_start_timestamp = system_start + 89_856_000;
+        let eras = vec![era(2, 208, 4_492_800, shelley_start_timestamp, 432_000, 1)];
+
+        let padded = pad_era_history(&eras, tip, &genesis).unwrap();
+
+        assert_eq!(padded.len(), 2, "byron placeholder + the one recorded era");
+
+        let byron = &padded[0];
+        assert_eq!(byron.protocol, 0);
+        assert_eq!(byron.start.slot, 0);
+        assert_eq!(byron.start.epoch, 0);
+        assert_eq!(byron.start.timestamp, system_start);
+
+        let byron_end = byron.end.as_ref().unwrap();
+        let shelley = &padded[1];
+
+        // chained: byron's end is overwritten by shelley's own recorded start
+        assert_eq!(byron_end.slot, shelley.start.slot);
+        assert_eq!(byron_end.epoch, shelley.start.epoch);
+        assert_eq!(byron_end.timestamp, shelley.start.timestamp);
+        assert_eq!(byron_end.timestamp, shelley_start_timestamp);
+
+        // the open (last) row's end is derived from tip, not hardcoded
+        let shelley_end = shelley.end.as_ref().unwrap();
+        assert_eq!(shelley_end.slot, tip);
+    }
+
+    #[test]
+    fn clamps_the_open_eras_end_when_tip_precedes_its_start() {
+        let genesis = crate::include::mainnet::load();
+        let system_start = parse_system_start(&genesis).unwrap();
+
+        // A rollback can leave `tip` behind the last era summary's own
+        // recorded start slot. The open end must clamp to that start
+        // instead of reporting an end before the era began.
+        let shelley_start_timestamp = system_start + 89_856_000;
+        let eras = vec![era(2, 208, 4_492_800, shelley_start_timestamp, 432_000, 1)];
+        let tip = 1_000_000; // well behind shelley's start slot of 4_492_800
+
+        let padded = pad_era_history(&eras, tip, &genesis).unwrap();
+
+        let shelley = padded.last().unwrap();
+        let end = shelley.end.as_ref().unwrap();
+
+        assert_eq!(end.slot, shelley.start.slot);
+        assert_eq!(end.epoch, shelley.start.epoch);
+        assert_eq!(end.timestamp, shelley.start.timestamp);
+    }
+
+    #[test]
+    fn dedupes_intra_era_protocol_bumps() {
+        let genesis = crate::include::preprod::load();
+        let tip = 100_000_000;
+
+        // 5->6 (alonzo), 7->8 (babbage) and 9->10 (conway) are intra-era
+        // bumps that must not produce a duplicate named row.
+        let eras = vec![
+            era(2, 4, 86_400, 0, 432_000, 1),
+            era(3, 5, 518_400, 0, 432_000, 1),
+            era(4, 6, 950_400, 0, 432_000, 1),
+            era(5, 7, 1_382_400, 0, 432_000, 1),
+            era(6, 9, 2_246_400, 0, 432_000, 1),
+            era(7, 12, 3_542_400, 0, 432_000, 1),
+            era(8, 20, 5_000_000, 0, 432_000, 1),
+            era(9, 163, 68_774_400, 0, 432_000, 1),
+            era(10, 250, 90_000_000, 0, 432_000, 1),
+        ];
+
+        let padded = pad_era_history(&eras, tip, &genesis).unwrap();
+
+        let protocols: Vec<u16> = padded.iter().map(|e| e.protocol).collect();
+        assert_eq!(protocols, vec![0, 2, 3, 4, 5, 7, 9]);
+    }
+
+    #[test]
+    fn pads_skipped_eras_for_preview() {
+        let genesis = crate::include::preview::load();
+        let system_start = parse_system_start(&genesis).unwrap();
+        let tip = 50_000_000;
+
+        // preview's real recorded history starts at Alonzo — Shelley,
+        // Allegra and Mary never happened as tracked on-chain state. A
+        // real era starting at slot 0 carries an absolute timestamp of
+        // `system_start` (see `genesis::bootstrap_eras`), not zero.
+        let eras = vec![era(5, 0, 0, system_start, 432_000, 1)];
+
+        let padded = pad_era_history(&eras, tip, &genesis).unwrap();
+
+        let protocols: Vec<u16> = padded.iter().map(|e| e.protocol).collect();
+        assert_eq!(protocols, vec![0, 2, 3, 4, 5]);
+
+        // the skipped-era placeholders (shelley, allegra, mary) are
+        // zero-width, sitting at system_start
+        for row in &padded[1..4] {
+            let end = row.end.as_ref().unwrap();
+            assert_eq!(row.start.slot, end.slot);
+            assert_eq!(row.start.epoch, end.epoch);
+            assert_eq!(row.start.timestamp, end.timestamp);
+        }
+    }
+
+    #[test]
+    fn keeps_an_era_whose_first_recorded_protocol_is_the_upper_value_of_its_range() {
+        // Preview's genesis sets Alonzo's protocolVersion.major to 6 (the
+        // intra-era-bump value), not 5 — so the *first* era Preview ever
+        // records as on-chain state is protocol 6, and protocol 5 never
+        // appears at all. Filtering for a fixed set of "opening" literals
+        // (the old `KNOWN_HARDFORKS = [2,3,4,5,7,9]` list) dropped this
+        // era entirely, since 6 was treated as an intra-era duplicate of a
+        // protocol-5 entry that was never actually recorded.
+        let genesis = crate::include::preview::load();
+        let system_start = parse_system_start(&genesis).unwrap();
+        let tip = 50_000_000;
+
+        let eras = vec![era(6, 0, 0, system_start, 432_000, 1)];
+
+        let padded = pad_era_history(&eras, tip, &genesis).unwrap();
+
+        let protocols: Vec<u16> = padded.iter().map(|e| e.protocol).collect();
+        assert_eq!(protocols, vec![0, 2, 3, 4, 6]);
+    }
+
+    #[test]
+    fn rejects_unrecognized_network_magic_with_no_recorded_eras() {
+        // An unrecognized magic has no well-known Byron boundary to
+        // fabricate, so with nothing real recorded either, there is
+        // nothing to build a table from at all.
+        let mut genesis = crate::include::preview::load();
+        genesis.shelley.network_magic = Some(42);
+
+        let err = pad_era_history(&[], 0, &genesis).unwrap_err();
+        assert!(matches!(err, ChainError::GenesisFieldMissing(_)));
+    }
+
+    #[test]
+    fn returns_real_history_unpadded_for_unrecognized_network_magic() {
+        // Custom/private networks (devnets, local test chains) force their
+        // starting era via `force_protocol`, so their very first recorded
+        // era already starts at slot 0 — there's no earlier history to pad
+        // in, and none should be fabricated. The real recorded eras come
+        // back as-is instead of erroring out.
+        let mut genesis = crate::include::preview::load();
+        genesis.shelley.network_magic = Some(42);
+        let system_start = parse_system_start(&genesis).unwrap();
+        let tip = 50_000_000;
+
+        let eras = vec![
+            era(9, 0, 0, system_start, 432_000, 1),
+            era(10, 100, 43_200_000, system_start + 43_200_000, 432_000, 1),
+        ];
+
+        let padded = pad_era_history(&eras, tip, &genesis).unwrap();
+
+        // deduped (9 and 10 both report "conway") and not prefixed with
+        // any fabricated Byron/Shelley/... placeholders
+        assert_eq!(padded.len(), 1);
+        assert_eq!(padded[0].protocol, 9);
+        assert_eq!(padded[0].start.slot, 0);
+
+        let end = padded[0].end.as_ref().unwrap();
+        assert_eq!(end.slot, tip);
+    }
+
+    #[test]
+    fn pads_with_no_recorded_eras_at_all() {
+        let genesis = crate::include::mainnet::load();
+        let system_start = parse_system_start(&genesis).unwrap();
+
+        let padded = pad_era_history(&[], 999, &genesis).unwrap();
+
+        assert_eq!(padded.len(), 1);
+        assert_eq!(padded[0].protocol, 0);
+        let end = padded[0].end.as_ref().unwrap();
+        assert_eq!(end.epoch, 208);
+        assert_eq!(end.timestamp, system_start + 89_856_000);
     }
 }

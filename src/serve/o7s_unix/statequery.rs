@@ -1,5 +1,8 @@
 use chrono::{Datelike, Timelike};
-use dolos_cardano::{load_era_summary, EraSummary as DolosEraSummary};
+use dolos_cardano::{
+    load_era_summary, load_era_summary_with_protocols, pad_era_history,
+    EraSummary as DolosEraSummary,
+};
 use dolos_core::StateStore;
 use pallas::codec::utils::AnyCbor;
 use pallas::ledger::traverse::MultiEraBlock;
@@ -224,12 +227,15 @@ impl<D: Domain> Session<D> {
             ))) => {
                 debug!("GetInterpreter query");
 
-                let chain_summary = load_era_summary::<D>(self.domain.state())
+                let raw_eras = load_era_summary_with_protocols::<D>(self.domain.state())
                     .map_err(|e| Error::server(format!("failed to load era summary: {}", e)))?;
 
-                let eras: Vec<DolosEraSummary> = chain_summary.iter_all().cloned().collect();
-
+                let tip = self.tip_cursor()?.slot();
                 let genesis = self.domain.genesis();
+
+                let eras: Vec<DolosEraSummary> = pad_era_history(&raw_eras, tip, &genesis)
+                    .map_err(|e| Error::server(format!("failed to pad era summary: {}", e)))?;
+
                 build_era_history_response(&eras, &genesis)?
             }
             Ok(q16::Request::LedgerQuery(q16::LedgerQuery::HardForkQuery(
