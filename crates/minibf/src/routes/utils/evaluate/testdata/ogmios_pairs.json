@@ -1,0 +1,637 @@
+[
+ {
+  "name": "spend_success",
+  "network": "mainnet",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "result": [
+    {
+     "validator": {
+      "index": 0,
+      "purpose": "spend"
+     },
+     "budget": {
+      "memory": 1765011,
+      "cpu": 384793937
+     }
+    }
+   ],
+   "id": "65861ceb-0a42-43a0-a03f-c48a10efe91c"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationResult": {
+     "spend:0": {
+      "memory": 1765011,
+      "steps": 384793937
+     }
+    }
+   },
+   "reflection": {
+    "id": "581448d2-2514-4d18-8c36-5d1b1632a2d3"
+   }
+  }
+ },
+ {
+  "name": "spend_missing_input_context",
+  "network": "mainnet",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "error": {
+    "code": 3010,
+    "message": "Some scripts of the transactions terminated with error(s).",
+    "data": [
+     {
+      "validator": {
+       "index": 0,
+       "purpose": "spend"
+      },
+      "error": {
+       "code": 3004,
+       "message": "Unable to create the evaluation context from the given transaction.",
+       "data": {
+        "reason": "Unknown transaction input (missing from UTxO set): ec6eb047f74e5412c116a819cdd43f1c27a29f2871241453019637b850461b43#0"
+       }
+      }
+     }
+    ]
+   },
+   "id": "4e10f81f-ce56-472d-b1e1-95105c8f25ae"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationFailure": {
+     "ScriptFailures": {
+      "spend:0": {
+       "CannotCreateEvaluationContext": {
+        "reason": "Unknown transaction input (missing from UTxO set): ec6eb047f74e5412c116a819cdd43f1c27a29f2871241453019637b850461b43#0"
+       }
+      }
+     }
+    }
+   },
+   "reflection": {
+    "id": "05ed9773-a649-4886-b460-13c49ebc3af7"
+   }
+  }
+ },
+ {
+  "name": "spend_unknown_input_extraneous",
+  "network": "mainnet",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "error": {
+    "code": 3010,
+    "message": "Some scripts of the transactions terminated with error(s).",
+    "data": [
+     {
+      "validator": {
+       "index": 0,
+       "purpose": "spend"
+      },
+      "error": {
+       "code": 3110,
+       "message": "Extraneous (non-required) redeemers found in the transaction. There are some redeemers that aren't pointing to any script. This could be because you've left some orphan redeemer behind, because they are pointing at the wrong thing or because you forgot to include their associated validator. Either way, the field 'data.extraneousRedeemers' lists the different orphan redeemer pointers.",
+       "data": {
+        "extraneousRedeemers": [
+         {
+          "index": 0,
+          "purpose": "spend"
+         }
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "id": "9cde3c65-f767-463a-91c0-710810317bb2"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationFailure": {
+     "ScriptFailures": {
+      "spend:0": {
+       "extraRedeemers": [
+        "spend:0"
+       ]
+      }
+     }
+    }
+   },
+   "reflection": {
+    "id": "bcca548c-20e8-41f2-a3e8-3241290aa8ea"
+   }
+  }
+ },
+ {
+  "name": "withdraw_key_extraneous",
+  "network": "mainnet",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "error": {
+    "code": 3010,
+    "message": "Some scripts of the transactions terminated with error(s).",
+    "data": [
+     {
+      "validator": {
+       "index": 0,
+       "purpose": "withdraw"
+      },
+      "error": {
+       "code": 3110,
+       "message": "Extraneous (non-required) redeemers found in the transaction. There are some redeemers that aren't pointing to any script. This could be because you've left some orphan redeemer behind, because they are pointing at the wrong thing or because you forgot to include their associated validator. Either way, the field 'data.extraneousRedeemers' lists the different orphan redeemer pointers.",
+       "data": {
+        "extraneousRedeemers": [
+         {
+          "index": 0,
+          "purpose": "withdraw"
+         }
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "id": "04844de9-7801-4434-8ef3-d0e0e6e07789"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationFailure": {
+     "ScriptFailures": {
+      "withdraw:0": {
+       "extraRedeemers": [
+        "withdraw:0"
+       ]
+      }
+     }
+    }
+   },
+   "reflection": {
+    "id": "5ebf6370-8eb0-49f4-8c28-3ebced0cdf43"
+   }
+  }
+ },
+ {
+  "name": "withdraw_script_missing",
+  "network": "mainnet",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "error": {
+    "code": 3010,
+    "message": "Some scripts of the transactions terminated with error(s).",
+    "data": [
+     {
+      "validator": {
+       "index": 0,
+       "purpose": "withdraw"
+      },
+      "error": {
+       "code": 3011,
+       "message": "An associated script witness is missing. Indeed, any script used in a transaction (when spending, minting, withdrawing or publishing certificates) must be provided in full with the transaction. Scripts must therefore be added either to the witness set or provided as a reference inputs should you use Plutus V2+ and a format from Babbage and beyond.",
+       "data": {
+        "missingScripts": [
+         {
+          "index": 0,
+          "purpose": "withdraw"
+         }
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "id": "060509b5-62be-4366-bc77-d9a258b6ef22"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationFailure": {
+     "ScriptFailures": {
+      "withdraw:0": {
+       "missingRequiredScripts": {
+        "missing": [
+         "withdrawal:0"
+        ]
+       }
+      }
+     }
+    }
+   },
+   "reflection": {
+    "id": "0ec4c251-4e3b-4378-bd45-5744f81246fd"
+   }
+  }
+ },
+ {
+  "name": "publish_key_extraneous",
+  "network": "mainnet",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "error": {
+    "code": 3010,
+    "message": "Some scripts of the transactions terminated with error(s).",
+    "data": [
+     {
+      "validator": {
+       "index": 0,
+       "purpose": "publish"
+      },
+      "error": {
+       "code": 3110,
+       "message": "Extraneous (non-required) redeemers found in the transaction. There are some redeemers that aren't pointing to any script. This could be because you've left some orphan redeemer behind, because they are pointing at the wrong thing or because you forgot to include their associated validator. Either way, the field 'data.extraneousRedeemers' lists the different orphan redeemer pointers.",
+       "data": {
+        "extraneousRedeemers": [
+         {
+          "index": 0,
+          "purpose": "publish"
+         }
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "id": "03d894d2-11ca-4826-9632-23bf4024cf1b"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationFailure": {
+     "ScriptFailures": {
+      "publish:0": {
+       "extraRedeemers": [
+        "publish:0"
+       ]
+      }
+     }
+    }
+   },
+   "reflection": {
+    "id": "7627e67d-d9c0-44ed-bda1-e16362cbe1d6"
+   }
+  }
+ },
+ {
+  "name": "publish_script_missing",
+  "network": "mainnet",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "error": {
+    "code": 3010,
+    "message": "Some scripts of the transactions terminated with error(s).",
+    "data": [
+     {
+      "validator": {
+       "index": 0,
+       "purpose": "publish"
+      },
+      "error": {
+       "code": 3011,
+       "message": "An associated script witness is missing. Indeed, any script used in a transaction (when spending, minting, withdrawing or publishing certificates) must be provided in full with the transaction. Scripts must therefore be added either to the witness set or provided as a reference inputs should you use Plutus V2+ and a format from Babbage and beyond.",
+       "data": {
+        "missingScripts": [
+         {
+          "index": 0,
+          "purpose": "publish"
+         }
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "id": "f1567fd3-1f2d-4cd2-8599-abc73f2b7907"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationFailure": {
+     "ScriptFailures": {
+      "publish:0": {
+       "missingRequiredScripts": {
+        "missing": [
+         "certificate:0"
+        ]
+       }
+      }
+     }
+    }
+   },
+   "reflection": {
+    "id": "ae736f32-de41-4f46-b775-6f3c2a2c5c36"
+   }
+  }
+ },
+ {
+  "name": "mint_success",
+  "network": "preprod",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "result": [
+    {
+     "validator": {
+      "index": 0,
+      "purpose": "mint"
+     },
+     "budget": {
+      "memory": 585506,
+      "cpu": 147083646
+     }
+    }
+   ],
+   "id": "d267108d-47a8-4ab9-9e5d-5ceb02bff27c"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationResult": {
+     "mint:0": {
+      "memory": 585506,
+      "steps": 147083646
+     }
+    }
+   },
+   "reflection": {
+    "id": "a11ffd94-2906-4720-a5db-12d3ff4967b5"
+   }
+  }
+ },
+ {
+  "name": "multi_purpose_success",
+  "network": "preprod",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "result": [
+    {
+     "validator": {
+      "index": 0,
+      "purpose": "spend"
+     },
+     "budget": {
+      "memory": 8994,
+      "cpu": 3193105
+     }
+    },
+    {
+     "validator": {
+      "index": 0,
+      "purpose": "mint"
+     },
+     "budget": {
+      "memory": 713992,
+      "cpu": 180490034
+     }
+    }
+   ],
+   "id": "1652a404-d0e6-45b4-ab0c-1306db1f54d2"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationResult": {
+     "spend:0": {
+      "memory": 8994,
+      "steps": 3193105
+     },
+     "mint:0": {
+      "memory": 713992,
+      "steps": 180490034
+     }
+    }
+   },
+   "reflection": {
+    "id": "7cbb1c11-6be5-4d61-9890-daadf5c6f603"
+   }
+  }
+ },
+ {
+  "name": "no_script",
+  "network": "preprod",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "result": [],
+   "id": "7d44da39-611c-45f0-9352-d1ed8f97fb0a"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationResult": {}
+   },
+   "reflection": {
+    "id": "e7f0eb76-2be6-4e77-bd96-22bfd16042a3"
+   }
+  }
+ },
+ {
+  "name": "incompatible_era",
+  "network": "preprod",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "error": {
+    "code": 3000,
+    "message": "Trying to evaluate a transaction from an old era (prior to Alonzo).",
+    "data": {
+     "incompatibleEra": "mary"
+    }
+   },
+   "id": "19f8c386-e485-4caf-9965-c25cbf1a9b47"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationFailure": {
+     "IncompatibleEra": "Mary"
+    }
+   },
+   "reflection": {
+    "id": "b41ba6a8-00d2-468e-af98-58a8f5a67eb5"
+   }
+  }
+ },
+ {
+  "name": "deserialisation_fault",
+  "network": "preprod",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "error": {
+    "code": -32602,
+    "message": "Invalid transaction; It looks like the given transaction wasn't well-formed. Note that I try to decode the transaction in every possible era and it was malformed in ALL eras. Yet, I can't pinpoint the exact issue for I do not know in which era / format you intended the transaction to be. The 'data' field, therefore, contains errors for each era.",
+    "data": {
+     "babbage": "invalid or incomplete value of type 'Transaction': Size mismatch when decoding Object / Array. Expected 0, but found 4.",
+     "conway": "invalid or incomplete value of type 'Transaction': Size mismatch when decoding Object / Array. Expected 0, but found 4.",
+     "alonzo": "invalid or incomplete value of type 'Transaction': Size mismatch when decoding Object / Array. Expected 0, but found 4.",
+     "mary": "invalid or incomplete value of type 'Transaction': Size mismatch when decoding Object / Array. Expected 0, but found 3.",
+     "allegra": "invalid or incomplete value of type 'Transaction': Size mismatch when decoding Object / Array. Expected 0, but found 3.",
+     "shelley": "invalid or incomplete value of type 'Transaction': Size mismatch when decoding Object / Array. Expected 0, but found 3."
+    }
+   },
+   "id": "84fb420a-643a-4b70-af83-25fa7ef6ae22"
+  },
+  "v5": {
+   "type": "jsonwsp/fault",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "fault": {
+    "code": "client",
+    "string": "Invalid request: Deserialisation failure while decoding serialised transaction. CBOR failed with error: DeserialiseFailure 0 \"expected tag\"."
+   },
+   "reflection": {
+    "id": "ccbcfe3d-e21d-4c1f-85a1-0c95df052c9c"
+   }
+  }
+ },
+ {
+  "name": "odd_length_hex_fault",
+  "network": "preprod",
+  "v6": {
+   "jsonrpc": "2.0",
+   "error": {
+    "code": -32600,
+    "message": "Invalid request: failed to decode base16-encoded payload."
+   },
+   "id": "04f7cac4-a1b5-44b4-8ba8-55fd2214cfd3"
+  },
+  "v5": {
+   "type": "jsonwsp/fault",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "fault": {
+    "code": "client",
+    "string": "Invalid request: failed to decode payload from base64 or base16."
+   },
+   "reflection": {
+    "id": "6fbcfd23-9abe-4950-bc7f-3533f842f06a"
+   }
+  }
+ },
+ {
+  "name": "hello_success",
+  "network": "preview",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "result": [
+    {
+     "validator": {
+      "index": 0,
+      "purpose": "spend"
+     },
+     "budget": {
+      "memory": 15694,
+      "cpu": 3776164
+     }
+    }
+   ],
+   "id": "fde152da-bf39-4f52-9bb7-236158a16b96"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationResult": {
+     "spend:0": {
+      "memory": 15694,
+      "steps": 3776164
+     }
+    }
+   },
+   "reflection": {
+    "id": "8e933ae0-56cf-48c0-bbfa-9375356b3a77"
+   }
+  }
+ },
+ {
+  "name": "hello_validation_failure",
+  "network": "preview",
+  "v6": {
+   "jsonrpc": "2.0",
+   "method": "evaluateTransaction",
+   "error": {
+    "code": 3010,
+    "message": "Some scripts of the transactions terminated with error(s).",
+    "data": [
+     {
+      "validator": {
+       "index": 0,
+       "purpose": "spend"
+      },
+      "error": {
+       "code": 3012,
+       "message": "Some of the scripts failed to evaluate to a positive outcome. The field 'data.validationError' informs about the nature of the error, and 'data.traces' lists all the execution traces collected during the script execution.",
+       "data": {
+        "validationError": "An error has occurred:\nThe machine terminated because of an error, either from a built-in function or from an explicit use of 'error'.\nCaused by: (error)",
+        "traces": []
+       }
+      }
+     }
+    ]
+   },
+   "id": "5c5667cf-416d-4052-b4ed-16073bd139c7"
+  },
+  "v5": {
+   "type": "jsonwsp/response",
+   "version": "1.0",
+   "servicename": "ogmios",
+   "methodname": "EvaluateTx",
+   "result": {
+    "EvaluationFailure": {
+     "ScriptFailures": {}
+    }
+   },
+   "reflection": {
+    "id": "3948c752-55b1-4573-a447-b4c8e7f7471c"
+   }
+  }
+ }
+]

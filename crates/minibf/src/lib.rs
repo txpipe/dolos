@@ -460,6 +460,14 @@ where
             "/utils/addresses/xpub/{xpub}/{role}/{index}",
             get(routes::utils::xpub_address::<D>),
         )
+        .route(
+            "/utils/txs/evaluate",
+            post(routes::utils::txs_evaluate::<D>).fallback(routes::invalid_path),
+        )
+        .route(
+            "/utils/txs/evaluate/utxos",
+            post(routes::utils::txs_evaluate_utxos::<D>).fallback(routes::invalid_path),
+        )
         .route("/blocks/latest", get(routes::blocks::latest::<D>))
         .route("/blocks/latest/txs", get(routes::blocks::latest_txs::<D>))
         .route(

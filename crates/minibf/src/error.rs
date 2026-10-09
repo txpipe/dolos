@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use serde::Serialize;
+use std::borrow::Cow;
 
 use crate::pagination::PaginationError;
 
@@ -32,21 +33,33 @@ pub enum Error {
     /// The path matched no route. Blockfrost answers those with a global
     /// `400`, not a `404`.
     InvalidPath,
+    /// The request has no Content-Type header.
+    MissingContentType,
+    /// The Content-Type header names a media type other than this one.
+    InvalidContentType(&'static str),
+    /// The transaction text is neither base16 nor base64.
+    InvalidTxPayload,
+    /// The `version` query parameter is not a 32-bit integer.
+    InvalidOgmiosVersion,
+    /// The evaluation request body is malformed, for this reason.
+    InvalidEvaluationRequest(String),
+    /// The configuration has no Ogmios endpoint for transaction evaluation.
+    EvaluationNotConfigured,
 }
 
 #[derive(Serialize)]
 struct ErrorBody {
     status_code: u16,
     error: &'static str,
-    message: &'static str,
+    message: Cow<'static, str>,
 }
 
 impl ErrorBody {
-    fn new(status_code: u16, error: &'static str, message: &'static str) -> Self {
+    fn new(status_code: u16, error: &'static str, message: impl Into<Cow<'static, str>>) -> Self {
         Self {
             status_code,
             error,
-            message,
+            message: message.into(),
         }
     }
 }
@@ -202,6 +215,58 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "Invalid path.",
+                )),
+            )
+                .into_response(),
+            // Blockfrost answers a request without Content-Type with this
+            // exact body.
+            Error::MissingContentType => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(ErrorBody::new(
+                    415,
+                    "Unsupported Media Type",
+                    "Unsupported Media Type: undefined",
+                )),
+            )
+                .into_response(),
+            Error::InvalidContentType(expected) => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    format!("Content-Type must be {expected}"),
+                )),
+            )
+                .into_response(),
+            Error::InvalidTxPayload => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Invalid request: failed to decode payload from base64 or base16.",
+                )),
+            )
+                .into_response(),
+            Error::InvalidOgmiosVersion => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Invalid version. Use an integer: 6 selects the Ogmios v6 format, any other value the v5 format.",
+                )),
+            )
+                .into_response(),
+            Error::InvalidEvaluationRequest(message) => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(400, "Bad Request", message)),
+            )
+                .into_response(),
+            Error::EvaluationNotConfigured => (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(ErrorBody::new(
+                    501,
+                    "Not Implemented",
+                    "Transaction evaluation needs an Ogmios endpoint. Set serve.minibf.ogmios_url.",
                 )),
             )
                 .into_response(),

@@ -308,12 +308,14 @@ The `serve.minibf` section controls the options for the HTTP endpoint that hosts
 | token_registry_url | string  | "https://token-registry.io"     |
 | url                | string  | "https://minibf.local"          |
 | max_scan_items     | integer | 3000                             |
+| ogmios_url         | string  | "http://localhost:1337"         |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin (defaults to `true`).
 - `token_registry_url`: optional token registry base URL used for off-chain asset metadata.
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
+- `ogmios_url`: optional Ogmios v6 HTTP endpoint that evaluates transactions for `/utils/txs/evaluate` and `/utils/txs/evaluate/utxos`. Without it, those endpoints answer `501`.
 
 ## `serve.minikupo` section
 
