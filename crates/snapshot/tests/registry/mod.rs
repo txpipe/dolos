@@ -219,8 +219,6 @@ pub fn registry() -> Vec<Entry> {
             GovState,
             canaries::gov_state,
             // Revision 3 appends each snapshot DRep's newest deregistration.
-            // Revision 4 appends `committee_auth_archive`, the authorization
-            // histories that the EPOCH rule removed from `committee_auths`.
             &[
                 Pinned {
                     rev: 1,
@@ -233,11 +231,7 @@ pub fn registry() -> Vec<Entry> {
                 Pinned {
                     rev: 3,
                     hex: include_str!("goldens/gov.rev3.hex"),
-                },
-                Pinned {
-                    rev: 4,
-                    hex: include_str!("goldens/gov.rev4.hex"),
-                },
+                }
             ]
         ),
         entity_entry!(

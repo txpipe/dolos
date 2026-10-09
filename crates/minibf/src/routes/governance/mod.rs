@@ -722,6 +722,24 @@ impl<'a, D: Domain> ProposalTypes<'a, D> {
     }
 }
 
+/// This type selects the committee voters that a request lists.
+enum CommitteeVoters {
+    /// This variant selects every committee hot credential that voted.
+    All,
+
+    /// This variant selects the given hot credentials only.
+    Hot(BTreeSet<Voter>),
+}
+
+impl CommitteeVoters {
+    fn contains(&self, voter: &Voter) -> bool {
+        match self {
+            Self::All => true,
+            Self::Hot(voters) => voters.contains(voter),
+        }
+    }
+}
+
 /// This function returns the committee votes of `voters` in one block, in
 /// Blockfrost order: the position of the transaction first, then the ballot
 /// map of the transaction. The map sorts the ballots by voter and the votes
@@ -734,7 +752,7 @@ impl<'a, D: Domain> ProposalTypes<'a, D> {
 /// offsets are the same on every page.
 fn committee_casts_in_block<D: Domain>(
     block: &MultiEraBlock,
-    voters: &BTreeSet<Voter>,
+    voters: &CommitteeVoters,
     types: &mut ProposalTypes<'_, D>,
 ) -> Result<Vec<CommitteeCast>, StatusCode> {
     let mut out = Vec::new();
@@ -753,15 +771,15 @@ fn committee_casts_in_block<D: Domain>(
         };
 
         for (voter, ballot) in procedures {
-            if !voters.contains(voter) {
-                continue;
-            }
-
             let cred = match voter {
                 Voter::ConstitutionalCommitteeKey(hash) => StakeCredential::AddrKeyhash(*hash),
                 Voter::ConstitutionalCommitteeScript(hash) => StakeCredential::ScriptHash(*hash),
                 _ => continue,
             };
+
+            if !voters.contains(voter) {
+                continue;
+            }
 
             for (action, procedure) in ballot {
                 let Some(governance_type) =
@@ -810,41 +828,57 @@ fn merge_slots(
         .dedup_by(|a, b| matches!((a, b), (Ok(a), Ok(b)) if a == b))
 }
 
-/// This function reads the vote blocks of the committee members `voters`
-/// from the archive, in the requested order, and returns the votes on the
-/// requested page. The votes are in chain order, or in the opposite order for
-/// `Order::Desc`.
+/// This function reads the committee vote blocks from the archive, in the
+/// requested order, and returns the votes of `voters` on the requested page.
+/// The votes are in chain order, or in the opposite order for `Order::Desc`.
 ///
-/// The `voter_votes` archive dimension gives the blocks that hold votes of
-/// one voter. The function merges the lanes of all voters and reads each
-/// block once, until the page is full, and at most `budget` blocks. Votes are
-/// listed up to `tip`, the state cursor.
+/// For `CommitteeVoters::All`, the `committee_votes` archive dimension,
+/// which has one key, gives the blocks that hold a committee vote. For
+/// `CommitteeVoters::Hot`, the `voter_votes` dimension gives the blocks of
+/// each hot credential, and the function merges those lanes. In both cases,
+/// the function reads each block one time, until the page is full, and at
+/// most `budget` blocks. The function lists the votes up to `tip`, the state
+/// cursor.
 ///
 /// A block that the archive no longer holds leaves the list, and the votes
 /// after it move up. The other history endpoints do the same under
 /// `sync.max_history`.
 fn committee_vote_rows<D: Domain>(
     domain: &D,
-    voters: &BTreeSet<StakeCredential>,
+    voters: &CommitteeVoters,
     tip: BlockSlot,
     pagination: &Pagination,
     budget: usize,
 ) -> Result<Vec<CommitteeCast>, Error> {
     let archive = domain.archive();
     let descending = matches!(pagination.order, Order::Desc);
-    let voters: BTreeSet<Voter> = voters.iter().map(committee_voter).collect();
 
     let mut lanes: Vec<Box<dyn Iterator<Item = Result<BlockSlot, ArchiveError>>>> = Vec::new();
 
-    for voter in &voters {
-        let slots = archive
-            .slots_by_voter_votes(&pallas_extras::voter_id_bytes(voter), 0, tip)
-            .map_err(log_and_500("failed to read voter votes index"))?;
-
+    let mut push_lane = |slots: <D::Archive as dolos_core::ArchiveStore>::SlotIter| {
         if descending {
             lanes.push(Box::new(slots.rev()));
         } else {
             lanes.push(Box::new(slots));
+        }
+    };
+
+    match voters {
+        CommitteeVoters::All => {
+            let slots = archive
+                .slots_by_committee_votes(0, tip)
+                .map_err(log_and_500("The read of the committee votes index failed."))?;
+
+            push_lane(slots);
+        }
+        CommitteeVoters::Hot(hot) => {
+            for voter in hot {
+                let slots = archive
+                    .slots_by_voter_votes(&pallas_extras::voter_id_bytes(voter), 0, tip)
+                    .map_err(log_and_500("failed to read voter votes index"))?;
+
+                push_lane(slots);
+            }
         }
     }
 
@@ -853,7 +887,7 @@ fn committee_vote_rows<D: Domain>(
     let mut types = ProposalTypes::new(domain);
 
     let rows = collect_block_rows(blocks, descending, pagination.to(), budget, |block| {
-        committee_casts_in_block(block, &voters, &mut types)
+        committee_casts_in_block(block, voters, &mut types)
     })?;
 
     Ok(rows
@@ -863,19 +897,89 @@ fn committee_vote_rows<D: Domain>(
         .collect())
 }
 
+/// This function returns the hot credentials that `cold` authorized, past or
+/// current.
+///
+/// The `committee_certs` archive dimension gives the blocks that hold the
+/// committee certificates of the cold credential. The function reads at most
+/// `budget` of those blocks, and collects the hot credential of each
+/// authorization in a valid transaction. A resignation adds no hot
+/// credential.
+///
+/// If the archive removed a block under `sync.max_history`, the
+/// authorizations of that block are not in the set. For a sitting member,
+/// the governance singleton still has the authorization history. Thus, the
+/// function also adds the hot credentials of that history.
+fn committee_hot_credentials<D: Domain>(
+    domain: &D,
+    cold: &StakeCredential,
+    tip: BlockSlot,
+    budget: usize,
+) -> Result<BTreeSet<StakeCredential>, Error> {
+    let archive = domain.archive();
+
+    let slots = archive
+        .slots_by_committee_certs(&pallas_extras::committee_cold_id_bytes(cold), 0, tip)
+        .map_err(log_and_500("The read of the committee certs index failed."))?;
+
+    let blocks = slots.map(|slot| archive.get_block_by_slot(&slot?));
+
+    let rows = collect_block_rows(blocks, false, usize::MAX, budget, |block| {
+        let mut out = Vec::new();
+
+        for tx in block.txs() {
+            // The ledger ignores the certificates of a phase-2-invalid
+            // transaction.
+            if !tx.is_valid() {
+                continue;
+            }
+
+            for cert in tx.certs() {
+                let Some(auth) = pallas_extras::cert_as_committee_auth(&cert) else {
+                    continue;
+                };
+
+                // A block with a tag for this cold credential can also hold
+                // the certificates of other cold credentials.
+                if auth.cold == *cold {
+                    out.push(auth.hot);
+                }
+            }
+        }
+
+        Ok(out)
+    })?;
+
+    let mut hot: BTreeSet<StakeCredential> = rows.into_iter().collect();
+
+    let gov = domain
+        .state()
+        .read_entity_typed::<GovState>(GovState::NS, &GovState::singleton_key())
+        .map_err(log_and_500("The read of the governance state failed."))?;
+
+    if let Some(history) = gov.as_ref().and_then(|gov| gov.committee_auths.get(cold)) {
+        hot.extend(history.iter().filter_map(|(_, auth)| match auth {
+            CommitteeAuthorization::HotCredential(hot) => Some(hot.clone()),
+            CommitteeAuthorization::Resigned(_) => None,
+        }));
+    }
+
+    Ok(hot)
+}
+
 /// This function lists the votes of `voters` on the requested page.
 ///
 /// `max_scan_items` limits both the page depth and the number of blocks that
 /// one request reads.
 async fn query_committee_votes<D>(
     domain: Facade<D>,
-    voters: BTreeSet<StakeCredential>,
+    voters: CommitteeVoters,
     pagination: Pagination,
 ) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    if voters.is_empty() {
+    if matches!(&voters, CommitteeVoters::Hot(hot) if hot.is_empty()) {
         return Ok(Json(Vec::new()));
     }
 
@@ -924,42 +1028,35 @@ where
     Ok(Json(page))
 }
 
-/// `GET /governance/committee/votes` lists the votes of every hot credential
-/// that a committee member authorized, past or current.
+/// `GET /governance/committee/votes` lists every constitutional-committee
+/// vote on the chain.
 ///
-/// The governance singleton keeps the authorization history of each cold
-/// credential, including the generations that left the effective committee
-/// state. The listing is the merge of the per-credential listings of all
-/// those hot credentials.
+/// The ledger rejects a vote of a hot credential that no committee member
+/// authorized. Thus, every committee vote in a valid transaction is the vote
+/// of an authorized hot credential, past or current. The endpoint does not
+/// do an authorization lookup. The `committee_votes` archive dimension,
+/// which has one key, gives the blocks to read.
 pub async fn committee_votes<D>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<GovState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
-    let voters = domain
-        .read_cardano_entity::<GovState>(GovState::singleton_key())?
-        .map(|gov| {
-            gov.committee_auths
-                .keys()
-                .chain(gov.committee_auth_archive.keys())
-                .flat_map(|cold| gov.committee_hot_credentials(cold))
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-
-    query_committee_votes(domain, voters, pagination).await
+    query_committee_votes(domain, CommitteeVoters::All, pagination).await
 }
 
 /// `GET /governance/committee/{cc_id}/votes` accepts a hot or cold CIP-129
 /// credential. A cold credential selects every hot credential that it
-/// authorized.
+/// authorized, past or current.
+///
+/// For a cold credential, the endpoint reads the certificate blocks of the
+/// credential from the `committee_certs` archive dimension before it reads
+/// the vote blocks. `max_scan_items` limits each of the two reads. Thus, one
+/// request reads at most two times that number of blocks.
 pub async fn committee_votes_by_id<D>(
     Path(cc_id): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -967,24 +1064,28 @@ pub async fn committee_votes_by_id<D>(
 ) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<GovState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
     let (role, credential) = parse_committee_id(&cc_id).map_err(|_| Error::InvalidCommitteeId)?;
 
-    let voters = match role {
+    let hot = match role {
         CommitteeCredentialRole::Hot => BTreeSet::from([credential]),
-        CommitteeCredentialRole::Cold => domain
-            .read_cardano_entity::<GovState>(GovState::singleton_key())?
-            .into_iter()
-            .flat_map(|gov| {
-                gov.committee_hot_credentials(&credential)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .collect(),
+        CommitteeCredentialRole::Cold => {
+            let tip = domain.get_tip_slot()?;
+            let budget = domain.config.max_scan_items() as usize;
+
+            domain
+                .query()
+                .run_blocking(move |domain| {
+                    Ok(committee_hot_credentials(&domain, &credential, tip, budget))
+                })
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??
+        }
     };
+
+    let voters = CommitteeVoters::Hot(hot.iter().map(committee_voter).collect());
 
     query_committee_votes(domain, voters, pagination).await
 }
@@ -2221,7 +2322,7 @@ mod tests {
     use dolos_cardano::model::{drep_to_entity_key, DRepDelegation, EpochValue, GovPurpose, Stake};
     use dolos_core::StateWriter as _;
     use dolos_testing::{
-        synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote},
+        synthetic::{BlockCerts, SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote},
         toy_domain::ToyDomain,
     };
     use itertools::Itertools;
@@ -2229,8 +2330,8 @@ mod tests {
         codec::{minicbor, utils::Bytes},
         ledger::primitives::{
             conway::{
-                CostModels, DRepVotingThresholds, ExUnitPrices, GovAction, GovActionId,
-                PoolVotingThresholds, ProtocolParamUpdate,
+                Certificate, CostModels, DRepVotingThresholds, ExUnitPrices, GovAction,
+                GovActionId, PoolVotingThresholds, ProtocolParamUpdate,
             },
             ExUnits, RationalNumber,
         },
@@ -3050,10 +3151,9 @@ mod tests {
     }
 
     /// This function writes a governance singleton in which the cold key
-    /// `[31; 28]` authorized the hot script first and the hot key later. The
-    /// hot script generation left the effective committee state, so it is in
-    /// the archive. The all-members listing reads the hot credentials from
-    /// this singleton.
+    /// `[31; 28]` authorized the hot script and then the hot key. The cold
+    /// listing reads the hot credentials of a sitting member from this
+    /// singleton and from the certificate blocks.
     fn seed_committee_votes_gov(domain: &ToyDomain) {
         seed_gov(
             domain,
@@ -3061,13 +3161,10 @@ mod tests {
                 committee_auths: BTreeMap::from([(
                     cc_cold_key(31),
                     vec![
+                        (5, CommitteeAuthorization::HotCredential(cc_hot_script())),
                         (15, CommitteeAuthorization::HotCredential(cc_hot_key())),
                         (25, CommitteeAuthorization::Resigned(None)),
                     ],
-                )]),
-                committee_auth_archive: BTreeMap::from([(
-                    cc_cold_key(31),
-                    vec![(5, CommitteeAuthorization::HotCredential(cc_hot_script()))],
                 )]),
                 active_since: Some(0),
                 ..Default::default()
@@ -3077,6 +3174,36 @@ mod tests {
 
     fn committee_votes_app(cfg: SyntheticBlockConfig) -> TestApp {
         TestApp::new_with_cfg_and_setup(cfg, |domain, _| seed_committee_votes_gov(domain))
+    }
+
+    /// This function adds committee certificates to the first transaction of
+    /// block 0 of `cfg`. The cold key `[31; 28]` authorizes the hot script
+    /// and then the hot key. The cold key `[33; 28]` resigns.
+    fn with_committee_certs(mut cfg: SyntheticBlockConfig) -> SyntheticBlockConfig {
+        let mut certs_by_block: Vec<BlockCerts> = vec![vec![]; cfg.block_count];
+        certs_by_block[0] = vec![vec![
+            Certificate::AuthCommitteeHot(cc_cold_key(31), cc_hot_script()),
+            Certificate::AuthCommitteeHot(cc_cold_key(31), cc_hot_key()),
+            Certificate::ResignCommitteeCold(cc_cold_key(33), None),
+        ]];
+        cfg.extra_certs_by_block = certs_by_block;
+        cfg
+    }
+
+    /// This function builds an app whose governance singleton has no
+    /// authorization history. This is the state after the EPOCH rule removed
+    /// every cold credential from the committee. The cold listing must then
+    /// find the hot credentials through the `committee_certs` index.
+    fn committee_certs_app(cfg: SyntheticBlockConfig) -> TestApp {
+        TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
+            seed_gov(
+                domain,
+                GovState {
+                    active_since: Some(0),
+                    ..Default::default()
+                },
+            )
+        })
     }
 
     /// Transaction 0 in block 0 proposes two actions. Transaction 1 proposes
@@ -3276,34 +3403,38 @@ mod tests {
         }
     }
 
-    /// The all-members listing is the merge of the per-credential listings
-    /// of the hot credentials in the governance singleton. A hot credential
-    /// that no committee member authorized is not in the listing, although
-    /// the chain holds its votes.
+    /// The all-members listing holds every committee vote on the chain. It
+    /// does not read the governance singleton. The listing includes a vote
+    /// of a hot credential that the singleton does not know. The listing
+    /// does not include the votes of DReps and pools.
     #[tokio::test]
-    async fn governance_committee_votes_list_authorized_credentials_only() {
-        let app = TestApp::new_with_cfg_and_setup(committee_votes_config(), |domain, _| {
-            seed_gov(
-                domain,
-                GovState {
-                    committee_auths: BTreeMap::from([(
-                        cc_cold_key(31),
-                        vec![(15, CommitteeAuthorization::HotCredential(cc_hot_script()))],
-                    )]),
-                    active_since: Some(0),
-                    ..Default::default()
-                },
-            );
-        });
+    async fn governance_committee_votes_list_every_committee_vote() {
+        let mut cfg = committee_votes_config();
+        cfg.votes_by_block[2].push(vec![
+            synthetic_vote(Voter::DRepKey(Hash::from([7u8; 28])), 0, 0, 0, Vote::Yes),
+            synthetic_vote(
+                Voter::StakePoolKey(Hash::from([8u8; 28])),
+                0,
+                0,
+                0,
+                Vote::Yes,
+            ),
+        ]);
+
+        let app = TestApp::new_with_cfg(cfg);
+        let hot_key = bech32_committee_hot(&cc_hot_key()).unwrap();
         let hot_script = bech32_committee_hot(&cc_hot_script()).unwrap();
 
         let rows = get_committee_votes(&app, "/governance/committee/votes").await;
 
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].voter_hot_id, hot_script);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(
+            rows.iter().map(|row| &row.voter_hot_id).collect_vec(),
+            [&hot_script, &hot_key, &hot_key, &hot_key, &hot_key]
+        );
 
-        // A singleton without authorizations gives an empty listing.
-        let app = TestApp::new_with_cfg(committee_votes_config());
+        // A chain without committee votes gives an empty listing.
+        let app = TestApp::new_with_cfg(drep_votes_config());
         assert!(get_committee_votes(&app, "/governance/committee/votes")
             .await
             .is_empty());
@@ -3365,12 +3496,14 @@ mod tests {
         );
     }
 
-    /// A cold credential selects every hot credential that it authorized. A
-    /// rotation therefore returns the votes of both hot keys. A resignation
-    /// adds no hot credential.
+    /// A cold credential selects every hot credential that it authorized on
+    /// the chain. As a result, a rotation returns the votes of both hot
+    /// keys. The lookup reads the certificates through the `committee_certs`
+    /// index. The lookup does not use the governance singleton, which has no
+    /// authorization in this test.
     #[tokio::test]
-    async fn governance_committee_votes_by_cold_id_follows_authorizations() {
-        let app = committee_votes_app(committee_votes_config());
+    async fn governance_committee_votes_by_cold_id_follows_authorization_certs() {
+        let app = committee_certs_app(with_committee_certs(committee_votes_config()));
 
         let cold_id = bech32_committee_cold(&cc_cold_key(31)).unwrap();
         let rows =
@@ -3386,16 +3519,97 @@ mod tests {
         );
     }
 
+    /// Under `sync.max_history`, the archive can remove the certificate
+    /// blocks of a past member. The authorization history of a sitting
+    /// member is still in the governance singleton. Thus, the cold lookup
+    /// also reads that history.
     #[tokio::test]
-    async fn governance_committee_votes_by_unauthorized_cold_id_is_empty() {
+    async fn governance_committee_votes_by_cold_id_follows_singleton_authorizations() {
         let app = committee_votes_app(committee_votes_config());
-        let cold_id = bech32_committee_cold(&cc_cold_key(32)).unwrap();
 
+        let cold_id = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        let rows =
+            get_committee_votes(&app, &format!("/governance/committee/{cold_id}/votes")).await;
+        let all = get_committee_votes(&app, "/governance/committee/votes").await;
+
+        assert_eq!(rows.len(), 5);
+        assert_eq!(
+            rows.iter().map(committee_row_id).collect_vec(),
+            all.iter().map(committee_row_id).collect_vec()
+        );
+    }
+
+    /// A cold credential without an authorization has no hot credential. A
+    /// resignation adds no hot credential. An authorization in a
+    /// phase-2-invalid transaction adds no hot credential, although its
+    /// block has a tag for the cold credential.
+    #[tokio::test]
+    async fn governance_committee_votes_by_cold_id_without_authorization_is_empty() {
+        let app = committee_certs_app(with_committee_certs(committee_votes_config()));
+
+        for cold in [cc_cold_key(32), cc_cold_key(33)] {
+            let cold_id = bech32_committee_cold(&cold).unwrap();
+            assert!(
+                get_committee_votes(&app, &format!("/governance/committee/{cold_id}/votes"))
+                    .await
+                    .is_empty(),
+                "The cold credential {cold_id} must have no vote."
+            );
+        }
+
+        let mut cfg = with_committee_certs(committee_votes_config());
+        cfg.invalid_txs_by_block = vec![vec![0], vec![], vec![]];
+        let app = committee_certs_app(cfg);
+
+        let cold_id = bech32_committee_cold(&cc_cold_key(31)).unwrap();
         assert!(
             get_committee_votes(&app, &format!("/governance/committee/{cold_id}/votes"))
                 .await
                 .is_empty()
         );
+    }
+
+    /// The cold lookup reads each certificate block that has a tag for the
+    /// cold credential. The scan budget limits this read in the same way as
+    /// the vote read.
+    #[tokio::test]
+    async fn governance_committee_votes_by_cold_id_scan_stops_at_the_budget() {
+        let key = Voter::ConstitutionalCommitteeKey(Hash::from([21u8; 28]));
+        let auth =
+            |hot: StakeCredential| vec![vec![Certificate::AuthCommitteeHot(cc_cold_key(31), hot)]];
+        let cfg = SyntheticBlockConfig {
+            block_count: 4,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![], vec![]],
+            extra_certs_by_block: vec![
+                auth(cc_hot_script()),
+                auth(cc_hot_script()),
+                auth(cc_hot_key()),
+                vec![],
+            ],
+            votes_by_block: vec![
+                vec![],
+                vec![],
+                vec![],
+                vec![vec![synthetic_vote(key, 0, 0, 0, Vote::Yes)]],
+            ],
+            ..Default::default()
+        };
+        let cold_id = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        let path = format!("/governance/committee/{cold_id}/votes?count=1");
+
+        // Three certificate blocks are more than a budget of two.
+        let app = TestApp::new_with_scan_limit(cfg.clone(), 2);
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("scan limit"), "The response body was {body}.");
+
+        // With a budget of three, the lookup reads every certificate block.
+        let app = TestApp::new_with_scan_limit(cfg, 3);
+        let rows = get_committee_votes(&app, &path).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, app.vectors().blocks[3].tx_hashes[0]);
     }
 
     #[tokio::test]

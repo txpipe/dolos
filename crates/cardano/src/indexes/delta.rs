@@ -16,7 +16,7 @@ use pallas::{
         addresses::Address,
         primitives::{
             alonzo::InstantaneousRewardTarget,
-            conway::{DatumOption, VotingProcedures},
+            conway::{DatumOption, Voter, VotingProcedures},
         },
         traverse::{MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraValue},
     },
@@ -288,6 +288,17 @@ impl CardanoIndexDeltaBuilder {
                 pallas_extras::drep_id_bytes(&cred),
             ));
         }
+
+        let cold = pallas_extras::cert_as_committee_auth(cert)
+            .map(|x| x.cold)
+            .or_else(|| pallas_extras::cert_as_committee_resign(cert).map(|x| x.cold));
+
+        if let Some(cold) = cold {
+            self.current_block().tags.push(Tag::new(
+                archive::COMMITTEE_CERTS,
+                pallas_extras::committee_cold_id_bytes(&cold),
+            ));
+        }
     }
 
     /// Add withdrawal tags to the current block.
@@ -311,13 +322,24 @@ impl CardanoIndexDeltaBuilder {
     }
 
     /// Tag the current block with the voters and the actions of a
-    /// transaction's votes.
+    /// transaction's votes. If a vote is a committee vote, this method also
+    /// tags the block in the `committee_votes` dimension, which has one key.
     ///
     /// A voter or action already tagged in this block is not tagged again, so
     /// a block holding many votes of one voter carries its tag once.
     pub fn add_votes(&mut self, procedures: &VotingProcedures) {
         for (voter, ballot) in procedures {
             self.add_vote_tag(archive::VOTER_VOTES, pallas_extras::voter_id_bytes(voter));
+
+            if matches!(
+                voter,
+                Voter::ConstitutionalCommitteeKey(_) | Voter::ConstitutionalCommitteeScript(_)
+            ) {
+                self.add_vote_tag(
+                    archive::COMMITTEE_VOTES,
+                    archive::COMMITTEE_VOTES_KEY.to_vec(),
+                );
+            }
 
             for action in ballot.keys() {
                 let key =
@@ -732,6 +754,21 @@ mod tests {
             pallas::ledger::primitives::conway::Voter::StakePoolKey(Hash::new([0x99; 28])),
             BTreeMap::from([(gov_action(0xaa, 0), voting_procedure(Vote::Yes))]),
         )]));
+
+        // COMMITTEE_CERTS
+        let resignation = Certificate::ResignCommitteeCold(
+            StakeCredential::AddrKeyhash(Hash::new([0xbb; 28])),
+            None,
+        );
+        builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(resignation))));
+
+        // COMMITTEE_VOTES (with VOTER_VOTES, ACTION_VOTES)
+        builder.add_votes(&BTreeMap::from([(
+            pallas::ledger::primitives::conway::Voter::ConstitutionalCommitteeKey(Hash::new(
+                [0xcc; 28],
+            )),
+            BTreeMap::from([(gov_action(0xaa, 0), voting_procedure(Vote::Yes))]),
+        )]));
     }
 
     fn gov_action(tx: u8, index: u32) -> GovActionId {
@@ -760,8 +797,9 @@ mod tests {
     /// Every vote tags its block by voter and by action, once per key. DRep
     /// voters are keyed by their CIP-129 DRep id, committee voters by their
     /// CIP-129 committee-hot id and pools by their pool hash; actions by their
-    /// proposal entity key. A re-vote in the same block adds no tag, and one
-    /// in a later block tags that block.
+    /// proposal entity key. A committee vote also tags the block one time in
+    /// the `committee_votes` dimension. A re-vote in the same block adds no
+    /// tag, and one in a later block tags that block.
     #[test]
     fn votes_tag_voters_and_actions() {
         use pallas::ledger::primitives::conway::Voter;
@@ -829,9 +867,86 @@ mod tests {
 
         assert_eq!(sorted_keys(&archive[0], archive::VOTER_VOTES), voters);
         assert_eq!(sorted_keys(&archive[0], archive::ACTION_VOTES), actions);
+        assert_eq!(
+            sorted_keys(&archive[0], archive::COMMITTEE_VOTES),
+            [archive::COMMITTEE_VOTES_KEY.to_vec()]
+        );
 
         assert_eq!(sorted_keys(&archive[1], archive::VOTER_VOTES), [drep_id]);
         assert_eq!(sorted_keys(&archive[1], archive::ACTION_VOTES), [first]);
+        assert!(sorted_keys(&archive[1], archive::COMMITTEE_VOTES).is_empty());
+    }
+
+    /// Two committee votes in one block tag the `committee_votes` dimension
+    /// one time.
+    #[test]
+    fn committee_votes_tag_the_lane_once_per_block() {
+        use pallas::ledger::primitives::conway::Voter;
+        use std::collections::BTreeMap;
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.start_block(100, vec![0; 32], Some(50));
+
+        builder.add_votes(&BTreeMap::from([
+            (
+                Voter::ConstitutionalCommitteeKey(Hash::new([0x01; 28])),
+                BTreeMap::from([(gov_action(0xa0, 0), voting_procedure(Vote::Yes))]),
+            ),
+            (
+                Voter::ConstitutionalCommitteeScript(Hash::new([0x02; 28])),
+                BTreeMap::from([(gov_action(0xa0, 0), voting_procedure(Vote::No))]),
+            ),
+        ]));
+
+        let archive = builder.build();
+
+        assert_eq!(
+            sorted_keys(&archive[0], archive::COMMITTEE_VOTES),
+            [archive::COMMITTEE_VOTES_KEY.to_vec()]
+        );
+    }
+
+    /// A hot-key authorization and a cold-key resignation tag the block with
+    /// the CIP-129 committee-cold id bytes of the cold credential. The
+    /// endpoint parses these bytes from a `cc_cold1…` id. A key credential
+    /// and a script credential with the same hash get different tag keys.
+    /// The hot credential is not a tag key.
+    #[test]
+    fn committee_certificates_tag_the_cip129_cold_id() {
+        use pallas::ledger::primitives::{conway::Certificate, StakeCredential};
+        use std::borrow::Cow;
+
+        let hash = Hash::new([0x99; 28]);
+        let key = StakeCredential::AddrKeyhash(hash);
+        let script = StakeCredential::ScriptHash(hash);
+        let hot = StakeCredential::AddrKeyhash(Hash::new([0x77; 28]));
+
+        let certs = [
+            Certificate::AuthCommitteeHot(key.clone(), hot),
+            Certificate::ResignCommitteeCold(key, None),
+            Certificate::ResignCommitteeCold(script, None),
+        ];
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.start_block(100, vec![0; 32], Some(50));
+
+        for cert in certs {
+            builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(cert))));
+        }
+
+        let keys: Vec<Vec<u8>> = builder
+            .build()
+            .remove(0)
+            .tags
+            .into_iter()
+            .filter(|tag| tag.dimension == archive::COMMITTEE_CERTS)
+            .map(|tag| tag.key)
+            .collect();
+
+        let key_id = [&[0x12u8][..], hash.as_slice()].concat();
+        let script_id = [&[0x13u8][..], hash.as_slice()].concat();
+
+        assert_eq!(keys, [key_id.clone(), key_id, script_id]);
     }
 
     /// Every DRep certificate kind tags the DRep under its CIP-129 id bytes,
