@@ -6,23 +6,22 @@ use axum::{
 use blockfrost_openapi::models::epoch_content::EpochContent;
 use dolos_cardano::model::EpochState;
 use dolos_core::Domain;
-use pallas::ledger::primitives::Epoch;
 
 use crate::{error::Error, mapping::IntoModel as _, Facade};
 
 use super::{
-    build_epoch_content, current_epoch, derive_current_active_stake, ensure_epoch_in_range,
-    load_epoch_state,
+    build_epoch_content, current_epoch, derive_current_active_stake, load_epoch_state,
+    parse_epoch_digits,
 };
 
 pub async fn by_number<D: Domain>(
     State(domain): State<Facade<D>>,
-    Path(epoch): Path<Epoch>,
+    Path(number): Path<String>,
 ) -> Result<Json<EpochContent>, Error>
 where
     Option<EpochState>: From<D::Entity>,
 {
-    ensure_epoch_in_range(epoch)?;
+    let epoch = parse_epoch_digits(&number)?;
 
     let (chain, current) = current_epoch(&domain)?;
 

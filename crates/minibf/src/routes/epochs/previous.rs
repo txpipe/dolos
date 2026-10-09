@@ -14,18 +14,18 @@ use crate::{
     Facade,
 };
 
-use super::{collect_epoch_contents, current_epoch, ensure_epoch_in_range};
+use super::{collect_epoch_contents, current_epoch, parse_epoch_digits};
 
 pub async fn by_number_previous<D: Domain>(
     State(domain): State<Facade<D>>,
-    Path(epoch): Path<Epoch>,
+    Path(number): Path<String>,
     Query(params): Query<PaginationParameters>,
 ) -> Result<Json<Vec<EpochContent>>, Error>
 where
     Option<EpochState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    ensure_epoch_in_range(epoch)?;
+    let epoch = parse_epoch_digits(&number)?;
     let (chain, current) = current_epoch(&domain)?;
 
     if epoch > current {

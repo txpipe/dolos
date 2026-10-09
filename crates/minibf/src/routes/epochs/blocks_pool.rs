@@ -16,10 +16,10 @@ use crate::{
     Facade,
 };
 
-use super::{current_epoch, ensure_epoch_in_range, epoch_slot_range};
+use super::{current_epoch, epoch_slot_range, parse_epoch};
 
 pub async fn by_number_blocks_pool<D: Domain>(
-    Path((epoch, pool_id)): Path<(u64, String)>,
+    Path((number, pool_id)): Path<(String, String)>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error>
@@ -27,7 +27,7 @@ where
     Option<PoolState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    ensure_epoch_in_range(epoch)?;
+    let epoch = parse_epoch(&number)?;
 
     let (chain, current) = current_epoch(&domain)?;
 

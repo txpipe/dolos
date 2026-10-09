@@ -16,6 +16,7 @@ use crate::{
     log_and_500,
     mapping::{epochs::EpochContentModelBuilder, stake_cred_to_address, IntoModel as _},
     pagination::Pagination,
+    routes::parse_path_number,
     Facade,
 };
 
@@ -41,8 +42,6 @@ pub use previous::by_number_previous;
 pub use stakes::by_number_stakes;
 pub use stakes_pool::by_number_stakes_pool;
 
-const MAX_EPOCH_NUMBER: Epoch = i32::MAX as Epoch;
-
 /// The chain summary and the epoch the tip is in.
 fn current_epoch<D: Domain>(domain: &Facade<D>) -> Result<(ChainSummary, Epoch), StatusCode> {
     let tip = domain.get_tip_slot()?;
@@ -58,12 +57,18 @@ fn epoch_slot_range(chain: &ChainSummary, epoch: Epoch) -> (BlockSlot, BlockSlot
     (chain.epoch_start(epoch), chain.epoch_start(epoch + 1))
 }
 
-fn ensure_epoch_in_range(epoch: Epoch) -> Result<(), Error> {
-    if epoch > MAX_EPOCH_NUMBER {
-        return Err(Error::InvalidEpochNumber);
+fn parse_epoch(raw: &str) -> Result<Epoch, Error> {
+    parse_path_number(raw, Error::NumberNotInteger, Error::InvalidEpochNumber)
+}
+
+/// Blockfrost accepts only digits on `/epochs/{number}`, `/next` and
+/// `/previous`, so `-1` is not an integer there.
+fn parse_epoch_digits(raw: &str) -> Result<Epoch, Error> {
+    if raw.starts_with(['+', '-']) {
+        return Err(Error::NumberNotInteger);
     }
 
-    Ok(())
+    parse_epoch(raw)
 }
 
 fn build_epoch_content<D: Domain>(
@@ -312,6 +317,8 @@ mod tests {
     use crate::test_support::{pool_id_cases, PoolIdCase, TestApp, TestFault, REG_POOL_ID};
     use dolos_testing::synthetic::SyntheticBlockConfig;
 
+    const MAX_EPOCH_NUMBER: Epoch = i32::MAX as Epoch;
+
     /// The builder nulls a passed active stake inside the preprod gap, only on
     /// preprod. `next` and `previous` build their items through it too.
     #[test]
@@ -532,6 +539,41 @@ mod tests {
                 let route = format!("/epochs/{tip}/{route}/{{id}}");
                 mismatches
                     .extend(pool_id_case_mismatch(&app, &case, &route, case.bounded_status).await);
+            }
+        }
+
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn epoch_number_errors_match_blockfrost() {
+        let app = TestApp::new();
+        let not_integer = "params/number must be integer";
+        let out_of_range = "Missing, out of range or malformed epoch_number.";
+        let blocks_pool = format!("/blocks/{REG_POOL_ID}");
+        let stakes_pool = format!("/stakes/{REG_POOL_ID}");
+        let mut mismatches = Vec::new();
+
+        // The second value is the message for `-1`. Only the first three routes
+        // reject a sign.
+        for (route, negative) in [
+            ("", not_integer),
+            ("/next", not_integer),
+            ("/previous", not_integer),
+            ("/parameters", out_of_range),
+            ("/blocks", out_of_range),
+            ("/stakes", out_of_range),
+            (blocks_pool.as_str(), out_of_range),
+            (stakes_pool.as_str(), out_of_range),
+        ] {
+            for (number, message) in [
+                ("abc", not_integer),
+                ("-1", negative),
+                ("2147483648", out_of_range),
+            ] {
+                let path = format!("/epochs/{number}{route}");
+                mismatches
+                    .extend(error_mismatch(&app, &path, StatusCode::BAD_REQUEST, message).await);
             }
         }
 

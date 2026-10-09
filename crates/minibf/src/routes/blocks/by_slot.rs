@@ -6,20 +6,26 @@ use axum::{
 use blockfrost_openapi::models::block_content::BlockContent;
 use dolos_core::{ArchiveStore as _, Domain};
 
-use crate::Facade;
+use crate::{error::Error, routes::parse_path_number, Facade};
 
 use super::{single_block_content, tip_block};
 
 pub async fn by_slot<D>(
-    Path(slot_number): Path<u64>,
+    Path(slot_number): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<BlockContent>, StatusCode>
+) -> Result<Json<BlockContent>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    let slot = parse_path_number(
+        &slot_number,
+        Error::SlotNumberNotInteger,
+        Error::InvalidSlotNumber,
+    )?;
+
     let block = domain
         .archive()
-        .get_block_by_slot(&slot_number)
+        .get_block_by_slot(&slot)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
@@ -53,7 +59,20 @@ mod tests {
     #[tokio::test]
     async fn blocks_by_slot_bad_request() {
         let app = TestApp::new();
-        assert_status(&app, "/blocks/slot/x", StatusCode::BAD_REQUEST).await;
+
+        for (slot, message) in [
+            ("x", "params/slot_number must be integer"),
+            ("-1", "Missing, out of range or malformed slot_number."),
+            (
+                "2147483648",
+                "Missing, out of range or malformed slot_number.",
+            ),
+        ] {
+            let (status, bytes) = app.get_bytes(&format!("/blocks/slot/{slot}")).await;
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{slot}");
+            assert_eq!(body["message"], message, "{slot}");
+        }
     }
 
     #[tokio::test]
