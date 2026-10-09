@@ -204,6 +204,20 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/txs/{tx_hash}/utxos`                                     | Get UTXOs for a specific transaction                     |
 | `/txs/{tx_hash}/withdrawals`                               | Get withdrawals for a specific transaction               |
 | `/utils/addresses/xpub/{xpub}/{role}/{index}`              | Derive an address from an xpub                           |
+| `/utils/txs/evaluate`                                      | Evaluate the execution units of a transaction            |
+| `/utils/txs/evaluate/utxos`                                | Evaluate the execution units with additional UTxOs       |
+
+## Transaction evaluation
+
+`POST /utils/txs/evaluate` and `POST /utils/txs/evaluate/utxos` answer in the Ogmios formats that Blockfrost serves: Ogmios v5 by default, Ogmios v6 with `?version=6`. Blockfrost sends these requests to Ogmios. Dolos evaluates the redeemers itself, with the cost models and the transaction execution limit of the current protocol parameters. It does not run the other ledger checks, so unsigned or unbalanced transactions evaluate too.
+
+The transaction inputs resolve as in Ogmios:
+
+- The ledger UTxO set gives the spent, reference and collateral inputs. A pending mempool transaction that spends one of them does not hide it.
+- The outputs of the unconfirmed mempool transactions come next. They replace `additionalUtxoSet` entries with the same reference.
+- An `additionalUtxoSet` entry that differs from the ledger entry with the same reference makes the request fail with `AdditionalUtxoOverlap`.
+
+`additionalUtxoSet` takes Ogmios v5 `[TxIn, TxOut]` pairs. A validity bound past the time horizon of the node, the first epoch boundary after the tip plus the safe zone, fails with `CannotCreateEvaluationContext`. When a script fails, the v5 format reports it as `validatorFailed`, with the error and the traces.
 
 ## Lifetime totals and `sync.max_history`
 
