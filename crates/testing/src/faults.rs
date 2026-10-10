@@ -1,10 +1,13 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+};
 
 use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
-    ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, LogEntry,
-    LogKey, LogValue, Namespace, StateError, StateStore, StateWriter, TagDimension, TipEvent,
-    UtxoIndexDelta, WalError, WalStore,
+    ArchiveError, ArchiveIndexDelta, ArchiveStore, ArchiveWriter, BlockBody, BlockSlot, ChainPoint,
+    Domain, DomainError, IndexRecord, LogEntry, LogKey, LogValue, Namespace, RawBlock, StateError,
+    StateStore, StateWriter, TagDimension, TipEvent, UtxoIndexDelta, WalError, WalStore,
 };
 
 use crate::toy_domain::{Mempool, TipSubscription, ToyDomain};
@@ -24,6 +27,22 @@ pub enum TestFault {
     StateTagsApplyError,
     WalStoreError,
     GenesisError,
+    /// The process dies after this many store commits: the first `n` state or
+    /// archive commits land, and every later one fails without writing.
+    ///
+    /// Counted across both stores of one [`FaultyToyDomain`], so a test can
+    /// stop a work unit between the two commits of a phase, whichever store
+    /// that phase commits first.
+    CrashAfterCommits(u32),
+}
+
+/// Whether a commit under `fault` comes after the crash, counting it if not.
+fn past_crash(fault: TestFault, commits: &AtomicU32) -> bool {
+    let TestFault::CrashAfterCommits(limit) = fault else {
+        return false;
+    };
+
+    commits.fetch_add(1, Ordering::SeqCst) >= limit
 }
 
 #[derive(Clone)]
@@ -37,8 +56,9 @@ pub struct FaultyToyDomain {
 
 impl FaultyToyDomain {
     pub fn new(inner: ToyDomain, fault: TestFault) -> Self {
-        let state = FaultyStateStore::new(inner.state().clone(), fault);
-        let archive = FaultyArchiveStore::new(inner.archive().clone(), fault);
+        let commits = Arc::new(AtomicU32::new(0));
+        let state = FaultyStateStore::counting(inner.state().clone(), fault, commits.clone());
+        let archive = FaultyArchiveStore::counting(inner.archive().clone(), fault, commits);
         let wal = FaultyWalStore::new(inner.wal().clone(), fault);
         let genesis_override = match fault {
             TestFault::GenesisError => {
@@ -62,11 +82,20 @@ impl FaultyToyDomain {
 pub struct FaultyStateStore {
     inner: MemoryStateStore,
     fault: TestFault,
+    commits: Arc<AtomicU32>,
 }
 
 impl FaultyStateStore {
     pub fn new(inner: MemoryStateStore, fault: TestFault) -> Self {
-        Self { inner, fault }
+        Self::counting(inner, fault, Default::default())
+    }
+
+    fn counting(inner: MemoryStateStore, fault: TestFault, commits: Arc<AtomicU32>) -> Self {
+        Self {
+            inner,
+            fault,
+            commits,
+        }
     }
 
     fn should_fault_ns(&self, _ns: dolos_core::Namespace) -> bool {
@@ -113,6 +142,7 @@ impl StateStore for FaultyStateStore {
         Ok(FaultyStateWriter {
             inner: self.inner.start_writer()?,
             fault: self.fault,
+            commits: self.commits.clone(),
         })
     }
 
@@ -167,6 +197,7 @@ impl StateStore for FaultyStateStore {
 pub struct FaultyStateWriter {
     inner: <MemoryStateStore as StateStore>::Writer,
     fault: TestFault,
+    commits: Arc<AtomicU32>,
 }
 
 impl StateWriter for FaultyStateWriter {
@@ -205,6 +236,11 @@ impl StateWriter for FaultyStateWriter {
     }
 
     fn commit(self) -> Result<(), StateError> {
+        if past_crash(self.fault, &self.commits) {
+            return Err(StateError::InternalStoreError(
+                "fault injection: crashed before state commit".into(),
+            ));
+        }
         self.inner.commit()
     }
 }
@@ -213,11 +249,20 @@ impl StateWriter for FaultyStateWriter {
 pub struct FaultyArchiveStore {
     inner: MemoryArchiveStore,
     fault: TestFault,
+    commits: Arc<AtomicU32>,
 }
 
 impl FaultyArchiveStore {
     pub fn new(inner: MemoryArchiveStore, fault: TestFault) -> Self {
-        Self { inner, fault }
+        Self::counting(inner, fault, Default::default())
+    }
+
+    fn counting(inner: MemoryArchiveStore, fault: TestFault, commits: Arc<AtomicU32>) -> Self {
+        Self {
+            inner,
+            fault,
+            commits,
+        }
     }
 
     fn should_fault(&self) -> bool {
@@ -231,7 +276,7 @@ impl FaultyArchiveStore {
 
 impl ArchiveStore for FaultyArchiveStore {
     type BlockIter<'a> = <MemoryArchiveStore as ArchiveStore>::BlockIter<'a>;
-    type Writer = <MemoryArchiveStore as ArchiveStore>::Writer;
+    type Writer = FaultyArchiveWriter;
     type LogIter = <MemoryArchiveStore as ArchiveStore>::LogIter;
     type EntityValueIter = <MemoryArchiveStore as ArchiveStore>::EntityValueIter;
     type SlotIter = <MemoryArchiveStore as ArchiveStore>::SlotIter;
@@ -242,7 +287,11 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.start_writer()
+        Ok(FaultyArchiveWriter {
+            inner: self.inner.start_writer()?,
+            fault: self.fault,
+            commits: self.commits.clone(),
+        })
     }
 
     fn read_logs(
@@ -379,6 +428,55 @@ impl ArchiveStore for FaultyArchiveStore {
             return Err(self.fault_err());
         }
         self.inner.iter_exact_records(slots)
+    }
+}
+
+pub struct FaultyArchiveWriter {
+    inner: <MemoryArchiveStore as ArchiveStore>::Writer,
+    fault: TestFault,
+    commits: Arc<AtomicU32>,
+}
+
+impl ArchiveWriter for FaultyArchiveWriter {
+    fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError> {
+        self.inner.apply(point, block)
+    }
+
+    fn apply_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
+        self.inner.apply_index(deltas)
+    }
+
+    fn undo_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
+        self.inner.undo_index(deltas)
+    }
+
+    fn append_prehashed(
+        &self,
+        records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), ArchiveError> {
+        self.inner.append_prehashed(records)
+    }
+
+    fn write_log(
+        &self,
+        ns: Namespace,
+        key: &LogKey,
+        value: &dolos_core::EntityValue,
+    ) -> Result<(), ArchiveError> {
+        self.inner.write_log(ns, key, value)
+    }
+
+    fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
+        self.inner.undo(point)
+    }
+
+    fn commit(self) -> Result<(), ArchiveError> {
+        if past_crash(self.fault, &self.commits) {
+            return Err(ArchiveError::InternalError(
+                "fault injection: crashed before archive commit".into(),
+            ));
+        }
+        self.inner.commit()
     }
 }
 
