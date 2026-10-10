@@ -1,7 +1,7 @@
 //! Commit logic for the close half of the epoch boundary (per-shard runs
 //! plus the finalize Ewrap pass).
 //!
-//! Each phase commits its own deltas and archive logs atomically. Both
+//! Each phase commits its archive logs, then its deltas. Both
 //! halves use the same streaming pattern: each entity namespace is read
 //! one record at a time, deltas for that record are applied, and the
 //! result is written immediately. Per-shard commits flush
@@ -134,8 +134,13 @@ impl BoundaryWork {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted shard deltas");
         }
 
-        writer.commit()?;
+        // Archive first: the state commit marks the shard done in
+        // `EWrapProgress`, and a restart never re-runs a done shard, so its
+        // rows have to be durable before that mark is (see the durability
+        // note on `WorkUnit::commit_state`). A crash in between re-runs the
+        // shard, which writes the same rows under the same keys again.
         archive_writer.commit()?;
+        writer.commit()?;
 
         debug!("ewrap commit complete");
         Ok(())
@@ -221,8 +226,9 @@ impl BoundaryWork {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted ewrap deltas");
         }
 
-        writer.commit()?;
+        // Archive first, for the same reason as `commit_shard`.
         archive_writer.commit()?;
+        writer.commit()?;
 
         debug!("ewrap commit complete");
         Ok(())
