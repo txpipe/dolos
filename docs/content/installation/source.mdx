@@ -9,6 +9,7 @@ The following instructions show how to build and install _Dolos_ from source cod
 You'll need to have the following components already available in your system.
 
 - [Rust toolchain](https://www.rust-lang.org/learn/get-started)
+- On Linux, a C compiler and `make`, used to build jemalloc
 
 ## Clone the Repository
 
@@ -30,4 +31,14 @@ Once you completed the above steps, you should be able to call Dolos directly fr
 
 ```sh
 dolos --help
+```
+
+## Memory Allocator
+
+On Linux, Dolos uses [jemalloc](https://jemalloc.net) as its memory allocator, through the default `jemalloc` feature. Under serving load, glibc's default allocator holds on to freed memory and the process keeps growing. Other platforms use the system allocator.
+
+To build with the system allocator on Linux, leave the `jemalloc` feature out:
+
+```sh
+cargo install --path . --no-default-features --features mithril,utils,grpc,minibf,minikupo,trp
 ```

@@ -1,6 +1,10 @@
 use clap::{Parser, Subcommand};
 use miette::{Context, IntoDiagnostic, Result};
 
+#[cfg(all(feature = "jemalloc", target_os = "linux"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod banner;
 mod common;
 mod daemon;
