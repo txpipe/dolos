@@ -96,6 +96,9 @@ rustls = { version = "0.23", default-features = false, features = [
     "tls12",
 ] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = { version = "0.7", optional = true }
+
 [dev-dependencies]
 anyhow = "1.0"
 divan = "0.1.21"
@@ -183,8 +186,11 @@ minikupo = [
 ]
 trp = ["dolos-trp"]
 
+# jemalloc as the global allocator on Linux; no effect on other targets
+jemalloc = ["dep:tikv-jemallocator"]
+
 # Default features - includes all services
-default = ["mithril", "utils", "grpc", "minibf", "minikupo", "trp"]
+default = ["mithril", "utils", "grpc", "minibf", "minikupo", "trp", "jemalloc"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
