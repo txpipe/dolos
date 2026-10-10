@@ -939,6 +939,10 @@ fn collect_minted_subjects(
     Ok(())
 }
 
+/// `GET /assets/policy/{policy_id}`.
+///
+/// The scan decodes at most `max_scan_items` blocks. A page it cannot cover
+/// within that many blocks is refused rather than truncated.
 pub async fn by_policy<D>(
     Path(policy_hex): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -966,12 +970,20 @@ where
 
     let needed_unique =
         matches!(pagination.order, Order::Asc).then(|| pagination.from() + pagination.count);
+    let budget = domain.config.max_scan_items() as usize;
+    let mut scanned = 0;
     let mut subjects: IndexSet<Vec<u8>> = IndexSet::new();
     while let Some(res) = stream.next().await {
         let (_slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let Some(block) = block else {
             continue;
         };
+        // another block is due while the budget is spent, so the page lies
+        // further in and out of reach for this request
+        if scanned == budget {
+            return Err(Error::ScanBudgetExceeded);
+        }
+        scanned += 1;
         collect_minted_subjects(&block, &policy, &mut subjects)?;
         if needed_unique.is_some_and(|needed| subjects.len() >= needed) {
             break;
@@ -1430,6 +1442,43 @@ mod tests {
             assert_eq!(assets.len(), 1);
             assert_eq!(assets[0].asset, expected);
             assert_eq!(assets[0].quantity, "1");
+        }
+    }
+
+    #[tokio::test]
+    async fn assets_by_policy_stops_at_scan_budget() {
+        // four blocks minting the same asset: only the first block carries a
+        // first mint, so anything past one asset costs blocks and yields
+        // nothing
+        let app = TestApp::new_with_scan_limit(
+            SyntheticBlockConfig {
+                block_count: 4,
+                txs_per_block: 1,
+                asset_names_by_block: vec!["ONLY".to_string(); 4],
+                ..Default::default()
+            },
+            3,
+        );
+        let policy = app.vectors().policy_id.clone();
+
+        // a page the scan covers before the budget runs out is served
+        let (status, bytes) = app
+            .get_bytes(&format!("/assets/policy/{policy}?count=1"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let page: Vec<AssetPolicyInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse policy assets");
+        assert_eq!(page.len(), 1);
+
+        // `desc` and an unfilled `asc` page both need the fourth block, so
+        // they are refused, not truncated
+        for query in ["order=desc&count=1", "order=asc&count=2"] {
+            let (status, bytes) = app
+                .get_bytes(&format!("/assets/policy/{policy}?{query}"))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            let body = String::from_utf8_lossy(&bytes);
+            assert!(body.contains("scan limit"), "The response body was {body}.");
         }
     }
 

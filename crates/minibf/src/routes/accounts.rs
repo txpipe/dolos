@@ -1,5 +1,7 @@
 use std::{collections::BTreeSet, ops::Deref};
 
+use indexmap::IndexSet;
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -294,6 +296,12 @@ where
 /// The shared query struct also accepts `from` and `to`; they are ignored
 /// here, as Blockfrost ignores them, so the list always covers the account's
 /// whole history.
+///
+/// `max_scan_items` caps both the page depth and the blocks the scan may
+/// decode. A page the scan cannot cover within that many blocks is refused,
+/// because a short answer would read as the end of the list. `desc` reads the
+/// whole history, so an account with more blocks than the budget gets no
+/// `desc` answer.
 pub async fn by_stake_addresses<D>(
     Path(stake_address): Path<String>,
     Query(mut params): Query<PaginationParameters>,
@@ -320,22 +328,28 @@ where
     }
 
     // `from`/`to` are ignored, so the scan always covers the whole history.
+    // Blockfrost places each address at its first appearance, so both orders
+    // read the chain oldest-first: `asc` stops once its page is covered,
+    // `desc` needs every address before it can reverse the list.
     let end_slot = domain.get_tip_slot()?;
     let stream = domain.query().blocks_by_stake_stream(
         &account_key.address.to_vec(),
         0,
         end_slot,
-        SlotOrder::from(pagination.order),
+        SlotOrder::Asc,
     );
 
-    let mut items = vec![];
-    let mut skipped = 0;
-    let mut seen = BTreeSet::new();
+    let needed = matches!(pagination.order, Order::Asc).then(|| pagination.to());
+    let budget = domain.config.max_scan_items() as usize;
+    let account = account_key.address.to_vec();
+
+    let mut addresses: IndexSet<String> = IndexSet::new();
+    let mut scanned = 0;
 
     let mut stream = Box::pin(stream);
 
     while let Some(res) = stream.next().await {
-        if items.len() >= pagination.count {
+        if needed.is_some_and(|needed| addresses.len() >= needed) {
             break;
         }
 
@@ -345,37 +359,34 @@ where
             continue;
         };
 
+        // another block is due while the budget is spent, so the page lies
+        // further in and out of reach for this request
+        if scanned == budget {
+            return Err(Error::ScanBudgetExceeded);
+        }
+        scanned += 1;
+
         let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         for (_, utxo) in block.txs().iter().flat_map(|tx| tx.produces()) {
             let address = utxo
                 .address()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            if match &address {
-                Address::Shelley(shelley) => {
-                    pallas_extras::shelley_address_to_stake_address(shelley)
-                        .map(|x| x.to_vec() == account_key.address.to_vec())
-                        .unwrap_or(false)
-                }
-                Address::Stake(stake) => stake.to_vec() == account_key.address.to_vec(),
-                Address::Byron(_) => false,
-            } && seen.insert(address.to_string())
-            {
-                if skipped < (pagination.page as usize - 1) * pagination.count {
-                    skipped += 1;
-                } else {
-                    items.push(AccountAddressesContentInner {
-                        address: address.to_string(),
-                    });
-                    if items.len() >= pagination.count {
-                        break;
-                    }
-                }
+            if address_belongs_to_account(&address, &account) {
+                addresses.insert(address.to_string());
             }
         }
-        if items.len() >= pagination.count {
-            break;
-        }
     }
+
+    let ordered: Box<dyn Iterator<Item = String>> = match pagination.order {
+        Order::Asc => Box::new(addresses.into_iter()),
+        Order::Desc => Box::new(addresses.into_iter().rev()),
+    };
+
+    let items = ordered
+        .skip(pagination.from())
+        .take(pagination.count)
+        .map(|address| AccountAddressesContentInner { address })
+        .collect();
 
     Ok(Json(items))
 }
@@ -2073,26 +2084,73 @@ mod tests {
     async fn accounts_by_stake_addresses_order_desc() {
         let app = TestApp::new();
         let stake_address = app.vectors().stake_address.as_str();
-        let path = format!("/accounts/{stake_address}/addresses?order=desc&count=5");
-        let (status, bytes) = app.get_bytes(&path).await;
-        assert_eq!(status, StatusCode::OK);
 
-        let desc: Vec<AccountAddressesContentInner> =
-            serde_json::from_slice(&bytes).expect("failed to parse addresses desc");
-        if desc.is_empty() {
-            return;
-        }
-        let address_bounds = |addr: &str| {
-            app.vectors()
-                .account_address_bounds
-                .iter()
-                .find_map(|(known, min, max)| (known == addr).then_some((*min, *max)))
-                .expect("missing address in vectors")
+        let get = |query: &'static str| {
+            let app = &app;
+            async move {
+                let (status, bytes) = app
+                    .get_bytes(&format!("/accounts/{stake_address}/addresses?{query}"))
+                    .await;
+                assert_eq!(status, StatusCode::OK, "{query}");
+                serde_json::from_slice::<Vec<AccountAddressesContentInner>>(&bytes)
+                    .expect("failed to parse addresses")
+                    .into_iter()
+                    .map(|x| x.address)
+                    .collect::<Vec<_>>()
+            }
         };
 
-        let desc_blocks: Vec<_> = desc.iter().map(|x| address_bounds(&x.address).1).collect();
+        let asc = get("order=asc&count=100").await;
+        let desc = get("order=desc&count=100").await;
+        assert!(asc.len() >= 4, "the window below needs four addresses");
 
-        assert!(desc_blocks.windows(2).all(|w| w[0] >= w[1]));
+        // The synthetic chain reuses the primary address in every block and
+        // pays some secondary addresses in two consecutive blocks. Placing
+        // those at their last appearance would reorder `desc`; Blockfrost
+        // defines `desc` as the reverse of `asc`.
+        let mut reversed = asc.clone();
+        reversed.reverse();
+        assert_eq!(desc, reversed);
+
+        // a `desc` page is a window into the reversed list
+        let page = get("order=desc&count=2&page=2").await;
+        assert_eq!(page, reversed[2..4].to_vec());
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_stops_at_scan_budget() {
+        // four blocks paying the same address: only the first block carries a
+        // first appearance, so anything past one address costs blocks and
+        // yields nothing
+        let app = TestApp::new_with_scan_limit(
+            SyntheticBlockConfig {
+                block_count: 4,
+                txs_per_block: 1,
+                ..Default::default()
+            },
+            3,
+        );
+        let stake_address = app.vectors().stake_address.clone();
+
+        // a page the scan covers before the budget runs out is served
+        let (status, bytes) = app
+            .get_bytes(&format!("/accounts/{stake_address}/addresses?count=1"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let page: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses");
+        assert_eq!(page.len(), 1);
+
+        // `desc` and an unfilled `asc` page both need the fourth block, so
+        // they are refused, not truncated
+        for query in ["order=desc&count=1", "order=asc&count=2"] {
+            let (status, bytes) = app
+                .get_bytes(&format!("/accounts/{stake_address}/addresses?{query}"))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            let body = String::from_utf8_lossy(&bytes);
+            assert!(body.contains("scan limit"), "The response body was {body}.");
+        }
     }
 
     #[tokio::test]
