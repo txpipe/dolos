@@ -141,7 +141,13 @@ fn indexes_round_trip_through_a_layer() {
 fn logs_round_trip_through_a_layer_per_namespace() {
     for (kind, ns) in LOG_KINDS {
         let records = common::logs(ns);
-        let decoded = roundtrip(kind, &epoch_scope(), &records, logs::encode, logs::decode);
+        let decoded = roundtrip(
+            kind,
+            &epoch_scope(),
+            &records,
+            |record| logs::encode(ns, record),
+            |bytes| logs::decode(ns, bytes),
+        );
 
         let mut order = logs::OrderCheck::default();
         for record in &decoded {
