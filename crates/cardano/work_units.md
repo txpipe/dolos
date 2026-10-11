@@ -31,7 +31,7 @@ The boundary work splits into a *close* half (`Ewrap`, ending epoch N) and an *o
 
 `Rupd` is a third sharded unit, firing mid-epoch at the randomness stability window. It computes rewards from the E-3 stake snapshot and writes one `PendingRewardState` entity per rewarded account in this shard's range; `Ewrap` consumes those entries to apply the rewards.
 
-All three sharded units share credential-key partitioning (`crate::shard::shard_key_ranges`) and the `crate::shard::ACCOUNT_SHARDS` constant; progress for each is tracked separately on `EpochState.ewrap_progress`, `EpochState.estart_progress`, and `EpochState.rupd_progress`. The shard count is captured at the first per-shard commit and persisted on `ShardProgress.total` so a value change between shards (e.g. across a crash and restart on a newer build) can't break an in-flight pipeline.
+All three sharded units share credential-key partitioning (`AccountKey::shard_ranges`) and the `crate::shard::ACCOUNT_SHARDS` constant; progress for each is tracked separately on `EpochState.ewrap_progress`, `EpochState.estart_progress`, and `EpochState.rupd_progress`. The shard count is captured at the first per-shard commit and persisted on `ShardProgress.total` so a value change between shards (e.g. across a crash and restart on a newer build) can't break an in-flight pipeline.
 
 The sections below walk the cycle starting at `Estart` (the first phase of every epoch).
 
@@ -121,7 +121,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 ### Per-shard body — per-credential reward emission
 
 - Each shard is scoped to a first-byte prefix bucket of the credential key space.
-- `load(shard)` extends the globals with shard-scoped `accounts_by_pool` (delegators in range) and `registered_accounts` (registered creds in range) by streaming `AccountState` only over the shard's two `EntityKey` ranges. Stashes the ranges on `RupdWork.shard_ranges` so `should_include` can gate emissions.
+- `load(shard)` extends the globals with shard-scoped `accounts_by_pool` (delegators in range) and `registered_accounts` (registered creds in range) by streaming `AccountState` only over the shard's two `AccountKey` ranges. Stashes the ranges on `RupdWork.shard_ranges` so `should_include` can gate emissions.
 - `compute(shard)` runs `define_rewards` over **every pool** (pool rewards depend on global pool stake / blocks, both hoisted to `initialize`) but emits only credentials this shard owns:
   - delegator rewards are filtered naturally — `pool_delegators(pool)` returns only in-range creds
   - leader rewards are gated by `should_include(operator_account)`; the shard whose range contains the operator credential is the sole emitter for that pool's leader reward

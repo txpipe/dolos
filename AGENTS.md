@@ -16,7 +16,7 @@ Dolos uses three distinct storage backends, each serving a specific purpose:
 
 ### ArchiveStore
 - **Purpose**: Historical block storage with temporal indexing
-- **Contents**: Block bodies indexed by slot (one zstd frame per body in flat segment files, compressed with the dictionary bundled in `dolos-flatfiles`), entity logs keyed by `LogKey` (slot + entity key), and the lookups over them: archive tags (by address, payment, stake, policy, asset, datum, …) and exact lookups (by block hash, block number, tx hash), written in the same batch as the blocks they project
+- **Contents**: Block bodies indexed by slot (one zstd frame per body in flat segment files, compressed with the dictionary bundled in `dolos-flatfiles`), entity logs keyed by `LogKey` (slot + typed key), and the lookups over them: archive tags (by address, payment, stake, policy, asset, datum, …) and exact lookups (by block hash, block number, tx hash), written in the same batch as the blocks they project
 - **Traits**: `ArchiveStore` (reads) + `ArchiveWriter` (batched writes)
 - **Database**: `<storage.path>/archive` (index plus flat block segment files)
 
@@ -66,6 +66,7 @@ The project follows a modular workspace architecture with clear separation of co
 - **Purpose**: Core traits, types, and abstractions common to all Dolos components
 - **Key Modules**:
   - `state`: `StateStore` and `StateWriter` traits, entity system
+  - `keys`: typed key codecs (`KeyCodec`, `FixedKey`, `KeyPrefix`), the variable-length `EntityKey` and `LogKey`, and the ranges over them (`KeyRange`, `RangeOf`, `LogRangeOf`)
   - `archive`: `ArchiveStore` and `ArchiveWriter` traits, `SlotTags` for indexing metadata
   - `indexes`: the chain-agnostic index record types (`Tag`, `UtxoIndexDelta`, `ArchiveIndexDelta`, `TagRecord`, `ExactRecord`, `IndexRecord`) the state and archive stores consume
   - `wal`: `WalStore` trait for write-ahead logging
@@ -103,11 +104,11 @@ The project follows a modular workspace architecture with clear separation of co
   - `state`: `StateStore` implementation with four-keyspace design:
     - **`state-cursor`**: Chain position tracking (single key-value)
     - **`state-utxos`**: UTxO set storage with `[tx_hash:32][index:4]` keys
-    - **`state-entities`**: All entity types with `[ns_hash:8][entity_key:32]` keys
+    - **`state-entities`**: All entity types with `[ns_hash:8][entity_key:var]` keys
     - **`state-tags`**: Live-UTxO tags with `[dim_hash:8][lookup_key:var][txo_ref:36]` keys
   - `archive`: `ArchiveStore` implementation with four-keyspace design:
     - **`archive-blocks`**: Slot -> packed physical frame locations in the flat segment files
-    - **`archive-logs`**: All log namespaces with `[ns_hash:8][log_key:40]` keys
+    - **`archive-logs`**: All log namespaces with `[ns_hash:8][slot:8][key:var]` keys
     - **`archive-tags`**: Tag-based prefix scans for block tags with `[dim_hash:8][key_hash:8][slot:8]` keys
     - **`index-exact`**: Exact-match lookups with `[dim_hash:8][key_data:var]` -> `[slot:8]`
   - `keys`: Shared key encoding utilities
@@ -252,10 +253,18 @@ pub trait EntityDelta {
 }
 ```
 
-- Entities are keyed by `NsKey(Namespace, EntityKey)`
+- Entities are keyed by `NsKey`, a namespace and an `EntityKey`, built with `NsKey::of::<E>` from the entity's typed key
 - Deltas describe changes, not final states
 - `apply()` can store "before" values for later `undo()`
 - Enables efficient rollbacks without full state snapshots
+
+### Typed Keys
+Entity and log keys are byte strings of any length (decision 0051). Every key kind has one struct implementing `KeyCodec` — in `dolos-cardano`, `AccountKey`, `PoolKey`, `DRepKey`, `ProposalKey`, `AssetKey`, `DatumKey`, `EraProtocol`, `StagedKey<G, M>` and `()` for the singletons — and readers and writers of a namespace both go through it:
+
+- `StateEntity` and `LogEntity` bind an entity type to its namespace and key kind; the `_typed` store methods take and yield that kind (`read_entity_typed::<E>(&key)`, `write_log_typed::<E>(slot, &key, &entity)`).
+- `EntityKey::of(&key)` and `LogKey::of(slot, &key)` build the stored form; `from_raw` is for backends, the snapshot crate, CLI tools and tests only.
+- A decode is exact: short input and trailing bytes are refused, so a typed iterator surfaces a malformed key as an error.
+- Only a `FixedKey` part may precede another part in a composite key, which keeps `RangeOf::prefix` / `LogRangeOf::prefix` ranges sound. A `KeyRange` is half-open, with an open end where a prefix of all `0xff` has no successor.
 
 ### QueryHelpers and Lazy Iteration
 The `QueryHelpers` trait (auto-implemented for all `Domain` types) joins index lookups with archive fetches:
