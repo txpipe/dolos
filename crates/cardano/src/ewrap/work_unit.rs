@@ -20,7 +20,7 @@ use tracing::{debug, info};
 
 use crate::{ewrap::BoundaryWork, load_epoch, CardanoLogic};
 
-use crate::shard::{shard_key_ranges, ACCOUNT_SHARDS};
+use crate::shard::ACCOUNT_SHARDS;
 
 pub struct EwrapWorkUnit {
     slot: BlockSlot,
@@ -153,7 +153,7 @@ where
     }
 
     fn load(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
-        let ranges = shard_key_ranges(shard_index, self.total_shards);
+        let ranges = crate::AccountKey::shard_ranges(shard_index, self.total_shards);
 
         debug!(
             slot = self.slot,
@@ -188,7 +188,7 @@ where
     }
 
     fn commit_state(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
-        let ranges = shard_key_ranges(shard_index, self.total_shards);
+        let ranges = crate::AccountKey::shard_ranges(shard_index, self.total_shards);
 
         let boundary = self
             .boundary

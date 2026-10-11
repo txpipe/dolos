@@ -149,7 +149,7 @@ impl StateStore for FaultyStateStore {
     fn iter_entities(
         &self,
         ns: dolos_core::Namespace,
-        range: std::ops::Range<dolos_core::EntityKey>,
+        range: dolos_core::KeyRange,
     ) -> Result<Self::EntityIter, StateError> {
         if self.should_fault_ns(ns) {
             return Err(self.fault_err());
@@ -308,7 +308,7 @@ impl ArchiveStore for FaultyArchiveStore {
     fn iter_logs(
         &self,
         ns: Namespace,
-        range: std::ops::Range<LogKey>,
+        range: dolos_core::KeyRange,
     ) -> Result<Self::LogIter, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());

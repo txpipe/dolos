@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use dolos_core::{BlockSlot, EntityKey, NsKey, TxOrder};
+use dolos_core::{BlockSlot, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
@@ -11,7 +11,7 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{epochs::Lovelace, pools::PoolHash, pparams::PParamsSet, FixedNamespace as _};
+use super::{epochs::Lovelace, pools::PoolHash, pparams::PParamsSet, ProposalKey};
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProposalAction {
@@ -254,7 +254,7 @@ pub struct ProposalState {
     pub spo_votes: BTreeMap<PoolHash, VoteEntry>,
 }
 
-entity_boilerplate!(ProposalState, "proposals");
+entity_boilerplate!(ProposalState, "proposals", state = super::ProposalKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -390,8 +390,8 @@ fn replace_entry<K: Ord>(
 }
 
 impl ProposalState {
-    pub fn key(&self) -> EntityKey {
-        Self::build_entity_key(self.tx, self.idx)
+    pub fn key(&self) -> ProposalKey {
+        ProposalKey::new(self.tx, self.idx)
     }
 
     pub fn gov_action_id(&self) -> GovActionId {
@@ -510,10 +510,6 @@ impl ProposalState {
         Self::id(self.tx, self.idx)
     }
 
-    pub fn build_entity_key(tx: Hash<32>, idx: u32) -> EntityKey {
-        EntityKey::from([idx.to_be_bytes().as_slice(), tx.as_slice()].concat())
-    }
-
     pub fn expires_at(&self) -> Option<Epoch> {
         self.max_epoch.map(|x| x + 1)
     }
@@ -615,10 +611,7 @@ impl dolos_core::EntityDelta for NewProposal {
     type Entity = ProposalState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((
-            ProposalState::NS,
-            ProposalState::build_entity_key(self.tx, self.idx),
-        ))
+        NsKey::of::<ProposalState>(&ProposalKey::new(self.tx, self.idx))
     }
 
     fn apply(&mut self, entity: &mut Option<ProposalState>) {
@@ -732,10 +725,7 @@ impl dolos_core::EntityDelta for NewProposalV2 {
     type Entity = ProposalState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((
-            ProposalState::NS,
-            ProposalState::build_entity_key(self.tx, self.idx),
-        ))
+        NsKey::of::<ProposalState>(&ProposalKey::new(self.tx, self.idx))
     }
 
     fn apply(&mut self, entity: &mut Option<ProposalState>) {
@@ -825,10 +815,7 @@ impl dolos_core::EntityDelta for VoteCast {
     type Entity = ProposalState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((
-            ProposalState::NS,
-            ProposalState::build_entity_key(self.proposal_tx, self.proposal_idx),
-        ))
+        NsKey::of::<ProposalState>(&ProposalKey::new(self.proposal_tx, self.proposal_idx))
     }
 
     fn apply(&mut self, entity: &mut Option<ProposalState>) {
@@ -925,10 +912,7 @@ impl dolos_core::EntityDelta for ProposalResolved {
     type Entity = ProposalState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((
-            ProposalState::NS,
-            ProposalState::build_entity_key(self.tx, self.idx),
-        ))
+        NsKey::of::<ProposalState>(&ProposalKey::new(self.tx, self.idx))
     }
 
     fn apply(&mut self, entity: &mut Option<ProposalState>) {

@@ -9,7 +9,7 @@
 //! boundary runs through `execute_work_unit`, the executor the node runs.
 
 use dolos_core::{
-    sync::execute_work_unit, ArchiveStore as _, Domain, DomainError, LogKey, StateStore as _,
+    sync::execute_work_unit, ArchiveStore as _, BlockSlot, Domain, DomainError, StateStore as _,
     StateWriter as _,
 };
 use dolos_testing::{
@@ -19,9 +19,8 @@ use dolos_testing::{
 use pallas::ledger::primitives::StakeCredential;
 
 use dolos_cardano::{
-    ewrap::EwrapWorkUnit, AccountEpochLog, AccountState, CardanoWorkUnit, DRepDelegation,
-    EpochState, EpochValue, FixedNamespace as _, PendingRewardState, PoolDelegation, PoolHash,
-    SingletonEntity as _, Stake,
+    ewrap::EwrapWorkUnit, AccountEpochLog, AccountKey, AccountState, CardanoWorkUnit,
+    DRepDelegation, EpochValue, PendingRewardState, PoolDelegation, PoolHash, Stake,
 };
 
 const CLOSING_EPOCH: u64 = 5;
@@ -45,13 +44,11 @@ fn seeded() -> ToyDomain {
     epoch.number = CLOSING_EPOCH;
 
     let writer = state.start_writer().unwrap();
-    writer
-        .write_entity_typed(&EpochState::singleton_key(), &epoch)
-        .unwrap();
+    writer.write_entity_typed(&(), &epoch).unwrap();
 
     for byte in ACCOUNTS {
         let credential = credential(byte);
-        let key = dolos_cardano::model::credential_to_key(&credential);
+        let key = AccountKey::from(&credential);
         let pool: PoolHash = [byte; 28].into();
 
         let account = AccountState {
@@ -95,10 +92,10 @@ where
     execute_work_unit(domain, &mut work)
 }
 
-fn account_epochs(domain: &ToyDomain) -> Vec<(LogKey, AccountEpochLog)> {
+fn account_epochs(domain: &ToyDomain) -> Vec<(BlockSlot, AccountKey, AccountEpochLog)> {
     domain
         .archive()
-        .iter_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, None)
+        .iter_logs_typed::<AccountEpochLog>(None)
         .unwrap()
         .map(Result::unwrap)
         .collect()
@@ -108,11 +105,11 @@ fn accounts(domain: &ToyDomain) -> Vec<AccountState> {
     ACCOUNTS
         .into_iter()
         .map(|byte| {
-            let key = dolos_cardano::model::credential_to_key(&credential(byte));
+            let key = AccountKey::from(&credential(byte));
 
             domain
                 .state()
-                .read_entity_typed::<AccountState>(AccountState::NS, &key)
+                .read_entity_typed::<AccountState>(&key)
                 .unwrap()
                 .expect("account present")
         })

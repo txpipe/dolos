@@ -1,4 +1,6 @@
 use dolos_core::NsKey;
+
+use super::DatumKey;
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
@@ -28,7 +30,7 @@ impl DatumState {
     }
 }
 
-entity_boilerplate!(DatumState, "datums");
+entity_boilerplate!(DatumState, "datums", state = super::DatumKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -75,7 +77,7 @@ impl dolos_core::EntityDelta for DatumRefIncrement {
     type Entity = DatumState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DATUM_NS, self.datum_hash))
+        NsKey::of::<DatumState>(&DatumKey(self.datum_hash))
     }
 
     fn apply(&mut self, entity: &mut Option<DatumState>) {
@@ -128,7 +130,7 @@ impl dolos_core::EntityDelta for DatumRefDecrement {
     type Entity = DatumState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DATUM_NS, self.datum_hash))
+        NsKey::of::<DatumState>(&DatumKey(self.datum_hash))
     }
 
     fn apply(&mut self, entity: &mut Option<DatumState>) {

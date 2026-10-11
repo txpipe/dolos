@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, EntityKey, NsKey, TxOrder};
+use dolos_core::{BlockSlot, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
@@ -10,8 +10,8 @@ use tracing::debug;
 use super::{
     epoch_value::{EpochValue, TransitionDefault},
     eras::EraProtocol,
+    keys::AccountKey,
     pools::PoolHash,
-    FixedNamespace as _,
 };
 use crate::{add, sub};
 
@@ -128,7 +128,7 @@ pub struct AccountState {
     pub retired_pool: Option<PoolHash>,
 }
 
-entity_boilerplate!(AccountState, "accounts");
+entity_boilerplate!(AccountState, "accounts", state = super::AccountKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -310,8 +310,7 @@ impl dolos_core::EntityDelta for ControlledAmountInc {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -367,8 +366,7 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -423,8 +421,7 @@ impl dolos_core::EntityDelta for StakeRegistration {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -438,7 +435,7 @@ impl dolos_core::EntityDelta for StakeRegistration {
 
         tracing::debug!(
             slot = self.slot,
-            account = hex::encode(minicbor::to_vec(&self.cred).unwrap()),
+            account = %AccountKey::from(&self.cred),
             "applying registration"
         );
 
@@ -484,8 +481,7 @@ impl dolos_core::EntityDelta for StakeDelegation {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -546,8 +542,7 @@ impl dolos_core::EntityDelta for VoteDelegation {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -604,8 +599,7 @@ impl dolos_core::EntityDelta for StakeDeregistration {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -665,8 +659,7 @@ impl dolos_core::EntityDelta for WithdrawalInc {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -686,7 +679,7 @@ impl dolos_core::EntityDelta for WithdrawalInc {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolDelegatorRetire {
-    pub(crate) delegator: EntityKey,
+    pub(crate) delegator: AccountKey,
     pub(crate) epoch: Epoch,
 
     // undo
@@ -695,7 +688,7 @@ pub struct PoolDelegatorRetire {
 }
 
 impl PoolDelegatorRetire {
-    pub fn new(delegator: EntityKey, epoch: Epoch) -> Self {
+    pub fn new(delegator: AccountKey, epoch: Epoch) -> Self {
         Self {
             delegator,
             epoch,
@@ -709,7 +702,7 @@ impl dolos_core::EntityDelta for PoolDelegatorRetire {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((AccountState::NS, self.delegator.clone()))
+        NsKey::of::<AccountState>(&self.delegator)
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -754,7 +747,7 @@ impl dolos_core::EntityDelta for PoolDelegatorRetire {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepDelegatorDrop {
-    pub(crate) delegator: EntityKey,
+    pub(crate) delegator: AccountKey,
     pub(crate) epoch: Epoch,
 
     // undo
@@ -762,7 +755,7 @@ pub struct DRepDelegatorDrop {
 }
 
 impl DRepDelegatorDrop {
-    pub fn new(delegator: EntityKey, epoch: Epoch) -> Self {
+    pub fn new(delegator: AccountKey, epoch: Epoch) -> Self {
         Self {
             delegator,
             epoch,
@@ -775,7 +768,7 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((AccountState::NS, self.delegator.clone()))
+        NsKey::of::<AccountState>(&self.delegator)
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -825,8 +818,7 @@ impl dolos_core::EntityDelta for TreasuryWithdrawal {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.account).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.account))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -869,8 +861,7 @@ impl dolos_core::EntityDelta for PoolDepositRefund {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.account).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.account))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -912,8 +903,7 @@ impl dolos_core::EntityDelta for ProposalDepositRefund {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.account).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.account))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -936,7 +926,7 @@ impl dolos_core::EntityDelta for ProposalDepositRefund {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssignRewards {
-    pub(crate) account: EntityKey,
+    pub(crate) account: AccountKey,
     pub(crate) reward: u64,
 
     // undo
@@ -944,7 +934,7 @@ pub struct AssignRewards {
 }
 
 impl AssignRewards {
-    pub fn new(account: EntityKey, reward: u64) -> Self {
+    pub fn new(account: AccountKey, reward: u64) -> Self {
         Self {
             account,
             reward,
@@ -957,7 +947,7 @@ impl dolos_core::EntityDelta for AssignRewards {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((AccountState::NS, self.account.clone()))
+        NsKey::of::<AccountState>(&self.account)
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -979,7 +969,7 @@ impl dolos_core::EntityDelta for AssignRewards {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountTransition {
-    pub(crate) account: EntityKey,
+    pub(crate) account: AccountKey,
     pub(crate) next_epoch: Epoch,
 
     // undo: snapshot each EpochValue before the rotation.
@@ -989,7 +979,7 @@ pub struct AccountTransition {
 }
 
 impl AccountTransition {
-    pub fn new(account: EntityKey, next_epoch: Epoch) -> Self {
+    pub fn new(account: AccountKey, next_epoch: Epoch) -> Self {
         Self {
             account,
             next_epoch,
@@ -1004,7 +994,7 @@ impl dolos_core::EntityDelta for AccountTransition {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((AccountState::NS, self.account.clone()))
+        NsKey::of::<AccountState>(&self.account)
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -1133,7 +1123,7 @@ mod prop_tests {
             pool in root::any_hash_28(),
             epoch in root::any_epoch(),
         ) -> PoolDelegatorRetire {
-            PoolDelegatorRetire::new(dolos_core::EntityKey::from(pool.as_slice()), epoch)
+            PoolDelegatorRetire::new(AccountKey(StakeCredential::AddrKeyhash(pool)), epoch)
         }
     }
 
@@ -1142,7 +1132,7 @@ mod prop_tests {
             cred_hash in root::any_hash_28(),
             epoch in root::any_epoch(),
         ) -> DRepDelegatorDrop {
-            DRepDelegatorDrop::new(dolos_core::EntityKey::from(cred_hash.as_slice()), epoch)
+            DRepDelegatorDrop::new(AccountKey(StakeCredential::AddrKeyhash(cred_hash)), epoch)
         }
     }
 
@@ -1178,7 +1168,7 @@ mod prop_tests {
             account_hash in root::any_hash_28(),
             reward in root::any_lovelace(),
         ) -> AssignRewards {
-            AssignRewards::new(dolos_core::EntityKey::from(account_hash.as_slice()), reward)
+            AssignRewards::new(AccountKey(StakeCredential::AddrKeyhash(account_hash)), reward)
         }
     }
 
@@ -1187,7 +1177,7 @@ mod prop_tests {
             account_hash in root::any_hash_28(),
             next_epoch in root::any_epoch(),
         ) -> AccountTransition {
-            AccountTransition::new(dolos_core::EntityKey::from(account_hash.as_slice()), next_epoch)
+            AccountTransition::new(AccountKey(StakeCredential::AddrKeyhash(account_hash)), next_epoch)
         }
     }
 

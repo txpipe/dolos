@@ -1,18 +1,17 @@
-use dolos_core::EntityKey;
 use pallas::{
     codec::minicbor::{self, bytes::ByteVec, Decode, Encode},
-    crypto::hash::{Hash, Hasher},
+    crypto::hash::Hash,
     ledger::primitives::Epoch,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::periods::{self, ChunkRow, StageIfAbsent, StagedRow};
+use super::{AssetKey, PolicyKey};
+use crate::periods::{ChunkRow, StageIfAbsent, StagedKey, StagedRow};
 
 /// The first mint of an asset within one epoch, staged until the epoch seals.
 ///
-/// Keyed `policy[..14] ‖ epoch ‖ blake2b(subject)[..16]`, so one prefix scan
-/// returns every staged epoch of a policy. The member hashes the whole subject:
-/// two policies can share the prefix and an asset name. Re-mints of an asset
+/// Keyed `policy ‖ epoch ‖ asset key`, so one prefix scan returns every staged
+/// epoch of a policy, and nothing else. Re-mints of an asset
 /// first minted in an earlier epoch are staged too; readers and the seal keep
 /// only the rows whose slot is the asset's `initial_slot`.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
@@ -34,7 +33,11 @@ pub struct StagedFirstMint {
     pub tx_index: u32,
 }
 
-entity_boilerplate!(StagedFirstMint, "staged-first-mints");
+entity_boilerplate!(
+    StagedFirstMint,
+    "staged-first-mints",
+    state = StagedKey<PolicyKey, AssetKey>
+);
 
 impl StagedFirstMint {
     pub fn subject(&self) -> Vec<u8> {
@@ -48,15 +51,18 @@ impl StagedFirstMint {
     }
 
     /// The `AssetState` key of the minted asset.
-    pub fn asset_key(&self) -> EntityKey {
-        EntityKey::from(Hasher::<256>::hash(&self.subject()))
+    pub fn asset_key(&self) -> AssetKey {
+        AssetKey::of(&self.subject())
     }
 }
 
 impl StagedRow for StagedFirstMint {
-    fn key(&self) -> EntityKey {
-        let subject = Hasher::<256>::hash(&self.subject());
-        periods::staged_key(self.policy.as_slice(), self.epoch, subject.as_slice())
+    fn key(&self) -> StagedKey<PolicyKey, AssetKey> {
+        StagedKey {
+            group: PolicyKey(self.policy),
+            epoch: self.epoch,
+            member: self.asset_key(),
+        }
     }
 
     fn epoch(&self) -> Epoch {
@@ -68,8 +74,9 @@ pub type StageFirstMint = StageIfAbsent<StagedFirstMint>;
 
 /// One chunk of the subjects first minted in an epoch, in mint order.
 ///
-/// Sealed at `(epoch_start(e), chunk)`. Every chunk carries the epoch's total,
-/// so a reader learns how many subjects the epoch holds from its first chunk.
+/// Sealed at `epoch_start(e) ‖ chunk (4 B)`. Every chunk carries the epoch's
+/// total, so a reader learns how many subjects the epoch holds from its first
+/// chunk.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Default)]
 pub struct FirstMintChunk {
     #[n(0)]
@@ -79,7 +86,7 @@ pub struct FirstMintChunk {
     pub subjects: Vec<ByteVec>,
 }
 
-entity_boilerplate!(FirstMintChunk, "first-mints");
+entity_boilerplate!(FirstMintChunk, "first-mints", log = u32);
 
 impl ChunkRow for FirstMintChunk {
     type Item = Vec<u8>;
@@ -99,8 +106,8 @@ impl ChunkRow for FirstMintChunk {
 /// One chunk of the asset names a policy first minted in an epoch, in mint
 /// order.
 ///
-/// Sealed at `(epoch_start(e), policy ‖ chunk)`, with the policy's total for
-/// the epoch on every chunk.
+/// Sealed at `epoch_start(e) ‖ policy ‖ chunk (4 B)`, with the policy's total
+/// for the epoch on every chunk.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Default)]
 pub struct PolicyMintChunk {
     #[n(0)]
@@ -110,7 +117,11 @@ pub struct PolicyMintChunk {
     pub names: Vec<ByteVec>,
 }
 
-entity_boilerplate!(PolicyMintChunk, "policy-first-mints");
+entity_boilerplate!(
+    PolicyMintChunk,
+    "policy-first-mints",
+    log = (PolicyKey, u32)
+);
 
 impl ChunkRow for PolicyMintChunk {
     type Item = Vec<u8>;

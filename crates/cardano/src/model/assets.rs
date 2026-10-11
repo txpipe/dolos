@@ -5,7 +5,7 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::FixedNamespace as _;
+use super::AssetKey;
 
 #[derive(Debug, Encode, Decode, Clone, Default, PartialEq, Eq)]
 pub struct AssetState {
@@ -26,7 +26,7 @@ pub struct AssetState {
     pub metadata_tx: Option<Hash<32>>,
 }
 
-entity_boilerplate!(AssetState, "assets");
+entity_boilerplate!(AssetState, "assets", state = super::AssetKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -111,12 +111,8 @@ impl dolos_core::EntityDelta for MintStatsUpdate {
     type Entity = AssetState;
 
     fn key(&self) -> NsKey {
-        let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
-        hasher.input(self.policy.as_slice());
-        hasher.input(self.asset.as_slice());
-        let key = hasher.finalize();
-        let key = key.as_slice();
-        NsKey::from((AssetState::NS, key))
+        let subject = [self.policy.as_slice(), self.asset.as_slice()].concat();
+        NsKey::of::<AssetState>(&AssetKey::of(&subject))
     }
 
     fn apply(&mut self, entity: &mut Option<AssetState>) {
@@ -178,12 +174,8 @@ impl dolos_core::EntityDelta for MetadataTxUpdate {
     type Entity = AssetState;
 
     fn key(&self) -> NsKey {
-        let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
-        hasher.input(self.policy.as_slice());
-        hasher.input(self.asset.as_slice());
-        let key = hasher.finalize();
-        let key = key.as_slice();
-        NsKey::from((AssetState::NS, key))
+        let subject = [self.policy.as_slice(), self.asset.as_slice()].concat();
+        NsKey::of::<AssetState>(&AssetKey::of(&subject))
     }
 
     fn apply(&mut self, entity: &mut Option<AssetState>) {

@@ -1,11 +1,10 @@
-use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
-use pallas::codec::minicbor;
+use dolos_core::{ChainError, Domain, Genesis, StateStore as _, StateWriter as _};
 use pallas::ledger::addresses::{Address, Network, StakeAddress, StakePayload};
 use pallas::ledger::primitives::StakeCredential;
 
 use crate::{
-    pallas_extras, AccountState, DRepDelegation, EpochValue, PoolDelegation, PoolHash, PoolParams,
-    PoolSnapshot, PoolState, Stake,
+    pallas_extras, AccountKey, AccountState, DRepDelegation, EpochValue, PoolDelegation, PoolHash,
+    PoolKey, PoolParams, PoolSnapshot, PoolState, Stake,
 };
 
 use pallas::crypto::hash::Hash;
@@ -124,7 +123,7 @@ pub fn bootstrap<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), C
 
     for dto in pools.values() {
         let state = parse_pool(dto);
-        writer.write_entity_typed(&EntityKey::from(state.operator.as_slice()), &state)?;
+        writer.write_entity_typed(&PoolKey(state.operator), &state)?;
     }
 
     let Some(delegations) = &staking.stake else {
@@ -133,9 +132,7 @@ pub fn bootstrap<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), C
 
     for (account, pool) in delegations {
         let state = parse_delegation(account, pool, genesis);
-        let key = minicbor::to_vec(&state.credential).unwrap();
-        let key = EntityKey::from(key);
-        writer.write_entity_typed(&key, &state)?;
+        writer.write_entity_typed(&AccountKey::from(&state.credential), &state)?;
     }
 
     writer.commit()?;

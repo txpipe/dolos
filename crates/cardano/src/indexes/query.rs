@@ -11,11 +11,11 @@ use pallas::{
 
 use dolos_core::{
     archive::ArchiveStore, AsyncQueryFacade, BlockBody, BlockSlot, ChainError, Domain, DomainError,
-    EntityKey, StateStore as _, TagDimension, TxHash, TxoRef,
+    StateStore as _, TagDimension, TxHash, TxoRef,
 };
 
 use crate::indexes::dimensions::archive;
-use crate::model::{DatumState, DATUM_NS};
+use crate::model::{DatumKey, DatumState};
 
 use futures_core::Stream;
 
@@ -544,10 +544,9 @@ where
     }
 
     async fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, DomainError> {
-        let key = EntityKey::from(*datum_hash);
+        let key = DatumKey(*datum_hash);
         self.run_blocking(move |domain| {
-            let datum_state: Option<DatumState> =
-                domain.state().read_entity_typed(DATUM_NS, &key)?;
+            let datum_state: Option<DatumState> = domain.state().read_entity_typed(&key)?;
             Ok(datum_state.map(|s| s.bytes))
         })
         .await

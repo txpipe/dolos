@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 
-use dolos_core::EntityKey;
 use pallas::codec::minicbor::{self, Decode, Encode};
 use serde::{Deserialize, Serialize};
 
@@ -40,19 +39,6 @@ impl From<u16> for EraProtocol {
 impl From<EraProtocol> for u16 {
     fn from(value: EraProtocol) -> Self {
         value.0
-    }
-}
-
-impl From<EraProtocol> for EntityKey {
-    fn from(value: EraProtocol) -> Self {
-        EntityKey::from(&value.0.to_be_bytes())
-    }
-}
-
-impl From<EntityKey> for EraProtocol {
-    fn from(value: EntityKey) -> Self {
-        let bytes: [u8; 2] = value.as_ref()[..2].try_into().unwrap();
-        Self(u16::from_be_bytes(bytes))
     }
 }
 
@@ -116,7 +102,7 @@ pub struct EraSummary {
     pub protocol: u16,
 }
 
-entity_boilerplate!(EraSummary, "eras");
+entity_boilerplate!(EraSummary, "eras", state = EraProtocol);
 
 #[cfg(test)]
 pub(crate) mod testing {

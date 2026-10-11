@@ -590,7 +590,7 @@ pub fn load_gov<D: Domain>(state: &D::State) -> Result<GovState, ChainError> {
 pub fn read_singleton<D: Domain, E: SingletonEntity>(
     state: &D::State,
 ) -> Result<Option<E>, ChainError> {
-    Ok(state.read_entity_typed::<E>(E::NS, &E::singleton_key())?)
+    Ok(state.read_entity_typed::<E>(&())?)
 }
 
 #[cfg(test)]

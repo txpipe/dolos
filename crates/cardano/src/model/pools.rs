@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, EntityKey, NsKey};
+use dolos_core::{BlockSlot, NsKey};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
@@ -9,7 +9,7 @@ use tracing::debug;
 
 use super::{
     epoch_value::{EpochValue, TransitionDefault},
-    FixedNamespace as _,
+    PoolKey,
 };
 use crate::pallas_extras::MultiEraPoolRegistration;
 
@@ -92,7 +92,7 @@ impl TransitionDefault for PoolSnapshot {
     }
 }
 
-entity_boilerplate!(PoolState, "pools");
+entity_boilerplate!(PoolState, "pools", state = super::PoolKey);
 
 impl PoolState {
     pub fn live_saturation(&self) -> RationalNumber {
@@ -228,8 +228,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
     type Entity = PoolState;
 
     fn key(&self) -> NsKey {
-        let key = self.cert.operator.as_slice();
-        NsKey::from((PoolState::NS, key))
+        NsKey::of::<PoolState>(&PoolKey(self.cert.operator))
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -332,7 +331,7 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     type Entity = PoolState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PoolState::NS, self.operator.as_slice()))
+        NsKey::of::<PoolState>(&PoolKey(self.operator))
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -389,7 +388,7 @@ impl dolos_core::EntityDelta for PoolDeRegistration {
     type Entity = PoolState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PoolState::NS, self.operator.as_slice()))
+        NsKey::of::<PoolState>(&PoolKey(self.operator))
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -439,7 +438,7 @@ impl dolos_core::EntityDelta for PoolWrapUp {
     type Entity = PoolState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PoolState::NS, self.pool_hash.as_slice()))
+        NsKey::of::<PoolState>(&PoolKey(self.pool_hash))
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -460,7 +459,7 @@ impl dolos_core::EntityDelta for PoolWrapUp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolTransition {
-    pub(crate) pool: EntityKey,
+    pub(crate) pool: PoolKey,
     pub(crate) next_epoch: Epoch,
 
     // undo: save the whole EpochValue so rotation can be reversed in one shot.
@@ -468,7 +467,7 @@ pub struct PoolTransition {
 }
 
 impl PoolTransition {
-    pub fn new(pool: EntityKey, next_epoch: Epoch) -> Self {
+    pub fn new(pool: PoolKey, next_epoch: Epoch) -> Self {
         Self {
             pool,
             next_epoch,
@@ -481,7 +480,7 @@ impl dolos_core::EntityDelta for PoolTransition {
     type Entity = PoolState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PoolState::NS, self.pool.clone()))
+        NsKey::of::<PoolState>(&self.pool)
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -542,7 +541,7 @@ mod prop_tests {
             pool in root::any_hash_28(),
             next_epoch in root::any_epoch(),
         ) -> PoolTransition {
-            PoolTransition::new(dolos_core::EntityKey::from(pool.as_slice()), next_epoch)
+            PoolTransition::new(PoolKey(pool), next_epoch)
         }
     }
 

@@ -4,13 +4,13 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use dolos_cardano::{
-    model::{FirstMintChunk, FixedNamespace as _, StagedFirstMint},
+    model::{FirstMintChunk, StagedFirstMint},
     periods::is_sealable,
     CardanoDelta,
 };
 use dolos_core::{
     import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ChainPoint, Domain as _,
-    Genesis, LogKey, StateStore as _, TemporalKey, WalStore as _,
+    Genesis, StateStore as _, WalStore as _,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
@@ -32,7 +32,7 @@ fn plain(cfg: SyntheticBlockConfig) -> SyntheticBlockConfig {
 fn staged(domain: &ToyDomain) -> BTreeSet<(u64, Vec<u8>, u64)> {
     domain
         .state()
-        .iter_entities_typed::<StagedFirstMint>(StagedFirstMint::NS, None)
+        .iter_entities_typed::<StagedFirstMint>(None)
         .unwrap()
         .map(|row| {
             let (_, row) = row.unwrap();
@@ -143,13 +143,9 @@ fn assert_epochs_seal(genesis: Arc<Genesis>, blocks: usize, step: u64) {
     let mut sealed = 0;
 
     for epoch in minted {
-        let key = LogKey::from((
-            TemporalKey::from(chain.epoch_start(epoch)),
-            dolos_core::EntityKey::from(&[0u8; 4]),
-        ));
         let row = domain
             .archive()
-            .read_log_typed::<FirstMintChunk>(FirstMintChunk::NS, &key)
+            .read_log_typed::<FirstMintChunk>(chain.epoch_start(epoch), &0)
             .unwrap();
 
         if is_sealable(&chain, mutable, epoch, tip_epoch) {
