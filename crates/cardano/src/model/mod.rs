@@ -1,33 +1,26 @@
-use dolos_core::{
-    ChainError, Entity, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateSchema,
-};
+use dolos_core::{ChainError, EntityValue, Namespace, NamespaceType, NsKey, StateSchema};
 
-pub trait FixedNamespace {
-    const NS: &'static str;
-}
+pub use dolos_core::{FixedNamespace, LogEntity, StateEntity};
 
-/// A namespace that holds exactly one row at a fixed key.
+/// A namespace that holds exactly one row, at the empty key.
 ///
 /// Singletons don't fit the population-shaped machinery (namespace
 /// streams, key ranges): readers address the row directly
 /// (`crate::read_singleton`) and boundary commits apply deltas through
 /// `WorkDeltas::apply_singleton`, which — unlike the streams — handles
 /// the row not existing yet.
-pub trait SingletonEntity: Entity + FixedNamespace {
-    const KEY: &'static [u8];
-
-    fn singleton_key() -> EntityKey {
-        EntityKey::from(Self::KEY)
-    }
-
+pub trait SingletonEntity: StateEntity<Key = ()> {
     fn ns_key() -> NsKey {
-        NsKey::from((Self::NS, Self::singleton_key()))
+        NsKey::of::<Self>(&())
     }
 }
 
+/// `FixedNamespace` and `Entity` for an entity type, and the key kinds it is
+/// stored under: `state = K` for a state entity, `log = K` for an archive
+/// log (the part after the slot).
 macro_rules! entity_boilerplate {
-    ($type:ident, $ns:literal) => {
-        impl super::FixedNamespace for $type {
+    ($type:ident, $ns:literal $(, state = $state:ty)? $(, log = $log:ty)?) => {
+        impl dolos_core::FixedNamespace for $type {
             const NS: &str = $ns;
         }
 
@@ -36,16 +29,28 @@ macro_rules! entity_boilerplate {
                 ns: dolos_core::Namespace,
                 value: &dolos_core::EntityValue,
             ) -> Result<Self, dolos_core::ChainError> {
-                assert_eq!(ns, <$type as super::FixedNamespace>::NS);
+                assert_eq!(ns, <$type as dolos_core::FixedNamespace>::NS);
                 let value = pallas::codec::minicbor::decode(value)?;
                 Ok(value)
             }
 
             fn encode_entity(value: &Self) -> (dolos_core::Namespace, dolos_core::EntityValue) {
                 let value = pallas::codec::minicbor::to_vec(value).unwrap();
-                (<$type as super::FixedNamespace>::NS, value)
+                (<$type as dolos_core::FixedNamespace>::NS, value)
             }
         }
+
+        $(
+            impl dolos_core::StateEntity for $type {
+                type Key = $state;
+            }
+        )?
+
+        $(
+            impl dolos_core::LogEntity for $type {
+                type Key = $log;
+            }
+        )?
     };
 }
 
@@ -58,6 +63,7 @@ pub mod epochs;
 pub mod eras;
 pub mod first_mints;
 pub mod gov;
+pub mod keys;
 pub mod logs;
 pub mod pending;
 pub mod pools;
@@ -76,6 +82,7 @@ pub use epochs::*;
 pub use eras::*;
 pub use first_mints::*;
 pub use gov::*;
+pub use keys::*;
 pub use logs::*;
 pub use pending::*;
 pub use pools::*;

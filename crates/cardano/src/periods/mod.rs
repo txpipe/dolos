@@ -12,24 +12,16 @@
 use std::{collections::BTreeMap, ops::Range};
 
 use dolos_core::{
-    ArchiveError, ArchiveStore, ArchiveWriter as _, ChainError, Domain, Entity, EntityDelta,
-    EntityKey, EntityValue, Genesis, LogKey, Namespace, NsKey, StateStore, StateWriter as _,
-    TemporalKey,
+    ArchiveError, ArchiveStore, ArchiveWriter as _, ChainError, Domain, EntityDelta, EntityValue,
+    FixedKey, Genesis, KeyBytes, KeyCodec, KeyError, LogEntity, LogKey, NsKey, RangeOf,
+    StateEntity, StateStore, StateWriter as _,
 };
 use pallas::{codec::minicbor, ledger::primitives::Epoch};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::{indexes::SlotOrder, ChainSummary, FixedNamespace};
+use crate::{indexes::SlotOrder, ChainSummary};
 
 pub mod first_mints;
-
-/// Leading bytes of a staged key that name its group.
-pub const GROUP_LEN: usize = 14;
-
-const EPOCH_LEN: usize = 2;
-
-/// Trailing bytes of a staged key that name a member of its group.
-pub const MEMBER_LEN: usize = dolos_core::KEY_SIZE - GROUP_LEN - EPOCH_LEN;
 
 /// Most entries one sealed list row holds; a longer list spans several rows.
 pub const CHUNK_LEN: usize = 256;
@@ -37,36 +29,46 @@ pub const CHUNK_LEN: usize = 256;
 /// Staged rows a seal handles per commit pair.
 const SEAL_BATCH: usize = 50_000;
 
-/// `group[..14] ‖ epoch ‖ member[..16]`: group-major, so one prefix scan
-/// returns every staged epoch of a group.
+/// The key of a staged row: `group ‖ epoch (8 B) ‖ member`.
 ///
-/// The epoch is truncated to two bytes, which tells apart the few epochs
-/// staged at any time; rows carry their full epoch.
-pub fn staged_key(group: &[u8], epoch: Epoch, member: &[u8]) -> EntityKey {
-    let mut key = [0u8; dolos_core::KEY_SIZE];
-    key[..GROUP_LEN].copy_from_slice(&group[..GROUP_LEN]);
-    key[GROUP_LEN..GROUP_LEN + EPOCH_LEN].copy_from_slice(&(epoch as u16).to_be_bytes());
-    key[GROUP_LEN + EPOCH_LEN..].copy_from_slice(&member[..MEMBER_LEN]);
-    EntityKey::from(&key)
+/// Group-major, so one prefix scan over a group returns every staged epoch of
+/// it, in epoch order. The key is exact: no two rows share it, and readers
+/// take a group's rows without filtering.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StagedKey<G, M> {
+    pub group: G,
+    pub epoch: Epoch,
+    pub member: M,
 }
 
-/// Every staged key of one group.
-pub fn group_range(group: &[u8]) -> Range<EntityKey> {
-    let mut start = [0u8; dolos_core::KEY_SIZE];
-    let mut end = [0xffu8; dolos_core::KEY_SIZE];
-    start[..GROUP_LEN].copy_from_slice(&group[..GROUP_LEN]);
-    end[..GROUP_LEN].copy_from_slice(&group[..GROUP_LEN]);
-    EntityKey::from(&start)..EntityKey::from(&end)
+impl<G: FixedKey, M: KeyCodec> KeyCodec for StagedKey<G, M> {
+    fn encode_key(&self, out: &mut KeyBytes) {
+        self.group.encode_key(out);
+        self.epoch.encode_key(out);
+        self.member.encode_key(out);
+    }
+
+    fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
+        let (group, (epoch, member)) = <(G, (u64, M))>::decode_key(bytes)?;
+
+        Ok(Self {
+            group,
+            epoch,
+            member,
+        })
+    }
 }
 
-/// Where a sealed row of `epoch` lives: `epoch_start(epoch) ‖ entity`.
-pub fn sealed_key(chain: &ChainSummary, epoch: Epoch, entity: EntityKey) -> LogKey {
-    LogKey::from((TemporalKey::from(chain.epoch_start(epoch)), entity))
-}
+/// A group is the prefix of its staged keys. Declared per group kind: the
+/// prefix trait is core's, so a blanket impl over every group is not one this
+/// crate may write.
+impl<M: KeyCodec> dolos_core::KeyPrefix<StagedKey<crate::PolicyKey, M>> for crate::PolicyKey {}
 
 /// A row staged in state until its epoch seals.
-pub trait StagedRow: Entity + FixedNamespace + Clone + std::fmt::Debug {
-    fn key(&self) -> EntityKey;
+pub trait StagedRow:
+    StateEntity<Key: Clone + std::fmt::Debug + Serialize + DeserializeOwned> + Clone + std::fmt::Debug
+{
+    fn key(&self) -> Self::Key;
 
     fn epoch(&self) -> Epoch;
 }
@@ -77,8 +79,9 @@ pub trait StagedRow: Entity + FixedNamespace + Clone + std::fmt::Debug {
 /// A delta that finds the row present changes nothing but still lands in the
 /// WAL, so visitors drop repeats within a block before emitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StageIfAbsent<E> {
-    pub(crate) key: EntityKey,
+#[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned"))]
+pub struct StageIfAbsent<E: StagedRow> {
+    pub(crate) key: E::Key,
     pub(crate) row: E,
 
     // undo
@@ -99,7 +102,7 @@ impl<E: StagedRow> EntityDelta for StageIfAbsent<E> {
     type Entity = E;
 
     fn key(&self) -> NsKey {
-        NsKey(E::NS, self.key.clone())
+        NsKey::of::<E>(&self.key)
     }
 
     fn apply(&mut self, entity: &mut Option<E>) {
@@ -153,30 +156,32 @@ pub fn seal_staged<D: Domain>(
 /// commit before the chunk's staged rows are deleted. A crash between the two
 /// leaves whole groups staged and sealed, and the re-run seals them again from
 /// the same rows.
-pub fn seal_groups<D, R>(
+pub fn seal_groups<D, E, G, M, R>(
     state: &D::State,
     archive: &D::Archive,
-    ns: Namespace,
-    rows: impl IntoIterator<Item = Result<(EntityKey, R), ChainError>>,
+    rows: impl IntoIterator<Item = Result<(StagedKey<G, M>, R), ChainError>>,
     batch: usize,
     mut seal: impl FnMut(
-        &[(EntityKey, R)],
+        &[(StagedKey<G, M>, R)],
         &<D::Archive as ArchiveStore>::Writer,
     ) -> Result<(), ChainError>,
 ) -> Result<(), ChainError>
 where
     D: Domain,
+    E: StateEntity<Key = StagedKey<G, M>>,
+    G: FixedKey + PartialEq,
+    M: KeyCodec,
 {
-    let mut chunk: Vec<(EntityKey, R)> = Vec::new();
+    let mut chunk: Vec<(StagedKey<G, M>, R)> = Vec::new();
 
-    let mut flush = |chunk: &mut Vec<(EntityKey, R)>| -> Result<(), ChainError> {
+    let mut flush = |chunk: &mut Vec<(StagedKey<G, M>, R)>| -> Result<(), ChainError> {
         let writer = archive.start_writer()?;
         seal(chunk, &writer)?;
         writer.commit()?;
 
         let writer = state.start_writer()?;
         for (key, _) in chunk.drain(..) {
-            writer.delete_entity(ns, &key)?;
+            writer.save_entity_typed::<E>(&key, None)?;
         }
         writer.commit()?;
 
@@ -186,9 +191,9 @@ where
     for row in rows {
         let row = row?;
 
-        let closes = chunk.last().is_some_and(|(last, _)| {
-            chunk.len() >= batch && last.as_ref()[..GROUP_LEN] != row.0.as_ref()[..GROUP_LEN]
-        });
+        let closes = chunk
+            .last()
+            .is_some_and(|(last, _)| chunk.len() >= batch && last.group != row.0.group);
 
         if closes {
             flush(&mut chunk)?;
@@ -207,7 +212,7 @@ where
 /// Staged rows in `range`, by epoch, in key order within each.
 pub fn read_staged<S, E>(
     state: &S,
-    range: Range<EntityKey>,
+    range: RangeOf<E::Key>,
 ) -> Result<BTreeMap<Epoch, Vec<E>>, ChainError>
 where
     S: StateStore,
@@ -215,7 +220,7 @@ where
 {
     let mut out: BTreeMap<Epoch, Vec<E>> = BTreeMap::new();
 
-    for row in state.iter_entities_typed::<E>(E::NS, Some(range))? {
+    for row in state.iter_entities_typed::<E>(Some(range))? {
         let (_, row) = row?;
         out.entry(row.epoch()).or_default().push(row);
     }
@@ -223,23 +228,22 @@ where
     Ok(out)
 }
 
-/// The sealed rows at `entity(e)` of each of `epochs`, raw, in one batched
-/// read.
-pub fn read_sealed<A: ArchiveStore>(
+/// The sealed rows of `R` at `key(e)` of each of `epochs`, raw, in one
+/// batched read. A sealed row of epoch `e` lives at `epoch_start(e) ‖ key`.
+pub fn read_sealed<A: ArchiveStore, R: LogEntity>(
     archive: &A,
-    ns: Namespace,
     chain: &ChainSummary,
     epochs: impl IntoIterator<Item = Epoch>,
-    entity: impl Fn(Epoch) -> EntityKey,
+    key: impl Fn(Epoch) -> R::Key,
 ) -> Result<BTreeMap<Epoch, EntityValue>, ChainError> {
     let epochs: Vec<Epoch> = epochs.into_iter().collect();
 
     let keys: Vec<LogKey> = epochs
         .iter()
-        .map(|&epoch| sealed_key(chain, epoch, entity(epoch)))
+        .map(|&epoch| LogKey::of(chain.epoch_start(epoch), &key(epoch)))
         .collect();
 
-    let values = archive.read_logs(ns, &keys.iter().collect::<Vec<_>>())?;
+    let values = archive.read_logs(R::NS, &keys.iter().collect::<Vec<_>>())?;
 
     Ok(epochs
         .into_iter()
@@ -282,7 +286,7 @@ pub fn join<E, V>(
 ///
 /// Field 0 is the group's entry count for the epoch, on every chunk, so a
 /// reader takes it off the first chunk without decoding the entries.
-pub trait ChunkRow: Entity + FixedNamespace {
+pub trait ChunkRow: LogEntity {
     type Item;
 
     fn new(count: u64, items: Vec<Self::Item>) -> Self;
@@ -310,24 +314,22 @@ pub fn chunk_count(raw: &[u8]) -> Result<u64, ChainError> {
     Ok(decoder.u64()?)
 }
 
-/// Chunks `chunks` of one sealed epoch, keyed `entity(i)`.
+/// Chunks `chunks` of one sealed epoch, keyed `key(i)`.
 pub fn load_chunks<A, R>(
     archive: &A,
     chain: &ChainSummary,
     epoch: Epoch,
     chunks: Range<u32>,
-    entity: impl Fn(u32) -> EntityKey,
+    key: impl Fn(u32) -> R::Key,
 ) -> Result<Vec<R>, ChainError>
 where
     A: ArchiveStore,
     R: ChunkRow,
 {
-    let keys: Vec<LogKey> = chunks
-        .clone()
-        .map(|i| sealed_key(chain, epoch, entity(i)))
-        .collect();
+    let slot = chain.epoch_start(epoch);
+    let keys: Vec<_> = chunks.clone().map(|i| (slot, key(i))).collect();
 
-    let rows = archive.read_logs_typed::<R>(R::NS, &keys.iter().collect::<Vec<_>>())?;
+    let rows = archive.read_logs_typed::<R>(&keys)?;
 
     rows.into_iter()
         .zip(chunks)
@@ -472,22 +474,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn staged_keys_group_by_prefix_and_sort_by_epoch() {
-        let group = [7u8; 28];
-        let key = |epoch| staged_key(&group, epoch, &[1u8; 32]);
+    fn staged_keys_are_exact_and_group_by_prefix() {
+        use crate::{AssetKey, PolicyKey};
 
-        let range = group_range(&group);
-        assert!(range.contains(&key(0)));
-        assert!(range.contains(&key(65_535)));
-        assert!(key(3) < key(4));
+        type Key = StagedKey<PolicyKey, AssetKey>;
 
-        let other = staged_key(&[8u8; 28], 3, &[0u8; 32]);
-        assert!(!range.contains(&other));
+        let group = PolicyKey([7u8; 28].into());
+        let key = |group, epoch| Key {
+            group,
+            epoch,
+            member: AssetKey([1u8; 32].into()),
+        };
 
-        // a group shares its prefix only up to GROUP_LEN bytes
-        let mut sibling = group;
-        sibling[GROUP_LEN] = 9;
-        assert!(range.contains(&staged_key(&sibling, 3, &[0u8; 32])));
+        let raw = dolos_core::keys::encode(&key(group, 300));
+        assert_eq!(raw.len(), 28 + 8 + 32);
+        assert_eq!(raw[..28], [7u8; 28]);
+        assert_eq!(raw[28..36], 300u64.to_be_bytes());
+        assert_eq!(Key::decode_key(&raw), Ok(key(group, 300)));
+        assert!(Key::decode_key(&raw[..67]).is_err());
+
+        let range = RangeOf::<Key>::prefix(&group);
+        assert!(range.contains(&key(group, 0)));
+        assert!(range.contains(&key(group, u64::MAX)));
+
+        let encoded = |epoch| dolos_core::keys::encode(&key(group, epoch));
+        assert!(encoded(3) < encoded(4));
+        assert!(encoded(255) < encoded(256));
+
+        let other = PolicyKey([8u8; 28].into());
+        assert!(!range.contains(&key(other, 3)));
+
+        // a policy sharing all but its last byte is another group
+        let mut sibling = [7u8; 28];
+        sibling[27] = 9;
+        assert!(!range.contains(&key(PolicyKey(sibling.into()), 3)));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn staged_keys_round_trip_and_decode_exactly(
+            group in proptest::prelude::any::<[u8; 28]>(),
+            epoch in proptest::prelude::any::<u64>(),
+            member in proptest::prelude::any::<[u8; 32]>(),
+        ) {
+            use crate::{AssetKey, PolicyKey};
+
+            let key = StagedKey {
+                group: PolicyKey(group.into()),
+                epoch,
+                member: AssetKey(member.into()),
+            };
+
+            let raw = dolos_core::keys::encode(&key);
+            proptest::prop_assert_eq!(StagedKey::decode_key(&raw), Ok(key));
+            proptest::prop_assert!(
+                StagedKey::<PolicyKey, AssetKey>::decode_key(&raw[..raw.len() - 1]).is_err()
+            );
+            proptest::prop_assert!(
+                StagedKey::<PolicyKey, AssetKey>::decode_key(&[raw.as_slice(), &[0]].concat())
+                    .is_err()
+            );
+        }
     }
 
     /// Byron epochs are a sixth of mainnet's mutable window (`3k/f`), so each
