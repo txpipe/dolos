@@ -81,7 +81,18 @@ pub struct SyntheticBlockConfig {
     /// Opt-in mint redeemer execution. `None` keeps the default chain
     /// byte-identical, which many endpoint tests assert.
     pub mint_redeemer: Option<MintRedeemerConfig>,
+    /// Slots between consecutive blocks.
+    pub slot_step: u64,
+    /// The mints of each tx, per block, replacing the default mint. Each entry
+    /// holds one list per tx; a missing entry keeps the default.
+    pub mints_by_block: Vec<Vec<TxMints>>,
+    /// Txs carry no certificates and no withdrawal. The default ones register
+    /// a DRep, which a pre-Conway chain cannot carry across an epoch boundary.
+    pub plain_txs: bool,
 }
+
+/// One tx's mints: policy, asset name and quantity, a burn when negative.
+pub type TxMints = Vec<([u8; 28], String, i64)>;
 
 /// Configuration for the opt-in mint redeemer execution.
 ///
@@ -180,6 +191,9 @@ impl Default for SyntheticBlockConfig {
             invalid_txs_by_block: vec![],
             ada_only_by_block: vec![],
             mint_redeemer: None,
+            slot_step: 1,
+            mints_by_block: vec![],
+            plain_txs: false,
         }
     }
 }
@@ -435,7 +449,7 @@ pub fn build_synthetic_blocks(
     let mut built_tx_hashes: Vec<Vec<Hash<32>>> = Vec::with_capacity(block_count);
 
     for (offset, asset_name) in asset_names.iter().enumerate() {
-        let slot = cfg.slot + offset as u64;
+        let slot = cfg.slot + offset as u64 * cfg.slot_step;
         let block_number = cfg.start_block + offset as u64;
         let asset_name = Bytes::from(asset_name.as_bytes().to_vec());
         let ada_only = cfg.ada_only_by_block.get(offset).copied().unwrap_or(false);
@@ -510,7 +524,8 @@ pub fn build_synthetic_blocks(
                 None
             };
 
-            let withdrawal_amount = (tx_offset == 0).then_some(1_000_000 + block_number);
+            let withdrawal_amount =
+                (tx_offset == 0 && !cfg.plain_txs).then_some(1_000_000 + block_number);
             withdrawal_amounts.push(withdrawal_amount);
 
             let gov_actions = gov_actions_by_block[offset]
@@ -555,6 +570,15 @@ pub fn build_synthetic_blocks(
                 .cloned()
                 .unwrap_or_default();
 
+            let mints = cfg.mints_by_block.get(offset).map(|txs| {
+                assert_eq!(
+                    txs.len(),
+                    txs_per_block,
+                    "mints_by_block needs one list per tx"
+                );
+                &txs[tx_offset]
+            });
+
             let mint_redeemer = if tx_offset == 0 {
                 cfg.mint_redeemer.as_ref()
             } else {
@@ -583,6 +607,8 @@ pub fn build_synthetic_blocks(
                 extra_certs,
                 cfg.proposal_deposit,
                 mint_redeemer,
+                mints,
+                cfg.plain_txs,
             ));
         }
 
@@ -1013,6 +1039,8 @@ fn sample_transaction(
     extra_certs: Vec<Certificate>,
     proposal_deposit: u64,
     mint_redeemer_cfg: Option<&MintRedeemerConfig>,
+    mints: Option<&TxMints>,
+    plain: bool,
 ) -> SyntheticTxSpec {
     let input = TransactionInput {
         transaction_id: tx_hash,
@@ -1022,6 +1050,34 @@ fn sample_transaction(
     // an ADA-only tx mints nothing, so it carries no mint redeemer either
     let (value, mint, redeemer) = if ada_only {
         (Value::Coin(lovelace), None, None)
+    } else if let Some(mints) = mints {
+        let mut mint: BTreeMap<Hash<28>, BTreeMap<Bytes, NonZeroInt>> = BTreeMap::new();
+        let mut output_multiasset: BTreeMap<Hash<28>, BTreeMap<Bytes, PositiveCoin>> =
+            BTreeMap::new();
+
+        for (policy, name, amount) in mints {
+            let name = Bytes::from(name.as_bytes().to_vec());
+            let quantity = NonZeroInt::try_from(*amount).expect("mint amount must be non-zero");
+            mint.entry(Hash::from(*policy))
+                .or_default()
+                .insert(name.clone(), quantity);
+
+            if *amount > 0 {
+                let amount = PositiveCoin::try_from(*amount as u64).expect("positive amount");
+                output_multiasset
+                    .entry(Hash::from(*policy))
+                    .or_default()
+                    .insert(name, amount);
+            }
+        }
+
+        let value = if output_multiasset.is_empty() {
+            Value::Coin(lovelace)
+        } else {
+            Value::Multiasset(lovelace, output_multiasset)
+        };
+
+        (value, (!mint.is_empty()).then_some(mint), None)
     } else {
         let mint_amount = NonZeroInt::try_from(mint_amount).expect("mint amount must be non-zero");
         let mut mint_assets = BTreeMap::new();
@@ -1136,14 +1192,15 @@ fn sample_transaction(
     ];
     certificates.extend(extra_certs);
 
-    let certificates = NonEmptySet::try_from(certificates).expect("non-empty certificates");
+    let certificates =
+        (!plain).then(|| NonEmptySet::try_from(certificates).expect("non-empty certificates"));
 
     let body = TransactionBody {
         inputs: Set::from(vec![input]),
         outputs: vec![TransactionOutput::PostAlonzo(KeepRaw::from(output))],
         fee: 7,
         ttl: Some(10),
-        certificates: Some(certificates),
+        certificates,
         withdrawals,
         auxiliary_data_hash,
         validity_interval_start: Some(5),

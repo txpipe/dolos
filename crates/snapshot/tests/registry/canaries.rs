@@ -1,4 +1,4 @@
-//! The seventeen canaries: one fully-populated value per namespace.
+//! The canaries: one fully-populated value per namespace.
 //!
 //! A canary is a value in which **every field is present and distinctive** —
 //! every `Option` is `Some`, every collection is non-empty, every nested type
@@ -24,10 +24,10 @@ use dolos_cardano::{
     model::{
         AccountEpochLog, AccountState, AssetState, AuthHistory, Committee, CommitteeAuthorization,
         Constitution, DRepDelegation, DRepExpiry, DRepState, DatumState, EndStats, EpochState,
-        EpochValue, EraBoundary, EraSummary, GovDistr, GovRoots, GovState, Nonces, PParamValue,
-        PParamsSet, PendingMirState, PendingRewardState, PoolDelegation, PoolParams, PoolSnapshot,
-        PoolState, ProposalAction, ProposalState, RollingStats, ShardProgress, Stake, StakeLog,
-        VoteEntry,
+        EpochValue, EraBoundary, EraSummary, FirstMintChunk, GovDistr, GovRoots, GovState, Nonces,
+        PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
+        PoolDelegation, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
+        RollingStats, ShardProgress, StagedFirstMint, Stake, StakeLog, VoteEntry,
     },
     pallas::{
         codec::utils::Bytes,
@@ -187,6 +187,33 @@ pub fn asset_state() -> AssetState {
         initial_slot: Some(44_444),
         mint_tx_count: 19,
         metadata_tx: Some(hash32(0x82)),
+    }
+}
+
+pub fn first_mint_chunk() -> FirstMintChunk {
+    FirstMintChunk {
+        count: 258,
+        subjects: vec![
+            [hash28(0xb0).as_slice(), b"first"].concat().into(),
+            [hash28(0xb1).as_slice(), b"second"].concat().into(),
+        ],
+    }
+}
+
+pub fn policy_mint_chunk() -> PolicyMintChunk {
+    PolicyMintChunk {
+        count: 257,
+        names: vec![b"first".to_vec().into(), b"second".to_vec().into()],
+    }
+}
+
+pub fn staged_first_mint() -> StagedFirstMint {
+    StagedFirstMint {
+        policy: hash28(0xb2),
+        name: b"staged".to_vec(),
+        epoch: 611,
+        slot: 163_000_123,
+        tx_index: 17,
     }
 }
 
