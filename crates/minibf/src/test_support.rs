@@ -386,12 +386,13 @@ impl TestApp {
         content_type: &str,
         body: Vec<u8>,
     ) -> (StatusCode, Vec<u8>) {
-        let req = Request::builder()
-            .method(Method::POST)
-            .uri(path)
-            .header("content-type", content_type)
-            .body(Body::from(body))
-            .expect("failed to build request");
+        // An empty content type sends no Content-Type header.
+        let mut req = Request::builder().method(Method::POST).uri(path);
+        if !content_type.is_empty() {
+            req = req.header("content-type", content_type);
+        }
+
+        let req = req.body(Body::from(body)).expect("failed to build request");
 
         let res = self
             .router
