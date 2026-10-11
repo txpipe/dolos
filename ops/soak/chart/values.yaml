@@ -1,0 +1,100 @@
+# One dolos instance per release. These defaults are instance-agnostic: no
+# cluster, network, registry or image is assumed. Everything an instance must
+# supply is empty here and `required` in the templates, so a missing value
+# fails at render rather than starting a half-configured node. See
+# ../README.md for every value and values.example.yaml for a full instance.
+
+# The instance name. Names the StatefulSet and its ConfigMap, and selects
+# the pod.
+name: ""
+
+# The network the instance follows, e.g. mainnet. Places the restore marker
+# at /var/data/<network>/.stele-restored.
+network: ""
+
+image:
+  repository: ghcr.io/txpipe/dolos
+  # sha256:<64 hex>. Required: a soak judges one exact build, so a tag that
+  # can move is not accepted. init and main always run this image.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# The instance's dolos.toml, carried verbatim into the ConfigMap and mounted
+# at /etc/config/dolos.toml. Its storage path must sit under /var/data, the
+# volume's mount point.
+dolosToml: ""
+
+# The stele the init container restores, once per volume.
+stele:
+  # oci://HOST/PATH or file://DIR.
+  source: ""
+  # latest, or the epoch whose stele to read. Registry sources only.
+  point: latest
+  # Plain HTTP to the registry; for an in-cluster mirror only.
+  insecure: false
+
+storage:
+  # Size of the data volume, e.g. 500Gi.
+  size: ""
+  # Empty uses the cluster's default storage class.
+  className: ""
+
+# Pool membership. Applied to the pod template only, never to the
+# StatefulSet: a serving pool selects pods, and tooling that surveys
+# StatefulSets by a pool label must not find a soak instance.
+podLabels: {}
+
+# Extra labels on the StatefulSet's own metadata.
+labels: {}
+
+# Headless Service the StatefulSet names. Empty uses the instance name. The
+# chart does not create it.
+serviceName: ""
+
+# Extra environment for the main container, as a Kubernetes env list.
+extraEnv: []
+
+# Container ports of the main container. They must match the listen
+# addresses in dolosToml.
+ports:
+  - name: grpc
+    containerPort: 50051
+  - name: minibf
+    containerPort: 3000
+  - name: trp
+    containerPort: 8000
+  - name: kupo
+    containerPort: 1442
+
+# The freshness probe: the instance is healthy while its latest block, read
+# from minibf on 127.0.0.1:<port>/blocks/latest, is at most maxAgeSeconds
+# old. Startup, readiness and liveness share the check and differ in timing.
+freshness:
+  port: 3000
+  maxAgeSeconds: 600
+probes:
+  startup:
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 200
+  readiness:
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 5
+  liveness:
+    initialDelaySeconds: 45
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 10
+
+resources:
+  init: {}
+  main: {}
+
+nodeSelector: {}
+tolerations: []
+
+terminationGracePeriodSeconds: 180
+automountServiceAccountToken: true

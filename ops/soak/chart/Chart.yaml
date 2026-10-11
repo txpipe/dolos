@@ -1,0 +1,12 @@
+apiVersion: v2
+name: dolos-soak
+description: one dolos instance that restores a stele, follows the tip and can join a serving pool
+type: application
+# Chart version: this chart. There is no appVersion on purpose: the build a
+# soak runs is image.digest in the instance's values file.
+version: 0.1.0
+home: https://github.com/txpipe/dolos
+keywords:
+  - dolos
+  - cardano
+  - soak

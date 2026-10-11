@@ -1,0 +1,137 @@
+# Reproduces the cardano-mainnet-stelae soak instance that ran on m2 from a
+# hand-written manifest: install it as release cardano-mainnet-stelae in
+# namespace ftr-dolos-m1. ../README.md lists where the render differs from
+# that manifest, and why.
+
+name: cardano-mainnet-stelae
+network: mainnet
+
+image:
+  repository: ghcr.io/txpipe/dolos
+  # sha-4866b97
+  digest: sha256:9b470e57c889d4de03a99b02c7c9bd97847e3e663445e25d7f292b0e7c816954
+
+stele:
+  source: oci://stelae-registry.stelae-publisher.svc.cluster.local:5000/cardano/mainnet
+  point: latest
+  insecure: true
+
+storage:
+  size: 500Gi
+  className: faster
+
+serviceName: dolos
+
+labels:
+  demeter.run/instance: cardano-mainnet-stelae
+  demeter.run/kind: DolosInstance
+
+podLabels:
+  cardano.demeter.run/network: cardano-mainnet
+  cardano.demeter.run/ready: "true"
+  demeter.run/instance: cardano-mainnet-stelae
+
+extraEnv:
+  - name: TX3_DIAGNOSTIC_DUMP
+    value: /var/data/diagnostic
+
+resources:
+  init:
+    requests:
+      cpu: 100m
+      memory: 4Gi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+  main:
+    requests:
+      cpu: 100m
+      memory: 8Gi
+    limits:
+      cpu: "8"
+      memory: 8Gi
+
+nodeSelector:
+  demeter.run/availability-sla: best-effort
+  demeter.run/availability-zone: az1
+  demeter.run/compute-arch: arm64
+  demeter.run/compute-profile: general-purpose
+
+tolerations:
+  - key: demeter.run/compute-profile
+    operator: Exists
+    effect: NoSchedule
+  - key: demeter.run/compute-arch
+    operator: Exists
+    effect: NoSchedule
+  - key: demeter.run/availability-sla
+    operator: Equal
+    value: best-effort
+    effect: NoSchedule
+
+dolosToml: |
+  [upstream]
+  peer_address = "internal-cardano-mainnet.ext-nodes-m1.svc.cluster.local:3000"
+
+  [storage]
+  version = "v4"
+  path = "/var/data/mainnet/db"
+
+  [storage.mempool]
+  backend = "redb"
+
+  [genesis]
+  byron_path = "/etc/genesis/mainnet/byron.json"
+  shelley_path = "/etc/genesis/mainnet/shelley.json"
+  alonzo_path = "/etc/genesis/mainnet/alonzo.json"
+  conway_path = "/etc/genesis/mainnet/conway.json"
+
+  [sync]
+  max_rollback = 129600
+
+  [serve.grpc]
+  listen_address = "[::]:50051"
+  permissive_cors = true
+
+  [serve.trp]
+  listen_address = "[::]:8000"
+  permissive_cors = true
+  max_optimize_rounds = 10
+  extra_fees = 1500000
+
+  [serve.minibf]
+  listen_address = "[::]:3000"
+  token_registry_url = "https://tokens.cardano.org"
+  permissive_cors = true
+  max_scan_items = 3000
+
+  [serve.minikupo]
+  listen_address = "[::]:1442"
+  permissive_cors = true
+
+  [mithril]
+  aggregator = "https://aggregator.release-mainnet.api.mithril.network/aggregator"
+  genesis_key = "5b3139312c36362c3134302c3138352c3133382c31312c3233372c3230372c3235302c3134342c32372c322c3138382c33302c31322c38312c3135352c3230342c31302c3137392c37352c32332c3133382c3139362c3231372c352c31342c32302c35372c37392c33392c3137365d"
+  ancillary_key = "5b32332c37312c39362c3133332c34372c3235332c3232362c3133362c3233352c35372c3136342c3130362c3138362c322c32312c32392c3132302c3136332c38392c3132312c3137372c3133382c3230382c3133382c3231342c39392c35382c32322c302c35382c332c36395d"
+
+  [chain]
+  type = "cardano"
+  magic = 764824073
+  is_testnet = false
+
+  [logging]
+  max_level = "INFO"
+  include_tokio = false
+  include_pallas = false
+  include_grpc = true
+  include_trp = true
+  include_minibf = true
+  include_minikupo = true
+  include_fjall = true
+
+  [snapshot]
+  download_url = "https://dolos-snapshots.s3-accelerate.amazonaws.com/${VERSION}/${NETWORK}/${VARIANT}/${POINT}.tar.gz"
+  state_epochs = [50, 100, 150, 200, 208, 236, 251, 290, 300, 350, 365, 400, 450, 500, 507, 550, 600, 650]
+
+  [stelae.registry]
+  user = "stelae"

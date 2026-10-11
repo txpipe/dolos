@@ -1,0 +1,127 @@
+{{/*
+canary-release surveys StatefulSets by this label to choose which instance
+to patch, and must never pick a soak instance. Pool labels go on the pod.
+*/}}
+{{- if hasKey .Values.labels "cardano.demeter.run/network" -}}
+{{- fail "labels must not carry cardano.demeter.run/network: put pool labels in podLabels" -}}
+{{- end -}}
+{{- $network := required "network is required" .Values.network -}}
+{{- $image := include "dolos-soak.image" . -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "dolos-soak.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dolos-soak.labels" . | nindent 4 }}
+    {{- with .Values.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  podManagementPolicy: OrderedReady
+  replicas: 1
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      {{- include "dolos-soak.selectorLabels" . | nindent 6 }}
+  serviceName: {{ .Values.serviceName | default (include "dolos-soak.name" .) }}
+  template:
+    metadata:
+      labels:
+        {{- include "dolos-soak.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: init
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              MARKER=/var/data/{{ $network }}/.stele-restored
+              if [ -f "$MARKER" ]; then
+                echo "stele already restored; skipping bootstrap"
+              else
+                dolos -c /etc/config/dolos.toml bootstrap stelae \
+                  --source {{ required "stele.source is required" .Values.stele.source }} \
+                  --point {{ required "stele.point is required" .Values.stele.point }} \
+                  {{- if .Values.stele.insecure }}
+                  --insecure \
+                  {{- end }}
+                  --continue
+                mkdir -p "$(dirname "$MARKER")"
+                touch "$MARKER"
+              fi
+              dolos -c /etc/config/dolos.toml data summary
+          {{- with .Values.resources.init }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/data
+            - name: config
+              mountPath: /etc/config
+      containers:
+        - name: main
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [dolos]
+          args: [-c, /etc/config/dolos.toml, daemon]
+          {{- with .Values.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.ports }}
+          ports:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          startupProbe:
+            {{- include "dolos-soak.freshnessCheck" . | nindent 12 }}
+            {{- toYaml .Values.probes.startup | nindent 12 }}
+          readinessProbe:
+            {{- include "dolos-soak.freshnessCheck" . | nindent 12 }}
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
+          livenessProbe:
+            {{- include "dolos-soak.freshnessCheck" . | nindent 12 }}
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
+          {{- with .Values.resources.main }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/data
+            - name: config
+              mountPath: /etc/config
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "dolos-soak.configMapName" . }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.storage.className }}
+        storageClassName: {{ . }}
+        {{- end }}
+        volumeMode: Filesystem
+        resources:
+          requests:
+            storage: {{ required "storage.size is required" .Values.storage.size }}
