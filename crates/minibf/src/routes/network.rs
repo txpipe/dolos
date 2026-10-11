@@ -6,9 +6,7 @@ use blockfrost_openapi::models::{
     network_eras_inner_start::NetworkErasInnerStart, network_stake::NetworkStake,
     network_supply::NetworkSupply,
 };
-use dolos_cardano::{
-    model::EpochState, mutable_slots, AccountState, EraProtocol, EraSummary, FixedNamespace,
-};
+use dolos_cardano::{model::EpochState, mutable_slots, AccountState, EraSummary};
 use dolos_core::{BlockSlot, Domain, Genesis, StateStore};
 
 use crate::{mapping::IntoModel, routes::genesis::parse_datetime_into_timestamp, Facade};
@@ -192,11 +190,11 @@ pub async fn eras<D: Domain>(
 
     let eras = domain
         .state()
-        .iter_entities_typed::<EraSummary>(EraSummary::NS, None)
+        .iter_entities_typed::<EraSummary>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map(|x| {
             let (key, era) = x.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let protocol = EraProtocol::from(key);
+            let protocol = key;
             Ok((protocol.into(), era))
         })
         .collect::<Result<Vec<_>, StatusCode>>()?;
@@ -262,7 +260,7 @@ where
 
     let accounts = domain
         .state()
-        .iter_entities_typed::<AccountState>(AccountState::NS, None)
+        .iter_entities_typed::<AccountState>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     for account in accounts {

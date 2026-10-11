@@ -55,9 +55,9 @@ where
     let mut items = Vec::with_capacity(subjects.len());
 
     for subject in subjects {
-        let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
+        let asset_key = dolos_cardano::AssetKey::of(&subject);
         let asset_state = domain
-            .read_cardano_entity::<AssetState>(entity_key.as_slice())?
+            .read_cardano_entity::<AssetState>(&asset_key)?
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
         items.push(AssetsInner {
@@ -74,7 +74,7 @@ mod tests {
     use super::*;
     use crate::test_support::{first_mint_chain, TestApp, TestFault};
     use blockfrost_openapi::models::asset::Asset;
-    use dolos_cardano::model::{FirstMintChunk, FixedNamespace as _, StagedFirstMint};
+    use dolos_cardano::model::{FirstMintChunk, StagedFirstMint};
     use dolos_core::{ArchiveStore as _, StateStore as _};
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use itertools::Itertools;
@@ -84,8 +84,8 @@ mod tests {
     mod scan {
         use std::collections::BTreeSet;
 
-        use dolos_cardano::model::{AssetState, FixedNamespace as _};
-        use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey, StateStore as _};
+        use dolos_cardano::model::{AssetKey, AssetState};
+        use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
         use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
 
         use crate::pagination::Order;
@@ -101,16 +101,14 @@ mod tests {
 
             let subjects: Vec<_> = subjects.into_iter().collect();
 
-            let keys: Vec<EntityKey> = subjects
+            let keys: Vec<AssetKey> = subjects
                 .iter()
-                .map(|subject| {
-                    EntityKey::from(pallas::crypto::hash::Hasher::<256>::hash(subject).as_slice())
-                })
+                .map(|subject| AssetKey::of(subject))
                 .collect();
 
             let states = domain
                 .state()
-                .read_entities_typed::<AssetState>(AssetState::NS, &keys.iter().collect::<Vec<_>>())
+                .read_entities_typed::<AssetState>(&keys.iter().collect::<Vec<_>>())
                 .unwrap();
 
             let tx_hash = tx.hash();
@@ -277,12 +275,12 @@ mod tests {
 
         let sealed = domain
             .archive()
-            .iter_logs_typed::<FirstMintChunk>(FirstMintChunk::NS, None)
+            .iter_logs_typed::<FirstMintChunk>(None)
             .unwrap()
             .count();
         let staged = domain
             .state()
-            .iter_entities_typed::<StagedFirstMint>(StagedFirstMint::NS, None)
+            .iter_entities_typed::<StagedFirstMint>(None)
             .unwrap()
             .count();
         assert!(sealed > 2, "{sealed} sealed rows");

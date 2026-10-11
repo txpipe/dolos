@@ -12,9 +12,7 @@
 use std::{ops::Range, path::Path, path::PathBuf};
 
 use dolos_core::{
-    archive::{
-        ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, LogKey,
-    },
+    archive::{ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter},
     builtin::{
         EmptyBlockIter, EmptyLogIter, EmptySlotIter, MemoryArchiveStore, MemoryStateStore,
         MemoryStateWriter, NoOpArchiveStore, NoOpArchiveWriter,
@@ -24,10 +22,11 @@ use dolos_core::{
         RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
     },
     ArchiveIndexDelta, BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
-    ExactRecord, IndexRecord, LogEntry, LogValue, MempoolError, MempoolEvent, MempoolStore,
-    MempoolTx, Namespace, RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
-    StateWriter as CoreStateWriter, TagDimension, TagRecord, TxHash, TxStatus, TxoRef, UtxoEntry,
-    UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
+    ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey, LogValue, MempoolError, MempoolEvent,
+    MempoolStore, MempoolTx, Namespace, RawBlock, StateError, StateSchema,
+    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TagRecord, TxHash,
+    TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError,
+    WalStore,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -652,7 +651,7 @@ impl CoreStateStore for StateStoreBackend {
     fn iter_entities(
         &self,
         ns: Namespace,
-        range: Range<EntityKey>,
+        range: KeyRange,
     ) -> Result<Self::EntityIter, StateError> {
         match self {
             Self::Redb(s) => s.iter_entities(ns, range).map(StateEntityIterBackend::Redb),
@@ -722,9 +721,9 @@ pub enum ArchiveStoreBackend {
     /// This exists for replays over an archive that already holds the chain
     /// (`dolos doctor rebuild-state --rewrite-logs`): block appends are not
     /// idempotent — replaying them would double every shared segment file,
-    /// whichever backend owns the index — while boundary log keys are
-    /// slot-derived and identical under replay, so re-written log rows
-    /// overwrite the originals in place.
+    /// whichever backend owns the index — while the logs are re-written from
+    /// scratch, into an archive whose logs [`Self::clear_logs`] dropped
+    /// first.
     ///
     /// [`Self::logs_only`] is the sole constructor, and it never nests one
     /// gate inside another.
@@ -798,6 +797,16 @@ impl ArchiveStoreBackend {
             Self::LogsOnly(inner) => inner.shutdown(),
             Self::Fjall(s) => s.shutdown().map_err(ArchiveError::from),
             Self::NoOp(s) => s.shutdown(),
+        }
+    }
+
+    /// Drop every log row of every namespace, leaving blocks and indexes.
+    pub fn clear_logs(&self) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(s) => s.clear_logs(),
+            Self::LogsOnly(inner) => inner.clear_logs(),
+            Self::Fjall(s) => s.clear_logs().map_err(ArchiveError::from),
+            Self::NoOp(_) => Ok(()),
         }
     }
 }
@@ -1058,11 +1067,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         }
     }
 
-    fn iter_logs(
-        &self,
-        ns: Namespace,
-        range: Range<LogKey>,
-    ) -> Result<Self::LogIter, ArchiveError> {
+    fn iter_logs(&self, ns: Namespace, range: KeyRange) -> Result<Self::LogIter, ArchiveError> {
         match self {
             Self::Memory(s) => CoreArchiveStore::iter_logs(s, ns, range)
                 .map(|iter| ArchiveLogIterBackend::Memory(Box::new(iter))),

@@ -13,9 +13,8 @@
 //! same question of what is on disk, through the same [`Pots::is_consistent`],
 //! for every logged hand-off.
 
-use dolos_cardano::model::{EpochState, SingletonEntity as _};
-use dolos_cardano::FixedNamespace as _;
-use dolos_core::{ArchiveStore, LogKey, StateStore};
+use dolos_cardano::model::EpochState;
+use dolos_core::{ArchiveStore, BlockSlot, StateStore};
 use miette::{Context as _, IntoDiagnostic as _};
 use pallas::ledger::primitives::Epoch;
 
@@ -28,7 +27,7 @@ const CHECK: CheckKind = CheckKind::EpochLog;
 /// `live` is the epoch the state store is currently in. The log covers
 /// *completed* epochs, so the last logged snapshot is the one before it.
 pub fn check_epoch_log<E: std::fmt::Display>(
-    snapshots: impl Iterator<Item = Result<(LogKey, EpochState), E>>,
+    snapshots: impl Iterator<Item = Result<(BlockSlot, (), EpochState), E>>,
     live: Epoch,
 ) -> Vec<Issue> {
     let mut issues = Vec::new();
@@ -36,7 +35,7 @@ pub fn check_epoch_log<E: std::fmt::Display>(
 
     for record in snapshots {
         let snapshot = match record {
-            Ok((_, snapshot)) => snapshot,
+            Ok((_, _, snapshot)) => snapshot,
             Err(err) => {
                 issues.push(Issue::new(
                     CHECK,
@@ -135,7 +134,7 @@ pub fn check_epoch_log<E: std::fmt::Display>(
 pub fn run(stores: &crate::common::Stores) -> miette::Result<Vec<Issue>> {
     let epoch = stores
         .state
-        .read_entity_typed::<EpochState>(EpochState::NS, &EpochState::singleton_key())
+        .read_entity_typed::<EpochState>(&())
         .into_diagnostic()
         .context("reading the live epoch state")?;
 
@@ -147,7 +146,7 @@ pub fn run(stores: &crate::common::Stores) -> miette::Result<Vec<Issue>> {
 
     let snapshots = stores
         .archive
-        .iter_logs_typed::<EpochState>(EpochState::NS, None)
+        .iter_logs_typed::<EpochState>(None)
         .into_diagnostic()
         .context("iterating the `epochs` log")?;
 
@@ -159,11 +158,10 @@ mod tests {
     use super::*;
     use dolos_cardano::model::EndStats;
     use dolos_cardano::pots::Pots;
-    use dolos_core::TemporalKey;
 
     const MAX_SUPPLY: u64 = 45_000_000_000_000_000;
 
-    fn snapshot(number: Epoch, utxos: u64) -> (LogKey, EpochState) {
+    fn snapshot(number: Epoch, utxos: u64) -> (BlockSlot, (), EpochState) {
         let state = EpochState {
             number,
             end: Some(EndStats::default()),
@@ -175,12 +173,12 @@ mod tests {
             ..EpochState::default()
         };
 
-        (LogKey::from(TemporalKey::from(number)), state)
+        (number, (), state)
     }
 
     fn log(
-        entries: Vec<(LogKey, EpochState)>,
-    ) -> impl Iterator<Item = Result<(LogKey, EpochState), String>> {
+        entries: Vec<(BlockSlot, (), EpochState)>,
+    ) -> impl Iterator<Item = Result<(BlockSlot, (), EpochState), String>> {
         entries.into_iter().map(Ok)
     }
 
@@ -215,7 +213,7 @@ mod tests {
     #[test]
     fn an_unclosed_snapshot_is_reported() {
         let mut entries = vec![snapshot(0, 100), snapshot(1, 200)];
-        entries[1].1.end = None;
+        entries[1].2.end = None;
 
         let issues = check_epoch_log(log(entries), 2);
 
@@ -230,7 +228,7 @@ mod tests {
     #[test]
     fn the_live_epochs_open_snapshot_is_tolerated() {
         let mut entries = vec![snapshot(0, 100), snapshot(1, 200)];
-        entries[1].1.end = None;
+        entries[1].2.end = None;
 
         let issues = check_epoch_log(log(entries), 1);
 
@@ -253,7 +251,7 @@ mod tests {
     #[test]
     fn a_non_conserving_handoff_is_reported() {
         let mut entries = vec![snapshot(0, 100), snapshot(1, 200)];
-        entries[1].1.initial_pots.utxos += 7;
+        entries[1].2.initial_pots.utxos += 7;
 
         let issues = check_epoch_log(log(entries), 2);
 

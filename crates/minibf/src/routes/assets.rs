@@ -413,8 +413,8 @@ impl AssetModelBuilder {
         };
 
         if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
-            let entity_key = pallas::crypto::hash::Hasher::<256>::hash(ref_asset_bytes.as_slice());
-            let ref_state = domain.read_cardano_entity::<AssetState>(entity_key.as_slice())?;
+            let asset_key = dolos_cardano::AssetKey::of(ref_asset_bytes);
+            let ref_state = domain.read_cardano_entity::<AssetState>(&asset_key)?;
 
             if let Some(metadata_tx) = ref_state.and_then(|state| state.metadata_tx) {
                 if let Some(EraCbor(era, cbor)) = domain
@@ -560,9 +560,9 @@ where
 {
     let subject = decode_asset_subject(subject)?;
 
-    let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
+    let asset_key = dolos_cardano::AssetKey::of(&subject);
     let state = domain
-        .read_cardano_entity::<AssetState>(entity_key.as_slice())?
+        .read_cardano_entity::<AssetState>(&asset_key)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok((subject, state))
@@ -963,9 +963,9 @@ where
     let mut items = Vec::with_capacity(subjects.len());
 
     for subject in subjects {
-        let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
+        let asset_key = dolos_cardano::AssetKey::of(&subject);
         let asset_state = domain
-            .read_cardano_entity::<AssetState>(entity_key.as_slice())?
+            .read_cardano_entity::<AssetState>(&asset_key)?
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
         items.push(AssetPolicyInner {
@@ -982,7 +982,7 @@ mod tests {
     use super::*;
     use crate::test_support::{first_mint_chain, first_mint_policies, TestApp, TestFault};
     use blockfrost_openapi::models::asset::Asset;
-    use dolos_cardano::model::{FixedNamespace as _, PolicyMintChunk};
+    use dolos_cardano::model::PolicyMintChunk;
     use dolos_core::AsyncQueryFacade;
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
 
@@ -1461,7 +1461,7 @@ mod tests {
 
         let sealed = domain
             .archive()
-            .iter_logs_typed::<PolicyMintChunk>(PolicyMintChunk::NS, None)
+            .iter_logs_typed::<PolicyMintChunk>(None)
             .unwrap()
             .count();
         assert!(sealed > 4, "{sealed} sealed rows");

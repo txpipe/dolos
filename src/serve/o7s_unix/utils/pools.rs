@@ -1,5 +1,4 @@
 use crate::prelude::*;
-use dolos_cardano::FixedNamespace as _;
 use dolos_cardano::{PoolParams, PoolState};
 use dolos_core::StateStore;
 use pallas::codec::minicbor::{self, Decode, Encode};
@@ -29,7 +28,7 @@ pub fn build_stake_pool_params_response<D: Domain>(
 ) -> Result<AnyCbor, Error> {
     let state = domain.state();
     let pools_iter = state
-        .iter_entities_typed::<PoolState>(PoolState::NS, None)
+        .iter_entities_typed::<PoolState>(None)
         .map_err(|e| Error::server(format!("failed to iterate pools: {}", e)))?;
 
     let filter_set: BTreeSet<Vec<u8>> = pool_ids.0.iter().map(|p| p.to_vec()).collect();
@@ -66,7 +65,7 @@ pub fn build_stake_pool_params_response<D: Domain>(
 pub fn build_stake_pools_response<D: Domain>(domain: &D) -> Result<AnyCbor, Error> {
     let state = domain.state();
     let pools_iter = state
-        .iter_entities_typed::<PoolState>(PoolState::NS, None)
+        .iter_entities_typed::<PoolState>(None)
         .map_err(|e| Error::server(format!("failed to iterate pools: {}", e)))?;
 
     let mut pool_ids: BTreeSet<Bytes> = BTreeSet::new();
@@ -100,7 +99,7 @@ pub fn build_pool_state_response<D: Domain>(
 ) -> Result<AnyCbor, Error> {
     let state = domain.state();
     let pools_iter = state
-        .iter_entities_typed::<PoolState>(PoolState::NS, None)
+        .iter_entities_typed::<PoolState>(None)
         .map_err(|e| Error::server(format!("failed to iterate pools: {}", e)))?;
 
     let filter_set: Option<BTreeSet<Vec<u8>>> = match pools_filter {

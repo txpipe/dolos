@@ -57,7 +57,8 @@ pub struct Args {
     ephemeral: bool,
 
     /// Also re-write the derived log records the archive carries (StakeLog,
-    /// reward logs, EpochState); in-place mode only
+    /// reward logs, EpochState, period logs), clearing the archive's logs
+    /// first; in-place mode only
     #[arg(long, conflicts_with_all = ["target", "ephemeral"])]
     rewrite_logs: bool,
 
@@ -140,20 +141,23 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
     Ok(())
 }
 
-fn confirm_wipe(state_path: &std::path::Path, force: bool) -> miette::Result<()> {
+fn confirm_wipe(state_path: &std::path::Path, logs: bool, force: bool) -> miette::Result<()> {
     if force {
         return Ok(());
     }
 
+    let logs = if logs { " and the archive's logs" } else { "" };
+
     if !std::io::stdin().is_terminal() {
         bail!(
-            "in-place rebuild wipes {} and no terminal is attached to confirm it; pass --force",
+            "in-place rebuild wipes {}{logs} and no terminal is attached to confirm it; pass \
+             --force",
             state_path.display(),
         );
     }
 
     eprint!(
-        "about to wipe {} and rebuild it from the local archive; continue? [y/N] ",
+        "about to wipe {}{logs} and rebuild from the local archive; continue? [y/N] ",
         state_path.display(),
     );
 
@@ -412,7 +416,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
             };
 
             check_wipe_scope(config, &state_path)?;
-            confirm_wipe(&state_path, args.force)?;
+            confirm_wipe(&state_path, args.rewrite_logs, args.force)?;
 
             let wal = open_store("wal", crate::common::open_wal_store(config))?;
 
@@ -429,6 +433,16 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
             }
 
             let state = open_store("state", crate::common::open_state_store(config))?;
+
+            // A re-written log row lands on the key its typed struct derives,
+            // which need not be the one an older layout stored it under, so
+            // the old rows go first rather than being overwritten in place.
+            if args.rewrite_logs {
+                archive
+                    .clear_logs()
+                    .into_diagnostic()
+                    .context("clearing the archive's logs")?;
+            }
 
             (state, Some(wal))
         }

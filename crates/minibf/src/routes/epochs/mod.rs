@@ -1,15 +1,12 @@
 use axum::{http::StatusCode, Json};
 use blockfrost_openapi::models::epoch_content::EpochContent;
 use dolos_cardano::{
-    model::{AccountEpochLog, EpochState, FixedNamespace as _},
+    model::{AccountEpochLog, EpochState},
     rupd::StakeSnapshot,
-    ChainSummary, EraProtocol, PoolHash,
+    AccountKey, ChainSummary, EraProtocol, PoolHash,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey, LogKey, TemporalKey};
-use pallas::{
-    codec::minicbor,
-    ledger::primitives::{Epoch, StakeCredential},
-};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain, LogRangeOf};
+use pallas::ledger::primitives::Epoch;
 
 use crate::{
     error::Error,
@@ -208,20 +205,19 @@ async fn stake_distribution_page<D: Domain>(
 ) -> Result<Vec<(String, AccountEpochLog)>, StatusCode> {
     let network = domain.get_network_id()?;
 
-    // Every row of an epoch's distribution shares the epoch-start temporal
-    // key, so the scan range is exactly one slot wide.
-    let start = chain.epoch_start(epoch);
-    let range = LogKey::from(TemporalKey::from(start))..LogKey::from(TemporalKey::from(start + 1));
+    // Every row of an epoch's distribution sits at the epoch-start slot, so
+    // the scan range is exactly that slot.
+    let range = LogRangeOf::slot(chain.epoch_start(epoch));
 
     let inner = domain.inner.clone();
     let skip = pagination.skip();
     let count = pagination.count;
 
     let page = tokio::task::spawn_blocking(
-        move || -> Result<Vec<(LogKey, AccountEpochLog)>, StatusCode> {
+        move || -> Result<Vec<(AccountKey, AccountEpochLog)>, StatusCode> {
             let iter = inner
                 .archive()
-                .iter_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, Some(range))
+                .iter_logs_typed::<AccountEpochLog>(Some(range))
                 .map_err(log_and_500("failed to iterate account epoch logs"))?;
 
             // Reward-only rows and zero-stake delegators are not in
@@ -229,7 +225,7 @@ async fn stake_distribution_page<D: Domain>(
             // pool sits in the value, not the key, so one pool is a filtered
             // scan of the whole epoch.
             iter.filter(|entry| match entry {
-                Ok((_, log)) => {
+                Ok((_, _, log)) => {
                     log.active_stake.unwrap_or(0) > 0
                         && pool.is_none_or(|pool| log.pool_id == Some(pool))
                 }
@@ -237,6 +233,7 @@ async fn stake_distribution_page<D: Domain>(
             })
             .skip(skip)
             .take(count)
+            .map(|entry| entry.map(|(_, account, log)| (account, log)))
             .collect::<Result<Vec<_>, _>>()
             .map_err(log_and_500("failed to read account epoch log"))
         },
@@ -245,13 +242,8 @@ async fn stake_distribution_page<D: Domain>(
     .map_err(log_and_500("account epoch scan task failed"))??;
 
     page.into_iter()
-        .map(|(key, log)| {
-            let entity = EntityKey::from(key);
-            let credential: StakeCredential = minicbor::decode(entity.as_ref()).map_err(
-                log_and_500("failed to decode stake credential from log key"),
-            )?;
-
-            let stake_address = stake_cred_to_address(&credential, network)
+        .map(|(account, log)| {
+            let stake_address = stake_cred_to_address(account.credential(), network)
                 .to_bech32()
                 .map_err(log_and_500("failed to encode stake address"))?;
 

@@ -249,11 +249,10 @@ pub fn run(
 mod tests {
     use super::*;
     use dolos_cardano::model::{
-        AccountState, EpochState, PoolParams, PoolSnapshot, PoolState, SingletonEntity as _,
+        AccountKey, AccountState, DRepKey, EpochState, PoolKey, PoolParams, PoolSnapshot, PoolState,
     };
-    use dolos_cardano::FixedNamespace as _;
     use dolos_core::{ArchiveStore as _, Domain as _, StateStore as _, WalStore as _};
-    use dolos_core::{ArchiveWriter as _, ChainPoint, EntityKey, StateWriter as _};
+    use dolos_core::{ArchiveWriter as _, ChainPoint, StateWriter as _};
     use dolos_testing::blocks::make_conway_block_with_prev;
     use dolos_testing::toy_domain::ToyDomain;
     use pallas::ledger::primitives::conway::{DRep, RationalNumber};
@@ -262,7 +261,7 @@ mod tests {
     fn live_epoch(domain: &ToyDomain) -> EpochState {
         domain
             .state()
-            .read_entity_typed::<EpochState>(EpochState::NS, &EpochState::singleton_key())
+            .read_entity_typed::<EpochState>(&())
             .unwrap()
             .expect("the harness bootstraps an epoch state")
     }
@@ -303,7 +302,7 @@ mod tests {
         issues.extend(accounts::check_account_epochs(
             domain
                 .state()
-                .iter_entities_typed::<AccountState>(AccountState::NS, None)
+                .iter_entities_typed::<AccountState>(None)
                 .unwrap(),
             epoch.number,
             |_| {},
@@ -312,7 +311,7 @@ mod tests {
         issues.extend(epoch_log::check_epoch_log(
             domain
                 .archive()
-                .iter_logs_typed::<EpochState>(EpochState::NS, None)
+                .iter_logs_typed::<EpochState>(None)
                 .unwrap(),
             epoch.number,
         ));
@@ -320,9 +319,9 @@ mod tests {
         let boundaries = totals::check_boundaries(
             domain
                 .archive()
-                .iter_logs_typed::<EpochState>(EpochState::NS, None)
+                .iter_logs_typed::<EpochState>(None)
                 .unwrap()
-                .map(|record| record.map(|(_, snapshot)| snapshot)),
+                .map(|record| record.map(|(_, _, snapshot)| snapshot)),
             Some(&epoch),
         );
 
@@ -418,7 +417,7 @@ mod tests {
         let epoch = live_epoch(&domain);
 
         let credential = StakeCredential::AddrKeyhash([0x42; 28].into());
-        let key = EntityKey::from(pallas::codec::minicbor::to_vec(&credential).unwrap());
+        let key = AccountKey::from(&credential);
         let account = AccountState::new(epoch.number + 3, credential);
 
         let writer = domain.state().start_writer().unwrap();
@@ -446,12 +445,7 @@ mod tests {
         };
 
         let writer = domain.archive().start_writer().unwrap();
-        writer
-            .write_log_typed(
-                &dolos_core::LogKey::from(dolos_core::TemporalKey::from(1_000_000u64)),
-                &future,
-            )
-            .unwrap();
+        writer.write_log_typed(1_000_000, &(), &future).unwrap();
         writer.commit().unwrap();
 
         let issues = check_everything(&domain);
@@ -468,9 +462,7 @@ mod tests {
         epoch.initial_pots.utxos += 1_000_000;
 
         let writer = domain.state().start_writer().unwrap();
-        writer
-            .write_entity_typed(&EpochState::singleton_key(), &epoch)
-            .unwrap();
+        writer.write_entity_typed(&(), &epoch).unwrap();
         writer.commit().unwrap();
 
         let issues = check_everything(&domain);
@@ -486,13 +478,11 @@ mod tests {
     /// A delegation that resolves must be read as resolving — through the
     /// store, not through a hand-built referent set.
     ///
-    /// A `PoolState` is keyed by an [`EntityKey`], which is a fixed-width,
-    /// zero-padded 32 bytes, while a delegation carries the bare 28-byte
-    /// hash. Comparing the two as raw bytes matches nothing, and the first
-    /// preprod run of this check reported all 105,101 delegated accounts as
-    /// dangling. Nothing that builds both sides by hand can catch that, so
-    /// this fixture writes the pool the way the node writes it and reads it
-    /// back the way the check reads it.
+    /// The first preprod run of this check compared stored pool keys against
+    /// the bare 28-byte hash a delegation carries, and reported all 105,101
+    /// delegated accounts as dangling. Nothing that builds both sides by hand
+    /// can catch that, so this fixture writes the pool the way the node writes
+    /// it and reads it back the way the check reads it.
     #[test]
     fn a_delegation_to_a_stored_pool_is_not_dangling() {
         let domain = ToyDomain::new(None, None);
@@ -536,7 +526,7 @@ mod tests {
         };
 
         let credential = StakeCredential::AddrKeyhash([0x43; 28].into());
-        let key = EntityKey::from(pallas::codec::minicbor::to_vec(&credential).unwrap());
+        let key = AccountKey::from(&credential);
 
         let mut account = AccountState::new(epoch.number, credential);
         account.pool = dolos_cardano::model::EpochValue::with_live(
@@ -546,10 +536,10 @@ mod tests {
 
         let writer = domain.state().start_writer().unwrap();
         writer
-            .write_entity_typed(&EntityKey::from(operator), &pool)
+            .write_entity_typed(&PoolKey(operator), &pool)
             .unwrap();
         writer
-            .write_entity_typed(&EntityKey::from(retired_operator), &retired_pool)
+            .write_entity_typed(&PoolKey(retired_operator), &retired_pool)
             .unwrap();
         writer.write_entity_typed(&key, &account).unwrap();
         writer.commit().unwrap();
@@ -570,7 +560,7 @@ mod tests {
 
         let operator = pallas::crypto::hash::Hash::<28>::from([0x77; 28]);
         let credential = StakeCredential::AddrKeyhash([0x43; 28].into());
-        let key = EntityKey::from(pallas::codec::minicbor::to_vec(&credential).unwrap());
+        let key = AccountKey::from(&credential);
 
         let mut account = AccountState::new(epoch.number, credential);
         account.pool = dolos_cardano::model::EpochValue::with_live(
@@ -595,12 +585,7 @@ mod tests {
     /// The `epochs` log entry for one epoch, keyed the way EWRAP keys it.
     fn write_snapshot(domain: &ToyDomain, slot: u64, snapshot: &EpochState) {
         let writer = domain.archive().start_writer().unwrap();
-        writer
-            .write_log_typed(
-                &dolos_core::LogKey::from(dolos_core::TemporalKey::from(slot)),
-                snapshot,
-            )
-            .unwrap();
+        writer.write_log_typed(slot, &(), snapshot).unwrap();
         writer.commit().unwrap();
     }
 
@@ -661,7 +646,7 @@ mod tests {
         let epoch = live_epoch(domain).number;
 
         let credential = StakeCredential::AddrKeyhash([seed; 28].into());
-        let key = EntityKey::from(pallas::codec::minicbor::to_vec(&credential).unwrap());
+        let key = AccountKey::from(&credential);
 
         let mut account = AccountState::new(epoch, credential);
         account.drep = dolos_cardano::model::EpochValue::with_live(
@@ -689,7 +674,7 @@ mod tests {
 
         let writer = domain.state().start_writer().unwrap();
         writer
-            .write_entity_typed(&dolos_cardano::model::drep_to_entity_key(key_of), &drep)
+            .write_entity_typed(&DRepKey::from(key_of), &drep)
             .unwrap();
         writer.commit().unwrap();
     }
