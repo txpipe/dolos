@@ -7,7 +7,7 @@
 //! ## Key Format
 //!
 //! ```text
-//! Key:   [ns_hash:8][entity_key:32]  (40 bytes total)
+//! Key:   [ns_hash:8][entity_key:var]
 //! Value: entity value bytes (CBOR encoded)
 //! ```
 //!
@@ -17,19 +17,19 @@
 //! - Extensibility for new entity types without code changes
 //! - Consistent ordering within each namespace (entities with same namespace
 //!   are grouped)
+//!
+//! The entity key is the typed key's encoding, of whatever length its kind
+//! has. A namespace's keys sort after its bare hash and before the hash's
+//! successor, which bounds a range left open at its end.
 
-use dolos_core::{EntityKey, Namespace};
+use std::ops::Bound;
 
-use crate::keys::hash_key;
+use dolos_core::{EntityKey, KeyRange, Namespace};
+
+use crate::{keys::hash_key, Error};
 
 /// Size of namespace hash prefix: 8 bytes (xxh3 truncated)
 pub const NS_HASH_SIZE: usize = 8;
-
-/// Size of entity key: 32 bytes
-pub const ENTITY_KEY_SIZE: usize = 32;
-
-/// Total size of prefixed entity key: 40 bytes
-pub const PREFIXED_KEY_SIZE: usize = NS_HASH_SIZE + ENTITY_KEY_SIZE;
 
 /// Hash a namespace string to an 8-byte prefix using xxh3.
 ///
@@ -40,46 +40,56 @@ pub fn hash_namespace(ns: Namespace) -> [u8; NS_HASH_SIZE] {
     hash.to_be_bytes()
 }
 
-/// Build entity key: `[ns_hash:8][entity_key:32]`
-pub fn build_entity_key(ns: Namespace, key: &EntityKey) -> [u8; PREFIXED_KEY_SIZE] {
-    let mut result = [0u8; PREFIXED_KEY_SIZE];
-    let ns_hash = hash_namespace(ns);
-    result[..NS_HASH_SIZE].copy_from_slice(&ns_hash);
-    result[NS_HASH_SIZE..].copy_from_slice(key.as_ref());
+/// `[ns_hash:8][bytes]`
+pub fn prefixed(ns: Namespace, bytes: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(NS_HASH_SIZE + bytes.len());
+    result.extend_from_slice(&hash_namespace(ns));
+    result.extend_from_slice(bytes);
     result
 }
 
-/// Build prefix for namespace iteration: `[ns_hash:8]`
-pub fn build_namespace_prefix(ns: Namespace) -> [u8; NS_HASH_SIZE] {
-    hash_namespace(ns)
+/// Build entity key: `[ns_hash:8][entity_key]`
+pub fn build_entity_key(ns: Namespace, key: &EntityKey) -> Vec<u8> {
+    prefixed(ns, key.as_ref())
 }
 
-/// Build range start key for entity iteration within a namespace.
-///
-/// Returns: `[ns_hash:8][range_start:32]`
-pub fn build_range_start(ns: Namespace, start: &EntityKey) -> [u8; PREFIXED_KEY_SIZE] {
-    build_entity_key(ns, start)
+/// The exclusive end of a namespace: the successor of its hash, which sorts
+/// after every key of the namespace and before every key of the next.
+/// Unbounded only for the all-`0xff` hash.
+pub fn namespace_end(ns: Namespace) -> Bound<Vec<u8>> {
+    match dolos_core::keys::successor(&hash_namespace(ns)) {
+        Some(end) => Bound::Excluded(end.to_vec()),
+        None => Bound::Unbounded,
+    }
 }
 
-/// Build range end key for entity iteration within a namespace.
-///
-/// Returns: `[ns_hash:8][range_end:32]`
-pub fn build_range_end(ns: Namespace, end: &EntityKey) -> [u8; PREFIXED_KEY_SIZE] {
-    build_entity_key(ns, end)
+/// The stored bounds of `range` within a namespace.
+pub fn build_range(ns: Namespace, range: &KeyRange) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+    let start = Bound::Included(prefixed(ns, &range.start));
+
+    let end = match &range.end {
+        Some(end) => Bound::Excluded(prefixed(ns, end)),
+        None => namespace_end(ns),
+    };
+
+    (start, end)
 }
 
-/// Decode entity key from stored key (extracts the 32-byte EntityKey portion).
-///
-/// The input key must be at least `PREFIXED_KEY_SIZE` bytes.
-pub fn decode_entity_key(key: &[u8]) -> EntityKey {
-    debug_assert!(key.len() >= PREFIXED_KEY_SIZE);
-    let mut entity_key = [0u8; ENTITY_KEY_SIZE];
-    entity_key.copy_from_slice(&key[NS_HASH_SIZE..NS_HASH_SIZE + ENTITY_KEY_SIZE]);
-    EntityKey::from(&entity_key)
+/// Decode the entity key out of a stored key.
+pub fn decode_entity_key(key: &[u8]) -> Result<EntityKey, Error> {
+    match key.get(NS_HASH_SIZE..) {
+        Some(entity) => Ok(EntityKey::from_raw(entity)),
+        None => Err(Error::Codec(format!(
+            "malformed state entity key of {} bytes",
+            key.len()
+        ))),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ops::RangeBounds;
+
     use super::*;
 
     #[test]
@@ -98,20 +108,26 @@ mod tests {
 
     #[test]
     fn test_entity_key_roundtrip() {
-        let ns = "accounts";
-        let original_key = EntityKey::from(&[0xab; 32]);
+        for len in [0, 2, 28, 32, 68] {
+            let original_key = EntityKey::from_raw(&vec![0xab; len]);
 
-        let prefixed = build_entity_key(ns, &original_key);
-        assert_eq!(prefixed.len(), PREFIXED_KEY_SIZE);
+            let prefixed = build_entity_key("accounts", &original_key);
+            assert_eq!(prefixed.len(), NS_HASH_SIZE + len);
 
-        let decoded = decode_entity_key(&prefixed);
-        assert_eq!(original_key, decoded);
+            let decoded = decode_entity_key(&prefixed).unwrap();
+            assert_eq!(original_key, decoded);
+        }
+    }
+
+    #[test]
+    fn test_short_stored_key_is_an_error() {
+        assert!(decode_entity_key(&[0; NS_HASH_SIZE - 1]).is_err());
     }
 
     #[test]
     fn test_entity_key_structure() {
         let ns = "accounts";
-        let entity_key = EntityKey::from(&[0xcd; 32]);
+        let entity_key = EntityKey::from_raw(&[0xcd; 32]);
 
         let prefixed = build_entity_key(ns, &entity_key);
 
@@ -119,26 +135,14 @@ mod tests {
         let expected_prefix = hash_namespace(ns);
         assert_eq!(&prefixed[..NS_HASH_SIZE], &expected_prefix);
 
-        // Remaining 32 bytes should be entity key
+        // Remaining bytes should be entity key
         assert_eq!(&prefixed[NS_HASH_SIZE..], entity_key.as_ref());
-    }
-
-    #[test]
-    fn test_namespace_prefix() {
-        let ns = "pools";
-        let prefix = build_namespace_prefix(ns);
-        let entity_key = EntityKey::from(&[0x12; 32]);
-        let full_key = build_entity_key(ns, &entity_key);
-
-        // Full key should start with namespace prefix
-        assert!(full_key.starts_with(&prefix));
     }
 
     #[test]
     fn test_namespace_isolation() {
         // Keys from different namespaces should not collide
-        let key_bytes = [0xaa; 32];
-        let entity_key = EntityKey::from(&key_bytes);
+        let entity_key = EntityKey::from_raw(&[0xaa; 32]);
 
         let accounts_key = build_entity_key("accounts", &entity_key);
         let pools_key = build_entity_key("pools", &entity_key);
@@ -151,18 +155,18 @@ mod tests {
     }
 
     #[test]
-    fn test_range_keys() {
+    fn test_open_range_covers_the_namespace_only() {
         let ns = "epochs";
-        let start = EntityKey::from(&[0x00; 32]);
-        let end = EntityKey::from(&[0xff; 32]);
+        let range = build_range(ns, &KeyRange::all());
 
-        let start_key = build_range_start(ns, &start);
-        let end_key = build_range_end(ns, &end);
+        let empty = build_entity_key(ns, &EntityKey::from_raw(&[]));
+        let long = build_entity_key(ns, &EntityKey::from_raw(&[0xff; 100]));
+        assert!(range.contains(&empty));
+        assert!(range.contains(&long));
 
-        // Both should have same namespace prefix
-        assert_eq!(&start_key[..NS_HASH_SIZE], &end_key[..NS_HASH_SIZE]);
-
-        // Start should be less than end lexicographically
-        assert!(start_key < end_key);
+        let next = dolos_core::keys::successor(&hash_namespace(ns))
+            .unwrap()
+            .to_vec();
+        assert!(!range.contains(&next));
     }
 }

@@ -17,7 +17,7 @@
 //!    block of the epoch it opens).
 //!
 //! 2. **`archive-logs`**: all log namespaces with namespace hash prefix. Key:
-//!    `[ns_hash:8][log_key:40]` (48 bytes), mirroring the state store's unified
+//!    `[ns_hash:8][slot:8][key:var]`, mirroring the state store's unified
 //!    entities keyspace — one keyspace, not one per namespace, because
 //!    per-namespace LSM trees blow the file-descriptor limit during heavy
 //!    compaction.
@@ -59,8 +59,8 @@ use std::sync::{Arc, Mutex};
 use dolos_core::{
     config::FjallArchiveConfig, key_hash, ArchiveError, ArchiveIndexDelta,
     ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot,
-    ChainPoint, EntityValue, ExactKind, IndexRecord, LogKey, Namespace, RawBlock, StateSchema,
-    TagDimension, KEY_HASH_SIZE,
+    ChainPoint, EntityValue, ExactKind, IndexRecord, KeyRange, LogKey, Namespace, RawBlock,
+    StateSchema, TagDimension, KEY_HASH_SIZE,
 };
 use fjall::{
     compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
@@ -79,8 +79,8 @@ pub mod scan;
 pub mod tags;
 
 use log_keys::{
-    build_log_key, build_temporal_bound, decode_log_key, namespace_end, namespace_start,
-    PREFIXED_LOG_KEY_SIZE,
+    build_log_key, build_range, build_temporal_bound, decode_log_key, namespace_end,
+    namespace_start,
 };
 
 pub use exact::ExactRecordIterator as ExactIter;
@@ -321,6 +321,16 @@ impl ArchiveStore {
     ///
     /// Persists all data and waits for outstanding flushes so fjall's drop
     /// implementation cannot hang on a full worker channel.
+    /// Drop every log row of every namespace, leaving blocks and indexes.
+    ///
+    /// For a replay that re-writes the logs from scratch: a re-written row
+    /// lands on the key its typed struct derives today, which need not be the
+    /// key an older layout stored it under.
+    pub fn clear_logs(&self) -> Result<(), Error> {
+        self.logs.clear()?;
+        Ok(())
+    }
+
     pub fn shutdown(&self) -> Result<(), Error> {
         use std::time::Duration;
 
@@ -826,23 +836,16 @@ impl Iterator for LogIter {
 
         let guard = self.inner.next()?;
 
-        match guard.into_inner() {
-            Ok((key, value)) => {
-                if key.len() < PREFIXED_LOG_KEY_SIZE {
-                    self.done = true;
-                    return Some(Err(ArchiveError::InternalError(format!(
-                        "malformed archive log key of {} bytes",
-                        key.len()
-                    ))));
-                }
+        let item = match guard.into_inner() {
+            Ok((key, value)) => decode_log_key(&key)
+                .map(|key| (key, value.to_vec()))
+                .map_err(ArchiveError::from),
+            Err(e) => Err(fjall_err(e)),
+        };
 
-                Some(Ok((decode_log_key(&key), value.to_vec())))
-            }
-            Err(e) => {
-                self.done = true;
-                Some(Err(fjall_err(e)))
-            }
-        }
+        self.done = item.is_err();
+
+        Some(item)
     }
 }
 
@@ -998,18 +1001,11 @@ impl CoreArchiveStore for ArchiveStore {
         Ok(out)
     }
 
-    fn iter_logs(
-        &self,
-        ns: Namespace,
-        range: Range<LogKey>,
-    ) -> Result<Self::LogIter, ArchiveError> {
+    fn iter_logs(&self, ns: Namespace, range: KeyRange) -> Result<Self::LogIter, ArchiveError> {
         self.check_namespace(ns)?;
 
-        let start = build_log_key(ns, &range.start);
-        let end = build_log_key(ns, &range.end);
-
         let snapshot = self.db.snapshot();
-        let inner = snapshot.range(&self.logs, start.as_slice()..end.as_slice());
+        let inner = snapshot.range(&self.logs, build_range(ns, &range));
 
         Ok(LogIter { inner, done: false })
     }
@@ -1247,7 +1243,10 @@ impl CoreArchiveStore for ArchiveStore {
         for (&ns, _) in self.schema.iter() {
             let range = snapshot.range(
                 &self.logs,
-                build_temporal_bound(ns, slot)..namespace_end(ns),
+                (
+                    Bound::Included(build_temporal_bound(ns, slot)),
+                    namespace_end(ns),
+                ),
             );
             for guard in range {
                 let key = guard.key().map_err(fjall_err)?;

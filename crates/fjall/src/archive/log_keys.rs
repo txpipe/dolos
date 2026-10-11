@@ -8,56 +8,46 @@
 //! ## Key Format
 //!
 //! ```text
-//! Key:   [ns_hash:8][log_key:40]  (48 bytes total)
+//! Key:   [ns_hash:8][slot:8][entity_key:var]
 //! Value: entity value bytes (CBOR encoded)
 //! ```
 //!
-//! The `log_key` is core's 40-byte [`LogKey`]: an 8-byte big-endian slot
-//! followed by a 32-byte entity key. Within one namespace, lexicographic
-//! order of the prefixed key equals `LogKey` order, which is what
-//! `iter_logs` range scans rely on.
+//! The part after the namespace hash is core's [`LogKey`]: an 8-byte
+//! big-endian slot followed by the typed entity key, of whatever length its
+//! kind has. Within one namespace, lexicographic order of the prefixed key
+//! equals `LogKey` order, which is what `iter_logs` range scans rely on.
 
 use dolos_core::{LogKey, Namespace};
 
-use crate::state::entity_keys::hash_namespace;
+use crate::{
+    state::entity_keys::{hash_namespace, prefixed, NS_HASH_SIZE},
+    Error,
+};
 
-/// Size of namespace hash prefix: 8 bytes (xxh3 truncated)
-pub const NS_HASH_SIZE: usize = 8;
+pub use crate::state::entity_keys::{build_range, namespace_end};
 
-/// Size of core's log key: 8-byte temporal prefix + 32-byte entity key
-pub const LOG_KEY_SIZE: usize = 40;
+/// Shortest stored log key: the namespace hash and the slot.
+pub const MIN_PREFIXED_LOG_KEY_SIZE: usize = NS_HASH_SIZE + LogKey::SLOT_LEN;
 
-/// Total size of a prefixed log key: 48 bytes
-pub const PREFIXED_LOG_KEY_SIZE: usize = NS_HASH_SIZE + LOG_KEY_SIZE;
-
-/// Build a log key: `[ns_hash:8][log_key:40]`
-pub fn build_log_key(ns: Namespace, key: &LogKey) -> [u8; PREFIXED_LOG_KEY_SIZE] {
-    let mut result = [0u8; PREFIXED_LOG_KEY_SIZE];
-    result[..NS_HASH_SIZE].copy_from_slice(&hash_namespace(ns));
-    result[NS_HASH_SIZE..].copy_from_slice(key.as_ref());
-    result
+/// Build a log key: `[ns_hash:8][log_key]`
+pub fn build_log_key(ns: Namespace, key: &LogKey) -> Vec<u8> {
+    prefixed(ns, key.as_ref())
 }
 
-/// Decode the 40-byte [`LogKey`] portion out of a stored key.
-///
-/// The input must be at least `PREFIXED_LOG_KEY_SIZE` bytes.
-pub fn decode_log_key(key: &[u8]) -> LogKey {
-    debug_assert!(key.len() >= PREFIXED_LOG_KEY_SIZE);
-    LogKey::from(&key[NS_HASH_SIZE..PREFIXED_LOG_KEY_SIZE])
+/// Decode the [`LogKey`] out of a stored key.
+pub fn decode_log_key(key: &[u8]) -> Result<LogKey, Error> {
+    key.get(NS_HASH_SIZE..)
+        .and_then(|log_key| LogKey::from_raw(log_key).ok())
+        .ok_or_else(|| Error::Codec(format!("malformed archive log key of {} bytes", key.len())))
 }
 
 /// Build a temporal bound within a namespace: `[ns_hash:8][slot:8]`.
 ///
-/// Compared lexicographically against 48-byte stored keys, this 16-byte
-/// bound sorts before every key of the namespace whose temporal prefix is
-/// `>= slot` and after every key whose prefix is `< slot` — the exact
-/// boundary semantics redb gets from comparing 40-byte keys against an
-/// 8-byte `TemporalKey` bound, which prune and truncate must reproduce.
+/// Compared lexicographically against stored keys, this 16-byte bound sorts
+/// before every key of the namespace whose slot is `>= slot` and after every
+/// key whose slot is `< slot` — the boundary prune and truncate draw.
 pub fn build_temporal_bound(ns: Namespace, slot: u64) -> Vec<u8> {
-    let mut result = Vec::with_capacity(NS_HASH_SIZE + 8);
-    result.extend_from_slice(&hash_namespace(ns));
-    result.extend_from_slice(&slot.to_be_bytes());
-    result
+    prefixed(ns, &slot.to_be_bytes())
 }
 
 /// Build the inclusive start of a namespace's key range: the bare 8-byte
@@ -66,40 +56,36 @@ pub fn namespace_start(ns: Namespace) -> Vec<u8> {
     hash_namespace(ns).to_vec()
 }
 
-/// Build an exclusive end bound covering the whole namespace:
-/// `[ns_hash:8][0xff:41]`.
-///
-/// One byte longer than any stored key, so even a log key of all `0xff`
-/// sorts before it, while every key of the next namespace prefix sorts
-/// after it.
-pub fn namespace_end(ns: Namespace) -> Vec<u8> {
-    let mut result = Vec::with_capacity(PREFIXED_LOG_KEY_SIZE + 1);
-    result.extend_from_slice(&hash_namespace(ns));
-    result.extend_from_slice(&[0xff; LOG_KEY_SIZE + 1]);
-    result
-}
-
 #[cfg(test)]
 mod tests {
+    use std::ops::{Bound, RangeBounds};
+
+    use dolos_core::KeyRange;
+
     use super::*;
 
-    fn log_key(slot: u64, entity: u8) -> LogKey {
-        let mut bytes = [entity; LOG_KEY_SIZE];
-        bytes[..8].copy_from_slice(&slot.to_be_bytes());
-        LogKey::from(bytes.as_slice())
+    fn log_key(slot: u64, entity: &[u8]) -> LogKey {
+        LogKey::from_raw(&[slot.to_be_bytes().as_slice(), entity].concat()).unwrap()
     }
 
     #[test]
     fn prefixed_key_roundtrip() {
-        let key = log_key(42, 0xab);
-        let prefixed = build_log_key("account-epochs", &key);
-        assert_eq!(prefixed.len(), PREFIXED_LOG_KEY_SIZE);
-        assert_eq!(decode_log_key(&prefixed), key);
+        for len in [0, 4, 28, 32, 100] {
+            let key = log_key(42, &vec![0xab; len]);
+            let prefixed = build_log_key("account-epochs", &key);
+            assert_eq!(prefixed.len(), MIN_PREFIXED_LOG_KEY_SIZE + len);
+            assert_eq!(decode_log_key(&prefixed).unwrap(), key);
+        }
+    }
+
+    #[test]
+    fn short_stored_key_is_an_error() {
+        assert!(decode_log_key(&[0; MIN_PREFIXED_LOG_KEY_SIZE - 1]).is_err());
     }
 
     #[test]
     fn namespace_isolation() {
-        let key = log_key(42, 0xab);
+        let key = log_key(42, &[0xab; 32]);
         let a = build_log_key("account-epochs", &key);
         let b = build_log_key("stakes", &key);
         assert_ne!(a[..NS_HASH_SIZE], b[..NS_HASH_SIZE]);
@@ -108,8 +94,8 @@ mod tests {
 
     #[test]
     fn key_order_matches_log_key_order() {
-        let earlier = build_log_key("stakes", &log_key(1, 0xff));
-        let later = build_log_key("stakes", &log_key(2, 0x00));
+        let earlier = build_log_key("stakes", &log_key(1, &[0xff; 40]));
+        let later = build_log_key("stakes", &log_key(2, &[]));
         assert!(earlier < later);
     }
 
@@ -117,10 +103,10 @@ mod tests {
     fn temporal_bound_splits_at_slot() {
         let ns = "stakes";
         let bound = build_temporal_bound(ns, 5);
-        let below = build_log_key(ns, &log_key(4, 0xff));
-        let at = build_log_key(ns, &log_key(5, 0x00));
+        let below = build_log_key(ns, &log_key(4, &[0xff; 50]));
+        let at = build_log_key(ns, &log_key(5, &[]));
         assert!(below.as_slice() < bound.as_slice());
-        assert!(at.as_slice() > bound.as_slice());
+        assert!(at.as_slice() >= bound.as_slice());
     }
 
     #[test]
@@ -128,9 +114,15 @@ mod tests {
         let ns = "epochs";
         let start = namespace_start(ns);
         let end = namespace_end(ns);
-        let min = build_log_key(ns, &LogKey::from([0u8; LOG_KEY_SIZE].as_slice()));
-        let max = build_log_key(ns, &LogKey::from([0xff; LOG_KEY_SIZE].as_slice()));
+        let min = build_log_key(ns, &log_key(0, &[]));
+        let max = build_log_key(ns, &log_key(u64::MAX, &[0xff; 100]));
         assert!(start.as_slice() < min.as_slice());
-        assert!(max.as_slice() < end.as_slice());
+
+        let range = (Bound::Included(start), end);
+        assert!(range.contains(&max));
+
+        let whole = build_range(ns, &KeyRange::all());
+        assert!(whole.contains(&min));
+        assert!(whole.contains(&max));
     }
 }

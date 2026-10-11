@@ -1,19 +1,15 @@
 //! Generic entity table operations for fjall state store.
 //!
 //! All entity types share a single keyspace (`state-entities`) with namespace
-//! hash prefixes. Keys are 40 bytes: `[ns_hash:8][entity_key:32]`.
+//! hash prefixes. Keys are `[ns_hash:8][entity_key:var]`.
 //!
 //! This design reduces the number of LSM-tree segment files compared to
 //! separate keyspaces per entity type.
 
-use std::ops::Range;
-
-use dolos_core::{EntityKey, EntityValue, Namespace, StateError};
+use dolos_core::{EntityKey, EntityValue, KeyRange, Namespace, StateError};
 use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
-use super::entity_keys::{
-    build_entity_key, build_range_end, build_range_start, decode_entity_key, PREFIXED_KEY_SIZE,
-};
+use super::entity_keys::{build_entity_key, build_range, decode_entity_key};
 use crate::Error;
 
 /// Read multiple entities by keys from the unified entities keyspace.
@@ -67,8 +63,12 @@ pub fn delete_entity(
 /// and a `Box<dyn DoubleEndedIterator + Send + 'static>`. Items are decoded
 /// one at a time in `next()`, keeping memory usage O(1) regardless of entity
 /// count.
+///
+/// Fuses after the first error: a malformed stored key or a failed read is
+/// never skipped, so a consumer cannot take a short scan for a complete one.
 pub struct EntityIterator {
     inner: fjall::Iter,
+    done: bool,
 }
 
 impl EntityIterator {
@@ -83,14 +83,11 @@ impl EntityIterator {
         readable: &R,
         keyspace: &Keyspace,
         ns: Namespace,
-        range: Range<EntityKey>,
+        range: KeyRange,
     ) -> Result<Self, Error> {
-        let start = build_range_start(ns, &range.start);
-        let end = build_range_end(ns, &range.end);
+        let inner = readable.range(keyspace, build_range(ns, &range));
 
-        let inner = readable.range(keyspace, start.as_slice()..end.as_slice());
-
-        Ok(Self { inner })
+        Ok(Self { inner, done: false })
     }
 }
 
@@ -98,20 +95,18 @@ impl Iterator for EntityIterator {
     type Item = Result<(EntityKey, EntityValue), StateError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        for guard in self.inner.by_ref() {
-            match guard.into_inner() {
-                Ok((key_bytes, value_bytes)) => {
-                    if key_bytes.len() >= PREFIXED_KEY_SIZE {
-                        let entity_key = decode_entity_key(&key_bytes);
-                        let entity_value = value_bytes.to_vec();
-                        return Some(Ok((entity_key, entity_value)));
-                    }
-                    // Skip malformed keys (too short), continue to next
-                }
-                Err(e) => return Some(Err(Error::Fjall(e).into())),
-            }
+        if self.done {
+            return None;
         }
-        None
+
+        let item = match self.inner.next()?.into_inner() {
+            Ok((key, value)) => decode_entity_key(&key).map(|key| (key, value.to_vec())),
+            Err(e) => Err(Error::Fjall(e)),
+        };
+
+        self.done = item.is_err();
+
+        Some(item.map_err(StateError::from))
     }
 }
 
