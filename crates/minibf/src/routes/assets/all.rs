@@ -46,16 +46,8 @@ where
     let subjects = domain
         .query()
         .run_blocking(move |domain| {
-            first_mints::all_page(
-                domain.state(),
-                domain.archive(),
-                &chain,
-                mary_epoch..=tip_epoch,
-                order,
-                skip,
-                count,
-            )
-            .map_err(DomainError::from)
+            first_mints::all_page(&domain, &chain, mary_epoch..=tip_epoch, order, skip, count)
+                .map_err(DomainError::from)
         })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

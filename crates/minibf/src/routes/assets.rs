@@ -944,8 +944,7 @@ where
         .query()
         .run_blocking(move |domain| {
             first_mints::policy_page(
-                domain.state(),
-                domain.archive(),
+                &domain,
                 &chain,
                 mary_epoch..=tip_epoch,
                 &policy,

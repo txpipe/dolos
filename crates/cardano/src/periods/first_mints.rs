@@ -188,20 +188,17 @@ fn segments<S: StateStore>(
 }
 
 /// One page of the subjects first minted over `epochs`, in mint order.
-pub fn all_page<S, A>(
-    state: &S,
-    archive: &A,
+pub fn all_page<D: Domain>(
+    domain: &D,
     chain: &ChainSummary,
     epochs: RangeInclusive<Epoch>,
     order: SlotOrder,
     skip: usize,
     count: usize,
-) -> Result<Vec<Vec<u8>>, ChainError>
-where
-    S: StateStore,
-    A: ArchiveStore,
-{
-    let mut staged = super::read_staged::<S, StagedFirstMint>(state, EntityKey::full_range())?;
+) -> Result<Vec<Vec<u8>>, ChainError> {
+    let (state, archive) = (domain.state(), domain.archive());
+
+    let mut staged = super::read_staged::<_, StagedFirstMint>(state, EntityKey::full_range())?;
     staged.retain(|epoch, _| epochs.contains(epoch));
 
     let sealed = super::read_sealed(archive, FirstMintChunk::NS, chain, epochs, |_| all_key(0))?;
@@ -215,22 +212,19 @@ where
 
 /// One page of the subjects `policy` first minted over `epochs`, in mint
 /// order, or `None` where it never minted.
-pub fn policy_page<S, A>(
-    state: &S,
-    archive: &A,
+pub fn policy_page<D: Domain>(
+    domain: &D,
     chain: &ChainSummary,
     epochs: RangeInclusive<Epoch>,
     policy: &Hash<28>,
     order: SlotOrder,
     skip: usize,
     count: usize,
-) -> Result<Option<Vec<Vec<u8>>>, ChainError>
-where
-    S: StateStore,
-    A: ArchiveStore,
-{
+) -> Result<Option<Vec<Vec<u8>>>, ChainError> {
+    let (state, archive) = (domain.state(), domain.archive());
+
     let mut staged =
-        super::read_staged::<S, StagedFirstMint>(state, super::group_range(policy.as_slice()))?;
+        super::read_staged::<_, StagedFirstMint>(state, super::group_range(policy.as_slice()))?;
 
     staged.retain(|epoch, _| epochs.contains(epoch));
 
@@ -398,21 +392,19 @@ mod tests {
     /// Every page the two lists can answer, in both orders.
     fn pages(domain: &ToyDomain) -> Vec<Option<Vec<Vec<u8>>>> {
         let chain = chain(domain);
-        let (state, archive) = (domain.state(), domain.archive());
         let mut out = Vec::new();
 
         for order in [SlotOrder::Asc, SlotOrder::Desc] {
             for count in [5, 300] {
                 for skip in (0..330).step_by(count) {
                     out.push(Some(
-                        all_page(state, archive, &chain, 0..=BOUNDARY, order, skip, count).unwrap(),
+                        all_page(domain, &chain, 0..=BOUNDARY, order, skip, count).unwrap(),
                     ));
 
                     for policy in [P, Q, sibling()] {
                         out.push(
                             policy_page(
-                                state,
-                                archive,
+                                domain,
                                 &chain,
                                 0..=BOUNDARY,
                                 &policy.into(),
@@ -449,16 +441,7 @@ mod tests {
 
         // epoch 5 in mint order: slot, tx index, subject, where the sibling's
         // "A" follows P's "B" in the same tx
-        let page = all_page(
-            domain.state(),
-            domain.archive(),
-            &chain(&domain),
-            5..=5,
-            SlotOrder::Asc,
-            0,
-            10,
-        )
-        .unwrap();
+        let page = all_page(&domain, &chain(&domain), 5..=5, SlotOrder::Asc, 0, 10).unwrap();
         let names: Vec<_> = page.iter().map(|s| (s[0], s[28..].to_vec())).collect();
         assert_eq!(page[2][..28], sibling());
         assert_eq!(
@@ -476,8 +459,7 @@ mod tests {
 
         // the re-mint of P's "A" is in no list
         let p = policy_page(
-            domain.state(),
-            domain.archive(),
+            &domain,
             &chain(&domain),
             0..=BOUNDARY,
             &P.into(),
@@ -590,16 +572,7 @@ mod tests {
             crate::periods::load_chunks(archive, &chain, e, c, all_key)
         })
         .unwrap();
-        let expected = all_page(
-            fresh.state(),
-            fresh.archive(),
-            &chain,
-            0..=BOUNDARY,
-            SlotOrder::Asc,
-            0,
-            400,
-        )
-        .unwrap();
+        let expected = all_page(&fresh, &chain, 0..=BOUNDARY, SlotOrder::Asc, 0, 400).unwrap();
         assert_eq!(all, expected);
 
         let q = segments(state, crate::periods::join(staged_q, sealed_q), |row| {
@@ -615,8 +588,7 @@ mod tests {
             .map(|name| [Q.as_slice(), &name].concat())
             .collect();
         let expected = policy_page(
-            fresh.state(),
-            fresh.archive(),
+            &fresh,
             &chain,
             0..=BOUNDARY,
             &Q.into(),
