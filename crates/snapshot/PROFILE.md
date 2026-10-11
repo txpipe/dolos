@@ -161,16 +161,17 @@ The 4 MiB ceiling and its measurement are the protocol's (SPEC.md, "The
 manifest size ceiling"); what is profile-owned is the arithmetic that keeps a Dolos stele inside the
 ceiling, and it stays here: a descriptor with its annotations costs ~350
 bytes, so the ceiling falls near 12,000 layers. A mainnet stele is bounded
-above by ~600 epochs × 5 per-epoch kinds (`blocks`, `indexes` and the three
-`log-{ns}`), plus the state tip's 74 layers (4 namespaces × 16 shards + 10
-single blobs), plus 74 more for every retained state dump — at 20 retained
+above by ~600 epochs × 7 per-epoch kinds (`blocks`, `indexes` and the five
+`log-{ns}`), plus the state tip's 77 layers (4 namespaces × 16 shards + 13
+single blobs), plus 77 more for every retained state dump — at 20 retained
 epochs, the ceiling of what a publisher is expected to configure, that is
-~4,554 layers and a manifest of roughly 1.6 MB, comfortably inside. The
+~5,817 layers and a manifest of roughly 2.0 MB, comfortably inside. The
 bound is loose in the direction that helps: the log kinds are omitted when
-empty, and Byron's ~200 epochs carry no reward or stake logs at all, so the
-realized count sits near ~4,150. **This is the arithmetic that bounds the
+empty, Byron's ~200 epochs carry no reward or stake logs at all, and the
+~250 epochs before Mary carry no first-mint logs, so the realized count sits
+near ~4,900. **This is the arithmetic that bounds the
 retained list**, and the reason per-epoch dumps were rejected: ~580 of them
-would be ~43,000 state layers on their own, more than three times the
+would be ~45,000 state layers on their own, more than three times the
 ceiling. (The Rationale's "~1,700 manifest descriptors" is decision-time
 sizing of the pre-split artifact; this paragraph is the authoritative count,
 and it counts layers rather than epochs.)

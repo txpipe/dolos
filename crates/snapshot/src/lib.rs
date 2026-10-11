@@ -142,7 +142,7 @@ pub use layers::digests::DIGESTS;
 /// and the closed set the `log-{ns}` kinds are drawn from. Nothing in the tree
 /// marks an entity as log-bearing, so the five are spelled here and held to
 /// the entity types by `log_kinds_derive_from_their_namespaces` in
-/// `tests/coverage.rs`. A fourth namespace acquiring logs would have no layer
+/// `tests/coverage.rs`. Another namespace acquiring logs would have no layer
 /// to travel in, which is why [`export`] refuses one rather than dropping it.
 pub const LOG_NAMESPACES: [Namespace; 5] = [
     AccountEpochLog::NS,
