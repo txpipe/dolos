@@ -204,6 +204,74 @@ pub fn pool_id_cases() -> Vec<PoolIdCase> {
     ]
 }
 
+/// Policies of [`first_mint_chain`]. `SIBLING` shares `ALPHA`'s first fourteen
+/// bytes, the prefix staged first mints are grouped by.
+pub mod first_mint_policies {
+    pub const ALPHA: [u8; 28] = [0x11; 28];
+    pub const BETA: [u8; 28] = [0x22; 28];
+    pub const GAMMA: [u8; 28] = [0x33; 28];
+    pub const SIBLING: [u8; 28] = [
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x99,
+        0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99,
+    ];
+}
+
+/// Twelve blocks over preview epochs 2 to 7, two per epoch, whose mints cover
+/// what first-mint order has to get right: several mints in one tx, several
+/// policies in one block and in one tx, re-mints within and across epochs, a
+/// full burn minted again, a repeat across the txs of one block, a policy
+/// sharing another's staged-key prefix, and an epoch with more first mints than
+/// a sealed chunk holds. The tip's epoch seals epochs 2 to 5 and leaves 6 and 7
+/// staged.
+pub fn first_mint_chain() -> SyntheticBlockConfig {
+    use first_mint_policies::*;
+
+    let mint = |policy: [u8; 28], name: &str, amount: i64| (policy, name.to_string(), amount);
+
+    let many: Vec<_> = (0..300)
+        .map(|i| mint(BETA, &format!("N{i:03}"), 1))
+        .collect();
+
+    let mints_by_block = vec![
+        vec![
+            vec![mint(ALPHA, "A", 1), mint(ALPHA, "B", 1)],
+            vec![mint(BETA, "X", 5)],
+        ],
+        vec![vec![mint(ALPHA, "A", 1)], vec![mint(SIBLING, "A", 1)]],
+        vec![
+            vec![mint(ALPHA, "A", -2)],
+            vec![mint(GAMMA, "Z", 1), mint(BETA, "Y", 1)],
+        ],
+        vec![vec![mint(ALPHA, "C", 1)], many],
+        vec![
+            vec![mint(ALPHA, "A", 1)],
+            vec![mint(ALPHA, "E", 1), mint(ALPHA, "D", 1), mint(BETA, "W", 1)],
+        ],
+        vec![vec![], vec![mint(GAMMA, "Z", -1)]],
+        vec![vec![mint(ALPHA, "F", 1)], vec![mint(ALPHA, "B", 1)]],
+        vec![vec![mint(BETA, "V", 1)], vec![]],
+        vec![
+            vec![mint(ALPHA, "G", 1), mint(ALPHA, "H", 1)],
+            vec![mint(ALPHA, "G", 1)],
+        ],
+        vec![vec![mint(GAMMA, "Y", 1)], vec![mint(SIBLING, "B", 1)]],
+        vec![vec![mint(BETA, "U", 1)], vec![mint(ALPHA, "I", 1)]],
+        vec![vec![mint(ALPHA, "A", 1)], vec![mint(ALPHA, "J", 1)]],
+    ];
+
+    SyntheticBlockConfig {
+        block_count: mints_by_block.len(),
+        txs_per_block: 2,
+        slot_step: 43_200,
+        mints_by_block,
+        plain_txs: true,
+        // each tx pays a fee of 7 out of its seed, so the pots balance across
+        // the boundaries
+        seed_amount: dolos_testing::MIN_UTXO_AMOUNT + 7,
+        ..Default::default()
+    }
+}
+
 pub struct TestDomainBuilder {
     domain: ToyDomain,
     vectors: SyntheticVectors,

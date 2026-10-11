@@ -17,7 +17,6 @@ reqwest.workspace = true
 num-rational.workspace = true
 num-bigint.workspace = true
 rayon.workspace = true
-indexmap.workspace = true
 
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }

@@ -1,0 +1,194 @@
+use dolos_core::EntityKey;
+use pallas::{
+    codec::minicbor::{self, bytes::ByteVec, Decode, Encode},
+    crypto::hash::{Hash, Hasher},
+    ledger::primitives::Epoch,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::periods::{self, ChunkRow, StageIfAbsent, StagedRow};
+
+/// The first mint of an asset within one epoch, staged until the epoch seals.
+///
+/// Keyed `policy[..14] ‖ epoch ‖ blake2b(subject)[..16]`, so one prefix scan
+/// returns every staged epoch of a policy. The member hashes the whole subject:
+/// two policies can share the prefix and an asset name. Re-mints of an asset
+/// first minted in an earlier epoch are staged too; readers and the seal keep
+/// only the rows whose slot is the asset's `initial_slot`.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+pub struct StagedFirstMint {
+    #[n(0)]
+    pub policy: Hash<28>,
+
+    #[n(1)]
+    #[cbor(with = "minicbor::bytes")]
+    pub name: Vec<u8>,
+
+    #[n(2)]
+    pub epoch: Epoch,
+
+    #[n(3)]
+    pub slot: u64,
+
+    #[n(4)]
+    pub tx_index: u32,
+}
+
+entity_boilerplate!(StagedFirstMint, "staged-first-mints");
+
+impl StagedFirstMint {
+    pub fn subject(&self) -> Vec<u8> {
+        [self.policy.as_slice(), self.name.as_slice()].concat()
+    }
+
+    /// Mint order: slot, then tx index, then subject bytes, the order db-sync
+    /// writes `ma_tx_mint` rows in.
+    pub fn mint_order(&self) -> (u64, u32, Vec<u8>) {
+        (self.slot, self.tx_index, self.subject())
+    }
+
+    /// The `AssetState` key of the minted asset.
+    pub fn asset_key(&self) -> EntityKey {
+        EntityKey::from(Hasher::<256>::hash(&self.subject()))
+    }
+}
+
+impl StagedRow for StagedFirstMint {
+    fn key(&self) -> EntityKey {
+        let subject = Hasher::<256>::hash(&self.subject());
+        periods::staged_key(self.policy.as_slice(), self.epoch, subject.as_slice())
+    }
+
+    fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+}
+
+pub type StageFirstMint = StageIfAbsent<StagedFirstMint>;
+
+/// One chunk of the subjects first minted in an epoch, in mint order.
+///
+/// Sealed at `(epoch_start(e), chunk)`. Every chunk carries the epoch's total,
+/// so a reader learns how many subjects the epoch holds from its first chunk.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Default)]
+pub struct FirstMintChunk {
+    #[n(0)]
+    pub count: u64,
+
+    #[n(1)]
+    pub subjects: Vec<ByteVec>,
+}
+
+entity_boilerplate!(FirstMintChunk, "first-mints");
+
+impl ChunkRow for FirstMintChunk {
+    type Item = Vec<u8>;
+
+    fn new(count: u64, items: Vec<Vec<u8>>) -> Self {
+        Self {
+            count,
+            subjects: items.into_iter().map(ByteVec::from).collect(),
+        }
+    }
+
+    fn into_items(self) -> Vec<Vec<u8>> {
+        self.subjects.into_iter().map(Vec::from).collect()
+    }
+}
+
+/// One chunk of the asset names a policy first minted in an epoch, in mint
+/// order.
+///
+/// Sealed at `(epoch_start(e), policy ‖ chunk)`, with the policy's total for
+/// the epoch on every chunk.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Default)]
+pub struct PolicyMintChunk {
+    #[n(0)]
+    pub count: u64,
+
+    #[n(1)]
+    pub names: Vec<ByteVec>,
+}
+
+entity_boilerplate!(PolicyMintChunk, "policy-first-mints");
+
+impl ChunkRow for PolicyMintChunk {
+    type Item = Vec<u8>;
+
+    fn new(count: u64, items: Vec<Vec<u8>>) -> Self {
+        Self {
+            count,
+            names: items.into_iter().map(ByteVec::from).collect(),
+        }
+    }
+
+    fn into_items(self) -> Vec<Vec<u8>> {
+        self.names.into_iter().map(Vec::from).collect()
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use crate::model::testing as root;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        pub fn any_staged_first_mint()(
+            policy in root::any_hash_28(),
+            name in prop::collection::vec(any::<u8>(), 0..32),
+            epoch in 0u64..1000,
+            slot in root::any_slot(),
+            tx_index in 0u32..500,
+        ) -> StagedFirstMint {
+            StagedFirstMint { policy, name, epoch, slot, tx_index }
+        }
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::testing::any_staged_first_mint;
+    use super::*;
+    use crate::model::testing::{assert_delta_roundtrip, assert_delta_serde_roundtrip};
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn stage_first_mint_roundtrip(
+            entity in prop::option::of(any_staged_first_mint()),
+            row in any_staged_first_mint(),
+        ) {
+            assert_delta_roundtrip(entity.clone(), StageFirstMint::new(row.clone()));
+            assert_delta_serde_roundtrip(entity, StageFirstMint::new(row));
+        }
+    }
+
+    #[test]
+    fn staging_keeps_the_first_row() {
+        let first = StagedFirstMint {
+            policy: [1u8; 28].into(),
+            name: b"A".to_vec(),
+            epoch: 7,
+            slot: 100,
+            tx_index: 0,
+        };
+        let later = StagedFirstMint {
+            slot: 200,
+            ..first.clone()
+        };
+
+        let mut entity = None;
+        let mut a = StageFirstMint::new(first.clone());
+        let mut b = StageFirstMint::new(later);
+        dolos_core::EntityDelta::apply(&mut a, &mut entity);
+        dolos_core::EntityDelta::apply(&mut b, &mut entity);
+        assert_eq!(entity, Some(first.clone()));
+
+        dolos_core::EntityDelta::undo(&b, &mut entity);
+        assert_eq!(entity, Some(first));
+
+        dolos_core::EntityDelta::undo(&a, &mut entity);
+        assert_eq!(entity, None);
+    }
+}
