@@ -32,7 +32,8 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
 
         let mut out = vec![];
 
-        // Special, hardcoded stuff.
+        // Byron comes hardcoded per network; the loop below adds the eras
+        // from Shelley on, one entry per era under its first protocol version.
         let known_hardforks = [2, 3, 4, 5, 7, 9];
         let mut previous = match self.genesis.shelley.network_magic {
             Some(764824073) => {
@@ -107,7 +108,7 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
                     }),
                 });
 
-                // In the case of preview, we add the skipped eras
+                // preview opens in Alonzo, so Shelley, Allegra and Mary are empty
                 let other = NetworkErasInner {
                     start: Box::new(NetworkErasInnerStart {
                         time: 0,
@@ -143,7 +144,7 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
             let start_time = era.slot_time(era.start.slot);
             let start_delta = start_time - system_start;
 
-            // Calculate for the final one. The rest will be overwritten
+            // the tip ends the last era; the next era's start overwrites the rest
             let (end_slot, end_epoch) = (self.tip, era.slot_epoch(self.tip).0);
             let end_time = era.slot_time(end_slot);
             let end_delta = end_time - system_start;
@@ -193,9 +194,8 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
     fn into_model(self) -> Result<Network, StatusCode> {
         let max_supply = self.genesis.shelley.max_lovelace_supply.unwrap_or_default();
 
-        // TODO: check why we have this semantic discrepancy. BF uses the name
-        // `total_supply` for what we call `circulating`. For BF, the `circulating`
-        // supply is total supply minus deposits.
+        // TODO: Blockfrost's `total` is what Dolos calls circulating, and its
+        // `circulating` leaves the deposits out; check the discrepancy.
         let total_supply = self.active.initial_pots.circulating();
         let circulating = self.active.initial_pots.utxos + self.active.initial_pots.rewards;
 
@@ -208,7 +208,7 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
                 treasury: self.active.initial_pots.treasury.to_string(),
                 reserves: self.active.initial_pots.reserves.to_string(),
             }),
-            // TODO: should compute snapshots as we do during sweep
+            // TODO: compute the snapshots the way the sweep does
             stake: Box::new(NetworkStake {
                 live: self.live_stake.to_string(),
                 active: self.active_stake.to_string(),

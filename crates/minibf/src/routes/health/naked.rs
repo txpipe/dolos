@@ -7,6 +7,6 @@ pub struct RootResponse {
 }
 
 pub async fn naked() -> Result<Json<RootResponse>, StatusCode> {
-    // TODO: Relate this value to sync status. If not in tip, then unhealthy.
+    // TODO: tie this to the sync status; behind the tip means unhealthy.
     Ok(Json(RootResponse { is_healthy: true }))
 }
