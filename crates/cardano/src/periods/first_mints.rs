@@ -9,25 +9,21 @@
 use std::{collections::BTreeMap, ops::RangeInclusive};
 
 use dolos_core::{
-    ArchiveStore, ArchiveWriter as _, ChainError, Domain, EntityKey, EntityValue, StateStore,
+    ArchiveStore, ArchiveWriter as _, ChainError, Domain, EntityValue, LogKey, RangeOf, StateStore,
 };
 use pallas::{crypto::hash::Hash, ledger::primitives::Epoch};
 
 use super::{Period, Segment};
 use crate::{
-    indexes::SlotOrder, AssetState, ChainSummary, FirstMintChunk, FixedNamespace as _,
-    PolicyMintChunk, StagedFirstMint,
+    indexes::SlotOrder, AssetKey, AssetState, ChainSummary, FirstMintChunk, FixedNamespace as _,
+    PolicyKey, PolicyMintChunk, StagedFirstMint,
 };
 
 /// Asset states read per state call when telling first mints from re-mints.
 const LOOKUP_BATCH: usize = 1_000;
 
-fn all_key(chunk: u32) -> EntityKey {
-    EntityKey::from(&chunk.to_be_bytes())
-}
-
-fn policy_key(policy: &Hash<28>, chunk: u32) -> EntityKey {
-    EntityKey::from([policy.as_slice(), &chunk.to_be_bytes()].concat())
+fn policy_key(policy: &Hash<28>, chunk: u32) -> (PolicyKey, u32) {
+    (PolicyKey(*policy), chunk)
 }
 
 /// Whether each staged row is its asset's first mint ever: the asset's
@@ -40,9 +36,8 @@ fn first_mint_flags<'a, S: StateStore>(
     let mut flags = Vec::with_capacity(rows.len());
 
     for batch in rows.chunks(LOOKUP_BATCH) {
-        let keys: Vec<EntityKey> = batch.iter().map(|row| row.asset_key()).collect();
-        let assets = state
-            .read_entities_typed::<AssetState>(AssetState::NS, &keys.iter().collect::<Vec<_>>())?;
+        let keys: Vec<AssetKey> = batch.iter().map(|row| row.asset_key()).collect();
+        let assets = state.read_entities_typed::<AssetState>(&keys.iter().collect::<Vec<_>>())?;
 
         for (row, asset) in batch.iter().zip(assets) {
             flags.push(asset.and_then(|x| x.initial_slot) == Some(row.slot));
@@ -67,7 +62,7 @@ pub(crate) fn seal<D: Domain>(
 ) -> Result<(), ChainError> {
     let mut rows = Vec::new();
 
-    for row in state.iter_entities_typed::<StagedFirstMint>(StagedFirstMint::NS, None)? {
+    for row in state.iter_entities_typed::<StagedFirstMint>(None)? {
         let (key, row) = row?;
 
         if sealable(row.epoch) {
@@ -90,7 +85,8 @@ pub(crate) fn seal<D: Domain>(
     }
 
     for (epoch, mut mints) in epochs {
-        let head = super::sealed_key(chain, epoch, all_key(0));
+        let slot = chain.epoch_start(epoch);
+        let head = LogKey::of(slot, &0u32);
 
         if archive.read_logs(FirstMintChunk::NS, &[&head])?[0].is_some() {
             continue;
@@ -105,8 +101,7 @@ pub(crate) fn seal<D: Domain>(
             .into_iter()
             .enumerate()
         {
-            let key = super::sealed_key(chain, epoch, all_key(i as u32));
-            writer.write_log_typed(&key, &chunk)?;
+            writer.write_log_typed(slot, &(i as u32), &chunk)?;
         }
 
         writer.commit()?;
@@ -117,10 +112,9 @@ pub(crate) fn seal<D: Domain>(
         .zip(flags)
         .map(|((key, row), first)| Ok((key, (row, first))));
 
-    super::seal_groups::<D, _>(
+    super::seal_groups::<D, StagedFirstMint, _, _, _>(
         state,
         archive,
-        StagedFirstMint::NS,
         rows,
         batch,
         |chunk, writer| {
@@ -140,8 +134,8 @@ pub(crate) fn seal<D: Domain>(
                     .into_iter()
                     .enumerate()
                 {
-                    let key = super::sealed_key(chain, epoch, policy_key(&policy, i as u32));
-                    writer.write_log_typed(&key, &chunk)?;
+                    let slot = chain.epoch_start(epoch);
+                    writer.write_log_typed(slot, &policy_key(&policy, i as u32), &chunk)?;
                 }
             }
 
@@ -198,15 +192,15 @@ pub fn all_page<D: Domain>(
 ) -> Result<Vec<Vec<u8>>, ChainError> {
     let (state, archive) = (domain.state(), domain.archive());
 
-    let mut staged = super::read_staged::<_, StagedFirstMint>(state, EntityKey::full_range())?;
+    let mut staged = super::read_staged::<_, StagedFirstMint>(state, RangeOf::all())?;
     staged.retain(|epoch, _| epochs.contains(epoch));
 
-    let sealed = super::read_sealed(archive, FirstMintChunk::NS, chain, epochs, |_| all_key(0))?;
+    let sealed = super::read_sealed::<_, FirstMintChunk>(archive, chain, epochs, |_| 0)?;
 
     let segments = segments(state, super::join(staged, sealed), |row| row.subject())?;
 
     super::page::<FirstMintChunk>(segments, order, skip, count, |epoch, chunks| {
-        super::load_chunks(archive, chain, epoch, chunks, all_key)
+        super::load_chunks(archive, chain, epoch, chunks, |i| i)
     })
 }
 
@@ -224,16 +218,11 @@ pub fn policy_page<D: Domain>(
     let (state, archive) = (domain.state(), domain.archive());
 
     let mut staged =
-        super::read_staged::<_, StagedFirstMint>(state, super::group_range(policy.as_slice()))?;
+        super::read_staged::<_, StagedFirstMint>(state, RangeOf::prefix(&PolicyKey(*policy)))?;
 
     staged.retain(|epoch, _| epochs.contains(epoch));
 
-    // the group prefix is shorter than a policy id
-    for rows in staged.values_mut() {
-        rows.retain(|row| row.policy == *policy);
-    }
-
-    let sealed = super::read_sealed(archive, PolicyMintChunk::NS, chain, epochs, |_| {
+    let sealed = super::read_sealed::<_, PolicyMintChunk>(archive, chain, epochs, |_| {
         policy_key(policy, 0)
     })?;
 
@@ -257,14 +246,16 @@ pub fn policy_page<D: Domain>(
 
 #[cfg(test)]
 mod tests {
-    use dolos_core::{ArchiveStore as _, Domain as _, LogKey, StateStore as _, StateWriter as _};
+    use dolos_core::{
+        ArchiveStore as _, BlockSlot, Domain as _, StateStore as _, StateWriter as _,
+    };
     use dolos_testing::{
         faults::{FaultyToyDomain, TestFault},
         toy_domain::ToyDomain,
     };
 
     use super::*;
-    use crate::periods::{is_sealable, StagedRow as _};
+    use crate::periods::{is_sealable, StagedKey, StagedRow as _};
 
     /// The epoch the sealing boundary opens: 5 and 6 are immutable at it, 7 is
     /// not.
@@ -273,10 +264,11 @@ mod tests {
     const P: [u8; 28] = [0x11; 28];
     const Q: [u8; 28] = [0x22; 28];
 
-    /// Shares `P`'s staged-key prefix.
+    /// Shares all of `P` but its last byte, so its staged keys sort right
+    /// after `P`'s.
     fn sibling() -> [u8; 28] {
         let mut policy = P;
-        policy[super::super::GROUP_LEN..].fill(0x99);
+        policy[27] = 0x99;
         policy
     }
 
@@ -359,20 +351,20 @@ mod tests {
     }
 
     type Logs = (
-        Vec<(LogKey, FirstMintChunk)>,
-        Vec<(LogKey, PolicyMintChunk)>,
+        Vec<(BlockSlot, u32, FirstMintChunk)>,
+        Vec<(BlockSlot, (PolicyKey, u32), PolicyMintChunk)>,
     );
 
     fn logs(domain: &ToyDomain) -> Logs {
         let archive = domain.archive();
 
         let all = archive
-            .iter_logs_typed::<FirstMintChunk>(FirstMintChunk::NS, None)
+            .iter_logs_typed::<FirstMintChunk>(None)
             .unwrap()
             .map(Result::unwrap)
             .collect();
         let policies = archive
-            .iter_logs_typed::<PolicyMintChunk>(PolicyMintChunk::NS, None)
+            .iter_logs_typed::<PolicyMintChunk>(None)
             .unwrap()
             .map(Result::unwrap)
             .collect();
@@ -380,10 +372,10 @@ mod tests {
         (all, policies)
     }
 
-    fn staged(domain: &ToyDomain) -> Vec<(EntityKey, StagedFirstMint)> {
+    fn staged(domain: &ToyDomain) -> Vec<(StagedKey<PolicyKey, AssetKey>, StagedFirstMint)> {
         domain
             .state()
-            .iter_entities_typed::<StagedFirstMint>(StagedFirstMint::NS, None)
+            .iter_entities_typed::<StagedFirstMint>(None)
             .unwrap()
             .map(Result::unwrap)
             .collect()
@@ -543,33 +535,32 @@ mod tests {
         let (state, archive) = (domain.state(), domain.archive());
 
         let staged_all =
-            crate::periods::read_staged::<_, StagedFirstMint>(state, EntityKey::full_range())
-                .unwrap();
+            crate::periods::read_staged::<_, StagedFirstMint>(state, RangeOf::all()).unwrap();
         let staged_q = crate::periods::read_staged::<_, StagedFirstMint>(
             state,
-            crate::periods::group_range(&Q),
+            RangeOf::prefix(&PolicyKey(Q.into())),
         )
         .unwrap();
 
         seal_as(&domain, &domain).unwrap();
 
         let sealed_all =
-            crate::periods::read_sealed(archive, FirstMintChunk::NS, &chain, 0..=BOUNDARY, |_| {
-                all_key(0)
-            })
-            .unwrap();
-        let sealed_q =
-            crate::periods::read_sealed(archive, PolicyMintChunk::NS, &chain, 0..=BOUNDARY, |_| {
-                policy_key(&Q.into(), 0)
-            })
-            .unwrap();
+            crate::periods::read_sealed::<_, FirstMintChunk>(archive, &chain, 0..=BOUNDARY, |_| 0)
+                .unwrap();
+        let sealed_q = crate::periods::read_sealed::<_, PolicyMintChunk>(
+            archive,
+            &chain,
+            0..=BOUNDARY,
+            |_| policy_key(&Q.into(), 0),
+        )
+        .unwrap();
 
         let all = segments(state, crate::periods::join(staged_all, sealed_all), |row| {
             row.subject()
         })
         .unwrap();
         let all = crate::periods::page::<FirstMintChunk>(all, SlotOrder::Asc, 0, 400, |e, c| {
-            crate::periods::load_chunks(archive, &chain, e, c, all_key)
+            crate::periods::load_chunks(archive, &chain, e, c, |i| i)
         })
         .unwrap();
         let expected = all_page(&fresh, &chain, 0..=BOUNDARY, SlotOrder::Asc, 0, 400).unwrap();

@@ -13,7 +13,7 @@
 //!    bytes) Value: `[era:2][cbor:...]`
 //!
 //! 3. **`state-entities`**: All entity types with namespace hash prefix Key:
-//!    `[ns_hash:8][entity_key:32]` (40 bytes) Value: entity CBOR bytes
+//!    `[ns_hash:8][entity_key:var]` Value: entity CBOR bytes
 //!
 //! 4. **`state-tags`**: Live-UTxO tags (mutable: insert on produce, delete on
 //!    consume) Key: `[dim_hash:8][lookup_key:var][txo_ref:36]` -> empty
@@ -27,12 +27,11 @@
 //! settings because its churn (a delete per spent output) is unlike the
 //! entity and UTxO keyspaces'.
 
-use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    config::FjallStateConfig, ChainPoint, EntityKey, EntityValue, Namespace, StateError,
+    config::FjallStateConfig, ChainPoint, EntityKey, EntityValue, KeyRange, Namespace, StateError,
     StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TxoRef,
     UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
 };
@@ -362,7 +361,7 @@ impl CoreStateStore for StateStore {
     fn iter_entities(
         &self,
         ns: Namespace,
-        range: Range<EntityKey>,
+        range: KeyRange,
     ) -> Result<Self::EntityIter, StateError> {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();

@@ -45,8 +45,7 @@ use dolos_cardano::{
 use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
     ArchiveError, ArchiveStore, ArchiveWriter as _, BlockBody, BlockSlot, ChainPoint, Domain,
-    EntityKey, ExactRecord, IndexRecord, LogKey, Namespace, StateStore, StateWriter as _,
-    TagRecord, TemporalKey,
+    ExactRecord, IndexRecord, KeyRange, LogKey, Namespace, StateStore, StateWriter as _, TagRecord,
 };
 use dolos_snapshot::{
     export::{self, EpochWindow, Plan},
@@ -67,7 +66,7 @@ use watcher::Watcher;
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
-    "sha256:efae189726dacec13053d47e95a7ce8d32ce41eb15d8a851650aaeef7210039a";
+    "sha256:dc576055f54bb832b376e525acaaa89bec20d2e9bab11ff62c13c3128f91725e";
 
 /// The chain point the skeleton fixture stands at: mid-epoch-2 under
 /// [`skeleton_summary`], so the export covers three epochs and the last window
@@ -198,7 +197,11 @@ fn a_log_under_an_uncovered_namespace_fails_the_export() {
 
     let writer = archive.start_writer().unwrap();
     writer
-        .write_log(stray, &LogKey::from(TemporalKey::from(120u64)), &vec![0xa0])
+        .write_log(
+            stray,
+            &LogKey::from_raw(&120u64.to_be_bytes()).unwrap(),
+            &vec![0xa0],
+        )
         .unwrap();
     writer.commit().unwrap();
 
@@ -385,7 +388,7 @@ fn every_layer_reads_back_as_the_store_yields_it() {
 
             let found: Vec<logs::LogRecord> = read_both_ways(&stele, &index, descriptor)
                 .iter()
-                .map(|raw| logs::decode(raw).unwrap())
+                .map(|raw| logs::decode(ns, raw).unwrap())
                 .collect();
 
             any_logs |= !found.is_empty();
@@ -504,9 +507,7 @@ fn expected_logs<B: ToyStores>(
     window: &EpochWindow,
     ns: dolos_core::Namespace,
 ) -> Vec<logs::LogRecord> {
-    let slots = window.slots();
-    let range =
-        LogKey::from(TemporalKey::from(slots.start))..LogKey::from(TemporalKey::from(slots.end));
+    let range = KeyRange::slots(window.slots());
 
     let mut found: Vec<logs::LogRecord> = domain
         .archive()
@@ -566,7 +567,7 @@ fn expected_state<B: ToyStores>(
 
         for entry in domain
             .state()
-            .iter_entities(ns, EntityKey::full_range())
+            .iter_entities(ns, dolos_core::KeyRange::all())
             .unwrap()
         {
             let (key, value) = entry.unwrap();
@@ -1215,7 +1216,7 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:e59d8b7ec7144216a9caab188b2de8d09d98c7c419e228a41131722796b81711","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":46}"#,
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"first-mints":1,"gov":3,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pool-deposit-refunds":0,"pools":1,"proposals":3,"staged-first-mints":1,"stakes":1,"utxos":1},"#,
+    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":2,"epochs":3,"eras":2,"first-mints":2,"gov":4,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pool-deposit-refunds":0,"pools":2,"proposals":4,"staged-first-mints":2,"stakes":2,"utxos":1},"#,
     r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"gov":1,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pools":1,"proposals":1,"staged-first-mints":1,"stakes":1,"utxos":16},"#,
     r#""stateEpochs":[]"#,
     r#"},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
@@ -1527,7 +1528,7 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
     fn iter_logs(
         &self,
         ns: Namespace,
-        range: std::ops::Range<LogKey>,
+        range: dolos_core::KeyRange,
     ) -> Result<Self::LogIter, ArchiveError> {
         self.inner.iter_logs(ns, range)
     }

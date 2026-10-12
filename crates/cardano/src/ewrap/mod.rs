@@ -16,13 +16,13 @@ use std::{
     sync::Arc,
 };
 
-use dolos_core::{BlockSlot, ChainError, EntityKey, Genesis, TxOrder};
+use dolos_core::{BlockSlot, ChainError, Genesis, TxOrder};
 use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
 
 use crate::{
     eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountEpochLog,
-    AccountState, CardanoDelta, CardanoEntity, DRepState, EpochState, EraProtocol, GovDistr,
-    GovState, PoolHash, PoolState, ProposalOutcome, ProposalState,
+    AccountState, CardanoDelta, DRepState, EpochState, EraProtocol, GovDistr, GovState, PoolHash,
+    PoolState, ProposalOutcome, ProposalState,
 };
 
 pub mod commit;
@@ -130,10 +130,10 @@ pub trait BoundaryVisitor {
     }
 }
 
-pub type AccountId = EntityKey;
-pub type PoolId = EntityKey;
-pub type DRepId = EntityKey;
-pub type ProposalId = EntityKey;
+pub type AccountId = crate::AccountKey;
+pub type PoolId = crate::PoolKey;
+pub type DRepId = crate::DRepKey;
+pub type ProposalId = crate::ProposalKey;
 
 /// One boundary's ruling on the live governance forest: the proposals it
 /// removes, each with the class of removal, plus the order the accepted
@@ -249,14 +249,16 @@ pub struct BoundaryWork {
     /// finalize.
     pub boundary_dreps: BTreeMap<StakeCredential, crate::DRepSnapshotEntry>,
 
-    /// Entity keys of the DReps registered at this boundary, which opens the
-    /// next epoch. Distribution accumulation skips delegations to any other
-    /// target (`AlwaysAbstain` / `AlwaysNoConfidence` excepted).
-    pub snapshot_registered_dreps: HashSet<EntityKey>,
+    /// The DReps registered at this boundary, which opens the next epoch.
+    /// Distribution accumulation skips delegations to any other target
+    /// (`AlwaysAbstain` / `AlwaysNoConfidence` excepted).
+    pub snapshot_registered_dreps: HashSet<DRepId>,
 
     // computed via visitors
     pub deltas: WorkDeltas,
-    pub logs: Vec<(EntityKey, CardanoEntity)>,
+    /// The merged account-epoch rows of the shard, written under
+    /// [`Self::account_epoch_slot`].
+    pub logs: Vec<(AccountId, AccountEpochLog)>,
 
     /// Credentials whose rewards were applied (need to be dequeued from state).
     pub applied_reward_credentials: Vec<StakeCredential>,

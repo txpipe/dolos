@@ -1,6 +1,6 @@
-use dolos_core::{EntityValue, Namespace, NamespaceType, StateSchema, TemporalKey};
+use dolos_core::{BlockSlot, EntityValue, Namespace, NamespaceType, StateSchema};
 use redb::{MultimapTableDefinition, ReadTransaction, TableDefinition, WriteTransaction};
-use std::{collections::HashMap, ops::Range};
+use std::{collections::HashMap, ops::Bound};
 use tracing::trace;
 
 pub mod mempool;
@@ -161,14 +161,14 @@ impl Table {
     pub fn range(
         &self,
         rx: &mut ReadTransaction,
-        range: Range<&[u8]>,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
     ) -> Result<redb::Range<'static, &'static [u8], &'static [u8]>, Error> {
         let Some(table) = self.as_value() else {
             return Err(Error::InvalidOperation);
         };
 
         let table = rx.open_table(*table)?;
-        let values = table.range(range)?;
+        let values = table.range::<&[u8]>(range)?;
 
         Ok(values)
     }
@@ -224,15 +224,12 @@ impl Table {
         Ok(())
     }
 
-    pub fn remove_before(
-        &self,
-        wx: &WriteTransaction,
-        temporal: &TemporalKey,
-    ) -> Result<(), Error> {
+    pub fn remove_before(&self, wx: &WriteTransaction, slot: BlockSlot) -> Result<(), Error> {
         match self {
             Table::Value(def) => {
                 let mut open_table = wx.open_table(*def)?;
-                let mut to_remove = open_table.extract_from_if(..temporal.as_ref(), |_, _| true)?;
+                let bound = slot.to_be_bytes();
+                let mut to_remove = open_table.extract_from_if(..bound.as_slice(), |_, _| true)?;
                 while let Some(Ok(_)) = to_remove.next() {
                     trace!("removing table entry");
                 }
@@ -243,11 +240,12 @@ impl Table {
         }
     }
 
-    pub fn remove_after(&self, wx: &WriteTransaction, temporal: &TemporalKey) -> Result<(), Error> {
+    pub fn remove_after(&self, wx: &WriteTransaction, slot: BlockSlot) -> Result<(), Error> {
         match self {
             Table::Value(def) => {
                 let mut open_table = wx.open_table(*def)?;
-                let mut to_remove = open_table.extract_from_if(temporal.as_ref().., |_, _| true)?;
+                let bound = slot.to_be_bytes();
+                let mut to_remove = open_table.extract_from_if(bound.as_slice().., |_, _| true)?;
                 while let Some(Ok(_)) = to_remove.next() {
                     trace!("removing table entry");
                 }

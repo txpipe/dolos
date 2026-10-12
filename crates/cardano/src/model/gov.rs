@@ -6,7 +6,7 @@
 //! the four per-purpose previous-governance-action roots, and the
 //! dormant-epoch counter (`vsNumDormantEpochs`).
 //!
-//! A single entity lives in the namespace under [`GOV_STATE_KEY`]. Its
+//! A single entity lives in the namespace, at the empty key. Its
 //! existence is an invariant: every store carries the row regardless of
 //! era — created inactive at genesis bootstrap (or by the CARDANO-006
 //! startup migration on stores bootstrapped before the invariant) and
@@ -32,9 +32,6 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use super::{GovPurpose, PoolHash, SingletonEntity};
-
-/// Key of the single `GovState` entity inside the `"gov"` namespace.
-pub const GOV_STATE_KEY: &[u8] = b"0";
 
 /// Expect message for delta apply/undo on the governance singleton — its
 /// existence is an invariant, so a miss means a corrupt store.
@@ -275,11 +272,9 @@ pub struct GovState {
     pub drep_snapshot: Option<DRepSnapshot>,
 }
 
-entity_boilerplate!(GovState, "gov");
+entity_boilerplate!(GovState, "gov", state = ());
 
-impl SingletonEntity for GovState {
-    const KEY: &'static [u8] = GOV_STATE_KEY;
-}
+impl SingletonEntity for GovState {}
 
 impl GovState {
     /// Activate governance with the Conway genesis enact-state (the

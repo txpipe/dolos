@@ -2,14 +2,13 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{
     config::{CardanoConfig, CustomUtxo},
-    ArchiveStore, ArchiveWriter, ChainError, Domain, LogKey, RawBlock, TemporalKey, TxoRef,
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainError, Domain, RawBlock, TxoRef,
 };
 
 use crate::{tx_sequence_to_hash, utxo_with_value};
 
 use bech32::{FromBase32, ToBase32, Variant};
-use dolos_cardano::model::{AccountEpochLog, FixedNamespace as _};
-use dolos_cardano::rupd::credential_to_key;
+use dolos_cardano::model::{AccountEpochLog, AccountKey};
 use pallas::codec::utils::{CborWrap, Int, Nullable};
 use pallas::codec::{minicbor, utils::KeepRaw};
 use pallas::crypto::{hash::Hasher, key::ed25519::SecretKeyExtended};
@@ -884,11 +883,12 @@ fn build_datum_and_script_fixture() -> SyntheticFixtureExtras {
 /// seeders from behaving like the two writers the merge removed.
 fn account_epoch_row<D: Domain>(
     domain: &D,
-    log_key: &LogKey,
+    slot: BlockSlot,
+    account: &AccountKey,
 ) -> Result<AccountEpochLog, ChainError> {
     let existing = domain
         .archive()
-        .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, log_key)
+        .read_log_typed::<AccountEpochLog>(slot, account)
         .map_err(ChainError::from)?;
 
     Ok(existing.unwrap_or_default())
@@ -908,7 +908,7 @@ pub fn seed_reward_logs<D: Domain>(
     let address = Address::from_bech32(stake_address)?;
     let (stake_cred, _) = dolos_cardano::pallas_extras::address_as_stake_cred(&address)
         .ok_or(ChainError::InvalidPoolParams)?;
-    let entity_key = credential_to_key(&stake_cred);
+    let account = AccountKey::from(stake_cred);
     let pool_keyhash =
         pool_keyhash_from_bech32(pool_id).map_err(|_| ChainError::InvalidPoolParams)?;
 
@@ -917,14 +917,12 @@ pub fn seed_reward_logs<D: Domain>(
 
     for epoch in epochs {
         let slot = summary.epoch_start(*epoch);
-        let log_key: LogKey = (TemporalKey::from(slot), entity_key.clone()).into();
-
-        let mut log = account_epoch_row(domain, &log_key)?;
+        let mut log = account_epoch_row(domain, slot, &account)?;
         log.member_reward = Some(42);
         log.pool_id = Some(pool_keyhash);
 
         writer
-            .write_log_typed(&log_key, &log)
+            .write_log_typed(slot, &account, &log)
             .map_err(ChainError::from)?;
     }
 
@@ -967,14 +965,14 @@ pub fn seed_account_stake_logs<D: Domain>(
         ];
 
         for (credential, amount) in entries {
-            let log_key: LogKey = (TemporalKey::from(slot), credential_to_key(credential)).into();
+            let account = AccountKey::from(credential);
 
-            let mut log = account_epoch_row(domain, &log_key)?;
+            let mut log = account_epoch_row(domain, slot, &account)?;
             log.active_stake = Some(amount);
             log.pool_id = Some(pool_keyhash);
 
             writer
-                .write_log_typed(&log_key, &log)
+                .write_log_typed(slot, &account, &log)
                 .map_err(ChainError::from)?;
         }
     }
@@ -991,11 +989,10 @@ pub fn seed_epoch_logs<D: Domain>(domain: &D, epochs: &[u64]) -> Result<(), Chai
 
     for epoch in epochs {
         let slot = summary.epoch_start(*epoch);
-        let log_key = LogKey::from(TemporalKey::from(slot));
         let mut state = base.clone();
         state.number = *epoch;
         state.largest_stable_slot = slot;
-        writer.write_log_typed(&log_key, &state)?;
+        writer.write_log_typed(slot, &(), &state)?;
     }
 
     writer.commit()?;

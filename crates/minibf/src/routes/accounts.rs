@@ -24,13 +24,12 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::{AccountState, DRepState, PoolState},
-    pallas_extras, AccountEpochLog, ChainSummary, FixedNamespace, PoolHash,
+    pallas_extras, AccountEpochLog, AccountKey, ChainSummary, PoolHash,
 };
 use dolos_core::async_query::BlockMetaResolver;
-use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, StateStore as _, TemporalKey};
+use dolos_core::{ArchiveStore as _, Domain, StateStore as _};
 use futures_util::StreamExt;
 use pallas::{
-    codec::minicbor,
     crypto::hash::{Hash, Hasher},
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
@@ -52,7 +51,15 @@ use crate::{
 
 struct AccountKeyParam {
     address: StakeAddress,
-    entity_key: Vec<u8>,
+    account: AccountKey,
+}
+
+impl AccountKeyParam {
+    /// The key the account-certs archive tag is filed under: the account
+    /// key's bytes, which the indexer writes as the credential's CBOR.
+    fn cert_tag(&self) -> Vec<u8> {
+        dolos_core::keys::encode(&self.account).to_vec()
+    }
 }
 
 fn stake_address_from_cip_19_credential(address: &str, network: Network) -> Option<StakeAddress> {
@@ -96,15 +103,11 @@ fn parse_account_key_param(address: &str, network: Network) -> Result<AccountKey
             stake_address.ok_or(Error::InvalidStakeAddress)?
         };
 
-    let stake_cred = dolos_cardano::pallas_extras::stake_address_to_cred(&address);
+    let account = AccountKey(dolos_cardano::pallas_extras::stake_address_to_cred(
+        &address,
+    ));
 
-    let entity_key =
-        minicbor::to_vec(&stake_cred).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(AccountKeyParam {
-        address,
-        entity_key,
-    })
+    Ok(AccountKeyParam { address, account })
 }
 
 struct AccountModelBuilder<'a> {
@@ -199,7 +202,7 @@ where
     let account_key = parse_account_key_param(&stake_address, network)?;
 
     let state = domain
-        .read_cardano_entity::<AccountState>(account_key.entity_key.as_slice())
+        .read_cardano_entity::<AccountState>(&account_key.account)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
@@ -313,7 +316,7 @@ where
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
-    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())?
+    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)?
         && !account_appears_in_pool_registrations(&domain, &account_key.address)?
     {
         return Err(StatusCode::NOT_FOUND.into());
@@ -476,7 +479,7 @@ where
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
 
-    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -570,7 +573,7 @@ where
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
 
-    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -893,7 +896,7 @@ where
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(stake_address, network)?;
 
-    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -905,6 +908,8 @@ where
         .get_network_id()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let cert_tag = account_key.cert_tag();
+
     let mut builder = AccountActivityModelBuilder::new(
         account_key.address,
         network,
@@ -914,7 +919,7 @@ where
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let stream = domain.query().blocks_by_account_certs_stream(
-        &account_key.entity_key,
+        &cert_tag,
         start_slot,
         end_slot,
         SlotOrder::from(pagination.order),
@@ -1133,7 +1138,7 @@ where
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
 
-    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1141,21 +1146,16 @@ where
     let summary = domain.get_chain_summary()?;
     let (current, _) = summary.slot_epoch(tip);
 
-    let entity_key: EntityKey = account_key.entity_key.into();
-
     // one key per epoch the chain has reached, read in a single batch: the log
     // is keyed by `(epoch start, credential)`, so an account's own row sits in
     // a different place in every epoch and no range covers them.
-    let keys: Vec<LogKey> = (0..=current)
-        .map(|epoch| {
-            let slot = summary.epoch_start(epoch);
-            LogKey::from((TemporalKey::from(slot), entity_key.clone()))
-        })
+    let keys: Vec<_> = (0..=current)
+        .map(|epoch| (summary.epoch_start(epoch), account_key.account.clone()))
         .collect();
 
     let rows = domain
         .archive()
-        .read_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, &keys.iter().collect::<Vec<_>>())
+        .read_logs_typed::<AccountEpochLog>(&keys)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut history = Vec::new();
@@ -1210,14 +1210,14 @@ where
     let pagination = Pagination::try_from(params)?;
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
-    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
     let tip = domain.get_tip_slot()?;
     let summary = domain.get_chain_summary()?;
     let (epoch, _) = summary.slot_epoch(tip);
 
-    let entity_key: EntityKey = account_key.entity_key.into();
+    let account = &account_key.account;
     let mut items = Vec::new();
     let mut skipped = 0;
     let skip = pagination.skip();
@@ -1231,7 +1231,6 @@ where
     // This order matches the db-sync order: leader, member, then refund.
     for reward_epoch in 0..=epoch {
         let stake_slot = summary.epoch_start(reward_epoch);
-        let stake_key: LogKey = (TemporalKey::from(stake_slot), entity_key.clone()).into();
 
         // This call reads both rows at the same time. `read_logs_typed`
         // returns one result for each key, in the order of the keys. The last
@@ -1240,11 +1239,13 @@ where
         // only the stake row.
         let (stake, refund) = if reward_epoch >= 2 {
             let refund_slot = summary.epoch_start(reward_epoch - 2);
-            let refund_key: LogKey = (TemporalKey::from(refund_slot), entity_key.clone()).into();
 
             let mut rows = domain
                 .archive()
-                .read_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, &[&stake_key, &refund_key])
+                .read_logs_typed::<AccountEpochLog>(&[
+                    (stake_slot, account.clone()),
+                    (refund_slot, account.clone()),
+                ])
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             let refund = rows.pop().flatten();
@@ -1253,7 +1254,7 @@ where
         } else {
             let stake = domain
                 .archive()
-                .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &stake_key)
+                .read_log_typed::<AccountEpochLog>(stake_slot, account)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             (stake, None)
         };
@@ -1289,7 +1290,7 @@ where
 
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
-    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1436,7 +1437,7 @@ where
 
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
-    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1544,18 +1545,18 @@ mod tests {
         let expected_key =
             parse_account_key_param(&canonical_key.to_bech32().expect("bech32"), network)
                 .expect("canonical key address")
-                .entity_key;
+                .account;
 
         let stake_vk = parse_account_key_param(&encode_bech32("stake_vk", &vk), network)
             .expect("stake_vk resolves");
-        assert_eq!(stake_vk.entity_key, expected_key);
+        assert_eq!(stake_vk.account, expected_key);
         assert_eq!(stake_vk.address, canonical_key);
 
         // `stake_vkh`: raw key-hash credential.
         let stake_vkh =
             parse_account_key_param(&encode_bech32("stake_vkh", key_hash.as_ref()), network)
                 .expect("stake_vkh resolves");
-        assert_eq!(stake_vkh.entity_key, expected_key);
+        assert_eq!(stake_vkh.account, expected_key);
         assert_eq!(stake_vkh.address, canonical_key);
 
         // `script`: raw script-hash credential.
@@ -1563,12 +1564,12 @@ mod tests {
         let expected_script =
             parse_account_key_param(&canonical_script.to_bech32().expect("bech32"), network)
                 .expect("canonical script address")
-                .entity_key;
+                .account;
 
         let script =
             parse_account_key_param(&encode_bech32("script", script_hash.as_ref()), network)
                 .expect("script resolves");
-        assert_eq!(script.entity_key, expected_script);
+        assert_eq!(script.account, expected_script);
         assert_eq!(script.address, canonical_script);
     }
 
@@ -1754,7 +1755,7 @@ mod tests {
             for (operator, reward_account) in &pools {
                 let pool = reward_only_pool(*operator, reward_account.clone());
                 writer
-                    .write_entity_typed(&EntityKey::from(operator.as_slice()), &pool)
+                    .write_entity_typed(&dolos_cardano::PoolKey((*operator).into()), &pool)
                     .expect("failed to write pool state");
             }
             writer.commit().expect("failed to commit pool state");
@@ -2624,15 +2625,11 @@ mod tests {
 
             let account = parse_account_key_param(&vectors.stake_address, Network::Testnet)
                 .expect("invalid fixture stake address");
-            let log_key: LogKey = (
-                TemporalKey::from(summary.epoch_start(seeded)),
-                EntityKey::from(account.entity_key),
-            )
-                .into();
+            let slot = summary.epoch_start(seeded);
 
             let mut log = domain
                 .archive()
-                .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &log_key)
+                .read_log_typed::<AccountEpochLog>(slot, &account.account)
                 .expect("stake log read failed")
                 .expect("missing stake log");
 
@@ -2641,7 +2638,7 @@ mod tests {
 
             let writer = domain.archive().start_writer().expect("archive writer");
             writer
-                .write_log_typed(&log_key, &log)
+                .write_log_typed(slot, &account.account, &log)
                 .expect("stake log write failed");
             writer.commit().expect("stake log commit failed");
         });
@@ -2710,14 +2707,10 @@ mod tests {
             let source_epoch = tip_epoch.checked_sub(2).expect("tip before epoch 2");
             let account = parse_account_key_param(&vectors.stake_address, Network::Testnet)
                 .expect("invalid fixture stake address");
-            let log_key: LogKey = (
-                TemporalKey::from(summary.epoch_start(source_epoch)),
-                EntityKey::from(account.entity_key),
-            )
-                .into();
+            let slot = summary.epoch_start(source_epoch);
             let mut log = domain
                 .archive()
-                .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &log_key)
+                .read_log_typed::<AccountEpochLog>(slot, &account.account)
                 .expect("reward log read failed")
                 .expect("missing reward log");
             let pool = log.pool_id.expect("missing reward pool");
@@ -2726,7 +2719,7 @@ mod tests {
 
             let writer = domain.archive().start_writer().expect("archive writer");
             writer
-                .write_log_typed(&log_key, &log)
+                .write_log_typed(slot, &account.account, &log)
                 .expect("refund log write failed");
             writer.commit().expect("refund log commit failed");
         });

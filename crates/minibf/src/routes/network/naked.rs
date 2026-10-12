@@ -1,6 +1,6 @@
 use axum::{extract::State, http::StatusCode, Json};
 use blockfrost_openapi::models::network::Network;
-use dolos_cardano::{model::EpochState, AccountState, FixedNamespace};
+use dolos_cardano::{model::EpochState, AccountState};
 use dolos_core::{Domain, StateStore};
 
 use crate::{
@@ -22,7 +22,7 @@ where
 
     let accounts = domain
         .state()
-        .iter_entities_typed::<AccountState>(AccountState::NS, None)
+        .iter_entities_typed::<AccountState>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     for account in accounts {

@@ -10,28 +10,23 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    ops::Range,
     sync::Arc,
 };
 
-use dolos_core::{BlockSlot, ChainError, Domain, EntityKey, Genesis, StateStore, TxOrder};
-use pallas::codec::minicbor;
+use dolos_core::{BlockSlot, ChainError, Domain, Genesis, RangeOf, StateStore, TxOrder};
 use pallas::ledger::primitives::{
     conway::{DRep, GovActionId, Vote},
     Epoch, StakeCredential,
 };
 
 use crate::{
-    ewrap::{BoundaryVisitor as _, BoundaryWork},
-    load_era_summary, load_gov,
-    model::drep_to_entity_key,
-    pallas_extras,
+    ewrap::{AccountId, BoundaryVisitor as _, BoundaryWork, DRepId, ProposalId},
+    load_era_summary, load_gov, pallas_extras,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
-    rupd::credential_to_key,
-    AccountState, ChainSummary, DRepSnapshotEntry, DRepState, EraProtocol, FixedNamespace as _,
-    PendingMirState, PendingRewardState, PoolHash, PoolState, ProposalAction, ProposalOutcome,
-    ProposalState,
+    AccountKey, AccountState, ChainSummary, DRepKey, DRepSnapshotEntry, DRepState, EraProtocol,
+    PendingMirState, PendingRewardState, PoolHash, PoolKey, PoolState, ProposalAction,
+    ProposalOutcome, ProposalState,
 };
 
 /// `RupdWork::relevant_epochs`, read from the closing boundary's side: the
@@ -162,13 +157,12 @@ impl BoundaryWork {
     fn load_pending_rewards_ranges<D: Domain>(
         &mut self,
         state: &D::State,
-        ranges: Vec<Range<EntityKey>>,
+        ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<(), ChainError> {
         let mut pending: HashMap<StakeCredential, Reward> = HashMap::new();
 
         for range in ranges {
-            let pending_iter = state
-                .iter_entities_typed::<PendingRewardState>(PendingRewardState::NS, Some(range))?;
+            let pending_iter = state.iter_entities_typed::<PendingRewardState>(Some(range))?;
 
             for record in pending_iter {
                 let (_, pending_state) = record?;
@@ -245,7 +239,7 @@ impl BoundaryWork {
             DRep::Abstain | DRep::NoConfidence => true,
             _ => self
                 .snapshot_registered_dreps
-                .contains(&drep_to_entity_key(drep)),
+                .contains(&DRepKey(drep.clone())),
         };
 
         in_snapshot.then(|| drep.clone())
@@ -271,7 +265,7 @@ impl BoundaryWork {
     /// That holds for the DRep leg only; the finalize pass takes it back
     /// out of the pool leg (`load_refunded_pool_debit`).
     fn load_proposal_deposits<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
-        let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+        let proposals = state.iter_entities_typed::<ProposalState>(None)?;
 
         for record in proposals {
             let (_, proposal) = record?;
@@ -410,7 +404,7 @@ impl BoundaryWork {
 
         let mut pending = false;
 
-        let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+        let proposals = state.iter_entities_typed::<ProposalState>(None)?;
 
         for record in proposals {
             let (_, proposal) = record?;
@@ -430,8 +424,7 @@ impl BoundaryWork {
         self.run_ratification::<D>(state)?;
 
         for id in self.ratification().enactment_order.clone() {
-            let proposal: Option<ProposalState> =
-                state.read_entity_typed(ProposalState::NS, &id)?;
+            let proposal: Option<ProposalState> = state.read_entity_typed(&id)?;
 
             if proposal
                 .is_some_and(|p| matches!(p.action, crate::ProposalAction::HardFork((10, _))))
@@ -461,7 +454,7 @@ impl BoundaryWork {
         genesis: Arc<Genesis>,
         shard_index: u32,
         total_shards: u32,
-        ranges: Vec<Range<EntityKey>>,
+        ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<BoundaryWork, ChainError> {
         let mut boundary = Self::new_empty::<D>(state, genesis)?;
 
@@ -486,7 +479,7 @@ impl BoundaryWork {
     fn compute_shard_deltas<D: Domain>(
         &mut self,
         state: &D::State,
-        ranges: Vec<Range<EntityKey>>,
+        ranges: Vec<RangeOf<AccountKey>>,
         shard_index: u32,
         total_shards: u32,
     ) -> Result<(), ChainError> {
@@ -496,7 +489,7 @@ impl BoundaryWork {
         // One merged row per account, collected here and pushed into `logs`
         // after the loop: the row builder reads `applied_rewards`, which the
         // loop is still appending to.
-        let mut account_epochs: Vec<(EntityKey, crate::CardanoEntity)> = Vec::new();
+        let mut account_epochs: Vec<(AccountId, crate::AccountEpochLog)> = Vec::new();
 
         let snapshot_epoch = self.distr_snapshot_epoch();
         let mut drep_distr: BTreeMap<DRep, u64> = BTreeMap::new();
@@ -505,8 +498,7 @@ impl BoundaryWork {
         let mut migration_drops: Vec<crate::DRepDelegatorDrop> = Vec::new();
 
         for range in ranges {
-            let accounts =
-                state.iter_entities_typed::<AccountState>(AccountState::NS, Some(range))?;
+            let accounts = state.iter_entities_typed::<AccountState>(Some(range))?;
 
             for record in accounts {
                 let (account_id, account) = record?;
@@ -522,7 +514,7 @@ impl BoundaryWork {
                         let dangling = matches!(drep, DRep::Key(_) | DRep::Script(_))
                             && !self
                                 .snapshot_registered_dreps
-                                .contains(&drep_to_entity_key(drep))
+                                .contains(&DRepKey(drep.clone()))
                             && !self.clears_drep_delegation(drep, &account);
 
                         if dangling {
@@ -548,7 +540,7 @@ impl BoundaryWork {
                 let row = self.account_epoch_row(&account, &self.applied_rewards[applied_before..]);
 
                 if !row.is_empty() {
-                    account_epochs.push((account_id.clone(), row.into()));
+                    account_epochs.push((account_id.clone(), row));
                 }
 
                 if let Some(epoch) = snapshot_epoch {
@@ -651,16 +643,14 @@ impl BoundaryWork {
         let account =
             pallas_extras::parse_reward_account(account).ok_or(ChainError::InvalidPoolParams)?;
 
-        let entity_key = minicbor::to_vec(account).unwrap();
-
-        let account = state.read_entity_typed(AccountState::NS, &entity_key.into())?;
+        let account = state.read_entity_typed(&AccountKey::from(account))?;
 
         Ok(account)
     }
 
     pub(crate) fn load_pool_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let stake_epoch = self.stake_snapshot.map(|(epoch, _)| epoch);
-        let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
+        let pools = state.iter_entities_typed::<PoolState>(None)?;
 
         for record in pools {
             let (_, pool) = record?;
@@ -796,7 +786,7 @@ impl BoundaryWork {
     pub(crate) fn load_drep_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let boundary_slot = self.chain_summary.epoch_start(self.ending_state.number + 1);
 
-        let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
+        let dreps = state.iter_entities_typed::<DRepState>(None)?;
 
         for record in dreps {
             let (id, drep) = record?;
@@ -843,9 +833,7 @@ impl BoundaryWork {
             return Ok(None);
         };
 
-        let entity_key = minicbor::to_vec(account).unwrap();
-
-        let account = state.read_entity_typed(AccountState::NS, &entity_key.into())?;
+        let account = state.read_entity_typed(&AccountKey::from(account))?;
 
         Ok(account)
     }
@@ -868,7 +856,7 @@ impl BoundaryWork {
     ) -> Result<(), ChainError> {
         for (credential, amount) in withdrawals {
             let account: Option<AccountState> =
-                state.read_entity_typed(AccountState::NS, &credential_to_key(credential))?;
+                state.read_entity_typed(&AccountKey::from(credential))?;
 
             let Some(account) = account.filter(|account| account.is_registered()) else {
                 continue;
@@ -896,8 +884,7 @@ impl BoundaryWork {
         let outcomes = self.ratification().outcomes.clone();
 
         for (id, outcome) in outcomes {
-            let proposal: Option<ProposalState> =
-                state.read_entity_typed(ProposalState::NS, &id)?;
+            let proposal: Option<ProposalState> = state.read_entity_typed(&id)?;
 
             let Some(proposal) = proposal else {
                 tracing::warn!(proposal=%id, "resolved proposal is not in state; skipping");
@@ -936,17 +923,15 @@ impl BoundaryWork {
     /// accounts. MIRs to unregistered accounts stay in their source pot (no
     /// transfer).
     fn process_pending_mirs<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
-        let pending_iter =
-            state.iter_entities_typed::<PendingMirState>(PendingMirState::NS, None)?;
+        let pending_iter = state.iter_entities_typed::<PendingMirState>(None)?;
 
         for record in pending_iter {
             let (_, pending_mir) = record?;
             let credential = &pending_mir.credential;
 
             // Look up the account to check registration status
-            let account_key = credential_to_key(credential);
-            let account: Option<AccountState> =
-                state.read_entity_typed(AccountState::NS, &account_key)?;
+            let account_key = AccountKey::from(credential);
+            let account: Option<AccountState> = state.read_entity_typed(&account_key)?;
 
             // Track that we need to dequeue this pending MIR
             self.applied_mir_credentials.push(credential.clone());
@@ -1109,7 +1094,7 @@ impl BoundaryWork {
     fn emit_drep_power_update(
         &mut self,
         distr: &BTreeMap<DRep, u64>,
-        id: &EntityKey,
+        id: &DRepId,
         drep: &DRepState,
     ) {
         if drep.registered_at.is_none() || drep.is_unregistered() {
@@ -1188,7 +1173,7 @@ impl BoundaryWork {
         // before the closing epoch, with votes resolved as of the boundary
         let mut proposals = Vec::new();
 
-        let records = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+        let records = state.iter_entities_typed::<ProposalState>(None)?;
 
         for record in records {
             let (key, proposal) = record?;
@@ -1241,8 +1226,7 @@ impl BoundaryWork {
         let mut pool_default_votes = BTreeMap::new();
 
         for pool in prev_distr.pool_distr.keys() {
-            let pool_state: Option<PoolState> =
-                state.read_entity_typed(PoolState::NS, &EntityKey::from(pool.as_slice()))?;
+            let pool_state: Option<PoolState> = state.read_entity_typed(&PoolKey(*pool))?;
 
             let Some(pool_state) = pool_state else {
                 continue;
@@ -1347,7 +1331,7 @@ impl BoundaryWork {
         // `enacted` is the run's own ordering; the verdict vector is not,
         // so the order is taken from there and only the classes from the
         // verdicts.
-        let by_id: BTreeMap<&GovActionId, &EntityKey> = input
+        let by_id: BTreeMap<&GovActionId, &ProposalId> = input
             .proposals
             .iter()
             .map(|proposal| (&proposal.id, &proposal.key))
@@ -1355,7 +1339,7 @@ impl BoundaryWork {
 
         for id in &outcome.enacted {
             if let Some(key) = by_id.get(id) {
-                ratification.enactment_order.push((*key).clone());
+                ratification.enactment_order.push(*(*key));
             }
         }
 
@@ -1378,7 +1362,7 @@ impl BoundaryWork {
                 "proposal resolved at boundary"
             );
 
-            ratification.outcomes.insert(verdict.key.clone(), outcome);
+            ratification.outcomes.insert(verdict.key, outcome);
         }
 
         // the pruned members the snapshot never carried
@@ -1419,12 +1403,12 @@ impl BoundaryWork {
 
         let mut forest = input.proposals.clone();
 
-        let in_snapshot: std::collections::HashSet<&EntityKey> =
+        let in_snapshot: std::collections::HashSet<&ProposalId> =
             input.proposals.iter().map(|p| &p.key).collect();
 
         let mut extra = Vec::new();
 
-        let records = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+        let records = state.iter_entities_typed::<ProposalState>(None)?;
 
         for record in records {
             let (key, proposal) = record?;
@@ -1483,9 +1467,9 @@ impl BoundaryWork {
         let closing = self.ending_state.number;
         let magic = self.genesis.network_magic();
 
-        let mut live: Vec<(EntityKey, (BlockSlot, u32))> = Vec::new();
+        let mut live: Vec<(ProposalId, (BlockSlot, u32))> = Vec::new();
 
-        let records = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+        let records = state.iter_entities_typed::<ProposalState>(None)?;
 
         for record in records {
             let (key, proposal) = record?;
@@ -1511,9 +1495,7 @@ impl BoundaryWork {
         let mut ratification = super::Ratification::default();
 
         for (key, _) in live {
-            ratification
-                .outcomes
-                .insert(key.clone(), ProposalOutcome::Enacted);
+            ratification.outcomes.insert(key, ProposalOutcome::Enacted);
             ratification.enactment_order.push(key);
         }
 
@@ -1557,7 +1539,7 @@ impl BoundaryWork {
         // application still votable in the starting epoch?
         let mut any_votable_survivor = false;
 
-        let records = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+        let records = state.iter_entities_typed::<ProposalState>(None)?;
 
         for record in records {
             let (id, proposal) = record?;
@@ -1615,7 +1597,7 @@ impl BoundaryWork {
         let mut visitor_wrapup = super::wrapup::BoundaryVisitor::default();
 
         // Pools — all pools, then retiring pools via their stored clones.
-        let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
+        let pools = state.iter_entities_typed::<PoolState>(None)?;
         for record in pools {
             let (pool_id, pool) = record?;
             visitor_enactment.visit_pool(self, &pool_id, &pool)?;
@@ -1645,7 +1627,7 @@ impl BoundaryWork {
             distr
         });
 
-        let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
+        let dreps = state.iter_entities_typed::<DRepState>(None)?;
         for record in dreps {
             let (drep_id, drep) = record?;
             visitor_enactment.visit_drep(self, &drep_id, &drep)?;
@@ -1659,7 +1641,7 @@ impl BoundaryWork {
         }
 
         // Active proposals + enacting + dropping.
-        let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+        let proposals = state.iter_entities_typed::<ProposalState>(None)?;
         for record in proposals {
             let (proposal_id, proposal) = record?;
             if proposal.is_active(self.ending_state.number) {
@@ -1720,11 +1702,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        ewrap::AppliedReward,
-        model::{credential_to_key, drep_to_entity_key},
-        shard::shard_key_ranges,
-        AccountTransition, AssignRewards, ControlledAmountInc, DRepDelegation, DRepRegistration,
-        DRepUnRegistration, EpochState, EpochValue, PoolDelegation, SingletonEntity as _, Stake,
+        ewrap::AppliedReward, AccountTransition, AssignRewards, ControlledAmountInc,
+        DRepDelegation, DRepRegistration, DRepUnRegistration, EpochValue, PoolDelegation, Stake,
     };
 
     /// Pins the rotation-timing assumption behind the distribution snapshot
@@ -1746,7 +1725,7 @@ mod tests {
     #[test]
     fn live_position_is_the_boundary_snapshot() {
         let credential = StakeCredential::AddrKeyhash([1u8; 28].into());
-        let key = credential_to_key(&credential);
+        let key = AccountKey::from(&credential);
 
         // epoch n = 5: account holds 100 lovelace of live stake
         let mut account = Some(crate::AccountState {
@@ -1906,9 +1885,7 @@ mod tests {
         let boundary_slot = chain.epoch_start(CLOSING_EPOCH + 1);
 
         let writer = state.start_writer().unwrap();
-        writer
-            .write_entity_typed(&EpochState::singleton_key(), &epoch)
-            .unwrap();
+        writer.write_entity_typed(&(), &epoch).unwrap();
 
         // alice: 100 snapshot stake + 40 proposal deposit, delegated to the
         // registered drep and to pool_a
@@ -1921,7 +1898,7 @@ mod tests {
 
         for account in [&alice, &bob, &carol] {
             writer
-                .write_entity_typed(&credential_to_key(&account.credential), account)
+                .write_entity_typed(&AccountKey::from(&account.credential), account)
                 .unwrap();
         }
 
@@ -1936,7 +1913,7 @@ mod tests {
         };
 
         writer
-            .write_entity_typed(&credential_to_key(&bob.credential), &bob_reward)
+            .write_entity_typed(&AccountKey::from(&bob.credential), &bob_reward)
             .unwrap();
 
         // registered before the boundary; power seeded with the deposit,
@@ -1955,7 +1932,7 @@ mod tests {
 
         for drep in [&registered, &unregistered, &fresh] {
             writer
-                .write_entity_typed(&drep_to_entity_key(&drep.identifier), drep)
+                .write_entity_typed(&DRepKey::from(&drep.identifier), drep)
                 .unwrap();
         }
 
@@ -1991,13 +1968,10 @@ mod tests {
         };
 
         writer
-            .write_entity_typed(&EntityKey::from(b"proposal-1".to_vec()), &proposal)
+            .write_entity_typed(&proposal.key(), &proposal)
             .unwrap();
         writer
-            .write_entity_typed(
-                &EntityKey::from(b"proposal-2".to_vec()),
-                &same_epoch_proposal,
-            )
+            .write_entity_typed(&same_epoch_proposal.key(), &same_epoch_proposal)
             .unwrap();
 
         writer.commit().unwrap();
@@ -2006,7 +1980,7 @@ mod tests {
     }
 
     fn run_shard(domain: &ToyDomain, shard: u32) {
-        let ranges = shard_key_ranges(shard, TOTAL_SHARDS);
+        let ranges = AccountKey::shard_ranges(shard, TOTAL_SHARDS);
 
         let mut boundary = BoundaryWork::load_shard::<ToyDomain>(
             domain.state(),
@@ -2032,7 +2006,7 @@ mod tests {
     fn read_drep_power(domain: &ToyDomain, drep: &DRep) -> u64 {
         domain
             .state()
-            .read_entity_typed::<crate::DRepState>(crate::DRepState::NS, &drep_to_entity_key(drep))
+            .read_entity_typed::<crate::DRepState>(&DRepKey::from(drep))
             .unwrap()
             .expect("drep row present")
             .voting_power
@@ -2150,13 +2124,9 @@ mod tests {
         };
 
         let writer = state.start_writer().unwrap();
-        for (key, proposal) in [
-            (b"proposal-3".to_vec(), &enacted_prior),
-            (b"proposal-4".to_vec(), &dropped_prior),
-            (b"proposal-5".to_vec(), &enacted_here),
-        ] {
+        for proposal in [&enacted_prior, &dropped_prior, &enacted_here] {
             writer
-                .write_entity_typed(&EntityKey::from(key), proposal)
+                .write_entity_typed(&proposal.key(), proposal)
                 .unwrap();
         }
         writer.commit().unwrap();
@@ -2221,7 +2191,7 @@ mod tests {
 
         let writer = state.start_writer().unwrap();
         writer
-            .write_entity_typed(&EntityKey::from(pool_a().as_slice()), &pool)
+            .write_entity_typed(&PoolKey(pool_a()), &pool)
             .unwrap();
         writer.commit().unwrap();
 
@@ -2336,19 +2306,17 @@ mod tests {
         epoch.number = CLOSING_EPOCH;
 
         let writer = state.start_writer().unwrap();
-        writer
-            .write_entity_typed(&EpochState::singleton_key(), &epoch)
-            .unwrap();
+        writer.write_entity_typed(&(), &epoch).unwrap();
 
         for drep in dreps {
             writer
-                .write_entity_typed(&drep_to_entity_key(&drep.identifier), drep)
+                .write_entity_typed(&DRepKey::from(&drep.identifier), drep)
                 .unwrap();
         }
 
         for account in accounts {
             writer
-                .write_entity_typed(&credential_to_key(&account.credential), account)
+                .write_entity_typed(&AccountKey::from(&account.credential), account)
                 .unwrap();
         }
 
@@ -2363,10 +2331,7 @@ mod tests {
     fn delegation_dropped(domain: &ToyDomain, account: &crate::AccountState) -> bool {
         let stored = domain
             .state()
-            .read_entity_typed::<crate::AccountState>(
-                crate::AccountState::NS,
-                &credential_to_key(&account.credential),
-            )
+            .read_entity_typed::<crate::AccountState>(&AccountKey::from(&account.credential))
             .unwrap()
             .expect("account row present");
 
@@ -2627,7 +2592,7 @@ mod tests {
                 }
 
                 if registered {
-                    boundary.snapshot_registered_dreps.insert(drep_to_entity_key(drep));
+                    boundary.snapshot_registered_dreps.insert(DRepKey::from(drep));
                 }
 
                 if boundary.clears_drep_delegation(drep, &account) {
@@ -2865,9 +2830,8 @@ mod ratification_tests {
     use super::tests::{replay_drep_certs, Cert};
     use super::*;
     use crate::{
-        model::credential_to_key, Committee, CommitteeAuthorization, EpochState, EpochValue,
-        GovDistr, GovState, PParamValue, PParamsSet, ProposalAction, ProposalState,
-        SingletonEntity as _, VoteCast, VoteEntry,
+        Committee, CommitteeAuthorization, EpochValue, GovDistr, PParamValue, PParamsSet,
+        ProposalAction, ProposalKey, ProposalState, VoteCast, VoteEntry,
     };
 
     const CLOSING: Epoch = 100;
@@ -3075,19 +3039,15 @@ mod ratification_tests {
 
         let writer = state.start_writer().unwrap();
 
-        writer
-            .write_entity_typed(&EpochState::singleton_key(), &epoch)
-            .unwrap();
-        writer
-            .write_entity_typed(&GovState::singleton_key(), &gov)
-            .unwrap();
+        writer.write_entity_typed(&(), &epoch).unwrap();
+        writer.write_entity_typed(&(), &gov).unwrap();
 
         // the devnet bootstrap leaves its accounts and pools positioned at
         // epoch 0; the boundary under test rotates every entity into
         // CLOSING + 1 and the strict transition refuses a jump, so reseat
         // them at the closing epoch
         let bootstrapped_accounts: Vec<_> = state
-            .iter_entities_typed::<crate::AccountState>(crate::AccountState::NS, None)
+            .iter_entities_typed::<crate::AccountState>(None)
             .unwrap()
             .map(|record| record.unwrap())
             .collect();
@@ -3103,7 +3063,7 @@ mod ratification_tests {
         }
 
         let bootstrapped_pools: Vec<_> = state
-            .iter_entities_typed::<PoolState>(PoolState::NS, None)
+            .iter_entities_typed::<PoolState>(None)
             .unwrap()
             .map(|record| record.unwrap())
             .collect();
@@ -3133,20 +3093,17 @@ mod ratification_tests {
         };
 
         writer
-            .write_entity_typed(&drep_to_entity_key(&drep()), &drep_row)
+            .write_entity_typed(&DRepKey::from(&drep()), &drep_row)
             .unwrap();
 
         let beneficiary = account(beneficiary());
         writer
-            .write_entity_typed(&credential_to_key(&beneficiary.credential), &beneficiary)
+            .write_entity_typed(&AccountKey::from(&beneficiary.credential), &beneficiary)
             .unwrap();
 
         for proposal in proposals {
             writer
-                .write_entity_typed(
-                    &ProposalState::build_entity_key(proposal.tx, proposal.idx),
-                    proposal,
-                )
+                .write_entity_typed(&ProposalKey::new(proposal.tx, proposal.idx), proposal)
                 .unwrap();
         }
 
@@ -3194,7 +3151,7 @@ mod ratification_tests {
             }
             let writer = domain.state().start_writer().unwrap();
             writer
-                .write_entity_typed(&drep_to_entity_key(&drep()), &row)
+                .write_entity_typed(&DRepKey::from(&drep()), &row)
                 .unwrap();
             writer.commit().unwrap();
             let boundary =
@@ -3221,10 +3178,7 @@ mod ratification_tests {
         gov.drep_snapshot.as_mut().unwrap().dreps.clear();
         let mut row = domain
             .state()
-            .read_entity_typed::<crate::DRepState>(
-                crate::DRepState::NS,
-                &drep_to_entity_key(&drep()),
-            )
+            .read_entity_typed::<crate::DRepState>(&DRepKey::from(&drep()))
             .unwrap()
             .unwrap();
         row.registered_at = Some((
@@ -3236,11 +3190,9 @@ mod ratification_tests {
         ));
         let writer = domain.state().start_writer().unwrap();
         writer
-            .write_entity_typed(&drep_to_entity_key(&drep()), &row)
+            .write_entity_typed(&DRepKey::from(&drep()), &row)
             .unwrap();
-        writer
-            .write_entity_typed(&GovState::singleton_key(), &gov)
-            .unwrap();
+        writer.write_entity_typed(&(), &gov).unwrap();
         writer.commit().unwrap();
         let boundary =
             BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
@@ -3271,20 +3223,15 @@ mod ratification_tests {
             .epoch_start(CLOSING)
             + 1;
         let mut row = state
-            .read_entity_typed::<crate::DRepState>(
-                crate::DRepState::NS,
-                &drep_to_entity_key(&drep()),
-            )
+            .read_entity_typed::<crate::DRepState>(&DRepKey::from(&drep()))
             .unwrap()
             .unwrap();
         row.unregistered_at = Some((slot, 0));
         row.registered_at = Some((slot + 1, 0));
         let writer = state.start_writer().unwrap();
+        writer.write_entity_typed(&(), &epoch).unwrap();
         writer
-            .write_entity_typed(&EpochState::singleton_key(), &epoch)
-            .unwrap();
-        writer
-            .write_entity_typed(&drep_to_entity_key(&drep()), &row)
+            .write_entity_typed(&DRepKey::from(&drep()), &row)
             .unwrap();
         writer.commit().unwrap();
         let boundary = BoundaryWork::load_shard::<ToyDomain>(
@@ -3292,7 +3239,7 @@ mod ratification_tests {
             domain.genesis(),
             0,
             1,
-            crate::shard::shard_key_ranges(0, 1),
+            AccountKey::shard_ranges(0, 1),
         )
         .unwrap();
         assert!(boundary.pv10_migration);
@@ -3314,9 +3261,7 @@ mod ratification_tests {
                 gov.drep_snapshot = None;
             }
             let writer = domain.state().start_writer().unwrap();
-            writer
-                .write_entity_typed(&GovState::singleton_key(), &gov)
-                .unwrap();
+            writer.write_entity_typed(&(), &gov).unwrap();
             writer.commit().unwrap();
             let boundary =
                 BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
@@ -3363,7 +3308,7 @@ mod ratification_tests {
 
         let writer = domain.state().start_writer().unwrap();
         writer
-            .write_entity_typed(&drep_to_entity_key(&drep()), &row)
+            .write_entity_typed(&DRepKey::from(&drep()), &row)
             .unwrap();
         writer.commit().unwrap();
 
@@ -3461,15 +3406,13 @@ mod ratification_tests {
         }
 
         let writer = state.start_writer().unwrap();
+        writer.write_entity_typed(&(), &gov).unwrap();
         writer
-            .write_entity_typed(&GovState::singleton_key(), &gov)
-            .unwrap();
-        writer
-            .write_entity_typed(&drep_to_entity_key(&drep()), &live)
+            .write_entity_typed(&DRepKey::from(&drep()), &live)
             .unwrap();
         writer
             .write_entity_typed(
-                &ProposalState::build_entity_key(proposal.tx, proposal.idx),
+                &ProposalKey::new(proposal.tx, proposal.idx),
                 &entity.unwrap(),
             )
             .unwrap();
@@ -3635,12 +3578,11 @@ mod ratification_tests {
             updated_in in 0u64..=CLOSING,
         ) {
             let domain = seed(&[]);
-            let mut row = domain.state().read_entity_typed::<crate::DRepState>(
-                crate::DRepState::NS, &drep_to_entity_key(&drep())).unwrap().unwrap();
+            let mut row = domain.state().read_entity_typed::<crate::DRepState>(&DRepKey::from(&drep())).unwrap().unwrap();
             row.expiry = Some(crate::DRepExpiry::new(expiry, updated_in));
             let expected = row.expiry.as_ref().unwrap().as_of(CLOSING);
             let writer = domain.state().start_writer().unwrap();
-            writer.write_entity_typed(&drep_to_entity_key(&drep()), &row).unwrap();
+            writer.write_entity_typed(&DRepKey::from(&drep()), &row).unwrap();
             writer.commit().unwrap();
             let boundary = BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
             row.expiry.as_mut().unwrap().set(next_expiry, CLOSING + 1);
@@ -3653,10 +3595,7 @@ mod ratification_tests {
     fn read(domain: &ToyDomain, proposal: &ProposalState) -> ProposalState {
         domain
             .state()
-            .read_entity_typed::<ProposalState>(
-                ProposalState::NS,
-                &ProposalState::build_entity_key(proposal.tx, proposal.idx),
-            )
+            .read_entity_typed::<ProposalState>(&ProposalKey::new(proposal.tx, proposal.idx))
             .unwrap()
             .expect("proposal row present")
     }
@@ -3733,17 +3672,14 @@ mod ratification_tests {
         // deposit refund is scheduled for the opening epoch instead)
         let account = domain
             .state()
-            .read_entity_typed::<crate::AccountState>(
-                crate::AccountState::NS,
-                &credential_to_key(&beneficiary()),
-            )
+            .read_entity_typed::<crate::AccountState>(&AccountKey::from(&beneficiary()))
             .unwrap()
             .expect("beneficiary row present");
         assert_eq!(account.stake.unwrap_live().rewards_sum, WITHDRAWAL);
 
         // ESTART: one account shard, then the finalize pass applying the
         // epoch transition that carries the new pots
-        let ranges = crate::shard::shard_key_ranges(0, 1);
+        let ranges = AccountKey::shard_ranges(0, 1);
         let mut shard = crate::estart::WorkContext::load_shard::<ToyDomain>(
             domain.state(),
             domain.genesis(),
@@ -3754,7 +3690,7 @@ mod ratification_tests {
         )
         .unwrap();
         shard
-            .commit_shard::<ToyDomain>(domain.state(), domain.archive(), ranges)
+            .commit_shard::<ToyDomain>(domain.state(), ranges)
             .unwrap();
 
         let mut estart = crate::estart::WorkContext::load_finalize::<ToyDomain>(
@@ -3764,7 +3700,7 @@ mod ratification_tests {
         .unwrap();
         let slot = estart.chain_summary.epoch_start(estart.starting_epoch_no());
         estart
-            .commit_finalize::<ToyDomain>(domain.state(), domain.archive(), slot)
+            .commit_finalize::<ToyDomain>(domain.state(), slot)
             .unwrap();
 
         let after = crate::load_epoch::<ToyDomain>(domain.state()).unwrap();
@@ -3801,10 +3737,10 @@ mod ratification_tests {
 
         // delegate the beneficiary to the registered drep as of the
         // snapshot position
-        let key = credential_to_key(&beneficiary());
+        let key = AccountKey::from(&beneficiary());
         let mut row = domain
             .state()
-            .read_entity_typed::<crate::AccountState>(crate::AccountState::NS, &key)
+            .read_entity_typed::<crate::AccountState>(&key)
             .unwrap()
             .expect("beneficiary row present");
         row.drep = EpochValue::from_parts(
@@ -3822,7 +3758,7 @@ mod ratification_tests {
         // EWRAP shard pass: the accumulation reads pre-enactment
         // positions, so the drep carries only the deposit weight of the
         // live proposal returning to the beneficiary
-        let ranges = crate::shard::shard_key_ranges(0, 1);
+        let ranges = AccountKey::shard_ranges(0, 1);
         let mut shard = BoundaryWork::load_shard::<ToyDomain>(
             domain.state(),
             domain.genesis(),
@@ -3864,10 +3800,7 @@ mod ratification_tests {
 
         let drep_row = domain
             .state()
-            .read_entity_typed::<crate::DRepState>(
-                crate::DRepState::NS,
-                &crate::model::drep_to_entity_key(&drep()),
-            )
+            .read_entity_typed::<crate::DRepState>(&DRepKey::from(&drep()))
             .unwrap()
             .expect("drep row present");
         assert_eq!(drep_row.voting_power, DEPOSIT + WITHDRAWAL);
@@ -3907,10 +3840,10 @@ mod ratification_tests {
 
             // the return account holds snapshot stake and delegates to the
             // registered drep and to a pool as of the snapshot position
-            let key = credential_to_key(&beneficiary());
+            let key = AccountKey::from(&beneficiary());
             let mut row = domain
                 .state()
-                .read_entity_typed::<crate::AccountState>(crate::AccountState::NS, &key)
+                .read_entity_typed::<crate::AccountState>(&key)
                 .unwrap()
                 .expect("beneficiary row present");
             row.stake = EpochValue::from_parts(
@@ -3944,7 +3877,7 @@ mod ratification_tests {
             writer.write_entity_typed(&key, &row).unwrap();
             writer.commit().unwrap();
 
-            let ranges = crate::shard::shard_key_ranges(0, 1);
+            let ranges = AccountKey::shard_ranges(0, 1);
             let mut shard = BoundaryWork::load_shard::<ToyDomain>(
                 domain.state(),
                 domain.genesis(),
@@ -4028,7 +3961,7 @@ mod ratification_tests {
         let domain = seed(&[enacted, expired]);
         let writer = domain.state().start_writer().unwrap();
         writer
-            .delete_entity(crate::AccountState::NS, &credential_to_key(&beneficiary()))
+            .save_entity_typed::<crate::AccountState>(&AccountKey::from(&beneficiary()), None)
             .unwrap();
         writer.commit().unwrap();
 
@@ -4052,9 +3985,7 @@ mod ratification_tests {
         let mut gov = crate::load_gov::<ToyDomain>(domain.state()).unwrap();
         gov.prev_distr = None;
         let writer = domain.state().start_writer().unwrap();
-        writer
-            .write_entity_typed(&GovState::singleton_key(), &gov)
-            .unwrap();
+        writer.write_entity_typed(&(), &gov).unwrap();
         writer.commit().unwrap();
 
         let boundary = finalize(&domain);
@@ -4101,9 +4032,7 @@ mod ratification_tests {
         let mut gov = crate::load_gov::<ToyDomain>(domain.state()).unwrap();
         gov.active_since = None;
         let writer = domain.state().start_writer().unwrap();
-        writer
-            .write_entity_typed(&GovState::singleton_key(), &gov)
-            .unwrap();
+        writer.write_entity_typed(&(), &gov).unwrap();
         writer.commit().unwrap();
 
         let boundary = finalize(&domain);
@@ -4160,9 +4089,7 @@ mod ratification_tests {
         let mut gov = crate::load_gov::<ToyDomain>(domain.state()).unwrap();
         gov.active_since = None;
         let writer = domain.state().start_writer().unwrap();
-        writer
-            .write_entity_typed(&GovState::singleton_key(), &gov)
-            .unwrap();
+        writer.write_entity_typed(&(), &gov).unwrap();
         writer.commit().unwrap();
 
         let boundary = finalize(&domain);
