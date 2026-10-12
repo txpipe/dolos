@@ -16,7 +16,7 @@
 //! never a re-pin.
 //!
 //! Between them these freeze: the twenty-five media types, the tag string, the
-//! seventeen archive dimension names, the three exact-record kind literals, the
+//! nineteen archive dimension names, the three exact-record kind literals, the
 //! five `log-{ns}` and seventeen `state-{ns}` kind strings — which is where the
 //! seventeen namespace strings live now that neither record names one — the
 //! layer header and scope shapes, and the `position`/`parameters` key
@@ -49,9 +49,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 50] = [
     ),
     (
         INDEXES,
-        "sha256:a792d43a501efd106665c365f4e4281e142c6b9d78c6425176e5b4803ed2ac20",
-        21,
-        561,
+        "sha256:a0179ae003b2f11abfb41885369b6cd1a6c8996630fa49aa3bed238a74d1b433",
+        23,
+        619,
     ),
     (
         "log-account-epochs",
@@ -345,7 +345,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 50] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:1f8b6e02f5c3a03668874e56260e7f2a3ef7a975cf6cbcf2644a2386a11b2bdb";
+    "sha256:2ad2e024a65bd3b41c57ffe74fb2745f1f2ff7081805996a6c73e762006cfbf0";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -547,9 +547,9 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106","kind":"blocks","#,
     r#""mediaType":"application/vnd.dolos.stele.blocks.v1+zstd","records":4,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":167},"#,
-    r#"{"diffId":"sha256:a792d43a501efd106665c365f4e4281e142c6b9d78c6425176e5b4803ed2ac20","kind":"indexes","#,
-    r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":21,"#,
-    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":561},"#,
+    r#"{"diffId":"sha256:a0179ae003b2f11abfb41885369b6cd1a6c8996630fa49aa3bed238a74d1b433","kind":"indexes","#,
+    r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":23,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":619},"#,
     r#"{"diffId":"sha256:be63f933f87028f2650741a6964a8a0e1bae9a12f73e012f0854a4c568a23055","kind":"log-account-epochs","#,
     r#""mediaType":"application/vnd.dolos.stele.log-account-epochs.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":102},"#,
@@ -696,7 +696,7 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#""scope":{"lastImmutable":3},"uncompressedSize":250}"#,
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"first-mints":1,"gov":4,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pool-deposit-refunds":0,"pools":1,"proposals":3,"staged-first-mints":1,"stakes":1,"utxos":1},"#,
+    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"first-mints":1,"gov":3,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pool-deposit-refunds":0,"pools":1,"proposals":3,"staged-first-mints":1,"stakes":1,"utxos":1},"#,
     r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"gov":1,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pools":1,"proposals":1,"staged-first-mints":1,"stakes":1,"utxos":16},"#,
     r#""stateEpochs":[4]"#,
     r#"},"position":{"#,

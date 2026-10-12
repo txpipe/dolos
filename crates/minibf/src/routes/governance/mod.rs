@@ -735,7 +735,7 @@ impl<'a, D: Domain> ProposalTypes<'a, D> {
 /// offsets are the same on every page.
 fn committee_casts_in_block<D: Domain>(
     block: &MultiEraBlock,
-    voters: &BTreeSet<Voter>,
+    voters: Option<&BTreeSet<Voter>>,
     types: &mut ProposalTypes<'_, D>,
 ) -> Result<Vec<CommitteeCast>, StatusCode> {
     let mut out = Vec::new();
@@ -754,7 +754,7 @@ fn committee_casts_in_block<D: Domain>(
         };
 
         for (voter, ballot) in procedures {
-            if !voters.contains(voter) {
+            if voters.is_some_and(|voters| !voters.contains(voter)) {
                 continue;
             }
 
@@ -800,48 +800,136 @@ fn merge_slots(
     lanes: Vec<Box<dyn Iterator<Item = Result<BlockSlot, ArchiveError>>>>,
     descending: bool,
 ) -> impl Iterator<Item = Result<BlockSlot, ArchiveError>> {
-    lanes
-        .into_iter()
-        .kmerge_by(move |a, b| match (a, b) {
-            (Err(_), _) => true,
-            (_, Err(_)) => false,
-            (Ok(a), Ok(b)) if descending => a > b,
-            (Ok(a), Ok(b)) => a < b,
-        })
-        .dedup_by(|a, b| matches!((a, b), (Ok(a), Ok(b)) if a == b))
+    let mut lanes = lanes.into_iter().map(|lane| lane.peekable()).collect_vec();
+    let mut previous = None;
+
+    std::iter::from_fn(move || loop {
+        let mut selected = None;
+        let mut selected_slot = None;
+        for (index, lane) in lanes.iter_mut().enumerate() {
+            match lane.peek() {
+                Some(Err(_)) => return lane.next(),
+                Some(Ok(slot))
+                    if selected_slot.is_none_or(|best| {
+                        if descending {
+                            *slot > best
+                        } else {
+                            *slot < best
+                        }
+                    }) =>
+                {
+                    selected = Some(index);
+                    selected_slot = Some(*slot);
+                }
+                _ => {}
+            }
+        }
+        let slot = lanes[selected?].next()?;
+        if selected_slot != previous {
+            previous = selected_slot;
+            return Some(slot);
+        }
+    })
 }
 
-/// This function reads the vote blocks of the committee members `voters`
-/// from the archive, in the requested order, and returns the votes on the
-/// requested page. The votes are in chain order, or in the opposite order for
-/// `Order::Desc`.
+enum CommitteeVoteQuery {
+    All,
+    Hot(StakeCredential),
+    Cold(StakeCredential),
+}
+
+fn committee_hot_credentials<D: Domain>(
+    domain: &D,
+    cold: &StakeCredential,
+    tip: BlockSlot,
+    budget: &mut usize,
+) -> Result<BTreeSet<StakeCredential>, Error> {
+    let archive = domain.archive();
+    let slots = archive
+        .slots_by_committee_certs(cold, 0, tip)
+        .map_err(log_and_500(
+            "The read of the index for committee certificates failed.",
+        ))?;
+
+    let mut voters = BTreeSet::new();
+    collect_block_rows::<()>(
+        slots,
+        |slot| archive.get_block_by_slot(&slot),
+        false,
+        usize::MAX,
+        budget,
+        |block| {
+            for tx in block.txs().into_iter().filter(|tx| tx.is_valid()) {
+                for cert in tx.certs() {
+                    if let Some(auth) = pallas_extras::cert_as_committee_auth(&cert) {
+                        if auth.cold == *cold {
+                            voters.insert(auth.hot);
+                        }
+                    }
+                }
+            }
+            Ok(Vec::new())
+        },
+    )?;
+    Ok(voters)
+}
+
+/// This function reads committee votes from retained blocks in chain order.
+/// For `Order::Desc`, it reads the votes in the opposite order.
+/// For a cold credential, it reads retained certificates to find distinct hot
+/// credentials. It merges their voter indexes into one sequence of slots.
+/// The query for all committee votes uses one index.
 ///
-/// The `voter_votes` archive dimension gives the blocks that hold votes of
-/// one voter. The function merges the lanes of all voters and reads each
-/// block once, until the page is full, and at most `budget` blocks. Votes are
-/// listed up to `tip`, the state cursor.
-///
-/// A block that the archive no longer holds leaves the list, and the votes
-/// after it move up. The other history endpoints do the same under
+/// The certificate scan and the vote scan share one limit for reads of block
+/// bodies. Both scans use the same state tip.
+/// The function omits votes from missing block bodies under
 /// `sync.max_history`.
 fn committee_vote_rows<D: Domain>(
     domain: &D,
-    voters: &BTreeSet<StakeCredential>,
+    query: &CommitteeVoteQuery,
     tip: BlockSlot,
     pagination: &Pagination,
-    budget: usize,
+    mut budget: usize,
 ) -> Result<Vec<CommitteeCast>, Error> {
+    if pagination.count == 0 {
+        return Ok(Vec::new());
+    }
+
     let archive = domain.archive();
     let descending = matches!(pagination.order, Order::Desc);
-    let voters: BTreeSet<Voter> = voters.iter().map(committee_voter).collect();
+    let voters = match query {
+        CommitteeVoteQuery::All => None,
+        CommitteeVoteQuery::Hot(hot) => Some(BTreeSet::from([committee_voter(hot)])),
+        CommitteeVoteQuery::Cold(cold) => Some(
+            committee_hot_credentials(domain, cold, tip, &mut budget)?
+                .iter()
+                .map(committee_voter)
+                .collect(),
+        ),
+    };
 
     let mut lanes: Vec<Box<dyn Iterator<Item = Result<BlockSlot, ArchiveError>>>> = Vec::new();
 
-    for voter in &voters {
-        let slots = archive
-            .slots_by_voter_votes(&pallas_extras::voter_id_bytes(voter), 0, tip)
-            .map_err(log_and_500("failed to read voter votes index"))?;
+    if let Some(voters) = &voters {
+        for voter in voters {
+            let slots = archive
+                .slots_by_voter_votes(&pallas_extras::voter_id_bytes(voter), 0, tip)
+                .map_err(log_and_500(
+                    "The read of the index for votes by voter failed.",
+                ))?;
 
+            if descending {
+                lanes.push(Box::new(slots.rev()));
+            } else {
+                lanes.push(Box::new(slots));
+            }
+        }
+    } else {
+        let slots = archive
+            .slots_by_committee_votes(0, tip)
+            .map_err(log_and_500(
+                "The read of the index for committee votes failed.",
+            ))?;
         if descending {
             lanes.push(Box::new(slots.rev()));
         } else {
@@ -849,13 +937,15 @@ fn committee_vote_rows<D: Domain>(
         }
     }
 
-    let blocks = merge_slots(lanes, descending).map(|slot| archive.get_block_by_slot(&slot?));
-
     let mut types = ProposalTypes::new(domain);
-
-    let rows = collect_block_rows(blocks, descending, pagination.to(), budget, |block| {
-        committee_casts_in_block(block, &voters, &mut types)
-    })?;
+    let rows = collect_block_rows(
+        merge_slots(lanes, descending),
+        |slot| archive.get_block_by_slot(&slot),
+        descending,
+        pagination.to(),
+        &mut budget,
+        |block| committee_casts_in_block(block, voters.as_ref(), &mut types),
+    )?;
 
     Ok(rows
         .into_iter()
@@ -864,19 +954,19 @@ fn committee_vote_rows<D: Domain>(
         .collect())
 }
 
-/// This function lists the votes of `voters` on the requested page.
+/// This function lists committee votes on the requested page.
 ///
 /// `max_scan_items` limits both the page depth and the number of blocks that
 /// one request reads.
 async fn query_committee_votes<D>(
     domain: Facade<D>,
-    voters: BTreeSet<StakeCredential>,
+    query: CommitteeVoteQuery,
     pagination: Pagination,
 ) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    if voters.is_empty() {
+    if pagination.count == 0 {
         return Ok(Json(Vec::new()));
     }
 
@@ -889,7 +979,7 @@ where
         .run_blocking(move |domain| {
             Ok(committee_vote_rows(
                 &domain,
-                &voters,
+                &query,
                 tip,
                 &pagination,
                 budget,
@@ -925,42 +1015,25 @@ where
     Ok(Json(page))
 }
 
-/// `GET /governance/committee/votes` lists the votes of every hot credential
-/// that a committee member authorized, past or current.
-///
-/// The governance singleton keeps the authorization history of each cold
-/// credential, including the generations that left the effective committee
-/// state. The listing is the merge of the per-credential listings of all
-/// those hot credentials.
+/// `GET /governance/committee/votes` lists all committee votes from retained
+/// blocks. It reads the index for committee votes and does not use
+/// authorization state.
 pub async fn committee_votes<D>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<GovState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
-    let voters = domain
-        .read_cardano_entity::<GovState>(GovState::singleton_key())?
-        .map(|gov| {
-            gov.committee_auths
-                .keys()
-                .chain(gov.committee_auth_archive.keys())
-                .flat_map(|cold| gov.committee_hot_credentials(cold))
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-
-    query_committee_votes(domain, voters, pagination).await
+    query_committee_votes(domain, CommitteeVoteQuery::All, pagination).await
 }
 
 /// `GET /governance/committee/{cc_id}/votes` accepts a hot or cold CIP-129
-/// credential. A cold credential selects every hot credential that it
-/// authorized.
+/// credential. A cold credential selects every hot credential that its
+/// retained authorization certificates name.
 pub async fn committee_votes_by_id<D>(
     Path(cc_id): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -968,26 +1041,17 @@ pub async fn committee_votes_by_id<D>(
 ) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<GovState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
     let (role, credential) = parse_committee_id(&cc_id).map_err(|_| Error::InvalidCommitteeId)?;
 
-    let voters = match role {
-        CommitteeCredentialRole::Hot => BTreeSet::from([credential]),
-        CommitteeCredentialRole::Cold => domain
-            .read_cardano_entity::<GovState>(GovState::singleton_key())?
-            .into_iter()
-            .flat_map(|gov| {
-                gov.committee_hot_credentials(&credential)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .collect(),
+    let query = match role {
+        CommitteeCredentialRole::Hot => CommitteeVoteQuery::Hot(credential),
+        CommitteeCredentialRole::Cold => CommitteeVoteQuery::Cold(credential),
     };
 
-    query_committee_votes(domain, voters, pagination).await
+    query_committee_votes(domain, query, pagination).await
 }
 
 struct ProposalRow {
@@ -1326,7 +1390,7 @@ pub(crate) fn voter_casts<D: Domain>(
     voter: &Voter,
     tip: BlockSlot,
     pagination: &Pagination,
-    budget: usize,
+    mut budget: usize,
 ) -> Result<Vec<CastVote>, Error> {
     let archive = domain.archive();
 
@@ -1342,11 +1406,14 @@ pub(crate) fn voter_casts<D: Domain>(
         Box::new(slots)
     };
 
-    let blocks = slots.map(|slot| archive.get_block_by_slot(&slot?));
-
-    let rows = collect_block_rows(blocks, descending, pagination.to(), budget, |block| {
-        Ok(voter_casts_in_block(block, voter))
-    })?;
+    let rows = collect_block_rows(
+        slots,
+        |slot| archive.get_block_by_slot(&slot),
+        descending,
+        pagination.to(),
+        &mut budget,
+        |block| Ok(voter_casts_in_block(block, voter)),
+    )?;
 
     Ok(rows
         .into_iter()
@@ -1476,25 +1543,27 @@ fn drep_updates_in_block(
 /// no row. So the function stops with `ScanBudgetExceeded` when it has read
 /// `budget` blocks and still needs another one.
 fn collect_block_rows<T>(
-    mut blocks: impl Iterator<Item = Result<Option<BlockBody>, ArchiveError>>,
+    mut slots: impl Iterator<Item = Result<BlockSlot, ArchiveError>>,
+    mut fetch: impl FnMut(BlockSlot) -> Result<Option<BlockBody>, ArchiveError>,
     descending: bool,
     needed: usize,
-    budget: usize,
+    budget: &mut usize,
     mut rows_in_block: impl FnMut(&MultiEraBlock) -> Result<Vec<T>, StatusCode>,
 ) -> Result<Vec<T>, Error> {
     let mut rows = Vec::new();
-    let mut scanned = 0;
 
     while rows.len() < needed {
-        let Some(body) = blocks.next() else {
+        let Some(slot) = slots.next() else {
             break;
         };
 
-        if scanned == budget {
+        if *budget == 0 {
             return Err(Error::ScanBudgetExceeded);
         }
 
-        scanned += 1;
+        *budget -= 1;
+        let slot = slot.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let body = fetch(slot);
 
         // A block that the archive no longer has leaves the list. The other
         // history endpoints do the same under `sync.max_history`.
@@ -1527,7 +1596,7 @@ fn read_drep_updates<D: Domain>(
     tip: BlockSlot,
     descending: bool,
     needed: usize,
-    budget: usize,
+    mut budget: usize,
 ) -> Result<Vec<DrepUpdatesInner>, Error> {
     let archive = domain.archive();
 
@@ -1541,11 +1610,14 @@ fn read_drep_updates<D: Domain>(
         Box::new(slots)
     };
 
-    let blocks = slots.map(|slot| archive.get_block_by_slot(&slot?));
-
-    collect_block_rows(blocks, descending, needed, budget, |block| {
-        drep_updates_in_block(block, drep)
-    })
+    collect_block_rows(
+        slots,
+        |slot| archive.get_block_by_slot(&slot),
+        descending,
+        needed,
+        &mut budget,
+        |block| drep_updates_in_block(block, drep),
+    )
 }
 
 /// `GET /governance/dreps/{drep_id}/updates` lists the registration,
@@ -2224,7 +2296,7 @@ fn read_votes<D: Domain>(
     tx: Hash<32>,
     idx: u32,
     pagination: &Pagination,
-    budget: usize,
+    mut budget: usize,
 ) -> Result<Vec<ProposalVotesInner>, Error> {
     let key = ProposalState::build_entity_key(tx, idx);
 
@@ -2284,16 +2356,19 @@ fn read_votes<D: Domain>(
         Box::new(slots)
     };
 
-    let blocks = slots.map(|slot| archive.get_block_by_slot(&slot?));
-
     let action = GovActionId {
         transaction_id: tx,
         action_index: idx,
     };
 
-    let rows = collect_block_rows(blocks, descending, pagination.to(), budget, |block| {
-        Ok(proposal_votes_in_block(block, &action))
-    })?;
+    let rows = collect_block_rows(
+        slots,
+        |slot| archive.get_block_by_slot(&slot),
+        descending,
+        pagination.to(),
+        &mut budget,
+        |block| Ok(proposal_votes_in_block(block, &action)),
+    )?;
 
     let chain = dolos_cardano::eras::load_era_summary::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -2686,7 +2761,7 @@ where
 mod tests {
     use super::*;
     use crate::mapping::bech32_drep;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{TestApp, TestDomainBuilder, TestFault};
     use bech32::{Bech32, Hrp};
     use dolos_cardano::model::{drep_to_entity_key, DRepDelegation, EpochValue, GovPurpose, Stake};
     use dolos_core::StateWriter as _;
@@ -2699,8 +2774,8 @@ mod tests {
         codec::{minicbor, utils::Bytes},
         ledger::primitives::{
             conway::{
-                CostModels, DRepVotingThresholds, ExUnitPrices, GovAction, GovActionId,
-                PoolVotingThresholds, ProtocolParamUpdate,
+                Certificate, CostModels, DRepVotingThresholds, ExUnitPrices, GovAction,
+                GovActionId, PoolVotingThresholds, ProtocolParamUpdate,
             },
             ExUnits, RationalNumber,
         },
@@ -3519,11 +3594,6 @@ mod tests {
         StakeCredential::ScriptHash(Hash::from([22u8; 28]))
     }
 
-    /// This function writes a governance singleton in which the cold key
-    /// `[31; 28]` authorized the hot script first and the hot key later. The
-    /// hot script generation left the effective committee state, so it is in
-    /// the archive. The all-members listing reads the hot credentials from
-    /// this singleton.
     fn seed_committee_votes_gov(domain: &ToyDomain) {
         seed_gov(
             domain,
@@ -3535,18 +3605,20 @@ mod tests {
                         (25, CommitteeAuthorization::Resigned(None)),
                     ],
                 )]),
-                committee_auth_archive: BTreeMap::from([(
-                    cc_cold_key(31),
-                    vec![(5, CommitteeAuthorization::HotCredential(cc_hot_script()))],
-                )]),
                 active_since: Some(0),
                 ..Default::default()
             },
         );
     }
 
-    fn committee_votes_app(cfg: SyntheticBlockConfig) -> TestApp {
-        TestApp::new_with_cfg_and_setup(cfg, |domain, _| seed_committee_votes_gov(domain))
+    fn committee_votes_app(mut cfg: SyntheticBlockConfig) -> TestApp {
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![
+            Certificate::AuthCommitteeHot(cc_cold_key(31), cc_hot_script()),
+            Certificate::AuthCommitteeHot(cc_cold_key(31), cc_hot_key()),
+            Certificate::ResignCommitteeCold(cc_cold_key(31), None),
+        ]];
+        TestApp::new_with_cfg(cfg)
     }
 
     /// Transaction 0 in block 0 proposes two actions. Transaction 1 proposes
@@ -3688,6 +3760,8 @@ mod tests {
         let blocks = &app.vectors().blocks;
         let hot_key = bech32_committee_hot(&cc_hot_key()).unwrap();
         let hot_script = bech32_committee_hot(&cc_hot_script()).unwrap();
+        let (domain, _) = TestDomainBuilder::new_with_synthetic(committee_votes_config()).finish();
+        let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
 
         assert_eq!(rows.len(), 5);
 
@@ -3743,15 +3817,12 @@ mod tests {
                 committee_votes_inner::GovernanceType::InfoAction
             );
             assert_eq!(row.block_height, blocks[block].block_number as i32);
+            assert_eq!(row.block_time, chain.slot_time(blocks[block].slot) as i32);
         }
     }
 
-    /// The all-members listing is the merge of the per-credential listings
-    /// of the hot credentials in the governance singleton. A hot credential
-    /// that no committee member authorized is not in the listing, although
-    /// the chain holds its votes.
     #[tokio::test]
-    async fn governance_committee_votes_list_authorized_credentials_only() {
+    async fn governance_committee_votes_list_is_independent_of_authorization_state() {
         let app = TestApp::new_with_cfg_and_setup(committee_votes_config(), |domain, _| {
             seed_gov(
                 domain,
@@ -3765,18 +3836,20 @@ mod tests {
                 },
             );
         });
-        let hot_script = bech32_committee_hot(&cc_hot_script()).unwrap();
-
         let rows = get_committee_votes(&app, "/governance/committee/votes").await;
+        assert_eq!(rows.len(), 5);
 
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].voter_hot_id, hot_script);
-
-        // A singleton without authorizations gives an empty listing.
-        let app = TestApp::new_with_cfg(committee_votes_config());
-        assert!(get_committee_votes(&app, "/governance/committee/votes")
-            .await
-            .is_empty());
+        let app = TestApp::new_with_cfg_and_setup(committee_votes_config(), |domain, _| {
+            let writer = domain.state().start_writer().unwrap();
+            writer
+                .delete_entity(GovState::NS, &GovState::singleton_key())
+                .unwrap();
+            writer.commit().unwrap();
+        });
+        assert_eq!(
+            get_committee_votes(&app, "/governance/committee/votes").await,
+            rows
+        );
     }
 
     #[tokio::test]
@@ -3869,6 +3942,348 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn governance_committee_cold_votes_ignore_stale_state() {
+        let app = TestApp::new_with_cfg_and_setup(committee_votes_config(), |domain, _| {
+            seed_committee_votes_gov(domain);
+        });
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        assert!(
+            get_committee_votes(&app, &format!("/governance/committee/{cold}/votes"))
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            get_committee_votes(&app, "/governance/committee/votes")
+                .await
+                .len(),
+            5
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_cold_votes_retained_auth_overrides_stale_state() {
+        let mut cfg = committee_votes_config();
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_script(),
+        )]];
+        let app =
+            TestApp::new_with_cfg_and_setup(cfg, |domain, _| seed_committee_votes_gov(domain));
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        let rows = get_committee_votes(&app, &format!("/governance/committee/{cold}/votes")).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].voter_hot_id,
+            bech32_committee_hot(&cc_hot_script()).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_cold_votes_match_typed_credentials_and_shared_hots() {
+        let cold_key = cc_cold_key(31);
+        let cold_script = StakeCredential::ScriptHash(Hash::from([31u8; 28]));
+        let hot_key = cc_hot_key();
+        let hot_script = StakeCredential::ScriptHash(Hash::from([21u8; 28]));
+        let cfg = SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![]],
+            extra_certs_by_block: vec![
+                vec![vec![
+                    Certificate::AuthCommitteeHot(cold_key.clone(), hot_key.clone()),
+                    Certificate::AuthCommitteeHot(cold_key.clone(), hot_key.clone()),
+                    Certificate::AuthCommitteeHot(cold_script.clone(), hot_script.clone()),
+                    Certificate::AuthCommitteeHot(cc_cold_key(32), hot_key.clone()),
+                    Certificate::ResignCommitteeCold(cc_cold_key(33), None),
+                ]],
+                vec![
+                    vec![],
+                    vec![Certificate::AuthCommitteeHot(
+                        cc_cold_key(34),
+                        hot_key.clone(),
+                    )],
+                ],
+                vec![],
+            ],
+            votes_by_block: vec![
+                vec![],
+                vec![],
+                vec![vec![
+                    synthetic_vote(committee_voter(&hot_key), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(committee_voter(&hot_script), 0, 0, 0, Vote::No),
+                    synthetic_vote(Voter::DRepKey(Hash::from([21u8; 28])), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(
+                        Voter::StakePoolKey(Hash::from([21u8; 28])),
+                        0,
+                        0,
+                        0,
+                        Vote::Yes,
+                    ),
+                ]],
+            ],
+            invalid_txs_by_block: vec![vec![], vec![1], vec![]],
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg(cfg);
+        let all = get_committee_votes(&app, "/governance/committee/votes").await;
+        assert_eq!(all.len(), 2);
+        for (cold, hot) in [
+            (cold_key, hot_key.clone()),
+            (cold_script, hot_script),
+            (cc_cold_key(32), hot_key),
+        ] {
+            let id = bech32_committee_cold(&cold).unwrap();
+            let rows =
+                get_committee_votes(&app, &format!("/governance/committee/{id}/votes")).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].voter_hot_id, bech32_committee_hot(&hot).unwrap());
+        }
+        for cold in [cc_cold_key(33), cc_cold_key(34)] {
+            let id = bech32_committee_cold(&cold).unwrap();
+            assert!(
+                get_committee_votes(&app, &format!("/governance/committee/{id}/votes"))
+                    .await
+                    .is_empty()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_committee_cold_votes_include_before_auth_and_after_resign() {
+        let mut cfg = committee_votes_in_blocks_config(&[1, 1, 1, 1]);
+        cfg.extra_certs_by_block = vec![vec![]; 5];
+        cfg.extra_certs_by_block[2] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_key(),
+        )]];
+        cfg.extra_certs_by_block[3] = vec![vec![Certificate::ResignCommitteeCold(
+            cc_cold_key(31),
+            None,
+        )]];
+        let app = TestApp::new_with_cfg(cfg);
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        let path = format!("/governance/committee/{cold}/votes");
+        let all = get_committee_votes(&app, "/governance/committee/votes").await;
+        assert_eq!(all.len(), 4);
+        assert_eq!(get_committee_votes(&app, &path).await, all);
+        assert_eq!(
+            get_committee_votes(&app, &format!("{path}?order=desc")).await,
+            all.iter().rev().cloned().collect_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_cold_votes_share_certificate_and_vote_budget() {
+        let mut cfg = committee_votes_across_blocks_config();
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_key(),
+        )]];
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        let path = format!("/governance/committee/{cold}/votes?count=1&page=2");
+        let app = TestApp::new_with_scan_limit(cfg.clone(), 2);
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        let app = TestApp::new_with_scan_limit(cfg, 3);
+        let rows = get_committee_votes(&app, &path).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, app.vectors().blocks[2].tx_hashes[0]);
+    }
+
+    #[test]
+    fn governance_committee_cold_votes_exact_shared_budget_and_deduplicated_blocks() {
+        let mut cfg = committee_votes_config();
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![
+            Certificate::AuthCommitteeHot(cc_cold_key(31), cc_hot_script()),
+            Certificate::AuthCommitteeHot(cc_cold_key(31), cc_hot_key()),
+        ]];
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        let query = CommitteeVoteQuery::Cold(cc_cold_key(31));
+        let tip = vectors.blocks[2].slot;
+        let rows = committee_vote_rows(&domain, &query, tip, &Pagination::default(), 3).unwrap();
+        assert_eq!(rows.len(), 5);
+        let pagination = Pagination {
+            count: 1,
+            page: 2,
+            ..Default::default()
+        };
+        let rows = committee_vote_rows(&domain, &query, tip, &pagination, 2).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].slot, vectors.blocks[1].slot);
+        let result = committee_vote_rows(&domain, &query, tip, &Pagination::default(), 2);
+        assert!(matches!(result, Err(Error::ScanBudgetExceeded)));
+        let query = CommitteeVoteQuery::Cold(cc_cold_key(32));
+        assert!(
+            committee_vote_rows(&domain, &query, tip, &Pagination::default(), 0)
+                .unwrap()
+                .is_empty()
+        );
+        let pagination = Pagination {
+            count: 0,
+            ..Default::default()
+        };
+        for query in [
+            CommitteeVoteQuery::All,
+            CommitteeVoteQuery::Hot(cc_hot_key()),
+            CommitteeVoteQuery::Cold(cc_cold_key(31)),
+        ] {
+            assert!(committee_vote_rows(&domain, &query, tip, &pagination, 0)
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn governance_committee_vote_queries_fail_independently_on_archive_index_errors() {
+        let (domain, vectors) =
+            TestDomainBuilder::new_with_synthetic(committee_votes_config()).finish();
+        let domain =
+            dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::ArchiveStoreError);
+        let tip = vectors.blocks[2].slot;
+        let result = committee_hot_credentials(&domain, &cc_cold_key(31), tip, &mut 1);
+        assert!(matches!(
+            result,
+            Err(Error::Code(StatusCode::INTERNAL_SERVER_ERROR))
+        ));
+        for query in [
+            CommitteeVoteQuery::All,
+            CommitteeVoteQuery::Hot(cc_hot_key()),
+        ] {
+            let result = committee_vote_rows(&domain, &query, tip, &Pagination::default(), 1);
+            assert!(matches!(
+                result,
+                Err(Error::Code(StatusCode::INTERNAL_SERVER_ERROR))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_committee_cold_votes_exclude_future_auth_at_captured_tip() {
+        let mut cfg = committee_votes_interleaved_config();
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_key(),
+        )]];
+        cfg.extra_certs_by_block[3] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_script(),
+        )]];
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        let tip = vectors.blocks[2].slot;
+        let query = CommitteeVoteQuery::Cold(cc_cold_key(31));
+        let rows = committee_vote_rows(&domain, &query, tip, &Pagination::default(), 100).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].slot, vectors.blocks[1].slot);
+        assert_eq!(rows[0].voter, cc_hot_key());
+        let rows = committee_vote_rows(
+            &domain,
+            &query,
+            vectors.blocks[3].slot,
+            &Pagination::default(),
+            100,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_missing_and_invalid_bodies() {
+        use dolos_cardano::indexes::archive_dimensions::{
+            COMMITTEE_CERTS, COMMITTEE_VOTES, VOTER_VOTES,
+        };
+        use dolos_core::{ArchiveIndexDelta, ArchiveWriter as _, Tag};
+
+        for dimension in [COMMITTEE_CERTS, COMMITTEE_VOTES, VOTER_VOTES] {
+            for body in [None, Some(vec![0xFF; 8])] {
+                let invalid = body.is_some();
+                let app =
+                    TestApp::new_with_cfg_and_setup(committee_votes_config(), |domain, vectors| {
+                        seed_committee_votes_gov(domain);
+                        let slot = vectors.blocks[2].slot + 1;
+                        let hash = Hash::<32>::from([0xEE; 32]);
+                        let writer = domain.archive().start_writer().unwrap();
+                        if let Some(body) = body {
+                            writer
+                                .apply(
+                                    &ChainPoint::Specific(slot, hash),
+                                    &std::sync::Arc::new(body),
+                                )
+                                .unwrap();
+                        }
+                        let key = match dimension {
+                            COMMITTEE_CERTS => {
+                                pallas_extras::committee_cold_id_bytes(&cc_cold_key(31))
+                            }
+                            COMMITTEE_VOTES => b"committee".to_vec(),
+                            _ => pallas_extras::voter_id_bytes(&committee_voter(&cc_hot_key())),
+                        };
+                        writer
+                            .apply_index(&[ArchiveIndexDelta {
+                                slot,
+                                block_hash: hash.to_vec(),
+                                block_number: None,
+                                tx_hashes: vec![],
+                                tags: vec![Tag::new(dimension, key)],
+                            }])
+                            .unwrap();
+                        writer.commit().unwrap();
+                        let writer = domain.state().start_writer().unwrap();
+                        writer.set_cursor(ChainPoint::Specific(slot, hash)).unwrap();
+                        writer.commit().unwrap();
+                    });
+                let id = if dimension == COMMITTEE_CERTS {
+                    Some(bech32_committee_cold(&cc_cold_key(31)).unwrap())
+                } else if dimension == VOTER_VOTES {
+                    Some(bech32_committee_hot(&cc_hot_key()).unwrap())
+                } else {
+                    None
+                };
+                let path = match id {
+                    Some(id) => format!("/governance/committee/{id}/votes"),
+                    None => "/governance/committee/votes".to_string(),
+                };
+                if invalid {
+                    assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+                } else {
+                    let rows = get_committee_votes(&app, &path).await;
+                    assert_eq!(
+                        rows.len(),
+                        if dimension == COMMITTEE_CERTS {
+                            0
+                        } else if dimension == COMMITTEE_VOTES {
+                            5
+                        } else {
+                            4
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_archive_index_errors() {
+        let app = TestApp::new_with_cfg_and_fault(
+            committee_votes_config(),
+            Some(TestFault::ArchiveStoreError),
+        );
+        for id in [
+            None,
+            Some(bech32_committee_hot(&cc_hot_key()).unwrap()),
+            Some(bech32_committee_cold(&cc_cold_key(31)).unwrap()),
+        ] {
+            let path = match id {
+                None => "/governance/committee/votes".to_string(),
+                Some(id) => format!("/governance/committee/{id}/votes"),
+            };
+            assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+        }
+    }
+
+    #[tokio::test]
     async fn governance_committee_votes_bad_request() {
         let app = committee_votes_app(committee_votes_config());
         let hot = bech32_committee_hot(&cc_hot_key()).unwrap();
@@ -3891,12 +4306,12 @@ mod tests {
             StatusCode::BAD_REQUEST,
         )
         .await;
-        assert_status(
-            &app,
-            "/governance/committee/not-a-credential/votes",
-            StatusCode::BAD_REQUEST,
-        )
-        .await;
+        let (status, body) = app
+            .get_bytes("/governance/committee/not-a-credential/votes")
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["message"], "Invalid or malformed cc credential id.");
 
         // A DRep credential is correct Bech32 text with the wrong prefix.
         assert_status(
@@ -4111,12 +4526,26 @@ mod tests {
 
         // The cold listing is the same merge.
         let cold_id = bech32_committee_cold(&cc_cold_key(31)).unwrap();
-        let rows =
-            get_committee_votes(&app, &format!("/governance/committee/{cold_id}/votes")).await;
+        let path = format!("/governance/committee/{cold_id}/votes");
+        let rows = get_committee_votes(&app, &path).await;
+        assert_eq!(rows, all);
         assert_eq!(
-            rows.iter().map(committee_row_id).collect_vec(),
-            all.iter().map(committee_row_id).collect_vec()
+            get_committee_votes(&app, &format!("{path}?order=desc")).await,
+            all.iter().rev().cloned().collect_vec()
         );
+        for order in ["asc", "desc"] {
+            let expected = if order == "asc" {
+                all.clone()
+            } else {
+                all.iter().rev().cloned().collect_vec()
+            };
+            for page in 1..=4 {
+                let rows =
+                    get_committee_votes(&app, &format!("{path}?count=1&page={page}&order={order}"))
+                        .await;
+                assert_eq!(rows, expected.get(page - 1..page).unwrap_or_default());
+            }
+        }
     }
 
     /// A block that holds the votes of two hot credentials is in two lanes.
@@ -4172,14 +4601,19 @@ mod tests {
     /// of the last block is the first row.
     #[tokio::test]
     async fn governance_committee_votes_paginate_retained_rows() {
-        let app =
-            TestApp::new_with_cfg_and_setup(committee_votes_across_blocks_config(), |domain, _| {
-                seed_committee_votes_gov(domain);
-                domain
-                    .archive()
-                    .prune_history(0, None, None)
-                    .expect("The archive did not prune its history.");
-            });
+        let mut cfg = committee_votes_across_blocks_config();
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_key(),
+        )]];
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
+            seed_committee_votes_gov(domain);
+            domain
+                .archive()
+                .prune_history(0, None, None)
+                .expect("The archive did not prune its history.");
+        });
         let last = app.vectors().blocks[4].tx_hashes[0].clone();
 
         let rows = get_committee_votes(&app, "/governance/committee/votes?count=1").await;
@@ -4188,6 +4622,17 @@ mod tests {
             vec![&last]
         );
         assert_eq!(rows[0].vote, committee_votes_inner::Vote::No);
+        let hot = bech32_committee_hot(&cc_hot_key()).unwrap();
+        assert_eq!(
+            get_committee_votes(&app, &format!("/governance/committee/{hot}/votes?count=1")).await,
+            rows
+        );
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        assert!(
+            get_committee_votes(&app, &format!("/governance/committee/{cold}/votes?count=1"))
+                .await
+                .is_empty()
+        );
 
         assert!(
             get_committee_votes(&app, "/governance/committee/votes?count=1&page=2")
@@ -4220,8 +4665,15 @@ mod tests {
             votes_by_block: vec![
                 vec![],
                 vec![
-                    vec![synthetic_vote(key.clone(), 0, 0, 0, Vote::Yes)],
-                    vec![synthetic_vote(key, 0, 0, 0, Vote::No)],
+                    vec![
+                        synthetic_vote(key.clone(), 0, 0, 0, Vote::Yes),
+                        synthetic_vote(drep_key_voter(), 0, 0, 0, Vote::Yes),
+                        synthetic_vote(spo_voter(), 0, 0, 0, Vote::Yes),
+                    ],
+                    vec![
+                        synthetic_vote(key, 0, 0, 0, Vote::No),
+                        synthetic_vote(committee_voter(&cc_hot_script()), 0, 0, 0, Vote::No),
+                    ],
                 ],
             ],
             invalid_txs_by_block: vec![vec![], vec![1]],
@@ -6119,28 +6571,200 @@ mod tests {
         let drep = drep_updates_test_drep();
         let updates = |block: &MultiEraBlock| drep_updates_in_block(block, &drep);
 
-        let blocks = || {
-            [false, false, true]
-                .into_iter()
-                .map(|valid| Ok(Some(drep_registration_block(valid))))
-        };
+        let slots = || (0..3).map(Ok);
+        let fetch = |slot| Ok(Some(drep_registration_block(slot == 2)));
 
         // two empty blocks spend a budget of two before the row appears
         assert!(matches!(
-            collect_block_rows(blocks(), false, 1, 2, updates),
+            collect_block_rows(slots(), fetch, false, 1, &mut 2, updates),
             Err(Error::ScanBudgetExceeded)
         ));
 
         // a budget of three reaches the block that holds the row
-        let rows = collect_block_rows(blocks(), false, 1, 3, updates).unwrap();
+        let rows = collect_block_rows(slots(), fetch, false, 1, &mut 3, updates).unwrap();
         assert_eq!(rows.len(), 1);
 
         // a full page stops the scan before the budget matters
-        let blocks = [true, false, false]
-            .into_iter()
-            .map(|valid| Ok(Some(drep_registration_block(valid))));
-        let rows = collect_block_rows(blocks, false, 1, 1, updates).unwrap();
+        let fetch = |slot| Ok(Some(drep_registration_block(slot == 0)));
+        let rows = collect_block_rows(slots(), fetch, false, 1, &mut 1, updates).unwrap();
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn collect_block_rows_exact_budget_and_extra_slot_without_fetch() {
+        let mut fetched = Vec::new();
+        let rows = collect_block_rows::<()>(
+            (0..2).map(Ok),
+            |slot| {
+                fetched.push(slot);
+                Ok(None)
+            },
+            false,
+            1,
+            &mut 2,
+            |_| Ok(Vec::new()),
+        )
+        .unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(fetched, [0, 1]);
+
+        fetched.clear();
+        let result = collect_block_rows::<()>(
+            (0..3).map(Ok),
+            |slot| {
+                fetched.push(slot);
+                Ok(None)
+            },
+            false,
+            1,
+            &mut 2,
+            |_| Ok(Vec::new()),
+        );
+        assert!(matches!(result, Err(Error::ScanBudgetExceeded)));
+        assert_eq!(fetched, [0, 1]);
+    }
+
+    #[test]
+    fn collect_block_rows_full_page_and_zero_rows_do_not_pull_extra_slots() {
+        let pulled = std::cell::Cell::new(0);
+        let fetched = std::cell::Cell::new(0);
+        let slots = (0..3).map(Ok).inspect(|_| pulled.set(pulled.get() + 1));
+        let rows = collect_block_rows(
+            slots,
+            |_| {
+                fetched.set(fetched.get() + 1);
+                Ok(Some(drep_registration_block(true)))
+            },
+            false,
+            1,
+            &mut 1,
+            |_| Ok(vec![()]),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(pulled.get(), 1);
+        assert_eq!(fetched.get(), 1);
+
+        let rows = collect_block_rows::<()>(
+            std::iter::from_fn(|| -> Option<Result<BlockSlot, ArchiveError>> {
+                panic!("The scan read a slot.")
+            }),
+            |_| panic!("The scan read a block body."),
+            false,
+            0,
+            &mut 0,
+            |_| panic!("The scan read a row."),
+        )
+        .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn collect_block_rows_errors_and_budget_precedence() {
+        let fault = || ArchiveError::InternalError("The test caused an archive error.".into());
+        let result = collect_block_rows::<()>(
+            std::iter::once(Err(fault())),
+            |_| panic!("The scan read a block body."),
+            false,
+            1,
+            &mut 0,
+            |_| Ok(Vec::new()),
+        );
+        assert!(matches!(result, Err(Error::ScanBudgetExceeded)));
+        let result = collect_block_rows::<()>(
+            std::iter::once(Err(fault())),
+            |_| panic!("The scan read a block body."),
+            false,
+            1,
+            &mut 1,
+            |_| Ok(Vec::new()),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Code(StatusCode::INTERNAL_SERVER_ERROR))
+        ));
+        let result = collect_block_rows::<()>(
+            std::iter::once(Ok(0)),
+            |_| Err(fault()),
+            false,
+            1,
+            &mut 1,
+            |_| Ok(Vec::new()),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Code(StatusCode::INTERNAL_SERVER_ERROR))
+        ));
+        let result = collect_block_rows::<()>(
+            std::iter::once(Ok(0)),
+            |_| Ok(Some(vec![0xFF; 8])),
+            false,
+            1,
+            &mut 1,
+            |_| Ok(Vec::new()),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Code(StatusCode::INTERNAL_SERVER_ERROR))
+        ));
+    }
+
+    #[test]
+    fn merge_slots_overlapping_lanes_stop_before_failing_tails() {
+        for descending in [false, true] {
+            let (first, last) = if descending { (3, 1) } else { (1, 3) };
+            let pulled = std::rc::Rc::new(std::cell::Cell::new(0));
+            let lanes = [last, 2]
+                .into_iter()
+                .map(|next| {
+                    let count = pulled.clone();
+                    let lane = [
+                        Ok(first),
+                        Ok(next),
+                        Err(ArchiveError::InternalError(
+                            "The scan must stop before this archive error.".into(),
+                        )),
+                    ]
+                    .into_iter()
+                    .inspect(move |_| count.set(count.get() + 1));
+                    Box::new(lane) as Box<dyn Iterator<Item = Result<BlockSlot, ArchiveError>>>
+                })
+                .collect();
+            let mut fetched = Vec::new();
+            let rows = collect_block_rows(
+                merge_slots(lanes, descending),
+                |slot| {
+                    fetched.push(slot);
+                    Ok(Some(drep_registration_block(true)))
+                },
+                descending,
+                2,
+                &mut 2,
+                |_| Ok(vec![()]),
+            )
+            .unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(fetched, [first, 2]);
+            assert_eq!(pulled.get(), 4);
+        }
+    }
+
+    #[test]
+    fn merge_slots_does_not_prefetch_after_single_lane_page() {
+        let pulled = std::rc::Rc::new(std::cell::Cell::new(0));
+        let count = pulled.clone();
+        let lane = (0..3).map(Ok).inspect(move |_| count.set(count.get() + 1));
+        let rows = collect_block_rows(
+            merge_slots(vec![Box::new(lane)], false),
+            |_| Ok(Some(drep_registration_block(true))),
+            false,
+            1,
+            &mut 1,
+            |_| Ok(vec![()]),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(pulled.get(), 1);
     }
 
     /// Blockfrost declares no `from`/`to` for this endpoint, so a malformed
