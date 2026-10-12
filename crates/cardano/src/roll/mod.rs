@@ -101,6 +101,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        order: &TxOrder,
         index: u32,
         output: &MultiEraOutput,
     ) -> Result<(), ChainError> {
@@ -391,22 +392,64 @@ impl<'a> DeltaBuilder<'a> {
             }
 
             for (index, output) in tx.produces() {
-                self.account_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.asset_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.datum_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.drep_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.epoch_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.pool_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                self.account_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.asset_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.datum_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.drep_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.epoch_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.pool_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
                 self.tx_logs
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.proposal_logs
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                    .visit_output(&mut deltas, block, tx, &order, index as u32, &output)?;
+                self.proposal_logs.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
             }
 
             // The Conway LEDGER rule runs CERTS, GOV, the withdrawal drain and

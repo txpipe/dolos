@@ -126,7 +126,7 @@ impl OrderCheck {
 mod tests {
     use dolos_cardano::model::{
         EpochState, FirstMintChunk, FixedNamespace as _, PolicyKey, PolicyMintChunk, PoolKey,
-        StakeLog,
+        StakeAddressesRow, StakeLog,
     };
 
     use super::*;
@@ -172,9 +172,14 @@ mod tests {
         let policy = LogKey::of(7, &(PolicyKey([1; 28].into()), 3u32));
         assert_eq!(policy.entity().len(), 32);
 
+        // stake addresses take an account: a credential header and its hash
+        let account = [slot.as_slice(), &[0x82, 0x01, 0x58, 0x1c], &[1; 28]].concat();
+        decode(StakeAddressesRow::NS, wire(&account).as_bytes()).unwrap();
+
         for (ns, len) in [
             (EpochState::NS, 32),
             (FirstMintChunk::NS, 32),
+            (StakeAddressesRow::NS, 32),
             (StakeLog::NS, 32),
             (StakeLog::NS, 0),
         ] {

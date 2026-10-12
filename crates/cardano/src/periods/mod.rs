@@ -22,6 +22,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::{indexes::SlotOrder, ChainSummary};
 
 pub mod first_mints;
+pub mod stake_addresses;
 
 /// Most entries one sealed list row holds; a longer list spans several rows.
 pub const CHUNK_LEN: usize = 256;
@@ -63,6 +64,7 @@ impl<G: FixedKey, M: KeyCodec> KeyCodec for StagedKey<G, M> {
 /// prefix trait is core's, so a blanket impl over every group is not one this
 /// crate may write.
 impl<M: KeyCodec> dolos_core::KeyPrefix<StagedKey<crate::PolicyKey, M>> for crate::PolicyKey {}
+impl<M: KeyCodec> dolos_core::KeyPrefix<StagedKey<crate::AccountKey, M>> for crate::AccountKey {}
 
 /// A row staged in state until its epoch seals.
 pub trait StagedRow:
@@ -146,7 +148,8 @@ pub fn seal_staged<D: Domain>(
     let mutable_slots = crate::utils::mutable_slots(genesis);
     let sealable = |epoch| is_sealable(chain, mutable_slots, epoch, boundary);
 
-    first_mints::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)
+    first_mints::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
+    stake_addresses::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)
 }
 
 /// Seal staged rows in chunks of whole groups.

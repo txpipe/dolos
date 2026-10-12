@@ -27,7 +27,8 @@ use dolos_cardano::{
         EpochValue, EraBoundary, EraSummary, FirstMintChunk, GovDistr, GovRoots, GovState, Nonces,
         PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
         PoolDelegation, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
-        RollingStats, ShardProgress, StagedFirstMint, Stake, StakeLog, VoteEntry,
+        RollingStats, ShardProgress, StagedFirstMint, StagedStakeAddress, Stake, StakeAddressesRow,
+        StakeLog, VoteEntry,
     },
     pallas::{
         codec::utils::Bytes,
@@ -214,6 +215,30 @@ pub fn staged_first_mint() -> StagedFirstMint {
         epoch: 611,
         slot: 163_000_123,
         tx_index: 17,
+    }
+}
+
+pub fn staged_stake_address() -> StagedStakeAddress {
+    StagedStakeAddress {
+        account: StakeCredential::ScriptHash(hash28(0xb3)),
+        address: [[0x11].as_slice(), &[0xb4; 28], &[0xb3; 28]].concat(),
+        epoch: 612,
+        slot: 163_400_321,
+        tx_index: 19,
+        output_index: 4,
+    }
+}
+
+pub fn stake_addresses_row() -> StakeAddressesRow {
+    StakeAddressesRow {
+        addresses: vec![
+            [[0x01].as_slice(), &[0xb5; 28], &[0xb6; 28]]
+                .concat()
+                .into(),
+            [[0x31].as_slice(), &[0xb7; 28], &[0xb6; 28]]
+                .concat()
+                .into(),
+        ],
     }
 }
 

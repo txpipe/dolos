@@ -266,7 +266,8 @@ impl OrderCheck {
 mod tests {
     use dolos_cardano::model::{
         AccountEpochLog, AccountState, AssetKey, AssetState, DRepState, EpochState, EraSummary,
-        FixedNamespace, GovState, PoolState, ProposalState, StagedFirstMint,
+        FixedNamespace, GovState, PoolState, ProposalState, StagedFirstMint, StagedStakeAddress,
+        StakeAddressesRow,
     };
 
     use super::*;
@@ -324,6 +325,13 @@ mod tests {
         keyed(AccountState::NS, &credential).unwrap();
         keyed(DRepState::NS, &[[0x22].as_slice(), &[7; 28]].concat()).unwrap();
 
+        // a staged stake address: the account, the epoch, then the address,
+        // which takes whatever width is left
+        let staged = |address: &[u8]| [credential.as_slice(), &[0; 8], address].concat();
+        keyed(StagedStakeAddress::NS, &staged(&[1; 57])).unwrap();
+        keyed(StagedStakeAddress::NS, &staged(&[1; 29])).unwrap();
+        keyed(StakeAddressesRow::NS, &credential).unwrap();
+
         for (ns, key) in [
             (EpochState::NS, vec![0x30]),
             (EpochState::NS, [0x30].into_iter().chain([0; 31]).collect()),
@@ -332,6 +340,9 @@ mod tests {
             (DRepState::NS, vec![0x22; 32]),
             (AccountState::NS, vec![1; 32]),
             (AccountEpochLog::NS, vec![1; 32]),
+            (StagedStakeAddress::NS, staged(&[])),
+            (StagedStakeAddress::NS, credential.clone()),
+            (StakeAddressesRow::NS, vec![1; 32]),
         ] {
             let err = keyed(ns, &key).unwrap_err();
             assert!(

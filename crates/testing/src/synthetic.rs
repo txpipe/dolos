@@ -88,10 +88,17 @@ pub struct SyntheticBlockConfig {
     /// Txs carry no certificates and no withdrawal. The default ones register
     /// a DRep, which a pre-Conway chain cannot carry across an epoch boundary.
     pub plain_txs: bool,
+    /// The addresses of zero-lovelace outputs each tx appends after its own,
+    /// per block. Each entry holds one list per tx; a missing entry appends
+    /// none.
+    pub extra_outputs_by_block: Vec<Vec<TxOutputs>>,
 }
 
 /// One tx's mints: policy, asset name and quantity, a burn when negative.
 pub type TxMints = Vec<([u8; 28], String, i64)>;
+
+/// One tx's extra outputs, as raw address bytes.
+pub type TxOutputs = Vec<Vec<u8>>;
 
 /// Configuration for the opt-in mint redeemer execution.
 ///
@@ -193,6 +200,7 @@ impl Default for SyntheticBlockConfig {
             slot_step: 1,
             mints_by_block: vec![],
             plain_txs: false,
+            extra_outputs_by_block: vec![],
         }
     }
 }
@@ -578,6 +586,15 @@ pub fn build_synthetic_blocks(
                 &txs[tx_offset]
             });
 
+            let extra_outputs = cfg.extra_outputs_by_block.get(offset).map(|txs| {
+                assert_eq!(
+                    txs.len(),
+                    txs_per_block,
+                    "extra_outputs_by_block needs one list per tx"
+                );
+                &txs[tx_offset]
+            });
+
             let mint_redeemer = if tx_offset == 0 {
                 cfg.mint_redeemer.as_ref()
             } else {
@@ -608,6 +625,7 @@ pub fn build_synthetic_blocks(
                 mint_redeemer,
                 mints,
                 cfg.plain_txs,
+                extra_outputs,
             ));
         }
 
@@ -1038,6 +1056,7 @@ fn sample_transaction(
     mint_redeemer_cfg: Option<&MintRedeemerConfig>,
     mints: Option<&TxMints>,
     plain: bool,
+    extra_outputs: Option<&TxOutputs>,
 ) -> SyntheticTxSpec {
     let input = TransactionInput {
         transaction_id: tx_hash,
@@ -1192,31 +1211,42 @@ fn sample_transaction(
     let certificates =
         (!plain).then(|| NonEmptySet::try_from(certificates).expect("non-empty certificates"));
 
-    let body = TransactionBody {
-        inputs: Set::from(vec![input]),
-        outputs: vec![TransactionOutput::PostAlonzo(KeepRaw::from(output))],
-        fee: 7,
-        ttl: Some(10),
-        certificates,
-        withdrawals,
-        auxiliary_data_hash,
-        validity_interval_start: Some(5),
-        mint,
-        script_data_hash: None,
-        collateral: None,
-        required_signers: Some(
-            NonEmptySet::try_from(vec![AddrKeyhash::from([4u8; 28])])
-                .expect("non-empty required signers"),
-        ),
-        network_id: None,
-        collateral_return: None,
-        total_collateral: None,
-        reference_inputs: None,
-        voting_procedures,
-        proposal_procedures,
-        treasury_value: None,
-        donation: None,
-    };
+    let body =
+        TransactionBody {
+            inputs: Set::from(vec![input]),
+            outputs: std::iter::once(output)
+                .chain(extra_outputs.into_iter().flatten().map(|address| {
+                    PostAlonzoTransactionOutput {
+                        address: Bytes::from(address.clone()),
+                        value: Value::Coin(0),
+                        datum_option: None,
+                        script_ref: None,
+                    }
+                }))
+                .map(|output| TransactionOutput::PostAlonzo(KeepRaw::from(output)))
+                .collect(),
+            fee: 7,
+            ttl: Some(10),
+            certificates,
+            withdrawals,
+            auxiliary_data_hash,
+            validity_interval_start: Some(5),
+            mint,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: Some(
+                NonEmptySet::try_from(vec![AddrKeyhash::from([4u8; 28])])
+                    .expect("non-empty required signers"),
+            ),
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures,
+            proposal_procedures,
+            treasury_value: None,
+            donation: None,
+        };
 
     let witness_set = WitnessSet {
         vkeywitness: None,
