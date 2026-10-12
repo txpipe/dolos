@@ -1019,12 +1019,15 @@ where
 /// blocks. It reads the index for committee votes and does not use
 /// authorization state.
 pub async fn committee_votes<D>(
-    Query(params): Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    params.from = None;
+    params.to = None;
+
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
@@ -1036,12 +1039,15 @@ where
 /// retained authorization certificates name.
 pub async fn committee_votes_by_id<D>(
     Path(cc_id): Path<String>,
-    Query(params): Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    params.from = None;
+    params.to = None;
+
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
     let (role, credential) = parse_committee_id(&cc_id).map_err(|_| Error::InvalidCommitteeId)?;
@@ -3874,6 +3880,53 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_ignores_from_and_to() {
+        let app = committee_votes_app(committee_votes_config());
+        let hot = bech32_committee_hot(&cc_hot_key()).unwrap();
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+
+        for path in [
+            "/governance/committee/votes".to_string(),
+            format!("/governance/committee/{hot}/votes"),
+            format!("/governance/committee/{cold}/votes"),
+        ] {
+            for pagination in [
+                "order=asc",
+                "count=1&page=2&order=asc",
+                "count=1&page=2&order=desc",
+            ] {
+                let base = format!("{path}?{pagination}");
+                let expected = get_committee_votes(&app, &base).await;
+                assert!(!expected.is_empty());
+
+                for query in [
+                    "from=bad",
+                    "to=bad",
+                    "from=200&to=100",
+                    "from=100:2&to=100:1",
+                    "from=0&to=0",
+                ] {
+                    let url = format!("{base}&{query}");
+                    assert_eq!(
+                        get_committee_votes(&app, &url).await,
+                        expected,
+                        "The response for {url} must ignore from and to."
+                    );
+                }
+            }
+
+            for pagination in ["count=0", "page=0", "order=sideways"] {
+                assert_status(
+                    &app,
+                    &format!("{path}?{pagination}&from=bad&to=bad"),
+                    StatusCode::BAD_REQUEST,
+                )
+                .await;
+            }
+        }
     }
 
     #[tokio::test]
