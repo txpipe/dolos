@@ -220,6 +220,16 @@ fn format_nonce(nonces: &Option<dolos_cardano::Nonces>) -> String {
     format!("{prefix}...{suffix}")
 }
 
+/// The epoch of a log row's slot, for a column headed `epoch`. A slot there is
+/// off by orders of magnitude and says nothing about being wrong, so without a
+/// summary absence renders as absence.
+fn epoch_of(slot: BlockSlot, ctx: &RowContext) -> String {
+    ctx.summary
+        .as_ref()
+        .map(|summary| summary.slot_epoch(slot).0.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 
 impl TableRow for StakeLog {
@@ -256,7 +266,7 @@ impl TableRow for StakeLog {
         vec![
             //format!("{}", pool_hex),
             format!("{}", pool_bech32),
-            format!("{}", slot),
+            epoch_of(slot, ctx),
             format!("{}", self.blocks_minted),
             format!("{}", self.total_stake),
             format!("{}", self.delegators_count),
@@ -354,13 +364,7 @@ impl TableRow for AccountEpochRewards {
     }
 
     fn rows(&self, slot: BlockSlot, account: &AccountKey, ctx: &RowContext) -> Vec<Vec<String>> {
-        // A slot under a column headed `epoch` is off by orders of magnitude and
-        // says nothing about being wrong, so absence renders as absence.
-        let epoch = ctx
-            .summary
-            .as_ref()
-            .map(|summary| summary.slot_epoch(slot).0.to_string())
-            .unwrap_or_else(|| "-".to_string());
+        let epoch = epoch_of(slot, ctx);
 
         let stake = render_stake_address(account, ctx);
 
@@ -618,11 +622,12 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let use_epoch_filter = args.epoch_start.is_some() || args.epoch_end.is_some();
 
-    // The reward view heads a column `epoch`, and only the summary turns the
-    // log's slot key into one, so it pays the state-store open in every format.
+    // The stakes and reward views head a column `epoch`, and only the summary
+    // turns the log's slot key into one, so they pay the state-store open in
+    // every format.
     let need_summary = use_epoch_filter
         || matches!(args.format, OutputFormat::Dbsync)
-        || args.namespace == "account-epochs/rewards";
+        || matches!(args.namespace.as_str(), "stakes" | "account-epochs/rewards");
     let summary = if need_summary {
         let state = crate::common::open_state_store(config)?;
         Some(load_chain_summary_from_state(&state).map_err(|err| miette::miette!("{err:?}"))?)
