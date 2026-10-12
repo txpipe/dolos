@@ -721,9 +721,9 @@ pub enum ArchiveStoreBackend {
     /// This exists for replays over an archive that already holds the chain
     /// (`dolos doctor rebuild-state --rewrite-logs`): block appends are not
     /// idempotent — replaying them would double every shared segment file,
-    /// whichever backend owns the index — while the logs are re-written from
-    /// scratch, into an archive whose logs [`Self::clear_logs`] dropped
-    /// first.
+    /// whichever backend owns the index — while boundary log keys are
+    /// slot-derived and identical under replay, so re-written log rows
+    /// overwrite the originals in place.
     ///
     /// [`Self::logs_only`] is the sole constructor, and it never nests one
     /// gate inside another.
@@ -797,16 +797,6 @@ impl ArchiveStoreBackend {
             Self::LogsOnly(inner) => inner.shutdown(),
             Self::Fjall(s) => s.shutdown().map_err(ArchiveError::from),
             Self::NoOp(s) => s.shutdown(),
-        }
-    }
-
-    /// Drop every log row of every namespace, leaving blocks and indexes.
-    pub fn clear_logs(&self) -> Result<(), ArchiveError> {
-        match self {
-            Self::Memory(s) => s.clear_logs(),
-            Self::LogsOnly(inner) => inner.clear_logs(),
-            Self::Fjall(s) => s.clear_logs().map_err(ArchiveError::from),
-            Self::NoOp(_) => Ok(()),
         }
     }
 }

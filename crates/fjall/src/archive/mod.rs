@@ -317,16 +317,6 @@ impl ArchiveStore {
         Ok(())
     }
 
-    /// Drop every log row of every namespace, leaving blocks and indexes.
-    ///
-    /// For a replay that re-writes the logs from scratch: a re-written row
-    /// lands on the key its typed struct derives today, which need not be the
-    /// key an older layout stored it under.
-    pub fn clear_logs(&self) -> Result<(), Error> {
-        self.logs.clear()?;
-        Ok(())
-    }
-
     /// Gracefully shutdown the archive store.
     ///
     /// Persists all data and waits for outstanding flushes so fjall's drop

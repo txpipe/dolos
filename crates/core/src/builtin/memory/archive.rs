@@ -152,12 +152,6 @@ impl MemoryArchiveStore {
         Ok(())
     }
 
-    /// Drop every log row of every namespace, leaving blocks and indexes.
-    pub fn clear_logs(&self) -> Result<(), ArchiveError> {
-        self.tables.write().map_err(|_| poisoned())?.logs.clear();
-        Ok(())
-    }
-
     fn check_namespace(&self, ns: Namespace) -> Result<(), ArchiveError> {
         if !self.schema.contains_key(ns) {
             return Err(ArchiveError::NamespaceNotFound(ns));
