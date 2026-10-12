@@ -2112,7 +2112,8 @@ mod prop_tests {
         gc.undo(&mut entity);
         assert_eq!(entity.as_ref().unwrap().committee_auths, auths);
 
-        // In the no-confidence state, the GC removes all committee authorization histories.
+        // In the no-confidence state, the GC removes all committee authorization
+        // histories.
         let mut entity = Some(GovState {
             committee: None,
             committee_auths: auths.clone(),
