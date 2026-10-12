@@ -30,7 +30,6 @@ use dolos_core::async_query::BlockMetaResolver;
 use dolos_core::{ArchiveStore as _, Domain, StateStore as _};
 use futures_util::StreamExt;
 use pallas::{
-    codec::minicbor,
     crypto::hash::{Hash, Hasher},
     ledger::{
         addresses::{Address, Network, StakeAddress, StakePayload},
@@ -56,10 +55,10 @@ struct AccountKeyParam {
 }
 
 impl AccountKeyParam {
-    /// The key the account-certs archive tag is filed under: the credential's
-    /// CBOR, as the indexer writes it.
+    /// The key the account-certs archive tag is filed under: the account
+    /// key's bytes, which the indexer writes as the credential's CBOR.
     fn cert_tag(&self) -> Vec<u8> {
-        minicbor::to_vec(self.account.credential()).expect("infallible")
+        dolos_core::keys::encode(&self.account).to_vec()
     }
 }
 
