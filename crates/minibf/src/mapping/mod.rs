@@ -69,6 +69,7 @@ use crate::Facade;
 pub mod blocks;
 pub mod cost_models;
 pub mod epochs;
+pub mod network;
 pub mod protocol_params;
 
 macro_rules! try_into_or_500 {
@@ -96,6 +97,12 @@ where
 pub fn round_f64<const DECIMALS: u8>(val: f64) -> f64 {
     let multiplier = 10_f64.powi(DECIMALS as i32);
     (val * multiplier).round() / multiplier
+}
+
+pub fn parse_datetime_into_timestamp(s: &str) -> Result<i32, StatusCode> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|x| x.timestamp() as i32)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// A ratio as the plain quotient, at the precision `f64` gives it.
