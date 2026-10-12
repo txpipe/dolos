@@ -1,4 +1,4 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::http::StatusCode;
 use blockfrost_openapi::models::{
     network::Network, network_eras_inner::NetworkErasInner,
     network_eras_inner_end::NetworkErasInnerEnd,
@@ -6,15 +6,15 @@ use blockfrost_openapi::models::{
     network_eras_inner_start::NetworkErasInnerStart, network_stake::NetworkStake,
     network_supply::NetworkSupply,
 };
-use dolos_cardano::{model::EpochState, mutable_slots, AccountState, EraSummary};
-use dolos_core::{BlockSlot, Domain, Genesis, StateStore};
+use dolos_cardano::{model::EpochState, mutable_slots, EraSummary};
+use dolos_core::{BlockSlot, Genesis};
 
-use crate::{mapping::IntoModel, routes::genesis::parse_datetime_into_timestamp, Facade};
+use super::{parse_datetime_into_timestamp, IntoModel};
 
-struct ChainModelBuilder<'a> {
-    tip: BlockSlot,
-    eras: Vec<(u16, EraSummary)>,
-    genesis: &'a Genesis,
+pub struct ChainModelBuilder<'a> {
+    pub tip: BlockSlot,
+    pub eras: Vec<(u16, EraSummary)>,
+    pub genesis: &'a Genesis,
 }
 
 impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
@@ -32,7 +32,8 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
 
         let mut out = vec![];
 
-        // Special, hardcoded stuff.
+        // Byron comes hardcoded per network; the loop below adds the eras
+        // from Shelley on, one entry per era under its first protocol version.
         let known_hardforks = [2, 3, 4, 5, 7, 9];
         let mut previous = match self.genesis.shelley.network_magic {
             Some(764824073) => {
@@ -107,7 +108,7 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
                     }),
                 });
 
-                // In the case of preview, we add the skipped eras
+                // preview opens in Alonzo, so Shelley, Allegra and Mary are empty
                 let other = NetworkErasInner {
                     start: Box::new(NetworkErasInnerStart {
                         time: 0,
@@ -143,7 +144,7 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
             let start_time = era.slot_time(era.start.slot);
             let start_delta = start_time - system_start;
 
-            // Calculate for the final one. The rest will be overwritten
+            // the tip ends the last era; the next era's start overwrites the rest
             let (end_slot, end_epoch) = (self.tip, era.slot_epoch(self.tip).0);
             let end_time = era.slot_time(end_slot);
             let end_delta = end_time - system_start;
@@ -180,40 +181,11 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
     }
 }
 
-pub async fn eras<D: Domain>(
-    State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<NetworkErasInner>>, StatusCode> {
-    let genesis = domain.genesis();
-    let tip = domain
-        .get_tip_slot()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let eras = domain
-        .state()
-        .iter_entities_typed::<EraSummary>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(|x| {
-            let (key, era) = x.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let protocol = key;
-            Ok((protocol.into(), era))
-        })
-        .collect::<Result<Vec<_>, StatusCode>>()?;
-
-    let builder = ChainModelBuilder {
-        eras,
-        genesis: &genesis,
-        tip,
-    };
-
-    let model = builder.into_model()?;
-    Ok(Json(model))
-}
-
-struct NetworkModelBuilder<'a> {
-    genesis: &'a Genesis,
-    active: EpochState,
-    live_stake: u64,
-    active_stake: u64,
+pub struct NetworkModelBuilder<'a> {
+    pub genesis: &'a Genesis,
+    pub active: EpochState,
+    pub live_stake: u64,
+    pub active_stake: u64,
 }
 
 impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
@@ -222,9 +194,8 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
     fn into_model(self) -> Result<Network, StatusCode> {
         let max_supply = self.genesis.shelley.max_lovelace_supply.unwrap_or_default();
 
-        // TODO: check why we have this semantic discrepancy. BF uses the name
-        // `total_supply` for what we call `circulating`. For BF, the `circulating`
-        // supply is total supply minus deposits.
+        // TODO: Blockfrost's `total` is what Dolos calls circulating, and its
+        // `circulating` leaves the deposits out; check the discrepancy.
         let total_supply = self.active.initial_pots.circulating();
         let circulating = self.active.initial_pots.utxos + self.active.initial_pots.rewards;
 
@@ -237,128 +208,11 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
                 treasury: self.active.initial_pots.treasury.to_string(),
                 reserves: self.active.initial_pots.reserves.to_string(),
             }),
-            // TODO: should compute snapshots as we do during sweep
+            // TODO: compute the snapshots the way the sweep does
             stake: Box::new(NetworkStake {
                 live: self.live_stake.to_string(),
                 active: self.active_stake.to_string(),
             }),
         })
-    }
-}
-
-fn compute_network_sync<D: Domain>(domain: Facade<D>) -> Result<Network, StatusCode>
-where
-    Option<EpochState>: From<D::Entity>,
-{
-    let genesis = domain.genesis();
-
-    let active = dolos_cardano::load_epoch::<D>(domain.state())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut live_stake = 0;
-    let mut active_stake = 0;
-
-    let accounts = domain
-        .state()
-        .iter_entities_typed::<AccountState>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    for account in accounts {
-        let (_, account) = account.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        live_stake += account.live_stake();
-        active_stake += account.active_stake();
-    }
-
-    let builder = NetworkModelBuilder {
-        genesis: &genesis,
-        active,
-        live_stake,
-        active_stake,
-    };
-
-    builder.into_model()
-}
-
-pub async fn naked<D>(State(domain): State<Facade<D>>) -> Result<Json<Network>, StatusCode>
-where
-    Option<EpochState>: From<D::Entity>,
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    const TTL: std::time::Duration = std::time::Duration::from_secs(30);
-
-    let domain_clone = domain.clone();
-    let fetcher = move || compute_network_sync(domain_clone);
-
-    let res = domain
-        .cache
-        .get_or_fetch_blocking(TTL, fetcher)
-        .await
-        .map_err(|e| match e {
-            crate::cache::CacheError::Inner(status) => status,
-            crate::cache::CacheError::JoinError(e) => {
-                tracing::error!("cache refresh task failed: {:?}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-        })?;
-
-    Ok(Json(res))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::{TestApp, TestFault};
-    use blockfrost_openapi::models::{network::Network, network_eras_inner::NetworkErasInner};
-
-    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
-        let (status, bytes) = app.get_bytes(path).await;
-        assert_eq!(
-            status,
-            expected,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-    }
-
-    #[tokio::test]
-    async fn network_happy_path() {
-        let app = TestApp::new();
-        let (status, bytes) = app.get_bytes("/network").await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-        let _: Network = serde_json::from_slice(&bytes).expect("failed to parse network response");
-    }
-
-    #[tokio::test]
-    async fn network_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
-        assert_status(&app, "/network", StatusCode::INTERNAL_SERVER_ERROR).await;
-    }
-
-    #[tokio::test]
-    async fn network_eras_happy_path() {
-        let app = TestApp::new();
-        let (status, bytes) = app.get_bytes("/network/eras").await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-        let _: Vec<NetworkErasInner> =
-            serde_json::from_slice(&bytes).expect("failed to parse network eras");
-    }
-
-    #[tokio::test]
-    async fn network_eras_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
-        assert_status(&app, "/network/eras", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }
