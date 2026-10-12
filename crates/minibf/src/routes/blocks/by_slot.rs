@@ -8,7 +8,7 @@ use dolos_core::Domain;
 
 use crate::{error::Error, routes::parse_path_number, Facade};
 
-use super::{main_block_at_slot, single_block_content, tip_block};
+use super::{build_block_model, main_block_at_slot, tip_block};
 
 pub async fn by_slot<D>(
     Path(slot_number): Path<String>,
@@ -28,7 +28,7 @@ where
     let chain = domain.get_chain_summary()?;
 
     let tip = tip_block(&domain)?;
-    let model = single_block_content(&domain, &block, &tip, &chain).await?;
+    let model = build_block_model(&domain, &block, &tip, &chain).await?;
 
     Ok(Json(model))
 }

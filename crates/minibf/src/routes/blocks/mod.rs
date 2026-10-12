@@ -246,14 +246,15 @@ fn tip_block<D: Domain>(domain: &Facade<D>) -> Result<BlockBody, StatusCode> {
 
 async fn build_block_model<D>(
     domain: &Facade<D>,
-    block: &BlockBody,
+    body: &BlockBody,
     tip: &BlockBody,
     chain: &ChainSummary,
 ) -> Result<BlockContent, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let mut builder = BlockModelBuilder::new(block)?;
+    let block = MultiEraBlock::decode(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut builder = BlockModelBuilder::new(body)?;
 
     let previous_hash = builder.previous_hash();
 
@@ -272,10 +273,7 @@ where
     }
 
     // the last block of a Byron epoch is followed by a boundary block
-    let maybe_next = {
-        let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        blocks_after(domain, &block)?.next().map(|(_, body)| body)
-    };
+    let maybe_next = blocks_after(domain, &block)?.next().map(|(_, body)| body);
 
     if let Some(next) = maybe_next.as_ref() {
         builder = builder.with_next(next)?;
@@ -287,20 +285,8 @@ where
         .with_chain(chain)
         .with_genesis_delegates(&domain.genesis());
 
-    builder.into_model()
-}
-
-async fn single_block_content<D>(
-    domain: &Facade<D>,
-    block: &BlockBody,
-    tip: &BlockBody,
-    chain: &ChainSummary,
-) -> Result<BlockContent, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let mut model = build_block_model(domain, block, tip, chain).await?;
-    genesis::set_genesis_previous_block(domain, &mut model);
+    let mut model = builder.into_model()?;
+    genesis::set_genesis_previous_block(domain, &block, &mut model)?;
 
     Ok(model)
 }
@@ -471,6 +457,17 @@ mod testing {
     /// carries a ~648 KB stakeholder list), each with the difficulty, and so
     /// the number, of the block before it like the real ones.
     pub fn mainnet_byron_chain(slot_0: bool) -> ByronChain {
+        byron_chain(slot_0, 0)
+    }
+
+    /// [`mainnet_byron_chain`] with the blocks before `first_slot` pruned, as
+    /// `sync.max_history` leaves an archive: the chain still names them, the
+    /// archive no longer holds them.
+    pub fn pruned_mainnet_byron_chain(first_slot: u64) -> ByronChain {
+        byron_chain(true, first_slot)
+    }
+
+    fn byron_chain(slot_0: bool, first_slot: u64) -> ByronChain {
         let genesis_hash = Hash::<32>::from_str(crate::hacks::GENESIS_HASH_MAINNET).unwrap();
         let (_, ebb_0) = make_byron_ebb_with_difficulty(0, genesis_hash, 0);
 
@@ -498,10 +495,16 @@ mod testing {
             })
             .collect();
 
+        let archived: Vec<_> = blocks
+            .iter()
+            .filter(|raw| MultiEraBlock::decode(raw).unwrap().slot() >= first_slot)
+            .cloned()
+            .collect();
+
         ByronChain {
             app: TestApp::new_with_archived_blocks(
                 dolos_cardano::include::mainnet::load(),
-                &blocks,
+                &archived,
             ),
             ebb_0: ArchivedBlock::new(&ebb_0),
             ebb_1: ArchivedBlock::new(&ebb_1),

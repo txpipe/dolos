@@ -10,7 +10,7 @@ use itertools::Either;
 use crate::{error::Error, Facade};
 
 use super::{
-    genesis, load_block_by_hash_or_number, parse_hash_or_number, single_block_content, tip_block,
+    build_block_model, genesis, load_block_by_hash_or_number, parse_hash_or_number, tip_block,
 };
 
 pub async fn by_hash_or_number<D>(
@@ -41,7 +41,7 @@ where
     let chain = domain.get_chain_summary()?;
 
     let tip = tip_block(&domain)?;
-    let model = single_block_content(&domain, &block, &tip, &chain).await?;
+    let model = build_block_model(&domain, &block, &tip, &chain).await?;
 
     Ok(Json(model))
 }
@@ -145,6 +145,17 @@ mod tests {
             assert_eq!(block.height, None);
             assert_eq!(block.slot_leader, "Epoch boundary slot leader");
         }
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_boundary_block_with_pruned_parent() {
+        let chain = pruned_mainnet_byron_chain(21600);
+
+        // a boundary block has no height to tell it from the first block, so
+        // its header decides: this one follows a pruned block, not genesis
+        let block = get_block(&chain.app, &format!("/blocks/{}", chain.ebb_1.hash)).await;
+        assert_eq!(block.height, None);
+        assert_eq!(block.previous_block, None);
     }
 
     #[tokio::test]

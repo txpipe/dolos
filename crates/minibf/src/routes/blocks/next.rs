@@ -69,12 +69,8 @@ where
     let futures = bodies
         .iter()
         .map(|body| build_block_model(&domain, body, &tip, &chain));
-    let mut output = try_join_all(futures).await?;
-    if is_genesis {
-        for block in output.iter_mut() {
-            genesis::set_genesis_previous_block(&domain, block);
-        }
-    }
+    let output = try_join_all(futures).await?;
+
     // Blockfrost takes no `order` here
     Ok(Json(output))
 }
