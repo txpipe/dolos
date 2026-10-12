@@ -1,6 +1,7 @@
-use std::{collections::BTreeSet, ops::Deref};
-
-use indexmap::IndexSet;
+use std::{
+    collections::{BTreeSet, HashSet},
+    ops::Deref,
+};
 
 use axum::{
     extract::{Path, Query, State},
@@ -346,7 +347,8 @@ where
     let budget = domain.config.max_scan_items() as usize;
     let account = account_key.address.to_vec();
 
-    let mut addresses: IndexSet<String> = IndexSet::new();
+    let mut addresses: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     let mut scanned = 0;
 
     let mut stream = Box::pin(stream);
@@ -374,8 +376,12 @@ where
             let address = utxo
                 .address()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            if address_belongs_to_account(&address, &account) {
-                addresses.insert(address.to_string());
+            if !address_belongs_to_account(&address, &account) {
+                continue;
+            }
+            let address = address.to_string();
+            if seen.insert(address.clone()) {
+                addresses.push(address);
             }
         }
     }
