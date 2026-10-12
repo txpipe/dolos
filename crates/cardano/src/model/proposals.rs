@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use dolos_core::{BlockSlot, NsKey, TxOrder};
+use dolos_core::{BlockSlot, FixedKey, KeyBytes, KeyCodec, KeyError, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
@@ -11,7 +11,7 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{epochs::Lovelace, pools::PoolHash, pparams::PParamsSet, ProposalKey};
+use super::{epochs::Lovelace, pools::PoolHash, pparams::PParamsSet};
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProposalAction {
@@ -254,7 +254,50 @@ pub struct ProposalState {
     pub spo_votes: BTreeMap<PoolHash, VoteEntry>,
 }
 
-entity_boilerplate!(ProposalState, "proposals", state = super::ProposalKey);
+/// A governance proposal: its index, then its transaction, `idx ‖ tx`, 36 B.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProposalKey {
+    pub tx: Hash<32>,
+    pub idx: u32,
+}
+
+/// Orders as the stored bytes do: index first, then transaction.
+impl Ord for ProposalKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.idx, self.tx).cmp(&(other.idx, other.tx))
+    }
+}
+
+impl PartialOrd for ProposalKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl ProposalKey {
+    pub fn new(tx: Hash<32>, idx: u32) -> Self {
+        Self { tx, idx }
+    }
+}
+
+impl KeyCodec for ProposalKey {
+    fn encode_key(&self, out: &mut KeyBytes) {
+        (self.idx, *self.tx).encode_key(out);
+    }
+
+    fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
+        let (idx, tx) = <(u32, [u8; 32])>::decode_key(bytes)?;
+        Ok(Self::new(tx.into(), idx))
+    }
+}
+
+impl FixedKey for ProposalKey {
+    const LEN: usize = 36;
+}
+
+display_as_stored!(ProposalKey);
+
+entity_boilerplate!(ProposalState, "proposals", state = ProposalKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -1625,5 +1668,42 @@ mod resolution_tests {
         assert_eq!(state.canceled_epoch, None);
         assert_eq!(state.max_epoch, Some(510));
         assert!(state.is_unresolved_at_close(505));
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use dolos_core::keys::encode;
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn layout_is_pinned() {
+        assert_eq!(
+            hex::encode(encode(&ProposalKey::new(
+                Hash::new([0x16; 32]),
+                0x0102_0304
+            ))),
+            format!("01020304{}", "16".repeat(32))
+        );
+    }
+
+    #[test]
+    fn malformed_keys_are_refused() {
+        assert!(ProposalKey::decode_key(&[0; 32]).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn keys_round_trip_in_idx_then_tx_order(
+            a in (any::<[u8; 32]>(), any::<u32>()),
+            b in (any::<[u8; 32]>(), any::<u32>()),
+        ) {
+            let a = ProposalKey::new(a.0.into(), a.1);
+            let b = ProposalKey::new(b.0.into(), b.1);
+            prop_assert_eq!(ProposalKey::decode_key(&encode(&a)), Ok(a));
+            prop_assert_eq!(encode(&a).cmp(&encode(&b)), (a.idx, a.tx).cmp(&(b.idx, b.tx)));
+        }
     }
 }

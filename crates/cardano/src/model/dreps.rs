@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, NsKey, TxOrder};
+use dolos_core::{keys::exact, BlockSlot, KeyBytes, KeyCodec, KeyError, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     ledger::primitives::{
@@ -9,7 +9,7 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::DRepKey;
+use crate::pallas_extras::{DREP_KEY_PREFIX, DREP_SCRIPT_PREFIX};
 
 /// Epoch-based DRep expiry, stored exactly as the Haskell ledger stores
 /// `drepExpiry`: **without** dormant-epoch credit. The actual expiry is
@@ -136,7 +136,90 @@ impl DRepState {
     }
 }
 
-entity_boilerplate!(DRepState, "dreps", state = super::DRepKey);
+/// A DRep: the CIP-129 credential header (key or script) and its hash, 29 B,
+/// or a single byte for the predefined abstain (`0`) and no-confidence (`1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DRepKey(pub DRep);
+
+/// Hashes the stored bytes, which tell DReps apart exactly as `Eq` does.
+impl std::hash::Hash for DRepKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        dolos_core::keys::encode(self).hash(state);
+    }
+}
+
+/// Orders by the stored bytes, the order the store keeps DReps in.
+impl Ord for DRepKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        dolos_core::keys::encode(self).cmp(&dolos_core::keys::encode(other))
+    }
+}
+
+impl PartialOrd for DRepKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl From<DRep> for DRepKey {
+    fn from(value: DRep) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&DRep> for DRepKey {
+    fn from(value: &DRep) -> Self {
+        Self(value.clone())
+    }
+}
+
+impl From<DRepKey> for DRep {
+    fn from(value: DRepKey) -> Self {
+        value.0
+    }
+}
+
+impl KeyCodec for DRepKey {
+    fn encode_key(&self, out: &mut KeyBytes) {
+        match &self.0 {
+            DRep::Key(hash) => {
+                out.push(DREP_KEY_PREFIX);
+                out.extend_from_slice(hash.as_slice());
+            }
+            DRep::Script(hash) => {
+                out.push(DREP_SCRIPT_PREFIX);
+                out.extend_from_slice(hash.as_slice());
+            }
+            DRep::Abstain => out.push(0),
+            DRep::NoConfidence => out.push(1),
+        }
+    }
+
+    fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
+        let Some((header, hash)) = bytes.split_first() else {
+            return Err(KeyError::Short {
+                expected: 1,
+                found: 0,
+            });
+        };
+
+        let drep = match *header {
+            0 => exact::<0>(hash).map(|_| DRep::Abstain)?,
+            1 => exact::<0>(hash).map(|_| DRep::NoConfidence)?,
+            DREP_KEY_PREFIX => DRep::Key(exact::<28>(hash)?.into()),
+            DREP_SCRIPT_PREFIX => DRep::Script(exact::<28>(hash)?.into()),
+            other => {
+                return Err(KeyError::Malformed(format!("drep header {other:#04x}")));
+            }
+        };
+
+        Ok(Self(drep))
+    }
+}
+
+display_as_stored!(DRepKey);
+
+entity_boilerplate!(DRepState, "dreps", state = DRepKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -1062,5 +1145,45 @@ mod compat_tests {
         let bytes = minicbor::to_vec(&state).unwrap();
         let decoded: DRepState = minicbor::decode(&bytes).unwrap();
         assert_eq!(decoded, state);
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use dolos_core::keys::encode;
+    use pallas::crypto::hash::Hash;
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::model::testing as root;
+
+    #[test]
+    fn layouts_are_pinned() {
+        assert_eq!(
+            hex::encode(encode(&DRepKey(DRep::Key(Hash::new([0x14; 28]))))),
+            format!("22{}", "14".repeat(28))
+        );
+        assert_eq!(
+            hex::encode(encode(&DRepKey(DRep::Script(Hash::new([0x15; 28]))))),
+            format!("23{}", "15".repeat(28))
+        );
+        assert_eq!(encode(&DRepKey(DRep::Abstain)).to_vec(), [0]);
+        assert_eq!(encode(&DRepKey(DRep::NoConfidence)).to_vec(), [1]);
+    }
+
+    #[test]
+    fn malformed_keys_are_refused() {
+        assert!(DRepKey::decode_key(&[]).is_err());
+        assert!(DRepKey::decode_key(&[0, 0]).is_err());
+        assert!(DRepKey::decode_key(&[DREP_KEY_PREFIX; 28]).is_err());
+        assert!(DRepKey::decode_key(&[DREP_KEY_PREFIX; 30]).is_err());
+        assert!(DRepKey::decode_key(&[0x42; 29]).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn keys_round_trip(key in root::any_drep().prop_map(DRepKey)) {
+            prop_assert_eq!(DRepKey::decode_key(&encode(&key)), Ok(key));
+        }
     }
 }

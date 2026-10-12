@@ -54,6 +54,54 @@ macro_rules! entity_boilerplate {
     };
 }
 
+/// A key that is a hash, stored as the hash's bytes.
+macro_rules! hash_key {
+    ($(#[$doc:meta])* $name:ident, $hash:ty, $len:literal) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+        pub struct $name(pub $hash);
+
+        impl From<$hash> for $name {
+            fn from(value: $hash) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$name> for $hash {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl dolos_core::KeyCodec for $name {
+            fn encode_key(&self, out: &mut dolos_core::KeyBytes) {
+                out.extend_from_slice(self.0.as_slice());
+            }
+
+            fn decode_key(bytes: &[u8]) -> Result<Self, dolos_core::KeyError> {
+                dolos_core::keys::exact::<$len>(bytes).map(|hash| Self(hash.into()))
+            }
+        }
+
+        impl dolos_core::FixedKey for $name {
+            const LEN: usize = $len;
+        }
+    };
+}
+
+/// Keys display as the hex of their stored bytes.
+macro_rules! display_as_stored {
+    ($($name:ty),*) => {
+        $(
+            impl std::fmt::Display for $name {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str(&hex::encode(dolos_core::keys::encode(self)))
+                }
+            }
+        )*
+    };
+}
+
 pub mod accounts;
 pub mod assets;
 pub mod datums;
@@ -63,7 +111,6 @@ pub mod epochs;
 pub mod eras;
 pub mod first_mints;
 pub mod gov;
-pub mod keys;
 pub mod logs;
 pub mod pending;
 pub mod pools;
@@ -82,7 +129,6 @@ pub use epochs::*;
 pub use eras::*;
 pub use first_mints::*;
 pub use gov::*;
-pub use keys::*;
 pub use logs::*;
 pub use pending::*;
 pub use pools::*;

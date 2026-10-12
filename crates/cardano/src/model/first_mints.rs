@@ -5,7 +5,7 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{AssetKey, PolicyKey};
+use super::AssetKey;
 use crate::periods::{ChunkRow, StageIfAbsent, StagedKey, StagedRow};
 
 /// The first mint of an asset within one epoch, staged until the epoch seals.
@@ -32,6 +32,15 @@ pub struct StagedFirstMint {
     #[n(4)]
     pub tx_index: u32,
 }
+
+hash_key!(
+    /// A minting policy.
+    PolicyKey,
+    Hash<28>,
+    28
+);
+
+display_as_stored!(PolicyKey);
 
 entity_boilerplate!(
     StagedFirstMint,
@@ -201,5 +210,34 @@ mod prop_tests {
 
         dolos_core::EntityDelta::undo(&a, &mut entity);
         assert_eq!(entity, None);
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use dolos_core::{keys::encode, KeyCodec};
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn layouts_are_pinned() {
+        assert_eq!(
+            encode(&PolicyKey(Hash::new([0x12; 28]))).to_vec(),
+            [0x12; 28]
+        );
+        assert_eq!(encode(&7u32).to_vec(), [0, 0, 0, 7]);
+        assert_eq!(
+            encode(&(PolicyKey(Hash::new([0x17; 28])), 2u32)).to_vec(),
+            [[0x17; 28].as_slice(), &[0, 0, 0, 2]].concat()
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn keys_round_trip(hash in any::<[u8; 28]>()) {
+            let key = PolicyKey(hash.into());
+            prop_assert_eq!(PolicyKey::decode_key(&encode(&key)), Ok(key));
+        }
     }
 }

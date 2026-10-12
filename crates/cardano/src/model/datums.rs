@@ -1,6 +1,4 @@
 use dolos_core::NsKey;
-
-use super::DatumKey;
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
@@ -30,7 +28,16 @@ impl DatumState {
     }
 }
 
-entity_boilerplate!(DatumState, "datums", state = super::DatumKey);
+hash_key!(
+    /// A datum, keyed by its hash.
+    DatumKey,
+    Hash<32>,
+    32
+);
+
+display_as_stored!(DatumKey);
+
+entity_boilerplate!(DatumState, "datums", state = DatumKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -263,6 +270,30 @@ mod tests {
             delta in any_datum_ref_decrement(),
         ) {
             assert_delta_roundtrip(entity, delta);
+        }
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use dolos_core::{keys::encode, KeyCodec};
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn layout_is_pinned() {
+        assert_eq!(
+            encode(&DatumKey(Hash::new([0x13; 32]))).to_vec(),
+            [0x13; 32]
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn keys_round_trip(hash in any::<[u8; 32]>()) {
+            let key = DatumKey(hash.into());
+            prop_assert_eq!(DatumKey::decode_key(&encode(&key)), Ok(key));
         }
     }
 }

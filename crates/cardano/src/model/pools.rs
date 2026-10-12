@@ -7,10 +7,7 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use super::{
-    epoch_value::{EpochValue, TransitionDefault},
-    PoolKey,
-};
+use super::epoch_value::{EpochValue, TransitionDefault};
 use crate::pallas_extras::MultiEraPoolRegistration;
 
 pub type PoolHash = Hash<28>;
@@ -92,7 +89,16 @@ impl TransitionDefault for PoolSnapshot {
     }
 }
 
-entity_boilerplate!(PoolState, "pools", state = super::PoolKey);
+hash_key!(
+    /// A pool, keyed by its operator hash.
+    PoolKey,
+    PoolHash,
+    28
+);
+
+display_as_stored!(PoolKey);
+
+entity_boilerplate!(PoolState, "pools", state = PoolKey);
 
 impl PoolState {
     pub fn live_saturation(&self) -> RationalNumber {
@@ -642,5 +648,31 @@ mod prop_tests {
             epoch: 6,
         }
         .apply(&mut Some(pool));
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use dolos_core::{keys::encode, KeyCodec};
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn layout_is_pinned() {
+        assert_eq!(encode(&PoolKey(Hash::new([0x11; 28]))).to_vec(), [0x11; 28]);
+    }
+
+    #[test]
+    fn malformed_keys_are_refused() {
+        assert!(PoolKey::decode_key(&[0; 32]).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn keys_round_trip(hash in any::<[u8; 28]>()) {
+            let key = PoolKey(hash.into());
+            prop_assert_eq!(PoolKey::decode_key(&encode(&key)), Ok(key));
+        }
     }
 }

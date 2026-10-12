@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use dolos_core::{FixedKey, KeyBytes, KeyCodec, KeyError};
 use pallas::codec::minicbor::{self, Decode, Encode};
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +41,20 @@ impl From<EraProtocol> for u16 {
     fn from(value: EraProtocol) -> Self {
         value.0
     }
+}
+
+impl KeyCodec for EraProtocol {
+    fn encode_key(&self, out: &mut KeyBytes) {
+        u16::from(*self).encode_key(out);
+    }
+
+    fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
+        u16::decode_key(bytes).map(Self::from)
+    }
+}
+
+impl FixedKey for EraProtocol {
+    const LEN: usize = 2;
 }
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,5 +160,31 @@ mod tests {
         assert!(!transition(9, 10).entering_conway());
         assert!(!transition(7, 8).entering_conway());
         assert!(!transition(2, 3).entering_conway());
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use dolos_core::keys::encode;
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn layout_is_pinned() {
+        assert_eq!(encode(&EraProtocol::from(9)).to_vec(), [0, 9]);
+    }
+
+    #[test]
+    fn malformed_keys_are_refused() {
+        assert!(EraProtocol::decode_key(&[0; 32]).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn keys_round_trip(era in any::<u16>()) {
+            let key = EraProtocol::from(era);
+            prop_assert_eq!(EraProtocol::decode_key(&encode(&key)), Ok(key));
+        }
     }
 }
