@@ -317,10 +317,6 @@ impl ArchiveStore {
         Ok(())
     }
 
-    /// Gracefully shutdown the archive store.
-    ///
-    /// Persists all data and waits for outstanding flushes so fjall's drop
-    /// implementation cannot hang on a full worker channel.
     /// Drop every log row of every namespace, leaving blocks and indexes.
     ///
     /// For a replay that re-writes the logs from scratch: a re-written row
@@ -331,6 +327,10 @@ impl ArchiveStore {
         Ok(())
     }
 
+    /// Gracefully shutdown the archive store.
+    ///
+    /// Persists all data and waits for outstanding flushes so fjall's drop
+    /// implementation cannot hang on a full worker channel.
     pub fn shutdown(&self) -> Result<(), Error> {
         use std::time::Duration;
 

@@ -377,7 +377,7 @@ impl FixedKey for ProposalKey {
     const LEN: usize = 36;
 }
 
-/// Keys display as the hex of their stored bytes, as stored keys always have.
+/// Keys display as the hex of their stored bytes.
 macro_rules! display_as_stored {
     ($($name:ty),*) => {
         $(

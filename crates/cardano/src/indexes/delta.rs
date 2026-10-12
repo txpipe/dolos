@@ -832,7 +832,7 @@ mod tests {
         let committee_id = [&[0x03u8][..], &[0x02; 28]].concat();
         let pool_id = vec![0x03; 28];
 
-        // the whole 36-byte proposal key, no longer cut to 32
+        // the whole 36-byte proposal key
         let first = keys::encode(&ProposalKey::new(Hash::new([0xa0; 32]), 0)).to_vec();
         let second = keys::encode(&ProposalKey::new(Hash::new([0xa0; 32]), 1)).to_vec();
         assert_eq!(first.len(), 36);

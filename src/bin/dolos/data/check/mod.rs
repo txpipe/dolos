@@ -476,13 +476,9 @@ mod tests {
     }
 
     /// A delegation that resolves must be read as resolving — through the
-    /// store, not through a hand-built referent set.
-    ///
-    /// The first preprod run of this check compared stored pool keys against
-    /// the bare 28-byte hash a delegation carries, and reported all 105,101
-    /// delegated accounts as dangling. Nothing that builds both sides by hand
-    /// can catch that, so this fixture writes the pool the way the node writes
-    /// it and reads it back the way the check reads it.
+    /// store, not through a hand-built referent set. The fixture writes the
+    /// pool the way the node writes it and reads it back the way the check
+    /// reads it, which is how a key-shape mismatch between the two shows.
     #[test]
     fn a_delegation_to_a_stored_pool_is_not_dangling() {
         let domain = ToyDomain::new(None, None);

@@ -154,10 +154,10 @@ fn an_in_place_rebuild_reproduces_the_synced_state() {
     assert_eq!(after.wal_tip, after.state.cursor, "WAL was not reseeded");
 }
 
-/// `--rewrite-logs` replays with derived-log writes passing through to the
-/// live archive. The keys are slot-derived, so a faithful replay overwrites
-/// every row with the value it already carries — and the blocks and segment
-/// files stay exactly as they were.
+/// `--rewrite-logs` clears the archive's logs and replays with derived-log
+/// writes passing through to the live archive, so a faithful replay re-writes
+/// every row with the value it carried — and the blocks and segment files stay
+/// exactly as they were.
 #[test]
 fn rewrite_logs_reproduces_the_log_rows_and_leaves_blocks_alone() {
     let node = Node::new();

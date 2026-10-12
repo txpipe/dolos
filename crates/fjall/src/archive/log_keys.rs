@@ -44,8 +44,8 @@ pub fn decode_log_key(key: &[u8]) -> Result<LogKey, Error> {
 /// Build a temporal bound within a namespace: `[ns_hash:8][slot:8]`.
 ///
 /// Compared lexicographically against stored keys, this 16-byte bound sorts
-/// before every key of the namespace whose slot is `>= slot` and after every
-/// key whose slot is `< slot` — the boundary prune and truncate draw.
+/// at or before every key of the namespace whose slot is `>= slot` and after
+/// every key whose slot is `< slot` — the boundary prune and truncate draw.
 pub fn build_temporal_bound(ns: Namespace, slot: u64) -> Vec<u8> {
     prefixed(ns, &slot.to_be_bytes())
 }
