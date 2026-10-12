@@ -115,6 +115,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        order: &TxOrder,
         mint: &MultiEraPolicyAssets,
     ) -> Result<(), ChainError> {
         Ok(())
@@ -418,15 +419,21 @@ impl<'a> DeltaBuilder<'a> {
             if tx.is_valid() {
                 for mint in tx.mints() {
                     self.account_state
-                        .visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.asset_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.datum_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.drep_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.epoch_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.pool_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.tx_logs.visit_mint(&mut deltas, block, tx, &mint)?;
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.asset_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.datum_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.drep_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.epoch_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.pool_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.tx_logs
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                     self.proposal_logs
-                        .visit_mint(&mut deltas, block, tx, &mint)?;
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                 }
 
                 for cert in tx.certs() {

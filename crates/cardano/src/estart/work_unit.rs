@@ -7,7 +7,8 @@
 //! (`AccountTransition`), and emits `EStartProgress` to advance
 //! `EpochState.estart_progress`.
 //!
-//! After the per-shard loop, `finalize()` runs the global "Estart" pass:
+//! After the per-shard loop, `finalize()` seals the period logs of every
+//! immutable epoch (`crate::periods`), then runs the global "Estart" pass:
 //! pool / drep / proposal snapshot transitions, nonce transition, pot
 //! recalculation (`EpochTransition`), era transitions (if protocol version
 //! changes), and the cursor advance. The cursor moves only here, so a
@@ -193,6 +194,14 @@ where
         let mut context = WorkContext::load_finalize::<D>(domain.state(), self.genesis.clone())?;
 
         info!(epoch = context.starting_epoch_no(), "starting epoch");
+
+        crate::periods::seal_staged::<D>(
+            domain.state(),
+            domain.archive(),
+            &context.chain_summary,
+            &self.genesis,
+            context.starting_epoch_no(),
+        )?;
 
         context.commit_finalize::<D>(domain.state(), domain.archive(), self.slot)?;
 

@@ -56,6 +56,7 @@ pub mod dreps;
 pub mod epoch_value;
 pub mod epochs;
 pub mod eras;
+pub mod first_mints;
 pub mod gov;
 pub mod logs;
 pub mod pending;
@@ -73,6 +74,7 @@ pub use dreps::*;
 pub use epoch_value::*;
 pub use epochs::*;
 pub use eras::*;
+pub use first_mints::*;
 pub use gov::*;
 pub use logs::*;
 pub use pending::*;
@@ -97,6 +99,9 @@ pub enum CardanoEntity {
     PendingMirState(Box<PendingMirState>),
     GovState(Box<GovState>),
     AccountEpochLog(Box<AccountEpochLog>),
+    StagedFirstMint(Box<StagedFirstMint>),
+    FirstMintChunk(Box<FirstMintChunk>),
+    PolicyMintChunk(Box<PolicyMintChunk>),
 }
 
 macro_rules! variant_boilerplate {
@@ -131,6 +136,9 @@ variant_boilerplate!(PendingRewardState);
 variant_boilerplate!(PendingMirState);
 variant_boilerplate!(GovState);
 variant_boilerplate!(AccountEpochLog);
+variant_boilerplate!(StagedFirstMint);
+variant_boilerplate!(FirstMintChunk);
+variant_boilerplate!(PolicyMintChunk);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -148,6 +156,9 @@ impl dolos_core::Entity for CardanoEntity {
             PendingMirState::NS => PendingMirState::decode_entity(ns, value).map(Into::into),
             GovState::NS => GovState::decode_entity(ns, value).map(Into::into),
             AccountEpochLog::NS => AccountEpochLog::decode_entity(ns, value).map(Into::into),
+            StagedFirstMint::NS => StagedFirstMint::decode_entity(ns, value).map(Into::into),
+            FirstMintChunk::NS => FirstMintChunk::decode_entity(ns, value).map(Into::into),
+            PolicyMintChunk::NS => PolicyMintChunk::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -167,6 +178,9 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PendingMirState(x) => PendingMirState::encode_entity(x),
             Self::GovState(x) => GovState::encode_entity(x),
             Self::AccountEpochLog(x) => AccountEpochLog::encode_entity(x),
+            Self::StagedFirstMint(x) => StagedFirstMint::encode_entity(x),
+            Self::FirstMintChunk(x) => FirstMintChunk::encode_entity(x),
+            Self::PolicyMintChunk(x) => PolicyMintChunk::encode_entity(x),
         }
     }
 }
@@ -186,6 +200,9 @@ pub fn build_schema() -> StateSchema {
     schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
     schema.insert(PendingMirState::NS, NamespaceType::KeyValue);
     schema.insert(GovState::NS, NamespaceType::KeyValue);
+    schema.insert(StagedFirstMint::NS, NamespaceType::KeyValue);
+    schema.insert(FirstMintChunk::NS, NamespaceType::KeyValue);
+    schema.insert(PolicyMintChunk::NS, NamespaceType::KeyValue);
     schema
 }
 
@@ -267,6 +284,7 @@ pub enum CardanoDelta {
     ProposalResolved(Box<ProposalResolved>),
     GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
     GovDRepSnapshot(Box<GovDRepSnapshot>),
+    StageFirstMint(Box<StageFirstMint>),
 }
 
 impl CardanoDelta {
@@ -372,6 +390,7 @@ delta_from!(GovDistrRotate);
 delta_from!(GovDRepSnapshot);
 delta_from!(GovDistrBoundaryCredit);
 delta_from!(ProposalResolved);
+delta_from!(StageFirstMint);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -444,6 +463,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => x.key(),
             Self::SetEpochIncentives(x) => x.key(),
             Self::DequeueReward(x) => x.key(),
+            Self::StageFirstMint(x) => x.key(),
         }
     }
 
@@ -514,6 +534,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::SetEpochIncentives(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DequeueReward(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageFirstMint(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -584,6 +605,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::SetEpochIncentives(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DequeueReward(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageFirstMint(x) => Self::downcast_undo(x.as_ref(), entity),
         }
     }
 }

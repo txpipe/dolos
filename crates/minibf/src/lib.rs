@@ -546,6 +546,10 @@ where
             get(routes::scripts::by_hash_utxos::<D>),
         )
         .route(
+            "/scripts/{script_hash}/redeemers",
+            get(routes::scripts::by_hash_redeemers::<D>),
+        )
+        .route(
             "/scripts/datum/{datum_hash}",
             get(routes::scripts::by_datum_hash::<D>),
         )
@@ -711,6 +715,14 @@ where
         .route(
             "/governance/proposals/{gov_action_id}/parameters",
             get(routes::governance::proposal_parameters_by_gov_action::<D>),
+        )
+        .route(
+            "/governance/proposals/{tx_hash}/{cert_index}/votes",
+            get(routes::governance::proposal_votes::<D>),
+        )
+        .route(
+            "/governance/proposals/{gov_action_id}/votes",
+            get(routes::governance::proposal_votes_by_gov_action::<D>),
         )
         .fallback(routes::invalid_path)
         .with_state(facade)

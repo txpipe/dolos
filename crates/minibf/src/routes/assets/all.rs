@@ -1,16 +1,13 @@
 //! `/assets`: every asset, in order of first mint.
 
-use std::collections::BTreeSet;
-
 use axum::{
     extract::{Query, State},
     http::StatusCode,
     Json,
 };
 use blockfrost_openapi::models::assets_inner::AssetsInner;
-use dolos_cardano::model::{AssetState, FixedNamespace as _};
-use dolos_core::{ArchiveStore as _, BlockBody, BlockSlot, Domain, EntityKey, StateStore as _};
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
+use dolos_cardano::{indexes::SlotOrder, model::AssetState, periods::first_mints};
+use dolos_core::{Domain, DomainError};
 
 use crate::{
     error::Error,
@@ -18,136 +15,11 @@ use crate::{
     Facade,
 };
 
-/// Subjects whose first mint is `tx`, in the order Blockfrost lists them.
+/// `GET /assets`: every asset ever minted, ordered by its first mint.
 ///
-/// Blockfrost sorts `/assets` by the first `ma_tx_mint` row of each asset, and
-/// db-sync writes those rows per tx in `(policy, name)` order, so assets born
-/// in the same tx come out sorted by subject bytes (the policy is a fixed 28
-/// bytes, so a plain byte comparison of the subject is exactly that). The
-/// ledger state decides what counts as a first mint: the tx must be the
-/// asset's `initial_tx`, which also keeps fully burned assets on the list.
-///
-/// The whole tx is resolved with a single state read: backends open a read
-/// transaction per call, and a scan that asks per minted asset would open one
-/// for every row of every mint it walks past.
-fn first_minted_subjects<D: Domain>(
-    domain: &D,
-    tx: &MultiEraTx<'_>,
-) -> Result<Vec<Vec<u8>>, Error> {
-    let mut subjects = BTreeSet::new();
-
-    for policy_assets in tx.mints() {
-        for asset in policy_assets.assets() {
-            subjects.insert([policy_assets.policy().as_slice(), asset.name()].concat());
-        }
-    }
-
-    if subjects.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let subjects: Vec<_> = subjects.into_iter().collect();
-
-    let keys: Vec<EntityKey> = subjects
-        .iter()
-        .map(|subject| {
-            EntityKey::from(pallas::crypto::hash::Hasher::<256>::hash(subject).as_slice())
-        })
-        .collect();
-
-    let states = domain
-        .state()
-        .read_entities_typed::<AssetState>(AssetState::NS, &keys.iter().collect::<Vec<_>>())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let tx_hash = tx.hash();
-
-    Ok(subjects
-        .into_iter()
-        .zip(states)
-        .filter_map(|(subject, state)| {
-            (state.and_then(|x| x.initial_tx) == Some(tx_hash)).then_some(subject)
-        })
-        .collect())
-}
-
-/// Walk the archive in `order` collecting first-minted subjects until `needed`
-/// of them are known.
-///
-/// `needed` bounds the results, not the work: nothing forces mints to be dense,
-/// so any number of blocks can sit between two first mints and a page that the
-/// archive cannot fill would replay every block from `start` to the tip. The
-/// walk therefore also stops after `budget` blocks and says so, instead of
-/// holding a blocking query slot for the length of the chain.
-fn scan_first_mints<D: Domain>(
-    domain: &D,
-    start: BlockSlot,
-    order: Order,
-    needed: usize,
-    budget: usize,
-) -> Result<Vec<Vec<u8>>, Error> {
-    let iter = domain
-        .archive()
-        .get_range(Some(start), None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let blocks: Box<dyn Iterator<Item = (BlockSlot, BlockBody)>> = match order {
-        Order::Asc => Box::new(iter),
-        Order::Desc => Box::new(iter.rev()),
-    };
-
-    let mut found = Vec::new();
-
-    for (scanned, (_, body)) in blocks.enumerate() {
-        // the iterator handed us another block while the budget is spent, so
-        // the answer is somewhere further in and out of reach for this request
-        if scanned == budget {
-            return Err(Error::ScanBudgetExceeded);
-        }
-
-        let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let txs = block.txs();
-
-        let txs: Box<dyn Iterator<Item = &MultiEraTx<'_>>> = match order {
-            Order::Asc => Box::new(txs.iter()),
-            Order::Desc => Box::new(txs.iter().rev()),
-        };
-
-        for tx in txs {
-            let mut minted = first_minted_subjects(domain, tx)?;
-
-            if minted.is_empty() {
-                continue;
-            }
-
-            if matches!(order, Order::Desc) {
-                minted.reverse();
-            }
-
-            found.append(&mut minted);
-
-            if found.len() >= needed {
-                return Ok(found);
-            }
-        }
-    }
-
-    Ok(found)
-}
-
-/// `GET /assets`: every asset ever minted, ordered by its first mint tx.
-///
-/// The state cannot serve this directly: `AssetState` is keyed by a hash of
-/// the subject and does not store the subject itself, and the archive indexes
-/// keep hashed keys too, so there is no store to enumerate subjects from. The
-/// listing therefore replays mints from the archive, starting where native
-/// assets begin (Mary) or, for `desc`, from the tip backwards, and stops as
-/// soon as the requested page is covered.
-///
-/// `max_scan_items` bounds the request twice: it caps the page depth like on
-/// the other scanning endpoints, and it caps the blocks the replay may decode.
-/// A page the replay cannot reach within that many blocks is refused, because
-/// a short answer would read as the end of the list.
+/// The order is Blockfrost's: by first mint tx, and by subject bytes within a
+/// tx. The page comes from the first-mint period logs, which need no block
+/// decoding at any depth.
 pub async fn all<D>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
@@ -157,31 +29,32 @@ where
     Option<AssetState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
     // Native assets exist since Mary, so nothing before that era can appear.
     let chain = domain.get_chain_summary()?;
     let Some(mary_epoch) = chain.first_mary_epoch() else {
         return Ok(Json(vec![]));
     };
-    let start = chain.epoch_start(mary_epoch);
+    let (tip_epoch, _) = chain.slot_epoch(domain.get_tip_slot()?);
 
-    let order = pagination.order;
-    let needed = pagination.from() + pagination.count;
-    let budget = domain.config.max_scan_items() as usize;
+    let order = match pagination.order {
+        Order::Asc => SlotOrder::Asc,
+        Order::Desc => SlotOrder::Desc,
+    };
+    let (skip, count) = (pagination.skip(), pagination.count);
 
     let subjects = domain
         .query()
-        .run_blocking(move |domain| Ok(scan_first_mints(&domain, start, order, needed, budget)))
+        .run_blocking(move |domain| {
+            first_mints::all_page(&domain, &chain, mary_epoch..=tip_epoch, order, skip, count)
+                .map_err(DomainError::from)
+        })
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut items = Vec::with_capacity(pagination.count);
-    for subject in subjects
-        .into_iter()
-        .skip(pagination.from())
-        .take(pagination.count)
-    {
+    let mut items = Vec::with_capacity(subjects.len());
+
+    for subject in subjects {
         let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
         let asset_state = domain
             .read_cardano_entity::<AssetState>(entity_key.as_slice())?
@@ -199,10 +72,109 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{first_mint_chain, TestApp, TestFault};
     use blockfrost_openapi::models::asset::Asset;
-    use dolos_testing::synthetic::SyntheticBlockConfig;
+    use dolos_cardano::model::{FirstMintChunk, FixedNamespace as _, StagedFirstMint};
+    use dolos_core::{ArchiveStore as _, StateStore as _};
+    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use itertools::Itertools;
+
+    /// The scan the period logs replaced: every block from Mary on, a tx's
+    /// subjects in byte order, kept where the tx is the asset's `initial_tx`.
+    mod scan {
+        use std::collections::BTreeSet;
+
+        use dolos_cardano::model::{AssetState, FixedNamespace as _};
+        use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey, StateStore as _};
+        use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
+
+        use crate::pagination::Order;
+
+        fn first_minted_subjects<D: Domain>(domain: &D, tx: &MultiEraTx<'_>) -> Vec<Vec<u8>> {
+            let mut subjects = BTreeSet::new();
+
+            for policy_assets in tx.mints() {
+                for asset in policy_assets.assets() {
+                    subjects.insert([policy_assets.policy().as_slice(), asset.name()].concat());
+                }
+            }
+
+            let subjects: Vec<_> = subjects.into_iter().collect();
+
+            let keys: Vec<EntityKey> = subjects
+                .iter()
+                .map(|subject| {
+                    EntityKey::from(pallas::crypto::hash::Hasher::<256>::hash(subject).as_slice())
+                })
+                .collect();
+
+            let states = domain
+                .state()
+                .read_entities_typed::<AssetState>(AssetState::NS, &keys.iter().collect::<Vec<_>>())
+                .unwrap();
+
+            let tx_hash = tx.hash();
+
+            subjects
+                .into_iter()
+                .zip(states)
+                .filter_map(|(subject, state)| {
+                    (state.and_then(|x| x.initial_tx) == Some(tx_hash)).then_some(subject)
+                })
+                .collect()
+        }
+
+        pub fn first_mints<D: Domain>(
+            domain: &D,
+            start: BlockSlot,
+            order: Order,
+            needed: usize,
+        ) -> Vec<Vec<u8>> {
+            let iter = domain.archive().get_range(Some(start), None).unwrap();
+
+            let blocks: Box<dyn Iterator<Item = _>> = match order {
+                Order::Asc => Box::new(iter),
+                Order::Desc => Box::new(iter.rev()),
+            };
+
+            let mut found = Vec::new();
+
+            for (_, body) in blocks {
+                let block = MultiEraBlock::decode(&body).unwrap();
+                let txs = block.txs();
+
+                let txs: Box<dyn Iterator<Item = &MultiEraTx<'_>>> = match order {
+                    Order::Asc => Box::new(txs.iter()),
+                    Order::Desc => Box::new(txs.iter().rev()),
+                };
+
+                for tx in txs {
+                    let mut minted = first_minted_subjects(domain, tx);
+
+                    if matches!(order, Order::Desc) {
+                        minted.reverse();
+                    }
+
+                    found.append(&mut minted);
+
+                    if found.len() >= needed {
+                        return found;
+                    }
+                }
+            }
+
+            found
+        }
+    }
+
+    /// The rich mint chain, and the domain behind it for the scan to read.
+    fn first_mint_app() -> (TestApp, ToyDomain) {
+        let mut domain = None;
+        let app = TestApp::new_with_cfg_and_setup(first_mint_chain(), |inner, _| {
+            domain = Some(inner.clone())
+        });
+        (app, domain.expect("setup ran"))
+    }
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
@@ -297,30 +269,64 @@ mod tests {
         assert!(page.is_empty());
     }
 
+    /// Every page in both orders, as the scan the logs replaced answers it,
+    /// over a chain whose first epochs are sealed and whose last are staged.
     #[tokio::test]
-    async fn assets_all_stops_at_scan_budget() {
-        // four blocks minting the same asset: only the first block carries a
-        // first mint, so anything past one asset costs blocks and yields
-        // nothing
-        let app = TestApp::new_with_scan_limit(
-            SyntheticBlockConfig {
-                block_count: 4,
-                txs_per_block: 1,
-                asset_names_by_block: vec!["ONLY".to_string(); 4],
-                ..Default::default()
-            },
-            3,
-        );
+    async fn assets_all_matches_the_first_mint_scan() {
+        let (app, domain) = first_mint_app();
 
-        // a page the scan covers before the budget runs out is served
-        let page = get_assets(&app, "?count=1").await;
-        assert_eq!(page.len(), 1);
+        let sealed = domain
+            .archive()
+            .iter_logs_typed::<FirstMintChunk>(FirstMintChunk::NS, None)
+            .unwrap()
+            .count();
+        let staged = domain
+            .state()
+            .iter_entities_typed::<StagedFirstMint>(StagedFirstMint::NS, None)
+            .unwrap()
+            .count();
+        assert!(sealed > 2, "{sealed} sealed rows");
+        assert!(staged > 0, "nothing staged");
 
-        // a page that would need a fourth block is refused, not truncated
-        let (status, bytes) = app.get_bytes("/assets?count=3").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let body = String::from_utf8_lossy(&bytes);
-        assert!(body.contains("scan limit"), "The response body was {body}.");
+        let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+        let start = chain.epoch_start(chain.first_mary_epoch().unwrap());
+        let total = scan::first_mints(&domain, start, Order::Asc, usize::MAX).len();
+        assert!(total > 300, "{total} first mints");
+
+        for (order, name) in [(Order::Asc, "asc"), (Order::Desc, "desc")] {
+            for count in [1, 7, 100] {
+                for page in 1..=total.div_ceil(count) + 1 {
+                    let skip = (page - 1) * count;
+                    let expected = scan::first_mints(&domain, start, order, skip + count)
+                        .into_iter()
+                        .skip(skip)
+                        .take(count)
+                        .map(hex::encode)
+                        .collect_vec();
+
+                    let query = format!("?order={name}&count={count}&page={page}");
+                    let got = get_assets(&app, &query)
+                        .await
+                        .into_iter()
+                        .map(|x| x.asset)
+                        .collect_vec();
+
+                    assert_eq!(got, expected, "{query}");
+                }
+            }
+        }
+    }
+
+    /// Pages as deep as the chain goes are served: there is no scan to bound.
+    #[tokio::test]
+    async fn assets_all_serves_pages_past_the_scan_limit() {
+        let (app, _) = first_mint_app();
+
+        let page = get_assets(&app, "?count=100&page=4").await;
+        assert!(!page.is_empty());
+
+        let page = get_assets(&app, "?count=100&page=31").await;
+        assert!(page.is_empty());
     }
 
     #[tokio::test]
@@ -329,8 +335,6 @@ mod tests {
         assert_status(&app, "/assets?count=0", StatusCode::BAD_REQUEST).await;
         assert_status(&app, "/assets?page=x", StatusCode::BAD_REQUEST).await;
         assert_status(&app, "/assets?order=sideways", StatusCode::BAD_REQUEST).await;
-        // page * count beyond the default scan limit (3000)
-        assert_status(&app, "/assets?page=31&count=100", StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]

@@ -15,9 +15,9 @@
 //! a re-run on unchanged code is encoding nondeterminism, which is a finding,
 //! never a re-pin.
 //!
-//! Between them these freeze: the twenty media types, the tag string, the
-//! sixteen archive dimension names, the three exact-record kind literals, the
-//! three `log-{ns}` and fourteen `state-{ns}` kind strings — which is where the
+//! Between them these freeze: the twenty-five media types, the tag string, the
+//! seventeen archive dimension names, the three exact-record kind literals, the
+//! five `log-{ns}` and seventeen `state-{ns}` kind strings — which is where the
 //! seventeen namespace strings live now that neither record names one — the
 //! layer header and scope shapes, and the `position`/`parameters` key
 //! spellings, the shard and schema maps included.
@@ -40,7 +40,7 @@ use stelae::{
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 42] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 50] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -49,9 +49,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 42] = [
     ),
     (
         INDEXES,
-        "sha256:be485ff209757934d6336a169d8608b36fdbf11e98ac03a3ff33fd07cc50350c",
-        20,
-        531,
+        "sha256:a792d43a501efd106665c365f4e4281e142c6b9d78c6425176e5b4803ed2ac20",
+        21,
+        561,
     ),
     (
         "log-account-epochs",
@@ -66,8 +66,20 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 42] = [
         94,
     ),
     (
+        "log-first-mints",
+        "sha256:1df740a58937970fa1b3341b2b386162c2b8e11b3198485e1e02e1bd810094f4",
+        2,
+        99,
+    ),
+    (
+        "log-policy-first-mints",
+        "sha256:0dd94be88137115925ecb012f3eb198b6adf198a193a4ff84351b44bcbaa4c4d",
+        2,
+        106,
+    ),
+    (
         "log-stakes",
-        "sha256:e650e8487b5827fc62a14428eeeb637f3d4ade3ba97cb5ec58465393ab503b9b",
+        "sha256:fb2e96db505743866f61225b34ae5ac90f5de8fef4af63e040c2f6d3cc337fb8",
         2,
         94,
     ),
@@ -192,98 +204,134 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 42] = [
         83,
     ),
     (
+        "state-first-mints",
+        "sha256:da427db221427af01284faf774edcdd385a93555e64d3c014dfb46a96340b29e",
+        2,
+        90,
+    ),
+    (
+        "state-first-mints",
+        "sha256:127d945f227857904b93cd411845534e8f32ac94183ff6a5d7584b2e06e87e63",
+        2,
+        90,
+    ),
+    (
         "state-gov",
-        "sha256:81afb0f36d765a73bdfd273069ae00b616911b611938bf5bcce2de8e2e79d1a3",
+        "sha256:a24226344bc49098dd05bd9793b526c2d1a9e9197a6cd8dfe330de50f817481c",
         2,
         82,
     ),
     (
         "state-gov",
-        "sha256:f569b56280287b58f66dc13c1f4c0b2f6895befb01399ec6d2c73e13a8679a97",
+        "sha256:9e0fdf4787c4be1eba09110748602aab30e047f4ef0490d1b298d7505f518f5d",
         2,
         82,
     ),
     (
         "state-pending-mirs",
-        "sha256:c4beb9329a074da55ca94b18af9a53bef30bf0fa9062a0c68a1d5d6139273b34",
+        "sha256:113c0fe6fc088ab6ce78a74659824d2936e7afc1effd5a85a79ba286df66353c",
         2,
         91,
     ),
     (
         "state-pending-mirs",
-        "sha256:aa9be81185789d9d36b652ab2cb8f184333d49f824935124a0f01cdc282268d8",
+        "sha256:71453eb3f5ac8d93bc365bed5cffa7cfca32445f1ec0d1756316f11028b67b6b",
         2,
         91,
     ),
     (
         "state-pending-rewards",
-        "sha256:3e9b83896b45e265c735941d8538ea26df386fcb185d143f206b4876e163f945",
+        "sha256:a233fd258cc3608e538ca46d15fd2a711b552fe7e60d0c18a044e1a9ce78b084",
         2,
         94,
     ),
     (
         "state-pending-rewards",
-        "sha256:e95e6b86a230a65b6b83ff7ccc7f7044ff02631e7e8598c0e77ad04e6c9f9e92",
+        "sha256:7e077dd045b29091691e94ffb7c60b7566a7f94b1e37a3d6c026b6b72a2fb871",
         2,
         94,
     ),
     (
+        "state-policy-first-mints",
+        "sha256:7fbd0b6f497400fa135f14e2b65a8d511c7a8c2fd5b6ed5610aedd9b745b46f5",
+        2,
+        98,
+    ),
+    (
+        "state-policy-first-mints",
+        "sha256:22a147c5b04f0be82b534244cb127ee2bb626ac31d619a4275778a9ab159253c",
+        2,
+        98,
+    ),
+    (
         "state-pools",
-        "sha256:48e77bcf02d086be8582f8629cebd54f61fce7cda146e343d3595e184f25fedd",
+        "sha256:d2715f18880274254aa4e2e587d9208ec7e353baf9ef532bdf8b4f7a9251988b",
         2,
         84,
     ),
     (
         "state-pools",
-        "sha256:01e29dafdf36d602c0802cf51c98b3f6fc0bc5c9f1048f6d01be6578c55bd0bb",
+        "sha256:eaa51b31d33d86947181a8dfa808da9be1331ea0cab070be26fbabecdcb24897",
         2,
         84,
     ),
     (
         "state-proposals",
-        "sha256:ed6dccae2909b2d8220e3e37d3109c3063c9e71a68a9e1679c3af45940c7a530",
+        "sha256:fdda9f8e5c3bf2fb54c97630c36bcf274816396daf3c5f9fe4a950efff576ab8",
         2,
         88,
     ),
     (
         "state-proposals",
-        "sha256:b01d5d3f233967452480859202ed73432e106558f89f873215fed3b12baa6068",
+        "sha256:fb377ebf3aeffcf756fdf16adc183760c727204ddabe71404d3048dd89882a5e",
         2,
         88,
     ),
     (
+        "state-staged-first-mints",
+        "sha256:2ce763a57d3f337f165155a3e779a48847b21d37fe5f09c99e099e5059455b8a",
+        2,
+        98,
+    ),
+    (
+        "state-staged-first-mints",
+        "sha256:a1aea9392eaba811ce3edcc08ea5cd4cb656c5cbb4b3bb914f6388860c9ebffc",
+        2,
+        98,
+    ),
+    (
         "state-stakes",
-        "sha256:481b837172a1d81fd0e3302798fbfbbba987d029f865e61dc2f0daa2ce801f75",
+        "sha256:f31ecdf580fa41d140d14b3d27411c0196721629cccb28b1602bc1e2cace590b",
         2,
         85,
     ),
     (
         "state-stakes",
-        "sha256:12baf607d0160d691bcf8e743fd35cbfa99f16f8a194ff63daecc9dbe9428675",
+        "sha256:30d99b0aa88a7e8b35f1a6c1601535c157f2b5d42f50853391ee596fa5a7ef44",
         2,
         85,
     ),
     (
         "state-utxos",
-        "sha256:c0e71f6801ef23c52e701b4d29df6d58ae8fa60effd13733f726be43570fbaa7",
+        "sha256:20358672a0eea32ac066d5add9f26e80bbbf05eaad06c86b634dfa0ae55841b3",
         2,
         91,
     ),
     (
         "state-utxos",
-        "sha256:657fb8c96c49238b79bb48349af39432ea310f498c49c55aa5b076cf166d5d94",
+        "sha256:0f1a7bb7f70e166575ac8f173f65a0f58d8f531563b45dbe1254697cfc10a563",
         2,
         91,
     ),
     (
         "state-utxos",
-        "sha256:61d7398a24f1c458b5030b44c5677229cef133ffb47c9b6416fecaaacb5adcd6",
+        "sha256:2f55f54d9ad1e7bd1b4419c6508741347865d732aeb817f0785f4bf329f18d19",
         2,
         91,
     ),
     (
         "state-utxos",
-        "sha256:f193e457cf6094ca38250b65ce07d37be4e056b816106a56545d751d30bd8673",
+        "sha256:ce4874d77aeb1e3c553f88c59f010315038b0577302e1c2b8d518a3877b48371",
         2,
         91,
     ),
@@ -297,7 +345,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 42] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:9757563de3f3dd9d07736031aac83f9bcc12de3332f798dc82fe01e1d84c951d";
+    "sha256:1f8b6e02f5c3a03668874e56260e7f2a3ef7a975cf6cbcf2644a2386a11b2bdb";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -499,16 +547,22 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106","kind":"blocks","#,
     r#""mediaType":"application/vnd.dolos.stele.blocks.v1+zstd","records":4,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":167},"#,
-    r#"{"diffId":"sha256:be485ff209757934d6336a169d8608b36fdbf11e98ac03a3ff33fd07cc50350c","kind":"indexes","#,
-    r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":20,"#,
-    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":531},"#,
+    r#"{"diffId":"sha256:a792d43a501efd106665c365f4e4281e142c6b9d78c6425176e5b4803ed2ac20","kind":"indexes","#,
+    r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":21,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":561},"#,
     r#"{"diffId":"sha256:be63f933f87028f2650741a6964a8a0e1bae9a12f73e012f0854a4c568a23055","kind":"log-account-epochs","#,
     r#""mediaType":"application/vnd.dolos.stele.log-account-epochs.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":102},"#,
     r#"{"diffId":"sha256:a42213234eaff408cfbf9cde9f43eb782b41726da3e144d497c576f4cabf37c4","kind":"log-epochs","#,
     r#""mediaType":"application/vnd.dolos.stele.log-epochs.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":94},"#,
-    r#"{"diffId":"sha256:e650e8487b5827fc62a14428eeeb637f3d4ade3ba97cb5ec58465393ab503b9b","kind":"log-stakes","#,
+    r#"{"diffId":"sha256:1df740a58937970fa1b3341b2b386162c2b8e11b3198485e1e02e1bd810094f4","kind":"log-first-mints","#,
+    r#""mediaType":"application/vnd.dolos.stele.log-first-mints.v1+zstd","records":2,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":99},"#,
+    r#"{"diffId":"sha256:0dd94be88137115925ecb012f3eb198b6adf198a193a4ff84351b44bcbaa4c4d","kind":"log-policy-first-mints","#,
+    r#""mediaType":"application/vnd.dolos.stele.log-policy-first-mints.v1+zstd","records":2,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":106},"#,
+    r#"{"diffId":"sha256:fb2e96db505743866f61225b34ae5ac90f5de8fef4af63e040c2f6d3cc337fb8","kind":"log-stakes","#,
     r#""mediaType":"application/vnd.dolos.stele.log-stakes.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":94},"#,
     r#"{"diffId":"sha256:9391e4ef7ca6c4b9413c21365423daa77571e89aaaedc5cfff6dd81655e90e11","kind":"state-account-epochs","#,
@@ -571,52 +625,70 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:ad1c687b6b519d6d922764504a333d91733a98a251c606524532c6b066167648","kind":"state-eras","#,
     r#""mediaType":"application/vnd.dolos.stele.state-eras.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":83},"#,
-    r#"{"diffId":"sha256:81afb0f36d765a73bdfd273069ae00b616911b611938bf5bcce2de8e2e79d1a3","kind":"state-gov","#,
+    r#"{"diffId":"sha256:da427db221427af01284faf774edcdd385a93555e64d3c014dfb46a96340b29e","kind":"state-first-mints","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-first-mints.v1+zstd","records":2,"#,
+    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":90},"#,
+    r#"{"diffId":"sha256:127d945f227857904b93cd411845534e8f32ac94183ff6a5d7584b2e06e87e63","kind":"state-first-mints","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-first-mints.v1+zstd","records":2,"#,
+    r#""scope":{"shard":0},"uncompressedSize":90},"#,
+    r#"{"diffId":"sha256:a24226344bc49098dd05bd9793b526c2d1a9e9197a6cd8dfe330de50f817481c","kind":"state-gov","#,
     r#""mediaType":"application/vnd.dolos.stele.state-gov.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":82},"#,
-    r#"{"diffId":"sha256:f569b56280287b58f66dc13c1f4c0b2f6895befb01399ec6d2c73e13a8679a97","kind":"state-gov","#,
+    r#"{"diffId":"sha256:9e0fdf4787c4be1eba09110748602aab30e047f4ef0490d1b298d7505f518f5d","kind":"state-gov","#,
     r#""mediaType":"application/vnd.dolos.stele.state-gov.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":82},"#,
-    r#"{"diffId":"sha256:c4beb9329a074da55ca94b18af9a53bef30bf0fa9062a0c68a1d5d6139273b34","kind":"state-pending-mirs","#,
+    r#"{"diffId":"sha256:113c0fe6fc088ab6ce78a74659824d2936e7afc1effd5a85a79ba286df66353c","kind":"state-pending-mirs","#,
     r#""mediaType":"application/vnd.dolos.stele.state-pending-mirs.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:aa9be81185789d9d36b652ab2cb8f184333d49f824935124a0f01cdc282268d8","kind":"state-pending-mirs","#,
+    r#"{"diffId":"sha256:71453eb3f5ac8d93bc365bed5cffa7cfca32445f1ec0d1756316f11028b67b6b","kind":"state-pending-mirs","#,
     r#""mediaType":"application/vnd.dolos.stele.state-pending-mirs.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:3e9b83896b45e265c735941d8538ea26df386fcb185d143f206b4876e163f945","kind":"state-pending-rewards","#,
+    r#"{"diffId":"sha256:a233fd258cc3608e538ca46d15fd2a711b552fe7e60d0c18a044e1a9ce78b084","kind":"state-pending-rewards","#,
     r#""mediaType":"application/vnd.dolos.stele.state-pending-rewards.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":94},"#,
-    r#"{"diffId":"sha256:e95e6b86a230a65b6b83ff7ccc7f7044ff02631e7e8598c0e77ad04e6c9f9e92","kind":"state-pending-rewards","#,
+    r#"{"diffId":"sha256:7e077dd045b29091691e94ffb7c60b7566a7f94b1e37a3d6c026b6b72a2fb871","kind":"state-pending-rewards","#,
     r#""mediaType":"application/vnd.dolos.stele.state-pending-rewards.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":94},"#,
-    r#"{"diffId":"sha256:48e77bcf02d086be8582f8629cebd54f61fce7cda146e343d3595e184f25fedd","kind":"state-pools","#,
+    r#"{"diffId":"sha256:7fbd0b6f497400fa135f14e2b65a8d511c7a8c2fd5b6ed5610aedd9b745b46f5","kind":"state-policy-first-mints","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-policy-first-mints.v1+zstd","records":2,"#,
+    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":98},"#,
+    r#"{"diffId":"sha256:22a147c5b04f0be82b534244cb127ee2bb626ac31d619a4275778a9ab159253c","kind":"state-policy-first-mints","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-policy-first-mints.v1+zstd","records":2,"#,
+    r#""scope":{"shard":0},"uncompressedSize":98},"#,
+    r#"{"diffId":"sha256:d2715f18880274254aa4e2e587d9208ec7e353baf9ef532bdf8b4f7a9251988b","kind":"state-pools","#,
     r#""mediaType":"application/vnd.dolos.stele.state-pools.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":84},"#,
-    r#"{"diffId":"sha256:01e29dafdf36d602c0802cf51c98b3f6fc0bc5c9f1048f6d01be6578c55bd0bb","kind":"state-pools","#,
+    r#"{"diffId":"sha256:eaa51b31d33d86947181a8dfa808da9be1331ea0cab070be26fbabecdcb24897","kind":"state-pools","#,
     r#""mediaType":"application/vnd.dolos.stele.state-pools.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":84},"#,
-    r#"{"diffId":"sha256:ed6dccae2909b2d8220e3e37d3109c3063c9e71a68a9e1679c3af45940c7a530","kind":"state-proposals","#,
+    r#"{"diffId":"sha256:fdda9f8e5c3bf2fb54c97630c36bcf274816396daf3c5f9fe4a950efff576ab8","kind":"state-proposals","#,
     r#""mediaType":"application/vnd.dolos.stele.state-proposals.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":88},"#,
-    r#"{"diffId":"sha256:b01d5d3f233967452480859202ed73432e106558f89f873215fed3b12baa6068","kind":"state-proposals","#,
+    r#"{"diffId":"sha256:fb377ebf3aeffcf756fdf16adc183760c727204ddabe71404d3048dd89882a5e","kind":"state-proposals","#,
     r#""mediaType":"application/vnd.dolos.stele.state-proposals.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":88},"#,
-    r#"{"diffId":"sha256:481b837172a1d81fd0e3302798fbfbbba987d029f865e61dc2f0daa2ce801f75","kind":"state-stakes","#,
+    r#"{"diffId":"sha256:2ce763a57d3f337f165155a3e779a48847b21d37fe5f09c99e099e5059455b8a","kind":"state-staged-first-mints","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-staged-first-mints.v1+zstd","records":2,"#,
+    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":98},"#,
+    r#"{"diffId":"sha256:a1aea9392eaba811ce3edcc08ea5cd4cb656c5cbb4b3bb914f6388860c9ebffc","kind":"state-staged-first-mints","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-staged-first-mints.v1+zstd","records":2,"#,
+    r#""scope":{"shard":0},"uncompressedSize":98},"#,
+    r#"{"diffId":"sha256:f31ecdf580fa41d140d14b3d27411c0196721629cccb28b1602bc1e2cace590b","kind":"state-stakes","#,
     r#""mediaType":"application/vnd.dolos.stele.state-stakes.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":85},"#,
-    r#"{"diffId":"sha256:12baf607d0160d691bcf8e743fd35cbfa99f16f8a194ff63daecc9dbe9428675","kind":"state-stakes","#,
+    r#"{"diffId":"sha256:30d99b0aa88a7e8b35f1a6c1601535c157f2b5d42f50853391ee596fa5a7ef44","kind":"state-stakes","#,
     r#""mediaType":"application/vnd.dolos.stele.state-stakes.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":85},"#,
-    r#"{"diffId":"sha256:c0e71f6801ef23c52e701b4d29df6d58ae8fa60effd13733f726be43570fbaa7","kind":"state-utxos","#,
+    r#"{"diffId":"sha256:20358672a0eea32ac066d5add9f26e80bbbf05eaad06c86b634dfa0ae55841b3","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:657fb8c96c49238b79bb48349af39432ea310f498c49c55aa5b076cf166d5d94","kind":"state-utxos","#,
+    r#"{"diffId":"sha256:0f1a7bb7f70e166575ac8f173f65a0f58d8f531563b45dbe1254697cfc10a563","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":1},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:61d7398a24f1c458b5030b44c5677229cef133ffb47c9b6416fecaaacb5adcd6","kind":"state-utxos","#,
+    r#"{"diffId":"sha256:2f55f54d9ad1e7bd1b4419c6508741347865d732aeb817f0785f4bf329f18d19","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:f193e457cf6094ca38250b65ce07d37be4e056b816106a56545d751d30bd8673","kind":"state-utxos","#,
+    r#"{"diffId":"sha256:ce4874d77aeb1e3c553f88c59f010315038b0577302e1c2b8d518a3877b48371","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"shard":1},"uncompressedSize":91},"#,
     r#"{"diffId":"sha256:13f9bbdf676ac47ad7238a52fa525f4413a88335c23d2d567c888abd8dedec80","kind":"digests","#,
@@ -624,8 +696,8 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#""scope":{"lastImmutable":3},"uncompressedSize":250}"#,
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"gov":4,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":0,"pools":1,"proposals":3,"stakes":1,"utxos":1},"#,
-    r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"gov":1,"pending_mirs":1,"pending_rewards":1,"pools":1,"proposals":1,"stakes":1,"utxos":16},"#,
+    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"first-mints":1,"gov":4,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pool-deposit-refunds":0,"pools":1,"proposals":3,"staged-first-mints":1,"stakes":1,"utxos":1},"#,
+    r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"gov":1,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pools":1,"proposals":1,"staged-first-mints":1,"stakes":1,"utxos":16},"#,
     r#""stateEpochs":[4]"#,
     r#"},"position":{"#,
     r#""epoch":7,"network":{"magic":764824073,"name":"mainnet"},"#,
@@ -634,7 +706,7 @@ const CANONICAL_INSCRIPTION: &str = concat!(
 /// Decode one record with the codec its layer kind names, so the streaming pass
 /// exercises every codec rather than only the framing underneath them.
 fn decode_one(kind: &str, record: &[u8]) {
-    // One codec for all six log kinds: they differ in which namespace they
+    // One codec for all five log kinds: they differ in which namespace they
     // carry, never in how a record is written.
     if log_ns_for(kind).is_some() {
         logs::decode(record).unwrap();
@@ -642,7 +714,7 @@ fn decode_one(kind: &str, record: &[u8]) {
         return;
     }
 
-    // And one codec for all fourteen state kinds, for the same reason — the
+    // And one codec for all seventeen state kinds, for the same reason — the
     // namespace it needs is the one the kind names.
     if let Some(ns) = state_ns_for(kind) {
         state::decode(ns, record).unwrap();

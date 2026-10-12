@@ -1,12 +1,12 @@
 //! The closed set of state namespaces a Dolos stele carries.
 //!
-//! ADR-004 defines state as one uniform key-value space: the thirteen entity
+//! ADR-004 defines state as one uniform key-value space: the sixteen entity
 //! namespaces of `dolos_cardano::model::build_schema()` plus [`UTXOS`], which
 //! is the UTxO set wearing the same shape as everything else. That uniformity
 //! is deliberate — it means the format has one state record, and the planned
 //! refactor folding UTxOs into the entity system (#1042) is invisible to it.
 //!
-//! The names are not spelled here. Thirteen of them are read off the entity
+//! The names are not spelled here. Sixteen of them are read off the entity
 //! types' own `FixedNamespace::NS`, and `utxos` is defined here because nothing
 //! else in the tree defines it. A namespace that exists in `build_schema` and
 //! not in [`NAMESPACES`] would be silently dropped from every published stele,
@@ -15,8 +15,8 @@
 
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
-    StakeLog,
+    FirstMintChunk, FixedNamespace, GovState, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PoolState, ProposalState, StagedFirstMint, StakeLog,
 };
 use dolos_core::Namespace;
 
@@ -34,7 +34,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against `build_schema()` directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 14] = [
+pub const NAMESPACES: [Namespace; 17] = [
     AccountEpochLog::NS,
     AccountState::NS,
     AssetState::NS,
@@ -42,11 +42,14 @@ pub const NAMESPACES: [Namespace; 14] = [
     DRepState::NS,
     EpochState::NS,
     EraSummary::NS,
+    FirstMintChunk::NS,
     GovState::NS,
     PendingMirState::NS,
     PendingRewardState::NS,
+    PolicyMintChunk::NS,
     PoolState::NS,
     ProposalState::NS,
+    StagedFirstMint::NS,
     StakeLog::NS,
     UTXOS,
 ];
@@ -68,7 +71,7 @@ pub const NAMESPACES: [Namespace; 14] = [
 /// `committee_auth_archive`, which keeps the committee authorization
 /// histories that the EPOCH rule removes. Kept beside [`NAMESPACES`], in the
 /// same order, and held to it by `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 14] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 17] = [
     (AccountEpochLog::NS, 1),
     (AccountState::NS, 1),
     (AssetState::NS, 1),
@@ -76,11 +79,14 @@ pub const SCHEMA_REVS: [(Namespace, u64); 14] = [
     (DRepState::NS, 1),
     (EpochState::NS, 2),
     (EraSummary::NS, 1),
+    (FirstMintChunk::NS, 1),
     (GovState::NS, 4),
     (PendingMirState::NS, 1),
     (PendingRewardState::NS, 1),
+    (PolicyMintChunk::NS, 1),
     (PoolState::NS, 1),
     (ProposalState::NS, 3),
+    (StagedFirstMint::NS, 1),
     (StakeLog::NS, 1),
     (UTXOS, 1),
 ];
