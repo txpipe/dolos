@@ -18,7 +18,7 @@ use dolos_cardano::model::{
     FirstMintChunk, FixedNamespace, GovState, PendingMirState, PendingRewardState, PolicyMintChunk,
     PoolState, ProposalState, StagedFirstMint, StakeLog,
 };
-use dolos_core::{keys::exact, KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
+use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
 use crate::Error;
 
@@ -96,12 +96,8 @@ pub const SCHEMA_REVS: [(Namespace, u64); 17] = [
 /// Width of a UTxO key: `tx_hash(32) ‖ output_index(4, BE)`.
 pub const UTXO_KEY_LEN: usize = 36;
 
-fn state_key<E: StateEntity>(key: &[u8]) -> Result<(), KeyError> {
-    E::Key::decode_key(key).map(|_| ())
-}
-
-fn log_key<E: LogEntity>(key: &[u8]) -> Result<(), KeyError> {
-    E::Key::decode_key(key).map(|_| ())
+fn exact<K: KeyCodec>(key: &[u8]) -> Result<(), KeyError> {
+    K::decode_key(key).map(|_| ())
 }
 
 /// Refuse a state key that is not one `ns` stores: the exact encoding of the
@@ -111,19 +107,19 @@ fn log_key<E: LogEntity>(key: &[u8]) -> Result<(), KeyError> {
 /// the key kind of the log, the only kind the namespace has.
 pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
     let checked = match ns {
-        AccountState::NS => state_key::<AccountState>(key),
-        AssetState::NS => state_key::<AssetState>(key),
-        DatumState::NS => state_key::<DatumState>(key),
-        DRepState::NS => state_key::<DRepState>(key),
-        EpochState::NS => state_key::<EpochState>(key),
-        EraSummary::NS => state_key::<EraSummary>(key),
-        GovState::NS => state_key::<GovState>(key),
-        PendingMirState::NS => state_key::<PendingMirState>(key),
-        PendingRewardState::NS => state_key::<PendingRewardState>(key),
-        PoolState::NS => state_key::<PoolState>(key),
-        ProposalState::NS => state_key::<ProposalState>(key),
-        StagedFirstMint::NS => state_key::<StagedFirstMint>(key),
-        UTXOS => exact::<UTXO_KEY_LEN>(key).map(|_| ()),
+        AccountState::NS => exact::<<AccountState as StateEntity>::Key>(key),
+        AssetState::NS => exact::<<AssetState as StateEntity>::Key>(key),
+        DatumState::NS => exact::<<DatumState as StateEntity>::Key>(key),
+        DRepState::NS => exact::<<DRepState as StateEntity>::Key>(key),
+        EpochState::NS => exact::<<EpochState as StateEntity>::Key>(key),
+        EraSummary::NS => exact::<<EraSummary as StateEntity>::Key>(key),
+        GovState::NS => exact::<<GovState as StateEntity>::Key>(key),
+        PendingMirState::NS => exact::<<PendingMirState as StateEntity>::Key>(key),
+        PendingRewardState::NS => exact::<<PendingRewardState as StateEntity>::Key>(key),
+        PoolState::NS => exact::<<PoolState as StateEntity>::Key>(key),
+        ProposalState::NS => exact::<<ProposalState as StateEntity>::Key>(key),
+        StagedFirstMint::NS => exact::<<StagedFirstMint as StateEntity>::Key>(key),
+        UTXOS => exact::<[u8; UTXO_KEY_LEN]>(key),
         AccountEpochLog::NS | FirstMintChunk::NS | PolicyMintChunk::NS | StakeLog::NS => {
             return check_log_key(ns, key)
                 .map_err(|_| Error::malformed("state", format!("{ns} key: not a log key")));
@@ -138,11 +134,11 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
 /// the key kind `ns`'s log declares.
 pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
     let checked = match ns {
-        AccountEpochLog::NS => log_key::<AccountEpochLog>(key),
-        EpochState::NS => log_key::<EpochState>(key),
-        FirstMintChunk::NS => log_key::<FirstMintChunk>(key),
-        PolicyMintChunk::NS => log_key::<PolicyMintChunk>(key),
-        StakeLog::NS => log_key::<StakeLog>(key),
+        AccountEpochLog::NS => exact::<<AccountEpochLog as LogEntity>::Key>(key),
+        EpochState::NS => exact::<<EpochState as LogEntity>::Key>(key),
+        FirstMintChunk::NS => exact::<<FirstMintChunk as LogEntity>::Key>(key),
+        PolicyMintChunk::NS => exact::<<PolicyMintChunk as LogEntity>::Key>(key),
+        StakeLog::NS => exact::<<StakeLog as LogEntity>::Key>(key),
         _ => return Err(Error::UnknownNamespace(ns.to_owned())),
     };
 
