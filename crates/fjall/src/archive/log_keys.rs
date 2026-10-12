@@ -20,7 +20,7 @@
 use dolos_core::{LogKey, Namespace};
 
 use crate::{
-    state::entity_keys::{hash_namespace, prefixed, NS_HASH_SIZE},
+    state::entity_keys::{hash_namespace, prefixed, StoredKey, NS_HASH_SIZE},
     Error,
 };
 
@@ -30,15 +30,20 @@ pub use crate::state::entity_keys::{build_range, namespace_end};
 pub const MIN_PREFIXED_LOG_KEY_SIZE: usize = NS_HASH_SIZE + LogKey::SLOT_LEN;
 
 /// Build a log key: `[ns_hash:8][log_key]`
-pub fn build_log_key(ns: Namespace, key: &LogKey) -> Vec<u8> {
+pub fn build_log_key(ns: Namespace, key: &LogKey) -> StoredKey {
     prefixed(ns, key.as_ref())
 }
 
 /// Decode the [`LogKey`] out of a stored key.
 pub fn decode_log_key(key: &[u8]) -> Result<LogKey, Error> {
-    key.get(NS_HASH_SIZE..)
-        .and_then(|log_key| LogKey::from_raw(log_key).ok())
-        .ok_or_else(|| Error::Codec(format!("malformed archive log key of {} bytes", key.len())))
+    let log_key = key.get(NS_HASH_SIZE..).ok_or_else(|| {
+        Error::Codec(format!(
+            "malformed archive log key: no namespace hash in {} bytes",
+            key.len()
+        ))
+    })?;
+
+    LogKey::from_raw(log_key).map_err(|e| Error::Codec(format!("malformed archive log key: {e}")))
 }
 
 /// Build a temporal bound within a namespace: `[ns_hash:8][slot:8]`.
@@ -46,14 +51,14 @@ pub fn decode_log_key(key: &[u8]) -> Result<LogKey, Error> {
 /// Compared lexicographically against stored keys, this 16-byte bound sorts
 /// at or before every key of the namespace whose slot is `>= slot` and after
 /// every key whose slot is `< slot` — the boundary prune and truncate draw.
-pub fn build_temporal_bound(ns: Namespace, slot: u64) -> Vec<u8> {
+pub fn build_temporal_bound(ns: Namespace, slot: u64) -> StoredKey {
     prefixed(ns, &slot.to_be_bytes())
 }
 
 /// Build the inclusive start of a namespace's key range: the bare 8-byte
 /// namespace hash, which sorts before every stored key of the namespace.
-pub fn namespace_start(ns: Namespace) -> Vec<u8> {
-    hash_namespace(ns).to_vec()
+pub fn namespace_start(ns: Namespace) -> StoredKey {
+    StoredKey::from_slice(&hash_namespace(ns))
 }
 
 #[cfg(test)]
@@ -80,7 +85,13 @@ mod tests {
 
     #[test]
     fn short_stored_key_is_an_error() {
-        assert!(decode_log_key(&[0; MIN_PREFIXED_LOG_KEY_SIZE - 1]).is_err());
+        let err = decode_log_key(&[0; NS_HASH_SIZE + 3]).unwrap_err();
+        assert!(
+            err.to_string().contains("key needs 8 bytes, found 3"),
+            "{err}"
+        );
+
+        assert!(decode_log_key(&[0; NS_HASH_SIZE - 1]).is_err());
     }
 
     #[test]

@@ -43,7 +43,7 @@ pub fn write_entity(
     value: &EntityValue,
 ) {
     let prefixed_key = build_entity_key(ns, key);
-    batch.insert(keyspace, prefixed_key, value.as_slice());
+    batch.insert(keyspace, prefixed_key.as_slice(), value.as_slice());
 }
 
 /// Delete an entity from the unified entities keyspace
@@ -54,7 +54,7 @@ pub fn delete_entity(
     key: &EntityKey,
 ) {
     let prefixed_key = build_entity_key(ns, key);
-    batch.remove(keyspace, prefixed_key);
+    batch.remove(keyspace, prefixed_key.as_slice());
 }
 
 /// Lazy streaming iterator over entities in a key range within a namespace.

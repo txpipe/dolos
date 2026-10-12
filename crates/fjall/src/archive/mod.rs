@@ -609,7 +609,11 @@ impl CoreArchiveWriter for ArchiveWriter {
         self.store.check_namespace(ns)?;
 
         let mut batch = self.batch.lock().unwrap();
-        batch.insert(&self.store.logs, build_log_key(ns, key), value.as_slice());
+        batch.insert(
+            &self.store.logs,
+            build_log_key(ns, key).as_slice(),
+            value.as_slice(),
+        );
 
         Ok(())
     }

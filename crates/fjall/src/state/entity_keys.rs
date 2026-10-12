@@ -25,6 +25,7 @@
 use std::ops::Bound;
 
 use dolos_core::{EntityKey, KeyRange, Namespace};
+use smallvec::SmallVec;
 
 use crate::{keys::hash_key, Error};
 
@@ -40,31 +41,34 @@ pub fn hash_namespace(ns: Namespace) -> [u8; NS_HASH_SIZE] {
     hash.to_be_bytes()
 }
 
+/// A stored key, held inline up to a namespace hash, a slot and a 32-byte key.
+pub type StoredKey = SmallVec<[u8; 48]>;
+
 /// `[ns_hash:8][bytes]`
-pub fn prefixed(ns: Namespace, bytes: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(NS_HASH_SIZE + bytes.len());
+pub fn prefixed(ns: Namespace, bytes: &[u8]) -> StoredKey {
+    let mut result = StoredKey::with_capacity(NS_HASH_SIZE + bytes.len());
     result.extend_from_slice(&hash_namespace(ns));
     result.extend_from_slice(bytes);
     result
 }
 
 /// Build entity key: `[ns_hash:8][entity_key]`
-pub fn build_entity_key(ns: Namespace, key: &EntityKey) -> Vec<u8> {
+pub fn build_entity_key(ns: Namespace, key: &EntityKey) -> StoredKey {
     prefixed(ns, key.as_ref())
 }
 
 /// The exclusive end of a namespace: the successor of its hash, which sorts
 /// after every key of the namespace and before every key of the next.
 /// Unbounded only for the all-`0xff` hash.
-pub fn namespace_end(ns: Namespace) -> Bound<Vec<u8>> {
+pub fn namespace_end(ns: Namespace) -> Bound<StoredKey> {
     match dolos_core::keys::successor(&hash_namespace(ns)) {
-        Some(end) => Bound::Excluded(end.to_vec()),
+        Some(end) => Bound::Excluded(StoredKey::from_slice(&end)),
         None => Bound::Unbounded,
     }
 }
 
 /// The stored bounds of `range` within a namespace.
-pub fn build_range(ns: Namespace, range: &KeyRange) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+pub fn build_range(ns: Namespace, range: &KeyRange) -> (Bound<StoredKey>, Bound<StoredKey>) {
     let start = Bound::Included(prefixed(ns, &range.start));
 
     let end = match &range.end {
@@ -164,9 +168,8 @@ mod tests {
         assert!(range.contains(&empty));
         assert!(range.contains(&long));
 
-        let next = dolos_core::keys::successor(&hash_namespace(ns))
-            .unwrap()
-            .to_vec();
+        let next =
+            StoredKey::from_slice(&dolos_core::keys::successor(&hash_namespace(ns)).unwrap());
         assert!(!range.contains(&next));
     }
 }
