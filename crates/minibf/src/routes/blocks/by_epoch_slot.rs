@@ -8,7 +8,7 @@ use dolos_core::Domain;
 
 use crate::{error::Error, routes::parse_path_number, Facade};
 
-use super::{main_block_at_slot, single_block_content, tip_block};
+use super::{build_block_model, main_block_at_slot, tip_block};
 
 /// Dolos stores blocks by absolute slot, so the epoch-relative pair is
 /// converted with the chain summary first.
@@ -51,7 +51,7 @@ where
     let block = main_block_at_slot(&domain, absolute_slot)?.ok_or(StatusCode::NOT_FOUND)?;
 
     let tip = tip_block(&domain)?;
-    let model = single_block_content(&domain, &block, &tip, &chain).await?;
+    let model = build_block_model(&domain, &block, &tip, &chain).await?;
 
     Ok(Json(model))
 }

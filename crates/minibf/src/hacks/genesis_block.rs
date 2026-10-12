@@ -107,23 +107,35 @@ pub fn genesis_block<D: Domain>(domain: &Facade<D>) -> Result<Option<BlockConten
     }))
 }
 
-/// Blockfrost links the first real block back to the genesis block.
-pub fn set_genesis_previous_block<D: Domain>(domain: &Facade<D>, block: &mut BlockContent) {
-    if block.height.is_some_and(|x| x > 1) {
-        return;
+/// Whether `block` opens the chain: its header links back to the genesis
+/// block or, as a Shelley header may, to no block at all.
+pub fn follows_genesis<D: Domain>(
+    domain: &Facade<D>,
+    block: &MultiEraBlock,
+) -> Result<bool, StatusCode> {
+    match block.header().previous_hash() {
+        Some(previous) => is_genesis_hash(domain, previous.as_ref()),
+        None => Ok(true),
+    }
+}
+
+/// Blockfrost links the first real block back to the genesis block, which the
+/// archive never holds. Any other block the archive lacks was pruned, and the
+/// block after it keeps no `previous_block`.
+pub fn set_genesis_previous_block<D: Domain>(
+    domain: &Facade<D>,
+    block: &MultiEraBlock,
+    model: &mut BlockContent,
+) -> Result<(), StatusCode> {
+    if model.previous_block.is_some() || !follows_genesis(domain, block)? {
+        return Ok(());
     }
 
-    let Some(genesis) = genesis_for_domain(domain) else {
-        return;
-    };
-
-    if block.hash == genesis.hash {
-        return;
+    if let Some(genesis) = genesis_for_domain(domain) {
+        model.previous_block = Some(genesis.hash.to_string());
     }
 
-    if block.previous_block.is_none() {
-        block.previous_block = Some(genesis.hash.to_string());
-    }
+    Ok(())
 }
 
 /// A transaction of the genesis block: one genesis output, under the hash the

@@ -40,19 +40,20 @@ where
     // walking back, the page starts `from` blocks before the reference block
     // and the genesis block closes the chain
     let (bodies, reaches_genesis) = {
-        let curr = MultiEraBlock::decode(&curr).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let mut iter = blocks_before(&domain, &curr)?;
+        let block = MultiEraBlock::decode(&curr).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut iter = blocks_before(&domain, &block)?;
 
         let from = pagination.from();
 
         // key-only skip; the block before the page tells whether it starts at all
-        let starts = match from {
-            0 => true,
+        let skipped = match from {
+            0 => None,
             _ => {
                 iter.skip_backward(from - 1);
-                iter.next_back().is_some()
+                iter.next_back().map(|(_, body)| body)
             }
         };
+        let starts = from == 0 || skipped.is_some();
 
         match starts {
             true => {
@@ -61,7 +62,17 @@ where
                     .take(pagination.count)
                     .map(|(_, body)| body)
                     .collect();
-                let reaches_genesis = bodies.len() < pagination.count;
+
+                // a short page closes the chain only when the oldest block
+                // reached follows genesis; `sync.max_history` may have pruned
+                // the blocks before it instead
+                let reaches_genesis = bodies.len() < pagination.count && {
+                    let oldest = bodies.last().or(skipped.as_ref()).unwrap_or(&curr);
+                    let oldest = MultiEraBlock::decode(oldest)
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                    genesis::follows_genesis(&domain, &oldest)?
+                };
 
                 (bodies, reaches_genesis)
             }
@@ -76,10 +87,6 @@ where
         .iter()
         .map(|body| build_block_model(&domain, body, &tip, &chain));
     let mut output = try_join_all(futures).await?;
-
-    for block in output.iter_mut() {
-        genesis::set_genesis_previous_block(&domain, block);
-    }
 
     if reaches_genesis {
         if let Some(genesis) = genesis::genesis_block(&domain).map_err(Error::Code)? {
@@ -208,6 +215,25 @@ mod tests {
         assert_eq!(hashes(&blocks), [genesis]);
         let blocks = get_blocks(&chain.app, &page(3)).await;
         assert!(blocks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn blocks_previous_stops_at_the_archive_cutoff() {
+        // epoch 0 pruned, boundary block 1 the oldest block retained
+        let chain = pruned_mainnet_byron_chain(21600);
+        let main = |slot: u64| chain.main[&slot].hash.as_str();
+
+        // a short page ends with what the archive holds, not with genesis
+        let path = format!("/blocks/{}/previous", main(21601));
+        let blocks = get_blocks(&chain.app, &path).await;
+        assert_eq!(hashes(&blocks), [chain.ebb_1.hash.as_str(), main(21600)]);
+
+        // nor does a page past the cutoff hold it
+        let path = format!("/blocks/{}/previous?count=1&page=3", main(21601));
+        assert!(get_blocks(&chain.app, &path).await.is_empty());
+
+        let path = format!("/blocks/{}/previous", chain.ebb_1.hash);
+        assert!(get_blocks(&chain.app, &path).await.is_empty());
     }
 
     #[tokio::test]

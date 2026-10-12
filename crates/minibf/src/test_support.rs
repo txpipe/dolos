@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -8,12 +9,12 @@ use axum::{
     http::{HeaderMap, Method, Request, StatusCode},
     Router,
 };
-use dolos_cardano::periods::stats::TOTALS;
+use dolos_cardano::{indexes::CardanoIndexDeltaBuilder, periods::stats::TOTALS};
 use dolos_core::{
     config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig, RoutePrefix},
     import::ImportExt as _,
-    ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _, CacheStore as _, ChainPoint, Domain,
-    RawBlock, StateStore,
+    ArchiveStore as _, ArchiveWriter as _, CacheStore as _, ChainPoint, Domain, RawBlock,
+    StateStore,
 };
 use dolos_testing::{
     synthetic::{
@@ -599,9 +600,10 @@ impl TestApp {
     }
 
     /// App over a fresh domain for `genesis` whose archive holds `blocks`,
-    /// written and indexed the way the roll pipeline files them, a Byron
-    /// epoch-boundary block under its chain difficulty included. No ledger
-    /// logic runs over them, so this is for routes that read the archive only.
+    /// written and indexed by the pipeline's own index builder, so a Byron
+    /// epoch-boundary block is filed as in production: by hash and slot, under
+    /// no number. No ledger logic runs over them, so this is for routes that
+    /// read the archive only.
     pub fn new_with_archived_blocks(genesis: dolos_core::Genesis, blocks: &[RawBlock]) -> Self {
         let domain = ToyDomain::new_with_genesis_and_config(
             Arc::new(genesis),
@@ -611,24 +613,19 @@ impl TestApp {
         );
 
         let writer = domain.archive().start_writer().expect("archive writer");
-        let mut deltas = Vec::new();
+        let mut indexes = CardanoIndexDeltaBuilder::new();
 
         for raw in blocks {
             let block = MultiEraBlock::decode(raw).expect("archived block decodes");
             let point = ChainPoint::Specific(block.slot(), block.hash());
 
             writer.apply(&point, raw).expect("archive block");
-
-            deltas.push(ArchiveIndexDelta {
-                slot: block.slot(),
-                block_hash: block.hash().to_vec(),
-                block_number: Some(block.number()),
-                tx_hashes: block.txs().iter().map(|tx| tx.hash().to_vec()).collect(),
-                tags: Vec::new(),
-            });
+            indexes.index_block(&block, &HashMap::new());
         }
 
-        writer.apply_index(&deltas).expect("index archived blocks");
+        writer
+            .apply_index(&indexes.build())
+            .expect("index archived blocks");
         writer.commit().expect("commit archived blocks");
 
         let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
