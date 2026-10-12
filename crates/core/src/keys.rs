@@ -212,13 +212,26 @@ impl fmt::Debug for KeyRange {
     }
 }
 
-/// A range of state keys of kind `K`.
-pub struct RangeOf<K> {
+/// Marks a [`Ranged`] over state entity keys.
+pub enum StateKeys {}
+
+/// Marks a [`Ranged`] over archive log keys, by slot and then the part after
+/// it.
+pub enum LogKeys {}
+
+/// A typed range over the keys of kind `K` in the key space `S`.
+pub struct Ranged<K, S> {
     raw: KeyRange,
-    _key: PhantomData<fn() -> K>,
+    _key: PhantomData<fn() -> (K, S)>,
 }
 
-impl<K: KeyCodec> RangeOf<K> {
+/// A range of state keys of kind `K`.
+pub type RangeOf<K> = Ranged<K, StateKeys>;
+
+/// A range of log keys whose part after the slot is of kind `K`.
+pub type LogRangeOf<K> = Ranged<K, LogKeys>;
+
+impl<K: KeyCodec, S> Ranged<K, S> {
     fn new(raw: KeyRange) -> Self {
         Self {
             raw,
@@ -226,11 +239,21 @@ impl<K: KeyCodec> RangeOf<K> {
         }
     }
 
-    /// Every key of the kind.
+    /// Every key of the namespace.
     pub fn all() -> Self {
         Self::new(KeyRange::all())
     }
 
+    pub fn raw(&self) -> &KeyRange {
+        &self.raw
+    }
+
+    pub fn into_raw(self) -> KeyRange {
+        self.raw
+    }
+}
+
+impl<K: KeyCodec> Ranged<K, StateKeys> {
     /// Every key that starts with `prefix`.
     pub fn prefix<P: KeyPrefix<K>>(prefix: &P) -> Self {
         Self::new(KeyRange::prefix(&encode(prefix)))
@@ -259,50 +282,9 @@ impl<K: KeyCodec> RangeOf<K> {
     pub fn contains(&self, key: &K) -> bool {
         self.raw.contains(&encode(key))
     }
-
-    pub fn raw(&self) -> &KeyRange {
-        &self.raw
-    }
-
-    pub fn into_raw(self) -> KeyRange {
-        self.raw
-    }
 }
 
-impl<K> Clone for RangeOf<K> {
-    fn clone(&self) -> Self {
-        Self {
-            raw: self.raw.clone(),
-            _key: PhantomData,
-        }
-    }
-}
-
-impl<K> fmt::Debug for RangeOf<K> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.raw.fmt(f)
-    }
-}
-
-/// A range of log keys whose part after the slot is of kind `K`.
-pub struct LogRangeOf<K> {
-    raw: KeyRange,
-    _key: PhantomData<fn() -> K>,
-}
-
-impl<K: KeyCodec> LogRangeOf<K> {
-    fn new(raw: KeyRange) -> Self {
-        Self {
-            raw,
-            _key: PhantomData,
-        }
-    }
-
-    /// Every row of the namespace.
-    pub fn all() -> Self {
-        Self::new(KeyRange::all())
-    }
-
+impl<K: KeyCodec> Ranged<K, LogKeys> {
     /// Every row at `slot`.
     pub fn slot(slot: BlockSlot) -> Self {
         Self::new(KeyRange::prefix(&slot.to_be_bytes()))
@@ -320,17 +302,9 @@ impl<K: KeyCodec> LogRangeOf<K> {
         prefix.encode_key(&mut bytes);
         Self::new(KeyRange::prefix(&bytes))
     }
-
-    pub fn raw(&self) -> &KeyRange {
-        &self.raw
-    }
-
-    pub fn into_raw(self) -> KeyRange {
-        self.raw
-    }
 }
 
-impl<K> Clone for LogRangeOf<K> {
+impl<K, S> Clone for Ranged<K, S> {
     fn clone(&self) -> Self {
         Self {
             raw: self.raw.clone(),
@@ -339,7 +313,7 @@ impl<K> Clone for LogRangeOf<K> {
     }
 }
 
-impl<K> fmt::Debug for LogRangeOf<K> {
+impl<K, S> fmt::Debug for Ranged<K, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.raw.fmt(f)
     }

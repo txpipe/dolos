@@ -66,7 +66,7 @@ The project follows a modular workspace architecture with clear separation of co
 - **Purpose**: Core traits, types, and abstractions common to all Dolos components
 - **Key Modules**:
   - `state`: `StateStore` and `StateWriter` traits, entity system
-  - `keys`: typed key codecs (`KeyCodec`, `FixedKey`, `KeyPrefix`), the variable-length `EntityKey` and `LogKey`, and the ranges over them (`KeyRange`, `RangeOf`, `LogRangeOf`)
+  - `keys`: typed key codecs (`KeyCodec`, `FixedKey`, `KeyPrefix`), the variable-length `EntityKey` and `LogKey`, and the ranges over them (`KeyRange`, and the typed `Ranged` behind `RangeOf` and `LogRangeOf`)
   - `archive`: `ArchiveStore` and `ArchiveWriter` traits, `SlotTags` for indexing metadata
   - `indexes`: the chain-agnostic index record types (`Tag`, `UtxoIndexDelta`, `ArchiveIndexDelta`, `TagRecord`, `ExactRecord`, `IndexRecord`) the state and archive stores consume
   - `wal`: `WalStore` trait for write-ahead logging

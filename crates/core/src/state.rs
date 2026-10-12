@@ -329,11 +329,16 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     }
 
     fn read_entity_typed<E: StateEntity>(&self, key: &E::Key) -> Result<Option<E>, StateError> {
-        let raw = self.read_entities_typed(&[key])?;
+        let raw = self.read_entities(E::NS, &[&EntityKey::of(key)])?;
 
-        let first = raw.into_iter().next().unwrap();
-
-        Ok(first)
+        raw.into_iter()
+            .next()
+            .unwrap()
+            .map(|v| {
+                E::decode_entity(E::NS, &v)
+                    .map_err(|x| StateError::EntityDecodingError(x.to_string()))
+            })
+            .transpose()
     }
 
     fn iter_entities_typed<E: StateEntity>(
