@@ -21,3 +21,29 @@ impl Default for ClockResponse {
 pub async fn clock() -> Result<Json<ClockResponse>, StatusCode> {
     Ok(Json(ClockResponse::default()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TestApp;
+
+    #[tokio::test]
+    async fn health_clock_happy_path() {
+        let app = TestApp::new();
+        let now = || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        };
+
+        let before = now();
+        let (status, bytes) = app.get_bytes("/health/clock").await;
+        let after = now();
+        assert_eq!(status, StatusCode::OK);
+
+        // Unix time in milliseconds, taken while the request ran
+        let clock: ClockResponse = serde_json::from_slice(&bytes).expect("failed to parse clock");
+        assert!((before..=after).contains(&clock.server_time));
+    }
+}
