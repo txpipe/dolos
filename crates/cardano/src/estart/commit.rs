@@ -6,25 +6,25 @@
 //! the result is written immediately. Per-shard commits flush
 //! `EpochState`'s `EStartProgress` and the shard's account-range
 //! slice; the finalize commit flushes pool / drep / proposal transitions,
-//! the closing `EpochTransition`, optional era-summary writes, archive
-//! logs, and advances the cursor.
+//! the closing `EpochTransition` and optional era-summary writes, and
+//! advances the cursor.
 
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain,
-    Entity, EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
+    save_entity_at, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain, EntityDelta as _,
+    NsKey, RangeOf, StateEntity, StateStore, StateWriter,
 };
 use tracing::{debug, instrument, trace, warn};
 
 use crate::{
-    forks, AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace,
+    forks, AccountKey, AccountState, CardanoEntity, DRepState, EpochState, EraProtocol, EraSummary,
     GovState, PoolState, ProposalState,
 };
 
 /// Era transition data collected from state.
 struct EraTransitionData {
-    prev_key: EntityKey,
+    prev_key: EraProtocol,
     prev_summary: EraSummary,
-    new_key: EntityKey,
+    new_key: EraProtocol,
     new_summary: EraSummary,
 }
 
@@ -43,10 +43,7 @@ impl super::WorkContext {
 
         tracing::info!(from=%transition.prev_version, to=%transition.new_version, "era transition detected");
 
-        let previous = state.read_entity_typed::<EraSummary>(
-            EraSummary::NS,
-            &EntityKey::from(transition.prev_version),
-        )?;
+        let previous = state.read_entity_typed::<EraSummary>(&transition.prev_version)?;
 
         let Some(mut previous) = previous else {
             return Err(BrokenInvariant::BadBootstrap.into());
@@ -65,9 +62,9 @@ impl super::WorkContext {
         };
 
         Ok(Some(EraTransitionData {
-            prev_key: EntityKey::from(transition.prev_version),
+            prev_key: transition.prev_version,
             prev_summary: previous,
-            new_key: EntityKey::from(transition.new_version),
+            new_key: transition.new_version,
             new_summary: new,
         }))
     }
@@ -80,22 +77,20 @@ impl super::WorkContext {
         &mut self,
         state: &D::State,
         writer: &<D::State as StateStore>::Writer,
-        range: Option<std::ops::Range<dolos_core::EntityKey>>,
+        range: Option<RangeOf<E::Key>>,
     ) -> Result<(), ChainError>
     where
         D: Domain,
-        E: Entity + FixedNamespace + Into<CardanoEntity>,
+        E: StateEntity + Into<CardanoEntity>,
     {
-        let records = state.iter_entities_typed::<E>(E::NS, range)?;
+        let records = state.iter_entities_typed::<E>(range)?;
 
         for record in records {
             let (entity_id, entity) = record?;
+            let key = NsKey::of::<E>(&entity_id);
 
             // Check if this entity has deltas to apply
-            let to_apply = self
-                .deltas
-                .entities
-                .remove(&NsKey::from((E::NS, entity_id.clone())));
+            let to_apply = self.deltas.entities.remove(&key);
 
             if let Some(to_apply) = to_apply {
                 let mut entity: Option<CardanoEntity> = Some(entity.into());
@@ -105,9 +100,9 @@ impl super::WorkContext {
                 }
 
                 // Write immediately - don't collect!
-                writer.save_entity_typed(E::NS, &entity_id, entity.as_ref())?;
+                save_entity_at(writer, &key, entity.as_ref())?;
             } else {
-                trace!(ns = E::NS, key = %entity_id, "no deltas for entity");
+                trace!(%key, "no deltas for entity");
             }
         }
 
@@ -116,23 +111,19 @@ impl super::WorkContext {
 
     /// Commit a single per-shard run: stream-and-apply per-account snapshot
     /// transitions for the shard's key ranges, then commit the
-    /// `EStartProgress` delta against `EpochState`. Archive logs
-    /// (if any) are flushed too — the start-of-epoch temporal key is
-    /// shared across shards.
+    /// `EStartProgress` delta against `EpochState`.
     ///
     /// **Does not advance the cursor.** Cursor moves only in
     /// `commit_finalize`.
-    #[instrument(skip(self, state, archive))]
+    #[instrument(skip(self, state))]
     pub fn commit_shard<D: Domain>(
         &mut self,
         state: &D::State,
-        archive: &D::Archive,
-        ranges: Vec<std::ops::Range<EntityKey>>,
+        ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<(), ChainError> {
         debug!("committing estart changes");
 
         let writer = state.start_writer()?;
-        let archive_writer = archive.start_writer()?;
 
         // Stream accounts in this shard's ranges only (one per
         // StakeCredential variant). Each call drains the matching deltas
@@ -146,30 +137,19 @@ impl super::WorkContext {
         self.deltas
             .apply_singleton::<EpochState, _>(state, &writer)?;
 
-        // Archive logs — share the start-of-epoch temporal key across shards.
-        let start_of_epoch = self.chain_summary.epoch_start(self.starting_epoch_no());
-        let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
-
-        debug!(log_count = self.logs.len(), "writing shard archive logs");
-        for (entity_key, log) in self.logs.drain(..) {
-            let log_key = LogKey::from((temporal_key.clone(), entity_key));
-            archive_writer.write_log_typed(&log_key, &log)?;
-        }
-
         if !self.deltas.entities.is_empty() {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted shard deltas");
         }
 
         writer.commit()?;
-        archive_writer.commit()?;
 
         debug!("estart commit complete");
         Ok(())
     }
 
     /// Commit the finalize half: pool / drep / proposal transitions + the
-    /// closing `EpochTransition` + (optional) era-summary writes + archive
-    /// logs + cursor advance.
+    /// closing `EpochTransition` + (optional) era-summary writes + cursor
+    /// advance.
     ///
     /// `AccountState` is intentionally **not** streamed here — per-account
     /// snapshot transitions were committed by the preceding per-shard
@@ -184,7 +164,6 @@ impl super::WorkContext {
     pub fn commit_finalize<D: Domain>(
         &mut self,
         state: &D::State,
-        archive: &D::Archive,
         slot: BlockSlot,
     ) -> Result<(), ChainError> {
         debug!("committing estart finalize changes");
@@ -209,12 +188,7 @@ impl super::WorkContext {
         // Collect era transition data first (only 1-2 entities, not a memory concern)
         let era_transition = self.collect_era_transition(state)?;
 
-        // Prepare archive logs
-        let start_of_epoch = self.chain_summary.epoch_start(self.starting_epoch_no());
-        let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
-
         let writer = state.start_writer()?;
-        let archive_writer = archive.start_writer()?;
 
         // Skip AccountState — committed earlier by per-shard runs.
 
@@ -260,14 +234,6 @@ impl super::WorkContext {
                 .write_entity_typed::<EraSummary>(&transition.new_key, &transition.new_summary)?;
         }
 
-        // Write archive logs (accumulated during compute_global_deltas, much smaller
-        // than entities)
-        debug!(log_count = self.logs.len(), "writing archive logs");
-        for (entity_key, log) in self.logs.drain(..) {
-            let log_key = LogKey::from((temporal_key.clone(), entity_key));
-            archive_writer.write_log_typed(&log_key, &log)?;
-        }
-
         // Verify all deltas were processed
         if !self.deltas.entities.is_empty() {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted deltas");
@@ -276,9 +242,7 @@ impl super::WorkContext {
         // Set cursor — only in finalize, never in shards.
         writer.set_cursor(ChainPoint::Slot(slot))?;
 
-        // Commit both writers atomically
         writer.commit()?;
-        archive_writer.commit()?;
 
         debug!("estart finalize commit complete");
 
@@ -291,9 +255,7 @@ mod tests {
     use dolos_core::{Domain as _, StateStore as _};
     use dolos_testing::toy_domain::ToyDomain;
 
-    use crate::{
-        gov_from_conway_genesis, ChainSummary, EraProtocol, GovGenesisInit, SingletonEntity as _,
-    };
+    use crate::{gov_from_conway_genesis, ChainSummary, EraProtocol, GovGenesisInit};
 
     use super::*;
 
@@ -305,15 +267,11 @@ mod tests {
             genesis: domain.genesis(),
             avvm_reclamation: Default::default(),
             deltas: Default::default(),
-            logs: Default::default(),
         }
     }
 
     fn read_gov(domain: &ToyDomain) -> Option<GovState> {
-        domain
-            .state()
-            .read_entity_typed::<GovState>(GovState::NS, &GovState::singleton_key())
-            .unwrap()
+        domain.state().read_entity_typed::<GovState>(&()).unwrap()
     }
 
     /// `GovGenesisInit` applied through the singleton path activates the
@@ -327,7 +285,7 @@ mod tests {
         // inactive state a chain crossing Chang would carry
         let writer = state.start_writer().unwrap();
         writer
-            .write_entity_typed(&GovState::singleton_key(), &GovState::default())
+            .write_entity_typed(&(), &GovState::default())
             .unwrap();
         writer.commit().unwrap();
         assert_eq!(read_gov(&domain), Some(GovState::default()));

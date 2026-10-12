@@ -1,7 +1,7 @@
-use dolos_core::{BlockSlot, ChainError, Domain, LogKey, StateStore, TemporalKey};
+use dolos_core::{BlockSlot, ChainError, Domain, StateStore};
 use pallas::ledger::primitives::Epoch;
 
-use crate::{model::EraSummary, EraBoundary, EraProtocol, FixedNamespace as _};
+use crate::{model::EraSummary, EraBoundary, EraProtocol};
 
 pub type EpochSlot = u32;
 
@@ -246,13 +246,12 @@ impl ChainSummary {
 }
 
 pub fn load_era_summary<D: Domain>(state: &D::State) -> Result<ChainSummary, ChainError> {
-    let eras = state.iter_entities_typed(EraSummary::NS, None)?;
+    let eras = state.iter_entities_typed::<EraSummary>(None)?;
 
     let mut chain = ChainSummary::default();
 
     for result in eras {
-        let (key, era) = result?;
-        let protocol = EraProtocol::from(key);
+        let (protocol, era) = result?;
         chain.append_era(protocol.into(), era);
     }
 
@@ -260,37 +259,28 @@ pub fn load_era_summary<D: Domain>(state: &D::State) -> Result<ChainSummary, Cha
 }
 
 pub fn load_chain_summary_from_state(state: &impl StateStore) -> Result<ChainSummary, ChainError> {
-    let eras = state.iter_entities_typed(EraSummary::NS, None)?;
+    let eras = state.iter_entities_typed::<EraSummary>(None)?;
 
     let mut chain = ChainSummary::default();
 
     for result in eras {
-        let (key, era) = result?;
-        let protocol = EraProtocol::from(key);
+        let (protocol, era) = result?;
         chain.append_era(protocol.into(), era);
     }
 
     Ok(chain)
 }
 
+/// The slots that start `start_epoch` and `end_epoch`, and, when both are
+/// given, the half-open slot range between them that bounds a log scan.
 pub fn log_epoch_range_to_key_range(
     summary: &ChainSummary,
     start_epoch: Option<u64>,
     end_epoch: Option<u64>,
-) -> (Option<u64>, Option<u64>, Option<std::ops::Range<LogKey>>) {
+) -> (Option<u64>, Option<u64>, Option<std::ops::Range<BlockSlot>>) {
     let start_slot = start_epoch.map(|epoch| summary.epoch_start(epoch));
     let end_slot = end_epoch.map(|epoch| summary.epoch_start(epoch));
-    let range = match (start_slot, end_slot) {
-        (Some(start), Some(end)) => {
-            let start_key = LogKey::from(TemporalKey::from(start));
-            let end_key = LogKey::from(TemporalKey::from(end));
-            Some(std::ops::Range {
-                start: start_key,
-                end: end_key,
-            })
-        }
-        _ => None,
-    };
+    let range = start_slot.zip(end_slot).map(|(start, end)| start..end);
 
     (start_slot, end_slot, range)
 }
@@ -298,14 +288,11 @@ pub fn log_epoch_range_to_key_range(
 pub fn load_active_era<D: Domain>(
     state: &D::State,
 ) -> Result<(EraProtocol, EraSummary), ChainError> {
-    let eras = state.iter_entities_typed::<EraSummary>(EraSummary::NS, None)?;
+    let eras = state.iter_entities_typed::<EraSummary>(None)?;
 
     match eras.last() {
         Some(x) => match x {
-            Ok((key, summary)) => {
-                let protocol = EraProtocol::from(key);
-                Ok((protocol, summary))
-            }
+            Ok((protocol, summary)) => Ok((protocol, summary)),
             Err(_) => Err(ChainError::EraNotFound),
         },
         None => Err(ChainError::EraNotFound),

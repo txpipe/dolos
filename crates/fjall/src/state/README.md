@@ -51,12 +51,14 @@ Value: [era:2][cbor:...]
 All entity types share a single keyspace with namespace hash prefixes:
 
 ```
-Key:   [ns_hash:8][entity_key:32]  (40 bytes)
+Key:   [ns_hash:8][entity_key:var]
 Value: CBOR-encoded entity data
 ```
 
 - `ns_hash`: 8-byte xxh3 hash of namespace string (e.g., "accounts", "pools")
-- `entity_key`: 32-byte entity key (typically a hash or structured identifier)
+- `entity_key`: the namespace's typed key, of whatever length its kind has — empty for a singleton, 28 bytes for a pool, 36 for a proposal (decision 0051)
+
+A range over a namespace starts at `ns_hash ‖ start` and ends at `ns_hash ‖ end`, or at the successor of `ns_hash` when the range is open. A stored key shorter than the namespace hash is an error from the iterator, never skipped.
 
 ### Tags Keyspace (`state-tags`)
 

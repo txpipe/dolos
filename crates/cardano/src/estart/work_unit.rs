@@ -7,7 +7,8 @@
 //! (`AccountTransition`), and emits `EStartProgress` to advance
 //! `EpochState.estart_progress`.
 //!
-//! After the per-shard loop, `finalize()` runs the global "Estart" pass:
+//! After the per-shard loop, `finalize()` seals the period logs of every
+//! immutable epoch (`crate::periods`), then runs the global "Estart" pass:
 //! pool / drep / proposal snapshot transitions, nonce transition, pot
 //! recalculation (`EpochTransition`), era transitions (if protocol version
 //! changes), and the cursor advance. The cursor moves only here, so a
@@ -26,7 +27,7 @@ use tracing::{debug, info};
 use crate::{
     estart::{AvvmReclamation, WorkContext},
     load_epoch,
-    shard::{shard_key_ranges, ACCOUNT_SHARDS},
+    shard::ACCOUNT_SHARDS,
     CardanoLogic, EpochState,
 };
 
@@ -136,7 +137,7 @@ where
     }
 
     fn load(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
-        let ranges = shard_key_ranges(shard_index, self.total_shards);
+        let ranges = crate::AccountKey::shard_ranges(shard_index, self.total_shards);
 
         debug!(
             slot = self.slot,
@@ -172,14 +173,14 @@ where
     }
 
     fn commit_state(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
-        let ranges = shard_key_ranges(shard_index, self.total_shards);
+        let ranges = crate::AccountKey::shard_ranges(shard_index, self.total_shards);
 
         let context = self
             .context
             .as_mut()
             .ok_or_else(|| DomainError::Internal("estart context not loaded".into()))?;
 
-        context.commit_shard::<D>(domain.state(), domain.archive(), ranges)?;
+        context.commit_shard::<D>(domain.state(), ranges)?;
         Ok(())
     }
 
@@ -194,7 +195,15 @@ where
 
         info!(epoch = context.starting_epoch_no(), "starting epoch");
 
-        context.commit_finalize::<D>(domain.state(), domain.archive(), self.slot)?;
+        crate::periods::seal_staged::<D>(
+            domain.state(),
+            domain.archive(),
+            &context.chain_summary,
+            &self.genesis,
+            context.starting_epoch_no(),
+        )?;
+
+        context.commit_finalize::<D>(domain.state(), self.slot)?;
 
         // Replace the per-shard context with the finalize-phase
         // WorkContext so post-finalize introspection (e.g. `ended_state`

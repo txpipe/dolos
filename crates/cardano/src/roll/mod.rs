@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
-    ChainError, Domain, EntityKey, Genesis, InvariantViolation, StateError, StateStore as _,
-    TxOrder, TxoRef,
+    ChainError, Domain, Genesis, InvariantViolation, RangeOf, StateError, StateStore as _, TxOrder,
+    TxoRef,
 };
 use pallas::{
     codec::utils::KeepRaw,
@@ -18,7 +18,7 @@ use tracing::{debug, instrument};
 
 use crate::{
     load_effective_pparams, load_gov, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor,
-    utxoset, Cache, DRepState, FixedNamespace as _, PParamsSet,
+    utxoset, Cache, DRepKey, DRepState, FixedNamespace as _, PParamsSet,
 };
 
 // Sub-modules
@@ -115,6 +115,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        order: &TxOrder,
         mint: &MultiEraPolicyAssets,
     ) -> Result<(), ChainError> {
         Ok(())
@@ -418,15 +419,21 @@ impl<'a> DeltaBuilder<'a> {
             if tx.is_valid() {
                 for mint in tx.mints() {
                     self.account_state
-                        .visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.asset_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.datum_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.drep_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.epoch_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.pool_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.tx_logs.visit_mint(&mut deltas, block, tx, &mint)?;
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.asset_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.datum_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.drep_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.epoch_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.pool_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.tx_logs
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                     self.proposal_logs
-                        .visit_mint(&mut deltas, block, tx, &mint)?;
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                 }
 
                 for cert in tx.certs() {
@@ -618,9 +625,11 @@ pub(crate) fn compute_delta<D: Domain>(
         let mut keys = Vec::new();
 
         // raw iteration: only the keys matter, skip the CBOR decode
-        for record in state.iter_entities(DRepState::NS, EntityKey::full_range())? {
+        let all = RangeOf::<DRepKey>::all().into_raw();
+
+        for record in state.iter_entities(DRepState::NS, all)? {
             let (key, _) = record?;
-            keys.push(key);
+            keys.push(key.decode::<DRepKey>().map_err(StateError::from)?);
         }
 
         dormancy.drep_keys = Arc::new(keys);
@@ -657,7 +666,7 @@ pub(crate) fn compute_delta<D: Domain>(
 mod tests {
     use std::collections::BTreeMap;
 
-    use dolos_core::NsKey;
+    use dolos_core::EntityKey;
     use pallas::codec::utils::{NonEmptySet, NonZeroInt, Set};
     use pallas::crypto::hash::Hash;
     use pallas::ledger::primitives::conway::{
@@ -666,7 +675,7 @@ mod tests {
     };
     use pallas::ledger::primitives::{StakeCredential, UnitInterval};
 
-    use crate::model::{EpochStatsUpdate, PParamValue as Val};
+    use crate::model::{EpochStatsUpdate, PParamValue as Val, PoolKey};
     use crate::{CardanoDelta, OwnedMultiEraBlock};
 
     use super::*;
@@ -815,8 +824,8 @@ mod tests {
         deltas
             .entities
             .keys()
-            .filter(|NsKey(namespace, _)| *namespace == ns)
-            .map(|NsKey(_, key)| key.clone())
+            .filter(|key| key.ns() == ns)
+            .map(|key| key.key().clone())
             .collect()
     }
 
@@ -824,7 +833,7 @@ mod tests {
         deltas
             .entities
             .iter()
-            .filter(|(NsKey(ns, _), _)| *ns == "epochs")
+            .filter(|(key, _)| key.ns() == "epochs")
             .flat_map(|(_, group)| group.iter())
             .find_map(|delta| match delta {
                 CardanoDelta::EpochStatsUpdate(stats) => Some((**stats).clone()),
@@ -836,7 +845,7 @@ mod tests {
     /// The operator hash of the fixture's `PoolRegistration` certificate,
     /// which `PoolRegistration::key` uses as the `pools` entity key.
     fn cert_pool_key() -> EntityKey {
-        EntityKey::from([0x77u8; 28].as_slice())
+        EntityKey::of(&PoolKey([0x77u8; 28].into()))
     }
 
     /// The block issuer's operator hash, which `PoolStateVisitor::visit_root`
@@ -847,7 +856,7 @@ mod tests {
         let block = OwnedMultiEraBlock::decode(issuer.1).unwrap();
         let key = block.view().header().issuer_vkey().unwrap().to_vec();
         let operator = pallas::crypto::hash::Hasher::<224>::hash(&key);
-        EntityKey::from(operator.as_slice())
+        EntityKey::of(&PoolKey(operator))
     }
 
     #[test]

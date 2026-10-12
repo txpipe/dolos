@@ -7,9 +7,10 @@
 use std::ops::Range;
 
 use crate::{
-    archive::{ArchiveError, ArchiveStore, ArchiveWriter, EmptyExactIter, EmptyTagIter, LogKey},
+    archive::{ArchiveError, ArchiveStore, ArchiveWriter, EmptyExactIter, EmptyTagIter},
     indexes::{ArchiveIndexDelta, IndexRecord},
-    BlockBody, BlockSlot, ChainPoint, EntityValue, Namespace, RawBlock, TagDimension,
+    BlockBody, BlockSlot, ChainPoint, EntityValue, KeyRange, LogKey, Namespace, RawBlock,
+    TagDimension,
 };
 
 // ============================================================================
@@ -158,11 +159,7 @@ impl ArchiveStore for NoOpArchiveStore {
         Ok(vec![None; keys.len()])
     }
 
-    fn iter_logs(
-        &self,
-        _ns: Namespace,
-        _range: Range<LogKey>,
-    ) -> Result<Self::LogIter, ArchiveError> {
+    fn iter_logs(&self, _ns: Namespace, _range: KeyRange) -> Result<Self::LogIter, ArchiveError> {
         Ok(EmptyLogIter)
     }
 

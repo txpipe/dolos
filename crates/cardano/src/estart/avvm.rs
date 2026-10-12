@@ -31,11 +31,11 @@
 //! thousand epochs behind any rollback window a node keeps.
 
 use dolos_core::{
-    ChainError, Domain, EntityKey, Genesis, StateStore, StateWriter, TxoRef, UtxoMap, UtxoSetDelta,
+    ChainError, Domain, Genesis, StateStore, StateWriter, TxoRef, UtxoMap, UtxoSetDelta,
 };
 use pallas::ledger::traverse::MultiEraOutput;
 
-use crate::{model::EraSummary, EraProtocol, FixedNamespace as _};
+use crate::{model::EraSummary, EraProtocol};
 
 /// The protocol major Shelley runs at. The end of that era *is* the
 /// reclamation boundary.
@@ -131,10 +131,7 @@ impl AvvmReclamation {
     /// A store that never had a Shelley era at all — a devnet forced straight
     /// into a later protocol — never crossed it either, and reads `false`.
     pub fn boundary_crossed<D: Domain>(state: &D::State) -> Result<bool, ChainError> {
-        let shelley = state.read_entity_typed::<EraSummary>(
-            EraSummary::NS,
-            &EntityKey::from(EraProtocol::from(SHELLEY)),
-        )?;
+        let shelley = state.read_entity_typed::<EraSummary>(&EraProtocol::from(SHELLEY))?;
 
         Ok(shelley.is_some_and(|x| x.end.is_some()))
     }

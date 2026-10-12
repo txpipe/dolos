@@ -3,15 +3,9 @@ use blockfrost_openapi::models::genesis_content::GenesisContent;
 use dolos_core::{Domain, Genesis};
 
 use crate::{
-    mapping::{round_f64, IntoModel},
+    mapping::{parse_datetime_into_timestamp, round_f64, IntoModel},
     Facade,
 };
-
-pub fn parse_datetime_into_timestamp(s: &str) -> Result<i32, axum::http::StatusCode> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .map(|x| x.timestamp() as i32)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
 
 pub struct GenesisModelBuilder<'a> {
     pub genesis: &'a Genesis,

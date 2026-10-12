@@ -12,7 +12,7 @@
 //! Per namespace, a **canary**: a fully-populated value ([`canaries`]) and the
 //! hex of its encoding at the current `SCHEMA_REVS` revision. The encoding is
 //! taken through the production path — `Entity::encode_entity` for the
-//! thirteen entity namespaces, `layers::state::encode_utxo_value` for `utxos`,
+//! entity namespaces, `layers::state::encode_utxo_value` for `utxos`,
 //! the one namespace whose value this profile builds rather than carries.
 //!
 //! ## Append-only history
@@ -57,8 +57,8 @@ pub mod ground_rules;
 
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
-    StakeLog,
+    FirstMintChunk, FixedNamespace, GovState, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PoolState, ProposalState, StagedFirstMint, StakeLog,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -177,10 +177,18 @@ pub fn registry() -> Vec<Entry> {
             enc_dreps,
             DRepState,
             canaries::drep_state,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/dreps.rev1.hex"),
-            }]
+            // Revision 2 moves the key, unpadded and exact (decision 0051);
+            // the value is unchanged.
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/dreps.rev1.hex"),
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/dreps.rev2.hex"),
+                },
+            ]
         ),
         entity_entry!(
             enc_epochs,
@@ -194,6 +202,8 @@ pub fn registry() -> Vec<Entry> {
             // hold rows of this shape, so today's reader must still accept
             // them — which is exactly what a retained canary asserts, and all
             // it asserts.
+            // Revision 3 moves the key, unpadded and exact (decision 0051);
+            // the value is unchanged.
             &[
                 Pinned {
                     rev: 1,
@@ -203,22 +213,53 @@ pub fn registry() -> Vec<Entry> {
                     rev: 2,
                     hex: include_str!("goldens/epochs.rev2.hex"),
                 },
+                Pinned {
+                    rev: 3,
+                    hex: include_str!("goldens/epochs.rev3.hex"),
+                },
             ]
         ),
         entity_entry!(
             enc_eras,
             EraSummary,
             canaries::era_summary,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/eras.rev1.hex"),
-            }]
+            // Revision 2 moves the key, unpadded and exact (decision 0051);
+            // the value is unchanged.
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/eras.rev1.hex"),
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/eras.rev2.hex"),
+                },
+            ]
+        ),
+        entity_entry!(
+            enc_first_mints,
+            FirstMintChunk,
+            canaries::first_mint_chunk,
+            // Revision 2 moves the key, unpadded and exact (decision 0051);
+            // the value is unchanged.
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/first-mints.rev1.hex"),
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/first-mints.rev2.hex"),
+                },
+            ]
         ),
         entity_entry!(
             enc_gov,
             GovState,
             canaries::gov_state,
             // Revision 3 appends each snapshot DRep's newest deregistration.
+            // Revision 4 moves the key, unpadded and exact (decision 0051);
+            // the value is unchanged.
             &[
                 Pinned {
                     rev: 1,
@@ -231,7 +272,11 @@ pub fn registry() -> Vec<Entry> {
                 Pinned {
                     rev: 3,
                     hex: include_str!("goldens/gov.rev3.hex"),
-                }
+                },
+                Pinned {
+                    rev: 4,
+                    hex: include_str!("goldens/gov.rev4.hex"),
+                },
             ]
         ),
         entity_entry!(
@@ -253,13 +298,30 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
+            enc_policy_first_mints,
+            PolicyMintChunk,
+            canaries::policy_mint_chunk,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/policy-first-mints.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
             enc_pools,
             PoolState,
             canaries::pool_state,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/pools.rev1.hex"),
-            }]
+            // Revision 2 moves the key, unpadded and exact (decision 0051);
+            // the value is unchanged.
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/pools.rev1.hex"),
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/pools.rev2.hex"),
+                },
+            ]
         ),
         entity_entry!(
             enc_proposals,
@@ -269,6 +331,8 @@ pub fn registry() -> Vec<Entry> {
             // bounded entries at 16..=18. Revision 1 still decodes, its
             // histories skipped. Revision 3 appends each vote's transaction
             // index to the bounded entries.
+            // Revision 4 moves the key, unpadded and exact (decision 0051);
+            // the value is unchanged.
             &[
                 Pinned {
                     rev: 1,
@@ -281,17 +345,46 @@ pub fn registry() -> Vec<Entry> {
                 Pinned {
                     rev: 3,
                     hex: include_str!("goldens/proposals.rev3.hex"),
-                }
+                },
+                Pinned {
+                    rev: 4,
+                    hex: include_str!("goldens/proposals.rev4.hex"),
+                },
+            ]
+        ),
+        entity_entry!(
+            enc_staged_first_mints,
+            StagedFirstMint,
+            canaries::staged_first_mint,
+            // Revision 2 moves the key, unpadded and exact (decision 0051);
+            // the value is unchanged.
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/staged-first-mints.rev1.hex"),
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/staged-first-mints.rev2.hex"),
+                },
             ]
         ),
         entity_entry!(
             enc_stakes,
             StakeLog,
             canaries::stake_log,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/stakes.rev1.hex"),
-            }]
+            // Revision 2 moves the key, unpadded and exact (decision 0051);
+            // the value is unchanged.
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/stakes.rev1.hex"),
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/stakes.rev2.hex"),
+                },
+            ]
         ),
         Entry {
             ns: UTXOS,

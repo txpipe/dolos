@@ -1,12 +1,12 @@
 use dolos_core::{
-    config::CardanoConfig, ChainError, ChainPoint, Domain, EntityKey, Genesis, StateStore as _,
+    config::CardanoConfig, ChainError, ChainPoint, Domain, Genesis, StateStore as _,
     StateWriter as _,
 };
 
 use crate::{
     gov_from_conway_genesis, indexes::utxo_index_delta_from_utxo_delta, pots::Pots,
-    utils::nonce_stability_window, EndStats, EpochState, EpochValue, EraBoundary, EraSummary,
-    GovState, Lovelace, Nonces, PParamsSet, RollingStats, SingletonEntity as _,
+    utils::nonce_stability_window, EndStats, EpochState, EpochValue, EraBoundary, EraProtocol,
+    EraSummary, GovState, Lovelace, Nonces, PParamsSet, RollingStats,
 };
 
 mod staking;
@@ -89,7 +89,7 @@ pub fn bootstrap_epoch<D: Domain>(
     };
 
     let writer = state.start_writer()?;
-    writer.write_entity_typed(&EpochState::singleton_key(), &epoch)?;
+    writer.write_entity_typed(&(), &epoch)?;
     writer.commit()?;
 
     Ok(epoch)
@@ -115,10 +115,8 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
         protocol: protocol_major,
     };
 
-    let key = protocol_major.to_be_bytes();
-
     let writer = state.start_writer()?;
-    writer.write_entity_typed(&EntityKey::from(&key), &era)?;
+    writer.write_entity_typed(&EraProtocol::from(protocol_major), &era)?;
     writer.commit()?;
 
     Ok(())
@@ -138,7 +136,7 @@ pub fn bootstrap_gov<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(
     }
 
     let writer = state.start_writer()?;
-    writer.write_entity_typed(&GovState::singleton_key(), &gov)?;
+    writer.write_entity_typed(&(), &gov)?;
     writer.commit()?;
 
     Ok(())
@@ -199,15 +197,12 @@ mod tests {
     use dolos_testing::toy_domain::ToyDomain;
     use std::sync::Arc;
 
-    use crate::{FixedNamespace as _, GovState};
+    use crate::GovState;
 
     use super::*;
 
     fn read_gov(domain: &ToyDomain) -> Option<GovState> {
-        domain
-            .state()
-            .read_entity_typed::<GovState>(GovState::NS, &GovState::singleton_key())
-            .unwrap()
+        domain.state().read_entity_typed::<GovState>(&()).unwrap()
     }
 
     #[test]

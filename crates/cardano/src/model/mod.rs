@@ -1,33 +1,26 @@
-use dolos_core::{
-    ChainError, Entity, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateSchema,
-};
+use dolos_core::{ChainError, EntityValue, Namespace, NamespaceType, NsKey, StateSchema};
 
-pub trait FixedNamespace {
-    const NS: &'static str;
-}
+pub use dolos_core::{FixedNamespace, LogEntity, StateEntity};
 
-/// A namespace that holds exactly one row at a fixed key.
+/// A namespace that holds exactly one row, at the empty key.
 ///
 /// Singletons don't fit the population-shaped machinery (namespace
 /// streams, key ranges): readers address the row directly
 /// (`crate::read_singleton`) and boundary commits apply deltas through
 /// `WorkDeltas::apply_singleton`, which — unlike the streams — handles
 /// the row not existing yet.
-pub trait SingletonEntity: Entity + FixedNamespace {
-    const KEY: &'static [u8];
-
-    fn singleton_key() -> EntityKey {
-        EntityKey::from(Self::KEY)
-    }
-
+pub trait SingletonEntity: StateEntity<Key = ()> {
     fn ns_key() -> NsKey {
-        NsKey::from((Self::NS, Self::singleton_key()))
+        NsKey::of::<Self>(&())
     }
 }
 
+/// `FixedNamespace` and `Entity` for an entity type, and the key kinds it is
+/// stored under: `state = K` for a state entity, `log = K` for an archive
+/// log (the part after the slot).
 macro_rules! entity_boilerplate {
-    ($type:ident, $ns:literal) => {
-        impl super::FixedNamespace for $type {
+    ($type:ident, $ns:literal $(, state = $state:ty)? $(, log = $log:ty)?) => {
+        impl dolos_core::FixedNamespace for $type {
             const NS: &str = $ns;
         }
 
@@ -36,16 +29,76 @@ macro_rules! entity_boilerplate {
                 ns: dolos_core::Namespace,
                 value: &dolos_core::EntityValue,
             ) -> Result<Self, dolos_core::ChainError> {
-                assert_eq!(ns, <$type as super::FixedNamespace>::NS);
+                assert_eq!(ns, <$type as dolos_core::FixedNamespace>::NS);
                 let value = pallas::codec::minicbor::decode(value)?;
                 Ok(value)
             }
 
             fn encode_entity(value: &Self) -> (dolos_core::Namespace, dolos_core::EntityValue) {
                 let value = pallas::codec::minicbor::to_vec(value).unwrap();
-                (<$type as super::FixedNamespace>::NS, value)
+                (<$type as dolos_core::FixedNamespace>::NS, value)
             }
         }
+
+        $(
+            impl dolos_core::StateEntity for $type {
+                type Key = $state;
+            }
+        )?
+
+        $(
+            impl dolos_core::LogEntity for $type {
+                type Key = $log;
+            }
+        )?
+    };
+}
+
+/// A key that is a hash, stored as the hash's bytes.
+macro_rules! hash_key {
+    ($(#[$doc:meta])* $name:ident, $hash:ty, $len:literal) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+        pub struct $name(pub $hash);
+
+        impl From<$hash> for $name {
+            fn from(value: $hash) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$name> for $hash {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl dolos_core::KeyCodec for $name {
+            fn encode_key(&self, out: &mut dolos_core::KeyBytes) {
+                out.extend_from_slice(self.0.as_slice());
+            }
+
+            fn decode_key(bytes: &[u8]) -> Result<Self, dolos_core::KeyError> {
+                dolos_core::keys::exact::<$len>(bytes).map(|hash| Self(hash.into()))
+            }
+        }
+
+        impl dolos_core::FixedKey for $name {
+            const LEN: usize = $len;
+        }
+    };
+}
+
+/// Keys display as the hex of their stored bytes.
+macro_rules! display_as_stored {
+    ($($name:ty),*) => {
+        $(
+            impl std::fmt::Display for $name {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str(&hex::encode(dolos_core::keys::encode(self)))
+                }
+            }
+        )*
     };
 }
 
@@ -56,6 +109,7 @@ pub mod dreps;
 pub mod epoch_value;
 pub mod epochs;
 pub mod eras;
+pub mod first_mints;
 pub mod gov;
 pub mod logs;
 pub mod pending;
@@ -73,6 +127,7 @@ pub use dreps::*;
 pub use epoch_value::*;
 pub use epochs::*;
 pub use eras::*;
+pub use first_mints::*;
 pub use gov::*;
 pub use logs::*;
 pub use pending::*;
@@ -97,6 +152,9 @@ pub enum CardanoEntity {
     PendingMirState(Box<PendingMirState>),
     GovState(Box<GovState>),
     AccountEpochLog(Box<AccountEpochLog>),
+    StagedFirstMint(Box<StagedFirstMint>),
+    FirstMintChunk(Box<FirstMintChunk>),
+    PolicyMintChunk(Box<PolicyMintChunk>),
 }
 
 macro_rules! variant_boilerplate {
@@ -131,6 +189,9 @@ variant_boilerplate!(PendingRewardState);
 variant_boilerplate!(PendingMirState);
 variant_boilerplate!(GovState);
 variant_boilerplate!(AccountEpochLog);
+variant_boilerplate!(StagedFirstMint);
+variant_boilerplate!(FirstMintChunk);
+variant_boilerplate!(PolicyMintChunk);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -148,6 +209,9 @@ impl dolos_core::Entity for CardanoEntity {
             PendingMirState::NS => PendingMirState::decode_entity(ns, value).map(Into::into),
             GovState::NS => GovState::decode_entity(ns, value).map(Into::into),
             AccountEpochLog::NS => AccountEpochLog::decode_entity(ns, value).map(Into::into),
+            StagedFirstMint::NS => StagedFirstMint::decode_entity(ns, value).map(Into::into),
+            FirstMintChunk::NS => FirstMintChunk::decode_entity(ns, value).map(Into::into),
+            PolicyMintChunk::NS => PolicyMintChunk::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -167,6 +231,9 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PendingMirState(x) => PendingMirState::encode_entity(x),
             Self::GovState(x) => GovState::encode_entity(x),
             Self::AccountEpochLog(x) => AccountEpochLog::encode_entity(x),
+            Self::StagedFirstMint(x) => StagedFirstMint::encode_entity(x),
+            Self::FirstMintChunk(x) => FirstMintChunk::encode_entity(x),
+            Self::PolicyMintChunk(x) => PolicyMintChunk::encode_entity(x),
         }
     }
 }
@@ -186,6 +253,9 @@ pub fn build_schema() -> StateSchema {
     schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
     schema.insert(PendingMirState::NS, NamespaceType::KeyValue);
     schema.insert(GovState::NS, NamespaceType::KeyValue);
+    schema.insert(StagedFirstMint::NS, NamespaceType::KeyValue);
+    schema.insert(FirstMintChunk::NS, NamespaceType::KeyValue);
+    schema.insert(PolicyMintChunk::NS, NamespaceType::KeyValue);
     schema
 }
 
@@ -267,6 +337,7 @@ pub enum CardanoDelta {
     ProposalResolved(Box<ProposalResolved>),
     GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
     GovDRepSnapshot(Box<GovDRepSnapshot>),
+    StageFirstMint(Box<StageFirstMint>),
 }
 
 impl CardanoDelta {
@@ -372,6 +443,7 @@ delta_from!(GovDistrRotate);
 delta_from!(GovDRepSnapshot);
 delta_from!(GovDistrBoundaryCredit);
 delta_from!(ProposalResolved);
+delta_from!(StageFirstMint);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -444,6 +516,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => x.key(),
             Self::SetEpochIncentives(x) => x.key(),
             Self::DequeueReward(x) => x.key(),
+            Self::StageFirstMint(x) => x.key(),
         }
     }
 
@@ -514,6 +587,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::SetEpochIncentives(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DequeueReward(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageFirstMint(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -584,6 +658,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::SetEpochIncentives(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DequeueReward(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageFirstMint(x) => Self::downcast_undo(x.as_ref(), entity),
         }
     }
 }

@@ -20,7 +20,6 @@ use dolos_cardano::{
     estart::{AvvmReclamation, EstartWorkUnit},
     indexes::{utxo_dimensions, utxo_index_delta_from_utxo_delta},
     pots::Pots,
-    EpochState, SingletonEntity as _,
 };
 
 /// Two base64url ed25519 public keys — the shape a Byron `avvmDistr`
@@ -87,9 +86,7 @@ fn schedule_allegra(domain: &ToyDomain) {
     epoch.pparams.schedule(epoch.number, Some(next));
 
     let writer = domain.state().start_writer().unwrap();
-    writer
-        .write_entity_typed(&EpochState::singleton_key(), &epoch)
-        .unwrap();
+    writer.write_entity_typed(&(), &epoch).unwrap();
     writer.commit().unwrap();
 }
 

@@ -145,7 +145,7 @@ fn rewards_point_reads<B: Backend>(bencher: divan::Bencher) {
 fn epoch_scan<B: Backend>(bencher: divan::Bencher) {
     let (store, _dir) = populated::<B>();
     let scanned_epoch = SHAPE.epochs / 2;
-    let range = SHAPE.log_key(scanned_epoch, 0)..SHAPE.log_key(scanned_epoch + 1, 0);
+    let range = SHAPE.log_range(scanned_epoch..scanned_epoch + 1);
 
     bencher.bench_local(|| {
         let mut rows = 0u64;

@@ -32,7 +32,7 @@ impl StateContents {
 
         for ns in dolos_cardano::model::build_schema().keys() {
             let rows: Vec<_> = state
-                .iter_entities(ns, EntityKey::full_range())
+                .iter_entities(ns, dolos_core::KeyRange::all())
                 .unwrap()
                 .collect::<Result<_, _>>()
                 .unwrap();
@@ -74,7 +74,7 @@ impl InstanceContents {
         for ns in dolos_cardano::model::build_schema().keys() {
             let rows: Vec<_> = stores
                 .archive
-                .iter_logs(ns, LogKey::full_range())
+                .iter_logs(ns, dolos_core::KeyRange::all())
                 .unwrap()
                 .collect::<Result<_, _>>()
                 .unwrap();

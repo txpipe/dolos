@@ -141,7 +141,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &PoolId,
         _: &PoolState,
     ) -> Result<(), ChainError> {
-        ctx.add_delta(PoolTransition::new(id.clone(), ctx.starting_epoch_no()));
+        ctx.add_delta(PoolTransition::new(*id, ctx.starting_epoch_no()));
 
         Ok(())
     }

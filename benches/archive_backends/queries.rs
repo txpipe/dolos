@@ -146,7 +146,7 @@ fn logs_only_scale(bencher: divan::Bencher, rows: u64) {
     .unwrap();
     populate_archive(&store, "account-epochs", &shape).unwrap();
     assert!(store.get_tip().unwrap().is_none());
-    let range = shape.log_key(2, 0)..shape.log_key(3, 0);
+    let range = shape.log_range(2..3);
     bencher.bench_local(|| {
         let mut count = 0;
         for entry in store.iter_logs("account-epochs", range.clone()).unwrap() {

@@ -1,7 +1,5 @@
 use std::{collections::HashMap, ops::Deref, sync::OnceLock, time::Duration};
 
-use indexmap::IndexSet;
-
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -22,9 +20,10 @@ use dolos_cardano::{
     },
     indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::AssetState,
+    periods::first_mints,
     ChainSummary,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EraCbor, StateStore as _};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain, DomainError, EraCbor, StateStore as _};
 use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
@@ -414,8 +413,8 @@ impl AssetModelBuilder {
         };
 
         if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
-            let entity_key = pallas::crypto::hash::Hasher::<256>::hash(ref_asset_bytes.as_slice());
-            let ref_state = domain.read_cardano_entity::<AssetState>(entity_key.as_slice())?;
+            let asset_key = dolos_cardano::AssetKey::of(ref_asset_bytes);
+            let ref_state = domain.read_cardano_entity::<AssetState>(&asset_key)?;
 
             if let Some(metadata_tx) = ref_state.and_then(|state| state.metadata_tx) {
                 if let Some(EraCbor(era, cbor)) = domain
@@ -561,9 +560,9 @@ where
 {
     let subject = decode_asset_subject(subject)?;
 
-    let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
+    let asset_key = dolos_cardano::AssetKey::of(&subject);
     let state = domain
-        .read_cardano_entity::<AssetState>(entity_key.as_slice())?
+        .read_cardano_entity::<AssetState>(&asset_key)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok((subject, state))
@@ -911,38 +910,8 @@ where
     Ok(Json(hashes))
 }
 
-fn collect_minted_subjects(
-    block: &[u8],
-    policy: &[u8],
-    seen: &mut IndexSet<Vec<u8>>,
-) -> Result<(), StatusCode> {
-    // Blockfrost groups the `ma_tx_mint` rows by policy and name. Then it sorts
-    // the rows by the first mint event. The caller supplies blocks in ascending
-    // slot order. `seen` keeps the first subject for each name. The set skips a
-    // repeated name in O(1) and keeps the first-mint order.
-    let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    for tx in block.txs() {
-        for policy_assets in tx.mints() {
-            if policy_assets.policy().as_slice() != policy {
-                continue;
-            }
-
-            for asset in policy_assets.assets() {
-                let mut subject = policy.to_vec();
-                subject.extend_from_slice(asset.name());
-                seen.insert(subject);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// `GET /assets/policy/{policy_id}`.
-///
-/// The scan decodes at most `max_scan_items` blocks. A page it cannot cover
-/// within that many blocks is refused rather than truncated.
+/// `GET /assets/policy/{policy}`: the assets a policy minted, ordered by
+/// first mint, from the first-mint period logs.
 pub async fn by_policy<D>(
     Path(policy_hex): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -955,59 +924,48 @@ where
     let pagination = Pagination::try_from(params)?;
 
     let policy = hex::decode(&policy_hex).map_err(|_| Error::InvalidPolicy)?;
-    if policy.len() != 28 {
-        return Err(Error::InvalidPolicy);
-    }
+    let policy: Hash<28> = <[u8; 28]>::try_from(policy.as_slice())
+        .map_err(|_| Error::InvalidPolicy)?
+        .into();
 
-    // Pagination depends on first-mint order. An ascending scan stops after it
-    // collects the requested prefix. A descending scan reads all asset names and
-    // then reverses them, because one name can occur in many blocks.
-    let end_slot = domain.get_tip_slot()?;
-    let stream = domain
+    let chain = domain.get_chain_summary()?;
+    let Some(mary_epoch) = chain.first_mary_epoch() else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+    let (tip_epoch, _) = chain.slot_epoch(domain.get_tip_slot()?);
+
+    let order = match pagination.order {
+        Order::Asc => SlotOrder::Asc,
+        Order::Desc => SlotOrder::Desc,
+    };
+    let (skip, count) = (pagination.skip(), pagination.count);
+
+    let subjects = domain
         .query()
-        .blocks_by_policy_stream(&policy, 0, end_slot, SlotOrder::Asc);
-    let mut stream = Box::pin(stream);
-
-    let needed_unique =
-        matches!(pagination.order, Order::Asc).then(|| pagination.from() + pagination.count);
-    let budget = domain.config.max_scan_items() as usize;
-    let mut scanned = 0;
-    let mut subjects: IndexSet<Vec<u8>> = IndexSet::new();
-    while let Some(res) = stream.next().await {
-        let (_slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let Some(block) = block else {
-            continue;
-        };
-        // another block is due while the budget is spent, so the page lies
-        // further in and out of reach for this request
-        if scanned == budget {
-            return Err(Error::ScanBudgetExceeded);
-        }
-        scanned += 1;
-        collect_minted_subjects(&block, &policy, &mut subjects)?;
-        if needed_unique.is_some_and(|needed| subjects.len() >= needed) {
-            break;
-        }
-    }
+        .run_blocking(move |domain| {
+            first_mints::policy_page(
+                &domain,
+                &chain,
+                mary_epoch..=tip_epoch,
+                &policy,
+                order,
+                skip,
+                count,
+            )
+            .map_err(DomainError::from)
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Blockfrost returns 404 when the policy has no mint operations.
-    if subjects.is_empty() {
-        return Err(StatusCode::NOT_FOUND.into());
-    }
+    let subjects = subjects.ok_or(StatusCode::NOT_FOUND)?;
 
-    // The scan collects the subjects in ascending first-mint order. For `desc`,
-    // reverse this order.
-    let ordered: Box<dyn Iterator<Item = Vec<u8>>> = if matches!(pagination.order, Order::Desc) {
-        Box::new(subjects.into_iter().rev())
-    } else {
-        Box::new(subjects.into_iter())
-    };
+    let mut items = Vec::with_capacity(subjects.len());
 
-    let mut items = Vec::new();
-    for subject in ordered.skip(pagination.skip()).take(pagination.count) {
-        let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
+    for subject in subjects {
+        let asset_key = dolos_cardano::AssetKey::of(&subject);
         let asset_state = domain
-            .read_cardano_entity::<AssetState>(entity_key.as_slice())?
+            .read_cardano_entity::<AssetState>(&asset_key)?
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
         items.push(AssetPolicyInner {
@@ -1022,9 +980,52 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{first_mint_chain, first_mint_policies, TestApp, TestFault};
     use blockfrost_openapi::models::asset::Asset;
-    use dolos_testing::synthetic::SyntheticBlockConfig;
+    use dolos_cardano::model::PolicyMintChunk;
+    use dolos_core::AsyncQueryFacade;
+    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
+
+    /// The scan the period logs replaced: the policy's tagged blocks from
+    /// genesis, each name kept at its first appearance in a mint.
+    async fn scan_policy(domain: &ToyDomain, policy: &[u8]) -> Vec<Vec<u8>> {
+        let end_slot = domain.state().read_cursor().unwrap().unwrap().slot();
+        let stream = AsyncQueryFacade::new(domain.clone()).blocks_by_policy_stream(
+            policy,
+            0,
+            end_slot,
+            SlotOrder::Asc,
+        );
+        let mut stream = Box::pin(stream);
+
+        let mut seen = std::collections::HashSet::new();
+        let mut subjects = Vec::new();
+
+        while let Some(res) = stream.next().await {
+            let Some(block) = res.unwrap().1 else {
+                continue;
+            };
+            let block = MultiEraBlock::decode(&block).unwrap();
+
+            for tx in block.txs() {
+                for policy_assets in tx.mints() {
+                    if policy_assets.policy().as_slice() != policy {
+                        continue;
+                    }
+
+                    for asset in policy_assets.assets() {
+                        let subject = [policy, asset.name()].concat();
+
+                        if seen.insert(subject.clone()) {
+                            subjects.push(subject);
+                        }
+                    }
+                }
+            }
+        }
+
+        subjects
+    }
 
     fn invalid_assets() -> Vec<String> {
         vec![
@@ -1445,41 +1446,60 @@ mod tests {
         }
     }
 
+    /// Every page in both orders of every policy, as the scan the logs
+    /// replaced answers it, over a chain whose first epochs are sealed and
+    /// whose last are staged.
     #[tokio::test]
-    async fn assets_by_policy_stops_at_scan_budget() {
-        // four blocks minting the same asset: only the first block carries a
-        // first mint, so anything past one asset costs blocks and yields
-        // nothing
-        let app = TestApp::new_with_scan_limit(
-            SyntheticBlockConfig {
-                block_count: 4,
-                txs_per_block: 1,
-                asset_names_by_block: vec!["ONLY".to_string(); 4],
-                ..Default::default()
-            },
-            3,
-        );
-        let policy = app.vectors().policy_id.clone();
+    async fn assets_by_policy_matches_the_policy_scan() {
+        use first_mint_policies::*;
 
-        // a page the scan covers before the budget runs out is served
-        let (status, bytes) = app
-            .get_bytes(&format!("/assets/policy/{policy}?count=1"))
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        let page: Vec<AssetPolicyInner> =
-            serde_json::from_slice(&bytes).expect("failed to parse policy assets");
-        assert_eq!(page.len(), 1);
+        let mut domain = None;
+        let app = TestApp::new_with_cfg_and_setup(first_mint_chain(), |inner, _| {
+            domain = Some(inner.clone())
+        });
+        let domain = domain.expect("setup ran");
 
-        // `desc` and an unfilled `asc` page both need the fourth block, so
-        // they are refused, not truncated
-        for query in ["order=desc&count=1", "order=asc&count=2"] {
-            let (status, bytes) = app
-                .get_bytes(&format!("/assets/policy/{policy}?{query}"))
-                .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
-            let body = String::from_utf8_lossy(&bytes);
-            assert!(body.contains("scan limit"), "The response body was {body}.");
+        let sealed = domain
+            .archive()
+            .iter_logs_typed::<PolicyMintChunk>(None)
+            .unwrap()
+            .count();
+        assert!(sealed > 4, "{sealed} sealed rows");
+
+        for policy in [ALPHA, BETA, GAMMA, SIBLING] {
+            let all = scan_policy(&domain, &policy).await;
+            assert!(!all.is_empty());
+
+            for (order, name) in [(Order::Asc, "asc"), (Order::Desc, "desc")] {
+                let ordered: Vec<String> = match order {
+                    Order::Asc => all.iter().map(hex::encode).collect(),
+                    Order::Desc => all.iter().rev().map(hex::encode).collect(),
+                };
+
+                for count in [1, 3, 100] {
+                    for page in 1..=all.len().div_ceil(count) + 1 {
+                        let skip = (page - 1) * count;
+                        let expected: Vec<String> =
+                            ordered.iter().skip(skip).take(count).cloned().collect();
+
+                        let path = format!(
+                            "/assets/policy/{}?order={name}&count={count}&page={page}",
+                            hex::encode(policy)
+                        );
+                        let (status, bytes) = app.get_bytes(&path).await;
+                        assert_eq!(status, StatusCode::OK, "{path}");
+
+                        let got: Vec<AssetPolicyInner> = serde_json::from_slice(&bytes).unwrap();
+                        let got: Vec<String> = got.into_iter().map(|x| x.asset).collect();
+
+                        assert_eq!(got, expected, "{path}");
+                    }
+                }
+            }
         }
+
+        let path = format!("/assets/policy/{}", unminted_policy());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]

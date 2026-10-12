@@ -1,19 +1,19 @@
 use std::collections::{HashMap, HashSet};
-use std::ops::Range;
 
-use dolos_core::{ChainError, EntityKey};
+use dolos_core::{ChainError, RangeOf};
 use pallas::ledger::primitives::StakeCredential;
 
 use crate::{
     pots::{EpochIncentives, Pots},
-    AccountState, ChainSummary, EpochValue, PParamsSet, PoolHash, PoolSnapshot, PoolState,
+    AccountKey, AccountState, ChainSummary, DRepKey, EpochValue, PParamsSet, PoolHash, PoolKey,
+    PoolSnapshot, PoolState, ProposalKey,
 };
 
 pub mod deltas;
 pub mod loading;
 pub mod work_unit;
 
-pub use deltas::{credential_to_key, DequeueMir, EnqueueMir, EnqueueReward, SetEpochIncentives};
+pub use deltas::{DequeueMir, EnqueueMir, EnqueueReward, SetEpochIncentives};
 pub use work_unit::RupdWorkUnit;
 
 pub trait RupdVisitor: Default {
@@ -43,10 +43,10 @@ pub trait RupdVisitor: Default {
     }
 }
 
-pub type AccountId = EntityKey;
-pub type PoolId = EntityKey;
-pub type DRepId = EntityKey;
-pub type ProposalId = EntityKey;
+pub type AccountId = AccountKey;
+pub type PoolId = PoolKey;
+pub type DRepId = DRepKey;
+pub type ProposalId = ProposalKey;
 
 #[derive(Debug, Default, Clone)]
 pub struct DelegatorMap(HashMap<PoolHash, HashMap<StakeCredential, u64>>);
@@ -146,8 +146,8 @@ pub struct RupdWork {
     /// Shard key ranges this `RupdWork` covers, set by `merge_shard`.
     /// `None` means "unsharded" — `should_include` returns true for
     /// every credential. `Some(ranges)` means `should_include` returns
-    /// true only for credentials whose `EntityKey` falls in one of the
-    /// listed ranges, so `define_rewards` running on a sharded context
-    /// emits only rewards owned by this shard.
-    pub shard_ranges: Option<Vec<Range<EntityKey>>>,
+    /// true only for credentials whose key falls in one of the listed
+    /// ranges, so `define_rewards` running on a sharded context emits only
+    /// rewards owned by this shard.
+    pub shard_ranges: Option<Vec<RangeOf<AccountKey>>>,
 }
