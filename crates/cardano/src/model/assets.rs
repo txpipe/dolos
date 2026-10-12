@@ -111,8 +111,7 @@ impl dolos_core::EntityDelta for MintStatsUpdate {
     type Entity = AssetState;
 
     fn key(&self) -> NsKey {
-        let subject = [self.policy.as_slice(), self.asset.as_slice()].concat();
-        NsKey::of::<AssetState>(&AssetKey::of(&subject))
+        NsKey::of::<AssetState>(&AssetKey::of_parts(self.policy.as_slice(), &self.asset))
     }
 
     fn apply(&mut self, entity: &mut Option<AssetState>) {
@@ -174,8 +173,7 @@ impl dolos_core::EntityDelta for MetadataTxUpdate {
     type Entity = AssetState;
 
     fn key(&self) -> NsKey {
-        let subject = [self.policy.as_slice(), self.asset.as_slice()].concat();
-        NsKey::of::<AssetState>(&AssetKey::of(&subject))
+        NsKey::of::<AssetState>(&AssetKey::of_parts(self.policy.as_slice(), &self.asset))
     }
 
     fn apply(&mut self, entity: &mut Option<AssetState>) {

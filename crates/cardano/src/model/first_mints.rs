@@ -52,7 +52,7 @@ impl StagedFirstMint {
 
     /// The `AssetState` key of the minted asset.
     pub fn asset_key(&self) -> AssetKey {
-        AssetKey::of(&self.subject())
+        AssetKey::of_parts(self.policy.as_slice(), &self.name)
     }
 }
 
