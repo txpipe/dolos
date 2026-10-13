@@ -429,8 +429,9 @@ fn concurrent_reads_beside_appends_are_consistent_and_keep_bounded_decoders() {
         assert_eq!(&store.read(loc).unwrap(), body);
     }
 
+    // Sixteen concurrent readers pool at most sixteen decoders.
     let stats = store.resource_stats();
-    assert!(stats.idle_decoders <= 8, "{stats:?}");
+    assert!(stats.idle_decoders <= 16, "{stats:?}");
     assert!(stats.idle_decoders >= 1, "{stats:?}");
     assert_eq!(stats.writers, 1);
 }
@@ -470,14 +471,14 @@ fn what_the_store_holds_is_bounded_by_the_work_in_flight_not_the_history() {
     assert_eq!(store.read(&loc).unwrap(), again[0]);
     assert_eq!(store.resource_stats().writers, 1);
 
-    // Reading everything ever written pools no more than eight decoders.
+    // Reading everything ever written, one read at a time, pools one decoder.
     for (bodies, locations) in &all {
         for (loc, body) in locations.iter().zip(bodies) {
             assert_eq!(&store.read(loc).unwrap(), body);
         }
     }
     let stats = store.resource_stats();
-    assert!(stats.idle_decoders <= 8, "{stats:?}");
+    assert_eq!(stats.idle_decoders, 1, "{stats:?}");
     assert_eq!(stats.writers, 1);
 }
 

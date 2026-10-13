@@ -671,6 +671,10 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn sync_config(&self) -> &config::SyncConfig;
     fn genesis(&self) -> Arc<Genesis>;
 
+    /// The one limiter every query facade built from this domain runs its
+    /// blocking work under.
+    fn query_limiter(&self) -> &QueryLimiter;
+
     fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain>;
     fn write_chain(&self) -> std::sync::RwLockWriteGuard<'_, Self::Chain>;
 
