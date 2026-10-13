@@ -6,7 +6,7 @@
 //! the four per-purpose previous-governance-action roots, and the
 //! dormant-epoch counter (`vsNumDormantEpochs`).
 //!
-//! A single entity lives in the namespace under [`GOV_STATE_KEY`]. Its
+//! A single entity lives in the namespace, at the empty key. Its
 //! existence is an invariant: every store carries the row regardless of
 //! era — created inactive at genesis bootstrap (or by the CARDANO-006
 //! startup migration on stores bootstrapped before the invariant) and
@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use dolos_core::{BlockSlot, NsKey};
+use dolos_core::{BlockSlot, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     ledger::primitives::{
@@ -32,9 +32,6 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use super::{GovPurpose, PoolHash, SingletonEntity};
-
-/// Key of the single `GovState` entity inside the `"gov"` namespace.
-pub const GOV_STATE_KEY: &[u8] = b"0";
 
 /// Expect message for delta apply/undo on the governance singleton — its
 /// existence is an invariant, so a miss means a corrupt store.
@@ -189,6 +186,11 @@ impl GovRoots {
 pub struct DRepSnapshotEntry {
     #[n(0)]
     pub expiry: Option<Epoch>,
+
+    /// The DRep's newest deregistration as of the snapshot. The ledger
+    /// removed every vote cast at or before it.
+    #[n(1)]
+    pub unregistered_at: Option<(BlockSlot, TxOrder)>,
 }
 
 /// Bounded counterpart of the ledger's `dpDRepState`, paired with `prev_distr`.
@@ -270,11 +272,9 @@ pub struct GovState {
     pub drep_snapshot: Option<DRepSnapshot>,
 }
 
-entity_boilerplate!(GovState, "gov");
+entity_boilerplate!(GovState, "gov", state = ());
 
-impl SingletonEntity for GovState {
-    const KEY: &'static [u8] = GOV_STATE_KEY;
-}
+impl SingletonEntity for GovState {}
 
 impl GovState {
     /// Activate governance with the Conway genesis enact-state (the
@@ -1130,11 +1130,14 @@ impl dolos_core::EntityDelta for GovDRepSnapshot {
     }
 }
 
-/// Fold the boundary-paid credits into the completed DRep-distribution
-/// accumulator: enacted treasury withdrawals and pool-deposit refunds land
-/// in the rewards UMap before the ledger takes the fresh DRep pulser
-/// snapshot at the same boundary, so their amounts count toward each
-/// recipient's snapshot DRep in the distribution this boundary publishes.
+/// Fold the boundary-paid amounts into the completed accumulator. Enacted
+/// treasury withdrawals and pool-deposit refunds land in the rewards UMap
+/// before the ledger takes the fresh DRep pulser snapshot at the same
+/// boundary, so their amounts count toward each recipient's snapshot DRep
+/// in the distribution this boundary publishes. Proposal-deposit refunds
+/// leave the pool leg: SNAP fixes the pool distribution first, and the
+/// pulser adds only the deposits of proposals still open after the
+/// boundary's removals.
 /// Emitted at a governance-active EWRAP finalize, before [`GovDistrRotate`],
 /// so the rotated copy the next boundary ratifies with carries them. An
 /// accumulator that is missing, incomplete, or belongs to another boundary
@@ -1143,6 +1146,7 @@ impl dolos_core::EntityDelta for GovDRepSnapshot {
 pub struct GovDistrBoundaryCredit {
     pub(crate) closing_epoch: Epoch,
     pub(crate) credits: BTreeMap<DRep, u64>,
+    pub(crate) pool_debits: BTreeMap<PoolHash, u64>,
 
     // undo — pre-image of `distr`, captured by `apply` only when state
     // was actually mutated.
@@ -1151,10 +1155,15 @@ pub struct GovDistrBoundaryCredit {
 }
 
 impl GovDistrBoundaryCredit {
-    pub fn new(closing_epoch: Epoch, credits: BTreeMap<DRep, u64>) -> Self {
+    pub fn new(
+        closing_epoch: Epoch,
+        credits: BTreeMap<DRep, u64>,
+        pool_debits: BTreeMap<PoolHash, u64>,
+    ) -> Self {
         Self {
             closing_epoch,
             credits,
+            pool_debits,
             applied: false,
             prev: None,
         }
@@ -1189,6 +1198,16 @@ impl dolos_core::EntityDelta for GovDistrBoundaryCredit {
 
         for (drep, credit) in &self.credits {
             *distr.drep_distr.entry(drep.clone()).or_default() += credit;
+        }
+
+        for (pool, debit) in &self.pool_debits {
+            let Some(stake) = distr.pool_distr.get_mut(pool) else {
+                continue;
+            };
+
+            let taken = (*debit).min(*stake);
+            *stake -= taken;
+            distr.pool_total = distr.pool_total.saturating_sub(taken);
         }
 
         self.applied = true;
@@ -1324,7 +1343,10 @@ mod tests {
             closing_epoch: 100,
             dreps: BTreeMap::from([(
                 StakeCredential::AddrKeyhash([7; 28].into()),
-                DRepSnapshotEntry { expiry: Some(120) },
+                DRepSnapshotEntry {
+                    expiry: Some(120),
+                    unregistered_at: Some((90, 2)),
+                },
             )]),
         };
         for prev in [None, Some(snapshot.clone())] {
@@ -1597,8 +1619,13 @@ mod prop_tests {
                 root::any_lovelace(),
                 0..4,
             ),
+            pool_debits in prop::collection::btree_map(
+                root::any_pool_hash(),
+                root::any_lovelace(),
+                0..4,
+            ),
         ) -> GovDistrBoundaryCredit {
-            GovDistrBoundaryCredit::new(closing_epoch, credits)
+            GovDistrBoundaryCredit::new(closing_epoch, credits, pool_debits)
         }
     }
 

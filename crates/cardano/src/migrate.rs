@@ -9,7 +9,7 @@
 use dolos_core::{ChainError, Domain, StateStore as _, StateWriter as _};
 use tracing::warn;
 
-use crate::{load_era_summary, read_singleton, GovState, SingletonEntity as _};
+use crate::{load_era_summary, read_singleton, GovState};
 
 /// CARDANO-006: create the governance singleton on stores bootstrapped
 /// before its existence invariant (genesis now seeds the row; older
@@ -46,7 +46,7 @@ pub(crate) fn ensure_gov_singleton<D: Domain>(state: &D::State) -> Result<bool, 
     );
 
     let writer = state.start_writer()?;
-    writer.write_entity_typed(&GovState::singleton_key(), &gov)?;
+    writer.write_entity_typed(&(), &gov)?;
     writer.commit()?;
 
     Ok(true)
@@ -58,22 +58,15 @@ mod tests {
     use dolos_testing::toy_domain::ToyDomain;
     use std::sync::Arc;
 
-    use crate::FixedNamespace as _;
-
     use super::*;
 
     fn read_gov(domain: &ToyDomain) -> Option<GovState> {
-        domain
-            .state()
-            .read_entity_typed::<GovState>(GovState::NS, &GovState::singleton_key())
-            .unwrap()
+        domain.state().read_entity_typed::<GovState>(&()).unwrap()
     }
 
     fn delete_gov(domain: &ToyDomain) {
         let writer = domain.state().start_writer().unwrap();
-        writer
-            .delete_entity(GovState::NS, &GovState::singleton_key())
-            .unwrap();
+        writer.save_entity_typed::<GovState>(&(), None).unwrap();
         writer.commit().unwrap();
     }
 
@@ -126,11 +119,6 @@ mod tests {
         let migrated = ensure_gov_singleton::<ToyDomain>(&state).unwrap();
 
         assert!(!migrated);
-        assert_eq!(
-            state
-                .read_entity_typed::<GovState>(GovState::NS, &GovState::singleton_key())
-                .unwrap(),
-            None
-        );
+        assert_eq!(state.read_entity_typed::<GovState>(&()).unwrap(), None);
     }
 }

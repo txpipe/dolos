@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
-use dolos_cardano::{model::AccountEpochLog, rupd::credential_to_key};
-use dolos_core::{
-    import::ImportExt, ArchiveStore, ArchiveWriter, ChainError, Domain, LogKey, RawBlock,
-    TemporalKey,
-};
+use dolos_cardano::{model::AccountEpochLog, AccountKey};
+use dolos_core::{import::ImportExt, ArchiveStore, ArchiveWriter, ChainError, Domain, RawBlock};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -130,10 +127,7 @@ impl<Stores: ToyStores> ApiFixture<Stores> {
         for start in (0..shape.log_rows).step_by(1000) {
             let writer = domain.archive().start_writer()?;
             for row in start..(start + 1000).min(shape.log_rows) {
-                let key = LogKey::from((
-                    TemporalKey::from(summary.epoch_start(epoch)),
-                    credential_to_key(&shape.credential(row)),
-                ));
+                let account = AccountKey::from(shape.credential(row));
                 let log = AccountEpochLog {
                     active_stake: Some(1_000_000 + row as u64),
                     pool_id: Some(if row % shape.pool_stride == 0 {
@@ -143,7 +137,7 @@ impl<Stores: ToyStores> ApiFixture<Stores> {
                     }),
                     ..Default::default()
                 };
-                writer.write_log_typed(&key, &log)?;
+                writer.write_log_typed(summary.epoch_start(epoch), &account, &log)?;
             }
             writer.commit()?;
         }

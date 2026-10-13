@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use dolos_core::{ChainError, Genesis, TxoRef};
+use dolos_core::{ChainError, Genesis, TxOrder, TxoRef};
 use pallas::{
     codec::utils::Bytes,
     ledger::{
@@ -302,9 +302,14 @@ fn parse_gov_action(
 pub struct ProposalVisitor {
     validity_period: Option<u64>,
     current_epoch: Option<Epoch>,
+    epoch_start: Option<u64>,
     network_magic: Option<u32>,
     protocol: Option<u16>,
     pending_votes: Vec<VoteCast>,
+
+    /// Transactions of the block visited so far, invalid ones included, so
+    /// the current one's index matches the crawl's `order`.
+    txs_seen: TxOrder,
 }
 
 impl BlockVisitor for ProposalVisitor {
@@ -315,11 +320,12 @@ impl BlockVisitor for ProposalVisitor {
         genesis: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
-        _: u64,
+        epoch_start: u64,
         protocol: u16,
     ) -> Result<(), ChainError> {
         self.validity_period = pparams.governance_action_validity_period();
         self.current_epoch = Some(epoch);
+        self.epoch_start = Some(epoch_start);
         self.network_magic = Some(genesis.network_magic());
         self.protocol = Some(protocol);
 
@@ -333,6 +339,9 @@ impl BlockVisitor for ProposalVisitor {
         tx: &MultiEraTx,
         _: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
+        let order = self.txs_seen;
+        self.txs_seen += 1;
+
         let MultiEraTx::Conway(conway_tx) = tx else {
             return Ok(());
         };
@@ -355,6 +364,8 @@ impl BlockVisitor for ProposalVisitor {
                     voter.clone(),
                     procedure.vote.clone(),
                     block.slot(),
+                    order,
+                    self.epoch_start.expect("value set in root"),
                 ));
             }
         }

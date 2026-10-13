@@ -17,9 +17,8 @@
 //! failure and not a silent re-encoding of every record the profile carries.
 //!
 //! The same types double as the exercise for the registry's retained-history
-//! machinery ([`synthetic_entry`]): every real namespace but `epochs` and
-//! `gov` sits at revision 1 with no history behind it, so without this the
-//! append-only path would be exercised only incidentally.
+//! machinery ([`synthetic_entry`]). They exercise the append-only path
+//! independently of the real namespaces' revision histories.
 
 use dolos_cardano::pallas::codec::minicbor::{self, Decode, Encode};
 
@@ -145,8 +144,8 @@ pub const SYNTHETIC_REV: u64 = 2;
 
 /// A registry entry whose history has actually moved: revision 1 is the
 /// retained encoding of [`BeforeAppend`], revision 2 the current
-/// [`AfterAppend`]. Running the real assertions over it is what proves the
-/// append-only path works before a real namespace needs it.
+/// [`AfterAppend`]. The real assertions exercise the append-only path on this
+/// entry independently of the ledger types.
 pub fn synthetic_entry() -> Entry {
     Entry {
         ns: SYNTHETIC_NS,

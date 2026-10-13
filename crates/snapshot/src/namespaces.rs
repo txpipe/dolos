@@ -1,12 +1,12 @@
 //! The closed set of state namespaces a Dolos stele carries.
 //!
-//! ADR-004 defines state as one uniform key-value space: the thirteen entity
+//! ADR-004 defines state as one uniform key-value space: the eighteen entity
 //! namespaces of `dolos_cardano::model::build_schema()` plus [`UTXOS`], which
 //! is the UTxO set wearing the same shape as everything else. That uniformity
 //! is deliberate — it means the format has one state record, and the planned
 //! refactor folding UTxOs into the entity system (#1042) is invisible to it.
 //!
-//! The names are not spelled here. Thirteen of them are read off the entity
+//! The names are not spelled here. Eighteen of them are read off the entity
 //! types' own `FixedNamespace::NS`, and `utxos` is defined here because nothing
 //! else in the tree defines it. A namespace that exists in `build_schema` and
 //! not in [`NAMESPACES`] would be silently dropped from every published stele,
@@ -15,10 +15,10 @@
 
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
-    StakeLog,
+    FirstMintChunk, FixedNamespace, GovState, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PoolState, ProposalState, StagedFirstMint, StagedStakeAddress, StakeAddressesRow, StakeLog,
 };
-use dolos_core::Namespace;
+use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
 use crate::Error;
 
@@ -34,7 +34,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against `build_schema()` directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 14] = [
+pub const NAMESPACES: [Namespace; 19] = [
     AccountEpochLog::NS,
     AccountState::NS,
     AssetState::NS,
@@ -42,11 +42,16 @@ pub const NAMESPACES: [Namespace; 14] = [
     DRepState::NS,
     EpochState::NS,
     EraSummary::NS,
+    FirstMintChunk::NS,
     GovState::NS,
     PendingMirState::NS,
     PendingRewardState::NS,
+    PolicyMintChunk::NS,
     PoolState::NS,
     ProposalState::NS,
+    StagedFirstMint::NS,
+    StagedStakeAddress::NS,
+    StakeAddressesRow::NS,
     StakeLog::NS,
     UTXOS,
 ];
@@ -62,26 +67,93 @@ pub const NAMESPACES: [Namespace; 14] = [
 /// `crates/snapshot/tests/field_registry.rs`, which fails the build when a
 /// record's field table moves without its revision, or the other way round.
 ///
-/// `epochs` is at 2: `RollingStats::registered_pools` was a `HashSet`, whose
-/// per-instance iteration order made the namespace's bytes irreproducible
-/// across publishers of identical state. Kept beside [`NAMESPACES`], in the
-/// same order, and held to it by `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 14] = [
+/// `epochs` reached 2 when `RollingStats::registered_pools` stopped being a
+/// `HashSet`, whose per-instance iteration order made the namespace's bytes
+/// irreproducible across publishers of identical state. The keys of `dreps`,
+/// `epochs`, `eras`, `first-mints`, `gov`, `pools`, `proposals`,
+/// `staged-first-mints` and `stakes` stopped being padded or truncated to a
+/// fixed width (decision 0051), and each of those moved one revision for it.
+/// Kept beside [`NAMESPACES`], in the same order, and held to it by
+/// `every_namespace_has_a_schema_rev` below.
+pub const SCHEMA_REVS: [(Namespace, u64); 19] = [
     (AccountEpochLog::NS, 1),
     (AccountState::NS, 1),
     (AssetState::NS, 1),
     (DatumState::NS, 1),
-    (DRepState::NS, 1),
-    (EpochState::NS, 2),
-    (EraSummary::NS, 1),
-    (GovState::NS, 2),
+    (DRepState::NS, 2),
+    (EpochState::NS, 3),
+    (EraSummary::NS, 2),
+    (FirstMintChunk::NS, 2),
+    (GovState::NS, 4),
     (PendingMirState::NS, 1),
     (PendingRewardState::NS, 1),
-    (PoolState::NS, 1),
-    (ProposalState::NS, 1),
-    (StakeLog::NS, 1),
+    (PolicyMintChunk::NS, 1),
+    (PoolState::NS, 2),
+    (ProposalState::NS, 4),
+    (StagedFirstMint::NS, 2),
+    (StagedStakeAddress::NS, 1),
+    (StakeAddressesRow::NS, 1),
+    (StakeLog::NS, 2),
     (UTXOS, 1),
 ];
+
+/// Width of a UTxO key: `tx_hash(32) ‖ output_index(4, BE)`.
+pub const UTXO_KEY_LEN: usize = 36;
+
+fn exact<K: KeyCodec>(key: &[u8]) -> Result<(), KeyError> {
+    K::decode_key(key).map(|_| ())
+}
+
+/// Refuse a state key that is not one `ns` stores: the exact encoding of the
+/// key kind its entity declares, or a UTxO ref under [`UTXOS`].
+///
+/// No state row is written under a log namespace; one that arrives is held to
+/// the key kind of the log, the only kind the namespace has.
+pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
+    let checked = match ns {
+        AccountState::NS => exact::<<AccountState as StateEntity>::Key>(key),
+        AssetState::NS => exact::<<AssetState as StateEntity>::Key>(key),
+        DatumState::NS => exact::<<DatumState as StateEntity>::Key>(key),
+        DRepState::NS => exact::<<DRepState as StateEntity>::Key>(key),
+        EpochState::NS => exact::<<EpochState as StateEntity>::Key>(key),
+        EraSummary::NS => exact::<<EraSummary as StateEntity>::Key>(key),
+        GovState::NS => exact::<<GovState as StateEntity>::Key>(key),
+        PendingMirState::NS => exact::<<PendingMirState as StateEntity>::Key>(key),
+        PendingRewardState::NS => exact::<<PendingRewardState as StateEntity>::Key>(key),
+        PoolState::NS => exact::<<PoolState as StateEntity>::Key>(key),
+        ProposalState::NS => exact::<<ProposalState as StateEntity>::Key>(key),
+        StagedFirstMint::NS => exact::<<StagedFirstMint as StateEntity>::Key>(key),
+        StagedStakeAddress::NS => exact::<<StagedStakeAddress as StateEntity>::Key>(key),
+        UTXOS => exact::<[u8; UTXO_KEY_LEN]>(key),
+        AccountEpochLog::NS
+        | FirstMintChunk::NS
+        | PolicyMintChunk::NS
+        | StakeAddressesRow::NS
+        | StakeLog::NS => {
+            return check_log_key(ns, key)
+                .map_err(|_| Error::malformed("state", format!("{ns} key: not a log key")));
+        }
+        _ => return Err(Error::UnknownNamespace(ns.to_owned())),
+    };
+
+    checked.map_err(|err| Error::malformed("state", format!("{ns} key: {err}")))
+}
+
+/// Refuse a log key whose part after the slot is not the exact encoding of
+/// the key kind `ns`'s log declares.
+pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
+    let checked = match ns {
+        AccountEpochLog::NS => exact::<<AccountEpochLog as LogEntity>::Key>(key),
+        EpochState::NS => exact::<<EpochState as LogEntity>::Key>(key),
+        FirstMintChunk::NS => exact::<<FirstMintChunk as LogEntity>::Key>(key),
+        PolicyMintChunk::NS => exact::<<PolicyMintChunk as LogEntity>::Key>(key),
+        StakeAddressesRow::NS => exact::<<StakeAddressesRow as LogEntity>::Key>(key),
+        StakeLog::NS => exact::<<StakeLog as LogEntity>::Key>(key),
+        _ => return Err(Error::UnknownNamespace(ns.to_owned())),
+    };
+
+    checked.map_err(|err| Error::malformed("log", format!("{ns} key: {err}")))
+}
 
 /// The revision a retired namespace's `parameters.schemas` entry carries.
 ///

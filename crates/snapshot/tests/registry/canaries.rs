@@ -1,4 +1,4 @@
-//! The fourteen canaries: one fully-populated value per namespace.
+//! The canaries: one fully-populated value per namespace.
 //!
 //! A canary is a value in which **every field is present and distinctive** —
 //! every `Option` is `Some`, every collection is non-empty, every nested type
@@ -24,10 +24,11 @@ use dolos_cardano::{
     model::{
         AccountEpochLog, AccountState, AssetState, AuthHistory, Committee, CommitteeAuthorization,
         Constitution, DRepDelegation, DRepExpiry, DRepState, DatumState, EndStats, EpochState,
-        EpochValue, EraBoundary, EraSummary, GovDistr, GovRoots, GovState, Nonces, PParamValue,
-        PParamsSet, PendingMirState, PendingRewardState, PoolDelegation, PoolParams, PoolSnapshot,
-        PoolState, ProposalAction, ProposalState, RollingStats, ShardProgress, Stake, StakeLog,
-        VoteHistory,
+        EpochValue, EraBoundary, EraSummary, FirstMintChunk, GovDistr, GovRoots, GovState, Nonces,
+        PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
+        PoolDelegation, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
+        RollingStats, ShardProgress, StagedFirstMint, StagedStakeAddress, Stake, StakeAddressesRow,
+        StakeLog, VoteEntry,
     },
     pallas::{
         codec::utils::Bytes,
@@ -187,6 +188,57 @@ pub fn asset_state() -> AssetState {
         initial_slot: Some(44_444),
         mint_tx_count: 19,
         metadata_tx: Some(hash32(0x82)),
+    }
+}
+
+pub fn first_mint_chunk() -> FirstMintChunk {
+    FirstMintChunk {
+        count: 258,
+        subjects: vec![
+            [hash28(0xb0).as_slice(), b"first"].concat().into(),
+            [hash28(0xb1).as_slice(), b"second"].concat().into(),
+        ],
+    }
+}
+
+pub fn policy_mint_chunk() -> PolicyMintChunk {
+    PolicyMintChunk {
+        count: 257,
+        names: vec![b"first".to_vec().into(), b"second".to_vec().into()],
+    }
+}
+
+pub fn staged_first_mint() -> StagedFirstMint {
+    StagedFirstMint {
+        policy: hash28(0xb2),
+        name: b"staged".to_vec(),
+        epoch: 611,
+        slot: 163_000_123,
+        tx_index: 17,
+    }
+}
+
+pub fn staged_stake_address() -> StagedStakeAddress {
+    StagedStakeAddress {
+        account: StakeCredential::ScriptHash(hash28(0xb3)),
+        address: [[0x11].as_slice(), &[0xb4; 28], &[0xb3; 28]].concat(),
+        epoch: 612,
+        slot: 163_400_321,
+        tx_index: 19,
+        output_index: 4,
+    }
+}
+
+pub fn stake_addresses_row() -> StakeAddressesRow {
+    StakeAddressesRow {
+        addresses: vec![
+            [[0x01].as_slice(), &[0xb5; 28], &[0xb6; 28]]
+                .concat()
+                .into(),
+            [[0x31].as_slice(), &[0xb7; 28], &[0xb6; 28]]
+                .concat()
+                .into(),
+        ],
     }
 }
 
@@ -422,7 +474,10 @@ pub fn gov_state() -> GovState {
             closing_epoch: 508,
             dreps: BTreeMap::from([(
                 StakeCredential::AddrKeyhash(hash28(0xdc)),
-                dolos_cardano::DRepSnapshotEntry { expiry: Some(530) },
+                dolos_cardano::DRepSnapshotEntry {
+                    expiry: Some(530),
+                    unregistered_at: Some((55_444_333, 7)),
+                },
             )]),
         }),
     }
@@ -519,12 +574,13 @@ pub fn pool_state() -> PoolState {
     }
 }
 
-fn vote_history(seed: u8) -> VoteHistory {
-    vec![
-        (400_000u64 + seed as u64, Vote::Yes),
-        (500_000u64 + seed as u64, Vote::No),
-        (600_000u64 + seed as u64, Vote::Abstain),
-    ]
+fn vote_entry(seed: u8) -> VoteEntry {
+    VoteEntry {
+        newest: (600_000u64 + seed as u64, Vote::Abstain),
+        standing: Some((400_000u64 + seed as u64, Vote::Yes)),
+        newest_order: 10 + seed as usize,
+        standing_order: 20 + seed as usize,
+    }
 }
 
 pub fn proposal_state() -> ProposalState {
@@ -553,17 +609,14 @@ pub fn proposal_state() -> ProposalState {
         purpose: Some(dolos_cardano::model::GovPurpose::Committee),
         anchor: Some(anchor(0x19)),
         cc_votes: BTreeMap::from([
-            (StakeCredential::AddrKeyhash(hash28(0x1a)), vote_history(1)),
-            (StakeCredential::ScriptHash(hash28(0x1b)), vote_history(2)),
+            (StakeCredential::AddrKeyhash(hash28(0x1a)), vote_entry(1)),
+            (StakeCredential::ScriptHash(hash28(0x1b)), vote_entry(2)),
         ]),
         drep_votes: BTreeMap::from([
-            (StakeCredential::AddrKeyhash(hash28(0x1c)), vote_history(3)),
-            (StakeCredential::ScriptHash(hash28(0x1d)), vote_history(4)),
+            (StakeCredential::AddrKeyhash(hash28(0x1c)), vote_entry(3)),
+            (StakeCredential::ScriptHash(hash28(0x1d)), vote_entry(4)),
         ]),
-        spo_votes: BTreeMap::from([
-            (hash28(0x1e), vote_history(5)),
-            (hash28(0x1f), vote_history(6)),
-        ]),
+        spo_votes: BTreeMap::from([(hash28(0x1e), vote_entry(5)), (hash28(0x1f), vote_entry(6))]),
     }
 }
 

@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use dolos_core::{BlockSlot, EntityKey};
+use dolos_core::BlockSlot;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::{
     conway::{DRep, DRepVotingThresholds, GovActionId, PoolVotingThresholds, RationalNumber, Vote},
@@ -29,6 +29,7 @@ use pallas::ledger::primitives::{
 
 use crate::{
     Committee, CommitteeAuthorization, GovRoots, PParamKind, PParamsSet, PoolHash, ProposalAction,
+    ProposalKey,
 };
 
 /// One proposal of the ratification snapshot, with its votes already
@@ -37,7 +38,7 @@ use crate::{
 pub struct RatifyProposal {
     /// Entity key of the backing `ProposalState`, for correlating
     /// verdicts back to store rows.
-    pub key: EntityKey,
+    pub key: ProposalKey,
 
     pub id: GovActionId,
 
@@ -170,7 +171,7 @@ pub struct Tallies {
 
 #[derive(Debug, Clone)]
 pub struct ProposalRatification {
-    pub key: EntityKey,
+    pub key: ProposalKey,
     pub id: GovActionId,
     pub verdict: Verdict,
     pub tallies: Tallies,
@@ -784,7 +785,7 @@ pub fn ratify(input: &RatifyInput) -> RatifyOutcome {
         };
 
         verdicts.push(ProposalRatification {
-            key: proposal.key.clone(),
+            key: proposal.key,
             id: proposal.id.clone(),
             verdict,
             tallies: Tallies {
@@ -824,7 +825,7 @@ pub fn ratify(input: &RatifyInput) -> RatifyOutcome {
 pub fn pruned_by_enactment(
     proposals: &[RatifyProposal],
     enacted: &[GovActionId],
-) -> BTreeSet<EntityKey> {
+) -> BTreeSet<ProposalKey> {
     let by_id: BTreeMap<&GovActionId, &RatifyProposal> =
         proposals.iter().map(|p| (&p.id, p)).collect();
 
@@ -876,7 +877,7 @@ pub fn pruned_by_enactment(
         }
 
         if !survives {
-            pruned.insert(proposal.key.clone());
+            pruned.insert(proposal.key);
         }
     }
 
@@ -888,7 +889,7 @@ mod tests {
     use pallas::ledger::primitives::conway::Anchor;
 
     use super::*;
-    use crate::{PParamValue, ProposalState};
+    use crate::{PParamValue, ProposalState, VoteEntry};
 
     fn rational(numerator: u64, denominator: u64) -> RationalNumber {
         RationalNumber {
@@ -964,7 +965,7 @@ mod tests {
 
     fn proposal(byte: u8, action: ProposalAction) -> RatifyProposal {
         RatifyProposal {
-            key: EntityKey::from(vec![byte]),
+            key: ProposalKey::new([byte; 32].into(), 0),
             id: action_id(byte),
             action,
             parent: None,
@@ -1426,7 +1427,12 @@ mod tests {
 
         // …and the application prunes it as a sibling of the winner
         let pruned = pruned_by_enactment(&input.proposals, &outcome.enacted);
-        assert_eq!(pruned, [EntityKey::from(vec![3u8])].into_iter().collect());
+        assert_eq!(
+            pruned,
+            [ProposalKey::new([3u8; 32].into(), 0)]
+                .into_iter()
+                .collect()
+        );
     }
 
     /// Shrinking treasury: two withdrawals compete for a treasury that
@@ -1591,7 +1597,12 @@ mod tests {
         let proposals = vec![winner, grandchild, orphan, unrelated];
         let pruned = pruned_by_enactment(&proposals, &[action_id(1)]);
 
-        assert_eq!(pruned, [EntityKey::from(vec![3u8])].into_iter().collect());
+        assert_eq!(
+            pruned,
+            [ProposalKey::new([3u8; 32].into(), 0)]
+                .into_iter()
+                .collect()
+        );
     }
 
     /// `votes_as_of` integration shape: the engine consumes resolved
@@ -1619,9 +1630,15 @@ mod tests {
             spo_votes: Default::default(),
         };
 
-        state
-            .drep_votes
-            .insert(cred(1), vec![(100, Vote::No), (200, Vote::Yes)]);
+        state.drep_votes.insert(
+            cred(1),
+            VoteEntry {
+                newest: (200, Vote::Yes),
+                standing: Some((100, Vote::No)),
+                newest_order: 0,
+                standing_order: 0,
+            },
+        );
 
         assert_eq!(state.drep_votes_as_of(150).get(&cred(1)), Some(&Vote::No));
         assert_eq!(state.drep_votes_as_of(250).get(&cred(1)), Some(&Vote::Yes));

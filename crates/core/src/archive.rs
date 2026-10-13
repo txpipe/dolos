@@ -4,138 +4,43 @@ use thiserror::Error;
 
 use crate::{
     indexes::{ArchiveIndexDelta, ExactRecord, IndexRecord, TagDimension, TagRecord},
-    state::KEY_SIZE,
-    BlockBody, BlockSlot, BrokenInvariant, ChainPoint, Entity, EntityKey, EntityValue, Namespace,
-    RawBlock,
+    keys::{KeyCodec, KeyError, KeyRange, LogKey, LogRangeOf},
+    BlockBody, BlockSlot, BrokenInvariant, ChainPoint, Entity, EntityValue, FixedNamespace,
+    Namespace, RawBlock,
 };
 
-const TEMPORAL_KEY_SIZE: usize = 8;
-const LOG_KEY_SIZE: usize = TEMPORAL_KEY_SIZE + KEY_SIZE;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
-pub struct TemporalKey([u8; TEMPORAL_KEY_SIZE]);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
-pub struct LogKey([u8; LOG_KEY_SIZE]);
-
-impl AsRef<[u8]> for TemporalKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
+/// An entity logged in one archive namespace. Its rows are keyed
+/// `slot ‖ Key`.
+pub trait LogEntity: Entity + FixedNamespace {
+    type Key: KeyCodec;
 }
 
-impl AsRef<[u8]> for LogKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<&[u8]> for LogKey {
-    fn from(value: &[u8]) -> Self {
-        let mut key = [0u8; LOG_KEY_SIZE];
-        let len = value.len().min(LOG_KEY_SIZE);
-        key[..len].copy_from_slice(&value[..len]);
-        LogKey(key)
-    }
-}
-
-impl From<Vec<u8>> for LogKey {
-    fn from(value: Vec<u8>) -> Self {
-        value.as_slice().into()
-    }
-}
-
-impl From<LogKey> for TemporalKey {
-    fn from(value: LogKey) -> Self {
-        // Safe to unwrap, we know the length matches.
-        let bytes: [u8; TEMPORAL_KEY_SIZE] =
-            value.as_ref()[..TEMPORAL_KEY_SIZE].try_into().unwrap();
-        TemporalKey(bytes)
-    }
-}
-
-impl From<LogKey> for EntityKey {
-    fn from(value: LogKey) -> Self {
-        EntityKey::from(&value.as_ref()[TEMPORAL_KEY_SIZE..])
-    }
-}
-
-impl From<&ChainPoint> for TemporalKey {
-    fn from(value: &ChainPoint) -> Self {
-        value.slot().into()
-    }
-}
-
-impl From<u64> for TemporalKey {
-    fn from(value: u64) -> Self {
-        TemporalKey(value.to_be_bytes())
-    }
-}
-
-impl From<(TemporalKey, EntityKey)> for LogKey {
-    fn from((temporal, entity): (TemporalKey, EntityKey)) -> Self {
-        // Safe to unwrap, we know the length matches.
-        let bytes: [u8; LOG_KEY_SIZE] = [temporal.as_ref(), entity.as_ref()]
-            .concat()
-            .try_into()
-            .unwrap();
-        Self(bytes)
-    }
-}
-
-impl From<TemporalKey> for LogKey {
-    fn from(value: TemporalKey) -> Self {
-        // Safe to unwrap, we know the length matches. We extend the key with 0 to match
-        // length.
-        let bytes: [u8; LOG_KEY_SIZE] = [value.as_ref(), &[0; KEY_SIZE]]
-            .concat()
-            .try_into()
-            .unwrap();
-        Self(bytes)
-    }
-}
-
-impl From<&ChainPoint> for LogKey {
-    fn from(value: &ChainPoint) -> Self {
-        let temporal: TemporalKey = value.into();
-        temporal.into()
-    }
-}
-
-impl LogKey {
-    pub fn full_range() -> Range<LogKey> {
-        Range {
-            start: LogKey([0u8; LOG_KEY_SIZE]),
-            end: LogKey([255u8; LOG_KEY_SIZE]),
-        }
-    }
-}
-
-pub struct LogIterTyped<A: ArchiveStore, E: Entity> {
+/// Log rows of one namespace with their keys decoded, in key order.
+pub struct LogIterTyped<A: ArchiveStore, E: LogEntity> {
     inner: A::LogIter,
-    ns: Namespace,
     _marker: PhantomData<E>,
 }
 
-impl<A: ArchiveStore, E: Entity> LogIterTyped<A, E> {
-    pub fn new(inner: A::LogIter, ns: Namespace) -> Self {
+impl<A: ArchiveStore, E: LogEntity> LogIterTyped<A, E> {
+    pub fn new(inner: A::LogIter) -> Self {
         Self {
             inner,
-            ns,
             _marker: PhantomData,
         }
     }
 }
 
-impl<A: ArchiveStore, E: Entity> Iterator for LogIterTyped<A, E> {
-    type Item = Result<(LogKey, E), ArchiveError>;
+impl<A: ArchiveStore, E: LogEntity> Iterator for LogIterTyped<A, E> {
+    type Item = Result<(BlockSlot, E::Key, E), ArchiveError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.inner.next()?;
 
         let mapped = next.and_then(|(key, value)| {
-            E::decode_entity(self.ns, &value)
-                .map(|v| (key, v))
+            let (slot, key) = key.decode::<E::Key>()?;
+
+            E::decode_entity(E::NS, &value)
+                .map(|v| (slot, key, v))
                 .map_err(|x| ArchiveError::EntityDecodingError(x.to_string()))
         });
 
@@ -168,6 +73,9 @@ pub enum ArchiveError {
 
     #[error("entity decoding error")]
     EntityDecodingError(String),
+
+    #[error(transparent)]
+    KeyDecodingError(#[from] KeyError),
 
     #[error("namespace {0} not found")]
     NamespaceNotFound(Namespace),
@@ -250,10 +158,15 @@ pub trait ArchiveWriter: Send + Sync + 'static {
         value: &EntityValue,
     ) -> Result<(), ArchiveError>;
 
-    fn write_log_typed<E: Entity>(&self, key: &LogKey, entity: &E) -> Result<(), ArchiveError> {
+    fn write_log_typed<E: LogEntity>(
+        &self,
+        slot: BlockSlot,
+        key: &E::Key,
+        entity: &E,
+    ) -> Result<(), ArchiveError> {
         let (ns, raw) = E::encode_entity(entity);
 
-        self.write_log(ns, key, &raw)
+        self.write_log(ns, &LogKey::of(slot, key), &raw)
     }
 
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError>;
@@ -299,21 +212,25 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         keys: &[&LogKey],
     ) -> Result<Vec<Option<EntityValue>>, ArchiveError>;
 
-    fn iter_logs(&self, ns: Namespace, range: Range<LogKey>)
-        -> Result<Self::LogIter, ArchiveError>;
+    /// Log rows of `ns` whose key falls in `range`, in key order.
+    fn iter_logs(&self, ns: Namespace, range: KeyRange) -> Result<Self::LogIter, ArchiveError>;
 
-    fn read_logs_typed<E: Entity>(
+    fn read_logs_typed<E: LogEntity>(
         &self,
-        ns: Namespace,
-        keys: &[&LogKey],
+        keys: &[(BlockSlot, E::Key)],
     ) -> Result<Vec<Option<E>>, ArchiveError> {
-        let raw = self.read_logs(ns, keys)?;
+        let keys: Vec<LogKey> = keys
+            .iter()
+            .map(|(slot, key)| LogKey::of(*slot, key))
+            .collect();
+
+        let raw = self.read_logs(E::NS, &keys.iter().collect::<Vec<_>>())?;
 
         let decoded = raw
             .into_iter()
             .map(|x| {
                 x.map(|v| {
-                    E::decode_entity(ns, &v)
+                    E::decode_entity(E::NS, &v)
                         .map_err(|x| ArchiveError::EntityDecodingError(x.to_string()))
                 })
             })
@@ -323,28 +240,32 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         Ok(decoded)
     }
 
-    fn read_log_typed<E: Entity>(
+    fn read_log_typed<E: LogEntity>(
         &self,
-        ns: Namespace,
-        key: &LogKey,
+        slot: BlockSlot,
+        key: &E::Key,
     ) -> Result<Option<E>, ArchiveError> {
-        let raw = self.read_logs_typed(ns, &[key])?;
+        let raw = self.read_logs(E::NS, &[&LogKey::of(slot, key)])?;
 
-        let first = raw.into_iter().next().unwrap();
-
-        Ok(first)
+        raw.into_iter()
+            .next()
+            .unwrap()
+            .map(|v| {
+                E::decode_entity(E::NS, &v)
+                    .map_err(|x| ArchiveError::EntityDecodingError(x.to_string()))
+            })
+            .transpose()
     }
 
-    fn iter_logs_typed<E: Entity>(
+    fn iter_logs_typed<E: LogEntity>(
         &self,
-        ns: Namespace,
-        range: Option<Range<LogKey>>,
+        range: Option<LogRangeOf<E::Key>>,
     ) -> Result<LogIterTyped<Self, E>, ArchiveError> {
-        let range = range.unwrap_or_else(LogKey::full_range);
+        let range = range.unwrap_or_else(LogRangeOf::all);
 
-        let inner = self.iter_logs(ns, range)?;
+        let inner = self.iter_logs(E::NS, range.into_raw())?;
 
-        Ok(LogIterTyped::<Self, E>::new(inner, ns))
+        Ok(LogIterTyped::<Self, E>::new(inner))
     }
 
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError>;

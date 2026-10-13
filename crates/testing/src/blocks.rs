@@ -102,6 +102,19 @@ pub fn make_conway_block_with_tx(
     auxiliary_data: Option<alonzo::AuxiliaryData>,
     valid: bool,
 ) -> (ChainPoint, RawBlock) {
+    make_conway_block_with_txs(slot, vec![(tx_body, valid)], auxiliary_data)
+}
+
+/// A Conway block carrying `txs` in order, each flagged valid or
+/// phase-2-invalid. `auxiliary_data`, if any, belongs to the first one.
+pub fn make_conway_block_with_txs(
+    slot: BlockSlot,
+    txs: Vec<(
+        pallas::ledger::primitives::conway::TransactionBody<'static>,
+        bool,
+    )>,
+    auxiliary_data: Option<alonzo::AuxiliaryData>,
+) -> (ChainPoint, RawBlock) {
     let header_body = HeaderBody {
         block_number: 1,
         slot,
@@ -125,8 +138,7 @@ pub fn make_conway_block_with_tx(
         body_signature: Bytes::from(vec![0x18]),
     };
 
-    let body = tx_body;
-    let witness_set = WitnessSet {
+    let witness_set = || WitnessSet {
         vkeywitness: None,
         native_script: None,
         bootstrap_witness: None,
@@ -137,10 +149,20 @@ pub fn make_conway_block_with_tx(
         plutus_v3_script: None,
     };
 
+    let invalid: Vec<u32> = txs
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, valid))| !valid)
+        .map(|(index, _)| index as u32)
+        .collect();
+
     let block = Block {
         header: KeepRaw::from(header),
-        transaction_bodies: vec![KeepRaw::from(body)],
-        transaction_witness_sets: vec![KeepRaw::from(witness_set)],
+        transaction_witness_sets: txs.iter().map(|_| KeepRaw::from(witness_set())).collect(),
+        transaction_bodies: txs
+            .into_iter()
+            .map(|(body, _)| KeepRaw::from(body))
+            .collect(),
         auxiliary_data_set: match auxiliary_data {
             Some(aux) => {
                 let mut map = BTreeMap::new();
@@ -149,7 +171,7 @@ pub fn make_conway_block_with_tx(
             }
             None => BTreeMap::new(),
         },
-        invalid_transactions: if valid { None } else { Some(vec![0]) },
+        invalid_transactions: (!invalid.is_empty()).then_some(invalid),
     };
 
     let hash = block.header.compute_hash();

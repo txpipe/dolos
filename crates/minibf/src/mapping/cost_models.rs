@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+
+use pallas::ledger::primitives::conway::CostModels;
+
 const V1_NAMES: [&str; 332] = [
     "addInteger-cpu-arguments-intercept",
     "addInteger-cpu-arguments-slope",
@@ -1037,7 +1041,7 @@ fn get_name_for_value_index(plutus_version: u64, value_index: u64) -> &'static s
     }
 }
 
-pub fn get_named_cost_model(plutus_version: u64, values: &[i64]) -> serde_json::Value {
+fn get_named_cost_model(plutus_version: u64, values: &[i64]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
 
     for (i, value) in values.iter().enumerate() {
@@ -1050,4 +1054,66 @@ pub fn get_named_cost_model(plutus_version: u64, values: &[i64]) -> serde_json::
     }
 
     serde_json::Value::Object(map)
+}
+
+fn cost_models_to_key_value(cost_models: &CostModels) -> Vec<(&'static str, &[i64])> {
+    let maybe = vec![
+        ("PlutusV1", cost_models.plutus_v1.as_ref()),
+        ("PlutusV2", cost_models.plutus_v2.as_ref()),
+        ("PlutusV3", cost_models.plutus_v3.as_ref()),
+    ];
+
+    maybe
+        .into_iter()
+        .filter_map(|(k, v)| v.map(|v| (k, v.as_slice())))
+        .collect()
+}
+
+/// Cost models as the raw operation-cost vectors the chain carries.
+///
+/// `/governance/proposals/…/parameters` returns exactly this, while the epoch
+/// endpoints run the vectors through [`map_cost_models_named`] first.
+pub(crate) fn map_cost_models_raw(
+    cost_models: &CostModels,
+) -> Option<Option<HashMap<String, serde_json::Value>>> {
+    let as_vec = cost_models_to_key_value(cost_models);
+    if as_vec.is_empty() {
+        None
+    } else {
+        Some(Some(
+            as_vec
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), serde_json::to_value(v).unwrap()))
+                .collect(),
+        ))
+    }
+}
+
+pub(crate) fn map_cost_models_named(
+    cost_models: &CostModels,
+) -> Option<HashMap<String, serde_json::Value>> {
+    let as_vec = cost_models_to_key_value(cost_models);
+    if as_vec.is_empty() {
+        None
+    } else {
+        Some(
+            as_vec
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        k.to_string(),
+                        get_named_cost_model(
+                            match k {
+                                "PlutusV1" => 1,
+                                "PlutusV2" => 2,
+                                "PlutusV3" => 3,
+                                _ => unreachable!(),
+                            },
+                            v,
+                        ),
+                    )
+                })
+                .collect(),
+        )
+    }
 }

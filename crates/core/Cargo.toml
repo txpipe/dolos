@@ -25,6 +25,7 @@ pallas.workspace = true
 hex.workspace = true
 regex.workspace = true
 serde_with = "3.16.0"
+smallvec = { version = "1.15.0", features = ["const_generics", "union"] }
 
 [dev-dependencies]
 proptest = "1.7.0"

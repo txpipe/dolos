@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
-    ChainError, Domain, EntityKey, Genesis, InvariantViolation, StateError, StateStore as _,
-    TxOrder, TxoRef,
+    ChainError, Domain, Genesis, InvariantViolation, RangeOf, StateError, StateStore as _, TxOrder,
+    TxoRef,
 };
 use pallas::{
     codec::utils::KeepRaw,
@@ -18,7 +18,7 @@ use tracing::{debug, instrument};
 
 use crate::{
     load_effective_pparams, load_gov, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor,
-    utxoset, Cache, DRepState, FixedNamespace as _, PParamsSet,
+    utxoset, Cache, DRepKey, DRepState, FixedNamespace as _, PParamsSet,
 };
 
 // Sub-modules
@@ -101,6 +101,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        order: &TxOrder,
         index: u32,
         output: &MultiEraOutput,
     ) -> Result<(), ChainError> {
@@ -115,6 +116,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        order: &TxOrder,
         mint: &MultiEraPolicyAssets,
     ) -> Result<(), ChainError> {
         Ok(())
@@ -390,22 +392,64 @@ impl<'a> DeltaBuilder<'a> {
             }
 
             for (index, output) in tx.produces() {
-                self.account_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.asset_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.datum_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.drep_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.epoch_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.pool_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                self.account_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.asset_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.datum_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.drep_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.epoch_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.pool_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
                 self.tx_logs
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.proposal_logs
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                    .visit_output(&mut deltas, block, tx, &order, index as u32, &output)?;
+                self.proposal_logs.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
             }
 
             // The Conway LEDGER rule runs CERTS, GOV, the withdrawal drain and
@@ -418,15 +462,21 @@ impl<'a> DeltaBuilder<'a> {
             if tx.is_valid() {
                 for mint in tx.mints() {
                     self.account_state
-                        .visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.asset_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.datum_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.drep_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.epoch_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.pool_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.tx_logs.visit_mint(&mut deltas, block, tx, &mint)?;
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.asset_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.datum_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.drep_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.epoch_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.pool_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.tx_logs
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                     self.proposal_logs
-                        .visit_mint(&mut deltas, block, tx, &mint)?;
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                 }
 
                 for cert in tx.certs() {
@@ -618,9 +668,11 @@ pub(crate) fn compute_delta<D: Domain>(
         let mut keys = Vec::new();
 
         // raw iteration: only the keys matter, skip the CBOR decode
-        for record in state.iter_entities(DRepState::NS, EntityKey::full_range())? {
+        let all = RangeOf::<DRepKey>::all().into_raw();
+
+        for record in state.iter_entities(DRepState::NS, all)? {
             let (key, _) = record?;
-            keys.push(key);
+            keys.push(key.decode::<DRepKey>().map_err(StateError::from)?);
         }
 
         dormancy.drep_keys = Arc::new(keys);
@@ -657,7 +709,7 @@ pub(crate) fn compute_delta<D: Domain>(
 mod tests {
     use std::collections::BTreeMap;
 
-    use dolos_core::NsKey;
+    use dolos_core::EntityKey;
     use pallas::codec::utils::{NonEmptySet, NonZeroInt, Set};
     use pallas::crypto::hash::Hash;
     use pallas::ledger::primitives::conway::{
@@ -666,7 +718,7 @@ mod tests {
     };
     use pallas::ledger::primitives::{StakeCredential, UnitInterval};
 
-    use crate::model::{EpochStatsUpdate, PParamValue as Val};
+    use crate::model::{EpochStatsUpdate, PParamValue as Val, PoolKey};
     use crate::{CardanoDelta, OwnedMultiEraBlock};
 
     use super::*;
@@ -815,8 +867,8 @@ mod tests {
         deltas
             .entities
             .keys()
-            .filter(|NsKey(namespace, _)| *namespace == ns)
-            .map(|NsKey(_, key)| key.clone())
+            .filter(|key| key.ns() == ns)
+            .map(|key| key.key().clone())
             .collect()
     }
 
@@ -824,7 +876,7 @@ mod tests {
         deltas
             .entities
             .iter()
-            .filter(|(NsKey(ns, _), _)| *ns == "epochs")
+            .filter(|(key, _)| key.ns() == "epochs")
             .flat_map(|(_, group)| group.iter())
             .find_map(|delta| match delta {
                 CardanoDelta::EpochStatsUpdate(stats) => Some((**stats).clone()),
@@ -836,7 +888,7 @@ mod tests {
     /// The operator hash of the fixture's `PoolRegistration` certificate,
     /// which `PoolRegistration::key` uses as the `pools` entity key.
     fn cert_pool_key() -> EntityKey {
-        EntityKey::from([0x77u8; 28].as_slice())
+        EntityKey::of(&PoolKey([0x77u8; 28].into()))
     }
 
     /// The block issuer's operator hash, which `PoolStateVisitor::visit_root`
@@ -847,7 +899,7 @@ mod tests {
         let block = OwnedMultiEraBlock::decode(issuer.1).unwrap();
         let key = block.view().header().issuer_vkey().unwrap().to_vec();
         let operator = pallas::crypto::hash::Hasher::<224>::hash(&key);
-        EntityKey::from(operator.as_slice())
+        EntityKey::of(&PoolKey(operator))
     }
 
     #[test]
@@ -880,6 +932,119 @@ mod tests {
 
         // The transaction is still counted and its collateral still priced.
         assert_eq!(stats.tx_count, 1);
+    }
+
+    /// A body with nothing in it but a fee, which keeps tx hashes apart.
+    fn bare_tx_body(fee: u64) -> TransactionBody<'static> {
+        TransactionBody {
+            inputs: Set::from(vec![]),
+            outputs: vec![],
+            fee,
+            ttl: None,
+            certificates: None,
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: None,
+            proposal_procedures: None,
+            treasury_value: None,
+            donation: None,
+        }
+    }
+
+    /// The ledger's cleanup compares a vote's position with its DRep's
+    /// deregistration, so both carry the transaction's index in the block,
+    /// phase-2-invalid transactions counted.
+    #[test]
+    fn votes_and_drep_certificates_carry_the_block_tx_index() {
+        let drep = StakeCredential::AddrKeyhash(Hash::<28>::from([0x66u8; 28]));
+
+        let unreg = TransactionBody {
+            certificates: Some(
+                NonEmptySet::try_from(vec![Certificate::UnRegDRepCert(drep.clone(), 500_000_000)])
+                    .unwrap(),
+            ),
+            ..bare_tx_body(2)
+        };
+
+        let reg = TransactionBody {
+            certificates: Some(
+                NonEmptySet::try_from(vec![Certificate::RegDRepCert(drep, 500_000_000, None)])
+                    .unwrap(),
+            ),
+            ..bare_tx_body(3)
+        };
+
+        let vote = TransactionBody {
+            voting_procedures: loaded_tx_body().voting_procedures,
+            ..bare_tx_body(4)
+        };
+
+        let (_, raw) = dolos_testing::blocks::make_conway_block_with_txs(
+            SLOT,
+            vec![
+                (bare_tx_body(1), false),
+                (unreg, true),
+                (reg, true),
+                (vote, true),
+            ],
+            None,
+        );
+
+        let mut work = WorkBlock::new(OwnedMultiEraBlock::decode(raw).unwrap());
+        let genesis = Arc::new(crate::load_test_genesis("preview"));
+        let pparams = test_pparams();
+        let utxos = HashMap::new();
+
+        DeltaBuilder::new(
+            genesis,
+            10,
+            &pparams,
+            EPOCH,
+            EPOCH_START,
+            &mut work,
+            &utxos,
+            DormancyContext::default(),
+        )
+        .crawl()
+        .unwrap();
+
+        let deltas: Vec<_> = work.deltas.entities.values().flatten().collect();
+
+        let votes: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                CardanoDelta::VoteCast(vote) => Some((vote.slot, vote.order)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(votes, vec![(SLOT, 3)]);
+
+        let unregistrations: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                CardanoDelta::DRepUnRegistration(cert) => Some((cert.slot, cert.txorder)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unregistrations, vec![(SLOT, 1)]);
+
+        let registrations: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                CardanoDelta::DRepRegistration(cert) => Some((cert.slot, cert.txorder)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(registrations, vec![(SLOT, 2)]);
     }
 
     #[test]

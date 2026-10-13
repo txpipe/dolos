@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, EntityKey, NsKey};
+use dolos_core::{BlockSlot, NsKey};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
@@ -7,10 +7,7 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use super::{
-    epoch_value::{EpochValue, TransitionDefault},
-    FixedNamespace as _,
-};
+use super::epoch_value::{EpochValue, TransitionDefault};
 use crate::pallas_extras::MultiEraPoolRegistration;
 
 pub type PoolHash = Hash<28>;
@@ -92,7 +89,16 @@ impl TransitionDefault for PoolSnapshot {
     }
 }
 
-entity_boilerplate!(PoolState, "pools");
+hash_key!(
+    /// A pool, keyed by its operator hash.
+    PoolKey,
+    PoolHash,
+    28
+);
+
+display_as_stored!(PoolKey);
+
+entity_boilerplate!(PoolState, "pools", state = PoolKey);
 
 impl PoolState {
     pub fn live_saturation(&self) -> RationalNumber {
@@ -228,8 +234,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
     type Entity = PoolState;
 
     fn key(&self) -> NsKey {
-        let key = self.cert.operator.as_slice();
-        NsKey::from((PoolState::NS, key))
+        NsKey::of::<PoolState>(&PoolKey(self.cert.operator))
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -332,7 +337,7 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     type Entity = PoolState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PoolState::NS, self.operator.as_slice()))
+        NsKey::of::<PoolState>(&PoolKey(self.operator))
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -389,7 +394,7 @@ impl dolos_core::EntityDelta for PoolDeRegistration {
     type Entity = PoolState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PoolState::NS, self.operator.as_slice()))
+        NsKey::of::<PoolState>(&PoolKey(self.operator))
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -439,7 +444,7 @@ impl dolos_core::EntityDelta for PoolWrapUp {
     type Entity = PoolState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PoolState::NS, self.pool_hash.as_slice()))
+        NsKey::of::<PoolState>(&PoolKey(self.pool_hash))
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -460,7 +465,7 @@ impl dolos_core::EntityDelta for PoolWrapUp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolTransition {
-    pub(crate) pool: EntityKey,
+    pub(crate) pool: PoolKey,
     pub(crate) next_epoch: Epoch,
 
     // undo: save the whole EpochValue so rotation can be reversed in one shot.
@@ -468,7 +473,7 @@ pub struct PoolTransition {
 }
 
 impl PoolTransition {
-    pub fn new(pool: EntityKey, next_epoch: Epoch) -> Self {
+    pub fn new(pool: PoolKey, next_epoch: Epoch) -> Self {
         Self {
             pool,
             next_epoch,
@@ -481,7 +486,7 @@ impl dolos_core::EntityDelta for PoolTransition {
     type Entity = PoolState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PoolState::NS, self.pool.clone()))
+        NsKey::of::<PoolState>(&self.pool)
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
@@ -542,7 +547,7 @@ mod prop_tests {
             pool in root::any_hash_28(),
             next_epoch in root::any_epoch(),
         ) -> PoolTransition {
-            PoolTransition::new(dolos_core::EntityKey::from(pool.as_slice()), next_epoch)
+            PoolTransition::new(PoolKey(pool), next_epoch)
         }
     }
 
@@ -643,5 +648,31 @@ mod prop_tests {
             epoch: 6,
         }
         .apply(&mut Some(pool));
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use dolos_core::{keys::encode, KeyCodec};
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn layout_is_pinned() {
+        assert_eq!(encode(&PoolKey(Hash::new([0x11; 28]))).to_vec(), [0x11; 28]);
+    }
+
+    #[test]
+    fn malformed_keys_are_refused() {
+        assert!(PoolKey::decode_key(&[0; 32]).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn keys_round_trip(hash in any::<[u8; 28]>()) {
+            let key = PoolKey(hash.into());
+            prop_assert_eq!(PoolKey::decode_key(&encode(&key)), Ok(key));
+        }
     }
 }

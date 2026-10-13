@@ -4,6 +4,4 @@
 //! for backward compatibility.
 
 pub use crate::model::epochs::SetEpochIncentives;
-pub use crate::model::pending::{
-    credential_to_key, DequeueMir, DequeueReward, EnqueueMir, EnqueueReward,
-};
+pub use crate::model::pending::{DequeueMir, DequeueReward, EnqueueMir, EnqueueReward};

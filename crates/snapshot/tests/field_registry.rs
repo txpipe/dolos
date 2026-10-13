@@ -50,7 +50,7 @@ fn schema_rev(ns: Namespace) -> u64 {
 
 /// The assertions every registry entry answers, applied to one of them.
 ///
-/// Shared by the fourteen real namespaces and by the synthetic entry of
+/// Shared by the nineteen real namespaces and by the synthetic entry of
 /// `ground_rules`, so the append-only path is exercised by the same code that
 /// enforces it rather than by a parallel imitation of it.
 fn check_entry(entry: &Entry, expected_rev: u64) {
@@ -151,11 +151,10 @@ fn every_canary_matches_the_registry() {
 /// The append-only path, exercised on an entry whose history has actually
 /// moved.
 ///
-/// Every real namespace but `epochs` and `gov` sits at revision 1, so the
-/// retained-canary assertions in [`check_entry`] would otherwise be running
-/// over a single element and proving nothing about the case they exist for.
-/// The synthetic entry appends a field for real: revision 1's bytes stay
-/// pinned and must still decode under revision 2's type.
+/// The synthetic entry exercises the retained-canary assertions in
+/// [`check_entry`] independently of the real namespaces' revision histories.
+/// It appends a field: revision 1's bytes stay pinned and must still decode
+/// under revision 2's type.
 #[test]
 fn the_append_only_path_holds_on_a_history_that_moved() {
     check_entry(

@@ -6,8 +6,7 @@ use axum::{
 };
 use dolos_cardano::{
     model::{
-        gov::GovState, AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState,
-        ProposalState,
+        gov::GovState, AccountState, AssetState, DRepState, EpochState, PoolState, ProposalState,
     },
     ChainSummary, PParamsSet, StakeLog,
 };
@@ -25,8 +24,8 @@ use tracing::Level;
 
 use dolos_core::{
     config::MinibfConfig, ArchiveStore as _, AsyncQueryFacade, BlockSlot, CancelToken, Domain,
-    Entity, EntityKey, EraCbor, LogKey, ServeError, StateError, StateStore as _, SubmitExt,
-    TemporalKey, TxOrder,
+    EraCbor, LogEntity, LogRangeOf, RangeOf, ServeError, StateEntity, StateError, StateStore as _,
+    SubmitExt, TxOrder,
 };
 
 mod cache;
@@ -141,11 +140,9 @@ impl<D: Domain> Facade<D> {
     ) -> Result<Option<EpochState>, StatusCode> {
         let slot = chain_summary.epoch_start(epoch);
 
-        let logkey = LogKey::from(TemporalKey::from(slot));
-
         let log = self
             .archive()
-            .read_log_typed::<EpochState>(EpochState::NS, &logkey)
+            .read_log_typed::<EpochState>(slot, &())
             .map_err(log_and_500("failed to read epoch log from archive"))?;
 
         Ok(log)
@@ -221,15 +218,14 @@ impl<D: Domain> Facade<D> {
 
     pub fn iter_cardano_entities<T>(
         &self,
-        range: Option<Range<EntityKey>>,
-    ) -> Result<impl Iterator<Item = Result<(EntityKey, T), StateError>>, StatusCode>
+        range: Option<RangeOf<T::Key>>,
+    ) -> Result<impl Iterator<Item = Result<(T::Key, T), StateError>>, StatusCode>
     where
-        T: FixedNamespace + Entity,
-        Option<T>: From<D::Entity>,
+        T: StateEntity,
     {
         let mapped = self
             .state()
-            .iter_entities_typed(T::NS, range)
+            .iter_entities_typed::<T>(range)
             .map_err(log_and_500("failed to iterate cardano entities"))?;
 
         Ok(mapped)
@@ -237,21 +233,20 @@ impl<D: Domain> Facade<D> {
 
     pub fn iter_cardano_logs_per_epoch<T>(
         &self,
-        key: EntityKey,
+        key: &T::Key,
         range: Range<Epoch>,
     ) -> Result<Vec<(Epoch, T)>, StatusCode>
     where
-        T: FixedNamespace + Entity,
+        T: LogEntity,
     {
         let summary = self.get_chain_summary()?;
 
         let mut out = vec![];
         for epoch in range {
             let slot = summary.epoch_start(epoch);
-            let logkey: LogKey = (TemporalKey::from(slot), key.clone()).into();
             if let Some(entity) = self
                 .archive()
-                .read_log_typed::<T>(T::NS, &logkey)
+                .read_log_typed::<T>(slot, key)
                 .map_err(log_and_500("failed to read log for epoch iteration"))?
             {
                 out.push((epoch, entity));
@@ -261,9 +256,8 @@ impl<D: Domain> Facade<D> {
         Ok(out)
     }
 
-    /// The log key is `(slot, pool)`. The range `slot..slot + 1`, with a zeroed
-    /// entity key on each bound, includes every pool at the start slot of this
-    /// epoch and no pool from the next epoch. Returns `None` when no log
+    /// The log key is `slot ‖ pool`: every pool's row at the start slot of
+    /// this epoch, and none of the next epoch's. Returns `None` when no log
     /// exists.
     fn stake_logs_sum_at_epoch(
         &self,
@@ -272,18 +266,15 @@ impl<D: Domain> Facade<D> {
     ) -> Result<Option<u64>, StatusCode> {
         let slot = chain_summary.epoch_start(epoch);
 
-        let start = LogKey::from(TemporalKey::from(slot));
-        let end = LogKey::from(TemporalKey::from(slot + 1));
-
         let iter = self
             .archive()
-            .iter_logs_typed::<StakeLog>(StakeLog::NS, Some(start..end))
+            .iter_logs_typed::<StakeLog>(Some(LogRangeOf::slot(slot)))
             .map_err(log_and_500("failed to iterate stake logs for epoch"))?;
 
         let mut total = 0u64;
         let mut found = false;
         for entry in iter {
-            let (_, log) = entry.map_err(log_and_500("failed to read stake log for epoch"))?;
+            let (_, _, log) = entry.map_err(log_and_500("failed to read stake log for epoch"))?;
             total += log.total_stake;
             found = true;
         }
@@ -317,27 +308,18 @@ impl<D: Domain> Facade<D> {
         Ok(None)
     }
 
-    pub fn read_cardano_entity<T>(&self, key: impl Into<EntityKey>) -> Result<Option<T>, StatusCode>
+    pub fn read_cardano_entity<T>(&self, key: &T::Key) -> Result<Option<T>, StatusCode>
     where
-        T: FixedNamespace,
-        Option<T>: From<D::Entity>,
+        T: StateEntity,
     {
-        let key = key.into();
-
-        let entity = self
-            .state()
-            .read_entity_typed(T::NS, &key)
-            .map_err(log_and_500("failed to read cardano entity"))?;
-
-        let downcast = entity.and_then(Option::<T>::from);
-
-        Ok(downcast)
+        self.state()
+            .read_entity_typed::<T>(key)
+            .map_err(log_and_500("failed to read cardano entity"))
     }
 
-    pub fn cardano_entity_exists<T>(&self, key: impl Into<EntityKey>) -> Result<bool, StatusCode>
+    pub fn cardano_entity_exists<T>(&self, key: &T::Key) -> Result<bool, StatusCode>
     where
-        T: FixedNamespace,
-        Option<T>: From<D::Entity>,
+        T: StateEntity,
     {
         Ok(self.read_cardano_entity::<T>(key)?.is_some())
     }
@@ -378,7 +360,7 @@ where
     let app = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
-        .route("/metrics", get(routes::metrics::metrics::<D>))
+        .route("/metrics", get(routes::metrics::naked::<D>))
         .route("/health/clock", get(routes::health::clock))
         .route("/genesis", get(routes::genesis::naked::<D>))
         .route("/network", get(routes::network::naked::<D>))
@@ -546,6 +528,10 @@ where
             get(routes::scripts::by_hash_utxos::<D>),
         )
         .route(
+            "/scripts/{script_hash}/redeemers",
+            get(routes::scripts::by_hash_redeemers::<D>),
+        )
+        .route(
             "/scripts/datum/{datum_hash}",
             get(routes::scripts::by_datum_hash::<D>),
         )
@@ -703,6 +689,14 @@ where
         .route(
             "/governance/proposals/{gov_action_id}/parameters",
             get(routes::governance::proposal_parameters_by_gov_action::<D>),
+        )
+        .route(
+            "/governance/proposals/{tx_hash}/{cert_index}/votes",
+            get(routes::governance::proposal_votes::<D>),
+        )
+        .route(
+            "/governance/proposals/{gov_action_id}/votes",
+            get(routes::governance::proposal_votes_by_gov_action::<D>),
         )
         .fallback(routes::invalid_path)
         .with_state(facade)

@@ -11,11 +11,11 @@ use pallas::{
 
 use dolos_core::{
     archive::ArchiveStore, AsyncQueryFacade, BlockBody, BlockSlot, ChainError, Domain, DomainError,
-    EntityKey, StateStore as _, TagDimension, TxHash, TxoRef,
+    StateStore as _, TagDimension, TxHash, TxoRef,
 };
 
 use crate::indexes::dimensions::archive;
-use crate::model::{DatumState, DATUM_NS};
+use crate::model::{DatumKey, DatumState};
 
 use futures_core::Stream;
 
@@ -119,6 +119,23 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
     fn blocks_by_metadata_stream(
         &self,
         label: u64,
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+
+    /// Stream blocks holding redeemers that executed the given script, in
+    /// slot order.
+    ///
+    /// Backed by the SCRIPT_REDEEMERS dimension, which the indexer resolves
+    /// at block-application time. The tag is exact but block-level: the
+    /// caller still matches each redeemer against the script hash to pick
+    /// rows. A store synced before the dimension shipped carries tags only
+    /// from its upgrade point; full history needs a store synced from
+    /// scratch.
+    fn blocks_by_script_redeemers_stream(
+        &self,
+        script_hash: &Hash<28>,
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
@@ -377,6 +394,24 @@ where
         )
     }
 
+    fn blocks_by_script_redeemers_stream(
+        &self,
+        script_hash: &Hash<28>,
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    {
+        blocks_by_tag_stream(
+            (*self).clone(),
+            archive::SCRIPT_REDEEMERS,
+            script_hash.as_slice().to_vec(),
+            start_slot,
+            end_slot,
+            order,
+        )
+    }
+
     async fn blocks_by_address(
         &self,
         address: &[u8],
@@ -509,10 +544,9 @@ where
     }
 
     async fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, DomainError> {
-        let key = EntityKey::from(*datum_hash);
+        let key = DatumKey(*datum_hash);
         self.run_blocking(move |domain| {
-            let datum_state: Option<DatumState> =
-                domain.state().read_entity_typed(DATUM_NS, &key)?;
+            let datum_state: Option<DatumState> = domain.state().read_entity_typed(&key)?;
             Ok(datum_state.map(|s| s.bytes))
         })
         .await

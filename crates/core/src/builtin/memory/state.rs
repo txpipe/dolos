@@ -7,7 +7,7 @@
 //!
 //! - entities live in one map keyed `(namespace, entity_key)`, which makes a
 //!   namespaced range scan a plain [`BTreeMap::range`] — the same shape fjall
-//!   gets from its `[ns_hash:8][entity_key:32]` prefix;
+//!   gets from its `[ns_hash:8][entity_key]` prefix;
 //! - UTxOs live in a map keyed on [`TxoRef`], whose `(tx_hash, index)` ordering
 //!   is exactly what fjall's `[tx_hash:32][index:4]` big-endian key encodes;
 //! - the live-UTxO tags live in a map keyed `(dimension, logical key)`, each
@@ -26,14 +26,13 @@
 //! memory-resident one that serves the snapshot export seam.
 
 use std::collections::{BTreeMap, HashSet};
-use std::ops::Range;
+use std::ops::Bound;
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::state::{
-    EntityKey, EntityValue, Namespace, StateError, StateStore, StateWriter, UtxoEntry,
-};
+use crate::state::{EntityValue, Namespace, StateError, StateStore, StateWriter, UtxoEntry};
 use crate::{
-    ChainPoint, EraCbor, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
+    ChainPoint, EntityKey, EraCbor, KeyRange, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap,
+    UtxoSet, UtxoSetDelta,
 };
 
 /// The store's whole contents, guarded as one unit so a commit is atomic.
@@ -284,20 +283,28 @@ impl StateStore for MemoryStateStore {
     fn iter_entities(
         &self,
         ns: Namespace,
-        range: Range<EntityKey>,
+        range: KeyRange,
     ) -> Result<Self::EntityIter, StateError> {
-        // An inverted range matches nothing on the disk backends, whose keys
-        // are bytes; `BTreeMap::range` panics on one, so it is caught here
-        // rather than turned into a difference between backends.
-        if range.start > range.end {
+        // An empty range matches nothing on the disk backends, whose keys are
+        // bytes; `BTreeMap::range` panics on an inverted one, so it is caught
+        // here rather than turned into a difference between backends.
+        if range.is_empty() {
             return Ok(MemoryEntityIter(Vec::new().into_iter()));
         }
 
         let tables = self.tables.read().map_err(|_| poisoned())?;
 
+        let start = Bound::Included((ns, EntityKey::from_raw(&range.start)));
+
+        let end = match &range.end {
+            Some(end) => Bound::Excluded((ns, EntityKey::from_raw(end))),
+            None => Bound::Unbounded,
+        };
+
         let entries: Vec<_> = tables
             .entities
-            .range((ns, range.start)..(ns, range.end))
+            .range((start, end))
+            .take_while(|((key_ns, _), _)| *key_ns == ns)
             .map(|((_, key), value)| (key.clone(), value.clone()))
             .collect();
 

@@ -66,8 +66,7 @@ use dolos_cardano::{
     eras::ChainSummary, indexes::archive_dimensions, pallas::ledger::traverse::MultiEraBlock,
 };
 use dolos_core::{
-    ArchiveStore, BlockSlot, ChainPoint, EntityKey, IndexRecord, LogKey, Namespace, StateStore,
-    TemporalKey,
+    ArchiveStore, BlockSlot, ChainPoint, IndexRecord, KeyRange, Namespace, StateStore,
 };
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
@@ -778,7 +777,7 @@ where
     }
 
     // One job per state kind: each walks its own namespace once, so the
-    // fourteen walks that ran in sequence overlap instead. The tip shards are
+    // nineteen walks that ran in sequence overlap instead. The tip shards are
     // not offered to the predecessor; the dumps among them are. See
     // [`Predecessor::landed`].
     for (kind, ns, shards) in STATE_KINDS {
@@ -1427,7 +1426,7 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
             .as_mut()
             .expect("the record that got here opened the layer");
 
-        sink.write_record(&logs::encode(&record)?)?;
+        sink.write_record(&logs::encode(ns, &record)?)?;
         records.tick();
     }
 
@@ -1557,11 +1556,8 @@ fn refuse_uncovered_logs<A: ArchiveStore>(archive: &A, window: &EpochWindow) -> 
 }
 
 /// A log key range covering every log whose slot falls in `slots`.
-///
-/// A [`LogKey`] built from a [`TemporalKey`] is the slot followed by 32 zero
-/// bytes, so the pair brackets exactly the half-open slot window.
-fn log_key_range(slots: &Range<BlockSlot>) -> Range<LogKey> {
-    LogKey::from(TemporalKey::from(slots.start))..LogKey::from(TemporalKey::from(slots.end))
+fn log_key_range(slots: &Range<BlockSlot>) -> KeyRange {
+    KeyRange::slots(slots.clone())
 }
 
 /// One band of epochs' index records: every tag, then every exact record,
@@ -1857,15 +1853,7 @@ fn write_state_kind<W: SteleWriter, S: StateStore>(
             records.tick();
         }
     } else {
-        // `full_range` is the store's own name for everything, and it ends
-        // *exclusively* at `[0xff; 32]` — so an entity keyed with
-        // thirty-two `0xff` bytes is invisible to it. That is a limit of a
-        // fixed-width key type rather than something export could route
-        // around: there is no representable exclusive bound above the
-        // maximum key. It is stated rather than silently inherited, because
-        // a state entity that no publisher can export is worth someone
-        // knowing about.
-        for entry in store.iter_entities(ns, EntityKey::full_range())? {
+        for entry in store.iter_entities(ns, KeyRange::all())? {
             let (key, value) = entry?;
 
             route(
@@ -2179,14 +2167,9 @@ mod tests {
         };
 
         assert_eq!(window.slots(), 100..200);
-        assert_eq!(
-            log_key_range(&window.slots()).start.as_ref()[..8],
-            100u64.to_be_bytes()
-        );
-        assert_eq!(
-            log_key_range(&window.slots()).end.as_ref()[..8],
-            200u64.to_be_bytes()
-        );
+        let range = log_key_range(&window.slots());
+        assert_eq!(range.start.as_slice(), 100u64.to_be_bytes());
+        assert_eq!(range.end.unwrap().as_slice(), 200u64.to_be_bytes());
     }
 
     #[test]

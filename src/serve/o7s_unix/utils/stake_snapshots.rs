@@ -1,5 +1,4 @@
 use crate::prelude::*;
-use dolos_cardano::FixedNamespace as _;
 use dolos_cardano::{load_epoch, load_era_summary, AccountState, EraProtocol, PoolState};
 use dolos_core::StateStore;
 use pallas::codec::minicbor;
@@ -49,7 +48,7 @@ pub fn build_stake_snapshots_response<D: Domain>(
         let mut total_active: u64 = 0;
 
         let pools_iter = state
-            .iter_entities_typed::<PoolState>(PoolState::NS, None)
+            .iter_entities_typed::<PoolState>(None)
             .map_err(|e| Error::server(format!("failed to iterate pools: {e}")))?;
 
         let mut all_active_pools: BTreeSet<Vec<u8>> = BTreeSet::new();
@@ -69,7 +68,7 @@ pub fn build_stake_snapshots_response<D: Domain>(
         }
 
         let accounts_iter = state
-            .iter_entities_typed::<AccountState>(AccountState::NS, None)
+            .iter_entities_typed::<AccountState>(None)
             .map_err(|e| Error::server(format!("failed to iterate accounts: {e}")))?;
 
         for record in accounts_iter {

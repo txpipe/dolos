@@ -1,75 +1,23 @@
-use std::{collections::HashMap, marker::PhantomData, ops::Range};
+use std::{collections::HashMap, marker::PhantomData};
 
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
 
 use crate::{
+    keys::{EntityKey, KeyCodec, KeyError, KeyRange, RangeOf},
     ChainError, ChainPoint, Domain, EraCbor, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap,
     UtxoSet, UtxoSetDelta,
 };
 
-pub const KEY_SIZE: usize = 32;
-
 pub type Namespace = &'static str;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct EntityKey([u8; KEY_SIZE]);
-
-impl From<&[u8]> for EntityKey {
-    fn from(value: &[u8]) -> Self {
-        let mut key = [0u8; KEY_SIZE];
-        let len = value.len().min(KEY_SIZE);
-        key[..len].copy_from_slice(&value[..len]);
-        EntityKey(key)
-    }
+/// A type whose rows live in one namespace.
+pub trait FixedNamespace {
+    const NS: Namespace;
 }
 
-impl<const N: usize> From<pallas::crypto::hash::Hash<N>> for EntityKey {
-    fn from(value: pallas::crypto::hash::Hash<N>) -> Self {
-        EntityKey::from(value.as_slice())
-    }
-}
-
-impl<const N: usize> From<&[u8; N]> for EntityKey {
-    fn from(value: &[u8; N]) -> Self {
-        EntityKey::from(value.as_slice())
-    }
-}
-
-impl From<Vec<u8>> for EntityKey {
-    fn from(value: Vec<u8>) -> Self {
-        value.as_slice().into()
-    }
-}
-
-impl std::fmt::Display for EntityKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.0))
-    }
-}
-
-impl AsRef<[u8]> for EntityKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl EntityKey {
-    pub fn full_range() -> Range<EntityKey> {
-        Range {
-            start: EntityKey([0u8; KEY_SIZE]),
-            end: EntityKey([255u8; KEY_SIZE]),
-        }
-    }
-}
-
-impl<const HASH_SIZE: usize> From<EntityKey> for pallas::crypto::hash::Hash<HASH_SIZE> {
-    fn from(value: EntityKey) -> Self {
-        let mut array = [0u8; HASH_SIZE];
-        let source = &value.0[..HASH_SIZE];
-        array.copy_from_slice(source);
-        pallas::crypto::hash::Hash::<HASH_SIZE>::new(array)
-    }
+/// An entity kept in one state namespace, under keys of one kind.
+pub trait StateEntity: Entity + FixedNamespace {
+    type Key: KeyCodec;
 }
 
 /// A namespaced key
@@ -77,14 +25,19 @@ impl<const HASH_SIZE: usize> From<EntityKey> for pallas::crypto::hash::Hash<HASH
 /// Represent a key to an entity by also specifying the namespace to which it
 /// belongs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
-pub struct NsKey(pub Namespace, pub EntityKey);
+pub struct NsKey(Namespace, EntityKey);
 
-impl<T> From<(&'static str, T)> for NsKey
-where
-    T: Into<EntityKey>,
-{
-    fn from((ns, key): (&'static str, T)) -> Self {
-        Self(ns, key.into())
+impl NsKey {
+    pub fn of<E: StateEntity>(key: &E::Key) -> Self {
+        Self(E::NS, EntityKey::of(key))
+    }
+
+    pub fn ns(&self) -> Namespace {
+        self.0
+    }
+
+    pub fn key(&self) -> &EntityKey {
+        &self.1
     }
 }
 
@@ -128,8 +81,6 @@ impl std::ops::Deref for StateSchema {
 }
 
 pub trait Entity: Sized + Send {
-    const KEY_SIZE: usize = 32;
-
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError>;
     fn encode_entity(value: &Self) -> (Namespace, EntityValue);
 }
@@ -204,6 +155,9 @@ pub enum StateError {
     #[error("entity decoding error")]
     EntityDecodingError(String),
 
+    #[error(transparent)]
+    KeyDecodingError(#[from] KeyError),
+
     /// The operation is part of the trait but the concrete backend does not
     /// implement it.
     ///
@@ -228,30 +182,31 @@ pub type UtxoEntry = (TxoRef, EraCbor);
 /// the alias only exists to satisfy the associated type.
 pub type EmptyUtxoIter = std::iter::Empty<Result<UtxoEntry, StateError>>;
 
-pub struct EntityIterTyped<S: StateStore, E: Entity> {
+/// Entities of one namespace with their keys decoded, in key order.
+pub struct EntityIterTyped<S: StateStore, E: StateEntity> {
     inner: S::EntityIter,
-    ns: Namespace,
     _marker: PhantomData<E>,
 }
 
-impl<S: StateStore, E: Entity> EntityIterTyped<S, E> {
-    pub fn new(inner: S::EntityIter, ns: Namespace) -> Self {
+impl<S: StateStore, E: StateEntity> EntityIterTyped<S, E> {
+    pub fn new(inner: S::EntityIter) -> Self {
         Self {
             inner,
-            ns,
             _marker: PhantomData,
         }
     }
 }
 
-impl<S: StateStore, E: Entity> Iterator for EntityIterTyped<S, E> {
-    type Item = Result<(EntityKey, E), StateError>;
+impl<S: StateStore, E: StateEntity> Iterator for EntityIterTyped<S, E> {
+    type Item = Result<(E::Key, E), StateError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.inner.next()?;
 
         let mapped = next.and_then(|(key, value)| {
-            E::decode_entity(self.ns, &value)
+            let key = key.decode::<E::Key>()?;
+
+            E::decode_entity(E::NS, &value)
                 .map(|v| (key, v))
                 .map_err(|x| StateError::EntityDecodingError(x.to_string()))
         });
@@ -259,35 +214,6 @@ impl<S: StateStore, E: Entity> Iterator for EntityIterTyped<S, E> {
         Some(mapped)
     }
 }
-
-// pub struct EntityValueIterTyped<S: State3Store> {
-//     inner: S::EntityValueIter,
-//     ns: Namespace,
-//     _marker: PhantomData<S::Entity>,
-// }
-
-// impl<S: State3Store> EntityValueIterTyped<S> {
-//     pub fn new(inner: S::EntityValueIter, ns: Namespace) -> Self {
-//         Self {
-//             inner,
-//             ns,
-//             _marker: PhantomData,
-//         }
-//     }
-// }
-
-// impl<S: State3Store> Iterator for EntityValueIterTyped<S> {
-//     type Item = Result<S::Entity, StateError>;
-
-//     fn next(&mut self) -> Option<Self::Item> {
-//         let next = self.inner.next()?;
-
-//         let mapped = next.and_then(|value| S::Entity::decode_entity(&self.ns,
-// &value));
-
-//         Some(mapped)
-//     }
-// }
 
 pub trait StateWriter: Sized + Send + Sync {
     fn set_cursor(&self, cursor: ChainPoint) -> Result<(), StateError>;
@@ -319,10 +245,14 @@ pub trait StateWriter: Sized + Send + Sync {
     #[must_use]
     fn commit(self) -> Result<(), StateError>;
 
-    fn write_entity_typed<E: Entity>(&self, key: &EntityKey, entity: &E) -> Result<(), StateError> {
+    fn write_entity_typed<E: StateEntity>(
+        &self,
+        key: &E::Key,
+        entity: &E,
+    ) -> Result<(), StateError> {
         let (ns, raw) = E::encode_entity(entity);
 
-        self.write_entity(ns, key, &raw)
+        self.write_entity(ns, &EntityKey::of(key), &raw)
     }
 
     fn save_entity(
@@ -337,16 +267,16 @@ pub trait StateWriter: Sized + Send + Sync {
             self.delete_entity(ns, key)
         }
     }
-    fn save_entity_typed<E: Entity>(
+
+    fn save_entity_typed<E: StateEntity>(
         &self,
-        ns: Namespace,
-        key: &EntityKey,
+        key: &E::Key,
         maybe_entity: Option<&E>,
     ) -> Result<(), StateError> {
         if let Some(entity) = maybe_entity {
             self.write_entity_typed(key, entity)
         } else {
-            self.delete_entity(ns, key)
+            self.delete_entity(E::NS, &EntityKey::of(key))
         }
     }
 }
@@ -367,11 +297,9 @@ pub trait StateStore: Sized + Send + Sync + Clone {
 
     fn start_writer(&self) -> Result<Self::Writer, StateError>;
 
-    fn iter_entities(
-        &self,
-        ns: Namespace,
-        range: Range<EntityKey>,
-    ) -> Result<Self::EntityIter, StateError>;
+    /// Entities of `ns` whose key falls in `range`, in key order.
+    fn iter_entities(&self, ns: Namespace, range: KeyRange)
+        -> Result<Self::EntityIter, StateError>;
 
     fn iter_entity_values(
         &self,
@@ -379,18 +307,18 @@ pub trait StateStore: Sized + Send + Sync + Clone {
         key: impl AsRef<[u8]>,
     ) -> Result<Self::EntityValueIter, StateError>;
 
-    fn read_entities_typed<E: Entity>(
+    fn read_entities_typed<E: StateEntity>(
         &self,
-        ns: Namespace,
-        keys: &[&EntityKey],
+        keys: &[&E::Key],
     ) -> Result<Vec<Option<E>>, StateError> {
-        let raw = self.read_entities(ns, keys)?;
+        let keys: Vec<EntityKey> = keys.iter().map(|key| EntityKey::of(*key)).collect();
+        let raw = self.read_entities(E::NS, &keys.iter().collect::<Vec<_>>())?;
 
         let decoded = raw
             .into_iter()
             .map(|x| {
                 x.map(|v| {
-                    E::decode_entity(ns, &v)
+                    E::decode_entity(E::NS, &v)
                         .map_err(|x| StateError::EntityDecodingError(x.to_string()))
                 })
             })
@@ -400,28 +328,28 @@ pub trait StateStore: Sized + Send + Sync + Clone {
         Ok(decoded)
     }
 
-    fn read_entity_typed<E: Entity>(
-        &self,
-        ns: Namespace,
-        key: &EntityKey,
-    ) -> Result<Option<E>, StateError> {
-        let raw = self.read_entities_typed(ns, &[key])?;
+    fn read_entity_typed<E: StateEntity>(&self, key: &E::Key) -> Result<Option<E>, StateError> {
+        let raw = self.read_entities(E::NS, &[&EntityKey::of(key)])?;
 
-        let first = raw.into_iter().next().unwrap();
-
-        Ok(first)
+        raw.into_iter()
+            .next()
+            .unwrap()
+            .map(|v| {
+                E::decode_entity(E::NS, &v)
+                    .map_err(|x| StateError::EntityDecodingError(x.to_string()))
+            })
+            .transpose()
     }
 
-    fn iter_entities_typed<E: Entity>(
+    fn iter_entities_typed<E: StateEntity>(
         &self,
-        ns: Namespace,
-        range: Option<Range<EntityKey>>,
+        range: Option<RangeOf<E::Key>>,
     ) -> Result<EntityIterTyped<Self, E>, StateError> {
-        let range = range.unwrap_or_else(EntityKey::full_range);
+        let range = range.unwrap_or_else(RangeOf::all);
 
-        let inner = self.iter_entities(ns, range)?;
+        let inner = self.iter_entities(E::NS, range.into_raw())?;
 
-        Ok(EntityIterTyped::<Self, E>::new(inner, ns))
+        Ok(EntityIterTyped::<Self, E>::new(inner))
     }
 
     // fn iter_entity_values_typed<E: Entity>(
@@ -466,23 +394,26 @@ pub fn load_entity_chunk<D: Domain>(
     chunk: &[NsKey],
     store: &D::State,
 ) -> Result<EntityMap<D::Entity>, StateError> {
-    let by_ns = chunk.iter().chunk_by(|key| key.0);
+    let by_ns = chunk.iter().chunk_by(|key| key.ns());
 
     let mut loaded: EntityMap<D::Entity> = HashMap::new();
 
     for (ns, chunk) in &by_ns {
-        let keys = chunk.map(|x| &x.1).collect::<Vec<_>>();
+        let chunk = chunk.collect::<Vec<_>>();
+        let keys = chunk.iter().map(|x| x.key()).collect::<Vec<_>>();
 
-        let decoded = store.read_entities_typed::<D::Entity>(ns, &keys)?;
+        let raw = store.read_entities(ns, &keys)?;
 
-        loaded = keys
-            .into_iter()
-            .zip(decoded)
-            .fold(loaded, |mut acc, (k, v)| {
-                let k = NsKey(ns, k.clone());
-                acc.insert(k, v);
-                acc
-            });
+        for (key, value) in chunk.into_iter().zip(raw) {
+            let value = value
+                .map(|v| {
+                    D::Entity::decode_entity(ns, &v)
+                        .map_err(|x| StateError::EntityDecodingError(x.to_string()))
+                })
+                .transpose()?;
+
+            loaded.insert(key.clone(), value);
+        }
     }
 
     Ok(loaded)
@@ -562,6 +493,17 @@ pub fn undo_delta_chunk<D: Domain>(
     Ok(())
 }
 
+/// Persist one entity at `key` through the writer: `Some` upserts the record,
+/// `None` deletes it.
+pub fn save_entity_at<E: Entity>(
+    writer: &impl StateWriter,
+    key: &NsKey,
+    entity: Option<&E>,
+) -> Result<(), StateError> {
+    let raw = entity.map(E::encode_entity);
+    writer.save_entity(key.ns(), key.key(), raw.as_ref().map(|(_, raw)| raw))
+}
+
 /// Persist every tracked entity through the writer: `Some` upserts the
 /// record, `None` deletes it.
 pub fn save_entities<D: Domain>(
@@ -569,8 +511,7 @@ pub fn save_entities<D: Domain>(
     entities: &EntityMap<D::Entity>,
 ) -> Result<(), StateError> {
     for (key, entity) in entities.iter() {
-        let NsKey(ns, key) = key;
-        writer.save_entity_typed(ns, key, entity.as_ref())?;
+        save_entity_at(writer, key, entity.as_ref())?;
     }
 
     Ok(())

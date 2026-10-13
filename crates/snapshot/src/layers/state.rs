@@ -7,25 +7,32 @@
 //! The namespace is not in the record: it is the layer's *kind*, one per state
 //! namespace (`crate::STATE_KINDS`), so a shape change to one namespace's
 //! records costs that namespace's kind a media-type move and leaves the other
-//! thirteen alone — and a namespace a reader does not know is skippable at the
+//! eighteen alone — and a namespace a reader does not know is skippable at the
 //! transport instead of poisoning one shared layer. Which is also why this
-//! module has one codec rather than fourteen — the kinds differ in what they
+//! module has one codec rather than nineteen — the kinds differ in what they
 //! carry, never in how a record is written — and why its refusals name the
 //! record shape, `state`, rather than a layer.
 //!
 //! ## One record shape, including for UTxOs
 //!
 //! ADR-004 treats the UTxO set as namespace [`crate::UTXOS`] beside the
-//! thirteen entity namespaces, rather than as a special layer kind. That is
+//! eighteen entity namespaces, rather than as a special layer kind. That is
 //! what keeps the format's state vocabulary to a single record, and it makes
 //! the planned refactor folding UTxOs into the entity system (#1042) invisible
 //! from outside: the day `utxos` becomes an ordinary namespace, nothing in this
 //! file changes.
 //!
-//! The namespace still governs the *codec parameters* — the key width above
+//! The namespace still governs the *codec parameters* — the key kind above
 //! all — so [`encode`] and [`decode`] take it as an argument, derived by the
 //! caller from the layer's kind. It is per-layer configuration now, not
 //! per-record content.
+//!
+//! ## Keys
+//!
+//! A key is the stored bytes of the namespace's typed key (decision 0051), of
+//! whatever length that kind has — an empty one for a singleton — and the
+//! codec refuses one that does not decode exactly as that kind
+//! ([`namespaces::check_state_key`]).
 //!
 //! ## The one place bytes are built rather than carried
 //!
@@ -47,32 +54,27 @@
 //! population would be all overhead. The counts are fixed by the profile
 //! specification (`crate::STATE_KINDS`), never by data or configuration.
 
-use dolos_core::{state::KEY_SIZE, EntityKey, EntityValue, Era, EraCbor, Namespace, TxoRef};
+use dolos_core::{EntityKey, EntityValue, Era, EraCbor, Namespace, TxoRef};
 use stelae::frame::{self, CanonicalCbor};
 
-use crate::{namespaces, Error, UTXOS};
+use crate::{namespaces, Error};
 use stelae::codec::{blob, close, open, uint};
+
+pub use crate::namespaces::UTXO_KEY_LEN;
 
 /// The name this codec refuses under.
 ///
-/// One record shape serves all fourteen `state-{ns}` kinds, so an error names
+/// One record shape serves all nineteen `state-{ns}` kinds, so an error names
 /// the shape rather than a layer — the layer is already in the message the
 /// caller wraps it in.
 const STATE: &str = "state";
-
-/// Width of an entity key — every namespace but [`crate::UTXOS`].
-pub const ENTITY_KEY_LEN: usize = KEY_SIZE;
-
-/// Width of a UTxO key: `tx_hash(32) ‖ output_index(4, BE)`.
-pub const UTXO_KEY_LEN: usize = KEY_SIZE + 4;
 
 /// The shard a state key belongs to under a kind published in `shards` shards:
 /// the first nibble of its first byte for a sixteen-way namespace, 0 for a
 /// single blob.
 ///
-/// Total by construction — [`decode`] refuses a record whose key is not the
-/// width its namespace requires, and both widths are non-zero — so the fallback
-/// for an empty key is unreachable rather than a policy.
+/// An empty key only exists in a single-blob namespace (the singletons), so
+/// the fallback for one is unreachable rather than a policy.
 pub fn shard_of(key: &[u8], shards: u8) -> u8 {
     if shards <= 1 {
         return 0;
@@ -87,7 +89,8 @@ pub fn shard_of(key: &[u8], shards: u8) -> u8 {
 /// it could disagree with the layer it sits in.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StateRecord {
-    /// [`ENTITY_KEY_LEN`] bytes, or [`UTXO_KEY_LEN`] under [`crate::UTXOS`].
+    /// The namespace's typed key, stored, or [`UTXO_KEY_LEN`] bytes under
+    /// [`crate::UTXOS`].
     pub key: Vec<u8>,
     /// The stored `EntityValue` verbatim, or CBOR `[era, body]` under
     /// [`crate::UTXOS`].
@@ -114,20 +117,10 @@ pub fn utxo(txo: &TxoRef, value: &EraCbor) -> Result<StateRecord, Error> {
     })
 }
 
-/// Read a record back as an entity. Refuses a key that is not entity-width —
-/// a UTxO record, above all.
-pub fn as_entity(record: &StateRecord) -> Result<EntityKey, Error> {
-    let key: [u8; ENTITY_KEY_LEN] = record.key.as_slice().try_into().map_err(|_| {
-        Error::malformed(
-            STATE,
-            format!(
-                "expected a {ENTITY_KEY_LEN}-byte entity key, found {}",
-                record.key.len()
-            ),
-        )
-    })?;
-
-    Ok(EntityKey::from(&key))
+/// Read a record back as an entity. [`decode`] already held its key to the
+/// namespace's key kind.
+pub fn as_entity(record: &StateRecord) -> EntityKey {
+    EntityKey::from_raw(&record.key)
 }
 
 /// Read a record back as a UTxO. Refuses a key that is not UTxO-width — an
@@ -143,8 +136,8 @@ pub fn as_utxo(record: &StateRecord) -> Result<(TxoRef, EraCbor), Error> {
         )
     })?;
 
-    let (hash, index) = key.split_at(KEY_SIZE);
-    let hash: [u8; KEY_SIZE] = hash.try_into().expect("split at KEY_SIZE");
+    let (hash, index) = key.split_at(32);
+    let hash: [u8; 32] = hash.try_into().expect("split at the hash");
     let index = u32::from_be_bytes(index.try_into().expect("the remaining four bytes"));
 
     Ok((
@@ -179,11 +172,11 @@ pub fn decode_utxo_value(bytes: &[u8]) -> Result<EraCbor, Error> {
 /// Encode one record of `ns`'s state layer.
 ///
 /// The namespace is a parameter rather than a field: it comes from the layer's
-/// kind, and it decides the key width this refuses under.
+/// kind, and it decides the key kind this refuses under.
 pub fn encode(ns: Namespace, record: &StateRecord) -> Result<CanonicalCbor, Error> {
     let ns = namespaces::resolve(ns)?;
 
-    check_key_width(ns, record.key.len())?;
+    namespaces::check_state_key(ns, &record.key)?;
 
     Ok(frame::encode(|e| {
         e.array(2)?.bytes(&record.key)?.bytes(&record.value)?;
@@ -191,8 +184,8 @@ pub fn encode(ns: Namespace, record: &StateRecord) -> Result<CanonicalCbor, Erro
     })?)
 }
 
-/// Decode one record of `ns`'s state layer, holding the key to the width the
-/// namespace requires.
+/// Decode one record of `ns`'s state layer, holding the key to the kind the
+/// namespace stores.
 pub fn decode(ns: Namespace, bytes: &[u8]) -> Result<StateRecord, Error> {
     let ns = namespaces::resolve(ns)?;
 
@@ -205,29 +198,9 @@ pub fn decode(ns: Namespace, bytes: &[u8]) -> Result<StateRecord, Error> {
 
     close(STATE, &decoder, bytes)?;
 
-    check_key_width(ns, key.len())?;
+    namespaces::check_state_key(ns, &key)?;
 
     Ok(StateRecord { key, value })
-}
-
-/// Both key widths are fixed by their namespace, and both `EntityKey` and a
-/// UTxO ref convert from a slice by padding or truncating — so a wrong width
-/// that got through would become a well-formed key pointing at nothing.
-fn check_key_width(ns: Namespace, len: usize) -> Result<(), Error> {
-    let expected = if ns == UTXOS {
-        UTXO_KEY_LEN
-    } else {
-        ENTITY_KEY_LEN
-    };
-
-    if len != expected {
-        return Err(Error::malformed(
-            STATE,
-            format!("{ns}: expected a {expected}-byte key, found {len}"),
-        ));
-    }
-
-    Ok(())
 }
 
 /// Strictly ascending `key`, optionally within one shard.
@@ -291,27 +264,93 @@ impl OrderCheck {
 
 #[cfg(test)]
 mod tests {
-    use dolos_cardano::model::{AccountState, FixedNamespace};
+    use dolos_cardano::model::{
+        AccountEpochLog, AccountState, AssetKey, AssetState, DRepState, EpochState, EraSummary,
+        FixedNamespace, GovState, PoolState, ProposalState, StagedFirstMint, StagedStakeAddress,
+        StakeAddressesRow,
+    };
 
     use super::*;
+    use crate::UTXOS;
 
+    /// An asset key: 32 bytes, any of them, so a byte picks its shard.
     fn entity_key(byte: u8) -> EntityKey {
-        EntityKey::from(&[byte; ENTITY_KEY_LEN])
+        EntityKey::of(&AssetKey([byte; 32].into()))
     }
 
     fn txo(byte: u8, index: u32) -> TxoRef {
-        TxoRef([byte; KEY_SIZE].into(), index)
+        TxoRef([byte; 32].into(), index)
+    }
+
+    fn keyed(ns: Namespace, key: &[u8]) -> Result<StateRecord, Error> {
+        let wire = frame::encode(|e| {
+            e.array(2)?.bytes(key)?.bytes(&[])?;
+            Ok(())
+        })
+        .unwrap();
+
+        decode(ns, wire.as_bytes())
     }
 
     #[test]
     fn an_entity_record_round_trips() {
         let original = entity(&entity_key(0x5a), &vec![0x82, 0x01, 0x02]);
 
-        let encoded = encode(AccountState::NS, &original).unwrap();
-        let decoded = decode(AccountState::NS, encoded.as_bytes()).unwrap();
+        let encoded = encode(AssetState::NS, &original).unwrap();
+        let decoded = decode(AssetState::NS, encoded.as_bytes()).unwrap();
 
         assert_eq!(decoded, original);
-        assert_eq!(as_entity(&decoded).unwrap(), entity_key(0x5a));
+        assert_eq!(as_entity(&decoded), entity_key(0x5a));
+    }
+
+    /// Each namespace takes exactly the keys of its kind, whatever their
+    /// width: an empty one for a singleton, 29 bytes or 1 for a DRep, and so
+    /// on.
+    #[test]
+    fn keys_are_held_to_their_namespace_kind() {
+        let credential = [[0x82, 0x00, 0x58, 0x1c].as_slice(), &[7; 28]].concat();
+
+        for (ns, len) in [
+            (EpochState::NS, 0),
+            (GovState::NS, 0),
+            (EraSummary::NS, 2),
+            (DRepState::NS, 1),
+            (PoolState::NS, 28),
+            (ProposalState::NS, 36),
+            (StagedFirstMint::NS, 68),
+        ] {
+            keyed(ns, &vec![1; len]).unwrap_or_else(|err| panic!("{ns}/{len}: {err:?}"));
+        }
+
+        keyed(AccountState::NS, &credential).unwrap();
+        keyed(DRepState::NS, &[[0x22].as_slice(), &[7; 28]].concat()).unwrap();
+
+        // a staged stake address: the account, the epoch, then the address,
+        // which takes whatever width is left
+        let staged = |address: &[u8]| [credential.as_slice(), &[0; 8], address].concat();
+        keyed(StagedStakeAddress::NS, &staged(&[1; 57])).unwrap();
+        keyed(StagedStakeAddress::NS, &staged(&[1; 29])).unwrap();
+        keyed(StakeAddressesRow::NS, &credential).unwrap();
+
+        for (ns, key) in [
+            (EpochState::NS, vec![0x30]),
+            (EpochState::NS, [0x30].into_iter().chain([0; 31]).collect()),
+            (PoolState::NS, vec![1; 32]),
+            (ProposalState::NS, vec![1; 32]),
+            (DRepState::NS, vec![0x22; 32]),
+            (AccountState::NS, vec![1; 32]),
+            (AccountEpochLog::NS, vec![1; 32]),
+            (StagedStakeAddress::NS, staged(&[])),
+            (StagedStakeAddress::NS, credential.clone()),
+            (StakeAddressesRow::NS, vec![1; 32]),
+        ] {
+            let err = keyed(ns, &key).unwrap_err();
+            assert!(
+                matches!(err, Error::MalformedRecord { .. }),
+                "{ns}/{}: {err:?}",
+                key.len()
+            );
+        }
     }
 
     #[test]
@@ -367,23 +406,24 @@ mod tests {
         }
     }
 
-    /// The key widths tell the two record shapes apart, now that no namespace
-    /// field does: each reader refuses the other's record on the width.
+    /// The key kinds tell the two record shapes apart, now that no namespace
+    /// field does: each namespace refuses the other's record.
     #[test]
     fn the_two_readers_refuse_each_others_records() {
         let entity_record = entity(&entity_key(1), &Vec::new());
         let utxo_record = utxo(&txo(1, 0), &EraCbor(1, Vec::new())).unwrap();
 
         assert!(as_utxo(&entity_record).is_err());
-        assert!(as_entity(&utxo_record).is_err());
+        assert!(encode(AssetState::NS, &utxo_record).is_err());
+        assert!(encode(UTXOS, &entity_record).is_err());
     }
 
     #[test]
     fn a_wrong_width_key_is_refused() {
         for (ns, width) in [
-            (AccountState::NS, UTXO_KEY_LEN),
-            (AccountState::NS, 0),
-            (UTXOS, ENTITY_KEY_LEN),
+            (AssetState::NS, UTXO_KEY_LEN),
+            (AssetState::NS, 0),
+            (UTXOS, 32),
             (UTXOS, UTXO_KEY_LEN + 1),
         ] {
             let wire = frame::encode(|e| {
@@ -411,10 +451,7 @@ mod tests {
     #[test]
     fn the_pre_split_three_element_record_is_refused() {
         let wire = frame::encode(|e| {
-            e.array(3)?
-                .str("accounts")?
-                .bytes(&[0u8; ENTITY_KEY_LEN])?
-                .bytes(&[])?;
+            e.array(3)?.str("accounts")?.bytes(&[0u8; 32])?.bytes(&[])?;
             Ok(())
         })
         .unwrap();
@@ -431,7 +468,7 @@ mod tests {
 
         assert!(encode("receipts", &record).is_err());
 
-        let wire = encode(AccountState::NS, &record).unwrap();
+        let wire = encode(AssetState::NS, &record).unwrap();
         assert!(decode("receipts", wire.as_bytes()).is_err());
     }
 

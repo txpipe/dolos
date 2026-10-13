@@ -29,9 +29,11 @@ Byte-identical to the redb blocks table, the multi-location case included (a Byr
 ### Logs (`archive-logs`)
 
 ```
-Key:   [ns_hash:8][log_key:40]  (48 bytes)
+Key:   [ns_hash:8][slot:8][key:var]
 Value: CBOR-encoded entity value
 ```
+
+The part after the namespace hash is core's `LogKey`: the big-endian slot, then the log's typed key, of whatever length its kind has (decision 0051). Prune and truncate cut at `[ns_hash:8][slot:8]`, so every key at a slot goes the same way whatever follows the slot. An open range ends at the successor of the namespace hash, and a stored key too short to hold its slot is an error from the iterator.
 
 One keyspace rather than one per namespace, mirroring the state store's entities keyspace: per-namespace LSM trees blow the file-descriptor limit during heavy compaction.
 

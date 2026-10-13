@@ -7,11 +7,11 @@
 //! seed rather than `rand`, so a population is reproducible from the shape
 //! alone.
 
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use dolos_core::{
-    ArchiveError, ArchiveStore, ArchiveWriter as _, BlockSlot, ChainPoint, EntityKey, LogKey,
-    Namespace, TemporalKey,
+    ArchiveError, ArchiveStore, ArchiveWriter as _, BlockSlot, ChainPoint, KeyRange, LogKey,
+    LogRangeOf, Namespace,
 };
 
 /// SplitMix64: tiny, seedable, and good enough to size filler payloads.
@@ -66,17 +66,23 @@ impl ArchiveShape {
     }
 
     /// The stable key of entity `i`, identical in every epoch.
-    pub fn entity(&self, i: u64) -> EntityKey {
+    pub fn entity(&self, i: u64) -> [u8; 32] {
         let mut bytes = [0u8; 32];
         for chunk in bytes.chunks_exact_mut(8) {
             chunk.copy_from_slice(&i.to_be_bytes());
         }
-        EntityKey::from(&bytes)
+        bytes
     }
 
     /// The log key of entity `i` at `epoch`'s boundary.
     pub fn log_key(&self, epoch: u64, i: u64) -> LogKey {
-        LogKey::from((TemporalKey::from(self.epoch_start(epoch)), self.entity(i)))
+        LogKey::of(self.epoch_start(epoch), &self.entity(i))
+    }
+
+    /// Every log row of the epochs in `epochs`.
+    pub fn log_range(&self, epochs: Range<u64>) -> KeyRange {
+        let slots = self.epoch_start(epochs.start)..self.epoch_start(epochs.end);
+        LogRangeOf::<[u8; 32]>::slots(slots).into_raw()
     }
 }
 

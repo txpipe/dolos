@@ -4,7 +4,7 @@ use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
     config::{CardanoConfig, StorageConfig, SyncConfig},
     sync::execute_work_unit,
-    BootstrapExt, LogKey, TemporalKey, *,
+    BootstrapExt, *,
 };
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -396,9 +396,8 @@ impl<B: ToyStores> ToyDomain<B> {
         let chain = dolos_cardano::eras::load_era_summary::<Self>(domain.stores.state()).unwrap();
         let epoch = dolos_cardano::load_epoch::<Self>(domain.stores.state()).unwrap();
         let epoch_start = chain.epoch_start(epoch.number);
-        let log_key = LogKey::from(TemporalKey::from(epoch_start));
         let writer = domain.stores.archive().start_writer().unwrap();
-        writer.write_log_typed(&log_key, &epoch).unwrap();
+        writer.write_log_typed(epoch_start, &(), &epoch).unwrap();
         writer.commit().unwrap();
 
         if let Some(delta) = initial_delta {
