@@ -289,9 +289,15 @@ entity_boilerplate!(AddressStats, "address-stats", log = AddressStatsKey);
 impl AddressStats {
     pub fn add(&mut self, other: &Self) {
         for (unit, sums) in &other.units {
-            let entry = self.units.entry(unit.clone()).or_default();
-            entry.received.0 = entry.received.0.saturating_add(sums.received.0);
-            entry.sent.0 = entry.sent.0.saturating_add(sums.sent.0);
+            match self.units.get_mut(unit) {
+                Some(entry) => {
+                    entry.received.0 = entry.received.0.saturating_add(sums.received.0);
+                    entry.sent.0 = entry.sent.0.saturating_add(sums.sent.0);
+                }
+                None => {
+                    self.units.insert(unit.clone(), *sums);
+                }
+            }
         }
 
         self.tx_count = self.tx_count.saturating_add(other.tx_count);
