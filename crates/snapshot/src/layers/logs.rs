@@ -4,10 +4,10 @@
 //!
 //! The namespace is not in the record: it is the layer's *kind*, one per log
 //! namespace (`crate::LOG_KINDS`), so a shape change to one namespace's logs
-//! costs a backfill of that namespace's blobs and leaves the other five alone.
-//! Which is also why this module has one codec rather than six — the six kinds
-//! differ in what they carry, never in how a record is written — and why its
-//! refusals name the record shape, `log`, rather than a layer.
+//! costs a backfill of that namespace's blobs and leaves the other eight alone.
+//! Which is also why this module has one codec rather than nine — the nine
+//! kinds differ in what they carry, never in how a record is written — and why
+//! its refusals name the record shape, `log`, rather than a layer.
 //!
 //! The namespace still decides the key kind, so [`encode`] and [`decode`] take
 //! it as an argument, as the state codec does. A log key is the 8-byte

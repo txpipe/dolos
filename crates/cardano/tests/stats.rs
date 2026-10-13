@@ -235,7 +235,7 @@ fn produced(tx: &TransactionBody, index: u32) -> TxoRef {
 /// - T2 spreads one account address over two more of the same account.
 /// - T3 is phase-2-invalid: it moves its collateral and its collateral return,
 ///   never its inputs or outputs.
-/// - T4 touches the three addresses of one payment hash's two of them.
+/// - T4 touches two of the three addresses of one payment hash.
 /// - T5 moves a token between two accounts, T6 spends a Byron output.
 /// - T7 spends two outputs of the first block, sending sums past u64 from one
 ///   address in one tx.

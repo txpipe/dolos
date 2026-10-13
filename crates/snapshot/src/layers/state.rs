@@ -7,8 +7,8 @@
 //! The namespace is not in the record: it is the layer's *kind*, one per state
 //! namespace (`crate::STATE_KINDS`), so a shape change to one namespace's
 //! records costs that namespace's kind a media-type move and leaves the other
-//! sixteen alone — and a namespace a reader does not know is skippable at the
-//! transport instead of poisoning one shared layer. Which is also why this
+//! twenty-five alone — and a namespace a reader does not know is skippable at
+//! the transport instead of poisoning one shared layer. Which is also why this
 //! module has one codec rather than twenty-six — the kinds differ in what they
 //! carry, never in how a record is written — and why its refusals name the
 //! record shape, `state`, rather than a layer.
