@@ -2,8 +2,9 @@
 //!
 //! Several endpoints scan a range of blocks and, for every tx in them, need the
 //! output each input consumes (`/addresses/{address}/transactions`,
-//! `/addresses/{address}/txs`, `/assets/{subject}/transactions`). Resolving an input means fetching the
-//! CBOR of the tx that produced it and reading the output at the input's index.
+//! `/addresses/{address}/txs`, `/assets/{subject}/transactions`). Resolving an
+//! input means fetching the CBOR of the tx that produced it and reading the
+//! output at the input's index.
 //!
 //! Done naively that is one fetch plus one full decode per input, so a
 //! dependency tx referenced by N inputs is paid for N times. This module keeps

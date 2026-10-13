@@ -18,8 +18,8 @@ use pallas::{
 use super::{BlockVisitor, WorkDeltas};
 use crate::{
     model::stats::split_payment, owned::OwnedMultiEraOutput, periods::stats::tx_stats,
-    periods::StagedKey, AccountKey, AddressStats, AddressStatsKey, Genesis, PParamsSet,
-    PaymentKey, StageAccountStats, StageAddressStats, StagePaymentAddress, StagePaymentStats,
+    periods::StagedKey, AccountKey, AddressStats, AddressStatsKey, Genesis, PParamsSet, PaymentKey,
+    StageAccountStats, StageAddressStats, StagePaymentAddress, StagePaymentStats,
     StagedAccountStats, StagedAddressStats, StagedPaymentAddress, StagedPaymentStats,
 };
 
@@ -55,15 +55,19 @@ impl BlockVisitor for StatsVisitor {
         tx: &MultiEraTx,
         utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
-        let moved = tx_stats(tx, |input: &MultiEraInput, visit: &mut dyn FnMut(&MultiEraOutput) -> Result<(), ChainError>| {
-            let txoref = TxoRef::from(input);
+        let moved = tx_stats(
+            tx,
+            |input: &MultiEraInput,
+             visit: &mut dyn FnMut(&MultiEraOutput) -> Result<(), ChainError>| {
+                let txoref = TxoRef::from(input);
 
-            let output = utxos.get(&txoref).ok_or_else(|| {
-                StateError::InvariantViolation(InvariantViolation::InputNotFound(txoref))
-            })?;
+                let output = utxos.get(&txoref).ok_or_else(|| {
+                    StateError::InvariantViolation(InvariantViolation::InputNotFound(txoref))
+                })?;
 
-            output.with_dependent(|_, output| visit(output))
-        })?;
+                output.with_dependent(|_, output| visit(output))
+            },
+        )?;
 
         let mut payments = HashSet::new();
         let mut accounts: HashMap<AccountKey, u64> = HashMap::new();

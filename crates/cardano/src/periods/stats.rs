@@ -19,8 +19,8 @@ use std::{
 };
 
 use dolos_core::{
-    ArchiveStore as _, Entity as _, ArchiveWriter as _, ChainError, Domain, EntityKey, EntityValue, LogKey,
-    LogRangeOf, RangeOf, StateStore, StateWriter as _,
+    ArchiveStore as _, ArchiveWriter as _, ChainError, Domain, Entity as _, EntityKey, EntityValue,
+    LogKey, LogRangeOf, RangeOf, StateStore, StateWriter as _,
 };
 use pallas::{
     codec::{
@@ -37,10 +37,10 @@ use pallas::{
 
 use super::StagedKey;
 use crate::{
-    model::stats::join_payment,
-    pallas_extras, AccountAddresses, AccountKey, AccountStats, AddressStats, AddressStatsKey,
-    ChainSummary, FixedNamespace as _, PaymentKey, PaymentStats, StagedAccountStats,
-    StagedAddressStats, StagedPaymentAddress, StagedPaymentStats, Sum, UnitSums,
+    model::stats::join_payment, pallas_extras, AccountAddresses, AccountKey, AccountStats,
+    AddressStats, AddressStatsKey, ChainSummary, FixedNamespace as _, PaymentKey, PaymentStats,
+    StagedAccountStats, StagedAddressStats, StagedPaymentAddress, StagedPaymentStats, Sum,
+    UnitSums,
 };
 
 /// Address rows read per round trip.
@@ -87,7 +87,10 @@ fn add_quantity(units: &mut BTreeMap<Bytes, UnitSums>, unit: Vec<u8>, flow: Flow
 /// Hands the output an input consumes to `visit`, or skips an input it can't
 /// resolve.
 pub trait Consumed:
-    FnMut(&MultiEraInput, &mut dyn FnMut(&MultiEraOutput) -> Result<(), ChainError>) -> Result<(), ChainError>
+    FnMut(
+    &MultiEraInput,
+    &mut dyn FnMut(&MultiEraOutput) -> Result<(), ChainError>,
+) -> Result<(), ChainError>
 {
 }
 
@@ -585,12 +588,10 @@ pub fn payment_totals<D: Domain>(
         staged.entry(key.epoch).or_default().tx_count = row.tx_count;
     }
 
-    let sealed = super::read_sealed::<_, PaymentStats>(
-        domain.archive(),
-        chain,
-        epochs.clone(),
-        |_| *payment,
-    )?;
+    let sealed =
+        super::read_sealed::<_, PaymentStats>(domain.archive(), chain, epochs.clone(), |_| {
+            *payment
+        })?;
 
     let mut tx_count = 0u64;
     let mut keys = Vec::new();
@@ -686,9 +687,10 @@ pub fn account_totals<D: Domain>(
         overlaps.insert(key.epoch, row.tx_overlap);
     }
 
-    let sealed = super::read_sealed::<_, AccountStats>(archive, chain, active.iter().copied(), |_| {
-        account.clone()
-    })?;
+    let sealed =
+        super::read_sealed::<_, AccountStats>(archive, chain, active.iter().copied(), |_| {
+            account.clone()
+        })?;
 
     for (epoch, raw) in sealed {
         overlaps.insert(
@@ -697,10 +699,7 @@ pub fn account_totals<D: Domain>(
         );
     }
 
-    let overlap: u64 = active
-        .iter()
-        .filter_map(|epoch| overlaps.get(epoch))
-        .sum();
+    let overlap: u64 = active.iter().filter_map(|epoch| overlaps.get(epoch)).sum();
 
     let mut totals = fold.finish();
     totals.tx_count = totals.tx_count.saturating_sub(overlap);
@@ -959,7 +958,10 @@ mod tests {
         assert_eq!(staged(&domain), (6, 6, 4, 1));
 
         let (addresses, payments, accounts) = logs(&domain);
-        assert_eq!((addresses.len(), payments.len(), accounts.len()), (12, 8, 2));
+        assert_eq!(
+            (addresses.len(), payments.len(), accounts.len()),
+            (12, 8, 2)
+        );
 
         assert_eq!(totals(&domain), before);
 
@@ -978,10 +980,7 @@ mod tests {
         // payment 0x40: three addresses, its tx count its own
         let shared = &before[addresses_len()];
         assert_eq!(shared.tx_count, 3 * ((1 + 4 + 5) - 1));
-        assert_eq!(
-            shared.units[&Bytes::from(vec![])].sent.0,
-            3 * (0 + 3 + 4)
-        );
+        assert_eq!(shared.units[&Bytes::from(vec![])].sent.0, 3 * (3 + 4));
 
         // an unknown credential has nothing
         assert_eq!(before[addresses_len() + 3], AddressStats::default());

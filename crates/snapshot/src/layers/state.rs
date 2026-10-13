@@ -338,10 +338,26 @@ mod tests {
         let epoch = [0u8; 8];
         let address = [epoch.as_slice(), &[0x01], &credential, &[1; 29]].concat();
         keyed(StagedAddressStats::NS, &address).unwrap();
-        keyed(StagedAddressStats::NS, &[epoch.as_slice(), &[0x00], &[1; 29]].concat()).unwrap();
-        keyed(StagedPaymentAddress::NS, &[[1; 28].as_slice(), &epoch, &[1; 29]].concat()).unwrap();
-        keyed(StagedPaymentStats::NS, &[[1; 28].as_slice(), &epoch].concat()).unwrap();
-        keyed(StagedAccountStats::NS, &[credential.as_slice(), &epoch].concat()).unwrap();
+        keyed(
+            StagedAddressStats::NS,
+            &[epoch.as_slice(), &[0x00], &[1; 29]].concat(),
+        )
+        .unwrap();
+        keyed(
+            StagedPaymentAddress::NS,
+            &[[1; 28].as_slice(), &epoch, &[1; 29]].concat(),
+        )
+        .unwrap();
+        keyed(
+            StagedPaymentStats::NS,
+            &[[1; 28].as_slice(), &epoch].concat(),
+        )
+        .unwrap();
+        keyed(
+            StagedAccountStats::NS,
+            &[credential.as_slice(), &epoch].concat(),
+        )
+        .unwrap();
         keyed(AddressStats::NS, &address[8..]).unwrap();
 
         for (ns, key) in [
@@ -355,10 +371,22 @@ mod tests {
             (StagedStakeAddress::NS, staged(&[])),
             (StagedStakeAddress::NS, credential.clone()),
             (StakeAddressesRow::NS, vec![1; 32]),
-            (StagedAddressStats::NS, [epoch.as_slice(), &[0x01], &credential].concat()),
-            (StagedAddressStats::NS, [epoch.as_slice(), &[0x02], &[1; 29]].concat()),
-            (StagedPaymentAddress::NS, [[1; 28].as_slice(), &epoch].concat()),
-            (StagedPaymentStats::NS, [[1; 28].as_slice(), &epoch, &[1]].concat()),
+            (
+                StagedAddressStats::NS,
+                [epoch.as_slice(), &[0x01], &credential].concat(),
+            ),
+            (
+                StagedAddressStats::NS,
+                [epoch.as_slice(), &[0x02], &[1; 29]].concat(),
+            ),
+            (
+                StagedPaymentAddress::NS,
+                [[1; 28].as_slice(), &epoch].concat(),
+            ),
+            (
+                StagedPaymentStats::NS,
+                [[1; 28].as_slice(), &epoch, &[1]].concat(),
+            ),
             (StagedAccountStats::NS, credential.clone()),
         ] {
             let err = keyed(ns, &key).unwrap_err();

@@ -113,7 +113,10 @@ fn p1() -> Vec<u8> {
 }
 
 fn asset(name: &str) -> (Hash<28>, Bytes) {
-    (Hash::from([0x55; 28]), Bytes::from(name.as_bytes().to_vec()))
+    (
+        Hash::from([0x55; 28]),
+        Bytes::from(name.as_bytes().to_vec()),
+    )
 }
 
 fn value(coin: u64, assets: &[(&str, u64)]) -> Value {
@@ -150,11 +153,7 @@ fn input(txo: &TxoRef) -> TransactionInput {
     }
 }
 
-fn body(
-    inputs: &[TxoRef],
-    outputs: Vec<(Vec<u8>, Value)>,
-    fee: u64,
-) -> TransactionBody<'static> {
+fn body(inputs: &[TxoRef], outputs: Vec<(Vec<u8>, Value)>, fee: u64) -> TransactionBody<'static> {
     TransactionBody {
         inputs: Set::from(inputs.iter().map(input).collect::<Vec<_>>()),
         outputs: outputs
@@ -234,12 +233,12 @@ fn produced(tx: &TransactionBody, index: u32) -> TxoRef {
 /// - T0 funds the addresses from the faucet.
 /// - T1 sends an address's output back to it.
 /// - T2 spreads one account address over two more of the same account.
-/// - T3 is phase-2-invalid: it moves its collateral and its collateral
-///   return, never its inputs or outputs.
+/// - T3 is phase-2-invalid: it moves its collateral and its collateral return,
+///   never its inputs or outputs.
 /// - T4 touches the three addresses of one payment hash's two of them.
 /// - T5 moves a token between two accounts, T6 spends a Byron output.
-/// - T7 spends two outputs of the first block, sending sums past u64 from
-///   one address in one tx.
+/// - T7 spends two outputs of the first block, sending sums past u64 from one
+///   address in one tx.
 /// - T8 and T9 land in later epochs, T9 in one still staged.
 fn chain() -> Vec<Vec<(TransactionBody<'static>, bool)>> {
     let seeds: Vec<TxoRef> = (0..funds().len() as u32).map(seed).collect();
@@ -411,10 +410,17 @@ impl Oracle {
         }
     }
 
-    fn fold(&self, mut fold: impl FnMut(&mut AddressStats, &MultiEraBlock, &dyn Fn(
-        &MultiEraInput,
-        &mut dyn FnMut(&MultiEraOutput) -> Result<(), ChainError>,
-    ) -> Result<(), ChainError>)) -> AddressStats {
+    fn fold(
+        &self,
+        mut fold: impl FnMut(
+            &mut AddressStats,
+            &MultiEraBlock,
+            &dyn Fn(
+                &MultiEraInput,
+                &mut dyn FnMut(&MultiEraOutput) -> Result<(), ChainError>,
+            ) -> Result<(), ChainError>,
+        ),
+    ) -> AddressStats {
         let mut totals = AddressStats::default();
 
         let consumed = |input: &MultiEraInput,
@@ -463,7 +469,17 @@ fn summary(domain: &ToyDomain) -> ChainSummary {
 }
 
 fn addresses() -> Vec<Vec<u8>> {
-    vec![a1(), a2(), a4(), b3(), e1(), e2(), p1(), byron(), staked(0x09, B)]
+    vec![
+        a1(),
+        a2(),
+        a4(),
+        b3(),
+        e1(),
+        e2(),
+        p1(),
+        byron(),
+        staked(0x09, B),
+    ]
 }
 
 const PAYMENTS: [u8; 7] = [0x01, 0x02, 0x03, 0x04, 0x0f, 0x05, 0x09];

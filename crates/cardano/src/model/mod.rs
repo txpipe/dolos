@@ -238,7 +238,9 @@ impl dolos_core::Entity for CardanoEntity {
             StakeAddressesRow::NS => StakeAddressesRow::decode_entity(ns, value).map(Into::into),
             StagedAddressStats::NS => StagedAddressStats::decode_entity(ns, value).map(Into::into),
             AddressStats::NS => AddressStats::decode_entity(ns, value).map(Into::into),
-            StagedPaymentAddress::NS => StagedPaymentAddress::decode_entity(ns, value).map(Into::into),
+            StagedPaymentAddress::NS => {
+                StagedPaymentAddress::decode_entity(ns, value).map(Into::into)
+            }
             StagedPaymentStats::NS => StagedPaymentStats::decode_entity(ns, value).map(Into::into),
             PaymentStats::NS => PaymentStats::decode_entity(ns, value).map(Into::into),
             StagedAccountStats::NS => StagedAccountStats::decode_entity(ns, value).map(Into::into),

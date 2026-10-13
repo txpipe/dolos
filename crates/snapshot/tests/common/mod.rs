@@ -268,9 +268,9 @@ pub fn logs(ns: Namespace) -> Vec<LogRecord> {
 /// One layer per namespace, so a kind's shards are the ones its spec'd count
 /// allows and its fixture keys reach: both of [`SHARDS`] for `assets`,
 /// `datums` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`, and shard 0
-/// for the twenty-two single blobs. Twenty-nine layers, and every namespace among
-/// them — which is what `the_golden_state_layers_cover_every_namespace` holds
-/// this to.
+/// for the twenty-two single blobs. Twenty-nine layers, and every namespace
+/// among them — which is what `the_golden_state_layers_cover_every_namespace`
+/// holds this to.
 pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
     STATE_KINDS
         .into_iter()

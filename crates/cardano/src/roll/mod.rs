@@ -375,8 +375,7 @@ impl<'a> DeltaBuilder<'a> {
             self.tx_logs.visit_tx(&mut deltas, block, tx, self.utxos)?;
             self.proposal_logs
                 .visit_tx(&mut deltas, block, tx, self.utxos)?;
-            self.stats
-                .visit_tx(&mut deltas, block, tx, self.utxos)?;
+            self.stats.visit_tx(&mut deltas, block, tx, self.utxos)?;
 
             for input in tx.consumes() {
                 let txoref = TxoRef::from(&input);
@@ -467,14 +466,8 @@ impl<'a> DeltaBuilder<'a> {
                     index as u32,
                     &output,
                 )?;
-                self.stats.visit_output(
-                    &mut deltas,
-                    block,
-                    tx,
-                    &order,
-                    index as u32,
-                    &output,
-                )?;
+                self.stats
+                    .visit_output(&mut deltas, block, tx, &order, index as u32, &output)?;
             }
 
             // The Conway LEDGER rule runs CERTS, GOV, the withdrawal drain and
@@ -586,8 +579,7 @@ impl<'a> DeltaBuilder<'a> {
                 self.tx_logs.visit_datums(&mut deltas, block, tx, datum)?;
                 self.proposal_logs
                     .visit_datums(&mut deltas, block, tx, datum)?;
-                self.stats
-                    .visit_datums(&mut deltas, block, tx, datum)?;
+                self.stats.visit_datums(&mut deltas, block, tx, datum)?;
             }
 
             // Same LEDGER gate as above: GOV never registers a proposal
@@ -654,8 +646,7 @@ impl<'a> DeltaBuilder<'a> {
                 .visit_update(&mut deltas, block, None, &update)?;
             self.proposal_logs
                 .visit_update(&mut deltas, block, None, &update)?;
-            self.stats
-                .visit_update(&mut deltas, block, None, &update)?;
+            self.stats.visit_update(&mut deltas, block, None, &update)?;
         }
 
         self.account_state.flush(&mut deltas)?;

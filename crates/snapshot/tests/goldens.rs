@@ -17,9 +17,9 @@
 //!
 //! Between them these freeze: the thirty-eight media types, the tag string, the
 //! seventeen archive dimension names, the three exact-record kind literals, the
-//! nine `log-{ns}` and twenty-six `state-{ns}` kind strings — which is where the
-//! twenty-six namespace strings live now that neither record names one — the
-//! layer header and scope shapes, and the `position`/`parameters` key
+//! nine `log-{ns}` and twenty-six `state-{ns}` kind strings — which is where
+//! the twenty-six namespace strings live now that neither record names one —
+//! the layer header and scope shapes, and the `position`/`parameters` key
 //! spellings, the shard and schema maps included.
 
 mod common;

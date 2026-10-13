@@ -184,7 +184,11 @@ mod tests {
         decode(AddressStats::NS, wire(&staked).as_bytes()).unwrap();
         let unstaked = [slot.as_slice(), &[0x00], &[1; 29]].concat();
         decode(AddressStats::NS, wire(&unstaked).as_bytes()).unwrap();
-        decode(PaymentStats::NS, wire(&[slot.as_slice(), &[1; 28]].concat()).as_bytes()).unwrap();
+        decode(
+            PaymentStats::NS,
+            wire(&[slot.as_slice(), &[1; 28]].concat()).as_bytes(),
+        )
+        .unwrap();
 
         for (ns, len) in [
             (EpochState::NS, 32),

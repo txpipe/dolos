@@ -75,8 +75,9 @@ impl AddressStatsKey {
     /// The address the key was built from, whole.
     pub fn address(&self) -> Vec<u8> {
         match self {
-            Self::Staked { account, rest } => [rest.as_slice(), account_hash(&account.0).as_slice()]
-                .concat(),
+            Self::Staked { account, rest } => {
+                [rest.as_slice(), account_hash(&account.0).as_slice()].concat()
+            }
             Self::Unstaked(address) => address.clone(),
         }
     }
@@ -234,7 +235,9 @@ impl<'b, C> Decode<'b, C> for Sum {
         }
 
         if d.tag()? != Tag::from(IanaTag::PosBignum) {
-            return Err(minicbor::decode::Error::message("sum: not a positive bignum"));
+            return Err(minicbor::decode::Error::message(
+                "sum: not a positive bignum",
+            ));
         }
 
         let bytes = d.bytes()?;
@@ -251,9 +254,7 @@ impl<'b, C> Decode<'b, C> for Sum {
 }
 
 /// What an address received and sent of one unit.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub struct UnitSums {
     #[n(0)]
     pub received: Sum,

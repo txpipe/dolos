@@ -220,7 +220,11 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
     ("state-staged-account-stats", StagedAccountStats::NS, 1),
     ("state-staged-address-stats", StagedAddressStats::NS, 1),
     ("state-staged-first-mints", StagedFirstMint::NS, 1),
-    ("state-staged-payment-addresses", StagedPaymentAddress::NS, 1),
+    (
+        "state-staged-payment-addresses",
+        StagedPaymentAddress::NS,
+        1,
+    ),
     ("state-staged-payment-stats", StagedPaymentStats::NS, 1),
     ("state-staged-stake-addresses", StagedStakeAddress::NS, 1),
     ("state-stake-addresses", StakeAddressesRow::NS, 1),
