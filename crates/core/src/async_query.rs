@@ -122,14 +122,79 @@ impl<D: Domain> BlockMetaResolver<D> {
     }
 }
 
+/// Transaction hashes located per blocking task when a batch resolves its
+/// slots. A heavy batch releases its permit between chunks, and a dropped one
+/// stops at the next chunk.
+pub const LOCATE_CHUNK: usize = 256;
+
+/// Bounds the blocking query work of one process.
+///
+/// The domain carries one limiter and every [`AsyncQueryFacade`] built from it
+/// runs its blocking closures under that limiter, whichever protocol started
+/// them. A permit exists only inside a running blocking closure, so async code
+/// never holds one while it waits for another.
+///
+/// A closure must never wait on async work: it would hold its permit while the
+/// work it waits on may need another. The types cannot enforce this.
 #[derive(Debug, Clone)]
-pub struct AsyncQueryOptions {
-    pub max_blocking: usize,
+pub struct QueryLimiter {
+    permits: Arc<Semaphore>,
+    cap: usize,
 }
 
-impl Default for AsyncQueryOptions {
+impl QueryLimiter {
+    pub const DEFAULT_CAP: usize = 32;
+
+    /// A limiter of `cap` permits, at least one.
+    pub fn new(cap: usize) -> Self {
+        let cap = cap.max(1);
+        Self {
+            permits: Arc::new(Semaphore::new(cap)),
+            cap,
+        }
+    }
+
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
+    /// Permits held by running closures.
+    pub fn in_use(&self) -> usize {
+        self.cap - self.permits.available_permits()
+    }
+
+    /// Blocking closures one request may run at once, so that a single
+    /// request cannot take every permit.
+    pub fn fan_out(&self) -> usize {
+        (self.cap / 2).clamp(1, 16)
+    }
+
+    /// Run `f` on the blocking pool once a permit is free. The permit moves
+    /// into the closure and is returned when it ends, panics included.
+    pub async fn run_blocking<T, F>(&self, f: F) -> Result<T, DomainError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let permit = self.permits.clone().acquire_owned().await.map_err(|_| {
+            DomainError::ArchiveError(ArchiveError::InternalError(
+                "query limiter closed".to_string(),
+            ))
+        })?;
+        let handle = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            f()
+        });
+
+        handle
+            .await
+            .map_err(|e| DomainError::ArchiveError(ArchiveError::InternalError(e.to_string())))
+    }
+}
+
+impl Default for QueryLimiter {
     fn default() -> Self {
-        Self { max_blocking: 16 }
+        Self::new(Self::DEFAULT_CAP)
     }
 }
 
@@ -153,11 +218,11 @@ fn pick_by_hash(candidates: Vec<BlockBody>, hash: &[u8]) -> Option<BlockBody> {
     })
 }
 
+/// Async access to a domain's blocking queries, run under the domain's
+/// [`QueryLimiter`].
 #[derive(Clone)]
 pub struct AsyncQueryFacade<D: Domain> {
     inner: D,
-    limiter: Arc<Semaphore>,
-    options: AsyncQueryOptions,
 }
 
 impl<D: Domain> AsyncQueryFacade<D>
@@ -165,23 +230,7 @@ where
     D: Clone + Send + Sync + 'static,
 {
     pub fn new(inner: D) -> Self {
-        Self::with_options(inner, AsyncQueryOptions::default())
-    }
-
-    pub fn with_options(inner: D, options: AsyncQueryOptions) -> Self {
-        let options = AsyncQueryOptions {
-            max_blocking: options.max_blocking.max(1),
-        };
-        let limiter = Arc::new(Semaphore::new(options.max_blocking));
-        Self {
-            inner,
-            limiter,
-            options,
-        }
-    }
-
-    pub fn options(&self) -> &AsyncQueryOptions {
-        &self.options
+        Self { inner }
     }
 
     pub async fn run_blocking<T, F>(&self, f: F) -> Result<T, DomainError>
@@ -189,20 +238,11 @@ where
         T: Send + 'static,
         F: FnOnce(D) -> Result<T, DomainError> + Send + 'static,
     {
-        let permit = self.limiter.clone().acquire_owned().await.map_err(|_| {
-            DomainError::ArchiveError(ArchiveError::InternalError(
-                "query limiter closed".to_string(),
-            ))
-        })?;
         let inner = self.inner.clone();
-        let handle = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            f(inner)
-        });
-
-        handle
-            .await
-            .map_err(|e| DomainError::ArchiveError(ArchiveError::InternalError(e.to_string())))?
+        self.inner
+            .query_limiter()
+            .run_blocking(move || f(inner))
+            .await?
     }
 
     pub async fn block_by_slot(&self, slot: BlockSlot) -> Result<Option<BlockBody>, DomainError> {
@@ -313,26 +353,32 @@ where
     /// Resolve transaction metadata while reading and decoding each selected
     /// archive body at most once.
     ///
-    /// Exact index lookups are retained for every distinct transaction hash.
-    /// Their slots are grouped before body work starts, then each group uses
-    /// one blocking task under the facade's shared limiter. Results are owned;
-    /// decoded blocks and body buffers are dropped inside those bounded tasks.
+    /// Exact index lookups are retained for every distinct transaction hash,
+    /// [`LOCATE_CHUNK`] hashes per blocking task, one chunk after another.
+    /// Their slots are grouped after the last chunk, then each group uses one
+    /// blocking task under the domain's limiter, at most
+    /// [`QueryLimiter::fan_out`] at a time. Results are owned; decoded blocks
+    /// and body buffers are dropped inside those bounded tasks.
     async fn block_meta_by_tx_hashes(
         &self,
-        tx_hashes: Vec<TxHash>,
+        requested: Vec<TxHash>,
     ) -> Result<(Vec<(TxHash, Option<BlockRefMeta>)>, usize), DomainError> {
-        let requested = tx_hashes.clone();
-        let located = self
-            .run_blocking(move |domain| {
-                tx_hashes
-                    .into_iter()
-                    .map(|tx_hash| {
-                        let slot = domain.archive().slot_by_tx_hash(tx_hash.as_slice())?;
-                        Ok((tx_hash, slot))
-                    })
-                    .collect::<Result<Vec<_>, DomainError>>()
-            })
-            .await?;
+        let mut located = Vec::with_capacity(requested.len());
+        for chunk in requested.chunks(LOCATE_CHUNK) {
+            let chunk = chunk.to_vec();
+            let slots = self
+                .run_blocking(move |domain| {
+                    chunk
+                        .into_iter()
+                        .map(|tx_hash| {
+                            let slot = domain.archive().slot_by_tx_hash(tx_hash.as_slice())?;
+                            Ok((tx_hash, slot))
+                        })
+                        .collect::<Result<Vec<_>, DomainError>>()
+                })
+                .await?;
+            located.extend(slots);
+        }
 
         let mut fetched = HashMap::new();
         let mut groups: HashMap<BlockSlot, Vec<TxHash>> = HashMap::new();
@@ -403,7 +449,7 @@ where
                     .await
             }
         }))
-        .buffer_unordered(self.options.max_blocking)
+        .buffer_unordered(self.inner.query_limiter().fan_out())
         .collect::<Vec<_>>()
         .await;
 
@@ -521,6 +567,30 @@ mod tests {
             pick_by_hash(candidates, ebb_hash.as_ref()),
             Some(ebb.as_ref().clone())
         );
+    }
+
+    #[test]
+    fn a_limiter_keeps_at_least_one_permit() {
+        assert_eq!(QueryLimiter::new(0).cap(), 1);
+        assert_eq!(QueryLimiter::default().cap(), QueryLimiter::DEFAULT_CAP);
+    }
+
+    #[test]
+    fn fan_out_is_half_the_cap_within_one_and_sixteen() {
+        for (cap, fan_out) in [(1, 1), (2, 1), (32, 16), (64, 16)] {
+            assert_eq!(QueryLimiter::new(cap).fan_out(), fan_out, "cap {cap}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_closure_returns_its_permit() {
+        let limiter = QueryLimiter::new(1);
+
+        let result = limiter.run_blocking(|| panic!("query panicked")).await;
+
+        assert!(result.is_err());
+        assert_eq!(limiter.in_use(), 0);
+        assert_eq!(limiter.run_blocking(|| 7).await.unwrap(), 7);
     }
 
     /// The ordinary slot holds one block and the index already named it, so

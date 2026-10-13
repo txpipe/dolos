@@ -283,6 +283,7 @@ pub struct ToyDomain<B: ToyStores = MemoryStores> {
     sync_config: SyncConfig,
     genesis: Arc<dolos_core::Genesis>,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
+    query_limiter: QueryLimiter,
 }
 
 impl ToyDomain<MemoryStores> {
@@ -372,6 +373,7 @@ impl<B: ToyStores> ToyDomain<B> {
             sync_config: SyncConfig::default(),
             genesis: genesis.clone(),
             tip_broadcast,
+            query_limiter: QueryLimiter::default(),
         };
 
         // Apply genesis state using the work unit pattern.
@@ -416,6 +418,13 @@ impl<B: ToyStores> ToyDomain<B> {
     /// (`max_rollback` / `max_history`); default leaves both `None`.
     pub fn with_sync_config(mut self, sync_config: SyncConfig) -> Self {
         self.sync_config = sync_config;
+        self
+    }
+
+    /// Override the query limiter so tests can bound blocking query work;
+    /// clones of the domain share it.
+    pub fn with_query_limiter(mut self, query_limiter: QueryLimiter) -> Self {
+        self.query_limiter = query_limiter;
         self
     }
 }
@@ -467,6 +476,10 @@ impl<B: ToyStores> dolos_core::Domain for ToyDomain<B> {
 
     fn genesis(&self) -> Arc<dolos_core::Genesis> {
         self.genesis.clone()
+    }
+
+    fn query_limiter(&self) -> &QueryLimiter {
+        &self.query_limiter
     }
 
     fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain> {

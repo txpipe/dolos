@@ -612,6 +612,10 @@ impl Domain for FaultyToyDomain {
             .unwrap_or_else(|| self.inner.genesis())
     }
 
+    fn query_limiter(&self) -> &dolos_core::QueryLimiter {
+        self.inner.query_limiter()
+    }
+
     fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain> {
         self.inner.read_chain()
     }
