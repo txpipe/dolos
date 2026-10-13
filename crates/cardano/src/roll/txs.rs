@@ -68,6 +68,7 @@ impl BlockVisitor for TxLogVisitor {
         _deltas: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
+        _: &TxOrder,
         _: u32,
         _output: &pallas::ledger::traverse::MultiEraOutput,
     ) -> Result<(), ChainError> {

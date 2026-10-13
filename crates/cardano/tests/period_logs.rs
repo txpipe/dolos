@@ -4,9 +4,9 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use dolos_cardano::{
-    model::{FirstMintChunk, StagedFirstMint},
+    model::{FirstMintChunk, StagedFirstMint, StagedStakeAddress, StakeAddressesRow},
     periods::is_sealable,
-    CardanoDelta,
+    AccountKey, CardanoDelta,
 };
 use dolos_core::{
     import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ChainPoint, Domain as _,
@@ -17,7 +17,11 @@ use dolos_testing::{
     toy_domain::ToyDomain,
     MIN_UTXO_AMOUNT,
 };
-use pallas::ledger::traverse::MultiEraBlock;
+use pallas::ledger::{
+    addresses::{Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart},
+    primitives::StakeCredential,
+    traverse::MultiEraBlock,
+};
 
 /// Plain, balanced txs: no certificates for a pre-Conway chain to choke on at
 /// a boundary, and a seed paying exactly the fee of 7, so the pots hold.
@@ -39,6 +43,101 @@ fn staged(domain: &ToyDomain) -> BTreeSet<(u64, Vec<u8>, u64)> {
             (row.epoch, row.subject(), row.slot)
         })
         .collect()
+}
+
+/// The synthetic chain's own account, which every tx's first output pays.
+fn primary() -> StakeCredential {
+    let address = Address::from_bech32(&SyntheticBlockConfig::default().address).unwrap();
+    dolos_cardano::pallas_extras::address_as_stake_cred(&address)
+        .unwrap()
+        .0
+}
+
+fn base(payment: u8) -> Vec<u8> {
+    let StakeCredential::AddrKeyhash(stake) = primary() else {
+        unreachable!("the synthetic account is a key")
+    };
+
+    ShelleyAddress::new(
+        Network::Testnet,
+        ShelleyPaymentPart::Key([payment; 28].into()),
+        ShelleyDelegationPart::Key(stake),
+    )
+    .to_vec()
+}
+
+fn staged_addresses(domain: &ToyDomain) -> BTreeSet<(u64, Vec<u8>, u64)> {
+    domain
+        .state()
+        .iter_entities_typed::<StagedStakeAddress>(None)
+        .unwrap()
+        .map(|row| {
+            let (_, row) = row.unwrap();
+            (row.epoch, row.address, row.slot)
+        })
+        .collect()
+}
+
+/// Rollback for stake addresses: undoing a block removes exactly the staged
+/// rows it created, and a repeat within a block never reaches the WAL.
+#[test]
+fn rollback_unstages_exactly_the_addresses_its_block_created() {
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 3,
+        txs_per_block: 2,
+        ada_only_by_block: vec![true; 3],
+        extra_outputs_by_block: vec![
+            // 0x90 three times across one block's txs: staged once
+            vec![vec![base(0x90), base(0x90)], vec![base(0x90)]],
+            // 0x90 again in a later block, same epoch: still the first row
+            vec![vec![base(0x90), base(0x91)], vec![]],
+            vec![vec![base(0x92)], vec![]],
+        ],
+        ..Default::default()
+    });
+
+    let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+    let mut points = Vec::new();
+    let mut after = Vec::new();
+
+    for block in &blocks {
+        domain.roll_forward(block.clone()).unwrap();
+
+        let decoded = MultiEraBlock::decode(block).unwrap();
+        points.push(ChainPoint::Specific(decoded.slot(), decoded.hash()));
+        after.push(staged_addresses(&domain));
+    }
+
+    let slot_of = |set: &BTreeSet<(u64, Vec<u8>, u64)>, address: &[u8]| {
+        set.iter()
+            .find(|(_, x, _)| x == address)
+            .map(|(_, _, slot)| *slot)
+    };
+
+    let first = slot_of(&after[0], &base(0x90)).expect("staged by the first block");
+    assert_eq!(slot_of(&after[1], &base(0x90)), Some(first));
+    assert!(slot_of(&after[0], &base(0x91)).is_none());
+    assert!(after[1].len() > after[0].len());
+    assert!(after[2].len() > after[1].len());
+
+    // the repeats inside the first block never reached the WAL: one row per
+    // distinct address its outputs pay
+    let entry = domain.wal().read_entry(&points[0]).unwrap().unwrap();
+    let stagings = entry
+        .delta
+        .iter()
+        .filter(|delta| matches!(delta, CardanoDelta::StageStakeAddress(_)))
+        .count();
+    assert_eq!(stagings, after[0].len());
+
+    domain.rollback(&points[1]).unwrap();
+    assert_eq!(staged_addresses(&domain), after[1]);
+
+    domain.rollback(&points[0]).unwrap();
+    assert_eq!(staged_addresses(&domain), after[0]);
 }
 
 /// Done criterion 1, rollback: undoing a block removes exactly the staged rows
@@ -139,6 +238,11 @@ fn assert_epochs_seal(genesis: Arc<Genesis>, blocks: usize, step: u64) {
         .collect();
 
     let staged_epochs: BTreeSet<u64> = staged(&domain).into_iter().map(|(e, _, _)| e).collect();
+    let account = AccountKey(primary());
+    let staged_account_epochs: BTreeSet<u64> = staged_addresses(&domain)
+        .into_iter()
+        .map(|(e, _, _)| e)
+        .collect();
 
     let mut sealed = 0;
 
@@ -148,7 +252,17 @@ fn assert_epochs_seal(genesis: Arc<Genesis>, blocks: usize, step: u64) {
             .read_log_typed::<FirstMintChunk>(chain.epoch_start(epoch), &0)
             .unwrap();
 
+        let addresses = domain
+            .archive()
+            .read_log_typed::<StakeAddressesRow>(chain.epoch_start(epoch), &account)
+            .unwrap();
+
         if is_sealable(&chain, mutable, epoch, tip_epoch) {
+            let addresses = addresses
+                .unwrap_or_else(|| panic!("epoch {epoch}'s addresses not sealed by {tip_epoch}"));
+            assert_eq!(addresses.addresses.len(), 1);
+            assert!(!staged_account_epochs.contains(&epoch));
+
             let row = row.unwrap_or_else(|| panic!("epoch {epoch} not sealed by {tip_epoch}"));
             assert_eq!(row.count as usize, row.subjects.len());
             assert!(
@@ -157,6 +271,11 @@ fn assert_epochs_seal(genesis: Arc<Genesis>, blocks: usize, step: u64) {
             );
             sealed += 1;
         } else {
+            assert!(
+                addresses.is_none(),
+                "epoch {epoch}'s addresses sealed early"
+            );
+            assert!(staged_account_epochs.contains(&epoch));
             assert!(row.is_none(), "epoch {epoch} sealed early");
             assert!(staged_epochs.contains(&epoch), "epoch {epoch} not staged");
         }

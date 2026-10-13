@@ -15,10 +15,10 @@
 //! a re-run on unchanged code is encoding nondeterminism, which is a finding,
 //! never a re-pin.
 //!
-//! Between them these freeze: the twenty-five media types, the tag string, the
+//! Between them these freeze: the twenty-eight media types, the tag string, the
 //! seventeen archive dimension names, the three exact-record kind literals, the
-//! five `log-{ns}` and seventeen `state-{ns}` kind strings — which is where the
-//! seventeen namespace strings live now that neither record names one — the
+//! six `log-{ns}` and nineteen `state-{ns}` kind strings — which is where the
+//! nineteen namespace strings live now that neither record names one — the
 //! layer header and scope shapes, and the `position`/`parameters` key
 //! spellings, the shard and schema maps included.
 
@@ -40,7 +40,7 @@ use stelae::{
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 48] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 53] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -78,8 +78,14 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 48] = [
         106,
     ),
     (
+        "log-stake-addresses",
+        "sha256:f92a9da68fed12295a18788dbafc148cbe714d05400a1f8e93fcca4894bd4b6a",
+        2,
+        103,
+    ),
+    (
         "log-stakes",
-        "sha256:aa436895d99f9210d3f1e68abb7871cc08a0af9b95640fcefb4d0de6fad971ff",
+        "sha256:5c8712d4326c48346233b9c53d56017a148b599c3435cdc644136364f9a91c84",
         2,
         90,
     ),
@@ -288,38 +294,62 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 48] = [
         134,
     ),
     (
+        "state-staged-stake-addresses",
+        "sha256:4b0705c99022a97547a8355290f20e7c1d81cfd8974d79c0d2d43315887803b4",
+        2,
+        167,
+    ),
+    (
+        "state-staged-stake-addresses",
+        "sha256:8da205d2e748c420093ebdb0d43566cb233a9651953bbd953c13f691706bc928",
+        2,
+        167,
+    ),
+    (
+        "state-stake-addresses",
+        "sha256:9d0f0cbb57182647da8dde31c52e7ce06c16b8e884449b45c22e2e0ae595bebe",
+        2,
+        94,
+    ),
+    (
+        "state-stake-addresses",
+        "sha256:2ea586f2f3293b4eb11bc631f38f9fb839a8963c92328c1db3605a57251c5e2a",
+        2,
+        94,
+    ),
+    (
         "state-stakes",
-        "sha256:5f843f7e56c6d63243f3eca41ad8eaf9a8f284ff766e15eca93ec294b79c610d",
+        "sha256:63d50f07ff2a528ae715dc75b5f5b2998c33041d1ae43006ec9f9f7b4b7aac9c",
         2,
         81,
     ),
     (
         "state-stakes",
-        "sha256:2614c6b02f0a66a127fb4c632d398e4e24d331fe2f82a1df3fbf180b392850af",
+        "sha256:4a7f93cc53fe5955d07e83851a80a7dea1057c2da0dbf4599e60cd1d90564f32",
         2,
         81,
     ),
     (
         "state-utxos",
-        "sha256:20358672a0eea32ac066d5add9f26e80bbbf05eaad06c86b634dfa0ae55841b3",
+        "sha256:34871099b0d3972e774f974b0ff15a5425bacca81d7c8365776d456d570ddc2e",
         2,
         91,
     ),
     (
         "state-utxos",
-        "sha256:0f1a7bb7f70e166575ac8f173f65a0f58d8f531563b45dbe1254697cfc10a563",
+        "sha256:a781669519aedd65081ef36f385e490e7f6eef989b5199f3368470c57fb04b90",
         2,
         91,
     ),
     (
         "state-utxos",
-        "sha256:2f55f54d9ad1e7bd1b4419c6508741347865d732aeb817f0785f4bf329f18d19",
+        "sha256:0bb8be8053d2e0d5d754064c9a9d1a0a4c851a32b4a8c2b2ee7b7a4c7e604648",
         2,
         91,
     ),
     (
         "state-utxos",
-        "sha256:ce4874d77aeb1e3c553f88c59f010315038b0577302e1c2b8d518a3877b48371",
+        "sha256:c213ded17f52f619bb3f0907b06d585f995b2e86d57ba50d1ab9eb493078cedf",
         2,
         91,
     ),
@@ -333,7 +363,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 48] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:7fb3efbec8180d75fc3bcc01a257568ab27563017c7cbdd7f1a1d440db523409";
+    "sha256:15f54fcdbe70b999b9c2e2b1d8b074240aae65188e8f10f51f6435796a0a8ffa";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -550,7 +580,10 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:aa3c5ce677eae1486956ec550a9341a3969cc745a2a094f9337ae29370908722","kind":"log-policy-first-mints","#,
     r#""mediaType":"application/vnd.dolos.stele.log-policy-first-mints.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":106},"#,
-    r#"{"diffId":"sha256:aa436895d99f9210d3f1e68abb7871cc08a0af9b95640fcefb4d0de6fad971ff","kind":"log-stakes","#,
+    r#"{"diffId":"sha256:f92a9da68fed12295a18788dbafc148cbe714d05400a1f8e93fcca4894bd4b6a","kind":"log-stake-addresses","#,
+    r#""mediaType":"application/vnd.dolos.stele.log-stake-addresses.v1+zstd","records":2,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":103},"#,
+    r#"{"diffId":"sha256:5c8712d4326c48346233b9c53d56017a148b599c3435cdc644136364f9a91c84","kind":"log-stakes","#,
     r#""mediaType":"application/vnd.dolos.stele.log-stakes.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":90},"#,
     r#"{"diffId":"sha256:90fab9f2698941985ddd5698d1d3972d0e606fd25cc3f1e51dc971fd16e2b491","kind":"state-account-epochs","#,
@@ -655,22 +688,34 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:6de7ffbfaf07a73451fd4ddd568e7f76227cae6fa2f8a069bb26070056e6046c","kind":"state-staged-first-mints","#,
     r#""mediaType":"application/vnd.dolos.stele.state-staged-first-mints.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":134},"#,
-    r#"{"diffId":"sha256:5f843f7e56c6d63243f3eca41ad8eaf9a8f284ff766e15eca93ec294b79c610d","kind":"state-stakes","#,
+    r#"{"diffId":"sha256:4b0705c99022a97547a8355290f20e7c1d81cfd8974d79c0d2d43315887803b4","kind":"state-staged-stake-addresses","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-staged-stake-addresses.v1+zstd","records":2,"#,
+    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":167},"#,
+    r#"{"diffId":"sha256:8da205d2e748c420093ebdb0d43566cb233a9651953bbd953c13f691706bc928","kind":"state-staged-stake-addresses","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-staged-stake-addresses.v1+zstd","records":2,"#,
+    r#""scope":{"shard":0},"uncompressedSize":167},"#,
+    r#"{"diffId":"sha256:9d0f0cbb57182647da8dde31c52e7ce06c16b8e884449b45c22e2e0ae595bebe","kind":"state-stake-addresses","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-stake-addresses.v1+zstd","records":2,"#,
+    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":94},"#,
+    r#"{"diffId":"sha256:2ea586f2f3293b4eb11bc631f38f9fb839a8963c92328c1db3605a57251c5e2a","kind":"state-stake-addresses","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-stake-addresses.v1+zstd","records":2,"#,
+    r#""scope":{"shard":0},"uncompressedSize":94},"#,
+    r#"{"diffId":"sha256:63d50f07ff2a528ae715dc75b5f5b2998c33041d1ae43006ec9f9f7b4b7aac9c","kind":"state-stakes","#,
     r#""mediaType":"application/vnd.dolos.stele.state-stakes.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":81},"#,
-    r#"{"diffId":"sha256:2614c6b02f0a66a127fb4c632d398e4e24d331fe2f82a1df3fbf180b392850af","kind":"state-stakes","#,
+    r#"{"diffId":"sha256:4a7f93cc53fe5955d07e83851a80a7dea1057c2da0dbf4599e60cd1d90564f32","kind":"state-stakes","#,
     r#""mediaType":"application/vnd.dolos.stele.state-stakes.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":81},"#,
-    r#"{"diffId":"sha256:20358672a0eea32ac066d5add9f26e80bbbf05eaad06c86b634dfa0ae55841b3","kind":"state-utxos","#,
+    r#"{"diffId":"sha256:34871099b0d3972e774f974b0ff15a5425bacca81d7c8365776d456d570ddc2e","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:0f1a7bb7f70e166575ac8f173f65a0f58d8f531563b45dbe1254697cfc10a563","kind":"state-utxos","#,
+    r#"{"diffId":"sha256:a781669519aedd65081ef36f385e490e7f6eef989b5199f3368470c57fb04b90","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":1},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:2f55f54d9ad1e7bd1b4419c6508741347865d732aeb817f0785f4bf329f18d19","kind":"state-utxos","#,
+    r#"{"diffId":"sha256:0bb8be8053d2e0d5d754064c9a9d1a0a4c851a32b4a8c2b2ee7b7a4c7e604648","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":91},"#,
-    r#"{"diffId":"sha256:ce4874d77aeb1e3c553f88c59f010315038b0577302e1c2b8d518a3877b48371","kind":"state-utxos","#,
+    r#"{"diffId":"sha256:c213ded17f52f619bb3f0907b06d585f995b2e86d57ba50d1ab9eb493078cedf","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"shard":1},"uncompressedSize":91},"#,
     r#"{"diffId":"sha256:13f9bbdf676ac47ad7238a52fa525f4413a88335c23d2d567c888abd8dedec80","kind":"digests","#,
@@ -678,8 +723,8 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#""scope":{"lastImmutable":3},"uncompressedSize":250}"#,
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":2,"epochs":3,"eras":2,"first-mints":2,"gov":4,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pool-deposit-refunds":0,"pools":2,"proposals":4,"staged-first-mints":2,"stakes":2,"utxos":1},"#,
-    r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"gov":1,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pools":1,"proposals":1,"staged-first-mints":1,"stakes":1,"utxos":16},"#,
+    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":2,"epochs":3,"eras":2,"first-mints":2,"gov":4,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pool-deposit-refunds":0,"pools":2,"proposals":4,"staged-first-mints":2,"staged-stake-addresses":1,"stake-addresses":1,"stakes":2,"utxos":1},"#,
+    r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"gov":1,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pools":1,"proposals":1,"staged-first-mints":1,"staged-stake-addresses":1,"stake-addresses":1,"stakes":1,"utxos":16},"#,
     r#""stateEpochs":[4]"#,
     r#"},"position":{"#,
     r#""epoch":7,"network":{"magic":764824073,"name":"mainnet"},"#,

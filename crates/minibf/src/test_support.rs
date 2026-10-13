@@ -272,6 +272,130 @@ pub fn first_mint_chain() -> SyntheticBlockConfig {
     }
 }
 
+/// Accounts of [`stake_address_chain`].
+pub mod stake_address_accounts {
+    use pallas::ledger::{
+        addresses::{
+            Address, Network, Pointer, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
+        },
+        primitives::StakeCredential,
+    };
+
+    use dolos_testing::synthetic::SyntheticBlockConfig;
+
+    /// The synthetic chain's own account: every tx's first output pays it.
+    pub fn primary() -> StakeCredential {
+        let address = Address::from_bech32(&SyntheticBlockConfig::default().address).unwrap();
+        dolos_cardano::pallas_extras::address_as_stake_cred(&address)
+            .unwrap()
+            .0
+    }
+
+    /// Another key account, paid only by extra outputs.
+    pub fn other() -> StakeCredential {
+        StakeCredential::AddrKeyhash([0x5a; 28].into())
+    }
+
+    /// A script account sharing `other`'s hash.
+    pub fn script() -> StakeCredential {
+        StakeCredential::ScriptHash([0x5a; 28].into())
+    }
+
+    /// The base address paying `payment` under `account`.
+    pub fn base(account: &StakeCredential, payment: u8) -> Vec<u8> {
+        let delegation = match account {
+            StakeCredential::AddrKeyhash(hash) => ShelleyDelegationPart::Key(*hash),
+            StakeCredential::ScriptHash(hash) => ShelleyDelegationPart::Script(*hash),
+        };
+
+        ShelleyAddress::new(
+            Network::Testnet,
+            ShelleyPaymentPart::Key([payment; 28].into()),
+            delegation,
+        )
+        .to_vec()
+    }
+
+    /// Addresses no account lists: an enterprise address and a pointer one.
+    pub fn unlisted(payment: u8) -> [Vec<u8>; 2] {
+        let payment = ShelleyPaymentPart::Key([payment; 28].into());
+
+        [
+            ShelleyAddress::new(
+                Network::Testnet,
+                payment.clone(),
+                ShelleyDelegationPart::Null,
+            )
+            .to_vec(),
+            ShelleyAddress::new(
+                Network::Testnet,
+                payment,
+                // one the pointer table resolves, which the ledger needs
+                ShelleyDelegationPart::Pointer(Pointer::new(53_004_562, 9, 0)),
+            )
+            .to_vec(),
+        ]
+    }
+}
+
+/// Twelve blocks over preview epochs 2 to 7, two per epoch, of three txs each,
+/// whose outputs cover what first-appearance order has to get right. Each tx
+/// pays the primary account first, and the builder's own outputs reuse
+/// addresses across consecutive blocks and every epoch. Extra outputs add
+/// several addresses of one account in one tx, an address repeated within a
+/// tx and a block, addresses whose bytes sort against their chain order, one
+/// returning epochs after it first appeared, a hundred and fifty fresh ones in
+/// one tx for deep pages, and other accounts and unlisted addresses between
+/// them. The tip's epoch seals epochs 2 to 5 and leaves 6 and 7 staged.
+pub fn stake_address_chain() -> SyntheticBlockConfig {
+    use stake_address_accounts::*;
+
+    let (a, b, c) = (primary(), other(), script());
+
+    let none = || vec![vec![], vec![], vec![]];
+
+    let mut extra = vec![none(); 12];
+
+    // several outputs to one account in one tx, against byte order, with a
+    // repeat inside the tx and another account in between
+    extra[0][1] = vec![
+        base(&a, 0x90),
+        base(&b, 0x91),
+        base(&a, 0x80),
+        base(&a, 0x90),
+    ];
+    // the repeat again in the next tx of the same block, and unlisted ones
+    let [enterprise, pointer] = unlisted(0x92);
+    extra[0][2] = vec![enterprise, base(&a, 0x90), pointer, base(&c, 0x93)];
+
+    // a hundred and fifty fresh addresses in one tx
+    extra[3][0] = (0..150u8).rev().map(|i| base(&a, i)).collect();
+
+    // an epoch-2 address returning in epoch 6, beside a fresh one
+    extra[8][1] = vec![base(&a, 0x80), base(&a, 0xa0), base(&b, 0x91)];
+
+    // a staged epoch with the script account and more fresh ones
+    extra[10][2] = vec![
+        base(&c, 0x93),
+        base(&c, 0xa1),
+        base(&a, 0xa2),
+        base(&a, 0x05),
+    ];
+
+    SyntheticBlockConfig {
+        block_count: 12,
+        txs_per_block: 3,
+        slot_step: 43_200,
+        plain_txs: true,
+        ada_only_by_block: vec![true; 12],
+        extra_outputs_by_block: extra,
+        // each tx pays a fee of 7 out of its seed, so the pots balance across
+        // the boundaries
+        seed_amount: dolos_testing::MIN_UTXO_AMOUNT + 7,
+        ..Default::default()
+    }
+}
+
 pub struct TestDomainBuilder {
     domain: ToyDomain,
     vectors: SyntheticVectors,

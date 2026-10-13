@@ -22,10 +22,11 @@
 use dolos_cardano::{
     indexes::archive_dimensions,
     model::{
-        AccountEpochLog, AccountKey, AccountState, AssetKey, AssetState, DRepKey, DRepState,
-        DatumKey, DatumState, EpochState, EraProtocol, EraSummary, FirstMintChunk,
+        AccountEpochLog, AccountKey, AccountState, AddressKey, AssetKey, AssetState, DRepKey,
+        DRepState, DatumKey, DatumState, EpochState, EraProtocol, EraSummary, FirstMintChunk,
         FixedNamespace as _, GovState, PendingMirState, PendingRewardState, PolicyKey,
-        PolicyMintChunk, PoolKey, PoolState, ProposalKey, ProposalState, StagedFirstMint, StakeLog,
+        PolicyMintChunk, PoolKey, PoolState, ProposalKey, ProposalState, StagedFirstMint,
+        StagedStakeAddress, StakeAddressesRow, StakeLog,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
     periods::StagedKey,
@@ -90,9 +91,11 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
     let credential = AccountKey(StakeCredential::AddrKeyhash([byte; 28].into()));
 
     let key = match ns {
-        AccountState::NS | AccountEpochLog::NS | PendingMirState::NS | PendingRewardState::NS => {
-            keys::encode(&credential)
-        }
+        AccountState::NS
+        | AccountEpochLog::NS
+        | PendingMirState::NS
+        | PendingRewardState::NS
+        | StakeAddressesRow::NS => keys::encode(&credential),
         AssetState::NS => keys::encode(&AssetKey([byte; 32].into())),
         DatumState::NS => keys::encode(&DatumKey([byte; 32].into())),
         DRepState::NS => keys::encode(&DRepKey(DRep::Key([byte; 28].into()))),
@@ -106,6 +109,11 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
             group: PolicyKey([byte; 28].into()),
             epoch: u64::from(byte),
             member: AssetKey([byte; 32].into()),
+        }),
+        StagedStakeAddress::NS => keys::encode(&StagedKey {
+            group: credential,
+            epoch: u64::from(byte),
+            member: AddressKey(vec![byte; 57]),
         }),
         other => panic!("no fixture key for {other}"),
     };

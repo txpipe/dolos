@@ -58,7 +58,7 @@ pub mod ground_rules;
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
     FirstMintChunk, FixedNamespace, GovState, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolState, ProposalState, StagedFirstMint, StakeLog,
+    PoolState, ProposalState, StagedFirstMint, StagedStakeAddress, StakeAddressesRow, StakeLog,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -368,6 +368,24 @@ pub fn registry() -> Vec<Entry> {
                     hex: include_str!("goldens/staged-first-mints.rev2.hex"),
                 },
             ]
+        ),
+        entity_entry!(
+            enc_staged_stake_addresses,
+            StagedStakeAddress,
+            canaries::staged_stake_address,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/staged-stake-addresses.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_stake_addresses,
+            StakeAddressesRow,
+            canaries::stake_addresses_row,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/stake-addresses.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_stakes,

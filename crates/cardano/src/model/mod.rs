@@ -116,6 +116,7 @@ pub mod pending;
 pub mod pools;
 pub mod pparams;
 pub mod proposals;
+pub mod stake_addresses;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -134,6 +135,7 @@ pub use pending::*;
 pub use pools::*;
 pub use pparams::*;
 pub use proposals::*;
+pub use stake_addresses::*;
 
 // --- CardanoEntity ---
 
@@ -155,6 +157,8 @@ pub enum CardanoEntity {
     StagedFirstMint(Box<StagedFirstMint>),
     FirstMintChunk(Box<FirstMintChunk>),
     PolicyMintChunk(Box<PolicyMintChunk>),
+    StagedStakeAddress(Box<StagedStakeAddress>),
+    StakeAddressesRow(Box<StakeAddressesRow>),
 }
 
 macro_rules! variant_boilerplate {
@@ -192,6 +196,8 @@ variant_boilerplate!(AccountEpochLog);
 variant_boilerplate!(StagedFirstMint);
 variant_boilerplate!(FirstMintChunk);
 variant_boilerplate!(PolicyMintChunk);
+variant_boilerplate!(StagedStakeAddress);
+variant_boilerplate!(StakeAddressesRow);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -212,6 +218,8 @@ impl dolos_core::Entity for CardanoEntity {
             StagedFirstMint::NS => StagedFirstMint::decode_entity(ns, value).map(Into::into),
             FirstMintChunk::NS => FirstMintChunk::decode_entity(ns, value).map(Into::into),
             PolicyMintChunk::NS => PolicyMintChunk::decode_entity(ns, value).map(Into::into),
+            StagedStakeAddress::NS => StagedStakeAddress::decode_entity(ns, value).map(Into::into),
+            StakeAddressesRow::NS => StakeAddressesRow::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -234,6 +242,8 @@ impl dolos_core::Entity for CardanoEntity {
             Self::StagedFirstMint(x) => StagedFirstMint::encode_entity(x),
             Self::FirstMintChunk(x) => FirstMintChunk::encode_entity(x),
             Self::PolicyMintChunk(x) => PolicyMintChunk::encode_entity(x),
+            Self::StagedStakeAddress(x) => StagedStakeAddress::encode_entity(x),
+            Self::StakeAddressesRow(x) => StakeAddressesRow::encode_entity(x),
         }
     }
 }
@@ -256,6 +266,8 @@ pub fn build_schema() -> StateSchema {
     schema.insert(StagedFirstMint::NS, NamespaceType::KeyValue);
     schema.insert(FirstMintChunk::NS, NamespaceType::KeyValue);
     schema.insert(PolicyMintChunk::NS, NamespaceType::KeyValue);
+    schema.insert(StagedStakeAddress::NS, NamespaceType::KeyValue);
+    schema.insert(StakeAddressesRow::NS, NamespaceType::KeyValue);
     schema
 }
 
@@ -338,6 +350,7 @@ pub enum CardanoDelta {
     GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
     GovDRepSnapshot(Box<GovDRepSnapshot>),
     StageFirstMint(Box<StageFirstMint>),
+    StageStakeAddress(Box<StageStakeAddress>),
 }
 
 impl CardanoDelta {
@@ -444,6 +457,7 @@ delta_from!(GovDRepSnapshot);
 delta_from!(GovDistrBoundaryCredit);
 delta_from!(ProposalResolved);
 delta_from!(StageFirstMint);
+delta_from!(StageStakeAddress);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -517,6 +531,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::SetEpochIncentives(x) => x.key(),
             Self::DequeueReward(x) => x.key(),
             Self::StageFirstMint(x) => x.key(),
+            Self::StageStakeAddress(x) => x.key(),
         }
     }
 
@@ -588,6 +603,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::SetEpochIncentives(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DequeueReward(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StageFirstMint(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageStakeAddress(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -659,6 +675,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::SetEpochIncentives(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DequeueReward(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StageFirstMint(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageStakeAddress(x) => Self::downcast_undo(x.as_ref(), entity),
         }
     }
 }

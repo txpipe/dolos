@@ -1,12 +1,12 @@
 //! The closed set of state namespaces a Dolos stele carries.
 //!
-//! ADR-004 defines state as one uniform key-value space: the sixteen entity
+//! ADR-004 defines state as one uniform key-value space: the eighteen entity
 //! namespaces of `dolos_cardano::model::build_schema()` plus [`UTXOS`], which
 //! is the UTxO set wearing the same shape as everything else. That uniformity
 //! is deliberate — it means the format has one state record, and the planned
 //! refactor folding UTxOs into the entity system (#1042) is invisible to it.
 //!
-//! The names are not spelled here. Sixteen of them are read off the entity
+//! The names are not spelled here. Eighteen of them are read off the entity
 //! types' own `FixedNamespace::NS`, and `utxos` is defined here because nothing
 //! else in the tree defines it. A namespace that exists in `build_schema` and
 //! not in [`NAMESPACES`] would be silently dropped from every published stele,
@@ -16,7 +16,7 @@
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
     FirstMintChunk, FixedNamespace, GovState, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolState, ProposalState, StagedFirstMint, StakeLog,
+    PoolState, ProposalState, StagedFirstMint, StagedStakeAddress, StakeAddressesRow, StakeLog,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -34,7 +34,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against `build_schema()` directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 17] = [
+pub const NAMESPACES: [Namespace; 19] = [
     AccountEpochLog::NS,
     AccountState::NS,
     AssetState::NS,
@@ -50,6 +50,8 @@ pub const NAMESPACES: [Namespace; 17] = [
     PoolState::NS,
     ProposalState::NS,
     StagedFirstMint::NS,
+    StagedStakeAddress::NS,
+    StakeAddressesRow::NS,
     StakeLog::NS,
     UTXOS,
 ];
@@ -73,7 +75,7 @@ pub const NAMESPACES: [Namespace; 17] = [
 /// fixed width (decision 0051), and each of those moved one revision for it.
 /// Kept beside [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 17] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 19] = [
     (AccountEpochLog::NS, 1),
     (AccountState::NS, 1),
     (AssetState::NS, 1),
@@ -89,6 +91,8 @@ pub const SCHEMA_REVS: [(Namespace, u64); 17] = [
     (PoolState::NS, 2),
     (ProposalState::NS, 4),
     (StagedFirstMint::NS, 2),
+    (StagedStakeAddress::NS, 1),
+    (StakeAddressesRow::NS, 1),
     (StakeLog::NS, 2),
     (UTXOS, 1),
 ];
@@ -119,8 +123,13 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         PoolState::NS => exact::<<PoolState as StateEntity>::Key>(key),
         ProposalState::NS => exact::<<ProposalState as StateEntity>::Key>(key),
         StagedFirstMint::NS => exact::<<StagedFirstMint as StateEntity>::Key>(key),
+        StagedStakeAddress::NS => exact::<<StagedStakeAddress as StateEntity>::Key>(key),
         UTXOS => exact::<[u8; UTXO_KEY_LEN]>(key),
-        AccountEpochLog::NS | FirstMintChunk::NS | PolicyMintChunk::NS | StakeLog::NS => {
+        AccountEpochLog::NS
+        | FirstMintChunk::NS
+        | PolicyMintChunk::NS
+        | StakeAddressesRow::NS
+        | StakeLog::NS => {
             return check_log_key(ns, key)
                 .map_err(|_| Error::malformed("state", format!("{ns} key: not a log key")));
         }
@@ -138,6 +147,7 @@ pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         EpochState::NS => exact::<<EpochState as LogEntity>::Key>(key),
         FirstMintChunk::NS => exact::<<FirstMintChunk as LogEntity>::Key>(key),
         PolicyMintChunk::NS => exact::<<PolicyMintChunk as LogEntity>::Key>(key),
+        StakeAddressesRow::NS => exact::<<StakeAddressesRow as LogEntity>::Key>(key),
         StakeLog::NS => exact::<<StakeLog as LogEntity>::Key>(key),
         _ => return Err(Error::UnknownNamespace(ns.to_owned())),
     };

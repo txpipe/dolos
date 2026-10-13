@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use dolos_core::{ChainError, TxoRef};
+use dolos_core::{ChainError, TxOrder, TxoRef};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -64,6 +64,7 @@ impl BlockVisitor for DatumVisitor {
         deltas: &mut WorkDeltas,
         _block: &MultiEraBlock,
         _tx: &MultiEraTx,
+        _: &TxOrder,
         _index: u32,
         output: &MultiEraOutput,
     ) -> Result<(), ChainError> {
