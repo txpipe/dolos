@@ -23,6 +23,7 @@ use crate::{indexes::SlotOrder, ChainSummary};
 
 pub mod first_mints;
 pub mod stake_addresses;
+pub mod stats;
 
 /// Most entries one sealed list row holds; a longer list spans several rows.
 pub const CHUNK_LEN: usize = 256;
@@ -65,6 +66,7 @@ impl<G: FixedKey, M: KeyCodec> KeyCodec for StagedKey<G, M> {
 /// crate may write.
 impl<M: KeyCodec> dolos_core::KeyPrefix<StagedKey<crate::PolicyKey, M>> for crate::PolicyKey {}
 impl<M: KeyCodec> dolos_core::KeyPrefix<StagedKey<crate::AccountKey, M>> for crate::AccountKey {}
+impl<M: KeyCodec> dolos_core::KeyPrefix<StagedKey<crate::PaymentKey, M>> for crate::PaymentKey {}
 
 /// A row staged in state until its epoch seals.
 pub trait StagedRow:
@@ -122,6 +124,61 @@ impl<E: StagedRow> EntityDelta for StageIfAbsent<E> {
     }
 }
 
+/// A staged row its contributions add up to.
+pub trait SumRow:
+    StateEntity<Key: Clone + std::fmt::Debug + Serialize + DeserializeOwned>
+    + Clone
+    + std::fmt::Debug
+    + Default
+{
+    fn add(&mut self, other: &Self);
+
+    /// Take `other` back out of a row it was added to; any part left at zero
+    /// goes with it.
+    fn sub(&mut self, other: &Self);
+
+    fn is_zero(&self) -> bool;
+}
+
+/// Add a contribution to a staged sum row, creating it if absent.
+///
+/// Undo takes the contribution back out and removes a row left at zero, so a
+/// zero row is never stored; a seal skips one all the same.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned"))]
+pub struct StageSum<E: SumRow> {
+    pub(crate) key: E::Key,
+    pub(crate) delta: E,
+}
+
+impl<E: SumRow> StageSum<E> {
+    pub fn new(key: E::Key, delta: E) -> Self {
+        Self { key, delta }
+    }
+}
+
+impl<E: SumRow> EntityDelta for StageSum<E> {
+    type Entity = E;
+
+    fn key(&self) -> NsKey {
+        NsKey::of::<E>(&self.key)
+    }
+
+    fn apply(&mut self, entity: &mut Option<E>) {
+        entity.get_or_insert_with(E::default).add(&self.delta);
+    }
+
+    fn undo(&self, entity: &mut Option<E>) {
+        if let Some(row) = entity {
+            row.sub(&self.delta);
+
+            if row.is_zero() {
+                *entity = None;
+            }
+        }
+    }
+}
+
 /// Whether `epoch` can no longer roll back once epoch `boundary` opens: its
 /// last slot is more than `mutable_slots` behind the boundary.
 pub fn is_sealable(
@@ -149,7 +206,8 @@ pub fn seal_staged<D: Domain>(
     let sealable = |epoch| is_sealable(chain, mutable_slots, epoch, boundary);
 
     first_mints::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
-    stake_addresses::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)
+    stake_addresses::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
+    stats::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)
 }
 
 /// Seal staged rows in chunks of whole groups.

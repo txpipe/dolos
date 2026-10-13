@@ -50,18 +50,6 @@ pub struct AccountVisitor {
     staged: HashSet<(StakeCredential, Vec<u8>)>,
 }
 
-/// The stake credential an output address lists under in the stake-address
-/// period log: a base address's key or script stake part, or a stake address.
-/// Pointer and Byron addresses list under none.
-fn listed_account(address: &Address) -> Option<StakeCredential> {
-    match address {
-        Address::Shelley(shelley) => pallas_extras::shelley_address_to_stake_address(shelley)
-            .map(|stake| pallas_extras::stake_address_to_cred(&stake)),
-        Address::Stake(stake) => Some(pallas_extras::stake_address_to_cred(stake)),
-        Address::Byron(_) => None,
-    }
-}
-
 impl BlockVisitor for AccountVisitor {
     fn visit_root(
         &mut self,
@@ -114,7 +102,7 @@ impl BlockVisitor for AccountVisitor {
         let address = output.address().expect("valid address");
         let epoch = self.epoch.expect("value set in root");
 
-        if let Some(account) = listed_account(&address) {
+        if let Some(account) = pallas_extras::address_account(&address) {
             let bytes = address.to_vec();
 
             if self.staged.insert((account.clone(), bytes.clone())) {
