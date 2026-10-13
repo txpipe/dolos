@@ -125,8 +125,8 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        EpochState, FirstMintChunk, FixedNamespace as _, PolicyKey, PolicyMintChunk, PoolKey,
-        StakeAddressesRow, StakeLog,
+        AccountStats, AddressStats, EpochState, FirstMintChunk, FixedNamespace as _, PaymentStats,
+        PolicyKey, PolicyMintChunk, PoolKey, StakeAddressesRow, StakeLog,
     };
 
     use super::*;
@@ -175,11 +175,25 @@ mod tests {
         // stake addresses take an account: a credential header and its hash
         let account = [slot.as_slice(), &[0x82, 0x01, 0x58, 0x1c], &[1; 28]].concat();
         decode(StakeAddressesRow::NS, wire(&account).as_bytes()).unwrap();
+        decode(AccountStats::NS, wire(&account).as_bytes()).unwrap();
+
+        // address stats take a tag, then an account and the rest of the
+        // address, or the address whole
+        let staked = [account.as_slice(), &[1; 29]].concat();
+        let staked = [&staked[..8], &[0x01], &staked[8..]].concat();
+        decode(AddressStats::NS, wire(&staked).as_bytes()).unwrap();
+        let unstaked = [slot.as_slice(), &[0x00], &[1; 29]].concat();
+        decode(AddressStats::NS, wire(&unstaked).as_bytes()).unwrap();
+        decode(PaymentStats::NS, wire(&[slot.as_slice(), &[1; 28]].concat()).as_bytes()).unwrap();
 
         for (ns, len) in [
             (EpochState::NS, 32),
             (FirstMintChunk::NS, 32),
             (StakeAddressesRow::NS, 32),
+            (AccountStats::NS, 32),
+            (AddressStats::NS, 1),
+            (AddressStats::NS, 32),
+            (PaymentStats::NS, 32),
             (StakeLog::NS, 32),
             (StakeLog::NS, 0),
         ] {
