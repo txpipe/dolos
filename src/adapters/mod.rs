@@ -43,6 +43,7 @@ pub struct DomainAdapter {
     pub archive: ArchiveStoreBackend,
     pub mempool: MempoolBackend,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
+    pub query_limiter: QueryLimiter,
 }
 
 impl DomainAdapter {
@@ -77,6 +78,10 @@ impl Domain for DomainAdapter {
 
     fn genesis(&self) -> Arc<Genesis> {
         self.genesis.clone()
+    }
+
+    fn query_limiter(&self) -> &QueryLimiter {
+        &self.query_limiter
     }
 
     fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain> {

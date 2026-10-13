@@ -261,6 +261,7 @@ fn build_domain(
         archive,
         mempool: MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
         tip_broadcast,
+        query_limiter: QueryLimiter::default(),
     })
 }
 

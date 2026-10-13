@@ -135,6 +135,7 @@ pub struct HarnessDomain {
     storage_config: StorageConfig,
     sync_config: SyncConfig,
     genesis: Arc<Genesis>,
+    query_limiter: QueryLimiter,
 }
 
 impl Domain for HarnessDomain {
@@ -158,6 +159,10 @@ impl Domain for HarnessDomain {
 
     fn genesis(&self) -> Arc<Genesis> {
         self.genesis.clone()
+    }
+
+    fn query_limiter(&self) -> &QueryLimiter {
+        &self.query_limiter
     }
 
     fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain> {
@@ -221,6 +226,7 @@ impl LedgerHarness {
             storage_config: StorageConfig::default(),
             sync_config: SyncConfig::default(),
             genesis,
+            query_limiter: QueryLimiter::default(),
         };
 
         // 5. Bootstrap (integrity check + drain pending work)
