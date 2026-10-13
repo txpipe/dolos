@@ -25,13 +25,12 @@ use dolos_cardano::{
     cip151,
     indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
     model::{AccountState, PoolState},
-    pallas_extras, PoolDelegation, PoolHash, StakeLog,
+    pallas_extras, AccountKey, PoolDelegation, PoolHash, PoolKey, StakeLog,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use futures::{future::join_all, StreamExt};
 use itertools::Itertools;
 use pallas::{
-    codec::minicbor,
     crypto::hash::Hasher,
     ledger::{
         addresses::Network,
@@ -192,10 +191,9 @@ where
     Option<AccountState>: From<D::Entity>,
 {
     owners.iter().try_fold(0u64, |acc, owner| {
-        let credential = StakeCredential::AddrKeyhash(*owner);
-        let key = minicbor::to_vec(&credential).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let key = AccountKey(StakeCredential::AddrKeyhash(*owner));
 
-        let Some(account) = domain.read_cardano_entity::<AccountState>(key)? else {
+        let Some(account) = domain.read_cardano_entity::<AccountState>(&key)? else {
             return Ok(acc);
         };
 
@@ -317,10 +315,8 @@ fn pool_hash_from_bytes(bytes: &[u8]) -> Option<PoolHash> {
 /// Gives the hash only for the canonical ID: the lowercase Bech32 text of 28
 /// bytes.
 ///
-/// An `EntityKey` has 32 bytes. `EntityKey::from(&[u8])` adds zero bytes to a
-/// short value and cuts a long value to 32 bytes. Thus, a 29-byte value that
-/// ends with `0x00` finds the pool of its first 28 bytes. The parsers return a
-/// `PoolHash` for this reason.
+/// A pool is keyed by exactly its 28-byte hash, so the parsers return a
+/// `PoolHash` rather than the bytes they decoded.
 fn canonical_pool_hash(input: &str) -> Option<PoolHash> {
     let (_, bytes) = bech32::decode(input).ok()?;
     let hash = pool_hash_from_bytes(&bytes)?;
@@ -644,7 +640,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
     let pool = domain
-        .read_cardano_entity::<PoolState>(hash)?
+        .read_cardano_entity::<PoolState>(&PoolKey(hash))?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let snapshot = pool
@@ -1001,7 +997,7 @@ where
             }
             Some(Ok(((state.register_slot, state.operator), (key, state))))
         })
-        .collect::<Result<Vec<((BlockSlot, PoolHash), (EntityKey, PoolState))>, StatusCode>>()?;
+        .collect::<Result<Vec<((BlockSlot, PoolHash), (PoolKey, PoolState))>, StatusCode>>()?;
 
     pools.sort_by(|a, b| Ord::cmp(&a.0, &b.0));
 
@@ -1326,7 +1322,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
     let pool = domain
-        .read_cardano_entity::<PoolState>(hash)?
+        .read_cardano_entity::<PoolState>(&PoolKey(hash))?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let onchain = pool
@@ -1351,7 +1347,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
     let pool = domain
-        .read_cardano_entity::<PoolState>(hash)?
+        .read_cardano_entity::<PoolState>(&PoolKey(hash))?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let relays = pool
@@ -1480,7 +1476,7 @@ where
     // covers every pool that registered on chain, and a pool must register
     // before it can mint. The index acts as a second proof of existence, for
     // any issuer that has no entity.
-    if !minted_any && !domain.cardano_entity_exists::<PoolState>(pool)? {
+    if !minted_any && !domain.cardano_entity_exists::<PoolState>(&PoolKey(pool))? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1500,7 +1496,7 @@ where
     let Some(hash) = parse_pool_id_bounded(&id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    if !domain.cardano_entity_exists::<PoolState>(hash)? {
+    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(hash))? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1526,8 +1522,7 @@ where
     let mapped: Vec<_> = page
         .into_iter()
         .map(|(delegator, account)| {
-            let delegator: StakeCredential = minicbor::decode(delegator.as_ref())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let delegator = StakeCredential::from(delegator);
 
             let builder = PoolDelegatorModelBuilder {
                 delegator,
@@ -1591,7 +1586,7 @@ where
     let Some(hash) = hash else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    if !domain.cardano_entity_exists::<PoolState>(hash)? {
+    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(hash))? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1600,7 +1595,7 @@ where
     let (epoch, _) = summary.slot_epoch(tip);
 
     let mut entries = domain
-        .iter_cardano_logs_per_epoch::<StakeLog>(hash.into(), 0..epoch)
+        .iter_cardano_logs_per_epoch::<StakeLog>(&PoolKey(hash), 0..epoch)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Apply order before pagination
@@ -1643,7 +1638,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
 
-    if !domain.cardano_entity_exists::<PoolState>(pool)? {
+    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(pool))? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1708,7 +1703,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
 
-    if !domain.cardano_entity_exists::<PoolState>(pool)? {
+    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(pool))? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -2544,7 +2539,7 @@ mod tests {
             for (register_slot, operator) in [c, a, d, b].into_iter().enumerate() {
                 let pool = retired_pool(operator, register_slot as u64, Some(100), is_retired);
                 writer
-                    .write_entity_typed(&EntityKey::from(operator.as_slice()), &pool)
+                    .write_entity_typed(&PoolKey(operator.into()), &pool)
                     .expect("failed to write pool state");
             }
 

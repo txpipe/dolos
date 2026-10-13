@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::ops::Range;
 
-use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore};
+use dolos_core::{ChainError, Domain, Genesis, RangeOf, StateStore};
 use pallas::ledger::primitives::StakeCredential;
 use tracing::{debug, trace};
 
@@ -9,8 +8,8 @@ use crate::{
     pallas_extras, pallas_ratio,
     pots::{self, EpochIncentives, Eta, Pots},
     ratio,
-    rupd::{credential_to_key, RupdWork, StakeSnapshot},
-    AccountState, EpochState, EpochValue, EraProtocol, FixedNamespace as _, PParamsSet, PoolHash,
+    rupd::{RupdWork, StakeSnapshot},
+    AccountKey, AccountState, EpochState, EpochValue, EraProtocol, PParamsSet, PoolHash,
     PoolParams, PoolSnapshot, PoolState,
 };
 
@@ -180,7 +179,7 @@ impl StakeSnapshot {
     ) -> Result<Self, ChainError> {
         let mut snapshot = Self::default();
 
-        let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
+        let pools = state.iter_entities_typed::<PoolState>(None)?;
 
         for record in pools {
             let (_, pool) = record?;
@@ -218,7 +217,7 @@ impl StakeSnapshot {
             }
         }
 
-        let accounts = state.iter_entities_typed::<AccountState>(AccountState::NS, None)?;
+        let accounts = state.iter_entities_typed::<AccountState>(None)?;
 
         for record in accounts {
             let (_, account) = record?;
@@ -286,11 +285,10 @@ impl StakeSnapshot {
         state: &D::State,
         stake_epoch: u64,
         protocol: EraProtocol,
-        ranges: &[Range<EntityKey>],
+        ranges: &[RangeOf<AccountKey>],
     ) -> Result<(), ChainError> {
         for range in ranges {
-            let accounts =
-                state.iter_entities_typed::<AccountState>(AccountState::NS, Some(range.clone()))?;
+            let accounts = state.iter_entities_typed::<AccountState>(Some(range.clone()))?;
 
             for record in accounts {
                 let (_, account) = record?;
@@ -470,7 +468,7 @@ impl RupdWork {
     pub fn merge_shard<D: Domain>(
         &mut self,
         state: &D::State,
-        ranges: Vec<Range<EntityKey>>,
+        ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<(), ChainError> {
         if let Some((snapshot_epoch, _)) = self.relevant_epochs() {
             let era = self.chain.era_for_epoch(snapshot_epoch + 1);
@@ -495,10 +493,10 @@ impl RupdWork {
         if work.relevant_epochs().is_some() {
             // Cover the entire credential-key space with a single range so
             // every account flows through `merge_shard` and lands in the
-            // per-account maps. `shard_ranges` is then `Some(full_range)`,
+            // per-account maps. `shard_ranges` is then the whole key space,
             // which makes `should_include` true for everything — same
             // behavior as the unsharded path.
-            work.merge_shard::<D>(state, vec![EntityKey::full_range()])?;
+            work.merge_shard::<D>(state, vec![RangeOf::all()])?;
         }
 
         Ok(work)
@@ -596,7 +594,7 @@ impl crate::rewards::RewardsContext for RupdWork {
         let Some(ranges) = self.shard_ranges.as_ref() else {
             return true;
         };
-        let key = credential_to_key(account);
-        ranges.iter().any(|r| key >= r.start && key < r.end)
+        let key = AccountKey::from(account);
+        ranges.iter().any(|r| r.contains(&key))
     }
 }

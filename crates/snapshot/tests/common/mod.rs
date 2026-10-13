@@ -19,17 +19,28 @@
 // binary does not reach look dead to it. They are not.
 #![allow(dead_code)]
 
-use dolos_cardano::indexes::archive_dimensions;
+use dolos_cardano::{
+    indexes::archive_dimensions,
+    model::{
+        AccountEpochLog, AccountKey, AccountState, AddressKey, AssetKey, AssetState, DRepKey,
+        DRepState, DatumKey, DatumState, EpochState, EraProtocol, EraSummary, FirstMintChunk,
+        FixedNamespace as _, GovState, PendingMirState, PendingRewardState, PolicyKey,
+        PolicyMintChunk, PoolKey, PoolState, ProposalKey, ProposalState, StagedFirstMint,
+        StagedStakeAddress, StakeAddressesRow, StakeLog,
+    },
+    pallas::ledger::primitives::{conway::DRep, StakeCredential},
+    periods::StagedKey,
+};
 use dolos_core::{
-    key_hash, BlockHash, EntityKey, EraCbor, ExactKind, ExactRecord, IndexRecord, LogKey,
+    key_hash, keys, BlockHash, EntityKey, EraCbor, ExactKind, ExactRecord, IndexRecord, LogKey,
     Namespace, TagRecord, TxoRef, VERBATIM_KEY_DIMENSION,
 };
 use dolos_snapshot::{
     layers::{
         blocks::BlockRecord,
         digests::ImmutableDigests,
-        logs::{LogRecord, LOG_KEY_LEN},
-        state::{self, StateRecord, ENTITY_KEY_LEN},
+        logs::LogRecord,
+        state::{self, StateRecord},
     },
     DigestsScope, DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS, DIGESTS,
     INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
@@ -60,6 +71,55 @@ pub const METADATA_LABEL: u64 = 674;
 /// about the split. A single-blob kind has only shard 0, so it takes the first
 /// of these and stops — see [`state_layers`].
 pub const SHARDS: [u8; 2] = [0, 1];
+
+/// The one shard an account key reaches: every one starts with the CBOR
+/// header of its credential, `0x82`.
+pub const ACCOUNT_SHARD: u8 = 8;
+
+/// The shards the fixture populates for `ns`'s kind, published in `shards`.
+pub fn populated_shards(ns: Namespace, shards: u8) -> Vec<u8> {
+    if shards > 1 && ns == AccountState::NS {
+        return vec![ACCOUNT_SHARD];
+    }
+
+    SHARDS.into_iter().filter(|shard| *shard < shards).collect()
+}
+
+/// A key of `ns`'s kind, stored, made from `byte`. Where the kind allows, the
+/// key's first byte is `byte`, which picks its shard.
+pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
+    let credential = AccountKey(StakeCredential::AddrKeyhash([byte; 28].into()));
+
+    let key = match ns {
+        AccountState::NS
+        | AccountEpochLog::NS
+        | PendingMirState::NS
+        | PendingRewardState::NS
+        | StakeAddressesRow::NS => keys::encode(&credential),
+        AssetState::NS => keys::encode(&AssetKey([byte; 32].into())),
+        DatumState::NS => keys::encode(&DatumKey([byte; 32].into())),
+        DRepState::NS => keys::encode(&DRepKey(DRep::Key([byte; 28].into()))),
+        EpochState::NS | GovState::NS => keys::encode(&()),
+        EraSummary::NS => keys::encode(&EraProtocol::from(u16::from(byte))),
+        FirstMintChunk::NS => keys::encode(&u32::from(byte)),
+        PolicyMintChunk::NS => keys::encode(&(PolicyKey([byte; 28].into()), u32::from(byte))),
+        PoolState::NS | StakeLog::NS => keys::encode(&PoolKey([byte; 28].into())),
+        ProposalState::NS => keys::encode(&ProposalKey::new([byte; 32].into(), u32::from(byte))),
+        StagedFirstMint::NS => keys::encode(&StagedKey {
+            group: PolicyKey([byte; 28].into()),
+            epoch: u64::from(byte),
+            member: AssetKey([byte; 32].into()),
+        }),
+        StagedStakeAddress::NS => keys::encode(&StagedKey {
+            group: credential,
+            epoch: u64::from(byte),
+            member: AddressKey(vec![byte; 57]),
+        }),
+        other => panic!("no fixture key for {other}"),
+    };
+
+    key.to_vec()
+}
 
 pub fn network() -> Network {
     Network::for_magic(NETWORK_MAGIC)
@@ -170,25 +230,27 @@ pub fn logs(ns: Namespace) -> Vec<LogRecord> {
         .position(|known| *known == ns)
         .expect("a log namespace") as u8;
 
-    vec![LogRecord::new(log_key(START_SLOT, 0x30 + i), vec![0x81, i])]
+    vec![LogRecord::new(
+        log_key(ns, START_SLOT, 0x30 + i),
+        vec![0x81, i],
+    )]
 }
 
 /// Every state layer the fixture writes: `(kind, namespace, shard)`, in
 /// inscription order.
 ///
-/// One layer per namespace now, rather than sixteen layers carrying all
-/// eighteen namespaces between them, so a kind's shards are the shards its
-/// spec'd count allows: both of [`SHARDS`] for the four sixteen-way kinds, and
-/// shard 0 alone for the fourteen single blobs. Twenty-two layers, and every
-/// namespace among them — which is what
-/// `the_golden_state_layers_cover_every_namespace` holds this to.
+/// One layer per namespace, so a kind's shards are the ones its spec'd count
+/// allows and its fixture keys reach: both of [`SHARDS`] for `assets`,
+/// `datums` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`, and shard 0
+/// for the thirteen single blobs. Twenty layers, and every namespace among
+/// them — which is what `the_golden_state_layers_cover_every_namespace` holds
+/// this to.
 pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
     STATE_KINDS
         .into_iter()
         .flat_map(|(kind, ns, shards)| {
-            SHARDS
+            populated_shards(ns, shards)
                 .into_iter()
-                .filter(move |shard| *shard < shards)
                 .map(move |shard| (kind, ns, shard))
         })
         .collect()
@@ -215,13 +277,12 @@ pub fn state(ns: Namespace, shard: u8) -> Vec<StateRecord> {
     let byte = (shard << 4) | (i & 0x0f);
 
     vec![if ns == UTXOS {
-        state::utxo(
-            &TxoRef([byte; ENTITY_KEY_LEN].into(), 3),
-            &EraCbor(6, vec![0xa0, byte]),
-        )
-        .unwrap()
+        state::utxo(&TxoRef([byte; 32].into(), 3), &EraCbor(6, vec![0xa0, byte])).unwrap()
     } else {
-        state::entity(&EntityKey::from(&[byte; ENTITY_KEY_LEN]), &vec![byte, 0xff])
+        state::entity(
+            &EntityKey::from_raw(&state_key(ns, byte)),
+            &vec![byte, 0xff],
+        )
     }]
 }
 
@@ -236,12 +297,9 @@ pub fn digests() -> Vec<ImmutableDigests> {
         .collect()
 }
 
-pub fn log_key(slot: u64, entity: u8) -> LogKey {
-    let mut raw = [0u8; LOG_KEY_LEN];
-    raw[..8].copy_from_slice(&slot.to_be_bytes());
-    raw[8..].fill(entity);
-
-    LogKey::from(raw.as_slice())
+/// A key of `ns`'s log at `slot`, made from `byte`.
+pub fn log_key(ns: Namespace, slot: u64, byte: u8) -> LogKey {
+    LogKey::from_raw(&[slot.to_be_bytes().as_slice(), &state_key(ns, byte)].concat()).unwrap()
 }
 
 pub fn encode_all<T>(
@@ -316,7 +374,7 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
         layers.push((
             kind,
             Box::new(epoch_scope()),
-            encode_all(&self::logs(ns), logs::encode),
+            encode_all(&self::logs(ns), |record| logs::encode(ns, record)),
         ));
     }
 
@@ -326,7 +384,7 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     // in both; what tells the layers apart is the epoch in the header and the
     // epoch in the descriptor scope.
     for (kind, ns, shards) in STATE_KINDS {
-        let populated: Vec<u8> = SHARDS.into_iter().filter(|shard| *shard < shards).collect();
+        let populated = populated_shards(ns, shards);
 
         for scope in [dump_scope as fn(u8) -> StateScope, state_scope] {
             for shard in populated.iter().copied() {

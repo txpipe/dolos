@@ -15,9 +15,10 @@ use crate::{
     SingletonEntity,
 };
 use dolos_core::{
-    ArchiveIndexDelta, ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainError,
-    ChainPoint, Domain, DomainError, EntityDelta, EntityMap, LogValue, NsKey, RawBlock, RawUtxoMap,
-    StateError, StateStore, StateWriter as _, TxoRef, UtxoIndexDelta, UtxoSetDelta, WalStore as _,
+    save_entity_at, ArchiveIndexDelta, ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot,
+    ChainError, ChainPoint, Domain, DomainError, EntityDelta, EntityMap, LogValue, NsKey, RawBlock,
+    RawUtxoMap, StateError, StateStore, StateWriter as _, TxoRef, UtxoIndexDelta, UtxoSetDelta,
+    WalStore as _,
 };
 
 /// Container for entity deltas computed during block processing.
@@ -53,19 +54,19 @@ impl WorkDeltas {
         CardanoEntity: Into<Option<E>>,
         S: StateStore,
     {
-        let Some(to_apply) = self.entities.remove(&E::ns_key()) else {
+        let key = E::ns_key();
+
+        let Some(to_apply) = self.entities.remove(&key) else {
             return Ok(None);
         };
 
-        let mut entity: Option<CardanoEntity> = state
-            .read_entity_typed::<E>(E::NS, &E::singleton_key())?
-            .map(Into::into);
+        let mut entity: Option<CardanoEntity> = state.read_entity_typed::<E>(&())?.map(Into::into);
 
         for mut delta in to_apply {
             delta.apply(&mut entity);
         }
 
-        writer.save_entity_typed(E::NS, &E::singleton_key(), entity.as_ref())?;
+        save_entity_at(writer, &key, entity.as_ref())?;
 
         Ok(entity.and_then(Into::into))
     }
@@ -348,9 +349,8 @@ impl WorkBatch {
     {
         let writer = domain.state().start_writer()?;
 
-        for (key, entity) in self.entities.iter_mut() {
-            let NsKey(ns, key) = key;
-            writer.save_entity_typed(ns, key, entity.as_ref())?;
+        for (key, entity) in self.entities.iter() {
+            save_entity_at(&writer, key, entity.as_ref())?;
         }
 
         // TODO: we treat the UTxO set differently due to tech-debt. We should migrate

@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dolos_core::{
-    builtin::MemoryStateStore, config::FjallStateConfig, ChainPoint, EntityKey, EraCbor, Tag,
-    TxoRef, UtxoIndexDelta, UtxoSet, UtxoSetDelta,
+    builtin::MemoryStateStore, config::FjallStateConfig, ChainPoint, EntityKey, EraCbor, KeyBytes,
+    KeyRange, RangeOf, Tag, TxoRef, UtxoIndexDelta, UtxoSet, UtxoSetDelta,
 };
 use dolos_core::{StateStore as CoreStateStore, StateWriter as CoreStateWriter};
 
@@ -91,6 +91,11 @@ macro_rules! conformance_suite {
             }
 
             #[test]
+            fn entities_of_mixed_widths_share_a_namespace() {
+                super::entities_of_mixed_widths_share_a_namespace::<$backend>();
+            }
+
+            #[test]
             fn writes_are_invisible_until_commit() {
                 super::writes_are_invisible_until_commit::<$backend>();
             }
@@ -132,7 +137,19 @@ conformance_suite!(fjall, Fjall);
 conformance_suite!(memory, Memory);
 
 fn key(n: u8) -> EntityKey {
-    EntityKey::from(&[n; 32])
+    EntityKey::of(&[n; 32])
+}
+
+/// `len` bytes of `n`.
+fn key_of(n: u8, len: usize) -> EntityKey {
+    EntityKey::from_raw(&vec![n; len])
+}
+
+fn range(start: &EntityKey, end: &EntityKey) -> KeyRange {
+    KeyRange {
+        start: KeyBytes::from_slice(start.as_ref()),
+        end: Some(KeyBytes::from_slice(end.as_ref())),
+    }
 }
 
 fn txo(n: u8, idx: u32) -> TxoRef {
@@ -416,7 +433,7 @@ fn entity_range_is_half_open_and_ordered<B: Backend>() {
             .expect("entity iteration failed")
     };
 
-    let all = collect(EntityKey::full_range());
+    let all = collect(KeyRange::all());
     assert_eq!(
         all.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
         vec![key(1), key(2), key(3), key(4)],
@@ -424,14 +441,14 @@ fn entity_range_is_half_open_and_ordered<B: Backend>() {
     );
 
     // Half-open: the start is included, the end is not.
-    let middle = collect(key(2)..key(4));
+    let middle = collect(range(&key(2), &key(4)));
     assert_eq!(
         middle.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
         vec![key(2), key(3)]
     );
 
     assert!(
-        collect(key(2)..key(2)).is_empty(),
+        collect(range(&key(2), &key(2))).is_empty(),
         "an empty range is empty"
     );
 
@@ -439,9 +456,76 @@ fn entity_range_is_half_open_and_ordered<B: Backend>() {
     // backends compare encoded bytes and simply find none, so an ordered-map
     // backend has to reach the same answer instead of panicking on the bound.
     assert!(
-        collect(key(4)..key(2)).is_empty(),
+        collect(range(&key(4), &key(2))).is_empty(),
         "an inverted range is empty"
     );
+}
+
+/// Keys of any width share one namespace: the empty key of a singleton, a
+/// one-byte key, hashes, and a composite past the old 32 bytes, all read back
+/// and walked in byte order — a key of all `0xff` included, which the open end
+/// of a range reaches and a fixed-width bound could not.
+fn entities_of_mixed_widths_share_a_namespace<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let keys = [
+        key_of(0x00, 0),
+        key_of(0x00, 1),
+        key_of(0x01, 1),
+        key_of(0x01, 2),
+        key_of(0x01, 28),
+        key_of(0x01, 29),
+        key_of(0x02, 36),
+        key_of(0xff, 32),
+        key_of(0xff, 68),
+    ];
+
+    let writer = store.start_writer().expect("start_writer failed");
+    for (i, key) in keys.iter().enumerate().rev() {
+        writer
+            .write_entity(ACCOUNTS, key, &vec![i as u8])
+            .expect("write_entity failed");
+    }
+    writer
+        .write_entity(POOLS, &key_of(0x01, 28), &vec![0xee])
+        .expect("write_entity failed");
+    writer.commit().expect("commit failed");
+
+    let read = store
+        .read_entities(ACCOUNTS, &keys.iter().collect::<Vec<_>>())
+        .expect("read_entities failed");
+    assert_eq!(
+        read,
+        (0..keys.len())
+            .map(|i| Some(vec![i as u8]))
+            .collect::<Vec<_>>()
+    );
+
+    // a key and its own prefix are two rows, not one
+    assert_eq!(
+        store.read_entities(ACCOUNTS, &[&key_of(0x01, 3)]).unwrap(),
+        vec![None]
+    );
+
+    let collect = |range: KeyRange| -> Vec<EntityKey> {
+        store
+            .iter_entities(ACCOUNTS, range)
+            .expect("iter_entities failed")
+            .map(|entry| entry.expect("entity iteration failed").0)
+            .collect()
+    };
+
+    assert_eq!(collect(KeyRange::all()), keys.to_vec());
+
+    // every key starting with 0x01, and none of its neighbours
+    assert_eq!(collect(KeyRange::prefix(&[0x01])), keys[2..6].to_vec());
+
+    // a typed prefix range over a composite key
+    let prefixed = RangeOf::<(u8, [u8; 35])>::prefix(&0x02u8).into_raw();
+    assert_eq!(collect(prefixed), keys[6..7].to_vec());
+
+    // the prefix of all `0xff` has no successor, so its range is open
+    assert_eq!(collect(KeyRange::prefix(&[0xff])), keys[7..].to_vec());
 }
 
 fn writes_are_invisible_until_commit<B: Backend>() {

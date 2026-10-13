@@ -1349,8 +1349,8 @@ fn restore_logs<R: SteleReader, A: ArchiveStore>(
 ) -> Result<u64, Error> {
     reader.drain(
         descriptor,
-        logs::decode,
-        |record| record.value.len() + logs::LOG_KEY_LEN,
+        |bytes: &[u8]| logs::decode(ns, bytes),
+        |record| record.key.as_ref().len() + record.value.len(),
         |chunk| {
             let writer = archive.start_writer()?;
 
@@ -1441,7 +1441,7 @@ fn restore_state<R: SteleReader, S: StateStore>(
         let writer = state.start_writer()?;
 
         for record in chunk {
-            let key = state::as_entity(&record)?;
+            let key = state::as_entity(&record);
 
             writer.write_entity(ns, &key, &record.value)?;
         }

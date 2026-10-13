@@ -4,10 +4,11 @@
 //! lookups to any `StateStore`, and `CardanoArchiveIndexExt`, which adds the
 //! history lookups to any `ArchiveStore`.
 
-use dolos_core::{ArchiveError, ArchiveStore, BlockSlot, StateError, StateStore, UtxoSet};
+use dolos_core::{keys, ArchiveError, ArchiveStore, BlockSlot, StateError, StateStore, UtxoSet};
 use pallas::ledger::primitives::StakeCredential;
 
 use super::dimensions::{archive, utxo};
+use crate::ProposalKey;
 
 /// Extension trait providing Cardano-specific live-UTxO queries.
 ///
@@ -246,16 +247,15 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
 
     /// Iterate over slots of blocks containing governance votes on an action.
     ///
-    /// The key is the proposal entity key of the action
-    /// (`ProposalState::build_entity_key`). Blocks whose only votes on the
-    /// action sit in phase-2-invalid transactions are listed too.
+    /// Blocks whose only votes on the action sit in phase-2-invalid
+    /// transactions are listed too.
     fn slots_by_action_votes(
         &self,
-        action: &[u8],
+        action: &ProposalKey,
         start: BlockSlot,
         end: BlockSlot,
     ) -> Result<Self::SlotIter, ArchiveError> {
-        self.slots_by_tag(archive::ACTION_VOTES, action, start, end)
+        self.slots_by_tag(archive::ACTION_VOTES, &keys::encode(action), start, end)
     }
 
     fn slots_by_committee_votes(

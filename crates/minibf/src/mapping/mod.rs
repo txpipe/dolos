@@ -60,7 +60,7 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{
-    pallas_extras, AccountState, ChainSummary, DRepState, PParamsSet, PoolHash, PoolState,
+    pallas_extras, AccountState, ChainSummary, DRepState, PParamsSet, PoolHash, PoolKey, PoolState,
 };
 use dolos_core::{async_query::BlockRefMeta, Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
@@ -69,6 +69,7 @@ use crate::Facade;
 pub mod blocks;
 pub mod cost_models;
 pub mod epochs;
+pub mod network;
 pub mod protocol_params;
 
 macro_rules! try_into_or_500 {
@@ -96,6 +97,12 @@ where
 pub fn round_f64<const DECIMALS: u8>(val: f64) -> f64 {
     let multiplier = 10_f64.powi(DECIMALS as i32);
     (val * multiplier).round() / multiplier
+}
+
+pub fn parse_datetime_into_timestamp(s: &str) -> Result<i32, StatusCode> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|x| x.timestamp() as i32)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// A ratio as the plain quotient, at the precision `f64` gives it.
@@ -1774,7 +1781,7 @@ impl<'a> TxModelBuilder<'a> {
                 _ => None,
             })
             .filter_map(|operator| {
-                match facade.read_cardano_entity::<PoolState>(operator.as_slice()) {
+                match facade.read_cardano_entity::<PoolState>(&PoolKey((*operator).into())) {
                     Ok(Some(state)) => Some(Ok((operator, state))),
                     Ok(None) => None,
                     Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
@@ -1864,7 +1871,7 @@ impl<'a> TxModelBuilder<'a> {
             if let Some(reg) = pallas_extras::cert_as_pool_registration(&cert) {
                 if repeated.insert((1, reg.operator.to_vec())) {
                     match facade
-                        .read_cardano_entity::<PoolState>(reg.operator.as_slice())
+                        .read_cardano_entity::<PoolState>(&PoolKey(reg.operator))
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                     {
                         Some(pool) => {

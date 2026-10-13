@@ -27,7 +27,7 @@ use tracing::{debug, info};
 use crate::{
     estart::{AvvmReclamation, WorkContext},
     load_epoch,
-    shard::{shard_key_ranges, ACCOUNT_SHARDS},
+    shard::ACCOUNT_SHARDS,
     CardanoLogic, EpochState,
 };
 
@@ -137,7 +137,7 @@ where
     }
 
     fn load(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
-        let ranges = shard_key_ranges(shard_index, self.total_shards);
+        let ranges = crate::AccountKey::shard_ranges(shard_index, self.total_shards);
 
         debug!(
             slot = self.slot,
@@ -173,14 +173,14 @@ where
     }
 
     fn commit_state(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
-        let ranges = shard_key_ranges(shard_index, self.total_shards);
+        let ranges = crate::AccountKey::shard_ranges(shard_index, self.total_shards);
 
         let context = self
             .context
             .as_mut()
             .ok_or_else(|| DomainError::Internal("estart context not loaded".into()))?;
 
-        context.commit_shard::<D>(domain.state(), domain.archive(), ranges)?;
+        context.commit_shard::<D>(domain.state(), ranges)?;
         Ok(())
     }
 
@@ -203,7 +203,7 @@ where
             context.starting_epoch_no(),
         )?;
 
-        context.commit_finalize::<D>(domain.state(), domain.archive(), self.slot)?;
+        context.commit_finalize::<D>(domain.state(), self.slot)?;
 
         // Replace the per-shard context with the finalize-phase
         // WorkContext so post-finalize introspection (e.g. `ended_state`

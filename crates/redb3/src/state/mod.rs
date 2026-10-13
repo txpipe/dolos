@@ -1,8 +1,8 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, ops::Bound, path::Path, sync::Arc};
 
 use dolos_core::{
-    config::RedbStateConfig, ChainPoint, EmptyUtxoIter, EntityKey, EntityValue, Namespace,
-    StateError, StateSchema, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet,
+    config::RedbStateConfig, ChainPoint, EmptyUtxoIter, EntityKey, EntityValue, KeyRange,
+    Namespace, StateError, StateSchema, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet,
 };
 
 use redb::{
@@ -31,7 +31,7 @@ impl Iterator for EntityIter {
 
         let entry = next
             .map(|(k, v)| (k.value().to_vec(), v.value().to_vec()))
-            .map(|(k, v)| (EntityKey::from(k), v))
+            .map(|(k, v)| (EntityKey::from_raw(&k), v))
             .map_err(Error::from)
             .map_err(StateError::from);
 
@@ -270,14 +270,17 @@ impl dolos_core::StateStore for StateStore {
     fn iter_entities(
         &self,
         ns: Namespace,
-        range: std::ops::Range<EntityKey>,
+        range: KeyRange,
     ) -> Result<Self::EntityIter, StateError> {
         let mut rx = self.db().begin_read().map_err(Error::from)?;
 
-        let range = std::ops::Range {
-            start: range.start.as_ref(),
-            end: range.end.as_ref(),
-        };
+        let range = (
+            Bound::Included(range.start.as_slice()),
+            match &range.end {
+                Some(end) => Bound::Excluded(end.as_slice()),
+                None => Bound::Unbounded,
+            },
+        );
 
         let table = self
             .tables

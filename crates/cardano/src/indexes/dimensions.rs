@@ -124,8 +124,7 @@ pub mod archive {
         /// (`pallas_extras::voter_id_bytes`).
         VOTER_VOTES = "voter_votes";
 
-        /// Governance votes by the proposal entity key of the action voted on
-        /// (`ProposalState::build_entity_key`).
+        /// Governance votes by the `ProposalKey` of the action voted on.
         ACTION_VOTES = "action_votes";
 
         /// Script hash of every script that a redeemer executed, resolved at

@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::epoch_stake_pool_content_inner::EpochStakePoolContentInner;
-use dolos_cardano::model::PoolState;
+use dolos_cardano::model::{PoolKey, PoolState};
 use dolos_core::Domain;
 
 use crate::{
@@ -36,7 +36,7 @@ where
     let Some(operator) = parse_pool_id_bounded(&pool_id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    if !domain.cardano_entity_exists::<PoolState>(operator)? {
+    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(operator))? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 

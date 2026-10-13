@@ -13,7 +13,7 @@
 //! ## State Store Keys
 //!
 //! - **UTxOs**: `txhash[32] ++ idx[4]` (36 bytes) -> `era[2] ++ cbor[...]`
-//! - **Entities**: `[ns_hash:8][key:32]` (40 bytes) -> value bytes
+//! - **Entities**: `[ns_hash:8][key:var]` -> value bytes
 
 use dolos_core::{Era, TxoRef};
 use std::hash::Hasher;

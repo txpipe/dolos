@@ -36,6 +36,7 @@ pub mod config;
 pub mod crawl;
 pub mod import;
 pub mod indexes;
+pub mod keys;
 pub mod mempool;
 pub mod point;
 pub mod state;
@@ -113,6 +114,10 @@ pub type LogSeq = u64;
 pub use archive::*;
 pub use async_query::*;
 pub use indexes::*;
+pub use keys::{
+    EntityKey, FixedKey, KeyBytes, KeyCodec, KeyError, KeyPrefix, KeyRange, LogKey, LogRangeOf,
+    RangeOf,
+};
 pub use mempool::*;
 pub use point::*;
 pub use state::*;

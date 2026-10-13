@@ -31,16 +31,14 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     indexes::CardanoArchiveIndexExt as _,
     model::{
-        drep_from_entity_key,
         gov::{CommitteeAuthorization, GovState},
-        AccountState, DRepState, FixedNamespace as _, ProposalAction, ProposalState,
-        SingletonEntity as _,
+        AccountState, DRepKey, DRepState, ProposalAction, ProposalKey, ProposalState,
     },
     pallas_extras, ChainSummary, PParamsSet,
 };
 use dolos_core::{
     ArchiveError, ArchiveStore as _, BlockBody, BlockSlot, ChainPoint, Domain, EntityKey,
-    StateStore as _, TxOrder,
+    KeyCodec as _, StateStore as _, TxOrder,
 };
 use itertools::Itertools;
 use pallas::{
@@ -116,6 +114,11 @@ fn parse_drep_id(drep_id: &str) -> Result<(String, Vec<u8>, bool, bool), StatusC
             }
         }
     }
+}
+
+/// The `dreps` key of the DRep whose id bytes `parse_drep_id` returned.
+fn drep_key(drep_bytes: &[u8]) -> Result<DRepKey, StatusCode> {
+    DRepKey::decode_key(drep_bytes).map_err(|_| StatusCode::BAD_REQUEST)
 }
 
 pub struct DrepModelBuilder<'a> {
@@ -254,7 +257,7 @@ where
     } else {
         Some(
             domain
-                .read_cardano_entity::<DRepState>(drep_bytes.clone())?
+                .read_cardano_entity::<DRepState>(&drep_key(&drep_bytes)?)?
                 .ok_or(StatusCode::NOT_FOUND)?,
         )
     };
@@ -314,7 +317,7 @@ where
     }
 
     let state = domain
-        .read_cardano_entity::<DRepState>(drep_bytes.clone())?
+        .read_cardano_entity::<DRepState>(&drep_key(&drep_bytes)?)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
@@ -420,16 +423,16 @@ where
     Option<AccountState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
 {
-    let (_, drep_key, _, is_special_case) = parse_drep_id(&drep_id)?;
+    let (_, drep_bytes, _, is_special_case) = parse_drep_id(&drep_id)?;
     let pagination = Pagination::try_from(params)?;
 
-    let drep_key = EntityKey::from(drep_key);
-    let drep = drep_from_entity_key(&drep_key).ok_or(StatusCode::BAD_REQUEST)?;
+    let drep_key = drep_key(&drep_bytes)?;
+    let drep = drep_key.0.clone();
 
     let registered_at = if is_special_case {
         None
     } else {
-        match domain.read_cardano_entity::<DRepState>(drep_key)? {
+        match domain.read_cardano_entity::<DRepState>(&drep_key)? {
             Some(state) if !state.is_unregistered() => state.registered_at,
             // Blockfrost returns an empty list for an unknown or retired DRep.
             _ => return Ok(Json(vec![])),
@@ -443,7 +446,7 @@ where
         tokio::task::spawn_blocking(move || -> Result<Vec<DrepDelegatorRow>, StatusCode> {
             scan.iter_cardano_entities::<AccountState>(None)?
                 .filter_ok(|(_, account)| delegates_to(account, &drep, registered_at))
-                .map_ok(|(key, account)| DrepDelegatorRow::new(key, account))
+                .map_ok(|(key, account)| DrepDelegatorRow::new(EntityKey::of(&key), account))
                 .collect::<Result<_, _>>()
                 .map_err(log_and_500("failed to scan drep delegators"))
         })
@@ -580,7 +583,7 @@ where
     Option<GovState>: From<D::Entity>,
 {
     let gov = domain
-        .read_cardano_entity::<GovState>(GovState::singleton_key())?
+        .read_cardano_entity::<GovState>(&())?
         .filter(|gov| gov.active_since.is_some())
         .ok_or(StatusCode::NOT_FOUND)?;
 
@@ -693,12 +696,12 @@ impl<'a, D: Domain> ProposalTypes<'a, D> {
             return Ok(*governance_type);
         }
 
-        let key = ProposalState::build_entity_key(tx, idx);
+        let key = ProposalKey::new(tx, idx);
 
         let state = self
             .domain
             .state()
-            .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
+            .read_entity_typed::<ProposalState>(&key)
             .map_err(log_and_500("failed to read proposal state"))?;
 
         let governance_type = match state {
@@ -1234,7 +1237,7 @@ fn read_page<D: Domain>(domain: &D, pagination: &Pagination) -> Result<Vec<Propo
 
     let entities = domain
         .state()
-        .iter_entities_typed::<ProposalState>(ProposalState::NS, None)
+        .iter_entities_typed::<ProposalState>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     for entry in entities {
@@ -1311,14 +1314,13 @@ pub(crate) struct CastVote {
 
 /// This function converts a DRep ID to the voter key of its ballots.
 ///
-/// `parse_drep_id` builds the same bytes that `drep_to_entity_key` writes.
-/// Thus, `drep_from_entity_key` reads them back. The CIP-129 header rule
-/// stays in `dolos-cardano`, next to the writer.
-fn drep_voter(drep_key: &EntityKey) -> Result<Voter, StatusCode> {
-    match drep_from_entity_key(drep_key) {
-        Some(DRep::Key(hash)) => Ok(Voter::DRepKey(hash)),
-        Some(DRep::Script(hash)) => Ok(Voter::DRepScript(hash)),
-        Some(DRep::Abstain | DRep::NoConfidence) | None => Err(StatusCode::BAD_REQUEST),
+/// `parse_drep_id` builds the bytes of a `DRepKey`, which decodes them. The
+/// CIP-129 header rule stays in `dolos-cardano`, next to the writer.
+fn drep_voter(drep_bytes: &[u8]) -> Result<Voter, StatusCode> {
+    match drep_key(drep_bytes)?.0 {
+        DRep::Key(hash) => Ok(Voter::DRepKey(hash)),
+        DRep::Script(hash) => Ok(Voter::DRepScript(hash)),
+        DRep::Abstain | DRep::NoConfidence => Err(StatusCode::BAD_REQUEST),
     }
 }
 
@@ -1478,7 +1480,7 @@ where
         return Ok(Json(Vec::new()));
     }
 
-    let voter = drep_voter(&EntityKey::from(drep_bytes))?;
+    let voter = drep_voter(&drep_bytes)?;
     let tip = domain.get_tip_slot()?;
     let budget = domain.config.max_scan_items() as usize;
 
@@ -1732,7 +1734,7 @@ where
     let tx: Hash<32> = tx_hash.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let state = domain
-        .read_cardano_entity::<ProposalState>(ProposalState::build_entity_key(tx, cert_index))?
+        .read_cardano_entity::<ProposalState>(&ProposalKey::new(tx, cert_index))?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
@@ -1768,7 +1770,7 @@ where
     let (tx, idx) = parse_gov_action_id(&gov_action_id).map_err(|_| Error::InvalidGovActionId)?;
 
     let state = domain
-        .read_cardano_entity::<ProposalState>(ProposalState::build_entity_key(tx, idx))?
+        .read_cardano_entity::<ProposalState>(&ProposalKey::new(tx, idx))?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
@@ -1843,11 +1845,11 @@ fn read_withdrawals<D: Domain>(
     idx: u32,
     pagination: &Pagination,
 ) -> Result<Vec<ProposalWithdrawalsInner>, Error> {
-    let key = ProposalState::build_entity_key(tx, idx);
+    let key = ProposalKey::new(tx, idx);
 
     let state = domain
         .state()
-        .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
+        .read_entity_typed::<ProposalState>(&key)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let Some(state) = state else {
@@ -1993,11 +1995,11 @@ fn read_parameters<D: Domain>(
     tx: Hash<32>,
     idx: u32,
 ) -> Result<ProposalParameters, Error> {
-    let key = ProposalState::build_entity_key(tx, idx);
+    let key = ProposalKey::new(tx, idx);
 
     let state = domain
         .state()
-        .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
+        .read_entity_typed::<ProposalState>(&key)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
@@ -2186,11 +2188,11 @@ fn drep_vote_counts<D: Domain>(
         return Ok(true);
     }
 
-    let drep_id = pallas_extras::drep_id_bytes(cred);
+    let drep = DRepKey(pallas_extras::stake_cred_to_drep(cred));
 
     let newest_dereg = domain
         .state()
-        .read_entity_typed::<DRepState>(DRepState::NS, &EntityKey::from(drep_id.as_slice()))
+        .read_entity_typed::<DRepState>(&drep)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .and_then(|state| state.unregistered_at);
 
@@ -2198,7 +2200,9 @@ fn drep_vote_counts<D: Domain>(
         None => Ok(true),
         Some(dereg) if dereg < vote_at => Ok(true),
         Some((slot, _)) if slot <= end => Ok(false),
-        Some(_) => scan_drep_deregistration(domain, &drep_id, vote_at, end),
+        Some(_) => {
+            scan_drep_deregistration(domain, &pallas_extras::drep_id_bytes(cred), vote_at, end)
+        }
     }
 }
 
@@ -2304,7 +2308,7 @@ fn read_votes<D: Domain>(
     pagination: &Pagination,
     mut budget: usize,
 ) -> Result<Vec<ProposalVotesInner>, Error> {
-    let key = ProposalState::build_entity_key(tx, idx);
+    let key = ProposalKey::new(tx, idx);
 
     // The `counted` flags compare the archive rows with the proposal row, so
     // the row must belong to the state at the cursor that bounds the listing.
@@ -2319,7 +2323,7 @@ fn read_votes<D: Domain>(
         || {
             domain
                 .state()
-                .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
+                .read_entity_typed::<ProposalState>(&key)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
         },
     )?;
@@ -2351,7 +2355,7 @@ fn read_votes<D: Domain>(
     let archive = domain.archive();
 
     let slots = archive
-        .slots_by_action_votes(key.as_ref(), 0, visible)
+        .slots_by_action_votes(&key, 0, visible)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let descending = matches!(pagination.order, Order::Desc);
@@ -2691,10 +2695,10 @@ where
     D: Domain + Clone + Send + Sync + 'static,
     Option<ProposalState>: From<D::Entity>,
 {
-    let key = ProposalState::build_entity_key(tx, idx);
+    let key = ProposalKey::new(tx, idx);
 
     let state = domain
-        .read_cardano_entity::<ProposalState>(key)?
+        .read_cardano_entity::<ProposalState>(&key)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     // Blockfrost never serves pre-Conway protocol updates here, and the
@@ -2769,7 +2773,7 @@ mod tests {
     use crate::mapping::bech32_drep;
     use crate::test_support::{TestApp, TestDomainBuilder, TestFault};
     use bech32::{Bech32, Hrp};
-    use dolos_cardano::model::{drep_to_entity_key, DRepDelegation, EpochValue, GovPurpose, Stake};
+    use dolos_cardano::model::{DRepDelegation, EpochValue, GovPurpose, Stake};
     use dolos_core::StateWriter as _;
     use dolos_testing::{
         synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote},
@@ -2777,7 +2781,7 @@ mod tests {
     };
     use itertools::Itertools;
     use pallas::{
-        codec::{minicbor, utils::Bytes},
+        codec::utils::Bytes,
         ledger::primitives::{
             conway::{
                 Certificate, CostModels, DRepVotingThresholds, ExUnitPrices, GovAction,
@@ -2866,7 +2870,7 @@ mod tests {
             .start_writer()
             .expect("failed to start writer");
         writer
-            .write_entity_typed(&dolos_core::EntityKey::from(drep_bytes), &state)
+            .write_entity_typed(&drep_key(&drep_bytes).unwrap(), &state)
             .expect("failed to write drep state");
         writer.commit().expect("failed to commit drep state");
     }
@@ -3001,7 +3005,7 @@ mod tests {
             .start_writer()
             .expect("failed to start writer");
         writer
-            .write_entity_typed(&drep_to_entity_key(&drep), &state)
+            .write_entity_typed(&DRepKey::from(&drep), &state)
             .expect("failed to write drep");
         writer.commit().expect("failed to commit drep");
     }
@@ -3062,7 +3066,7 @@ mod tests {
         account.drep = EpochValue::with_live(epoch, DRepDelegation::Delegated(drep));
         account.vote_delegated_at = Some(delegated_at);
 
-        let key = EntityKey::from(minicbor::to_vec(&credential).expect("encode credential"));
+        let key = dolos_cardano::AccountKey::from(&credential);
         let writer = domain
             .state()
             .start_writer()
@@ -3847,9 +3851,7 @@ mod tests {
 
         let app = TestApp::new_with_cfg_and_setup(committee_votes_config(), |domain, _| {
             let writer = domain.state().start_writer().unwrap();
-            writer
-                .delete_entity(GovState::NS, &GovState::singleton_key())
-                .unwrap();
+            writer.save_entity_typed::<GovState>(&(), None).unwrap();
             writer.commit().unwrap();
         });
         assert_eq!(
@@ -6155,7 +6157,7 @@ mod tests {
             .start_writer()
             .expect("The state store cannot start a writer.");
         writer
-            .write_entity_typed(&GovState::singleton_key(), &state)
+            .write_entity_typed(&(), &state)
             .expect("The state writer cannot write the governance state.");
         writer
             .commit()
@@ -6905,11 +6907,11 @@ mod tests {
         let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
             .parse()
             .expect("failed to parse the proposal tx hash");
-        let key = ProposalState::build_entity_key(tx, 0);
+        let key = ProposalKey::new(tx, 0);
 
         let mut state = domain
             .state()
-            .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
+            .read_entity_typed::<ProposalState>(&key)
             .expect("failed to read the proposal")
             .expect("the proposal is missing");
 
@@ -6932,11 +6934,11 @@ mod tests {
         cred: &StakeCredential,
         change: impl FnOnce(&mut DRepState),
     ) {
-        let key = EntityKey::from(pallas_extras::drep_id_bytes(cred));
+        let key = DRepKey(pallas_extras::stake_cred_to_drep(cred));
 
         let mut state = domain
             .state()
-            .read_entity_typed::<DRepState>(DRepState::NS, &key)
+            .read_entity_typed::<DRepState>(&key)
             .expect("failed to read the drep")
             .expect("the drep is missing");
 

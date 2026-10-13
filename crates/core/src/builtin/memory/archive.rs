@@ -10,9 +10,9 @@
 //!   that slot in arrival order, which is chain order — a Byron epoch-boundary
 //!   block and the first main block of the epoch it opens share a slot, and the
 //!   main block arrives second;
-//! - logs live in one map keyed `(namespace, log_key)`, which makes a
+//! - logs live in one map keyed `(namespace, log_key bytes)`, which makes a
 //!   namespaced range scan a plain [`BTreeMap::range`] — the same shape fjall
-//!   gets from its `[ns_hash:8][log_key:40]` prefix;
+//!   gets from its `[ns_hash:8][log_key]` prefix;
 //! - the archive tags live in one set keyed on the traversal contract's own
 //!   sort key `(dimension, key_hash, slot)`, and the exact lookups in one map
 //!   keyed `(kind, key)`. The disk backend encodes `[dim_hash][key][slot]`
@@ -44,13 +44,14 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use pallas::ledger::traverse::MultiEraBlock;
 
-use crate::archive::{ArchiveError, ArchiveStore, ArchiveWriter, LogKey, Skippable};
+use crate::archive::{ArchiveError, ArchiveStore, ArchiveWriter, Skippable};
 use crate::indexes::{
     key_hash, ArchiveIndexDelta, ExactKind, ExactRecord, IndexRecord, KeyHash, TagDimension,
     TagRecord, MAX_EXACT_KEY_LEN,
 };
 use crate::{
-    BlockBody, BlockSlot, ChainPoint, EntityValue, Namespace, RawBlock, StateSchema, TemporalKey,
+    BlockBody, BlockSlot, ChainPoint, EntityValue, KeyBytes, KeyRange, LogKey, Namespace, RawBlock,
+    StateSchema,
 };
 
 /// A stored archive tag: the traversal contract's sort key, used as the key.
@@ -86,7 +87,9 @@ struct Tables {
     /// is removed rather than kept empty, so the first and last keys are
     /// always real chain positions.
     blocks: BTreeMap<BlockSlot, Vec<BlockBody>>,
-    logs: BTreeMap<(Namespace, LogKey), EntityValue>,
+    /// Keyed on the log key's bytes, so a range bound shorter than a slot is
+    /// still a key of the map.
+    logs: BTreeMap<(Namespace, KeyBytes), EntityValue>,
     archive_tags: BTreeSet<ArchiveTag>,
     /// Keyed on the record's own inline key rather than a `Vec`, so
     /// `iter_exact_records` copies rather than allocates per record.
@@ -112,13 +115,12 @@ fn poisoned() -> ArchiveError {
     ArchiveError::InternalError("archive store lock poisoned".into())
 }
 
-/// The first log key at `slot`: the bare temporal prefix, zero-padded.
-///
-/// Both boundary rules are drawn against it — prune keeps rows from here on,
-/// truncate drops them — which is the same comparison the disk backends make
-/// between a full log key and a bare 8-byte prefix.
-fn temporal_bound(slot: BlockSlot) -> LogKey {
-    LogKey::from(TemporalKey::from(slot))
+/// The slot a stored log key starts with.
+fn log_slot(key: &KeyBytes) -> BlockSlot {
+    let slot = key[..LogKey::SLOT_LEN]
+        .try_into()
+        .expect("stored from a LogKey");
+    BlockSlot::from_be_bytes(slot)
 }
 
 /// Archive store held entirely in memory.
@@ -331,7 +333,9 @@ impl ArchiveWriter for MemoryArchiveWriter {
                     }
                 }
                 Op::WriteLog(ns, key, value) => {
-                    tables.logs.insert((ns, key), value);
+                    tables
+                        .logs
+                        .insert((ns, KeyBytes::from_slice(key.as_ref())), value);
                 }
                 // A rollback walks the chain backwards, so at a slot holding
                 // more than one block the one to remove is the last to
@@ -491,32 +495,44 @@ impl ArchiveStore for MemoryArchiveStore {
 
         let values = keys
             .iter()
-            .map(|key| tables.logs.get(&(ns, (*key).clone())).cloned())
+            .map(|key| {
+                tables
+                    .logs
+                    .get(&(ns, KeyBytes::from_slice(key.as_ref())))
+                    .cloned()
+            })
             .collect();
 
         Ok(values)
     }
 
-    fn iter_logs(
-        &self,
-        ns: Namespace,
-        range: Range<LogKey>,
-    ) -> Result<Self::LogIter, ArchiveError> {
+    fn iter_logs(&self, ns: Namespace, range: KeyRange) -> Result<Self::LogIter, ArchiveError> {
         self.check_namespace(ns)?;
 
-        // An inverted range matches nothing on the disk backends, whose keys
-        // are bytes; `BTreeMap::range` panics on one, so it is caught here
-        // rather than turned into a difference between backends.
-        if range.start > range.end {
+        // An empty range matches nothing on the disk backends, whose keys are
+        // bytes; `BTreeMap::range` panics on an inverted one, so it is caught
+        // here rather than turned into a difference between backends.
+        if range.is_empty() {
             return Ok(MemoryLogIter(Vec::new().into_iter()));
         }
 
         let tables = self.tables.read().map_err(|_| poisoned())?;
 
+        let start = Bound::Included((ns, range.start));
+
+        let end = match range.end {
+            Some(end) => Bound::Excluded((ns, end)),
+            None => Bound::Unbounded,
+        };
+
         let rows: Vec<_> = tables
             .logs
-            .range((ns, range.start)..(ns, range.end))
-            .map(|((_, key), value)| (key.clone(), value.clone()))
+            .range((start, end))
+            .take_while(|((key_ns, _), _)| *key_ns == ns)
+            .map(|((_, key), value)| {
+                let key = LogKey::from_raw(key).expect("stored from a LogKey");
+                (key, value.clone())
+            })
             .collect();
 
         Ok(MemoryLogIter(rows.into_iter()))
@@ -625,10 +641,11 @@ impl ArchiveStore for MemoryArchiveStore {
         };
 
         let prune_before = first.saturating_add(capped);
-        let cutoff = temporal_bound(prune_before);
 
         tables.blocks.retain(|slot, _| *slot >= prune_before);
-        tables.logs.retain(|(_, key), _| *key >= cutoff);
+        tables
+            .logs
+            .retain(|(_, key), _| log_slot(key) >= prune_before);
 
         // The index entries of a pruned block go with it. The disk backend
         // amortizes this across rounds; here a walk of the maps is the cost
@@ -646,15 +663,14 @@ impl ArchiveStore for MemoryArchiveStore {
     /// The cut is by slot: the block at `after`'s slot survives (including a
     /// second block sharing that slot), while log rows *at* the slot go with
     /// the cut — the boundary the disk backends draw by comparing full log
-    /// keys against the bare 8-byte temporal prefix.
+    /// keys against the bare 8-byte slot prefix.
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
         let slot = after.slot();
-        let cutoff = temporal_bound(slot);
 
         let mut tables = self.tables.write().map_err(|_| poisoned())?;
 
         tables.blocks.retain(|s, _| *s <= slot);
-        tables.logs.retain(|(_, key), _| *key < cutoff);
+        tables.logs.retain(|(_, key), _| log_slot(key) < slot);
 
         Ok(())
     }

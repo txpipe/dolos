@@ -2,14 +2,13 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{
     config::{CardanoConfig, CustomUtxo},
-    ArchiveStore, ArchiveWriter, ChainError, Domain, LogKey, RawBlock, TemporalKey, TxoRef,
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainError, Domain, RawBlock, TxoRef,
 };
 
 use crate::{tx_sequence_to_hash, utxo_with_value};
 
 use bech32::{FromBase32, ToBase32, Variant};
-use dolos_cardano::model::{AccountEpochLog, FixedNamespace as _};
-use dolos_cardano::rupd::credential_to_key;
+use dolos_cardano::model::{AccountEpochLog, AccountKey};
 use pallas::codec::utils::{CborWrap, Int, Nullable};
 use pallas::codec::{minicbor, utils::KeepRaw};
 use pallas::crypto::{hash::Hasher, key::ed25519::SecretKeyExtended};
@@ -89,10 +88,17 @@ pub struct SyntheticBlockConfig {
     /// Txs carry no certificates and no withdrawal. The default ones register
     /// a DRep, which a pre-Conway chain cannot carry across an epoch boundary.
     pub plain_txs: bool,
+    /// The addresses of zero-lovelace outputs each tx appends after its own,
+    /// per block. Each entry holds one list per tx; a missing entry appends
+    /// none.
+    pub extra_outputs_by_block: Vec<Vec<TxOutputs>>,
 }
 
 /// One tx's mints: policy, asset name and quantity, a burn when negative.
 pub type TxMints = Vec<([u8; 28], String, i64)>;
+
+/// One tx's extra outputs, as raw address bytes.
+pub type TxOutputs = Vec<Vec<u8>>;
 
 /// Configuration for the opt-in mint redeemer execution.
 ///
@@ -194,6 +200,7 @@ impl Default for SyntheticBlockConfig {
             slot_step: 1,
             mints_by_block: vec![],
             plain_txs: false,
+            extra_outputs_by_block: vec![],
         }
     }
 }
@@ -580,6 +587,15 @@ pub fn build_synthetic_blocks(
                 &txs[tx_offset]
             });
 
+            let extra_outputs = cfg.extra_outputs_by_block.get(offset).map(|txs| {
+                assert_eq!(
+                    txs.len(),
+                    txs_per_block,
+                    "extra_outputs_by_block needs one list per tx"
+                );
+                &txs[tx_offset]
+            });
+
             let mint_redeemer = if tx_offset == 0 {
                 cfg.mint_redeemer.as_ref()
             } else {
@@ -610,6 +626,7 @@ pub fn build_synthetic_blocks(
                 mint_redeemer,
                 mints,
                 cfg.plain_txs,
+                extra_outputs,
             ));
         }
 
@@ -885,11 +902,12 @@ fn build_datum_and_script_fixture() -> SyntheticFixtureExtras {
 /// seeders from behaving like the two writers the merge removed.
 fn account_epoch_row<D: Domain>(
     domain: &D,
-    log_key: &LogKey,
+    slot: BlockSlot,
+    account: &AccountKey,
 ) -> Result<AccountEpochLog, ChainError> {
     let existing = domain
         .archive()
-        .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, log_key)
+        .read_log_typed::<AccountEpochLog>(slot, account)
         .map_err(ChainError::from)?;
 
     Ok(existing.unwrap_or_default())
@@ -909,7 +927,7 @@ pub fn seed_reward_logs<D: Domain>(
     let address = Address::from_bech32(stake_address)?;
     let (stake_cred, _) = dolos_cardano::pallas_extras::address_as_stake_cred(&address)
         .ok_or(ChainError::InvalidPoolParams)?;
-    let entity_key = credential_to_key(&stake_cred);
+    let account = AccountKey::from(stake_cred);
     let pool_keyhash =
         pool_keyhash_from_bech32(pool_id).map_err(|_| ChainError::InvalidPoolParams)?;
 
@@ -918,14 +936,12 @@ pub fn seed_reward_logs<D: Domain>(
 
     for epoch in epochs {
         let slot = summary.epoch_start(*epoch);
-        let log_key: LogKey = (TemporalKey::from(slot), entity_key.clone()).into();
-
-        let mut log = account_epoch_row(domain, &log_key)?;
+        let mut log = account_epoch_row(domain, slot, &account)?;
         log.member_reward = Some(42);
         log.pool_id = Some(pool_keyhash);
 
         writer
-            .write_log_typed(&log_key, &log)
+            .write_log_typed(slot, &account, &log)
             .map_err(ChainError::from)?;
     }
 
@@ -968,14 +984,14 @@ pub fn seed_account_stake_logs<D: Domain>(
         ];
 
         for (credential, amount) in entries {
-            let log_key: LogKey = (TemporalKey::from(slot), credential_to_key(credential)).into();
+            let account = AccountKey::from(credential);
 
-            let mut log = account_epoch_row(domain, &log_key)?;
+            let mut log = account_epoch_row(domain, slot, &account)?;
             log.active_stake = Some(amount);
             log.pool_id = Some(pool_keyhash);
 
             writer
-                .write_log_typed(&log_key, &log)
+                .write_log_typed(slot, &account, &log)
                 .map_err(ChainError::from)?;
         }
     }
@@ -992,11 +1008,10 @@ pub fn seed_epoch_logs<D: Domain>(domain: &D, epochs: &[u64]) -> Result<(), Chai
 
     for epoch in epochs {
         let slot = summary.epoch_start(*epoch);
-        let log_key = LogKey::from(TemporalKey::from(slot));
         let mut state = base.clone();
         state.number = *epoch;
         state.largest_stable_slot = slot;
-        writer.write_log_typed(&log_key, &state)?;
+        writer.write_log_typed(slot, &(), &state)?;
     }
 
     writer.commit()?;
@@ -1042,6 +1057,7 @@ fn sample_transaction(
     mint_redeemer_cfg: Option<&MintRedeemerConfig>,
     mints: Option<&TxMints>,
     plain: bool,
+    extra_outputs: Option<&TxOutputs>,
 ) -> SyntheticTxSpec {
     let input = TransactionInput {
         transaction_id: tx_hash,
@@ -1196,31 +1212,42 @@ fn sample_transaction(
     let certificates =
         (!plain).then(|| NonEmptySet::try_from(certificates).expect("non-empty certificates"));
 
-    let body = TransactionBody {
-        inputs: Set::from(vec![input]),
-        outputs: vec![TransactionOutput::PostAlonzo(KeepRaw::from(output))],
-        fee: 7,
-        ttl: Some(10),
-        certificates,
-        withdrawals,
-        auxiliary_data_hash,
-        validity_interval_start: Some(5),
-        mint,
-        script_data_hash: None,
-        collateral: None,
-        required_signers: Some(
-            NonEmptySet::try_from(vec![AddrKeyhash::from([4u8; 28])])
-                .expect("non-empty required signers"),
-        ),
-        network_id: None,
-        collateral_return: None,
-        total_collateral: None,
-        reference_inputs: None,
-        voting_procedures,
-        proposal_procedures,
-        treasury_value: None,
-        donation: None,
-    };
+    let body =
+        TransactionBody {
+            inputs: Set::from(vec![input]),
+            outputs: std::iter::once(output)
+                .chain(extra_outputs.into_iter().flatten().map(|address| {
+                    PostAlonzoTransactionOutput {
+                        address: Bytes::from(address.clone()),
+                        value: Value::Coin(0),
+                        datum_option: None,
+                        script_ref: None,
+                    }
+                }))
+                .map(|output| TransactionOutput::PostAlonzo(KeepRaw::from(output)))
+                .collect(),
+            fee: 7,
+            ttl: Some(10),
+            certificates,
+            withdrawals,
+            auxiliary_data_hash,
+            validity_interval_start: Some(5),
+            mint,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: Some(
+                NonEmptySet::try_from(vec![AddrKeyhash::from([4u8; 28])])
+                    .expect("non-empty required signers"),
+            ),
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures,
+            proposal_procedures,
+            treasury_value: None,
+            donation: None,
+        };
 
     let witness_set = WitnessSet {
         vkeywitness: None,

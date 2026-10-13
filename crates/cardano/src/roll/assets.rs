@@ -100,6 +100,7 @@ impl BlockVisitor for AssetStateVisitor {
         deltas: &mut WorkDeltas,
         _block: &MultiEraBlock,
         tx: &MultiEraTx,
+        _: &TxOrder,
         _index: u32,
         output: &MultiEraOutput,
     ) -> Result<(), ChainError> {

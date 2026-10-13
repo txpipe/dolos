@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use dolos_cardano::model::PoolState;
+use dolos_cardano::model::{PoolKey, PoolState};
 use dolos_core::{ArchiveStore as _, Domain};
 use pallas::crypto::hash::Hasher;
 
@@ -104,7 +104,7 @@ where
 
     // Blockfrost 404s a pool db-sync never saw. A pool registers before it
     // mints, so a block found here proves it as well as a `PoolState` does.
-    if !minted_here && !domain.cardano_entity_exists::<PoolState>(hash)? {
+    if !minted_here && !domain.cardano_entity_exists::<PoolState>(&PoolKey(hash))? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 

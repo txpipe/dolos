@@ -16,7 +16,7 @@ fn clear_state(config: &RootConfig, ns: Namespace) -> miette::Result<()> {
     let writer = state.start_writer().into_diagnostic()?;
 
     let all_keys = state
-        .iter_entities(ns, EntityKey::full_range())
+        .iter_entities(ns, KeyRange::all())
         .into_diagnostic()
         .context("iterating entities")?
         .map_ok(|(key, _)| key);

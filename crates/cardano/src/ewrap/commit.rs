@@ -11,15 +11,14 @@
 //! archive.
 
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey,
-    NsKey, StateStore, StateWriter, TemporalKey,
+    save_entity_at, ArchiveStore, ArchiveWriter, ChainError, Domain, EntityDelta as _, NsKey,
+    RangeOf, StateEntity, StateStore, StateWriter,
 };
 use tracing::{debug, instrument, trace, warn};
 
 use crate::{
-    ewrap::BoundaryWork, rupd::credential_to_key, AccountState, CardanoEntity, DRepState,
-    EpochState, FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState,
-    ProposalState,
+    ewrap::BoundaryWork, AccountKey, AccountState, CardanoEntity, DRepState, EpochState, GovState,
+    PendingMirState, PendingRewardState, PoolState, ProposalState,
 };
 
 impl BoundaryWork {
@@ -31,21 +30,19 @@ impl BoundaryWork {
         &mut self,
         state: &D::State,
         writer: &<D::State as StateStore>::Writer,
-        range: Option<std::ops::Range<dolos_core::EntityKey>>,
+        range: Option<RangeOf<E::Key>>,
     ) -> Result<(), ChainError>
     where
         D: Domain,
-        E: Entity + FixedNamespace + Into<CardanoEntity>,
+        E: StateEntity + Into<CardanoEntity>,
     {
-        let records = state.iter_entities_typed::<E>(E::NS, range)?;
+        let records = state.iter_entities_typed::<E>(range)?;
 
         for record in records {
             let (entity_id, entity) = record?;
+            let key = NsKey::of::<E>(&entity_id);
 
-            let to_apply = self
-                .deltas
-                .entities
-                .remove(&NsKey::from((E::NS, entity_id.clone())));
+            let to_apply = self.deltas.entities.remove(&key);
 
             if let Some(to_apply) = to_apply {
                 let mut entity: Option<CardanoEntity> = Some(entity.into());
@@ -54,9 +51,9 @@ impl BoundaryWork {
                     delta.apply(&mut entity);
                 }
 
-                writer.save_entity_typed(E::NS, &entity_id, entity.as_ref())?;
+                save_entity_at(writer, &key, entity.as_ref())?;
             } else {
-                trace!(ns = E::NS, key = %entity_id, "no deltas for entity");
+                trace!(%key, "no deltas for entity");
             }
         }
 
@@ -72,7 +69,7 @@ impl BoundaryWork {
         &mut self,
         state: &D::State,
         archive: &D::Archive,
-        ranges: Vec<std::ops::Range<dolos_core::EntityKey>>,
+        ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<(), ChainError> {
         debug!("committing ewrap changes");
 
@@ -102,8 +99,7 @@ impl BoundaryWork {
             "deleting applied pending rewards"
         );
         for credential in self.applied_reward_credentials.drain(..) {
-            let key = credential_to_key(&credential);
-            writer.delete_entity(PendingRewardState::NS, &key)?;
+            writer.save_entity_typed::<PendingRewardState>(&credential.into(), None)?;
         }
 
         // Any unspendable rewards left in the map after flush (i.e. those not
@@ -114,20 +110,18 @@ impl BoundaryWork {
                 "draining remaining pending rewards (shard)"
             );
             for (credential, _) in self.rewards.iter_pending() {
-                let key = credential_to_key(credential);
-                writer.delete_entity(PendingRewardState::NS, &key)?;
+                writer.save_entity_typed::<PendingRewardState>(&credential.into(), None)?;
             }
         }
 
-        // Archive logs — share one temporal key across shards. The shard pass
-        // writes the merged account-epoch rows and nothing else, so the key is
-        // theirs rather than the closing epoch's.
-        let temporal_key = TemporalKey::from(&ChainPoint::Slot(self.account_epoch_slot()));
+        // Archive logs — the shard pass writes the merged account-epoch rows,
+        // keyed at the start of the epoch they describe rather than the
+        // closing one.
+        let slot = self.account_epoch_slot();
 
         debug!(log_count = self.logs.len(), "writing shard archive logs");
-        for (entity_key, log) in self.logs.drain(..) {
-            let log_key = LogKey::from((temporal_key.clone(), entity_key));
-            archive_writer.write_log_typed(&log_key, &log)?;
+        for (account, log) in self.logs.drain(..) {
+            archive_writer.write_log_typed(slot, &account, &log)?;
         }
 
         if !self.deltas.entities.is_empty() {
@@ -150,9 +144,9 @@ impl BoundaryWork {
     /// wrapup-global deltas for pools, dreps, proposals, plus the
     /// `EpochWrapUp` delta on `EpochState` that closes the boundary
     /// (overwrites `entity.end` with the final stats, rotates
-    /// rolling/pparams snapshots, clears `ewrap_progress`). Also writes
-    /// archive logs produced by the global visitors and the completed
-    /// `EpochState` snapshot under the epoch-start temporal key.
+    /// rolling/pparams snapshots, clears `ewrap_progress`). Also writes the
+    /// completed `EpochState` snapshot to the archive, at the start of its
+    /// epoch.
     #[instrument(skip_all)]
     pub fn commit_finalize<D: Domain>(
         &mut self,
@@ -202,25 +196,15 @@ impl BoundaryWork {
             "deleting processed pending MIRs"
         );
         for credential in self.applied_mir_credentials.drain(..) {
-            let key = credential_to_key(&credential);
-            writer.delete_entity(PendingMirState::NS, &key)?;
+            writer.save_entity_typed::<PendingMirState>(&credential.into(), None)?;
         }
 
-        // Write archive logs under the epoch-start temporal key.
+        // Write the completed `EpochState` to archive at the start of its
+        // epoch (preserves the pre-snapshot-rotation state for historical
+        // queries). `ending_state.end` was assembled with the final stats by
+        // `wrapup.flush` before this commit ran.
         let start_of_epoch = self.chain_summary.epoch_start(self.ending_state().number);
-        let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
-
-        debug!(log_count = self.logs.len(), "writing ewrap archive logs");
-        for (entity_key, log) in self.logs.drain(..) {
-            let log_key = LogKey::from((temporal_key.clone(), entity_key));
-            archive_writer.write_log_typed(&log_key, &log)?;
-        }
-
-        // Write the completed `EpochState` to archive under the epoch-start
-        // temporal key (preserves the pre-snapshot-rotation state for
-        // historical queries). `ending_state.end` was assembled with the
-        // final stats by `wrapup.flush` before this commit ran.
-        archive_writer.write_log_typed(&temporal_key.clone().into(), self.ending_state())?;
+        archive_writer.write_log_typed(start_of_epoch, &(), self.ending_state())?;
 
         if !self.deltas.entities.is_empty() {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted ewrap deltas");

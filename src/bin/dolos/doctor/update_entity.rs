@@ -1,5 +1,5 @@
-use dolos_cardano::{model::AccountState, EpochState, FixedNamespace as _, PoolState};
-use dolos_core::config::RootConfig;
+use dolos_cardano::{model::AccountState, EpochState, PoolState};
+use dolos_core::{config::RootConfig, KeyCodec as _, StateEntity};
 use miette::IntoDiagnostic;
 
 use dolos::prelude::*;
@@ -10,9 +10,10 @@ pub struct Args {
     #[arg(long)]
     namespace: String,
 
-    /// key of the entity to update
+    /// hex key of the entity to update, for namespaces that hold more than
+    /// one
     #[arg(long)]
-    key: String,
+    key: Option<String>,
 
     /// cbor hex of the new entity value
     #[arg(long)]
@@ -28,15 +29,12 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let state = crate::common::open_state_store(config)?;
 
-    let ns = match args.namespace.as_str() {
-        "epochs" => EpochState::NS,
-        "accounts" => AccountState::NS,
-        "pools" => PoolState::NS,
+    let (ns, key) = match args.namespace.as_str() {
+        "epochs" => typed_key::<EpochState>(args.key.as_deref())?,
+        "accounts" => typed_key::<AccountState>(args.key.as_deref())?,
+        "pools" => typed_key::<PoolState>(args.key.as_deref())?,
         _ => return Err(miette::Error::msg("invalid namespace")),
     };
-
-    let key = hex::decode(&args.key).into_diagnostic()?;
-    let key = EntityKey::from(key);
 
     let value = hex::decode(&args.cbor_hex).into_diagnostic()?;
     let value = EntityValue::from(value);
@@ -58,4 +56,18 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     }
 
     Ok(())
+}
+
+/// The namespace of `E` and the stored key `hex` names in it, refused unless
+/// it decodes exactly as `E`'s key.
+fn typed_key<E: StateEntity>(hex: Option<&str>) -> miette::Result<(Namespace, EntityKey)> {
+    // a singleton's key is empty, so it needs no `--key`
+    let bytes = hex::decode(hex.unwrap_or_default()).into_diagnostic()?;
+
+    let key = E::Key::decode_key(&bytes).map_err(|err| match hex {
+        Some(_) => miette::miette!("not a {} key: {err}", E::NS),
+        None => miette::miette!("--key is required for this namespace"),
+    })?;
+
+    Ok((E::NS, EntityKey::of(&key)))
 }

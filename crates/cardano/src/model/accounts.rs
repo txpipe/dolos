@@ -1,4 +1,7 @@
-use dolos_core::{BlockSlot, EntityKey, NsKey, TxOrder};
+use dolos_core::{
+    keys::exact, BlockSlot, FixedKey, KeyBytes, KeyCodec, KeyError, KeyPrefix, NsKey, RangeOf,
+    TxOrder,
+};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
@@ -11,9 +14,12 @@ use super::{
     epoch_value::{EpochValue, TransitionDefault},
     eras::EraProtocol,
     pools::PoolHash,
-    FixedNamespace as _,
 };
-use crate::{add, sub};
+use crate::{
+    add,
+    shard::{validate_total_shards, PREFIX_SPACE},
+    sub,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Serialize, Deserialize, Default)]
 pub struct Stake {
@@ -128,7 +134,162 @@ pub struct AccountState {
     pub retired_pool: Option<PoolHash>,
 }
 
-entity_boilerplate!(AccountState, "accounts");
+/// The variant of a stake credential, keyed by the CBOR header its
+/// [`AccountKey`]s start with: `0x82 ‖ variant ‖ 0x58 0x1c`.
+///
+/// The header carries no entropy, so it is the prefix the account shards
+/// split under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CredentialKind {
+    KeyHash,
+    Script,
+}
+
+impl CredentialKind {
+    const ARRAY: u8 = 0x82;
+    const BYTES_28: [u8; 2] = [0x58, 0x1c];
+
+    fn variant(self) -> u8 {
+        match self {
+            Self::KeyHash => 0,
+            Self::Script => 1,
+        }
+    }
+
+    pub fn of(credential: &StakeCredential) -> Self {
+        match credential {
+            StakeCredential::AddrKeyhash(_) => Self::KeyHash,
+            StakeCredential::ScriptHash(_) => Self::Script,
+        }
+    }
+
+    fn credential(self, hash: Hash<28>) -> StakeCredential {
+        match self {
+            Self::KeyHash => StakeCredential::AddrKeyhash(hash),
+            Self::Script => StakeCredential::ScriptHash(hash),
+        }
+    }
+}
+
+impl KeyCodec for CredentialKind {
+    fn encode_key(&self, out: &mut KeyBytes) {
+        out.extend_from_slice(&[
+            Self::ARRAY,
+            self.variant(),
+            Self::BYTES_28[0],
+            Self::BYTES_28[1],
+        ]);
+    }
+
+    fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
+        match exact::<4>(bytes)? {
+            [Self::ARRAY, 0, 0x58, 0x1c] => Ok(Self::KeyHash),
+            [Self::ARRAY, 1, 0x58, 0x1c] => Ok(Self::Script),
+            header => Err(KeyError::Malformed(format!(
+                "stake credential header {}",
+                hex::encode(header)
+            ))),
+        }
+    }
+}
+
+impl FixedKey for CredentialKind {
+    const LEN: usize = 4;
+}
+
+impl KeyPrefix<AccountKey> for CredentialKind {}
+
+/// A stake credential, keyed by its CBOR encoding: the
+/// [`CredentialKind`] header and the 28-byte hash.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AccountKey(pub StakeCredential);
+
+impl AccountKey {
+    pub fn credential(&self) -> &StakeCredential {
+        &self.0
+    }
+
+    /// The two ranges, one per credential variant, of shard `index` of
+    /// `total`. Shards split on the first byte of the hash, the first byte
+    /// after the header, so `total` must divide 256.
+    ///
+    /// Panics on an invalid split in every build profile: `total` can come
+    /// from persisted progress, and a broken partition would skip or repeat
+    /// accounts silently.
+    pub fn shard_ranges(index: u32, total: u32) -> Vec<RangeOf<AccountKey>> {
+        if let Err(e) = validate_total_shards(total) {
+            panic!("shard_ranges: {e}");
+        }
+
+        assert!(
+            index < total,
+            "shard_ranges: shard index ({index}) must be < total shards ({total})",
+        );
+
+        let step = PREFIX_SPACE / total;
+        let bucket = |kind: CredentialKind, first: u32| {
+            let mut hash = [0u8; 28];
+            hash[0] = first as u8;
+            AccountKey(kind.credential(hash.into()))
+        };
+
+        [CredentialKind::KeyHash, CredentialKind::Script]
+            .into_iter()
+            .map(|kind| {
+                let range = RangeOf::prefix(&kind).starting_at(&bucket(kind, index * step));
+
+                if index + 1 == total {
+                    range
+                } else {
+                    range.ending_before(&bucket(kind, (index + 1) * step))
+                }
+            })
+            .collect()
+    }
+}
+
+impl From<StakeCredential> for AccountKey {
+    fn from(value: StakeCredential) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&StakeCredential> for AccountKey {
+    fn from(value: &StakeCredential) -> Self {
+        Self(value.clone())
+    }
+}
+
+impl From<AccountKey> for StakeCredential {
+    fn from(value: AccountKey) -> Self {
+        value.0
+    }
+}
+
+impl KeyCodec for AccountKey {
+    fn encode_key(&self, out: &mut KeyBytes) {
+        CredentialKind::of(&self.0).encode_key(out);
+
+        match &self.0 {
+            StakeCredential::AddrKeyhash(hash) | StakeCredential::ScriptHash(hash) => {
+                out.extend_from_slice(hash.as_slice())
+            }
+        }
+    }
+
+    fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
+        let (kind, hash) = <(CredentialKind, [u8; 28])>::decode_key(bytes)?;
+        Ok(Self(kind.credential(hash.into())))
+    }
+}
+
+impl FixedKey for AccountKey {
+    const LEN: usize = 32;
+}
+
+display_as_stored!(AccountKey);
+
+entity_boilerplate!(AccountState, "accounts", state = AccountKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -310,8 +471,7 @@ impl dolos_core::EntityDelta for ControlledAmountInc {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -367,8 +527,7 @@ impl dolos_core::EntityDelta for ControlledAmountDec {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -423,8 +582,7 @@ impl dolos_core::EntityDelta for StakeRegistration {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -438,7 +596,7 @@ impl dolos_core::EntityDelta for StakeRegistration {
 
         tracing::debug!(
             slot = self.slot,
-            account = hex::encode(minicbor::to_vec(&self.cred).unwrap()),
+            account = %AccountKey::from(&self.cred),
             "applying registration"
         );
 
@@ -484,8 +642,7 @@ impl dolos_core::EntityDelta for StakeDelegation {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -546,8 +703,7 @@ impl dolos_core::EntityDelta for VoteDelegation {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -604,8 +760,7 @@ impl dolos_core::EntityDelta for StakeDeregistration {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -665,8 +820,7 @@ impl dolos_core::EntityDelta for WithdrawalInc {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -686,7 +840,7 @@ impl dolos_core::EntityDelta for WithdrawalInc {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolDelegatorRetire {
-    pub(crate) delegator: EntityKey,
+    pub(crate) delegator: AccountKey,
     pub(crate) epoch: Epoch,
 
     // undo
@@ -695,7 +849,7 @@ pub struct PoolDelegatorRetire {
 }
 
 impl PoolDelegatorRetire {
-    pub fn new(delegator: EntityKey, epoch: Epoch) -> Self {
+    pub fn new(delegator: AccountKey, epoch: Epoch) -> Self {
         Self {
             delegator,
             epoch,
@@ -709,7 +863,7 @@ impl dolos_core::EntityDelta for PoolDelegatorRetire {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((AccountState::NS, self.delegator.clone()))
+        NsKey::of::<AccountState>(&self.delegator)
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -754,7 +908,7 @@ impl dolos_core::EntityDelta for PoolDelegatorRetire {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepDelegatorDrop {
-    pub(crate) delegator: EntityKey,
+    pub(crate) delegator: AccountKey,
     pub(crate) epoch: Epoch,
 
     // undo
@@ -762,7 +916,7 @@ pub struct DRepDelegatorDrop {
 }
 
 impl DRepDelegatorDrop {
-    pub fn new(delegator: EntityKey, epoch: Epoch) -> Self {
+    pub fn new(delegator: AccountKey, epoch: Epoch) -> Self {
         Self {
             delegator,
             epoch,
@@ -775,7 +929,7 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((AccountState::NS, self.delegator.clone()))
+        NsKey::of::<AccountState>(&self.delegator)
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -825,8 +979,7 @@ impl dolos_core::EntityDelta for TreasuryWithdrawal {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.account).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.account))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -869,8 +1022,7 @@ impl dolos_core::EntityDelta for PoolDepositRefund {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.account).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.account))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -912,8 +1064,7 @@ impl dolos_core::EntityDelta for ProposalDepositRefund {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.account).unwrap();
-        NsKey::from((AccountState::NS, enc))
+        NsKey::of::<AccountState>(&AccountKey::from(&self.account))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -936,7 +1087,7 @@ impl dolos_core::EntityDelta for ProposalDepositRefund {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssignRewards {
-    pub(crate) account: EntityKey,
+    pub(crate) account: AccountKey,
     pub(crate) reward: u64,
 
     // undo
@@ -944,7 +1095,7 @@ pub struct AssignRewards {
 }
 
 impl AssignRewards {
-    pub fn new(account: EntityKey, reward: u64) -> Self {
+    pub fn new(account: AccountKey, reward: u64) -> Self {
         Self {
             account,
             reward,
@@ -957,7 +1108,7 @@ impl dolos_core::EntityDelta for AssignRewards {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((AccountState::NS, self.account.clone()))
+        NsKey::of::<AccountState>(&self.account)
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -979,7 +1130,7 @@ impl dolos_core::EntityDelta for AssignRewards {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountTransition {
-    pub(crate) account: EntityKey,
+    pub(crate) account: AccountKey,
     pub(crate) next_epoch: Epoch,
 
     // undo: snapshot each EpochValue before the rotation.
@@ -989,7 +1140,7 @@ pub struct AccountTransition {
 }
 
 impl AccountTransition {
-    pub fn new(account: EntityKey, next_epoch: Epoch) -> Self {
+    pub fn new(account: AccountKey, next_epoch: Epoch) -> Self {
         Self {
             account,
             next_epoch,
@@ -1004,7 +1155,7 @@ impl dolos_core::EntityDelta for AccountTransition {
     type Entity = AccountState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((AccountState::NS, self.account.clone()))
+        NsKey::of::<AccountState>(&self.account)
     }
 
     fn apply(&mut self, entity: &mut Option<AccountState>) {
@@ -1133,7 +1284,7 @@ mod prop_tests {
             pool in root::any_hash_28(),
             epoch in root::any_epoch(),
         ) -> PoolDelegatorRetire {
-            PoolDelegatorRetire::new(dolos_core::EntityKey::from(pool.as_slice()), epoch)
+            PoolDelegatorRetire::new(AccountKey(StakeCredential::AddrKeyhash(pool)), epoch)
         }
     }
 
@@ -1142,7 +1293,7 @@ mod prop_tests {
             cred_hash in root::any_hash_28(),
             epoch in root::any_epoch(),
         ) -> DRepDelegatorDrop {
-            DRepDelegatorDrop::new(dolos_core::EntityKey::from(cred_hash.as_slice()), epoch)
+            DRepDelegatorDrop::new(AccountKey(StakeCredential::AddrKeyhash(cred_hash)), epoch)
         }
     }
 
@@ -1178,7 +1329,7 @@ mod prop_tests {
             account_hash in root::any_hash_28(),
             reward in root::any_lovelace(),
         ) -> AssignRewards {
-            AssignRewards::new(dolos_core::EntityKey::from(account_hash.as_slice()), reward)
+            AssignRewards::new(AccountKey(StakeCredential::AddrKeyhash(account_hash)), reward)
         }
     }
 
@@ -1187,7 +1338,7 @@ mod prop_tests {
             account_hash in root::any_hash_28(),
             next_epoch in root::any_epoch(),
         ) -> AccountTransition {
-            AccountTransition::new(dolos_core::EntityKey::from(account_hash.as_slice()), next_epoch)
+            AccountTransition::new(AccountKey(StakeCredential::AddrKeyhash(account_hash)), next_epoch)
         }
     }
 
@@ -1382,5 +1533,106 @@ mod prop_tests {
         ) {
             assert_delta_serde_roundtrip(Some(entity), delta);
         }
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use dolos_core::keys::encode;
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::model::testing as root;
+
+    #[test]
+    fn layout_is_pinned() {
+        let account = AccountKey(StakeCredential::AddrKeyhash(Hash::new([0xaa; 28])));
+        assert_eq!(
+            hex::encode(encode(&account)),
+            format!("8200581c{}", "aa".repeat(28))
+        );
+
+        let script = AccountKey(StakeCredential::ScriptHash(Hash::new([0xbb; 28])));
+        assert_eq!(
+            hex::encode(encode(&script)),
+            format!("8201581c{}", "bb".repeat(28))
+        );
+    }
+
+    /// The account key is the credential's own CBOR, unchanged.
+    #[test]
+    fn keys_are_the_credential_cbor() {
+        for credential in [
+            StakeCredential::AddrKeyhash(Hash::new([0x42; 28])),
+            StakeCredential::ScriptHash(Hash::new([0x43; 28])),
+        ] {
+            assert_eq!(
+                encode(&AccountKey(credential.clone())).to_vec(),
+                minicbor::to_vec(&credential).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_keys_are_refused() {
+        let account = encode(&AccountKey(StakeCredential::AddrKeyhash(Hash::new(
+            [1; 28],
+        ))));
+        assert!(AccountKey::decode_key(&account[..31]).is_err());
+        assert!(AccountKey::decode_key(&[account.as_slice(), &[0]].concat()).is_err());
+
+        let mut bad_header = account.clone();
+        bad_header[1] = 2;
+        assert!(AccountKey::decode_key(&bad_header).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn keys_round_trip(credential in root::any_stake_credential()) {
+            let key = AccountKey(credential);
+            prop_assert_eq!(AccountKey::decode_key(&encode(&key)), Ok(key));
+        }
+
+        /// Exactly one shard range holds any account key.
+        #[test]
+        fn shards_partition_the_accounts(credential in root::any_stake_credential(), total in prop::sample::select(vec![1u32, 2, 16, 32, 256])) {
+            let key = AccountKey(credential);
+
+            let hits = (0..total)
+                .flat_map(|index| AccountKey::shard_ranges(index, total))
+                .filter(|range| range.contains(&key))
+                .count();
+
+            prop_assert_eq!(hits, 1);
+        }
+    }
+
+    #[test]
+    fn shard_ranges_split_on_the_first_hash_byte() {
+        let key = |kind: CredentialKind, first: u8| {
+            let mut hash = [0xffu8; 28];
+            hash[0] = first;
+            AccountKey(kind.credential(hash.into()))
+        };
+
+        for kind in [CredentialKind::KeyHash, CredentialKind::Script] {
+            let index = usize::from(kind == CredentialKind::Script);
+
+            let third = &AccountKey::shard_ranges(3, 16)[index];
+            assert!(third.contains(&key(kind, 0x30)));
+            assert!(third.contains(&key(kind, 0x3f)));
+            assert!(!third.contains(&key(kind, 0x40)));
+            assert!(!third.contains(&key(kind, 0x2f)));
+
+            let last = &AccountKey::shard_ranges(15, 16)[index];
+            assert!(last.contains(&key(kind, 0xff)));
+            assert!(!last.contains(&key(kind, 0xef)));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "must divide")]
+    fn shard_ranges_refuse_a_non_divisor() {
+        AccountKey::shard_ranges(0, 3);
     }
 }

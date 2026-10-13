@@ -606,8 +606,8 @@ pub fn drep_id_is_script(drep_id: &[u8]) -> bool {
 }
 
 /// Returns the CIP-129 id bytes of a DRep credential: the key or script header
-/// byte, then the 28-byte hash. These are the bytes that `drep_to_entity_key`
-/// writes before its padding.
+/// byte, then the 28-byte hash. These are the bytes of the DRep's
+/// [`crate::DRepKey`].
 pub fn drep_id_bytes(cred: &StakeCredential) -> Vec<u8> {
     match cred {
         StakeCredential::AddrKeyhash(hash) => [&[DREP_KEY_PREFIX][..], hash.as_slice()].concat(),
