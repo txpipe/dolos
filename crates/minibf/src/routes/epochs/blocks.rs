@@ -12,15 +12,15 @@ use crate::{
     Facade,
 };
 
-use super::{current_epoch, ensure_epoch_in_range, epoch_slot_range};
+use super::{current_epoch, epoch_slot_range, parse_epoch};
 
 pub async fn by_number_blocks<D: Domain>(
-    Path(epoch): Path<u64>,
+    Path(number): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error> {
     let pagination = Pagination::try_from(params)?;
-    ensure_epoch_in_range(epoch)?;
+    let epoch = parse_epoch(&number)?;
 
     let (chain, current) = current_epoch(&domain)?;
 
