@@ -21,7 +21,7 @@ use dolos_core::Domain;
 
 use crate::{
     hacks, log_and_500,
-    mapping::{IntoModel as _, TxModelBuilder},
+    mapping::{txs::TxModelBuilder, IntoModel as _},
     Facade,
 };
 
