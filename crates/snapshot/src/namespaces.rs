@@ -80,11 +80,11 @@ pub const NAMESPACES: [Namespace; 27] = [
 /// `epochs` reached 2 when `RollingStats::registered_pools` stopped being a
 /// `HashSet`, whose per-instance iteration order made the namespace's bytes
 /// irreproducible across publishers of identical state. The keys of `dreps`,
-/// `epochs`, `eras`, `first-mints`, `gov`, `metadata-labels`, `pools`, `proposals`,
-/// `staged-first-mints` and `stakes` stopped being padded or truncated to a
-/// fixed width (decision 0051), and each of those moved one revision for it.
-/// Kept beside [`NAMESPACES`], in the same order, and held to it by
-/// `every_namespace_has_a_schema_rev` below.
+/// `epochs`, `eras`, `first-mints`, `gov`, `metadata-labels`, `pools`,
+/// `proposals`, `staged-first-mints` and `stakes` stopped being padded or
+/// truncated to a fixed width (decision 0051), and each of those moved one
+/// revision for it. Kept beside [`NAMESPACES`], in the same order, and held to
+/// it by `every_namespace_has_a_schema_rev` below.
 pub const SCHEMA_REVS: [(Namespace, u64); 27] = [
     (AccountEpochLog::NS, 1),
     (AccountStats::NS, 1),
