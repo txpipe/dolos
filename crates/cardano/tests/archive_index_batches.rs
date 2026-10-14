@@ -317,9 +317,8 @@ fn datum_slots(domain: &ToyDomain) -> Vec<BlockSlot> {
         .collect()
 }
 
-/// Done criterion 4: the 100- and 500-block partitions, plus the extremes —
-/// every block its own batch, as after a restore at each block, and the whole
-/// chain in one.
+/// The 100- and 500-block partitions, plus the extremes — every block its own
+/// batch, as after a restore at each block, and the whole chain in one.
 #[test]
 fn every_import_partition_writes_the_same_index_records() {
     let chain = chain();
@@ -341,9 +340,8 @@ fn every_import_partition_writes_the_same_index_records() {
     }
 }
 
-/// Done criterion 3, shape one: the 500-block batch holds the producer, so
-/// the invalid tx's ordinary input sits in memory, and still contributes
-/// nothing.
+/// Shape one: the 500-block batch holds the producer, so the invalid tx's
+/// ordinary input sits in memory, and still contributes nothing.
 #[test]
 fn an_input_produced_before_an_invalid_tx_is_not_tagged_by_it() {
     let chain = chain();
@@ -368,8 +366,8 @@ fn an_input_produced_before_an_invalid_tx_is_not_tagged_by_it() {
     );
 }
 
-/// Done criterion 3, shape two: the 500-block batch loads the named input for
-/// the valid spender after the invalid tx; only the spender is tagged by it.
+/// Shape two: the 500-block batch loads the named input for the valid spender
+/// after the invalid tx; only the spender is tagged by it.
 #[test]
 fn an_input_consumed_after_an_invalid_tx_is_tagged_by_its_spender_only() {
     let chain = chain();

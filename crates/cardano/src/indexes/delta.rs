@@ -456,9 +456,9 @@ impl CardanoIndexDeltaBuilder {
             // tags are candidates, not response rows: a phase-2-failed tx's
             // redeemers get tagged, and the Blockfrost rule (db-sync stores
             // no redeemers for failed txs) stays a query-time filter. A spend
-            // redeemer names an ordinary input, so
-            // it resolves only when that input is consumed: a failed tx's
-            // spend redeemers stay untagged, whatever else the batch loaded.
+            // redeemer names an ordinary input, so it resolves only when that
+            // input is consumed: a failed tx's spend redeemers stay untagged,
+            // whatever else the batch loaded.
             for redeemer in tx.redeemers() {
                 let resolved =
                     crate::pallas_extras::redeemer_script_hash(&tx, &redeemer, &mut |input| {
