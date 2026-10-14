@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicU32, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use dolos_core::{
@@ -34,6 +37,9 @@ pub enum TestFault {
     /// stop a work unit between the two commits of a phase, whichever store
     /// that phase commits first.
     CrashAfterCommits(u32),
+    /// [`StateStore::utxos_by_tag`] and [`StateStore::get_utxos`] sleep this
+    /// long before answering, as a heavy lookup on a large store would.
+    SlowUtxoReads(Duration),
 }
 
 /// Whether a commit under `fault` comes after the crash, counting it if not.
@@ -109,6 +115,12 @@ impl FaultyStateStore {
     fn fault_err(&self) -> StateError {
         StateError::InternalStoreError("fault injection: state store".into())
     }
+
+    fn slow_utxo_read(&self) {
+        if let TestFault::SlowUtxoReads(delay) = self.fault {
+            std::thread::sleep(delay);
+        }
+    }
 }
 
 impl StateStore for FaultyStateStore {
@@ -172,6 +184,7 @@ impl StateStore for FaultyStateStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
+        self.slow_utxo_read();
         self.inner.get_utxos(refs)
     }
 
@@ -183,6 +196,7 @@ impl StateStore for FaultyStateStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
+        self.slow_utxo_read();
         self.inner.utxos_by_tag(dimension, key)
     }
 
@@ -610,6 +624,10 @@ impl Domain for FaultyToyDomain {
             .as_ref()
             .cloned()
             .unwrap_or_else(|| self.inner.genesis())
+    }
+
+    fn query_limiter(&self) -> &dolos_core::QueryLimiter {
+        self.inner.query_limiter()
     }
 
     fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain> {

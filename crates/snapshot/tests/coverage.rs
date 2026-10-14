@@ -45,10 +45,10 @@ fn namespace_registry_matches_build_schema() {
         "the profile's state namespaces have drifted from build_schema()"
     );
 
-    // ADR-004 says eighteen entity namespaces plus `utxos`. If that count
+    // ADR-004 says twenty-five entity namespaces plus `utxos`. If that count
     // moves, the sentence in the ADR moves with it.
-    assert_eq!(entities.len(), 18);
-    assert_eq!(NAMESPACES.len(), 19);
+    assert_eq!(entities.len(), 25);
+    assert_eq!(NAMESPACES.len(), 26);
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn the_golden_state_layers_cover_every_namespace() {
     }
 }
 
-/// Every state kind appears in the golden stele, so all seventeen kind strings
+/// Every state kind appears in the golden stele, so all twenty-six kind strings
 /// are frozen by a published digest — the state half of
 /// `the_golden_stele_covers_every_log_kind`.
 #[test]
