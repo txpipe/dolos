@@ -150,7 +150,7 @@ impl CacheService {
             .shared()
     }
 
-    /// Gets or creates the cache entry for type T.
+    /// Gets or creates the cache entry for the pair of T and E.
     async fn get_entry<T, E>(&self) -> Arc<Mutex<Entry<T, E>>>
     where
         T: Send + Sync + 'static,
