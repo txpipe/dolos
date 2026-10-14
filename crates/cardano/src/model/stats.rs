@@ -284,7 +284,12 @@ pub struct AddressStats {
     pub tx_count: u64,
 }
 
-entity_boilerplate!(AddressStats, "address-stats", log = AddressStatsKey);
+entity_boilerplate!(
+    AddressStats,
+    "address-stats",
+    log = AddressStatsKey,
+    role = View
+);
 
 impl AddressStats {
     pub fn add(&mut self, other: &Self) {
@@ -336,7 +341,8 @@ pub struct StagedAddressStats(#[n(0)] pub AddressStats);
 entity_boilerplate!(
     StagedAddressStats,
     "staged-address-stats",
-    state = (Epoch, AddressStatsKey)
+    state = (Epoch, AddressStatsKey),
+    role = View
 );
 
 impl SumRow for StagedAddressStats {
@@ -368,7 +374,7 @@ pub struct PaymentStats {
     pub tx_count: u64,
 }
 
-entity_boilerplate!(PaymentStats, "payment-stats", log = PaymentKey);
+entity_boilerplate!(PaymentStats, "payment-stats", log = PaymentKey, role = View);
 
 /// One address of a payment credential that moved value in an epoch, staged
 /// until the epoch seals.
@@ -391,7 +397,8 @@ pub struct StagedPaymentAddress {
 entity_boilerplate!(
     StagedPaymentAddress,
     "staged-payment-addresses",
-    state = StagedKey<PaymentKey, PaymentTail>
+    state = StagedKey<PaymentKey, PaymentTail>,
+    role = View
 );
 
 impl StagedRow for StagedPaymentAddress {
@@ -421,7 +428,8 @@ pub struct StagedPaymentStats {
 entity_boilerplate!(
     StagedPaymentStats,
     "staged-payment-stats",
-    state = StagedKey<PaymentKey, ()>
+    state = StagedKey<PaymentKey, ()>,
+    role = View
 );
 
 impl SumRow for StagedPaymentStats {
@@ -450,7 +458,7 @@ pub struct AccountStats {
     pub tx_overlap: u64,
 }
 
-entity_boilerplate!(AccountStats, "account-stats", log = AccountKey);
+entity_boilerplate!(AccountStats, "account-stats", log = AccountKey, role = View);
 
 /// An account's tx overlap in an epoch that has not sealed, keyed
 /// `account ‖ epoch`.
@@ -463,7 +471,8 @@ pub struct StagedAccountStats {
 entity_boilerplate!(
     StagedAccountStats,
     "staged-account-stats",
-    state = StagedKey<AccountKey, ()>
+    state = StagedKey<AccountKey, ()>,
+    role = View
 );
 
 impl SumRow for StagedAccountStats {
