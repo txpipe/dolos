@@ -32,6 +32,22 @@ the store that holds what it projects:
 - the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
 - the archive tags and the exact lookups (by block hash, block number, tx hash) project the block history and live in the `ArchiveStore` (`ArchiveStore::slots_by_tag` / `slot_by_*`, written through `ArchiveWriter::apply_index` in the same batch as the blocks)
 
+### Ledger entities and materialized views
+Every state or archive namespace has a role, `NamespaceRole` in `dolos-core`,
+declared on its entity type (`entity_boilerplate!(…, role = View)` in
+`dolos-cardano`; a type that says nothing is `Ledger`):
+- a **ledger** namespace holds what `ChainLogic` needs to apply the next block
+- a **view** namespace is a projection kept for the queries and endpoints that read it; the ledger never reads one. The period logs and stats (`crates/cardano/src/periods/`) are the views today; `dolos_cardano::model::NAMESPACE_ROLES` lists both sets and `namespaces_of(role)` filters them
+
+The roll computes the views through one visitor set
+(`crates/cardano/src/roll/views.rs`). `sync.materialized_views = false`, read
+through `Domain::sync_config`, skips that set, skips the ESTART seal, and makes
+the minibf endpoints a view serves answer `501` through `Facade::require_views`;
+the schema the stores open does not change. To add a view: declare `role = View`
+on its type, add it to the namespace list in `crates/cardano/src/model/mod.rs`
+(the `the_views_are_the_period_logs_and_stats` test pins the set), put its
+visitor in `ViewVisitors`, and open its endpoints with `require_views`.
+
 ### Database File Organization
 
 ```
