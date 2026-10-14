@@ -1391,12 +1391,6 @@ impl IntoModel<PoolDelegatorsInner> for PoolDelegatorModelBuilder {
     }
 }
 
-/// Blocks minted by a pool, oldest first.
-///
-/// The `pool_blocks` archive dimension tags each block with its issuer pool,
-/// so the page is a key-only slot scan plus one body read per listed block.
-/// The cost does not grow with the page number, so deep pages stay cheap and
-/// the scan budget does not apply.
 /// Pool block index slots read per blocking task while a page is located.
 const POOL_BLOCKS_CHUNK: usize = 4096;
 
@@ -1471,6 +1465,12 @@ where
     Ok((page, minted_any))
 }
 
+/// Blocks minted by a pool, oldest first.
+///
+/// The `pool_blocks` archive dimension tags each block with its issuer pool,
+/// so the page is a key-only slot scan plus one body read per listed block.
+/// The cost does not grow with the page number, so deep pages stay cheap and
+/// the scan budget does not apply.
 pub async fn by_id_blocks<D>(
     Path(id): Path<String>,
     Query(mut params): Query<PaginationParameters>,
