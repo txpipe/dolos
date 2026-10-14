@@ -226,6 +226,22 @@ mod tests {
         }
     }
 
+    /// Waits for the entry's fetch in flight, if any, to store its result.
+    async fn wait_for_fetch<T, E>(cache: &CacheService)
+    where
+        T: Clone + Send + Sync + 'static,
+        E: Clone + Send + Sync + 'static,
+    {
+        let entry = cache.get_entry::<T, E>().await;
+        let fetch = lock(&entry).fetch.clone();
+
+        if let Some(fetch) = fetch {
+            let _ = tokio::time::timeout(Duration::from_secs(5), fetch)
+                .await
+                .expect("timed out waiting for the cache fetch");
+        }
+    }
+
     #[tokio::test]
     async fn test_cache_basic() {
         let cache = CacheService::default();
@@ -310,7 +326,7 @@ mod tests {
         request.abort();
         let _ = request.await;
         gate.open();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        wait_for_fetch::<String, ()>(&cache).await;
 
         let get = |value: &'static str| {
             let calls = calls.clone();
@@ -325,7 +341,7 @@ mod tests {
         tokio::time::sleep(ttl).await;
         assert_eq!(get("second").await.unwrap(), "first");
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_for_fetch::<String, ()>(&cache).await;
         assert_eq!(get("third").await.unwrap(), "second");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
