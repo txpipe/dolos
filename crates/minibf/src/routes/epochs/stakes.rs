@@ -21,6 +21,8 @@ pub async fn by_number_stakes<D: Domain>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<EpochStakeContentInner>>, Error> {
     let pagination = Pagination::try_from(params)?;
+    // Each page reads every row before it, so the page depth is the scan.
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
     let epoch = parse_epoch(&number)?;
 
     let (chain, current) = current_epoch(&domain)?;
@@ -102,6 +104,31 @@ mod tests {
         // Epoch 0 is in range but nothing is seeded there.
         let stakes: Vec<EpochStakeContentInner> = get_ok(&app, "/epochs/0/stakes").await;
         assert!(stakes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn epochs_stakes_within_scan_limit() {
+        let app = TestApp::new_with_scan_limit(Default::default(), 2);
+        let epoch = app.tip_epoch() - 1;
+        let stakes: Vec<EpochStakeContentInner> =
+            get_ok(&app, &format!("/epochs/{epoch}/stakes?count=1&page=2")).await;
+        assert_eq!(stakes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn epochs_stakes_rejects_deep_page() {
+        let app = TestApp::new_with_scan_limit(Default::default(), 2);
+        let epoch = app.tip_epoch() - 1;
+        let (status, bytes) = app
+            .get_bytes(&format!("/epochs/{epoch}/stakes?count=1&page=3"))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["message"],
+            "pagination scan limit exceeded, reduce page number or count"
+        );
     }
 
     #[tokio::test]
