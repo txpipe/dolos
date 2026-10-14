@@ -1,12 +1,10 @@
-use std::collections::HashSet;
-
 use dolos_core::{ChainError, Genesis, TxOrder};
 
 use super::WorkDeltas;
 use pallas::ledger::primitives::alonzo::{
     InstantaneousRewardSource, InstantaneousRewardTarget, MoveInstantaneousReward,
 };
-use pallas::ledger::primitives::{Epoch, StakeCredential};
+use pallas::ledger::primitives::Epoch;
 use pallas::ledger::{
     addresses::Address,
     traverse::{MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx},
@@ -15,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     pallas_extras, roll::BlockVisitor, ControlledAmountDec, ControlledAmountInc, EnqueueMir,
-    PParamsSet, StageStakeAddress, StagedStakeAddress, StakeDelegation, StakeDeregistration,
-    StakeRegistration, VoteDelegation, WithdrawalInc,
+    PParamsSet, StakeDelegation, StakeDeregistration, StakeRegistration, VoteDelegation,
+    WithdrawalInc,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,10 +42,6 @@ pub struct AccountVisitor {
     /// Pre-Alonzo (< 5): MIRs overwrite previous values.
     /// Alonzo+ (>= 5): MIRs accumulate.
     protocol_version: Option<u16>,
-
-    /// Account addresses already staged by this block: a repeat changes no
-    /// staged row but would still cost a WAL delta.
-    staged: HashSet<(StakeCredential, Vec<u8>)>,
 }
 
 impl BlockVisitor for AccountVisitor {
@@ -93,29 +87,14 @@ impl BlockVisitor for AccountVisitor {
     fn visit_output(
         &mut self,
         deltas: &mut WorkDeltas,
-        block: &MultiEraBlock,
+        _: &MultiEraBlock,
         _: &MultiEraTx,
-        order: &TxOrder,
-        index: u32,
+        _: &TxOrder,
+        _: u32,
         output: &MultiEraOutput,
     ) -> Result<(), ChainError> {
         let address = output.address().expect("valid address");
         let epoch = self.epoch.expect("value set in root");
-
-        if let Some(account) = pallas_extras::address_account(&address) {
-            let bytes = address.to_vec();
-
-            if self.staged.insert((account.clone(), bytes.clone())) {
-                deltas.add_for_entity(StageStakeAddress::new(StagedStakeAddress {
-                    account,
-                    address: bytes,
-                    epoch,
-                    slot: block.slot(),
-                    tx_index: *order as u32,
-                    output_index: index,
-                }));
-            }
-        }
 
         let Some((cred, is_pointer)) = pallas_extras::address_as_stake_cred(&address) else {
             return Ok(());

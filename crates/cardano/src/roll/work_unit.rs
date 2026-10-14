@@ -71,6 +71,7 @@ where
             &self.cache,
             domain.state(),
             &mut self.batch,
+            true,
         )?;
 
         // Load entities here so `compute` can apply deltas before WAL serialization;
