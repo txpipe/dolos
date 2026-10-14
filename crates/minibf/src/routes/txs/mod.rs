@@ -37,12 +37,25 @@ fn parse_tx_hash(tx_hash: &str) -> Result<Vec<u8>, StatusCode> {
 #[cfg(test)]
 mod testing {
     use axum::http::StatusCode;
+    use pallas::interop::hardano::configs::byron;
 
     use crate::test_support::TestApp;
 
     pub const MISSING_HASH: &str =
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     pub const INVALID_HASH: &str = "not-a-hash";
+
+    /// The first Byron genesis UTxO of the preview genesis the test domain
+    /// runs on: the tx hash Blockfrost serves it under and its lovelace.
+    pub fn genesis_utxo() -> (String, u64) {
+        let genesis = dolos_cardano::include::preview::load();
+        let (hash, _, amount) = byron::genesis_utxos(&genesis.byron)
+            .into_iter()
+            .next()
+            .expect("the preview genesis has byron utxos");
+
+        (hash.to_string(), amount)
+    }
 
     /// The body of a `200` response to `path`.
     pub async fn get_ok<T: serde::de::DeserializeOwned>(app: &TestApp, path: &str) -> T {

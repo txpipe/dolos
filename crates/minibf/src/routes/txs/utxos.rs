@@ -76,6 +76,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn txs_by_hash_utxos_genesis_utxo() {
+        let app = TestApp::new();
+        let (tx_hash, amount) = genesis_utxo();
+        let path = format!("/txs/{tx_hash}/utxos");
+        let parsed: TxContentUtxo = get_ok(&app, &path).await;
+
+        // a genesis utxo has no inputs and one unspent output
+        assert_eq!(parsed.hash, tx_hash);
+        assert!(parsed.inputs.is_empty());
+        assert_eq!(parsed.outputs.len(), 1);
+        assert_eq!(parsed.outputs[0].output_index, 0);
+        assert_eq!(parsed.outputs[0].amount[0].unit, "lovelace");
+        assert_eq!(parsed.outputs[0].amount[0].quantity, amount.to_string());
+    }
+
+    #[tokio::test]
     async fn txs_by_hash_utxos_bad_request() {
         let app = TestApp::new();
         let path = format!("/txs/{INVALID_HASH}/utxos");

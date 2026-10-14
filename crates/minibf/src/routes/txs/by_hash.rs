@@ -64,6 +64,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn txs_by_hash_genesis_utxo() {
+        let app = TestApp::new();
+        let (tx_hash, amount) = genesis_utxo();
+        let path = format!("/txs/{tx_hash}");
+        let parsed: TxContent = get_ok(&app, &path).await;
+
+        // served like Blockfrost does: a synthetic tx in the genesis block
+        assert_eq!(parsed.hash, tx_hash);
+        assert_eq!(parsed.block, crate::hacks::GENESIS_HASH_PREVIEW);
+        assert_eq!(parsed.block_height, 0);
+        assert_eq!(parsed.utxo_count, 1);
+        assert_eq!(parsed.output_amount.len(), 1);
+        assert_eq!(parsed.output_amount[0].quantity, amount.to_string());
+    }
+
+    #[tokio::test]
     async fn txs_by_hash_not_found() {
         let app = TestApp::new();
         let path = format!("/txs/{MISSING_HASH}");
