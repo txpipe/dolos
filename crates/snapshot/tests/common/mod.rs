@@ -375,8 +375,8 @@ pub fn write_layer(
 ///
 /// Every log kind and every state kind appears, which is what makes the goldens
 /// freeze all thirty-five namespace-bearing kind strings: the namespace lives
-/// in the layer header now, and nowhere else on the wire. Each state kind appears
-/// once per populated shard in both the retained dump and the tip.
+/// in the layer header now, and nowhere else on the wire. Each state kind
+/// appears once per populated shard in both the retained dump and the tip.
 pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     use dolos_snapshot::layers::{
         blocks, digests as digests_layer, indexes as indexes_layer, logs,
