@@ -86,6 +86,16 @@ impl<D: Domain> Facade<D> {
             .ok_or(StatusCode::NOT_FOUND)
     }
 
+    /// Refuse, with a reply saying why, when the node keeps no materialized
+    /// views: an endpoint that reads one has nothing to read.
+    pub fn require_views(&self) -> Result<(), error::Error> {
+        if self.sync_config().materialized_views() {
+            Ok(())
+        } else {
+            Err(error::Error::ViewsNotMaterialized)
+        }
+    }
+
     pub fn get_tip_slot(&self) -> Result<BlockSlot, StatusCode> {
         let tip = self
             .state()
@@ -772,6 +782,7 @@ where
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
+    use dolos_testing::synthetic::SyntheticBlockConfig;
     use serde_json::{json, Value};
 
     use crate::test_support::TestApp;
@@ -833,5 +844,63 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let body: Value = serde_json::from_slice(&bytes).expect("json body for /blocks/slot/");
         assert_eq!(body["message"], json!("Missing or malformed block hash."));
+    }
+
+    /// The endpoints that read a materialized view answer 501 on a node that
+    /// keeps none, and the ledger endpoints answer as always.
+    #[tokio::test]
+    async fn view_backed_endpoints_answer_501_without_views() {
+        let app = TestApp::new_without_views(SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        });
+        let vectors = app.vectors().clone();
+
+        let view_backed = [
+            "/assets".to_string(),
+            format!("/assets/policy/{}", vectors.policy_id),
+            format!("/accounts/{}/addresses", vectors.stake_address),
+            format!("/accounts/{}/addresses/total", vectors.stake_address),
+            format!("/addresses/{}/total", vectors.address),
+        ];
+
+        for path in &view_backed {
+            let (status, bytes) = app.get_bytes(path).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_IMPLEMENTED,
+                "unexpected status {status} for {path} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+
+            let body: Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| panic!("no json body for {path}"));
+            assert_eq!(
+                body,
+                json!({
+                    "status_code": 501,
+                    "error": "Not Implemented",
+                    "message": "This node does not keep the materialized views this endpoint reads: sync.materialized_views is off.",
+                }),
+                "unexpected body for {path}"
+            );
+        }
+
+        let ledger = [
+            format!("/assets/{}", vectors.asset_unit),
+            format!("/accounts/{}", vectors.stake_address),
+            format!("/addresses/{}", vectors.address),
+        ];
+
+        for path in &ledger {
+            let (status, bytes) = app.get_bytes(path).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "unexpected status {status} for {path} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
     }
 }

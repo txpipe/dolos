@@ -312,6 +312,8 @@ where
     Option<PoolState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
+    domain.require_views()?;
+
     // Drop `from`/`to` before validation: Blockfrost never reads them here,
     // so a malformed or reversed window is ignored rather than rejected.
     params.from = None;
@@ -383,6 +385,8 @@ where
     Option<AccountState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
+    domain.require_views()?;
+
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
 

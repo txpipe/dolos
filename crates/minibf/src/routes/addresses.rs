@@ -639,6 +639,8 @@ pub async fn total<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    domain.require_views()?;
+
     let parsed = parse_address(&address)?;
 
     let chain = domain.get_chain_summary()?;

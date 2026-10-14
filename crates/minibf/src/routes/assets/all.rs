@@ -28,6 +28,8 @@ where
     D: Domain + Clone + Send + Sync + 'static,
     Option<AssetState>: From<D::Entity>,
 {
+    domain.require_views()?;
+
     let pagination = Pagination::try_from(params)?;
 
     // Native assets exist since Mary, so nothing before that era can appear.

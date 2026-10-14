@@ -6,7 +6,7 @@ use axum::{
     Router,
 };
 use dolos_core::{
-    config::{CardanoConfig, MinibfConfig},
+    config::{CardanoConfig, MinibfConfig, SyncConfig},
     import::ImportExt as _,
     Domain, StateStore,
 };
@@ -402,7 +402,13 @@ pub struct TestDomainBuilder {
 }
 
 impl TestDomainBuilder {
-    pub fn new_with_synthetic(mut cfg: SyntheticBlockConfig) -> Self {
+    pub fn new_with_synthetic(cfg: SyntheticBlockConfig) -> Self {
+        Self::new_with_synthetic_and_sync(cfg, SyncConfig::default())
+    }
+
+    /// A synthetic domain whose sync config is `sync` while the blocks
+    /// import, so what the import materializes follows it.
+    pub fn new_with_synthetic_and_sync(mut cfg: SyntheticBlockConfig, sync: SyncConfig) -> Self {
         let genesis = Arc::new(dolos_cardano::include::preview::load());
         let min_slot = {
             let temp = ToyDomain::new_with_genesis_and_config(
@@ -420,7 +426,8 @@ impl TestDomainBuilder {
         }
         let (blocks, vectors, chain_config) = build_synthetic_blocks(cfg);
 
-        let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+        let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None)
+            .with_sync_config(sync);
         domain
             .import_blocks(blocks.clone())
             .expect("failed to import synthetic blocks");
@@ -500,6 +507,14 @@ impl TestApp {
     ) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         setup(&domain, &vectors);
+        Self::from_domain(domain, vectors, None, None)
+    }
+
+    /// App on a node that keeps no materialized views
+    /// (`sync.materialized_views = false`).
+    pub fn new_without_views(cfg: SyntheticBlockConfig) -> Self {
+        let sync = SyncConfig::default().with_materialized_views(false);
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic_and_sync(cfg, sync).finish();
         Self::from_domain(domain, vectors, None, None)
     }
 

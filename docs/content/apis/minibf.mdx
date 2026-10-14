@@ -205,6 +205,20 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/txs/{tx_hash}/withdrawals`                               | Get withdrawals for a specific transaction               |
 | `/utils/addresses/xpub/{xpub}/{role}/{index}`              | Derive an address from an xpub                           |
 
+## Materialized views
+
+Some endpoints read a materialized view: a projection the node keeps beside the ledger for that endpoint, written as blocks roll (see [the data layer](../architecture/data-layer)). A node configured with `sync.materialized_views = false` keeps none of them, and these endpoints answer `501 Not Implemented` with a Blockfrost-shaped body saying so:
+
+| Endpoint                                    | View                     |
+| ------------------------------------------- | ------------------------ |
+| `/assets`                                   | first mints              |
+| `/assets/policy/{policy_id}`                | first mints by policy    |
+| `/accounts/{stake_address}/addresses`       | stake addresses          |
+| `/accounts/{stake_address}/addresses/total` | address and account stats |
+| `/addresses/{address}/total`                | address and payment stats |
+
+Every other endpoint answers as usual.
+
 ## Lifetime totals and `sync.max_history`
 
 `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` read per-epoch sums from the Stats period logs rather than folding blocks. When `sync.max_history` is set, housekeeping prunes those logs by slot like any other, so the sums and `tx_count` only cover the epochs the retained window still holds. Run with full history if you need true lifetime totals.
