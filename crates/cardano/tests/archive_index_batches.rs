@@ -355,7 +355,7 @@ fn an_input_produced_before_an_invalid_tx_is_not_tagged_by_it() {
     assert_eq!(datum_slots(&domain), vec![slot(PRODUCER)]);
     assert!(spent_slots(&domain, &chain.produced).is_empty());
 
-    // what it consumes, it is tagged by
+    // it is tagged by what it consumes, its collateral
     assert_eq!(
         address_slots(&domain, &collateral_address(1)),
         vec![invalid]
