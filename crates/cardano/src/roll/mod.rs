@@ -770,7 +770,7 @@ pub(crate) fn compute_delta<D: Domain>(
 mod tests {
     use std::collections::BTreeMap;
 
-    use dolos_core::EntityKey;
+    use dolos_core::{EntityKey, NsKey};
     use pallas::codec::utils::{NonEmptySet, NonZeroInt, Set};
     use pallas::crypto::hash::Hash;
     use pallas::ledger::primitives::conway::{
@@ -898,6 +898,11 @@ mod tests {
     /// Crawl a one-transaction Conway block whose transaction is valid or
     /// phase-2-invalid, and hand back the deltas it produced.
     fn crawl_single_tx_block(valid: bool) -> WorkDeltas {
+        crawl_block(valid, true)
+    }
+
+    /// `crawl_single_tx_block` on a node with or without the views.
+    fn crawl_block(valid: bool, views: bool) -> WorkDeltas {
         let (_, raw) =
             dolos_testing::blocks::make_conway_block_with_tx(SLOT, loaded_tx_body(), None, valid);
 
@@ -917,12 +922,50 @@ mod tests {
             &mut work,
             &utxos,
             DormancyContext::default(),
-            true,
+            views,
         );
 
         builder.crawl().unwrap();
 
         work.deltas
+    }
+
+    /// A node without views crawls the same ledger deltas as one with them,
+    /// and nothing in a view namespace.
+    #[test]
+    fn without_views_the_crawl_writes_ledger_namespaces_only() {
+        use dolos_core::NamespaceRole;
+
+        let role = |key: &NsKey| crate::model::namespace_role(key.ns()).expect("a model namespace");
+
+        let ledger = |deltas: &WorkDeltas| -> BTreeMap<NsKey, String> {
+            deltas
+                .entities
+                .iter()
+                .filter(|(key, _)| role(key) == NamespaceRole::Ledger)
+                .map(|(key, group)| (key.clone(), format!("{group:?}")))
+                .collect()
+        };
+
+        let with = crawl_block(true, true);
+        let without = crawl_block(true, false);
+
+        assert!(
+            with.entities
+                .keys()
+                .any(|key| role(key) == NamespaceRole::View),
+            "the fixture block contributes to no view"
+        );
+
+        assert!(
+            without
+                .entities
+                .keys()
+                .all(|key| role(key) == NamespaceRole::Ledger),
+            "a view namespace was written without views"
+        );
+
+        assert_eq!(ledger(&with), ledger(&without));
     }
 
     fn keys_in(deltas: &WorkDeltas, ns: &str) -> Vec<EntityKey> {

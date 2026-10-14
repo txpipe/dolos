@@ -70,6 +70,18 @@ pub struct SyncConfig {
 
     #[serde(default, skip_serializing_if = "SyncLimit::is_default")]
     pub sync_limit: SyncLimit,
+
+    /// Whether the node materializes the views: the namespaces kept for the
+    /// queries and endpoints that read them, which the ledger never consults
+    /// (`NamespaceRole::View`). On by default. Off, the roll writes none of
+    /// them, the epoch boundary seals none, and the endpoints they serve
+    /// answer that the node does not keep them.
+    ///
+    /// Decided before the first sync: a view is written only as blocks roll,
+    /// so turning it on later leaves it without the history synced while it
+    /// was off, until the node bootstraps again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    materialized_views: Option<bool>,
 }
 
 impl SyncConfig {
@@ -82,11 +94,21 @@ impl SyncConfig {
         self.pull_batch_size.unwrap_or(default_pull_batch_size())
     }
 
+    pub fn with_materialized_views(mut self, materialized_views: bool) -> Self {
+        self.materialized_views = Some(materialized_views);
+        self
+    }
+
+    pub fn materialized_views(&self) -> bool {
+        self.materialized_views.unwrap_or(true)
+    }
+
     pub fn is_default(&self) -> bool {
         self.pull_batch_size.is_none()
             && self.max_history.is_none()
             && self.max_rollback.is_none()
             && self.sync_limit.is_default()
+            && self.materialized_views.is_none()
     }
 }
 
@@ -1215,6 +1237,34 @@ mod tests {
         let restored: StorageConfig = serde_json::from_value(json).unwrap();
 
         assert!(matches!(restored.archive, ArchiveStoreConfig::InMemory));
+    }
+
+    /// The views are on unless the config says otherwise, and only an
+    /// explicit choice is written back.
+    #[test]
+    fn materialized_views_are_on_unless_switched_off() {
+        use serde_json::json;
+
+        let sync: SyncConfig = serde_json::from_value(json!({})).unwrap();
+        assert!(sync.materialized_views());
+        assert!(sync.is_default());
+        assert!(serde_json::to_value(&sync)
+            .unwrap()
+            .get("materialized_views")
+            .is_none());
+
+        let sync: SyncConfig =
+            serde_json::from_value(json!({ "materialized_views": false })).unwrap();
+        assert!(!sync.materialized_views());
+        assert!(!sync.is_default());
+        assert_eq!(
+            serde_json::to_value(&sync).unwrap()["materialized_views"],
+            json!(false)
+        );
+
+        assert!(!SyncConfig::default()
+            .with_materialized_views(false)
+            .materialized_views());
     }
 
     #[test]

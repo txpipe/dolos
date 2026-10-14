@@ -71,7 +71,7 @@ where
             &self.cache,
             domain.state(),
             &mut self.batch,
-            true,
+            domain.sync_config().materialized_views(),
         )?;
 
         // Load entities here so `compute` can apply deltas before WAL serialization;

@@ -8,7 +8,8 @@
 //! `EpochState.estart_progress`.
 //!
 //! After the per-shard loop, `finalize()` seals the period logs of every
-//! immutable epoch (`crate::periods`), then runs the global "Estart" pass:
+//! immutable epoch (`crate::periods`, skipped by a node that materializes no
+//! views), then runs the global "Estart" pass:
 //! pool / drep / proposal snapshot transitions, nonce transition, pot
 //! recalculation (`EpochTransition`), era transitions (if protocol version
 //! changes), and the cursor advance. The cursor moves only here, so a
@@ -195,13 +196,16 @@ where
 
         info!(epoch = context.starting_epoch_no(), "starting epoch");
 
-        crate::periods::seal_staged::<D>(
-            domain.state(),
-            domain.archive(),
-            &context.chain_summary,
-            &self.genesis,
-            context.starting_epoch_no(),
-        )?;
+        // A node without views staged nothing to seal.
+        if domain.sync_config().materialized_views() {
+            crate::periods::seal_staged::<D>(
+                domain.state(),
+                domain.archive(),
+                &context.chain_summary,
+                &self.genesis,
+                context.starting_epoch_no(),
+            )?;
+        }
 
         context.commit_finalize::<D>(domain.state(), self.slot)?;
 

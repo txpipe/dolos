@@ -8,6 +8,11 @@
 //! staged rows. Readers take the staged rows first and the sealed ones second,
 //! and per epoch the sealed row wins, so a seal running beside a read leaves
 //! its answer unchanged.
+//!
+//! Every namespace here is a materialized view (`NamespaceRole::View`): the
+//! ledger never reads one. A node with `sync.materialized_views` off stages
+//! nothing (`crate::roll::views`), seals nothing, and answers the endpoints
+//! these logs serve with an error saying so.
 
 use std::{collections::BTreeMap, ops::Range};
 
