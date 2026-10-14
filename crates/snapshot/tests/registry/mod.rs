@@ -56,9 +56,11 @@ pub mod enums;
 pub mod ground_rules;
 
 use dolos_cardano::model::{
-    AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FirstMintChunk, FixedNamespace, GovState, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolState, ProposalState, StagedFirstMint, StagedStakeAddress, StakeAddressesRow, StakeLog,
+    AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
+    EpochState, EraSummary, FirstMintChunk, FixedNamespace, GovState, PaymentStats,
+    PendingMirState, PendingRewardState, PolicyMintChunk, PoolState, ProposalState,
+    StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
+    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow, StakeLog,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -368,6 +370,69 @@ pub fn registry() -> Vec<Entry> {
                     hex: include_str!("goldens/staged-first-mints.rev2.hex"),
                 },
             ]
+        ),
+        entity_entry!(
+            enc_account_stats,
+            AccountStats,
+            canaries::account_stats,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/account-stats.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_address_stats,
+            AddressStats,
+            canaries::address_stats,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/address-stats.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_payment_stats,
+            PaymentStats,
+            canaries::payment_stats,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/payment-stats.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_staged_account_stats,
+            StagedAccountStats,
+            canaries::staged_account_stats,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/staged-account-stats.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_staged_address_stats,
+            StagedAddressStats,
+            canaries::staged_address_stats,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/staged-address-stats.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_staged_payment_addresses,
+            StagedPaymentAddress,
+            canaries::staged_payment_address,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/staged-payment-addresses.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_staged_payment_stats,
+            StagedPaymentStats,
+            canaries::staged_payment_stats,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/staged-payment-stats.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_staged_stake_addresses,

@@ -22,10 +22,12 @@
 use dolos_cardano::{
     indexes::archive_dimensions,
     model::{
-        AccountEpochLog, AccountKey, AccountState, AddressKey, AssetKey, AssetState, DRepKey,
-        DRepState, DatumKey, DatumState, EpochState, EraProtocol, EraSummary, FirstMintChunk,
-        FixedNamespace as _, GovState, PendingMirState, PendingRewardState, PolicyKey,
-        PolicyMintChunk, PoolKey, PoolState, ProposalKey, ProposalState, StagedFirstMint,
+        AccountEpochLog, AccountKey, AccountState, AccountStats, AddressKey, AddressStats,
+        AddressStatsKey, AssetKey, AssetState, DRepKey, DRepState, DatumKey, DatumState,
+        EpochState, EraProtocol, EraSummary, FirstMintChunk, FixedNamespace as _, GovState,
+        PaymentKey, PaymentStats, PaymentTail, PendingMirState, PendingRewardState, PolicyKey,
+        PolicyMintChunk, PoolKey, PoolState, ProposalKey, ProposalState, StagedAccountStats,
+        StagedAddressStats, StagedFirstMint, StagedPaymentAddress, StagedPaymentStats,
         StagedStakeAddress, StakeAddressesRow, StakeLog,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
@@ -89,13 +91,37 @@ pub fn populated_shards(ns: Namespace, shards: u8) -> Vec<u8> {
 /// key's first byte is `byte`, which picks its shard.
 pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
     let credential = AccountKey(StakeCredential::AddrKeyhash([byte; 28].into()));
+    let payment = PaymentKey([byte; 28].into());
+    let address = AddressStatsKey::Staked {
+        account: credential.clone(),
+        rest: vec![byte; 29],
+    };
 
     let key = match ns {
         AccountState::NS
         | AccountEpochLog::NS
+        | AccountStats::NS
         | PendingMirState::NS
         | PendingRewardState::NS
         | StakeAddressesRow::NS => keys::encode(&credential),
+        AddressStats::NS => keys::encode(&address),
+        PaymentStats::NS => keys::encode(&payment),
+        StagedAccountStats::NS => keys::encode(&StagedKey {
+            group: credential,
+            epoch: u64::from(byte),
+            member: (),
+        }),
+        StagedAddressStats::NS => keys::encode(&(u64::from(byte), address)),
+        StagedPaymentAddress::NS => keys::encode(&StagedKey {
+            group: payment,
+            epoch: u64::from(byte),
+            member: PaymentTail(vec![byte; 29]),
+        }),
+        StagedPaymentStats::NS => keys::encode(&StagedKey {
+            group: payment,
+            epoch: u64::from(byte),
+            member: (),
+        }),
         AssetState::NS => keys::encode(&AssetKey([byte; 32].into())),
         DatumState::NS => keys::encode(&DatumKey([byte; 32].into())),
         DRepState::NS => keys::encode(&DRepKey(DRep::Key([byte; 28].into()))),
@@ -142,7 +168,7 @@ pub fn state_scope(shard: u8) -> StateScope {
 ///
 /// Below [`EPOCH`] rather than equal to it, and that is the interesting
 /// choice: a dump cut at the sequence *is* the tip, byte for byte, so a
-/// fixture that used one would write seventeen kinds' worth of layers whose
+/// fixture that used one would write twenty-six kinds' worth of layers whose
 /// digests are already pinned and freeze nothing new. A past epoch's dump has
 /// its own header, its own `diffId`, and the descriptor shape decision 0026
 /// added — which is what a golden is for.
@@ -222,7 +248,7 @@ pub fn indexes() -> Vec<IndexRecord> {
 /// The namespace is no longer in the record — it is the layer's kind — so what
 /// distinguishes one log layer from another here is the record's key and value,
 /// and both are derived from the namespace's position in [`LOG_NAMESPACES`].
-/// The seven kind strings are frozen by the layer headers instead, which is
+/// The nine kind strings are frozen by the layer headers instead, which is
 /// where they now live on the wire.
 pub fn logs(ns: Namespace) -> Vec<LogRecord> {
     let i = LOG_NAMESPACES
@@ -242,9 +268,9 @@ pub fn logs(ns: Namespace) -> Vec<LogRecord> {
 /// One layer per namespace, so a kind's shards are the ones its spec'd count
 /// allows and its fixture keys reach: both of [`SHARDS`] for `assets`,
 /// `datums` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`, and shard 0
-/// for the thirteen single blobs. Twenty layers, and every namespace among
-/// them — which is what `the_golden_state_layers_cover_every_namespace` holds
-/// this to.
+/// for the twenty-two single blobs. Twenty-nine layers, and every namespace
+/// among them — which is what `the_golden_state_layers_cover_every_namespace`
+/// holds this to.
 pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
     STATE_KINDS
         .into_iter()
@@ -261,7 +287,7 @@ pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
 /// The namespace is no longer in the record — it is the layer's kind — so what
 /// distinguishes one state layer's content from another's is the record's key
 /// and value, both derived from the namespace's position in [`NAMESPACES`].
-/// The eighteen namespace strings are frozen by the kinds in the layer
+/// The twenty-six namespace strings are frozen by the kinds in the layer
 /// headers instead, which is where they now live on the wire.
 ///
 /// The key's first byte carries the shard in its high nibble, so the record

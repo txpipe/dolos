@@ -19,13 +19,14 @@ use blockfrost_openapi::models::{
     account_transactions_content_inner::AccountTransactionsContentInner,
     account_withdrawal_content_inner::AccountWithdrawalContentInner,
     address_utxo_content_inner::AddressUtxoContentInner,
+    tx_content_output_amount_inner::TxContentOutputAmountInner,
 };
 
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::{AccountState, DRepState, PoolState},
     pallas_extras,
-    periods::stake_addresses,
+    periods::{stake_addresses, stats},
     AccountEpochLog, AccountKey, ChainSummary, PoolHash,
 };
 use dolos_core::async_query::BlockMetaResolver;
@@ -46,7 +47,7 @@ use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 use crate::{
     error::Error,
     inputs::{for_each_touched_output, InputDeps, InputResolver},
-    mapping::{self, bech32_drep, bech32_pool, AssetTotals, IntoModel},
+    mapping::{self, bech32_drep, bech32_pool, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -356,67 +357,10 @@ where
     Ok(Json(items))
 }
 
-/// Fold one block's txs into an account's lifetime totals.
-///
-/// Produced outputs are received and resolved inputs are sent, the same split
-/// `/addresses/{address}/total` makes for a single address; a tx counts once
-/// however many of the account's addresses it touches.
-async fn sum_account_block_txs<D>(
-    domain: &Facade<D>,
-    deps: &mut InputDeps,
-    account: &[u8],
-    block: &[u8],
-    received: &mut AssetTotals,
-    sent: &mut AssetTotals,
-    tx_count: &mut usize,
-) -> Result<(), StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let txs = block.txs();
-
-    let mut resolver = deps.prepare(domain, txs.iter()).await?;
-
-    for tx in txs.iter() {
-        let mut matched = false;
-
-        for (_, output) in tx.produces() {
-            let address = output
-                .address()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if address_belongs_to_account(&address, account) {
-                received.add_output(&output);
-                matched = true;
-            }
-        }
-
-        for input in tx.consumes() {
-            if let Some(output) = resolver.resolve(&input)? {
-                let address = output
-                    .address()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                if address_belongs_to_account(&address, account) {
-                    sent.add_output(&output);
-                    matched = true;
-                }
-            }
-        }
-
-        if matched {
-            *tx_count += 1;
-        }
-    }
-
-    Ok(())
-}
-
-fn account_amounts(totals: AssetTotals) -> Vec<AccountAddressesTotalReceivedSumInner> {
-    totals
-        .into_amounts()
+fn account_amounts(
+    amounts: Vec<TxContentOutputAmountInner>,
+) -> Vec<AccountAddressesTotalReceivedSumInner> {
+    amounts
         .into_iter()
         .map(|amount| AccountAddressesTotalReceivedSumInner {
             unit: amount.unit,
@@ -426,21 +370,11 @@ fn account_amounts(totals: AssetTotals) -> Vec<AccountAddressesTotalReceivedSumI
 }
 
 /// `GET /accounts/{stake_address}/addresses/total`: lifetime sums and tx count
-/// across every address of an account.
+/// across every address of an account, from the Stats period logs.
 ///
-/// The totals are folded from the archive on each request rather than kept as
-/// state: a per-account asset breakdown is unbounded — one row grows with every
-/// distinct asset the account ever touched — and it would ride along in every
-/// stele and every state rebuild. The account therefore pays the same full
-/// scan `/addresses/{address}/total` already pays for a single address, which
-/// also means the answer only covers the history the archive still holds.
-///
-/// Pointer-delegated addresses are out of scope. The archive's stake tag and
-/// this fold both resolve an output's account through
-/// `pallas_extras::shelley_address_to_stake_address`, which has no answer for
-/// a pointer, so those blocks are never tagged and so never scanned. Every
-/// other account endpoint reads that same tag, so the blind spot is the
-/// family's, not this endpoint's.
+/// Pointer addresses are out of scope: an output's account is resolved
+/// through `pallas_extras::address_account`, which has no answer for a
+/// pointer, as for every other account endpoint.
 pub async fn by_stake_addresses_total<D>(
     Path(stake_address): Path<String>,
     State(domain): State<Facade<D>>,
@@ -456,52 +390,34 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    let account = account_key.address.to_vec();
-    let end_slot = domain.get_tip_slot()?;
+    let chain = domain.get_chain_summary()?;
+    let (tip_epoch, _) = chain.slot_epoch(domain.get_tip_slot()?);
+    let epochs = chain.first_shelley_epoch()..=tip_epoch;
+    let account = account_key.account.clone();
 
-    let stream = domain
+    let totals = domain
         .query()
-        .blocks_by_stake_stream(&account, 0, end_slot, SlotOrder::Asc);
-
-    let mut received = AssetTotals::default();
-    let mut sent = AssetTotals::default();
-    let mut tx_count: usize = 0;
-    let mut deps = InputDeps::default();
-
-    let mut stream = Box::pin(stream);
-
-    while let Some(res) = stream.next().await {
-        let (_slot, block) = res.map_err(|err| {
+        .run_blocking(move |domain| {
+            stats::account_totals(&domain, &chain, epochs, &account).map_err(DomainError::from)
+        })
+        .await
+        .map_err(|err| {
             tracing::error!(?err);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-
-        let Some(block) = block else {
-            continue;
-        };
-
-        sum_account_block_txs(
-            &domain,
-            &mut deps,
-            &account,
-            &block,
-            &mut received,
-            &mut sent,
-            &mut tx_count,
-        )
-        .await?;
-    }
 
     let stake_address = account_key
         .address
         .to_bech32()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let (received_sum, sent_sum) = mapping::stats_amounts(&totals);
+
     let model = AccountAddressesTotal {
         stake_address,
-        received_sum: account_amounts(received),
-        sent_sum: account_amounts(sent),
-        tx_count: tx_count as i32,
+        received_sum: account_amounts(received_sum),
+        sent_sum: account_amounts(sent_sum),
+        tx_count: totals.tx_count as i32,
     };
 
     Ok(Json(model))

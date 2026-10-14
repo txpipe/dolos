@@ -1,12 +1,12 @@
 //! The closed set of state namespaces a Dolos stele carries.
 //!
-//! ADR-004 defines state as one uniform key-value space: the eighteen entity
+//! ADR-004 defines state as one uniform key-value space: the twenty-five entity
 //! namespaces of `dolos_cardano::model::build_schema()` plus [`UTXOS`], which
 //! is the UTxO set wearing the same shape as everything else. That uniformity
 //! is deliberate — it means the format has one state record, and the planned
 //! refactor folding UTxOs into the entity system (#1042) is invisible to it.
 //!
-//! The names are not spelled here. Eighteen of them are read off the entity
+//! The names are not spelled here. Twenty-five of them are read off the entity
 //! types' own `FixedNamespace::NS`, and `utxos` is defined here because nothing
 //! else in the tree defines it. A namespace that exists in `build_schema` and
 //! not in [`NAMESPACES`] would be silently dropped from every published stele,
@@ -14,9 +14,11 @@
 //! that a build failure instead.
 
 use dolos_cardano::model::{
-    AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FirstMintChunk, FixedNamespace, GovState, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolState, ProposalState, StagedFirstMint, StagedStakeAddress, StakeAddressesRow, StakeLog,
+    AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
+    EpochState, EraSummary, FirstMintChunk, FixedNamespace, GovState, PaymentStats,
+    PendingMirState, PendingRewardState, PolicyMintChunk, PoolState, ProposalState,
+    StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
+    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow, StakeLog,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -34,9 +36,11 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against `build_schema()` directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 19] = [
+pub const NAMESPACES: [Namespace; 26] = [
     AccountEpochLog::NS,
+    AccountStats::NS,
     AccountState::NS,
+    AddressStats::NS,
     AssetState::NS,
     DatumState::NS,
     DRepState::NS,
@@ -44,12 +48,17 @@ pub const NAMESPACES: [Namespace; 19] = [
     EraSummary::NS,
     FirstMintChunk::NS,
     GovState::NS,
+    PaymentStats::NS,
     PendingMirState::NS,
     PendingRewardState::NS,
     PolicyMintChunk::NS,
     PoolState::NS,
     ProposalState::NS,
+    StagedAccountStats::NS,
+    StagedAddressStats::NS,
     StagedFirstMint::NS,
+    StagedPaymentAddress::NS,
+    StagedPaymentStats::NS,
     StagedStakeAddress::NS,
     StakeAddressesRow::NS,
     StakeLog::NS,
@@ -75,9 +84,11 @@ pub const NAMESPACES: [Namespace; 19] = [
 /// fixed width (decision 0051), and each of those moved one revision for it.
 /// Kept beside [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 19] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
     (AccountEpochLog::NS, 1),
+    (AccountStats::NS, 1),
     (AccountState::NS, 1),
+    (AddressStats::NS, 1),
     (AssetState::NS, 1),
     (DatumState::NS, 1),
     (DRepState::NS, 2),
@@ -85,12 +96,17 @@ pub const SCHEMA_REVS: [(Namespace, u64); 19] = [
     (EraSummary::NS, 2),
     (FirstMintChunk::NS, 2),
     (GovState::NS, 4),
+    (PaymentStats::NS, 1),
     (PendingMirState::NS, 1),
     (PendingRewardState::NS, 1),
     (PolicyMintChunk::NS, 1),
     (PoolState::NS, 2),
     (ProposalState::NS, 4),
+    (StagedAccountStats::NS, 1),
+    (StagedAddressStats::NS, 1),
     (StagedFirstMint::NS, 2),
+    (StagedPaymentAddress::NS, 1),
+    (StagedPaymentStats::NS, 1),
     (StagedStakeAddress::NS, 1),
     (StakeAddressesRow::NS, 1),
     (StakeLog::NS, 2),
@@ -122,11 +138,18 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         PendingRewardState::NS => exact::<<PendingRewardState as StateEntity>::Key>(key),
         PoolState::NS => exact::<<PoolState as StateEntity>::Key>(key),
         ProposalState::NS => exact::<<ProposalState as StateEntity>::Key>(key),
+        StagedAccountStats::NS => exact::<<StagedAccountStats as StateEntity>::Key>(key),
+        StagedAddressStats::NS => exact::<<StagedAddressStats as StateEntity>::Key>(key),
         StagedFirstMint::NS => exact::<<StagedFirstMint as StateEntity>::Key>(key),
+        StagedPaymentAddress::NS => exact::<<StagedPaymentAddress as StateEntity>::Key>(key),
+        StagedPaymentStats::NS => exact::<<StagedPaymentStats as StateEntity>::Key>(key),
         StagedStakeAddress::NS => exact::<<StagedStakeAddress as StateEntity>::Key>(key),
         UTXOS => exact::<[u8; UTXO_KEY_LEN]>(key),
         AccountEpochLog::NS
+        | AccountStats::NS
+        | AddressStats::NS
         | FirstMintChunk::NS
+        | PaymentStats::NS
         | PolicyMintChunk::NS
         | StakeAddressesRow::NS
         | StakeLog::NS => {
@@ -144,8 +167,11 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
 pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
     let checked = match ns {
         AccountEpochLog::NS => exact::<<AccountEpochLog as LogEntity>::Key>(key),
+        AccountStats::NS => exact::<<AccountStats as LogEntity>::Key>(key),
+        AddressStats::NS => exact::<<AddressStats as LogEntity>::Key>(key),
         EpochState::NS => exact::<<EpochState as LogEntity>::Key>(key),
         FirstMintChunk::NS => exact::<<FirstMintChunk as LogEntity>::Key>(key),
+        PaymentStats::NS => exact::<<PaymentStats as LogEntity>::Key>(key),
         PolicyMintChunk::NS => exact::<<PolicyMintChunk as LogEntity>::Key>(key),
         StakeAddressesRow::NS => exact::<<StakeAddressesRow as LogEntity>::Key>(key),
         StakeLog::NS => exact::<<StakeLog as LogEntity>::Key>(key),
