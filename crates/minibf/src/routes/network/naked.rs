@@ -54,11 +54,11 @@ where
 
     let res = domain
         .cache
-        .get_or_fetch_blocking(TTL, fetcher)
+        .get_or_fetch_blocking(TTL, domain.query_limiter(), fetcher)
         .await
         .map_err(|e| match e {
             crate::cache::CacheError::Inner(status) => status,
-            crate::cache::CacheError::JoinError(e) => {
+            e => {
                 tracing::error!("cache refresh task failed: {:?}", e);
                 StatusCode::INTERNAL_SERVER_ERROR
             }
