@@ -35,6 +35,7 @@ pub(crate) mod inputs;
 pub(crate) mod mapping;
 mod pagination;
 mod routes;
+pub(crate) mod scan;
 #[cfg(test)]
 mod test_support;
 

@@ -114,6 +114,143 @@ fn ensure_pool_aligned(
     })
 }
 
+/// The pool half of [`StakeSnapshot::load_globals`], fed one pool at a time.
+///
+/// A caller that reads the store in chunks feeds every pool here, then every
+/// account to the [`GlobalsAccountPass`] that [`Self::accounts`] returns.
+pub struct GlobalsPoolPass {
+    snapshot: StakeSnapshot,
+    current_epoch: u64,
+    stake_epoch: u64,
+    protocol: EraProtocol,
+}
+
+impl GlobalsPoolPass {
+    pub fn new(current_epoch: u64, stake_epoch: u64, protocol: EraProtocol) -> Self {
+        Self {
+            snapshot: StakeSnapshot::default(),
+            current_epoch,
+            stake_epoch,
+            protocol,
+        }
+    }
+
+    pub fn track(&mut self, pool: PoolState) -> Result<(), ChainError> {
+        // Check ALL pools, not just admitted ones, so a pool lagging out of
+        // the admission window is caught rather than silently dropped.
+        ensure_pool_aligned(&pool.operator, &pool.snapshot, self.current_epoch)?;
+
+        // Sum blocks from ALL pools that have mark() data for the performance epoch.
+        // This is needed for epoch_blocks() denominator in apparent performance.
+        if let Some(mark_snapshot) = pool.snapshot.mark() {
+            self.snapshot.performance_epoch_pool_blocks += mark_snapshot.blocks_minted as u64;
+        }
+
+        // Only include pools that existed at the stake snapshot epoch for
+        // stake-based calculations (rewards, delegation, etc.)
+        if pool.snapshot.snapshot_at(self.stake_epoch).is_some() {
+            self.snapshot.pools.insert(pool.operator, pool.snapshot);
+        }
+
+        Ok(())
+    }
+
+    /// End the pool half, once every pool was tracked.
+    pub fn accounts(self) -> GlobalsAccountPass {
+        // Build owner-credential → pools-they-own index from the same
+        // go-snapshot params that `define_rewards` passes to
+        // `live_pledge`. This is shard-agnostic: owners can be in any
+        // first-byte prefix, so the index is built once over every pool
+        // and then consulted while iterating accounts globally.
+        let mut owner_to_pools: HashMap<StakeCredential, Vec<PoolHash>> = HashMap::new();
+        for (pool_hash, pool_snapshot) in &self.snapshot.pools {
+            let Some(go_snapshot) = pool_snapshot.go() else {
+                continue;
+            };
+            for owner_hash in &go_snapshot.params.pool_owners {
+                let cred = pallas_extras::keyhash_to_stake_cred(*owner_hash);
+                owner_to_pools.entry(cred).or_default().push(*pool_hash);
+            }
+        }
+
+        GlobalsAccountPass {
+            snapshot: self.snapshot,
+            owner_to_pools,
+            stake_epoch: self.stake_epoch,
+            protocol: self.protocol,
+        }
+    }
+}
+
+/// The account half of [`StakeSnapshot::load_globals`], fed one account at a
+/// time.
+pub struct GlobalsAccountPass {
+    snapshot: StakeSnapshot,
+    owner_to_pools: HashMap<StakeCredential, Vec<PoolHash>>,
+    stake_epoch: u64,
+    protocol: EraProtocol,
+}
+
+impl GlobalsAccountPass {
+    pub fn track(&mut self, account: &AccountState) -> Result<(), ChainError> {
+        let Some(pool) = account.delegated_pool_at(self.stake_epoch) else {
+            return Ok(());
+        };
+
+        let Some(pool_state) = self.snapshot.pools.get(pool) else {
+            return Ok(());
+        };
+
+        let Some(stake_snapshot) = pool_state.snapshot_at(self.stake_epoch) else {
+            return Ok(());
+        };
+
+        if stake_snapshot.is_retired {
+            return Ok(());
+        }
+
+        let stake_value = account.stake.snapshot_at(self.stake_epoch);
+        let stake = stake_value
+            .map(|x| x.total_for_era(self.protocol))
+            .unwrap_or_default();
+
+        // in_shard = false: globals pass keeps only pool-level totals,
+        // not the per-account map.
+        self.snapshot
+            .track_stake(&account.credential, *pool, stake, false)?;
+
+        // If this account is a declared owner of the pool it
+        // delegates to, contribute its stake to the pool's live
+        // pledge. Must be done in `load_globals` (not
+        // `merge_shard`) because owners can live in any shard while
+        // every shard needs the *full* live pledge to reproduce
+        // `pool_rewards` faithfully.
+        if let Some(owned_pools) = self.owner_to_pools.get(&account.credential) {
+            if owned_pools.contains(pool) {
+                *self.snapshot.pool_live_pledges.entry(*pool).or_insert(0) += stake;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// End the pass, once every account was tracked.
+    pub fn finish(self) -> StakeSnapshot {
+        let snapshot = self.snapshot;
+
+        for (pool_id, stake) in snapshot.pool_stake.iter() {
+            trace!(%pool_id, %stake, "pool stake");
+        }
+
+        trace!(
+            active_stake = %snapshot.active_stake_sum,
+            "stake aggregation"
+        );
+
+        snapshot
+    }
+}
+
 impl StakeSnapshot {
     fn track_stake(
         &mut self,
@@ -177,99 +314,21 @@ impl StakeSnapshot {
         stake_epoch: u64,
         protocol: EraProtocol,
     ) -> Result<Self, ChainError> {
-        let mut snapshot = Self::default();
+        let mut pools = GlobalsPoolPass::new(current_epoch, stake_epoch, protocol);
 
-        let pools = state.iter_entities_typed::<PoolState>(None)?;
-
-        for record in pools {
+        for record in state.iter_entities_typed::<PoolState>(None)? {
             let (_, pool) = record?;
-
-            // Check ALL pools, not just admitted ones, so a pool lagging out of
-            // the admission window is caught rather than silently dropped.
-            ensure_pool_aligned(&pool.operator, &pool.snapshot, current_epoch)?;
-
-            // Sum blocks from ALL pools that have mark() data for the performance epoch.
-            // This is needed for epoch_blocks() denominator in apparent performance.
-            if let Some(mark_snapshot) = pool.snapshot.mark() {
-                snapshot.performance_epoch_pool_blocks += mark_snapshot.blocks_minted as u64;
-            }
-
-            // Only include pools that existed at the stake snapshot epoch for
-            // stake-based calculations (rewards, delegation, etc.)
-            if pool.snapshot.snapshot_at(stake_epoch).is_some() {
-                snapshot.pools.insert(pool.operator, pool.snapshot);
-            }
+            pools.track(pool)?;
         }
 
-        // Build owner-credential → pools-they-own index from the same
-        // go-snapshot params that `define_rewards` passes to
-        // `live_pledge`. This is shard-agnostic: owners can be in any
-        // first-byte prefix, so the index is built once over every pool
-        // and then consulted while iterating accounts globally.
-        let mut owner_to_pools: HashMap<StakeCredential, Vec<PoolHash>> = HashMap::new();
-        for (pool_hash, pool_snapshot) in &snapshot.pools {
-            let Some(go_snapshot) = pool_snapshot.go() else {
-                continue;
-            };
-            for owner_hash in &go_snapshot.params.pool_owners {
-                let cred = pallas_extras::keyhash_to_stake_cred(*owner_hash);
-                owner_to_pools.entry(cred).or_default().push(*pool_hash);
-            }
-        }
+        let mut accounts = pools.accounts();
 
-        let accounts = state.iter_entities_typed::<AccountState>(None)?;
-
-        for record in accounts {
+        for record in state.iter_entities_typed::<AccountState>(None)? {
             let (_, account) = record?;
-
-            let Some(pool) = account.delegated_pool_at(stake_epoch) else {
-                continue;
-            };
-
-            let Some(pool_state) = snapshot.pools.get(pool) else {
-                continue;
-            };
-
-            let Some(stake_snapshot) = pool_state.snapshot_at(stake_epoch) else {
-                continue;
-            };
-
-            if stake_snapshot.is_retired {
-                continue;
-            }
-
-            let stake_value = account.stake.snapshot_at(stake_epoch);
-            let stake = stake_value
-                .map(|x| x.total_for_era(protocol))
-                .unwrap_or_default();
-
-            // in_shard = false: globals pass keeps only pool-level totals,
-            // not the per-account map.
-            snapshot.track_stake(&account.credential, *pool, stake, false)?;
-
-            // If this account is a declared owner of the pool it
-            // delegates to, contribute its stake to the pool's live
-            // pledge. Must be done in `load_globals` (not
-            // `merge_shard`) because owners can live in any shard while
-            // every shard needs the *full* live pledge to reproduce
-            // `pool_rewards` faithfully.
-            if let Some(owned_pools) = owner_to_pools.get(&account.credential) {
-                if owned_pools.contains(pool) {
-                    *snapshot.pool_live_pledges.entry(*pool).or_insert(0) += stake;
-                }
-            }
+            accounts.track(&account)?;
         }
 
-        for (pool_id, stake) in snapshot.pool_stake.iter() {
-            trace!(%pool_id, %stake, "pool stake");
-        }
-
-        trace!(
-            active_stake = %snapshot.active_stake_sum,
-            "stake aggregation"
-        );
-
-        Ok(snapshot)
+        Ok(accounts.finish())
     }
 
     /// Add the per-account leg of the stake snapshot for one shard.

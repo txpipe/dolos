@@ -17,7 +17,7 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 use itertools::Either;
 use pallas::ledger::{
     addresses::{Address, ShelleyPaymentPart, StakePayload},
-    traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx},
+    traverse::{MultiEraOutput, MultiEraTx},
 };
 
 use dolos_cardano::{
@@ -31,7 +31,7 @@ use dolos_core::{BlockBody, BlockSlot, Domain, DomainError, StateStore as _, Txo
 
 use crate::{
     error::Error,
-    inputs::{tx_touches_output, InputDeps, InputResolver},
+    inputs::{match_block_txs, tx_touches_output, InputDeps, InputResolver},
     mapping::{
         aggregate_assets, stats_amounts, AddressExtendedModelBuilder, AddressKind,
         AddressModelBuilder, IntoModel,
@@ -133,18 +133,22 @@ fn parse_address(address: &str) -> Result<ParsedAddress, Error> {
     Err(Error::InvalidAddress)
 }
 
-fn refs_for_address<D: Domain>(
-    domain: &Facade<D>,
-    address: &str,
-) -> Result<HashSet<TxoRef>, Error> {
+/// The live UTxO refs of `address`, read on the blocking pool.
+async fn refs_for_address<D>(domain: &Facade<D>, address: &str) -> Result<HashSet<TxoRef>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
     let parsed = parse_address(address)?;
-    refs_for_parsed_address(domain, &parsed)
+
+    Ok(domain
+        .blocking(move |domain| refs_for_parsed_address(&domain, &parsed))
+        .await?)
 }
 
 fn refs_for_parsed_address<D: Domain>(
     domain: &Facade<D>,
     parsed: &ParsedAddress,
-) -> Result<HashSet<TxoRef>, Error> {
+) -> Result<HashSet<TxoRef>, StatusCode> {
     match parsed {
         ParsedAddress::Payment { key, .. } => {
             Ok(domain.state().utxos_by_payment(key).map_err(|err| {
@@ -366,7 +370,7 @@ where
 {
     let pagination = Pagination::try_from(params)?;
 
-    let refs = refs_for_address(&domain, &address)?;
+    let refs = refs_for_address(&domain, &address).await?;
 
     // If the address is not seen on the chain, send 404.
     if refs.is_empty() {
@@ -397,16 +401,23 @@ where
     // narrows the refs to the outputs that hold it.
     let (refs, filter) = if &asset == "lovelace" {
         (
-            refs_for_address(&domain, &address)?,
+            refs_for_address(&domain, &address).await?,
             super::utxos::UtxoFilter::AdaOnly,
         )
     } else {
-        let refs = refs_for_address(&domain, &address)?;
+        let refs = refs_for_address(&domain, &address).await?;
         let asset = super::assets::decode_asset_subject(&asset)?;
-        let asset_refs = domain
-            .state()
-            .utxos_by_asset(&asset)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let asset_refs = {
+            let asset = asset.clone();
+            domain
+                .blocking(move |domain| {
+                    domain
+                        .state()
+                        .utxos_by_asset(&asset)
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                })
+                .await?
+        };
 
         if asset_refs.is_empty() {
             if is_asset_in_chain(&domain, &asset).await? {
@@ -467,39 +478,26 @@ async fn find_txs<D>(
     address: &VKeyOrAddress,
     chain: &ChainSummary,
     pagination: &Pagination,
-    block: &[u8],
+    block: BlockBody,
 ) -> Result<Vec<AddressTransactionsContentInner>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let address = address.clone();
+    let matched = match_block_txs(domain, deps, pagination, block, move |resolver, tx| {
+        has_address(resolver, &address, tx)
+    })
+    .await?;
 
-    let txs = block.txs();
-
-    // only the txs that will actually be scanned contribute dependencies
-    let scanned = txs
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| !pagination.should_skip(block.number(), *idx))
-        .map(|(_, tx)| tx);
-
-    let mut resolver = deps.prepare(domain, scanned).await?;
-
-    let mut matches = vec![];
-
-    for (idx, tx) in txs.iter().enumerate() {
-        if !pagination.should_skip(block.number(), idx) && has_address(&mut resolver, address, tx)?
-        {
-            let model = AddressTransactionsContentInner {
-                tx_hash: hex::encode(tx.hash().as_slice()),
-                tx_index: idx as i32,
-                block_height: block.number() as i32,
-                block_time: chain.slot_time(block.slot()) as i32,
-            };
-
-            matches.push(model);
-        }
-    }
+    let mut matches: Vec<_> = matched
+        .into_iter()
+        .map(|tx| AddressTransactionsContentInner {
+            tx_hash: hex::encode(tx.hash.as_slice()),
+            tx_index: tx.index as i32,
+            block_height: tx.block_number as i32,
+            block_time: chain.slot_time(tx.block_slot) as i32,
+        })
+        .collect();
 
     if matches!(pagination.order, Order::Desc) {
         matches = matches.into_iter().rev().collect();
@@ -546,7 +544,7 @@ where
             continue;
         };
 
-        let mut txs = find_txs(&domain, &mut deps, &address, &chain, &pagination, &block)
+        let mut txs = find_txs(&domain, &mut deps, &address, &chain, &pagination, block)
             .await
             .map_err(Error::Code)?;
         matches.append(&mut txs);
@@ -610,7 +608,7 @@ where
             continue;
         };
 
-        let mut txs = find_txs(&domain, &mut deps, &address, &chain, &pagination, &block)
+        let mut txs = find_txs(&domain, &mut deps, &address, &chain, &pagination, block)
             .await
             .map_err(Error::Code)?;
         matches.append(&mut txs);
@@ -701,7 +699,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{health_beside, TestApp, TestFault, SLOW_READ};
     use blockfrost_openapi::models::{
         address_content::{AddressContent, Type as AddressType},
         address_content_extended::Type as AddressExtendedType,
@@ -1421,5 +1419,13 @@ mod tests {
         let addr = "invalid_address";
         let parsed = parse_address(addr);
         assert!(matches!(parsed, Err(Error::InvalidAddress)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_utxo_listing_does_not_stall_health() {
+        let app = TestApp::new_with_fault(Some(TestFault::SlowUtxoReads(SLOW_READ)));
+        let path = format!("/addresses/{}/utxos", app.vectors().address);
+
+        assert_eq!(health_beside(&app, &path).await, StatusCode::OK);
     }
 }
