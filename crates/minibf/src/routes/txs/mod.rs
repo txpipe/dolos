@@ -20,7 +20,8 @@ use dolos_cardano::{indexes::AsyncCardanoQueryExt, AccountState, DRepState, Pool
 use dolos_core::Domain;
 
 use crate::{
-    hacks, log_and_500,
+    hacks::genesis_tx,
+    log_and_500,
     mapping::{txs::TxModelBuilder, IntoModel as _},
     Facade,
 };
@@ -40,7 +41,7 @@ where
     let (raw, order) = match domain.get_block_by_tx_hash(&hash).await {
         Ok(block) => block,
         Err(StatusCode::NOT_FOUND) => {
-            return Ok(Json(hacks::genesis_tx_content_for_hash(&domain, &hash)?));
+            return Ok(Json(genesis_tx::content_for_hash(&domain, &hash)?));
         }
         Err(err) => return Err(err),
     };
@@ -84,9 +85,7 @@ where
     let (raw, order) = match domain.get_block_by_tx_hash(&hash).await {
         Ok(block) => block,
         Err(StatusCode::NOT_FOUND) => {
-            return Ok(Json(
-                hacks::genesis_tx_utxos_for_hash(&domain, &hash).await?,
-            ));
+            return Ok(Json(genesis_tx::utxos_for_hash(&domain, &hash).await?));
         }
         Err(err) => return Err(err),
     };
