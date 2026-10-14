@@ -46,7 +46,9 @@ use crate::{
 };
 
 mod all;
+mod utxos;
 pub use all::all;
+pub use utxos::by_subject_utxos;
 
 struct OnchainMetadata {
     version: Option<OnchainMetadataStandard>,
@@ -978,7 +980,42 @@ where
 }
 
 #[cfg(test)]
+mod testing {
+    use axum::http::StatusCode;
+
+    use crate::test_support::TestApp;
+
+    pub fn invalid_assets() -> Vec<String> {
+        vec![
+            // non-hex characters
+            "not-hex-asset".to_string(),
+            // valid hex, shorter than a policy id
+            "abcd".to_string(),
+            // valid hex, longer than a policy id plus the longest asset name
+            "f".repeat(122),
+            // valid length, non-hex characters
+            "z".repeat(56),
+        ]
+    }
+
+    pub fn missing_asset() -> &'static str {
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+
+    pub async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::testing::*;
     use super::*;
     use crate::test_support::{first_mint_chain, first_mint_policies, TestApp, TestFault};
     use blockfrost_openapi::models::asset::Asset;
@@ -1025,33 +1062,6 @@ mod tests {
         }
 
         subjects
-    }
-
-    fn invalid_assets() -> Vec<String> {
-        vec![
-            // non-hex characters
-            "not-hex-asset".to_string(),
-            // valid hex, shorter than a policy id
-            "abcd".to_string(),
-            // valid hex, longer than a policy id plus the longest asset name
-            "f".repeat(122),
-            // valid length, non-hex characters
-            "z".repeat(56),
-        ]
-    }
-
-    fn missing_asset() -> &'static str {
-        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-    }
-
-    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
-        let (status, bytes) = app.get_bytes(path).await;
-        assert_eq!(
-            status,
-            expected,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
     }
 
     #[tokio::test]
