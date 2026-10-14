@@ -18,7 +18,7 @@ use dolos_core::{ChainError, Genesis};
 
 use crate::{
     eras::ChainSummary, roll::WorkDeltas, AccountState, CardanoDelta, DRepState, EpochState,
-    EraProtocol, PoolState, ProposalState,
+    EraKey, PoolState, ProposalState,
 };
 
 pub mod avvm;
@@ -89,7 +89,7 @@ pub struct WorkContext {
     // loaded
     ended_state: EpochState,
 
-    pub active_protocol: EraProtocol,
+    pub active_protocol: EraKey,
     pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,
 

@@ -9,8 +9,8 @@ use crate::{
     pots::{self, EpochIncentives, Eta, Pots},
     ratio,
     rupd::{RupdWork, StakeSnapshot},
-    AccountKey, AccountState, EpochState, EpochValue, EraProtocol, PParamsSet, PoolHash,
-    PoolParams, PoolSnapshot, PoolState,
+    AccountKey, AccountState, EpochState, EpochValue, EraKey, PParamsSet, PoolHash, PoolParams,
+    PoolSnapshot, PoolState,
 };
 
 /// Calculate eta using pool blocks (not total blocks including federated).
@@ -122,11 +122,11 @@ pub struct GlobalsPoolPass {
     snapshot: StakeSnapshot,
     current_epoch: u64,
     stake_epoch: u64,
-    protocol: EraProtocol,
+    protocol: EraKey,
 }
 
 impl GlobalsPoolPass {
-    pub fn new(current_epoch: u64, stake_epoch: u64, protocol: EraProtocol) -> Self {
+    pub fn new(current_epoch: u64, stake_epoch: u64, protocol: EraKey) -> Self {
         Self {
             snapshot: StakeSnapshot::default(),
             current_epoch,
@@ -188,7 +188,7 @@ pub struct GlobalsAccountPass {
     snapshot: StakeSnapshot,
     owner_to_pools: HashMap<StakeCredential, Vec<PoolHash>>,
     stake_epoch: u64,
-    protocol: EraProtocol,
+    protocol: EraKey,
 }
 
 impl GlobalsAccountPass {
@@ -268,7 +268,7 @@ impl StakeSnapshot {
             .or_insert(stake);
 
         // Same reasoning for the delegator count, which `finalize` reports in
-        // the per-pool `StakeLog`: counting it here (the globals pass sees
+        // the per-pool `PoolEpochLog`: counting it here (the globals pass sees
         // every account) keeps it correct after a mid-RUPD restart, which a
         // per-shard tally would not be.
         self.pool_delegator_counts
@@ -312,7 +312,7 @@ impl StakeSnapshot {
         state: &D::State,
         current_epoch: u64,
         stake_epoch: u64,
-        protocol: EraProtocol,
+        protocol: EraKey,
     ) -> Result<Self, ChainError> {
         let mut pools = GlobalsPoolPass::new(current_epoch, stake_epoch, protocol);
 
@@ -343,7 +343,7 @@ impl StakeSnapshot {
         &mut self,
         state: &D::State,
         stake_epoch: u64,
-        protocol: EraProtocol,
+        protocol: EraKey,
         ranges: &[RangeOf<AccountKey>],
     ) -> Result<(), ChainError> {
         for range in ranges {
@@ -502,7 +502,7 @@ impl RupdWork {
             // snapshot_epoch + 1 to determine the era (e.g., Conway excludes pointer
             // address UTxOs from stake).
             let era = work.chain.era_for_epoch(snapshot_epoch + 1);
-            let protocol = EraProtocol::from(era.protocol);
+            let protocol = EraKey::from(era.protocol);
 
             work.snapshot =
                 StakeSnapshot::load_globals::<D>(state, current_epoch, snapshot_epoch, protocol)?;
@@ -531,7 +531,7 @@ impl RupdWork {
     ) -> Result<(), ChainError> {
         if let Some((snapshot_epoch, _)) = self.relevant_epochs() {
             let era = self.chain.era_for_epoch(snapshot_epoch + 1);
-            let protocol = EraProtocol::from(era.protocol);
+            let protocol = EraKey::from(era.protocol);
             self.snapshot
                 .merge_shard::<D>(state, snapshot_epoch, protocol, &ranges)?;
         }

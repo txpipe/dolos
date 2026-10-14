@@ -1,5 +1,5 @@
 use chrono::{Datelike, Timelike};
-use dolos_cardano::{load_era_summary, EraSummary as DolosEraSummary};
+use dolos_cardano::{load_era_summary, EraState as DolosEraState};
 use dolos_core::StateStore;
 use pallas::codec::utils::AnyCbor;
 use pallas::ledger::traverse::MultiEraBlock;
@@ -227,7 +227,7 @@ impl<D: Domain> Session<D> {
                 let chain_summary = load_era_summary::<D>(self.domain.state())
                     .map_err(|e| Error::server(format!("failed to load era summary: {}", e)))?;
 
-                let eras: Vec<DolosEraSummary> = chain_summary.iter_all().cloned().collect();
+                let eras: Vec<DolosEraState> = chain_summary.iter_all().cloned().collect();
 
                 let genesis = self.domain.genesis();
                 build_era_history_response(&eras, &genesis)?

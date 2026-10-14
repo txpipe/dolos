@@ -24,11 +24,11 @@ use dolos_cardano::{
     model::{
         AccountEpochLog, AccountState, AssetState, AuthHistory, Committee, CommitteeAuthorization,
         Constitution, DRepDelegation, DRepExpiry, DRepState, DatumState, EndStats, EpochState,
-        EpochValue, EraBoundary, EraSummary, FirstMintChunk, GovDistr, GovRoots, GovState, Nonces,
+        EpochValue, EraBoundary, EraState, FirstMintChunk, GovDistr, GovRoots, GovState, Nonces,
         PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
-        PoolDelegation, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
-        RollingStats, ShardProgress, StagedFirstMint, StagedStakeAddress, Stake, StakeAddressesRow,
-        StakeLog, VoteEntry,
+        PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction,
+        ProposalState, RollingStats, ShardProgress, StagedFirstMint, StagedStakeAddress, Stake,
+        StakeAddressesRow, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, PaymentStats, StagedAccountStats, StagedAddressStats,
@@ -130,8 +130,8 @@ pub fn account_epoch_log() -> AccountEpochLog {
 /// `relative_size` is pinned at an exactly-representable power of two, so the
 /// golden fixes the IEEE-754 bits and nothing else: a value that needed
 /// rounding would pin the rounding rather than the field.
-pub fn stake_log() -> StakeLog {
-    StakeLog {
+pub fn pool_epoch_log() -> PoolEpochLog {
+    PoolEpochLog {
         blocks_minted: 42,
         total_stake: 123_456_789_000,
         relative_size: 0.015625,
@@ -470,8 +470,8 @@ pub fn epoch_state() -> EpochState {
     }
 }
 
-pub fn era_summary() -> EraSummary {
-    EraSummary {
+pub fn era_summary() -> EraState {
+    EraState {
         start: EraBoundary {
             epoch: 208,
             slot: 4_492_800,

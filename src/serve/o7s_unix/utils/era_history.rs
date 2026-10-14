@@ -1,10 +1,10 @@
 use crate::prelude::*;
-use dolos_cardano::EraSummary as DolosEraSummary;
+use dolos_cardano::EraState as DolosEraState;
 use pallas::codec::minicbor::{self, Encoder};
 use pallas::codec::utils::AnyCbor;
 
 pub struct EraHistoryResponse<'a> {
-    pub eras: &'a [DolosEraSummary],
+    pub eras: &'a [DolosEraState],
     pub system_start: u64,
     pub security_param: u64,
 }
@@ -82,7 +82,7 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
 }
 
 pub fn build_era_history_response(
-    eras: &[DolosEraSummary],
+    eras: &[DolosEraState],
     genesis: &Genesis,
 ) -> Result<AnyCbor, Error> {
     if eras.is_empty() {

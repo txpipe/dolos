@@ -17,7 +17,7 @@ use crate::{
     estart::{avvm::AvvmReclamation, BoundaryVisitor as _, WorkContext},
     gov_from_conway_genesis, load_era_summary,
     roll::WorkDeltas,
-    AccountKey, AccountState, DRepState, EStartProgress, EraProtocol, GovGenesisInit, PoolState,
+    AccountKey, AccountState, DRepState, EStartProgress, EraKey, GovGenesisInit, PoolState,
     ProposalState,
 };
 
@@ -110,7 +110,7 @@ impl WorkContext {
     ) -> Result<Self, ChainError> {
         let ended_state = crate::load_epoch::<D>(state)?;
         let chain_summary = load_era_summary::<D>(state)?;
-        let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
+        let active_protocol = EraKey::from(chain_summary.edge().protocol);
 
         Ok(Self {
             ended_state,
