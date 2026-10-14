@@ -6,24 +6,32 @@ use axum::{
 };
 use dolos_cardano::{indexes::CardanoStateIndexExt, network_from_genesis, pallas_extras};
 use dolos_core::async_query::BlockMetaResolver;
-use dolos_core::{ArchiveStore as _, Domain, EraCbor, StateStore as _, TxoRef, UtxoSet};
+use dolos_core::{
+    ArchiveStore as _, AsyncQueryFacade, Domain, EraCbor, StateStore as _, TxoRef, UtxoSet,
+};
 use pallas::codec::minicbor;
+use pallas::crypto::hash::Hash;
 use pallas::ledger::{
     addresses::{Address, StakeAddress},
     primitives::{conway::DatumOption, conway::ScriptRef, StakeCredential},
     traverse::{ComputeHash, Era, MultiEraOutput, MultiEraTx, MultiEraValue, OriginalHash},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{bad_request, patterns, Facade};
+
+/// UTxO refs read, decoded and filtered per blocking task. A heavy match
+/// releases its permit between chunks, and a dropped one stops at the next
+/// chunk.
+const MATCH_CHUNK: usize = 1024;
 
 pub async fn by_pattern<D: Domain>(
     State(facade): State<Facade<D>>,
     Path(pattern): Path<String>,
     Query(query): Query<MatchesQuery>,
 ) -> Response {
-    let filters = match MatchesFilters::try_from_query(query, &facade) {
+    let filters = match MatchesFilters::try_from_query(query, &facade).await {
         Ok(filters) => filters,
         Err(err) => return err.into_response(),
     };
@@ -33,22 +41,29 @@ pub async fn by_pattern<D: Domain>(
         Err(err) => return bad_request(err.to_string()),
     };
 
-    let (refs, filter) = match &parsed {
-        patterns::Pattern::Address(pattern) => match refs_for_address_pattern(&facade, pattern) {
-            Ok(result) => result,
-            Err(err) => return err.into_response(),
-        },
-        patterns::Pattern::Asset(pattern) => match refs_for_asset_pattern(&facade, pattern) {
-            Ok(result) => result,
-            Err(err) => return err.into_response(),
-        },
+    let query = facade.query();
+    let refs = match parsed {
+        patterns::Pattern::Address(pattern) => {
+            blocking(&query, move |domain| {
+                refs_for_address_pattern(&domain, &pattern)
+            })
+            .await
+        }
+        patterns::Pattern::Asset(pattern) => {
+            blocking(&query, move |domain| {
+                refs_for_asset_pattern(&domain, &pattern)
+            })
+            .await
+        }
         patterns::Pattern::OutputRef(pattern) => {
-            match refs_for_output_ref_pattern(&facade, pattern).await {
-                Ok(result) => result,
-                Err(err) => return err.into_response(),
-            }
+            refs_for_output_ref_pattern(&facade, &pattern).await
         }
         patterns::Pattern::Any => return bad_request("wildcard patterns are not supported"),
+    };
+
+    let (refs, filter) = match refs {
+        Ok(result) => result,
+        Err(err) => return err.into_response(),
     };
 
     let matches = match build_matches(&facade, refs, filter, filters.resolve_hashes).await {
@@ -77,6 +92,20 @@ impl MatchError {
     }
 }
 
+/// Run `f` on the blocking pool under the domain's query limiter, so a store
+/// read never occupies an async worker.
+async fn blocking<D, T, F>(query: &AsyncQueryFacade<D>, f: F) -> Result<T, MatchError>
+where
+    D: Domain,
+    T: Send + 'static,
+    F: FnOnce(D) -> Result<T, MatchError> + Send + 'static,
+{
+    query
+        .run_blocking(move |domain| Ok(f(domain)))
+        .await
+        .map_err(|_| MatchError::Internal)?
+}
+
 #[derive(Serialize)]
 struct MatchResponse {
     transaction_index: u32,
@@ -96,7 +125,7 @@ struct MatchResponse {
     spent_at: Option<serde_json::Value>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 struct ValueResponse {
     coins: u64,
     assets: HashMap<String, u64>,
@@ -144,7 +173,7 @@ struct MatchesFilters {
 }
 
 impl MatchesFilters {
-    fn try_from_query<D: Domain>(
+    async fn try_from_query<D: Domain>(
         query: MatchesQuery,
         facade: &Facade<D>,
     ) -> Result<Self, MatchError> {
@@ -169,12 +198,12 @@ impl MatchesFilters {
         };
 
         let created_after = match query.created_after.as_deref() {
-            Some(value) => Some(parse_slot_or_point(value, facade)?),
+            Some(value) => Some(parse_slot_or_point(value, facade).await?),
             None => None,
         };
 
         let created_before = match query.created_before.as_deref() {
-            Some(value) => Some(parse_slot_or_point(value, facade)?),
+            Some(value) => Some(parse_slot_or_point(value, facade).await?),
             None => None,
         };
 
@@ -228,7 +257,7 @@ enum OutputFilter {
 }
 
 fn refs_for_address_pattern<D: Domain>(
-    facade: &Facade<D>,
+    domain: &D,
     pattern: &patterns::AddressPattern,
 ) -> Result<(UtxoSet, OutputFilter), MatchError> {
     match pattern {
@@ -239,7 +268,7 @@ fn refs_for_address_pattern<D: Domain>(
             match address {
                 Address::Stake(stake) => {
                     let stake_bytes = stake.to_vec();
-                    let refs = facade
+                    let refs = domain
                         .state()
                         .utxos_by_stake(&stake_bytes)
                         .map_err(|_| MatchError::Internal)?;
@@ -251,7 +280,7 @@ fn refs_for_address_pattern<D: Domain>(
                     Ok((refs, OutputFilter::Address(filter)))
                 }
                 _ => {
-                    let refs = facade
+                    let refs = domain
                         .state()
                         .utxos_by_address(bytes)
                         .map_err(|_| MatchError::Internal)?;
@@ -264,7 +293,7 @@ fn refs_for_address_pattern<D: Domain>(
             delegation,
         } => {
             let payment_key = credential_hash(payment);
-            let stake_keys = stake_keys_for_credential(facade, delegation)?;
+            let stake_keys = stake_keys_for_credential(domain, delegation)?;
 
             if payment_key.is_none() && stake_keys.is_none() {
                 return Err(MatchError::BadRequest(
@@ -274,7 +303,7 @@ fn refs_for_address_pattern<D: Domain>(
 
             let mut refs = payment_key
                 .as_ref()
-                .map(|key| facade.state().utxos_by_payment(key))
+                .map(|key| domain.state().utxos_by_payment(key))
                 .transpose()
                 .map_err(|_| MatchError::Internal)?
                 .unwrap_or_default();
@@ -282,7 +311,7 @@ fn refs_for_address_pattern<D: Domain>(
             if let Some(stake_keys) = stake_keys {
                 let mut stake_refs = UtxoSet::new();
                 for key in stake_keys {
-                    let next = facade
+                    let next = domain
                         .state()
                         .utxos_by_stake(&key)
                         .map_err(|_| MatchError::Internal)?;
@@ -302,7 +331,7 @@ fn refs_for_address_pattern<D: Domain>(
 }
 
 fn refs_for_asset_pattern<D: Domain>(
-    facade: &Facade<D>,
+    domain: &D,
     pattern: &patterns::AssetPattern,
 ) -> Result<(UtxoSet, OutputFilter), MatchError> {
     let filter = match pattern.name() {
@@ -317,14 +346,14 @@ fn refs_for_asset_pattern<D: Domain>(
     };
 
     let refs = match pattern.name() {
-        patterns::AssetNamePattern::Any => facade
+        patterns::AssetNamePattern::Any => domain
             .state()
             .utxos_by_policy(pattern.policy())
             .map_err(|_| MatchError::Internal)?,
         patterns::AssetNamePattern::Exact(name) => {
             let mut subject = pattern.policy().to_vec();
             subject.extend_from_slice(name);
-            facade
+            domain
                 .state()
                 .utxos_by_asset(&subject)
                 .map_err(|_| MatchError::Internal)?
@@ -387,10 +416,10 @@ fn stake_credential_pattern(stake: &StakeAddress) -> patterns::CredentialPattern
 }
 
 fn stake_keys_for_credential<D: Domain>(
-    facade: &Facade<D>,
+    domain: &D,
     credential: &patterns::CredentialPattern,
 ) -> Result<Option<Vec<Vec<u8>>>, MatchError> {
-    let network = network_from_genesis(&facade.genesis());
+    let network = network_from_genesis(&domain.genesis());
 
     let build_key = |cred: StakeCredential| -> Vec<u8> {
         pallas_extras::stake_credential_to_address(network, &cred).to_vec()
@@ -413,43 +442,50 @@ fn stake_keys_for_credential<D: Domain>(
     Ok(Some(keys))
 }
 
+/// An output that passed the pattern's filter, owned so it can leave the
+/// blocking task that decoded it.
+#[derive(Debug, PartialEq)]
+struct Candidate {
+    txo_ref: TxoRef,
+    address: String,
+    value: ValueResponse,
+    datum_hash: Option<String>,
+    datum_type: Option<String>,
+    /// Present only when the match resolves hashes.
+    datum: Option<DatumSource>,
+    script_hash: Option<Hash<28>>,
+}
+
+#[derive(Debug, PartialEq)]
+enum DatumSource {
+    Absent,
+    /// The inline datum's CBOR, hex-encoded.
+    Inline(String),
+    Hash(Hash<32>),
+}
+
 async fn build_matches<D: Domain>(
     facade: &Facade<D>,
     refs: UtxoSet,
     filter: OutputFilter,
     resolve_hashes: bool,
 ) -> Result<Vec<MatchResponse>, MatchError> {
-    let utxos = facade
-        .state()
-        .get_utxos(refs.into_iter().collect())
-        .map_err(|_| MatchError::Internal)?;
-
-    let mut matched = Vec::new();
-    for (txo_ref, cbor) in &utxos {
-        let cbor: &dolos_core::EraCbor = cbor.as_ref();
-        let output = MultiEraOutput::try_from(cbor).map_err(|_| MatchError::Internal)?;
-        let address = output.address().map_err(|_| MatchError::Internal)?;
-
-        if matches_output_filter(&output, &address, &filter) {
-            matched.push((txo_ref, output, address));
-        }
-    }
+    let candidates =
+        select_candidates(&facade.query(), refs, filter, resolve_hashes, MATCH_CHUNK).await?;
 
     let mut block_meta = BlockMetaResolver::new(facade.query());
     let block_deps = block_meta
-        .resolve_batch(matched.iter().map(|(txo_ref, _, _)| txo_ref.0))
+        .resolve_batch(candidates.iter().map(|candidate| candidate.txo_ref.0))
         .await
         .map_err(|_| MatchError::Internal)?;
     let mut out = Vec::new();
 
-    for (txo_ref, output, address) in matched {
-        let tx_hash = txo_ref.0;
+    for candidate in candidates {
+        let tx_hash = candidate.txo_ref.0;
         let block_info = block_deps.get(&tx_hash).ok_or(MatchError::Internal)?;
 
-        let (datum_hash, datum_type) = output_datum_info(&output);
-        let script_hash = output_script_hash(&output);
         let (datum, script) =
-            resolve_output_extras(facade, &output, script_hash, resolve_hashes).await?;
+            resolve_output_extras(facade, candidate.datum, candidate.script_hash).await?;
 
         out.push(MatchResponse {
             transaction_index: block_info
@@ -457,13 +493,13 @@ async fn build_matches<D: Domain>(
                 .try_into()
                 .map_err(|_| MatchError::Internal)?,
             transaction_id: tx_hash.to_string(),
-            output_index: txo_ref.1,
-            address: address.to_string(),
-            value: map_value(output.value()),
-            datum_hash,
+            output_index: candidate.txo_ref.1,
+            address: candidate.address,
+            value: candidate.value,
+            datum_hash: candidate.datum_hash,
             datum,
-            datum_type,
-            script_hash: script_hash.map(|hash: pallas::crypto::hash::Hash<28>| hash.to_string()),
+            datum_type: candidate.datum_type,
+            script_hash: candidate.script_hash.map(|hash| hash.to_string()),
             script,
             created_at: PointResponse {
                 slot_no: block_info.slot,
@@ -474,6 +510,76 @@ async fn build_matches<D: Domain>(
     }
 
     Ok(out)
+}
+
+/// Read, decode and filter the outputs behind `refs`, `chunk` refs per
+/// blocking task.
+async fn select_candidates<D: Domain>(
+    query: &AsyncQueryFacade<D>,
+    refs: UtxoSet,
+    filter: OutputFilter,
+    resolve_hashes: bool,
+    chunk: usize,
+) -> Result<Vec<Candidate>, MatchError> {
+    let mut refs: Vec<_> = refs.into_iter().collect();
+    refs.sort();
+
+    let filter = Arc::new(filter);
+    let mut candidates = Vec::new();
+
+    for refs in refs.chunks(chunk.max(1)) {
+        let refs = refs.to_vec();
+        let filter = filter.clone();
+        let selected = blocking(query, move |domain| {
+            select_chunk(&domain, refs, &filter, resolve_hashes)
+        })
+        .await?;
+        candidates.extend(selected);
+    }
+
+    Ok(candidates)
+}
+
+fn select_chunk<D: Domain>(
+    domain: &D,
+    refs: Vec<TxoRef>,
+    filter: &OutputFilter,
+    resolve_hashes: bool,
+) -> Result<Vec<Candidate>, MatchError> {
+    let utxos = domain
+        .state()
+        .get_utxos(refs)
+        .map_err(|_| MatchError::Internal)?;
+
+    let mut selected = Vec::new();
+    for (txo_ref, cbor) in utxos {
+        let cbor: &dolos_core::EraCbor = cbor.as_ref();
+        let output = MultiEraOutput::try_from(cbor).map_err(|_| MatchError::Internal)?;
+        let address = output.address().map_err(|_| MatchError::Internal)?;
+
+        if !matches_output_filter(&output, &address, filter) {
+            continue;
+        }
+
+        let (datum_hash, datum_type) = output_datum_info(&output);
+        let datum = if resolve_hashes {
+            Some(output_datum_source(&output)?)
+        } else {
+            None
+        };
+
+        selected.push(Candidate {
+            txo_ref,
+            address: address.to_string(),
+            value: map_value(output.value()),
+            datum_hash,
+            datum_type,
+            datum,
+            script_hash: output_script_hash(&output),
+        });
+    }
+
+    Ok(selected)
 }
 
 fn output_has_asset(output: &MultiEraOutput<'_>, filter: &AssetFilter) -> bool {
@@ -531,43 +637,50 @@ fn output_script_hash(output: &MultiEraOutput<'_>) -> Option<pallas::crypto::has
     })
 }
 
+fn output_datum_source(output: &MultiEraOutput<'_>) -> Result<DatumSource, MatchError> {
+    match output.datum() {
+        None => Ok(DatumSource::Absent),
+        Some(DatumOption::Data(data)) => minicbor::to_vec(&data.0)
+            .map(hex::encode)
+            .map(DatumSource::Inline)
+            .map_err(|_| MatchError::Internal),
+        Some(DatumOption::Hash(hash)) => Ok(DatumSource::Hash(hash)),
+    }
+}
+
 async fn resolve_output_extras<D: Domain>(
     facade: &Facade<D>,
-    output: &MultiEraOutput<'_>,
-    script_hash: Option<pallas::crypto::hash::Hash<28>>,
-    resolve_hashes: bool,
+    datum: Option<DatumSource>,
+    script_hash: Option<Hash<28>>,
 ) -> Result<(Option<serde_json::Value>, Option<serde_json::Value>), MatchError> {
-    if resolve_hashes {
-        let datum = match output.datum() {
-            None => serde_json::Value::Null,
-            Some(DatumOption::Data(data)) => minicbor::to_vec(&data.0)
-                .map(hex::encode)
-                .map(serde_json::Value::String)
-                .map_err(|_| MatchError::Internal)?,
-            Some(DatumOption::Hash(hash)) => facade
-                .resolve_datum(&hash)
-                .await
-                .map_err(|_| MatchError::Internal)?
-                .map(|datum| serde_json::Value::String(datum.datum))
-                .unwrap_or(serde_json::Value::Null),
-        };
+    let Some(datum) = datum else {
+        return Ok((None, None));
+    };
 
-        let script = match script_hash {
-            None => serde_json::Value::Null,
-            Some(script_hash) => facade
-                .resolve_script(&script_hash)
-                .await
-                .map_err(|_| MatchError::Internal)?
-                .map(serde_json::to_value)
-                .transpose()
-                .map_err(|_| MatchError::Internal)?
-                .unwrap_or(serde_json::Value::Null),
-        };
+    let datum = match datum {
+        DatumSource::Absent => serde_json::Value::Null,
+        DatumSource::Inline(cbor) => serde_json::Value::String(cbor),
+        DatumSource::Hash(hash) => facade
+            .resolve_datum(&hash)
+            .await
+            .map_err(|_| MatchError::Internal)?
+            .map(|datum| serde_json::Value::String(datum.datum))
+            .unwrap_or(serde_json::Value::Null),
+    };
 
-        Ok((Some(datum), Some(script)))
-    } else {
-        Ok((None, None))
-    }
+    let script = match script_hash {
+        None => serde_json::Value::Null,
+        Some(script_hash) => facade
+            .resolve_script(&script_hash)
+            .await
+            .map_err(|_| MatchError::Internal)?
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| MatchError::Internal)?
+            .unwrap_or(serde_json::Value::Null),
+    };
+
+    Ok((Some(datum), Some(script)))
 }
 
 fn map_value(value: MultiEraValue<'_>) -> ValueResponse {
@@ -662,7 +775,10 @@ fn sort_matches(matches: &mut [MatchResponse], order: MatchOrder) {
     }
 }
 
-fn parse_slot_or_point<D: Domain>(value: &str, facade: &Facade<D>) -> Result<u64, MatchError> {
+async fn parse_slot_or_point<D: Domain>(
+    value: &str,
+    facade: &Facade<D>,
+) -> Result<u64, MatchError> {
     if let Some((slot, hash)) = value.split_once('.') {
         let slot = slot
             .parse::<u64>()
@@ -672,11 +788,14 @@ fn parse_slot_or_point<D: Domain>(value: &str, facade: &Facade<D>) -> Result<u64
         if bytes.len() != 32 {
             return Err(MatchError::BadRequest(slot_range_hint()));
         }
-        let found_slot = facade
-            .archive()
-            .slot_by_block_hash(&bytes)
-            .map_err(|_| MatchError::Internal)?
-            .ok_or_else(|| MatchError::BadRequest(slot_range_hint()))?;
+        let found_slot = blocking(&facade.query(), move |domain| {
+            domain
+                .archive()
+                .slot_by_block_hash(&bytes)
+                .map_err(|_| MatchError::Internal)
+        })
+        .await?
+        .ok_or_else(|| MatchError::BadRequest(slot_range_hint()))?;
 
         if found_slot != slot {
             return Err(MatchError::BadRequest(slot_range_hint()));
@@ -744,13 +863,22 @@ fn spent_hint() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     use axum::http::StatusCode;
+    use dolos_core::AsyncQueryFacade;
     use serde::Deserialize;
     use serde_json::{json, Value};
 
-    use crate::test_support::{TestApp, TestFault};
+    use super::{refs_for_asset_pattern, select_candidates, Candidate};
+    use crate::{
+        patterns,
+        test_support::{TestApp, TestFault},
+    };
 
     #[derive(Debug, Deserialize)]
     struct MatchResponseTest {
@@ -1044,5 +1172,102 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let path = format!("/matches/{}", app.vectors().address);
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    const SLOW_READ: Duration = Duration::from_secs(1);
+    const HEALTH_BUDGET: Duration = Duration::from_millis(300);
+
+    fn policy_match_path(app: &TestApp) -> String {
+        format!("/matches/{}.*", app.vectors().policy_id)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_match_does_not_stall_health_on_one_thread() {
+        let app = TestApp::new_with_fault(Some(TestFault::SlowUtxoReads(SLOW_READ)));
+        let path = policy_match_path(&app);
+
+        let started = Instant::now();
+        let matched = app.get_bytes(&path);
+        let health = async {
+            let (status, _) = app.get_bytes("/health").await;
+            (status, started.elapsed())
+        };
+        let ((match_status, _), (health_status, health_took)) = tokio::join!(matched, health);
+
+        assert_eq!(match_status, StatusCode::OK);
+        assert_eq!(health_status, StatusCode::OK);
+        assert!(
+            health_took < HEALTH_BUDGET,
+            "/health took {health_took:?} behind a slow match"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_matches_do_not_stall_health_on_two_workers() {
+        let app = Arc::new(TestApp::new_with_fault(Some(TestFault::SlowUtxoReads(
+            SLOW_READ,
+        ))));
+        let path = policy_match_path(&app);
+
+        let matches: Vec<_> = (0..4)
+            .map(|_| {
+                let app = app.clone();
+                let path = path.clone();
+                tokio::spawn(async move { app.get_bytes(&path).await.0 })
+            })
+            .collect();
+
+        // Let the matches reach their store reads before /health asks. The
+        // clock starts first: workers stuck in a read drive no timers, so the
+        // sleep itself stalls with them.
+        let started = Instant::now();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let health = tokio::spawn({
+            let app = app.clone();
+            async move {
+                let (status, _) = app.get_bytes("/health").await;
+                (status, started.elapsed())
+            }
+        });
+
+        let (health_status, health_took) = health.await.expect("health task");
+        assert_eq!(health_status, StatusCode::OK);
+        assert!(
+            health_took < HEALTH_BUDGET,
+            "/health took {health_took:?} behind four slow matches"
+        );
+
+        for matched in matches {
+            assert_eq!(matched.await.expect("match task"), StatusCode::OK);
+        }
+    }
+
+    async fn candidates(app: &TestApp, resolve_hashes: bool, chunk: usize) -> Vec<Candidate> {
+        let pattern = match patterns::Pattern::parse(&format!("{}.*", app.vectors().policy_id)) {
+            Ok(patterns::Pattern::Asset(pattern)) => pattern,
+            other => panic!("unexpected policy pattern {other:?}"),
+        };
+        let (refs, filter) = refs_for_asset_pattern(app.domain(), &pattern).expect("policy refs");
+        let query = AsyncQueryFacade::new(app.domain().clone());
+
+        let mut candidates = select_candidates(&query, refs, filter, resolve_hashes, chunk)
+            .await
+            .expect("candidates");
+        candidates.sort_by(|a, b| a.txo_ref.cmp(&b.txo_ref));
+        candidates
+    }
+
+    #[tokio::test]
+    async fn chunked_selection_matches_unchunked() {
+        let app = TestApp::new();
+
+        for resolve_hashes in [false, true] {
+            let whole = candidates(&app, resolve_hashes, usize::MAX).await;
+            let chunked = candidates(&app, resolve_hashes, 2).await;
+
+            assert!(whole.len() > 2, "too few candidates to split into chunks");
+            assert_eq!(chunked, whole);
+        }
     }
 }

@@ -7,16 +7,16 @@
 //! The namespace is not in the record: it is the layer's *kind*, one per state
 //! namespace (`crate::STATE_KINDS`), so a shape change to one namespace's
 //! records costs that namespace's kind a media-type move and leaves the other
-//! eighteen alone — and a namespace a reader does not know is skippable at the
-//! transport instead of poisoning one shared layer. Which is also why this
-//! module has one codec rather than nineteen — the kinds differ in what they
+//! twenty-five alone — and a namespace a reader does not know is skippable at
+//! the transport instead of poisoning one shared layer. Which is also why this
+//! module has one codec rather than twenty-six — the kinds differ in what they
 //! carry, never in how a record is written — and why its refusals name the
 //! record shape, `state`, rather than a layer.
 //!
 //! ## One record shape, including for UTxOs
 //!
 //! ADR-004 treats the UTxO set as namespace [`crate::UTXOS`] beside the
-//! eighteen entity namespaces, rather than as a special layer kind. That is
+//! twenty-five entity namespaces, rather than as a special layer kind. That is
 //! what keeps the format's state vocabulary to a single record, and it makes
 //! the planned refactor folding UTxOs into the entity system (#1042) invisible
 //! from outside: the day `utxos` becomes an ordinary namespace, nothing in this
@@ -64,7 +64,7 @@ pub use crate::namespaces::UTXO_KEY_LEN;
 
 /// The name this codec refuses under.
 ///
-/// One record shape serves all nineteen `state-{ns}` kinds, so an error names
+/// One record shape serves all twenty-six `state-{ns}` kinds, so an error names
 /// the shape rather than a layer — the layer is already in the message the
 /// caller wraps it in.
 const STATE: &str = "state";
@@ -265,9 +265,10 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountEpochLog, AccountState, AssetKey, AssetState, DRepState, EpochState, EraSummary,
-        FixedNamespace, GovState, PoolState, ProposalState, StagedFirstMint, StagedStakeAddress,
-        StakeAddressesRow,
+        AccountEpochLog, AccountState, AddressStats, AssetKey, AssetState, DRepState, EpochState,
+        EraSummary, FixedNamespace, GovState, PoolState, ProposalState, StagedAccountStats,
+        StagedAddressStats, StagedFirstMint, StagedPaymentAddress, StagedPaymentStats,
+        StagedStakeAddress, StakeAddressesRow,
     };
 
     use super::*;
@@ -332,6 +333,33 @@ mod tests {
         keyed(StagedStakeAddress::NS, &staged(&[1; 29])).unwrap();
         keyed(StakeAddressesRow::NS, &credential).unwrap();
 
+        // staged stats: an address's are keyed epoch first, a payment
+        // credential's and an account's group first
+        let epoch = [0u8; 8];
+        let address = [epoch.as_slice(), &[0x01], &credential, &[1; 29]].concat();
+        keyed(StagedAddressStats::NS, &address).unwrap();
+        keyed(
+            StagedAddressStats::NS,
+            &[epoch.as_slice(), &[0x00], &[1; 29]].concat(),
+        )
+        .unwrap();
+        keyed(
+            StagedPaymentAddress::NS,
+            &[[1; 28].as_slice(), &epoch, &[1; 29]].concat(),
+        )
+        .unwrap();
+        keyed(
+            StagedPaymentStats::NS,
+            &[[1; 28].as_slice(), &epoch].concat(),
+        )
+        .unwrap();
+        keyed(
+            StagedAccountStats::NS,
+            &[credential.as_slice(), &epoch].concat(),
+        )
+        .unwrap();
+        keyed(AddressStats::NS, &address[8..]).unwrap();
+
         for (ns, key) in [
             (EpochState::NS, vec![0x30]),
             (EpochState::NS, [0x30].into_iter().chain([0; 31]).collect()),
@@ -343,6 +371,23 @@ mod tests {
             (StagedStakeAddress::NS, staged(&[])),
             (StagedStakeAddress::NS, credential.clone()),
             (StakeAddressesRow::NS, vec![1; 32]),
+            (
+                StagedAddressStats::NS,
+                [epoch.as_slice(), &[0x01], &credential].concat(),
+            ),
+            (
+                StagedAddressStats::NS,
+                [epoch.as_slice(), &[0x02], &[1; 29]].concat(),
+            ),
+            (
+                StagedPaymentAddress::NS,
+                [[1; 28].as_slice(), &epoch].concat(),
+            ),
+            (
+                StagedPaymentStats::NS,
+                [[1; 28].as_slice(), &epoch, &[1]].concat(),
+            ),
+            (StagedAccountStats::NS, credential.clone()),
         ] {
             let err = keyed(ns, &key).unwrap_err();
             assert!(

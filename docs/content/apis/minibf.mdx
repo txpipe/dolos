@@ -207,4 +207,4 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 
 ## Lifetime totals and `sync.max_history`
 
-`/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` fold every transaction kept in the archive. When `sync.max_history` is set, blocks pruned by housekeeping are not counted, so the sums and `tx_count` only cover the retained window. Run with full history if you need true lifetime totals.
+`/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` read per-epoch sums from the Stats period logs rather than folding blocks. When `sync.max_history` is set, housekeeping prunes those logs by slot like any other, so the sums and `tx_count` only cover the epochs the retained window still holds. Run with full history if you need true lifetime totals.

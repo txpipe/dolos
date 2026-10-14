@@ -16,7 +16,7 @@ use std::sync::Arc;
 use dolos::adapters::DomainAdapter;
 use dolos_core::{
     config::RootConfig, import::ImportExt as _, BootstrapExt as _, ChainLogic as _, Domain as _,
-    StateStore as _,
+    QueryLimiter, StateStore as _,
 };
 use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
 
@@ -143,6 +143,7 @@ impl Node {
             archive: stores.archive,
             mempool: stores.mempool,
             tip_broadcast,
+            query_limiter: QueryLimiter::default(),
         };
 
         domain.bootstrap().unwrap();

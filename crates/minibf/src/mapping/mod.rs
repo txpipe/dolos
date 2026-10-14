@@ -1069,6 +1069,41 @@ impl AssetTotals {
     }
 }
 
+/// The received and sent amounts of a Stats total, each lovelace first, then
+/// every asset with a nonzero sum on that side, by unit.
+pub fn stats_amounts(
+    stats: &dolos_cardano::AddressStats,
+) -> (
+    Vec<TxContentOutputAmountInner>,
+    Vec<TxContentOutputAmountInner>,
+) {
+    let side = |pick: fn(&dolos_cardano::UnitSums) -> u128| {
+        let lovelace = stats
+            .units
+            .get(&Vec::new().into())
+            .map(pick)
+            .unwrap_or_default();
+
+        let assets = stats
+            .units
+            .iter()
+            .filter(|(unit, sums)| !unit.is_empty() && pick(sums) > 0)
+            .map(|(unit, sums)| TxContentOutputAmountInner {
+                unit: hex::encode(unit.as_slice()),
+                quantity: pick(sums).to_string(),
+            });
+
+        std::iter::once(TxContentOutputAmountInner {
+            unit: "lovelace".to_string(),
+            quantity: lovelace.to_string(),
+        })
+        .chain(assets)
+        .collect()
+    };
+
+    (side(|sums| sums.received.0), side(|sums| sums.sent.0))
+}
+
 pub fn aggregate_assets<'a>(
     txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
 ) -> Vec<TxContentOutputAmountInner> {

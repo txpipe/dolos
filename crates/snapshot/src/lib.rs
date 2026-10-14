@@ -3,7 +3,7 @@
 //! [`stelae`] is the protocol: framing, canonicalization, digests and the
 //! naming rules that let vendors coexist in one registry. It knows nothing
 //! about Cardano. This crate is the other half — the *profile* — and it says
-//! what a Dolos stele actually contains: twenty-eight layer kinds, their media
+//! what a Dolos stele actually contains: thirty-eight layer kinds, their media
 //! types,
 //! the tag a sequence renders as, what goes in `position`, `parameters` and
 //! each layer's `scope`, and the byte-exact codec for every record shape.
@@ -107,9 +107,11 @@ pub use stelae::progress;
 pub use stelae::{dir, inscription, transport, SteleReader};
 
 use dolos_cardano::model::{
-    AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FirstMintChunk, FixedNamespace, GovState, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolState, ProposalState, StagedFirstMint, StagedStakeAddress, StakeAddressesRow, StakeLog,
+    AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
+    EpochState, EraSummary, FirstMintChunk, FixedNamespace, GovState, PaymentStats,
+    PendingMirState, PendingRewardState, PolicyMintChunk, PoolState, ProposalState,
+    StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
+    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow, StakeLog,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -140,14 +142,17 @@ pub use layers::digests::DIGESTS;
 ///
 /// A subset of [`NAMESPACES`] — every log namespace is also a state namespace —
 /// and the closed set the `log-{ns}` kinds are drawn from. Nothing in the tree
-/// marks an entity as log-bearing, so the six are spelled here and held to
+/// marks an entity as log-bearing, so the nine are spelled here and held to
 /// the entity types by `log_kinds_derive_from_their_namespaces` in
 /// `tests/coverage.rs`. Another namespace acquiring logs would have no layer
 /// to travel in, which is why [`export`] refuses one rather than dropping it.
-pub const LOG_NAMESPACES: [Namespace; 6] = [
+pub const LOG_NAMESPACES: [Namespace; 9] = [
     AccountEpochLog::NS,
+    AccountStats::NS,
+    AddressStats::NS,
     EpochState::NS,
     FirstMintChunk::NS,
+    PaymentStats::NS,
     PolicyMintChunk::NS,
     StakeAddressesRow::NS,
     StakeLog::NS,
@@ -162,10 +167,13 @@ pub const LOG_NAMESPACES: [Namespace; 6] = [
 /// not underscores — but it is *spelled out* here rather than composed, so the
 /// wire vocabulary is greppable and a namespace rename cannot silently rename a
 /// published kind. The derivation is a test, not a constructor.
-pub const LOG_KINDS: [(&str, Namespace); 6] = [
+pub const LOG_KINDS: [(&str, Namespace); 9] = [
     ("log-account-epochs", AccountEpochLog::NS),
+    ("log-account-stats", AccountStats::NS),
+    ("log-address-stats", AddressStats::NS),
     ("log-epochs", EpochState::NS),
     ("log-first-mints", FirstMintChunk::NS),
+    ("log-payment-stats", PaymentStats::NS),
     ("log-policy-first-mints", PolicyMintChunk::NS),
     ("log-stake-addresses", StakeAddressesRow::NS),
     ("log-stakes", StakeLog::NS),
@@ -191,9 +199,11 @@ pub const LOG_KINDS: [(&str, Namespace); 6] = [
 /// namespace is a single blob. Re-sharding a namespace is a media-type-version
 /// event for that namespace's kind, decided by the format's owner; it is not a
 /// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 19] = [
+pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
     ("state-account-epochs", AccountEpochLog::NS, 1),
+    ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
+    ("state-address-stats", AddressStats::NS, 1),
     ("state-assets", AssetState::NS, 16),
     ("state-datums", DatumState::NS, 16),
     ("state-dreps", DRepState::NS, 1),
@@ -201,21 +211,30 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 19] = [
     ("state-eras", EraSummary::NS, 1),
     ("state-first-mints", FirstMintChunk::NS, 1),
     ("state-gov", GovState::NS, 1),
+    ("state-payment-stats", PaymentStats::NS, 1),
     ("state-pending-mirs", PendingMirState::NS, 1),
     ("state-pending-rewards", PendingRewardState::NS, 1),
     ("state-policy-first-mints", PolicyMintChunk::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
+    ("state-staged-account-stats", StagedAccountStats::NS, 1),
+    ("state-staged-address-stats", StagedAddressStats::NS, 1),
     ("state-staged-first-mints", StagedFirstMint::NS, 1),
+    (
+        "state-staged-payment-addresses",
+        StagedPaymentAddress::NS,
+        1,
+    ),
+    ("state-staged-payment-stats", StagedPaymentStats::NS, 1),
     ("state-staged-stake-addresses", StagedStakeAddress::NS, 1),
     ("state-stake-addresses", StakeAddressesRow::NS, 1),
     ("state-stakes", StakeLog::NS, 1),
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 
-/// The nineteen state kind names alone: what [`StateScope`] answers for
+/// The twenty-six state kind names alone: what [`StateScope`] answers for
 /// [`Scope::kinds`].
-pub const STATE_KIND_NAMES: [&str; 19] = [
+pub const STATE_KIND_NAMES: [&str; 26] = [
     STATE_KINDS[0].0,
     STATE_KINDS[1].0,
     STATE_KINDS[2].0,
@@ -235,6 +254,13 @@ pub const STATE_KIND_NAMES: [&str; 19] = [
     STATE_KINDS[16].0,
     STATE_KINDS[17].0,
     STATE_KINDS[18].0,
+    STATE_KINDS[19].0,
+    STATE_KINDS[20].0,
+    STATE_KINDS[21].0,
+    STATE_KINDS[22].0,
+    STATE_KINDS[23].0,
+    STATE_KINDS[24].0,
+    STATE_KINDS[25].0,
 ];
 
 /// The kind carrying `ns`'s state tip, or `None` where the namespace is not one
@@ -259,7 +285,7 @@ pub fn state_ns_for(kind: &str) -> Option<Namespace> {
         .map(|(_, ns, _)| ns)
 }
 
-/// Whether `kind` is one of the nineteen state kinds — the tip predicate the
+/// Whether `kind` is one of the twenty-six state kinds — the tip predicate the
 /// driver's staging arithmetic sums under, reaching it through
 /// [`stelae_driver::DriverProfile::is_state_kind`].
 pub fn is_state_kind(kind: &str) -> bool {
@@ -275,7 +301,7 @@ pub fn shards_for(ns: Namespace) -> Option<u8> {
         .map(|(_, _, shards)| shards)
 }
 
-/// How many state layers every publish writes: the shard counts summed — 79
+/// How many state layers every publish writes: the shard counts summed — 86
 /// today. Every shard of every namespace kind is written even when empty, so
 /// tip completeness stays structural rather than data-dependent.
 pub const fn state_layer_count() -> usize {
@@ -407,13 +433,13 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
 ///
 /// The log kinds are the exception, and the only one: a log layer exists if and
 /// only if its namespace has at least one record in the window, so an epoch
-/// contributes between two and eight layers. Split out because the two arities
+/// contributes between two and eleven layers. Split out because the two arities
 /// are what the layer arithmetic in [`export::export`] and
 /// [`registry::preview`] is made of.
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
-/// The twenty-eight layer kinds, in the order the inscription lists them.
-pub const KINDS: [&str; 28] = [
+/// The thirty-eight layer kinds, in the order the inscription lists them.
+pub const KINDS: [&str; 38] = [
     BLOCKS,
     INDEXES,
     LOG_KINDS[0].0,
@@ -422,6 +448,9 @@ pub const KINDS: [&str; 28] = [
     LOG_KINDS[3].0,
     LOG_KINDS[4].0,
     LOG_KINDS[5].0,
+    LOG_KINDS[6].0,
+    LOG_KINDS[7].0,
+    LOG_KINDS[8].0,
     STATE_KIND_NAMES[0],
     STATE_KIND_NAMES[1],
     STATE_KIND_NAMES[2],
@@ -441,6 +470,13 @@ pub const KINDS: [&str; 28] = [
     STATE_KIND_NAMES[16],
     STATE_KIND_NAMES[17],
     STATE_KIND_NAMES[18],
+    STATE_KIND_NAMES[19],
+    STATE_KIND_NAMES[20],
+    STATE_KIND_NAMES[21],
+    STATE_KIND_NAMES[22],
+    STATE_KIND_NAMES[23],
+    STATE_KIND_NAMES[24],
+    STATE_KIND_NAMES[25],
     DIGESTS,
 ];
 
@@ -450,7 +486,7 @@ pub const KINDS: [&str; 28] = [
 /// The namespace lives in the kind rather than in the scope, so a log layer
 /// wears the same [`EpochScope`] as `blocks` and `indexes` do — which is what
 /// keeps per-(kind, scope) inheritance working across the split.
-pub const EPOCH_KINDS: [&str; 8] = [
+pub const EPOCH_KINDS: [&str; 11] = [
     DENSE_EPOCH_KINDS[0],
     DENSE_EPOCH_KINDS[1],
     LOG_KINDS[0].0,
@@ -459,6 +495,9 @@ pub const EPOCH_KINDS: [&str; 8] = [
     LOG_KINDS[3].0,
     LOG_KINDS[4].0,
     LOG_KINDS[5].0,
+    LOG_KINDS[6].0,
+    LOG_KINDS[7].0,
+    LOG_KINDS[8].0,
 ];
 
 /// The kind carrying `ns`'s logs, or `None` where the namespace has no log
@@ -1192,7 +1231,7 @@ pub enum StateRole {
 
 /// Scope of one shard of one state kind, in one of its two roles.
 ///
-/// Uniform across all nineteen kinds, single-blob namespaces included — their
+/// Uniform across all twenty-six kinds, single-blob namespaces included — their
 /// one layer is shard 0 — so the header and descriptor shapes stay one shape
 /// and a reader never dispatches on the kind to parse a scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

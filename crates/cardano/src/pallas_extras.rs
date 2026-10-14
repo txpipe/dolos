@@ -347,6 +347,19 @@ pub fn shelley_address_to_stake_address(address: &ShelleyAddress) -> Option<Stak
     }
 }
 
+/// The account an address belongs to in the period logs: a base address's
+/// key or script stake part, or a stake address. Pointer and Byron addresses
+/// belong to none.
+pub fn address_account(address: &Address) -> Option<StakeCredential> {
+    match address {
+        Address::Shelley(shelley) => {
+            shelley_address_to_stake_address(shelley).map(|stake| stake_address_to_cred(&stake))
+        }
+        Address::Stake(stake) => Some(stake_address_to_cred(stake)),
+        Address::Byron(_) => None,
+    }
+}
+
 pub type IsPointer = bool;
 
 pub fn address_as_stake_cred(address: &Address) -> Option<(StakeCredential, IsPointer)> {

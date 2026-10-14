@@ -30,6 +30,7 @@ pub mod dreps;
 pub mod epochs;
 pub mod pools;
 pub mod proposals;
+pub mod stats;
 pub mod txs;
 pub mod work_unit;
 
@@ -43,6 +44,7 @@ use datums::DatumVisitor;
 use dreps::{DRepStateVisitor, DormancyContext};
 use epochs::EpochStateVisitor;
 use pools::PoolStateVisitor;
+use stats::StatsVisitor;
 use txs::TxLogVisitor;
 
 pub trait BlockVisitor {
@@ -227,6 +229,7 @@ pub struct DeltaBuilder<'a> {
     pool_state: PoolStateVisitor,
     tx_logs: TxLogVisitor,
     proposal_logs: ProposalVisitor,
+    stats: StatsVisitor,
 }
 
 impl<'a> DeltaBuilder<'a> {
@@ -257,6 +260,7 @@ impl<'a> DeltaBuilder<'a> {
             pool_state: Default::default(),
             tx_logs: Default::default(),
             proposal_logs: Default::default(),
+            stats: Default::default(),
         }
     }
 
@@ -345,6 +349,15 @@ impl<'a> DeltaBuilder<'a> {
             self.epoch_start,
             self.protocol,
         )?;
+        self.stats.visit_root(
+            &mut deltas,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
+        )?;
 
         for (order, tx) in block.txs().iter().enumerate() {
             self.account_state
@@ -362,6 +375,7 @@ impl<'a> DeltaBuilder<'a> {
             self.tx_logs.visit_tx(&mut deltas, block, tx, self.utxos)?;
             self.proposal_logs
                 .visit_tx(&mut deltas, block, tx, self.utxos)?;
+            self.stats.visit_tx(&mut deltas, block, tx, self.utxos)?;
 
             for input in tx.consumes() {
                 let txoref = TxoRef::from(&input);
@@ -386,6 +400,8 @@ impl<'a> DeltaBuilder<'a> {
                     self.tx_logs
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
                     self.proposal_logs
+                        .visit_input(&mut deltas, block, tx, &input, resolved)?;
+                    self.stats
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
                     Result::<_, ChainError>::Ok(())
                 })?;
@@ -450,6 +466,8 @@ impl<'a> DeltaBuilder<'a> {
                     index as u32,
                     &output,
                 )?;
+                self.stats
+                    .visit_output(&mut deltas, block, tx, &order, index as u32, &output)?;
             }
 
             // The Conway LEDGER rule runs CERTS, GOV, the withdrawal drain and
@@ -477,6 +495,8 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                     self.proposal_logs
                         .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.stats
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                 }
 
                 for cert in tx.certs() {
@@ -495,6 +515,8 @@ impl<'a> DeltaBuilder<'a> {
                     self.tx_logs
                         .visit_cert(&mut deltas, block, tx, &order, &cert)?;
                     self.proposal_logs
+                        .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                    self.stats
                         .visit_cert(&mut deltas, block, tx, &order, &cert)?;
                 }
 
@@ -515,6 +537,8 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
                     self.proposal_logs
                         .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
+                    self.stats
+                        .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
                 }
 
                 if let Some(update) = tx.update() {
@@ -533,6 +557,8 @@ impl<'a> DeltaBuilder<'a> {
                     self.tx_logs
                         .visit_update(&mut deltas, block, Some(tx), &update)?;
                     self.proposal_logs
+                        .visit_update(&mut deltas, block, Some(tx), &update)?;
+                    self.stats
                         .visit_update(&mut deltas, block, Some(tx), &update)?;
                 }
             }
@@ -553,6 +579,7 @@ impl<'a> DeltaBuilder<'a> {
                 self.tx_logs.visit_datums(&mut deltas, block, tx, datum)?;
                 self.proposal_logs
                     .visit_datums(&mut deltas, block, tx, datum)?;
+                self.stats.visit_datums(&mut deltas, block, tx, datum)?;
             }
 
             // Same LEDGER gate as above: GOV never registers a proposal
@@ -575,6 +602,8 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
                     self.proposal_logs
                         .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
+                    self.stats
+                        .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
                 }
             }
 
@@ -594,6 +623,8 @@ impl<'a> DeltaBuilder<'a> {
                 self.tx_logs
                     .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
                 self.proposal_logs
+                    .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
+                self.stats
                     .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
             }
         }
@@ -615,6 +646,7 @@ impl<'a> DeltaBuilder<'a> {
                 .visit_update(&mut deltas, block, None, &update)?;
             self.proposal_logs
                 .visit_update(&mut deltas, block, None, &update)?;
+            self.stats.visit_update(&mut deltas, block, None, &update)?;
         }
 
         self.account_state.flush(&mut deltas)?;
@@ -625,6 +657,7 @@ impl<'a> DeltaBuilder<'a> {
         self.pool_state.flush(&mut deltas)?;
         self.tx_logs.flush(&mut deltas)?;
         self.proposal_logs.flush(&mut deltas)?;
+        self.stats.flush(&mut deltas)?;
 
         self.work.deltas = deltas;
 

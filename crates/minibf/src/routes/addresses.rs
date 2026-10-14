@@ -23,16 +23,18 @@ use pallas::ledger::{
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::AssetState,
-    pallas_extras, ChainSummary,
+    pallas_extras,
+    periods::stats,
+    AddressStatsKey, ChainSummary, PaymentKey,
 };
-use dolos_core::{BlockBody, BlockSlot, Domain, StateStore as _, TxoRef};
+use dolos_core::{BlockBody, BlockSlot, Domain, DomainError, StateStore as _, TxoRef};
 
 use crate::{
     error::Error,
     inputs::{tx_touches_output, InputDeps, InputResolver},
     mapping::{
-        aggregate_assets, AddressExtendedModelBuilder, AddressKind, AddressModelBuilder,
-        AssetTotals, IntoModel,
+        aggregate_assets, stats_amounts, AddressExtendedModelBuilder, AddressKind,
+        AddressModelBuilder, IntoModel,
     },
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
@@ -459,59 +461,6 @@ fn has_address(
     })
 }
 
-async fn sum_block_txs<D>(
-    domain: &Facade<D>,
-    deps: &mut InputDeps,
-    address: &VKeyOrAddress,
-    block: &[u8],
-    received: &mut AssetTotals,
-    sent: &mut AssetTotals,
-    tx_count: &mut usize,
-) -> Result<(), StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let txs = block.txs();
-
-    let mut resolver = deps.prepare(domain, txs.iter()).await?;
-
-    for tx in txs.iter() {
-        let mut matched = false;
-
-        for (_, output) in tx.produces() {
-            let candidate = output
-                .address()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if address_matches(address, &candidate) {
-                received.add_output(&output);
-                matched = true;
-            }
-        }
-
-        for input in tx.consumes() {
-            if let Some(output) = resolver.resolve(&input)? {
-                let candidate = output
-                    .address()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                if address_matches(address, &candidate) {
-                    sent.add_output(&output);
-                    matched = true;
-                }
-            }
-        }
-
-        if matched {
-            *tx_count += 1;
-        }
-    }
-
-    Ok(())
-}
-
 async fn find_txs<D>(
     domain: &Facade<D>,
     deps: &mut InputDeps,
@@ -681,6 +630,8 @@ where
     Ok(Json(transactions))
 }
 
+/// `GET /addresses/{address}/total`: lifetime sums and tx count of an address
+/// or of a payment credential's addresses, from the Stats period logs.
 pub async fn total<D>(
     Path(address): Path<String>,
     State(domain): State<Facade<D>>,
@@ -688,49 +639,60 @@ pub async fn total<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let end_slot = domain.get_tip_slot()?;
+    let parsed = parse_address(&address)?;
 
-    let (stream, parsed) =
-        blocks_for_address_stream(&domain, &address, 0, end_slot, SlotOrder::Asc)?;
+    let chain = domain.get_chain_summary()?;
+    let (tip_epoch, _) = chain.slot_epoch(domain.get_tip_slot()?);
+    let shelley = chain.first_shelley_epoch();
 
-    let mut received = AssetTotals::default();
-    let mut sent = AssetTotals::default();
-    let mut tx_count: usize = 0;
-    let mut deps = InputDeps::default();
+    let query = match parsed {
+        ParsedAddress::Payment { key, .. } => match <[u8; 28]>::try_from(key.as_slice()) {
+            Ok(hash) => Either::Left(PaymentKey(hash.into())),
+            Err(_) => return Err(StatusCode::NOT_FOUND.into()),
+        },
+        ParsedAddress::Shelley { key, .. } | ParsedAddress::Byron { key } => {
+            let address =
+                Address::from_bytes(&key).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Either::Right(address)
+        }
+    };
 
-    let mut stream = Box::pin(stream);
-    while let Some(res) = stream.next().await {
-        let (_slot, block) = res.map_err(|err| {
+    let totals = domain
+        .query()
+        .run_blocking(move |domain| {
+            match &query {
+                Either::Left(payment) => {
+                    stats::payment_totals(&domain, &chain, shelley..=tip_epoch, payment)
+                }
+                Either::Right(address) => {
+                    let from = match address {
+                        Address::Byron(_) => 0,
+                        _ => shelley,
+                    };
+
+                    let key = AddressStatsKey::of(address);
+                    stats::address_totals(&domain, &chain, from..=tip_epoch, &key)
+                }
+            }
+            .map_err(DomainError::from)
+        })
+        .await
+        .map_err(|err| {
             tracing::error!(?err);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-        let Some(block) = block else {
-            continue;
-        };
-
-        sum_block_txs(
-            &domain,
-            &mut deps,
-            &parsed,
-            &block,
-            &mut received,
-            &mut sent,
-            &mut tx_count,
-        )
-        .await
-        .map_err(Error::Code)?;
-    }
-
-    if tx_count == 0 {
+    if totals.tx_count == 0 {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
+    let (received_sum, sent_sum) = stats_amounts(&totals);
+
     let model = AddressContentTotal {
         address,
-        received_sum: received.into_amounts(),
-        sent_sum: sent.into_amounts(),
-        tx_count: tx_count as i32,
+        received_sum,
+        sent_sum,
+        tx_count: totals.tx_count as i32,
     };
 
     Ok(Json(model))
