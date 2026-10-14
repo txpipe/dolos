@@ -777,7 +777,7 @@ where
     }
 
     // One job per state kind: each walks its own namespace once, so the
-    // twenty-six walks that ran in sequence overlap instead. The tip shards are
+    // twenty-seven walks that ran in sequence overlap instead. The tip shards are
     // not offered to the predecessor; the dumps among them are. See
     // [`Predecessor::landed`].
     for (kind, ns, shards) in STATE_KINDS {

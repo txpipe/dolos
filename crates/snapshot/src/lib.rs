@@ -111,7 +111,7 @@ use dolos_cardano::model::{
     EpochState, EraSummary, FirstMintChunk, FixedNamespace, GovState, PaymentStats,
     PendingMirState, PendingRewardState, PolicyMintChunk, PoolState, ProposalState,
     StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
-    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow, StakeLog,
+    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow, StakeLog, ViewsState,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -199,7 +199,7 @@ pub const LOG_KINDS: [(&str, Namespace); 9] = [
 /// namespace is a single blob. Re-sharding a namespace is a media-type-version
 /// event for that namespace's kind, decided by the format's owner; it is not a
 /// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
+pub const STATE_KINDS: [(&str, Namespace, u8); 27] = [
     ("state-account-epochs", AccountEpochLog::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
@@ -230,11 +230,12 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
     ("state-stake-addresses", StakeAddressesRow::NS, 1),
     ("state-stakes", StakeLog::NS, 1),
     ("state-utxos", namespaces::UTXOS, 16),
+    ("state-views", ViewsState::NS, 1),
 ];
 
-/// The twenty-six state kind names alone: what [`StateScope`] answers for
+/// The twenty-seven state kind names alone: what [`StateScope`] answers for
 /// [`Scope::kinds`].
-pub const STATE_KIND_NAMES: [&str; 26] = [
+pub const STATE_KIND_NAMES: [&str; 27] = [
     STATE_KINDS[0].0,
     STATE_KINDS[1].0,
     STATE_KINDS[2].0,
@@ -261,6 +262,7 @@ pub const STATE_KIND_NAMES: [&str; 26] = [
     STATE_KINDS[23].0,
     STATE_KINDS[24].0,
     STATE_KINDS[25].0,
+    STATE_KINDS[26].0,
 ];
 
 /// The kind carrying `ns`'s state tip, or `None` where the namespace is not one
@@ -285,8 +287,8 @@ pub fn state_ns_for(kind: &str) -> Option<Namespace> {
         .map(|(_, ns, _)| ns)
 }
 
-/// Whether `kind` is one of the twenty-six state kinds — the tip predicate the
-/// driver's staging arithmetic sums under, reaching it through
+/// Whether `kind` is one of the twenty-seven state kinds — the tip predicate
+/// the driver's staging arithmetic sums under, reaching it through
 /// [`stelae_driver::DriverProfile::is_state_kind`].
 pub fn is_state_kind(kind: &str) -> bool {
     state_ns_for(kind).is_some()
@@ -301,7 +303,7 @@ pub fn shards_for(ns: Namespace) -> Option<u8> {
         .map(|(_, _, shards)| shards)
 }
 
-/// How many state layers every publish writes: the shard counts summed — 86
+/// How many state layers every publish writes: the shard counts summed — 87
 /// today. Every shard of every namespace kind is written even when empty, so
 /// tip completeness stays structural rather than data-dependent.
 pub const fn state_layer_count() -> usize {
@@ -439,7 +441,7 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
 /// The thirty-eight layer kinds, in the order the inscription lists them.
-pub const KINDS: [&str; 38] = [
+pub const KINDS: [&str; 39] = [
     BLOCKS,
     INDEXES,
     LOG_KINDS[0].0,
@@ -477,6 +479,7 @@ pub const KINDS: [&str; 38] = [
     STATE_KIND_NAMES[23],
     STATE_KIND_NAMES[24],
     STATE_KIND_NAMES[25],
+    STATE_KIND_NAMES[26],
     DIGESTS,
 ];
 
@@ -1231,9 +1234,9 @@ pub enum StateRole {
 
 /// Scope of one shard of one state kind, in one of its two roles.
 ///
-/// Uniform across all twenty-six kinds, single-blob namespaces included — their
-/// one layer is shard 0 — so the header and descriptor shapes stay one shape
-/// and a reader never dispatches on the kind to parse a scope.
+/// Uniform across all twenty-seven kinds, single-blob namespaces included —
+/// their one layer is shard 0 — so the header and descriptor shapes stay one
+/// shape and a reader never dispatches on the kind to parse a scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateScope {
     pub network_magic: u64,

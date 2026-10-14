@@ -129,6 +129,7 @@ pub mod pparams;
 pub mod proposals;
 pub mod stake_addresses;
 pub mod stats;
+pub mod views;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -149,6 +150,7 @@ pub use pparams::*;
 pub use proposals::*;
 pub use stake_addresses::*;
 pub use stats::*;
+pub use views::*;
 
 // --- CardanoEntity ---
 
@@ -168,6 +170,7 @@ pub enum CardanoEntity {
     PendingMirState(Box<PendingMirState>),
     GovState(Box<GovState>),
     AccountEpochLog(Box<AccountEpochLog>),
+    ViewsState(Box<ViewsState>),
 
     // materialized views
     StagedFirstMint(Box<StagedFirstMint>),
@@ -216,6 +219,7 @@ variant_boilerplate!(PendingRewardState);
 variant_boilerplate!(PendingMirState);
 variant_boilerplate!(GovState);
 variant_boilerplate!(AccountEpochLog);
+variant_boilerplate!(ViewsState);
 variant_boilerplate!(StagedFirstMint);
 variant_boilerplate!(FirstMintChunk);
 variant_boilerplate!(PolicyMintChunk);
@@ -245,6 +249,7 @@ impl dolos_core::Entity for CardanoEntity {
             PendingMirState::NS => PendingMirState::decode_entity(ns, value).map(Into::into),
             GovState::NS => GovState::decode_entity(ns, value).map(Into::into),
             AccountEpochLog::NS => AccountEpochLog::decode_entity(ns, value).map(Into::into),
+            ViewsState::NS => ViewsState::decode_entity(ns, value).map(Into::into),
             StagedFirstMint::NS => StagedFirstMint::decode_entity(ns, value).map(Into::into),
             FirstMintChunk::NS => FirstMintChunk::decode_entity(ns, value).map(Into::into),
             PolicyMintChunk::NS => PolicyMintChunk::decode_entity(ns, value).map(Into::into),
@@ -278,6 +283,7 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PendingMirState(x) => PendingMirState::encode_entity(x),
             Self::GovState(x) => GovState::encode_entity(x),
             Self::AccountEpochLog(x) => AccountEpochLog::encode_entity(x),
+            Self::ViewsState(x) => ViewsState::encode_entity(x),
             Self::StagedFirstMint(x) => StagedFirstMint::encode_entity(x),
             Self::FirstMintChunk(x) => FirstMintChunk::encode_entity(x),
             Self::PolicyMintChunk(x) => PolicyMintChunk::encode_entity(x),
@@ -331,6 +337,7 @@ namespaces!(
     PendingRewardState,
     PendingMirState,
     GovState,
+    ViewsState,
     // materialized views
     StagedFirstMint,
     FirstMintChunk,
@@ -446,6 +453,7 @@ pub enum CardanoDelta {
     StagePaymentAddress(Box<StagePaymentAddress>),
     StagePaymentStats(Box<StagePaymentStats>),
     StageAccountStats(Box<StageAccountStats>),
+    MarkViewsStale(Box<MarkViewsStale>),
 }
 
 impl CardanoDelta {
@@ -557,6 +565,7 @@ delta_from!(StageAddressStats);
 delta_from!(StagePaymentAddress);
 delta_from!(StagePaymentStats);
 delta_from!(StageAccountStats);
+delta_from!(MarkViewsStale);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -635,6 +644,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => x.key(),
             Self::StagePaymentStats(x) => x.key(),
             Self::StageAccountStats(x) => x.key(),
+            Self::MarkViewsStale(x) => x.key(),
         }
     }
 
@@ -711,6 +721,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StagePaymentStats(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StageAccountStats(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::MarkViewsStale(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -787,6 +798,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StagePaymentStats(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StageAccountStats(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::MarkViewsStale(x) => Self::downcast_undo(x.as_ref(), entity),
         }
     }
 }
@@ -824,6 +836,9 @@ mod tests {
             namespace_role(AccountState::NS),
             Some(NamespaceRole::Ledger)
         );
+        // the state of the views is ledger state: the switch and a stele
+        // must both carry it
+        assert_eq!(namespace_role(ViewsState::NS), Some(NamespaceRole::Ledger));
         assert_eq!(namespace_role("utxos"), None);
     }
 

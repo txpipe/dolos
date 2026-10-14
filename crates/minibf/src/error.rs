@@ -35,8 +35,9 @@ pub enum Error {
     /// The path matched no route. Blockfrost answers those with a global
     /// `400`, not a `404`.
     InvalidPath,
-    /// The endpoint reads a materialized view and this node keeps none
-    /// (`sync.materialized_views = false`).
+    /// The endpoint reads a materialized view and this node does not
+    /// materialize them: `sync.materialized_views` is off, or was off while
+    /// it synced.
     ViewsNotMaterialized,
 }
 
@@ -243,7 +244,7 @@ impl IntoResponse for Error {
                 Json(ErrorBody::new(
                     501,
                     "Not Implemented",
-                    "This node does not keep the materialized views this endpoint reads: sync.materialized_views is off.",
+                    "This node does not serve the materialized views this endpoint reads: sync.materialized_views is off, or was off while it synced.",
                 )),
             )
                 .into_response(),

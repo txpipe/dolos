@@ -207,7 +207,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 
 ## Materialized views
 
-Some endpoints read a materialized view: a projection the node keeps beside the ledger for that endpoint, written as blocks roll (see [the data layer](../architecture/data-layer)). A node configured with `sync.materialized_views = false` keeps none of them, and these endpoints answer `501 Not Implemented` with a Blockfrost-shaped body saying so:
+Some endpoints read a materialized view: a projection the node keeps beside the ledger for that endpoint, written as blocks roll (see [the data layer](../architecture/data-layer)). A node configured with `sync.materialized_views = false` keeps none of them, and a node whose views fell behind the ledger while the setting was off (the `views` state row records since when, and a stele carries it) does not serve them either, whatever the setting says now. In both cases these endpoints answer `501 Not Implemented` with a Blockfrost-shaped body saying so:
 
 | Endpoint                                    | View                     |
 | ------------------------------------------- | ------------------------ |

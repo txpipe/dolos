@@ -10,8 +10,9 @@
 //! Everything below this module is `dolos_snapshot::restore`, which is generic
 //! over the store traits. What only this module knows is the node: its network
 //! magic, which comes from genesis and never from a file an operator can edit,
-//! and its `sync.max_history`, which bounds how much chain history a restore
-//! bothers to read.
+//! its `sync.max_history`, which bounds how much chain history a restore
+//! bothers to read, and its `sync.materialized_views`, which says whether the
+//! layers of the views are read at all.
 //!
 //! ## The two sources are one restore
 //!
@@ -104,6 +105,7 @@ struct Node {
     stores: crate::common::Stores,
     magic: u64,
     max_history: Option<u64>,
+    materialized_views: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +132,7 @@ impl Node {
             stores,
             magic: u64::from(genesis.network_magic()),
             max_history: config.sync.max_history,
+            materialized_views: config.sync.materialized_views(),
         })
     }
 
@@ -142,6 +145,7 @@ impl Node {
         dolos_snapshot::restore::Restoring {
             network_magic: self.magic,
             max_history: self.max_history,
+            materialized_views: self.materialized_views,
             storage_path: &self.root,
             resume,
             skip_space_check,
@@ -239,6 +243,16 @@ fn report(
         );
     } else {
         println!("epochs:   {}", plan.epochs.len());
+    }
+
+    // Printed only when it happened: a view layer left in the stele is this
+    // node's own `sync.materialized_views = false`, and the namespaces it
+    // would have filled stay empty, which is what their endpoints say.
+    if plan.skipped_views > 0 {
+        println!(
+            "views:    {} layer(s) left in the stele by sync.materialized_views = false",
+            plan.skipped_views,
+        );
     }
 
     // Printed only when it happened, and never folded into the epoch line: an

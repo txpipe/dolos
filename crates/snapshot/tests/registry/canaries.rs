@@ -28,7 +28,7 @@ use dolos_cardano::{
         PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
         PoolDelegation, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
         RollingStats, ShardProgress, StagedFirstMint, StagedStakeAddress, Stake, StakeAddressesRow,
-        StakeLog, VoteEntry,
+        StakeLog, ViewsState, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, PaymentStats, StagedAccountStats, StagedAddressStats,
@@ -971,4 +971,10 @@ pub fn every_nonce_variant() -> Vec<(&'static str, Nonce)> {
             },
         ),
     ]
+}
+
+pub fn views_state() -> ViewsState {
+    ViewsState {
+        stale_since: Some(7),
+    }
 }

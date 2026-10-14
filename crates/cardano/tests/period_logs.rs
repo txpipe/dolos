@@ -6,7 +6,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use dolos_cardano::{
     model::{
         namespace_role, namespaces_of, FirstMintChunk, StagedFirstMint, StagedStakeAddress,
-        StakeAddressesRow,
+        StakeAddressesRow, ViewsState,
     },
     periods::is_sealable,
     AccountKey, CardanoDelta,
@@ -393,4 +393,67 @@ fn a_node_without_views_stages_and_seals_nothing() {
             );
         }
     }
+
+    // the store says since when the views are missing: the first block
+    assert_eq!(
+        domain.state().read_entity_typed::<ViewsState>(&()).unwrap(),
+        Some(ViewsState {
+            stale_since: Some(points[0].slot())
+        })
+    );
+    assert!(!dolos_cardano::views_materialized(&domain).unwrap());
+}
+
+/// The views fall behind the moment a batch rolls without them, and the
+/// store remembers: switching the views back on later neither revives them
+/// nor stages anything, and rolling the batch back takes the mark with it.
+#[test]
+fn views_switched_back_on_stay_stale() {
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 4,
+        txs_per_block: 1,
+        ..Default::default()
+    });
+
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let points: Vec<ChainPoint> = raw
+        .iter()
+        .map(|block| {
+            let decoded = MultiEraBlock::decode(block).unwrap();
+            ChainPoint::Specific(decoded.slot(), decoded.hash())
+        })
+        .collect();
+
+    let row = |domain: &ToyDomain| domain.state().read_entity_typed::<ViewsState>(&()).unwrap();
+
+    // the first block rolls with the views, the second without
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    domain.roll_forward(raw[0].clone()).unwrap();
+    assert_eq!(row(&domain), None);
+    assert!(dolos_cardano::views_materialized(&domain).unwrap());
+
+    let domain = domain.with_sync_config(SyncConfig::default().with_materialized_views(false));
+    domain.roll_forward(raw[1].clone()).unwrap();
+    let stale = ViewsState {
+        stale_since: Some(points[1].slot()),
+    };
+    assert_eq!(row(&domain), Some(stale.clone()));
+
+    // the switch back on changes nothing: the store knows better
+    let domain = domain.with_sync_config(SyncConfig::default());
+    domain.roll_forward(raw[2].clone()).unwrap();
+    domain.roll_forward(raw[3].clone()).unwrap();
+    assert_eq!(row(&domain), Some(stale));
+    assert!(!dolos_cardano::views_materialized(&domain).unwrap());
+
+    let staged_after = staged_addresses(&domain);
+    assert!(staged_after
+        .iter()
+        .all(|(_, _, slot)| *slot == points[0].slot()));
+
+    // rolling back past the batch that marked the views takes the mark out
+    domain.rollback(&points[0]).unwrap();
+    assert_eq!(row(&domain), None);
+    assert!(dolos_cardano::views_materialized(&domain).unwrap());
 }

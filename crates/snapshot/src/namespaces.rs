@@ -1,12 +1,12 @@
 //! The closed set of state namespaces a Dolos stele carries.
 //!
-//! ADR-004 defines state as one uniform key-value space: the twenty-five entity
+//! ADR-004 defines state as one uniform key-value space: the twenty-six entity
 //! namespaces of `dolos_cardano::model::build_schema()` plus [`UTXOS`], which
 //! is the UTxO set wearing the same shape as everything else. That uniformity
 //! is deliberate — it means the format has one state record, and the planned
 //! refactor folding UTxOs into the entity system (#1042) is invisible to it.
 //!
-//! The names are not spelled here. Twenty-five of them are read off the entity
+//! The names are not spelled here. Twenty-six of them are read off the entity
 //! types' own `FixedNamespace::NS`, and `utxos` is defined here because nothing
 //! else in the tree defines it. A namespace that exists in `build_schema` and
 //! not in [`NAMESPACES`] would be silently dropped from every published stele,
@@ -18,7 +18,7 @@ use dolos_cardano::model::{
     EpochState, EraSummary, FirstMintChunk, FixedNamespace, GovState, PaymentStats,
     PendingMirState, PendingRewardState, PolicyMintChunk, PoolState, ProposalState,
     StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
-    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow, StakeLog,
+    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow, StakeLog, ViewsState,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -36,7 +36,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against `build_schema()` directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 26] = [
+pub const NAMESPACES: [Namespace; 27] = [
     AccountEpochLog::NS,
     AccountStats::NS,
     AccountState::NS,
@@ -63,6 +63,7 @@ pub const NAMESPACES: [Namespace; 26] = [
     StakeAddressesRow::NS,
     StakeLog::NS,
     UTXOS,
+    ViewsState::NS,
 ];
 
 /// The schema revision of each namespace's record content, as
@@ -84,7 +85,7 @@ pub const NAMESPACES: [Namespace; 26] = [
 /// fixed width (decision 0051), and each of those moved one revision for it.
 /// Kept beside [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 27] = [
     (AccountEpochLog::NS, 1),
     (AccountStats::NS, 1),
     (AccountState::NS, 1),
@@ -111,6 +112,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
     (StakeAddressesRow::NS, 1),
     (StakeLog::NS, 2),
     (UTXOS, 1),
+    (ViewsState::NS, 1),
 ];
 
 /// Width of a UTxO key: `tx_hash(32) ‖ output_index(4, BE)`.
@@ -144,6 +146,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         StagedPaymentAddress::NS => exact::<<StagedPaymentAddress as StateEntity>::Key>(key),
         StagedPaymentStats::NS => exact::<<StagedPaymentStats as StateEntity>::Key>(key),
         StagedStakeAddress::NS => exact::<<StagedStakeAddress as StateEntity>::Key>(key),
+        ViewsState::NS => exact::<<ViewsState as StateEntity>::Key>(key),
         UTXOS => exact::<[u8; UTXO_KEY_LEN]>(key),
         AccountEpochLog::NS
         | AccountStats::NS

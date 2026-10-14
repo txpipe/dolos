@@ -197,7 +197,7 @@ where
         info!(epoch = context.starting_epoch_no(), "starting epoch");
 
         // A node without views staged nothing to seal.
-        if domain.sync_config().materialized_views() {
+        if crate::views_materialized(domain)? {
             crate::periods::seal_staged::<D>(
                 domain.state(),
                 domain.archive(),

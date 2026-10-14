@@ -40,8 +40,15 @@ declared on its entity type (`entity_boilerplate!(…, role = View)` in
 - a **view** namespace is a projection kept for the queries and endpoints that read it; the ledger never reads one. The period logs and stats (`crates/cardano/src/periods/`) are the views today; `dolos_cardano::model::NAMESPACE_ROLES` lists both sets and `namespaces_of(role)` filters them
 
 The roll computes the views through one visitor set
-(`crates/cardano/src/roll/views.rs`). `sync.materialized_views = false`, read
-through `Domain::sync_config`, skips that set, skips the ESTART seal, and makes
+(`crates/cardano/src/roll/views.rs`), and only while the node materializes them
+(`dolos_cardano::views_materialized`): `sync.materialized_views` is on and the
+`views` singleton (`ViewsState`, ledger state) does not say they fell behind.
+The first batch rolled with the switch off records the slot the views stopped
+at (`MarkViewsStale`, through the WAL), and nothing but a fresh bootstrap or a
+state rebuild makes them complete again. A node that does not materialize the
+views skips the visitor set and the ESTART seal, leaves the view layers out of
+a stele restore (`crates/snapshot/src/restore.rs`, by role, so a new view needs
+nothing there; a restore with the switch off writes the `views` row), and makes
 the minibf endpoints a view serves answer `501` through `Facade::require_views`;
 the schema the stores open does not change. To add a view: declare `role = View`
 on its type, add it to the namespace list in `crates/cardano/src/model/mod.rs`

@@ -518,6 +518,16 @@ impl TestApp {
         Self::from_domain(domain, vectors, None, None)
     }
 
+    /// App on a node that synced with the views off and has the switch on
+    /// now: the store says the views fell behind, and the switch does not
+    /// override it.
+    pub fn new_with_stale_views(cfg: SyntheticBlockConfig) -> Self {
+        let sync = SyncConfig::default().with_materialized_views(false);
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic_and_sync(cfg, sync).finish();
+        let domain = domain.with_sync_config(SyncConfig::default());
+        Self::from_domain(domain, vectors, None, None)
+    }
+
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
     /// can be exercised without building a chain of thousands of blocks.
     pub fn new_with_scan_limit(cfg: SyntheticBlockConfig, max_scan_items: u64) -> Self {

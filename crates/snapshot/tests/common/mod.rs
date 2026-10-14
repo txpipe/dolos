@@ -28,7 +28,7 @@ use dolos_cardano::{
         PaymentKey, PaymentStats, PaymentTail, PendingMirState, PendingRewardState, PolicyKey,
         PolicyMintChunk, PoolKey, PoolState, ProposalKey, ProposalState, StagedAccountStats,
         StagedAddressStats, StagedFirstMint, StagedPaymentAddress, StagedPaymentStats,
-        StagedStakeAddress, StakeAddressesRow, StakeLog,
+        StagedStakeAddress, StakeAddressesRow, StakeLog, ViewsState,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
     periods::StagedKey,
@@ -125,7 +125,7 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         AssetState::NS => keys::encode(&AssetKey([byte; 32].into())),
         DatumState::NS => keys::encode(&DatumKey([byte; 32].into())),
         DRepState::NS => keys::encode(&DRepKey(DRep::Key([byte; 28].into()))),
-        EpochState::NS | GovState::NS => keys::encode(&()),
+        EpochState::NS | GovState::NS | ViewsState::NS => keys::encode(&()),
         EraSummary::NS => keys::encode(&EraProtocol::from(u16::from(byte))),
         FirstMintChunk::NS => keys::encode(&u32::from(byte)),
         PolicyMintChunk::NS => keys::encode(&(PolicyKey([byte; 28].into()), u32::from(byte))),
@@ -168,7 +168,7 @@ pub fn state_scope(shard: u8) -> StateScope {
 ///
 /// Below [`EPOCH`] rather than equal to it, and that is the interesting
 /// choice: a dump cut at the sequence *is* the tip, byte for byte, so a
-/// fixture that used one would write twenty-six kinds' worth of layers whose
+/// fixture that used one would write twenty-seven kinds' worth of layers whose
 /// digests are already pinned and freeze nothing new. A past epoch's dump has
 /// its own header, its own `diffId`, and the descriptor shape decision 0026
 /// added — which is what a golden is for.
@@ -287,7 +287,7 @@ pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
 /// The namespace is no longer in the record — it is the layer's kind — so what
 /// distinguishes one state layer's content from another's is the record's key
 /// and value, both derived from the namespace's position in [`NAMESPACES`].
-/// The twenty-six namespace strings are frozen by the kinds in the layer
+/// The twenty-seven namespace strings are frozen by the kinds in the layer
 /// headers instead, which is where they now live on the wire.
 ///
 /// The key's first byte carries the shard in its high nibble, so the record

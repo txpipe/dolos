@@ -12,7 +12,7 @@ use dolos_core::{
 use tracing::{debug, info};
 
 use crate::roll::batch::WorkBatch;
-use crate::{roll, Cache, CardanoDelta, CardanoEntity, CardanoLogic};
+use crate::{roll, Cache, CardanoDelta, CardanoEntity, CardanoLogic, MarkViewsStale};
 
 /// Work unit for processing a batch of blocks ("rolling" the chain forward).
 pub struct RollWorkUnit {
@@ -66,13 +66,29 @@ where
         self.batch.load_utxos(domain)?;
         self.batch.decode_utxos()?;
 
+        // The views roll only while the switch is on and they hold every
+        // block so far: once they fell behind, rolling them again would leave
+        // a gap nothing reads across.
+        let complete = crate::views_complete::<D>(domain.state())?;
+        let views = domain.sync_config().materialized_views() && complete;
+
         roll::compute_delta::<D>(
             self.genesis.clone(),
             &self.cache,
             domain.state(),
             &mut self.batch,
-            domain.sync_config().materialized_views(),
+            views,
         )?;
+
+        // The first batch rolled without the views records the slot they
+        // stopped at, through the WAL like any other delta.
+        if !views && complete {
+            let since = self.batch.first_slot();
+
+            if let Some(block) = self.batch.blocks.first_mut() {
+                block.deltas.add_for_entity(MarkViewsStale::new(since));
+            }
+        }
 
         // Load entities here so `compute` can apply deltas before WAL serialization;
         // this is what populates each delta's `prev_*` undo state in time for

@@ -10,9 +10,10 @@
 //! its answer unchanged.
 //!
 //! Every namespace here is a materialized view (`NamespaceRole::View`): the
-//! ledger never reads one. A node with `sync.materialized_views` off stages
-//! nothing (`crate::roll::views`), seals nothing, and answers the endpoints
-//! these logs serve with an error saying so.
+//! ledger never reads one. A node that does not materialize the views
+//! (`crate::views_materialized`: the switch is off, or they fell behind the
+//! ledger while it was) stages nothing (`crate::roll::views`), seals nothing,
+//! and answers the endpoints these logs serve with an error saying so.
 
 use std::{collections::BTreeMap, ops::Range};
 

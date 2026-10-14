@@ -41,10 +41,14 @@
 mod node;
 mod watcher;
 
-use dolos_cardano::indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta};
+use dolos_cardano::{
+    indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta},
+    model::{namespace_role, ViewsState, NAMESPACE_ROLES},
+};
 use dolos_core::{
-    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, StateStore,
-    StateWriter as _, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, FixedNamespace as _,
+    KeyRange, LogKey, Namespace, NamespaceRole, StateStore, StateWriter as _, TagRecord, TxoRef,
+    UtxoSet, UtxoSetDelta,
 };
 use dolos_snapshot::{
     is_state_kind,
@@ -56,7 +60,7 @@ use dolos_testing::{
     faults::{FaultyStateStore, TestFault},
     toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
 };
-use node::{export_plan, export_to, harness, plan_at_boundary, Blank};
+use node::{export_plan, export_to, harness, harness_without_views, plan_at_boundary, Blank};
 use serde_json::json;
 use stelae::{
     dir::{LayerSpec, SteleDir},
@@ -118,7 +122,7 @@ fn restore_into<B: ToyStores>(
 ) -> Result<restore::Summary, Error> {
     let stele = SteleDir::open(root)?;
 
-    let plan = restore::plan(&stele, magic, None)?;
+    let plan = restore::plan(&stele, magic, None, true)?;
     // A directory stele stages nothing — its blobs are read where they are —
     // so the only volume this restore has a need on is the destination.
     plan.preflight(root, &stelae::Resume::none(), None)?;
@@ -156,6 +160,7 @@ fn the_headless_facade_restores_a_directory_without_an_observer() {
         restore::Restoring {
             network_magic: magic_of(&domain),
             max_history: None,
+            materialized_views: true,
             storage_path: storage.path(),
             resume: false,
             skip_space_check: false,
@@ -177,6 +182,121 @@ fn the_headless_facade_restores_a_directory_without_an_observer() {
     assert_eq!(
         outcome.summary.layers_fetched,
         outcome.plan.layers().count()
+    );
+}
+
+/// A node with `sync.materialized_views` off restores the ledger and none of
+/// the views: their namespaces come out empty rather than frozen at the
+/// stele's tip, and the plan says what it left in the stele.
+#[test]
+fn a_node_without_views_restores_no_view_layer() {
+    fn rows<S: StateStore>(state: &S, ns: Namespace) -> usize {
+        state.iter_entities(ns, KeyRange::all()).unwrap().count()
+    }
+
+    let is_view = |ns: Namespace| namespace_role(ns) == Some(NamespaceRole::View);
+
+    let domain: ToyDomain = harness();
+    let source = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    export_to(source.path(), &domain);
+
+    // the stele carries view rows, so an empty namespace below is the plan's
+    // doing and not the fixture's
+    assert!(NAMESPACE_ROLES
+        .iter()
+        .any(|&(ns, _)| is_view(ns) && rows(domain.state(), ns) > 0));
+
+    let blank = Blank::<MemoryStores>::open();
+    let outcome = restore::execute(
+        restore::Input::Directory(source.path()),
+        restore::Restoring {
+            network_magic: magic_of(&domain),
+            max_history: None,
+            materialized_views: false,
+            storage_path: storage.path(),
+            resume: false,
+            skip_space_check: false,
+        },
+        target(&blank),
+        None,
+    )
+    .unwrap();
+
+    assert!(outcome.plan.skipped_views > 0);
+    assert!(outcome.plan.state.keys().all(|ns| !is_view(ns)));
+    assert!(outcome
+        .plan
+        .epochs
+        .iter()
+        .all(|epoch| epoch.logs.keys().all(|ns| !is_view(ns))));
+    assert_eq!(
+        outcome.summary.layers_fetched,
+        outcome.plan.layers().count()
+    );
+
+    for &(ns, role) in NAMESPACE_ROLES {
+        let expected = match role {
+            NamespaceRole::View => 0,
+            NamespaceRole::Ledger if ns == ViewsState::NS => 1,
+            NamespaceRole::Ledger => rows(domain.state(), ns),
+        };
+        assert_eq!(rows(blank.state(), ns), expected, "{ns}");
+    }
+
+    // and the store says so: the views it holds are none
+    assert_eq!(
+        blank.state().read_entity_typed::<ViewsState>(&()).unwrap(),
+        Some(ViewsState {
+            stale_since: Some(0)
+        })
+    );
+
+    assert_eq!(
+        blank.state().read_cursor().unwrap(),
+        domain.state().read_cursor().unwrap()
+    );
+}
+
+/// A stele from a node whose views fell behind carries that fact in its
+/// `views` row, so a node restoring it with the switch on inherits stale
+/// views rather than empty ones it would trust.
+#[test]
+fn a_stele_from_a_node_without_views_restores_stale_views() {
+    let domain: ToyDomain = harness_without_views();
+    let since = domain
+        .state()
+        .read_entity_typed::<ViewsState>(&())
+        .unwrap()
+        .expect("the harness synced without the views")
+        .stale_since
+        .expect("and says since when");
+
+    let source = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    export_to(source.path(), &domain);
+
+    let blank = Blank::<MemoryStores>::open();
+    restore::execute(
+        restore::Input::Directory(source.path()),
+        restore::Restoring {
+            network_magic: magic_of(&domain),
+            max_history: None,
+            materialized_views: true,
+            storage_path: storage.path(),
+            resume: false,
+            skip_space_check: false,
+        },
+        target(&blank),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        blank.state().read_entity_typed::<ViewsState>(&()).unwrap(),
+        Some(ViewsState {
+            stale_since: Some(since)
+        })
     );
 }
 
@@ -336,7 +456,7 @@ fn an_unknown_layer_kind_is_skipped_and_reported() {
     let inscription = export_one_kind_ahead(temp.path(), &domain, json!({"epoch": 0}));
 
     let stele = SteleDir::open(temp.path()).unwrap();
-    let plan = restore::plan(&stele, magic, None).unwrap();
+    let plan = restore::plan(&stele, magic, None, true).unwrap();
 
     assert_eq!(plan.skipped_unknown.len(), 1);
     assert_eq!(plan.skipped_unknown[0].kind, AHEAD_KIND);
@@ -460,7 +580,7 @@ fn a_restore_interrupted_in_utxo_tags_commits_neither_utxos_nor_cursor_and_resum
     let state = FaultyStateStore::new(blank.state().clone(), TestFault::StateTagsApplyError);
 
     let stele = SteleDir::open(temp.path()).unwrap();
-    let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
+    let plan = restore::plan(&stele, magic_of(&domain), None, true).unwrap();
     let index = stele.blob_index().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let mut checkpoint = Checkpoint::open(
@@ -564,7 +684,7 @@ fn utxo_tags_commit_with_each_batch<B: ToyStores>() {
         checked: std::sync::atomic::AtomicUsize::new(0),
     });
     let stele = SteleDir::open(temp.path()).unwrap();
-    let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
+    let plan = restore::plan(&stele, magic_of(&domain), None, true).unwrap();
 
     let summary = restore::restore(
         &stele,
@@ -1218,7 +1338,7 @@ fn restore_watched<B: ToyStores>(
     let stele = SteleDir::open(root)?;
     let identity = stele.read_inscription()?.digest()?;
 
-    let plan = restore::plan(&stele, magic, None)?;
+    let plan = restore::plan(&stele, magic, None, true)?;
     let index = stele.blob_index()?;
 
     let mut checkpoint = Checkpoint::open(progress_path_in(storage), identity, resume)?;
@@ -1276,6 +1396,7 @@ fn the_headless_facade_resumes_an_interrupted_directory_restore() {
         restore::Restoring {
             network_magic: magic,
             max_history: None,
+            materialized_views: true,
             storage_path: storage.path(),
             resume: true,
             skip_space_check: false,
@@ -1405,10 +1526,20 @@ fn a_stele_with_retained_dumps_restores_the_tip_and_reports_the_dumps() {
         &plan_at_boundary(&domain, 1, RetainedEpochs::new(vec![1]).unwrap()),
     );
 
-    let plain_plan =
-        restore::plan(&SteleDir::open(plain_root.path()).unwrap(), magic, None).unwrap();
-    let dumped_plan =
-        restore::plan(&SteleDir::open(dumped_root.path()).unwrap(), magic, None).unwrap();
+    let plain_plan = restore::plan(
+        &SteleDir::open(plain_root.path()).unwrap(),
+        magic,
+        None,
+        true,
+    )
+    .unwrap();
+    let dumped_plan = restore::plan(
+        &SteleDir::open(dumped_root.path()).unwrap(),
+        magic,
+        None,
+        true,
+    )
+    .unwrap();
 
     // Reported: every kind's shards, under the epoch their scope names.
     assert!(plain_plan.state_dumps.is_empty());
@@ -1789,7 +1920,7 @@ fn the_remaining_download_excludes_what_is_already_done() {
 
     let stele = SteleDir::open(temp.path()).unwrap();
     let index = stele.blob_index().unwrap();
-    let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
+    let plan = restore::plan(&stele, magic_of(&domain), None, true).unwrap();
 
     let fresh = plan
         .remaining(&stele, &index, &stelae::Resume::none())
@@ -1855,7 +1986,7 @@ fn the_remaining_download_excludes_what_is_already_done() {
 /// interruption below is built on.
 fn layers_in_driver_order(root: &std::path::Path, magic: u64) -> (Vec<Digest>, Vec<Digest>) {
     let stele = SteleDir::open(root).unwrap();
-    let plan = restore::plan(&stele, magic, None).unwrap();
+    let plan = restore::plan(&stele, magic, None, true).unwrap();
 
     (
         plan.immutable_layers().map(|l| l.diff_id).collect(),
@@ -1897,9 +2028,9 @@ fn max_history_selects_epochs_and_never_the_tip() {
     let stele = SteleDir::open(temp.path()).unwrap();
 
     for max_history in [None, Some(0), Some(u64::MAX)] {
-        let plan = restore::plan(&stele, magic_of(&domain), max_history).unwrap();
+        let plan = restore::plan(&stele, magic_of(&domain), max_history, true).unwrap();
 
-        // Keyed by namespace now, so the tip is twenty-six entries and every
+        // Keyed by namespace now, so the tip is twenty-seven entries and every
         // layer under them.
         assert_eq!(plan.state.len(), STATE_KINDS.len(), "{max_history:?}");
         assert_eq!(
