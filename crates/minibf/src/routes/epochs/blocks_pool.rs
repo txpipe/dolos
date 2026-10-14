@@ -3,8 +3,13 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use dolos_cardano::model::{PoolKey, PoolState};
-use dolos_core::{ArchiveStore as _, Domain};
+use std::{iter::Peekable, ops::Range};
+
+use dolos_cardano::{
+    model::{PoolKey, PoolState},
+    PoolHash,
+};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use pallas::crypto::hash::Hasher;
 
 use crate::{
@@ -17,6 +22,106 @@ use crate::{
 };
 
 use super::{current_epoch, epoch_slot_range, parse_epoch};
+
+/// Blocks read and header-decoded per blocking task. One chunk holds its
+/// permit for a few milliseconds.
+const EPOCH_BLOCKS_CHUNK: usize = 256;
+
+/// The hashes of one page of the blocks in `slots` that `issuer` minted, and
+/// whether it minted any of the blocks read. The blocks are read `chunk` at a
+/// time per blocking task. A chunk ends on a slot boundary, so the next one
+/// resumes past the last slot read; the scan stops once the page is full.
+async fn issuer_page<D: Domain>(
+    domain: &Facade<D>,
+    issuer: PoolHash,
+    slots: Range<BlockSlot>,
+    order: Order,
+    skip: usize,
+    count: usize,
+    chunk: usize,
+) -> Result<(Vec<String>, bool), StatusCode> {
+    let Range { mut start, mut end } = slots;
+    let chunk = chunk.max(1);
+    let mut page = Vec::new();
+    let mut seen = 0usize;
+    let mut minted_here = false;
+
+    while page.len() < count {
+        let (hashes, last, exhausted) = domain
+            .blocking(move |domain| {
+                let iter = domain
+                    .archive()
+                    .get_range(Some(start), Some(end))
+                    .map_err(log_and_500("failed to range-scan epoch blocks"))?;
+
+                let blocks: Box<dyn Iterator<Item = (BlockSlot, Vec<u8>)>> = match order {
+                    Order::Asc => Box::new(iter),
+                    Order::Desc => Box::new(iter.rev()),
+                };
+
+                issuer_chunk(blocks.peekable(), issuer, chunk)
+            })
+            .await?;
+
+        minted_here |= !hashes.is_empty();
+
+        for hash in hashes {
+            if seen >= skip && page.len() < count {
+                page.push(hash);
+            }
+            seen += 1;
+        }
+
+        let Some(last) = last else {
+            break;
+        };
+
+        if exhausted {
+            break;
+        }
+
+        match order {
+            Order::Asc => start = last + 1,
+            Order::Desc => end = last,
+        }
+    }
+
+    Ok((page, minted_here))
+}
+
+/// The hashes of the blocks `issuer` minted among the next `chunk` blocks, read
+/// on through the last block's slot. Returns the last slot read and whether the
+/// blocks ran out.
+fn issuer_chunk(
+    mut blocks: Peekable<impl Iterator<Item = (BlockSlot, Vec<u8>)>>,
+    issuer: PoolHash,
+    chunk: usize,
+) -> Result<(Vec<String>, Option<BlockSlot>, bool), StatusCode> {
+    let mut hashes = Vec::new();
+    let mut read = 0usize;
+    let mut last = None;
+
+    while let Some((slot, body)) = blocks.next_if(|(slot, _)| read < chunk || Some(*slot) == last) {
+        read += 1;
+        last = Some(slot);
+
+        let Some(header) = decode_block_header(&body)? else {
+            continue;
+        };
+
+        let Some(key) = header.issuer_vkey() else {
+            continue;
+        };
+
+        if Hasher::<224>::hash(key) == issuer {
+            hashes.push(header.hash().to_string());
+        }
+    }
+
+    let exhausted = blocks.peek().is_none();
+
+    Ok((hashes, last, exhausted))
+}
 
 pub async fn by_number_blocks_pool<D: Domain>(
     Path((number, pool_id)): Path<(String, String)>,
@@ -41,66 +146,16 @@ where
 
     let (start, end) = epoch_slot_range(&chain, epoch);
 
-    let inner = domain.inner.clone();
-    let issuer = hash;
-    let skip = pagination.skip();
-    let count = pagination.count;
-    let order = pagination.order;
-
-    let (page, minted_here) =
-        tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), StatusCode> {
-            let iter = inner
-                .archive()
-                .get_range(Some(start), Some(end))
-                .map_err(log_and_500("failed to range-scan epoch blocks"))?;
-
-            let scan = |blocks: &mut dyn Iterator<Item = (u64, Vec<u8>)>| {
-                let mut minted_here = false;
-                let mut page = Vec::new();
-                let mut seen = 0usize;
-
-                for (_slot, body) in blocks {
-                    let Some(header) = decode_block_header(&body)? else {
-                        continue;
-                    };
-
-                    let Some(key) = header.issuer_vkey() else {
-                        continue;
-                    };
-
-                    if Hasher::<224>::hash(key) != issuer {
-                        continue;
-                    }
-
-                    minted_here = true;
-
-                    if seen >= skip && page.len() < count {
-                        page.push(header.hash().to_string());
-                    }
-
-                    seen += 1;
-
-                    if page.len() >= count {
-                        break;
-                    }
-                }
-
-                Ok::<_, StatusCode>((page, minted_here))
-            };
-
-            match order {
-                Order::Asc => {
-                    let mut blocks = iter.into_iter();
-                    scan(&mut blocks)
-                }
-                Order::Desc => {
-                    let mut blocks = iter.rev();
-                    scan(&mut blocks)
-                }
-            }
-        })
-        .await
-        .map_err(log_and_500("epoch block scan task failed"))??;
+    let (page, minted_here) = issuer_page(
+        &domain,
+        hash,
+        start..end,
+        pagination.order,
+        pagination.skip(),
+        pagination.count,
+        EPOCH_BLOCKS_CHUNK,
+    )
+    .await?;
 
     // Blockfrost 404s a pool db-sync never saw. A pool registers before it
     // mints, so a block found here proves it as well as a `PoolState` does.
@@ -207,5 +262,53 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let path = format!("/epochs/0/blocks/{}", toy_issuer_pool());
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn chunked_issuer_pages_match_unchunked() {
+        let app = TestApp::new();
+        let facade = app.facade();
+        let issuer = Hasher::<224>::hash(&[0x10, 0x11]);
+        let slots = 0..facade.get_tip_slot().expect("tip") + 1;
+
+        let (all, minted) = issuer_page(
+            &facade,
+            issuer,
+            slots.clone(),
+            Order::Asc,
+            0,
+            100,
+            usize::MAX,
+        )
+        .await
+        .expect("issuer page");
+        assert!(
+            minted && all.len() > 2,
+            "too few blocks to split into chunks"
+        );
+
+        for order in [Order::Asc, Order::Desc] {
+            for (skip, count) in [(0, 100), (1, 2), (2, 1), (3, 5), (10, 5)] {
+                let whole = issuer_page(
+                    &facade,
+                    issuer,
+                    slots.clone(),
+                    order,
+                    skip,
+                    count,
+                    usize::MAX,
+                )
+                .await
+                .expect("issuer page");
+
+                for chunk in [1, 2] {
+                    let chunked =
+                        issuer_page(&facade, issuer, slots.clone(), order, skip, count, chunk)
+                            .await
+                            .expect("issuer page");
+                    assert_eq!(chunked, whole, "{order:?}, skip {skip}, count {count}");
+                }
+            }
+        }
     }
 }
