@@ -536,7 +536,7 @@ fn snapshot_namespace(
 ) -> Vec<(dolos_core::EntityKey, dolos_core::EntityValue)> {
     domain
         .state()
-        .iter_entities(ns, dolos_core::EntityKey::full_range())
+        .iter_entities(ns, dolos_core::KeyRange::all())
         .unwrap()
         .map(|x| x.unwrap())
         .collect()

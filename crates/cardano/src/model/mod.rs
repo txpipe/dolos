@@ -1,33 +1,26 @@
-use dolos_core::{
-    ChainError, Entity, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateSchema,
-};
+use dolos_core::{ChainError, EntityValue, Namespace, NamespaceType, NsKey, StateSchema};
 
-pub trait FixedNamespace {
-    const NS: &'static str;
-}
+pub use dolos_core::{FixedNamespace, LogEntity, StateEntity};
 
-/// A namespace that holds exactly one row at a fixed key.
+/// A namespace that holds exactly one row, at the empty key.
 ///
 /// Singletons don't fit the population-shaped machinery (namespace
 /// streams, key ranges): readers address the row directly
 /// (`crate::read_singleton`) and boundary commits apply deltas through
 /// `WorkDeltas::apply_singleton`, which — unlike the streams — handles
 /// the row not existing yet.
-pub trait SingletonEntity: Entity + FixedNamespace {
-    const KEY: &'static [u8];
-
-    fn singleton_key() -> EntityKey {
-        EntityKey::from(Self::KEY)
-    }
-
+pub trait SingletonEntity: StateEntity<Key = ()> {
     fn ns_key() -> NsKey {
-        NsKey::from((Self::NS, Self::singleton_key()))
+        NsKey::of::<Self>(&())
     }
 }
 
+/// `FixedNamespace` and `Entity` for an entity type, and the key kinds it is
+/// stored under: `state = K` for a state entity, `log = K` for an archive
+/// log (the part after the slot).
 macro_rules! entity_boilerplate {
-    ($type:ident, $ns:literal) => {
-        impl super::FixedNamespace for $type {
+    ($type:ident, $ns:literal $(, state = $state:ty)? $(, log = $log:ty)?) => {
+        impl dolos_core::FixedNamespace for $type {
             const NS: &str = $ns;
         }
 
@@ -36,16 +29,76 @@ macro_rules! entity_boilerplate {
                 ns: dolos_core::Namespace,
                 value: &dolos_core::EntityValue,
             ) -> Result<Self, dolos_core::ChainError> {
-                assert_eq!(ns, <$type as super::FixedNamespace>::NS);
+                assert_eq!(ns, <$type as dolos_core::FixedNamespace>::NS);
                 let value = pallas::codec::minicbor::decode(value)?;
                 Ok(value)
             }
 
             fn encode_entity(value: &Self) -> (dolos_core::Namespace, dolos_core::EntityValue) {
                 let value = pallas::codec::minicbor::to_vec(value).unwrap();
-                (<$type as super::FixedNamespace>::NS, value)
+                (<$type as dolos_core::FixedNamespace>::NS, value)
             }
         }
+
+        $(
+            impl dolos_core::StateEntity for $type {
+                type Key = $state;
+            }
+        )?
+
+        $(
+            impl dolos_core::LogEntity for $type {
+                type Key = $log;
+            }
+        )?
+    };
+}
+
+/// A key that is a hash, stored as the hash's bytes.
+macro_rules! hash_key {
+    ($(#[$doc:meta])* $name:ident, $hash:ty, $len:literal) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+        pub struct $name(pub $hash);
+
+        impl From<$hash> for $name {
+            fn from(value: $hash) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$name> for $hash {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl dolos_core::KeyCodec for $name {
+            fn encode_key(&self, out: &mut dolos_core::KeyBytes) {
+                out.extend_from_slice(self.0.as_slice());
+            }
+
+            fn decode_key(bytes: &[u8]) -> Result<Self, dolos_core::KeyError> {
+                dolos_core::keys::exact::<$len>(bytes).map(|hash| Self(hash.into()))
+            }
+        }
+
+        impl dolos_core::FixedKey for $name {
+            const LEN: usize = $len;
+        }
+    };
+}
+
+/// Keys display as the hex of their stored bytes.
+macro_rules! display_as_stored {
+    ($($name:ty),*) => {
+        $(
+            impl std::fmt::Display for $name {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str(&hex::encode(dolos_core::keys::encode(self)))
+                }
+            }
+        )*
     };
 }
 
@@ -56,6 +109,7 @@ pub mod dreps;
 pub mod epoch_value;
 pub mod epochs;
 pub mod eras;
+pub mod first_mints;
 pub mod gov;
 pub mod logs;
 pub mod metadata_labels;
@@ -63,6 +117,8 @@ pub mod pending;
 pub mod pools;
 pub mod pparams;
 pub mod proposals;
+pub mod stake_addresses;
+pub mod stats;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -74,6 +130,7 @@ pub use dreps::*;
 pub use epoch_value::*;
 pub use epochs::*;
 pub use eras::*;
+pub use first_mints::*;
 pub use gov::*;
 pub use logs::*;
 pub use metadata_labels::*;
@@ -81,6 +138,8 @@ pub use pending::*;
 pub use pools::*;
 pub use pparams::*;
 pub use proposals::*;
+pub use stake_addresses::*;
+pub use stats::*;
 
 // --- CardanoEntity ---
 
@@ -99,6 +158,18 @@ pub enum CardanoEntity {
     PendingMirState(Box<PendingMirState>),
     GovState(Box<GovState>),
     AccountEpochLog(Box<AccountEpochLog>),
+    StagedFirstMint(Box<StagedFirstMint>),
+    FirstMintChunk(Box<FirstMintChunk>),
+    PolicyMintChunk(Box<PolicyMintChunk>),
+    StagedStakeAddress(Box<StagedStakeAddress>),
+    StakeAddressesRow(Box<StakeAddressesRow>),
+    StagedAddressStats(Box<StagedAddressStats>),
+    AddressStats(Box<AddressStats>),
+    StagedPaymentAddress(Box<StagedPaymentAddress>),
+    StagedPaymentStats(Box<StagedPaymentStats>),
+    PaymentStats(Box<PaymentStats>),
+    StagedAccountStats(Box<StagedAccountStats>),
+    AccountStats(Box<AccountStats>),
     MetadataLabelState(Box<MetadataLabelState>),
 }
 
@@ -134,6 +205,18 @@ variant_boilerplate!(PendingRewardState);
 variant_boilerplate!(PendingMirState);
 variant_boilerplate!(GovState);
 variant_boilerplate!(AccountEpochLog);
+variant_boilerplate!(StagedFirstMint);
+variant_boilerplate!(FirstMintChunk);
+variant_boilerplate!(PolicyMintChunk);
+variant_boilerplate!(StagedStakeAddress);
+variant_boilerplate!(StakeAddressesRow);
+variant_boilerplate!(StagedAddressStats);
+variant_boilerplate!(AddressStats);
+variant_boilerplate!(StagedPaymentAddress);
+variant_boilerplate!(StagedPaymentStats);
+variant_boilerplate!(PaymentStats);
+variant_boilerplate!(StagedAccountStats);
+variant_boilerplate!(AccountStats);
 variant_boilerplate!(MetadataLabelState);
 
 impl dolos_core::Entity for CardanoEntity {
@@ -152,6 +235,20 @@ impl dolos_core::Entity for CardanoEntity {
             PendingMirState::NS => PendingMirState::decode_entity(ns, value).map(Into::into),
             GovState::NS => GovState::decode_entity(ns, value).map(Into::into),
             AccountEpochLog::NS => AccountEpochLog::decode_entity(ns, value).map(Into::into),
+            StagedFirstMint::NS => StagedFirstMint::decode_entity(ns, value).map(Into::into),
+            FirstMintChunk::NS => FirstMintChunk::decode_entity(ns, value).map(Into::into),
+            PolicyMintChunk::NS => PolicyMintChunk::decode_entity(ns, value).map(Into::into),
+            StagedStakeAddress::NS => StagedStakeAddress::decode_entity(ns, value).map(Into::into),
+            StakeAddressesRow::NS => StakeAddressesRow::decode_entity(ns, value).map(Into::into),
+            StagedAddressStats::NS => StagedAddressStats::decode_entity(ns, value).map(Into::into),
+            AddressStats::NS => AddressStats::decode_entity(ns, value).map(Into::into),
+            StagedPaymentAddress::NS => {
+                StagedPaymentAddress::decode_entity(ns, value).map(Into::into)
+            }
+            StagedPaymentStats::NS => StagedPaymentStats::decode_entity(ns, value).map(Into::into),
+            PaymentStats::NS => PaymentStats::decode_entity(ns, value).map(Into::into),
+            StagedAccountStats::NS => StagedAccountStats::decode_entity(ns, value).map(Into::into),
+            AccountStats::NS => AccountStats::decode_entity(ns, value).map(Into::into),
             MetadataLabelState::NS => MetadataLabelState::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
@@ -172,6 +269,18 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PendingMirState(x) => PendingMirState::encode_entity(x),
             Self::GovState(x) => GovState::encode_entity(x),
             Self::AccountEpochLog(x) => AccountEpochLog::encode_entity(x),
+            Self::StagedFirstMint(x) => StagedFirstMint::encode_entity(x),
+            Self::FirstMintChunk(x) => FirstMintChunk::encode_entity(x),
+            Self::PolicyMintChunk(x) => PolicyMintChunk::encode_entity(x),
+            Self::StagedStakeAddress(x) => StagedStakeAddress::encode_entity(x),
+            Self::StakeAddressesRow(x) => StakeAddressesRow::encode_entity(x),
+            Self::StagedAddressStats(x) => StagedAddressStats::encode_entity(x),
+            Self::AddressStats(x) => AddressStats::encode_entity(x),
+            Self::StagedPaymentAddress(x) => StagedPaymentAddress::encode_entity(x),
+            Self::StagedPaymentStats(x) => StagedPaymentStats::encode_entity(x),
+            Self::PaymentStats(x) => PaymentStats::encode_entity(x),
+            Self::StagedAccountStats(x) => StagedAccountStats::encode_entity(x),
+            Self::AccountStats(x) => AccountStats::encode_entity(x),
             Self::MetadataLabelState(x) => MetadataLabelState::encode_entity(x),
         }
     }
@@ -192,6 +301,18 @@ pub fn build_schema() -> StateSchema {
     schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
     schema.insert(PendingMirState::NS, NamespaceType::KeyValue);
     schema.insert(GovState::NS, NamespaceType::KeyValue);
+    schema.insert(StagedFirstMint::NS, NamespaceType::KeyValue);
+    schema.insert(FirstMintChunk::NS, NamespaceType::KeyValue);
+    schema.insert(PolicyMintChunk::NS, NamespaceType::KeyValue);
+    schema.insert(StagedStakeAddress::NS, NamespaceType::KeyValue);
+    schema.insert(StakeAddressesRow::NS, NamespaceType::KeyValue);
+    schema.insert(StagedAddressStats::NS, NamespaceType::KeyValue);
+    schema.insert(AddressStats::NS, NamespaceType::KeyValue);
+    schema.insert(StagedPaymentAddress::NS, NamespaceType::KeyValue);
+    schema.insert(StagedPaymentStats::NS, NamespaceType::KeyValue);
+    schema.insert(PaymentStats::NS, NamespaceType::KeyValue);
+    schema.insert(StagedAccountStats::NS, NamespaceType::KeyValue);
+    schema.insert(AccountStats::NS, NamespaceType::KeyValue);
     schema.insert(MetadataLabelState::NS, NamespaceType::KeyValue);
     schema
 }
@@ -274,6 +395,12 @@ pub enum CardanoDelta {
     ProposalResolved(Box<ProposalResolved>),
     GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
     GovDRepSnapshot(Box<GovDRepSnapshot>),
+    StageFirstMint(Box<StageFirstMint>),
+    StageStakeAddress(Box<StageStakeAddress>),
+    StageAddressStats(Box<StageAddressStats>),
+    StagePaymentAddress(Box<StagePaymentAddress>),
+    StagePaymentStats(Box<StagePaymentStats>),
+    StageAccountStats(Box<StageAccountStats>),
     MetadataLabelTxInc(Box<MetadataLabelTxInc>),
 }
 
@@ -380,6 +507,12 @@ delta_from!(GovDistrRotate);
 delta_from!(GovDRepSnapshot);
 delta_from!(GovDistrBoundaryCredit);
 delta_from!(ProposalResolved);
+delta_from!(StageFirstMint);
+delta_from!(StageStakeAddress);
+delta_from!(StageAddressStats);
+delta_from!(StagePaymentAddress);
+delta_from!(StagePaymentStats);
+delta_from!(StageAccountStats);
 delta_from!(MetadataLabelTxInc);
 
 #[allow(deprecated)]
@@ -453,6 +586,12 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => x.key(),
             Self::SetEpochIncentives(x) => x.key(),
             Self::DequeueReward(x) => x.key(),
+            Self::StageFirstMint(x) => x.key(),
+            Self::StageStakeAddress(x) => x.key(),
+            Self::StageAddressStats(x) => x.key(),
+            Self::StagePaymentAddress(x) => x.key(),
+            Self::StagePaymentStats(x) => x.key(),
+            Self::StageAccountStats(x) => x.key(),
             Self::MetadataLabelTxInc(x) => x.key(),
         }
     }
@@ -524,6 +663,12 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::SetEpochIncentives(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DequeueReward(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageFirstMint(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageStakeAddress(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageAddressStats(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StagePaymentAddress(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StagePaymentStats(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageAccountStats(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::MetadataLabelTxInc(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
@@ -595,7 +740,107 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::SetEpochIncentives(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DequeueReward(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageFirstMint(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageStakeAddress(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageAddressStats(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StagePaymentAddress(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StagePaymentStats(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageAccountStats(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::MetadataLabelTxInc(x) => Self::downcast_undo(x.as_ref(), entity),
+        }
+    }
+}
+
+#[cfg(test)]
+mod wal_tests {
+    use super::*;
+    use crate::periods::StagedKey;
+    use pallas::ledger::primitives::StakeCredential;
+
+    #[test]
+    fn appended_delta_variant_indices_are_pinned() {
+        let account = AccountKey(StakeCredential::AddrKeyhash([0x11; 28].into()));
+        let deltas: Vec<(u32, CardanoDelta)> = vec![
+            (
+                64,
+                GovDRepSnapshot::new(DRepSnapshot {
+                    closing_epoch: 7,
+                    dreps: Default::default(),
+                })
+                .into(),
+            ),
+            (
+                65,
+                StageFirstMint::new(StagedFirstMint {
+                    policy: [0x22; 28].into(),
+                    name: b"A".to_vec(),
+                    epoch: 7,
+                    slot: 100,
+                    tx_index: 0,
+                })
+                .into(),
+            ),
+            (
+                66,
+                StageStakeAddress::new(StagedStakeAddress {
+                    account: account.0.clone(),
+                    address: vec![0x33; 29],
+                    epoch: 7,
+                    slot: 100,
+                    tx_index: 0,
+                    output_index: 0,
+                })
+                .into(),
+            ),
+            (
+                67,
+                StageAddressStats::new(
+                    (7, AddressStatsKey::Unstaked(vec![0x33; 29])),
+                    StagedAddressStats(AddressStats::default()),
+                )
+                .into(),
+            ),
+            (
+                68,
+                StagePaymentAddress::new(StagedPaymentAddress {
+                    payment: [0x44; 28].into(),
+                    epoch: 7,
+                    tail: vec![0x60],
+                })
+                .into(),
+            ),
+            (
+                69,
+                StagePaymentStats::new(
+                    StagedKey {
+                        group: PaymentKey([0x44; 28].into()),
+                        epoch: 7,
+                        member: (),
+                    },
+                    StagedPaymentStats { tx_count: 1 },
+                )
+                .into(),
+            ),
+            (
+                70,
+                StageAccountStats::new(
+                    StagedKey {
+                        group: account,
+                        epoch: 7,
+                        member: (),
+                    },
+                    StagedAccountStats { tx_overlap: 1 },
+                )
+                .into(),
+            ),
+            (71, MetadataLabelTxInc::new(674, 1).into()),
+        ];
+
+        for (index, delta) in deltas {
+            let encoded = bincode::serialize(&delta).unwrap();
+            assert_eq!(&encoded[..4], &index.to_le_bytes());
+            let decoded: CardanoDelta = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(bincode::serialize(&decoded).unwrap(), encoded);
         }
     }
 }

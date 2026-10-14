@@ -56,3 +56,18 @@ pub async fn root<D: Domain>(
 pub async fn invalid_path() -> Error {
     Error::InvalidPath
 }
+
+/// Parses a path number that Blockfrost types as `integer`: an optional sign
+/// and ASCII digits, from 0 through `i32::MAX`.
+pub fn parse_path_number(raw: &str, not_integer: Error, out_of_range: Error) -> Result<u64, Error> {
+    let digits = raw.strip_prefix(['+', '-']).unwrap_or(raw);
+
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(not_integer);
+    }
+
+    match raw.parse::<i32>() {
+        Ok(value) if value >= 0 => Ok(value as u64),
+        _ => Err(out_of_range),
+    }
+}

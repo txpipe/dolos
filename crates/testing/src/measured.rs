@@ -177,7 +177,7 @@ impl<Inner: ArchiveStore> ArchiveStore for MeasuredArchive<Inner> {
     fn iter_logs(
         &self,
         ns: Namespace,
-        range: Range<LogKey>,
+        range: dolos_core::KeyRange,
     ) -> Result<Self::LogIter, ArchiveError> {
         Ok(CountedIter {
             inner: self.inner.iter_logs(ns, range)?,
@@ -314,7 +314,7 @@ impl<Inner: StateStore> StateStore for MeasuredState<Inner> {
     fn iter_entities(
         &self,
         ns: Namespace,
-        range: Range<EntityKey>,
+        range: dolos_core::KeyRange,
     ) -> Result<Self::EntityIter, StateError> {
         Ok(CountedIter {
             inner: self.inner.iter_entities(ns, range)?,

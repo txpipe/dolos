@@ -17,9 +17,8 @@
 //! failure and not a silent re-encoding of every record the profile carries.
 //!
 //! The same types double as the exercise for the registry's retained-history
-//! machinery ([`synthetic_entry`]): every real namespace but `epochs` and
-//! `gov` sits at revision 1 with no history behind it, so without this the
-//! append-only path would be exercised only incidentally.
+//! machinery ([`synthetic_entry`]): the synthetic entry appends a field for
+//! real, so the append-only path is exercised directly.
 
 use dolos_cardano::pallas::codec::minicbor::{self, Decode, Encode};
 

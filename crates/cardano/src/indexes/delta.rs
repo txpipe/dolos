@@ -7,8 +7,8 @@
 //! store).
 
 use dolos_core::{
-    ArchiveIndexDelta, BlockSlot, EraCbor, Tag, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap,
-    UtxoSetDelta,
+    keys, ArchiveIndexDelta, BlockSlot, EraCbor, Tag, TagDimension, TxoRef, UtxoIndexDelta,
+    UtxoMap, UtxoSetDelta,
 };
 use pallas::{
     codec::minicbor,
@@ -23,7 +23,7 @@ use pallas::{
 };
 
 use super::dimensions::{archive, utxo};
-use crate::{model::ProposalState, pallas_extras};
+use crate::{model::ProposalKey, pallas_extras};
 
 /// Builder for constructing index deltas from Cardano block data.
 ///
@@ -227,6 +227,14 @@ impl CardanoIndexDeltaBuilder {
             .push(Tag::new(archive::SCRIPT, hash));
     }
 
+    /// Add the hash of a script that a redeemer executed to the current
+    /// block.
+    pub fn add_redeemer_script(&mut self, hash: Vec<u8>) {
+        self.current_block()
+            .tags
+            .push(Tag::new(archive::SCRIPT_REDEEMERS, hash));
+    }
+
     /// Add certificate tags to the current block.
     pub fn add_cert(&mut self, cert: &MultiEraCert) {
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
@@ -320,9 +328,8 @@ impl CardanoIndexDeltaBuilder {
             self.add_vote_tag(archive::VOTER_VOTES, pallas_extras::voter_id_bytes(voter));
 
             for action in ballot.keys() {
-                let key =
-                    ProposalState::build_entity_key(action.transaction_id, action.action_index);
-                self.add_vote_tag(archive::ACTION_VOTES, key.as_ref().to_vec());
+                let key = ProposalKey::new(action.transaction_id, action.action_index);
+                self.add_vote_tag(archive::ACTION_VOTES, keys::encode(&key).to_vec());
             }
         }
     }
@@ -358,10 +365,7 @@ impl CardanoIndexDeltaBuilder {
         block: &pallas::ledger::traverse::MultiEraBlock<'_>,
         resolved_inputs: &std::collections::HashMap<TxoRef, crate::OwnedMultiEraOutput>,
     ) {
-        use pallas::ledger::{
-            primitives::conway::ScriptRef,
-            traverse::{ComputeHash as _, OriginalHash as _},
-        };
+        use pallas::ledger::traverse::{ComputeHash as _, OriginalHash as _};
 
         self.start_block(block.slot(), block.hash().to_vec(), Some(block.number()));
 
@@ -404,20 +408,7 @@ impl CardanoIndexDeltaBuilder {
                 }
 
                 if let Some(script_ref) = output.script_ref() {
-                    match script_ref {
-                        ScriptRef::NativeScript(script) => {
-                            self.add_script_hash(script.original_hash().to_vec());
-                        }
-                        ScriptRef::PlutusV1Script(script) => {
-                            self.add_script_hash(script.compute_hash().to_vec());
-                        }
-                        ScriptRef::PlutusV2Script(script) => {
-                            self.add_script_hash(script.compute_hash().to_vec());
-                        }
-                        ScriptRef::PlutusV3Script(script) => {
-                            self.add_script_hash(script.compute_hash().to_vec());
-                        }
-                    }
+                    self.add_script_hash(pallas_extras::script_ref_hash(&script_ref).to_vec());
                 }
             }
 
@@ -448,6 +439,29 @@ impl CardanoIndexDeltaBuilder {
 
             for redeemer in tx.redeemers() {
                 self.add_datum_hash(redeemer.data().compute_hash().to_vec());
+            }
+
+            // tags are candidates, not response rows: phase-2-failed txs get
+            // tagged like every other dimension does, and the Blockfrost
+            // rule (db-sync stores no redeemers for failed txs) stays a
+            // query-time filter. resolution is best effort — a spend
+            // redeemer only tags when its declared input is in
+            // `resolved_inputs`.
+            for redeemer in tx.redeemers() {
+                let resolved =
+                    crate::pallas_extras::redeemer_script_hash(&tx, &redeemer, &mut |input| {
+                        let txo_ref: TxoRef = input.into();
+                        let address = resolved_inputs.get(&txo_ref).and_then(|resolved| {
+                            resolved.with_dependent(|_, output| output.address().ok())
+                        });
+                        Ok::<_, std::convert::Infallible>(address)
+                    });
+
+                let Ok(Some(hash)) = resolved else {
+                    continue;
+                };
+
+                self.add_redeemer_script(hash.to_vec());
             }
 
             // Votes in phase-2-invalid txs are tagged too; readers skip them.
@@ -704,6 +718,9 @@ mod tests {
         // SCRIPT
         builder.add_script_hash(vec![0x44; 28]);
 
+        // SCRIPT_REDEEMERS
+        builder.add_redeemer_script(vec![0x88; 28]);
+
         // ACCOUNT_CERTS
         let registration =
             Certificate::StakeRegistration(StakeCredential::AddrKeyhash(Hash::new([0x55; 28])));
@@ -815,12 +832,10 @@ mod tests {
         let committee_id = [&[0x03u8][..], &[0x02; 28]].concat();
         let pool_id = vec![0x03; 28];
 
-        let first = ProposalState::build_entity_key(Hash::new([0xa0; 32]), 0)
-            .as_ref()
-            .to_vec();
-        let second = ProposalState::build_entity_key(Hash::new([0xa0; 32]), 1)
-            .as_ref()
-            .to_vec();
+        // the whole 36-byte proposal key
+        let first = keys::encode(&ProposalKey::new(Hash::new([0xa0; 32]), 0)).to_vec();
+        let second = keys::encode(&ProposalKey::new(Hash::new([0xa0; 32]), 1)).to_vec();
+        assert_eq!(first.len(), 36);
 
         let mut voters = vec![drep_id.clone(), committee_id, pool_id];
         voters.sort();
@@ -839,7 +854,7 @@ mod tests {
     /// credential with the same hash get different keys.
     #[test]
     fn drep_certificates_tag_the_cip129_drep_id() {
-        use crate::model::drep_to_entity_key;
+        use crate::model::DRepKey;
         use pallas::ledger::primitives::{
             conway::{Certificate, DRep},
             StakeCredential,
@@ -879,7 +894,7 @@ mod tests {
 
         // the same bytes the dreps namespace keys its entities by
         assert_eq!(
-            &drep_to_entity_key(&DRep::Key(hash)).as_ref()[..29],
+            keys::encode(&DRepKey::from(&DRep::Key(hash))).as_slice(),
             key_id.as_slice()
         );
     }

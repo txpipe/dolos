@@ -2,14 +2,13 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{
     config::{CardanoConfig, CustomUtxo},
-    ArchiveStore, ArchiveWriter, ChainError, Domain, LogKey, RawBlock, TemporalKey, TxoRef,
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainError, Domain, RawBlock, TxoRef,
 };
 
 use crate::{tx_sequence_to_hash, utxo_with_value};
 
 use bech32::{FromBase32, ToBase32, Variant};
-use dolos_cardano::model::{AccountEpochLog, FixedNamespace as _};
-use dolos_cardano::rupd::credential_to_key;
+use dolos_cardano::model::{AccountEpochLog, AccountKey};
 use pallas::codec::utils::{CborWrap, Int, Nullable};
 use pallas::codec::{minicbor, utils::KeepRaw};
 use pallas::crypto::{hash::Hasher, key::ed25519::SecretKeyExtended};
@@ -24,12 +23,12 @@ use pallas::{
             alonzo,
             conway::{
                 Anchor, Certificate, DRep, DatumOption, GovAction, GovActionId, PlutusData,
-                PlutusScript, PostAlonzoTransactionOutput, ProposalProcedure, ScriptRef,
-                TransactionBody, TransactionOutput, Value, Vote, Voter, VotingProcedure,
-                VotingProcedures, WitnessSet,
+                PlutusScript, PostAlonzoTransactionOutput, ProposalProcedure, Redeemer,
+                RedeemerTag, Redeemers, ScriptRef, TransactionBody, TransactionOutput, Value, Vote,
+                Voter, VotingProcedure, VotingProcedures, WitnessSet,
             },
-            AddrKeyhash, Bytes, NonEmptySet, NonZeroInt, PositiveCoin, Relay, Set, StakeCredential,
-            TransactionInput, VrfKeyhash,
+            AddrKeyhash, Bytes, ExUnits, NonEmptySet, NonZeroInt, PositiveCoin, Relay, Set,
+            StakeCredential, TransactionInput, VrfKeyhash,
         },
         traverse::ComputeHash,
     },
@@ -75,6 +74,65 @@ pub struct SyntheticBlockConfig {
     /// Indices of the phase-2-invalid txs in each block. Each outer entry
     /// represents one block; an empty list leaves every tx valid.
     pub invalid_txs_by_block: Vec<Vec<u32>>,
+    /// Blocks whose txs mint nothing and pay lovelace only. Each entry
+    /// represents one block; a missing entry keeps the asset.
+    pub ada_only_by_block: Vec<bool>,
+    /// Opt-in mint redeemer execution. `None` keeps the default chain
+    /// byte-identical, which many endpoint tests assert.
+    pub mint_redeemer: Option<MintRedeemerConfig>,
+    /// Slots between consecutive blocks.
+    pub slot_step: u64,
+    /// The mints of each tx, per block, replacing the default mint. Each entry
+    /// holds one list per tx; a missing entry keeps the default.
+    pub mints_by_block: Vec<Vec<TxMints>>,
+    /// Txs carry no certificates and no withdrawal. The default ones register
+    /// a DRep, which a pre-Conway chain cannot carry across an epoch boundary.
+    pub plain_txs: bool,
+    /// The addresses of zero-lovelace outputs each tx appends after its own,
+    /// per block. Each entry holds one list per tx; a missing entry appends
+    /// none.
+    pub extra_outputs_by_block: Vec<Vec<TxOutputs>>,
+}
+
+/// One tx's mints: policy, asset name and quantity, a burn when negative.
+pub type TxMints = Vec<([u8; 28], String, i64)>;
+
+/// One tx's extra outputs, as raw address bytes.
+pub type TxOutputs = Vec<Vec<u8>>;
+
+/// Configuration for the opt-in mint redeemer execution.
+///
+/// When set, the first tx of every block mints under `policy_id` and
+/// carries one Mint redeemer for it. The policy then counts as an
+/// executed script in the SCRIPT_REDEEMERS dimension.
+#[derive(Clone, Debug)]
+pub struct MintRedeemerConfig {
+    /// Policy that the redeemer executes. The policy is the script hash.
+    pub policy_id: [u8; 28],
+    /// Append one phase-2-invalid tx to the first block. The tx carries
+    /// a redeemer for the same policy. Endpoints must not list it.
+    pub include_invalid_tx: bool,
+}
+
+impl Default for MintRedeemerConfig {
+    fn default() -> Self {
+        Self {
+            policy_id: [2u8; 28],
+            include_invalid_tx: false,
+        }
+    }
+}
+
+/// Execution units of every synthetic mint redeemer.
+///
+/// With the preview prices (mem 577/10000, steps 721/10000000) the
+/// redeemer fee is exactly 93750 lovelace.
+pub const MINT_REDEEMER_EX_MEM: u64 = 1_000_000;
+pub const MINT_REDEEMER_EX_STEPS: u64 = 500_000_000;
+
+/// The plutus data that every synthetic mint redeemer carries.
+fn mint_redeemer_data() -> PlutusData {
+    PlutusData::BigInt(pallas::ledger::primitives::BigInt::Int(Int::from(7)))
 }
 
 /// Build a testnet Shelley address with both payment and stake key parts.
@@ -137,6 +195,12 @@ impl Default for SyntheticBlockConfig {
             proposal_deposit: 100_000_000,
             spend_previous_outputs: false,
             invalid_txs_by_block: vec![],
+            ada_only_by_block: vec![],
+            mint_redeemer: None,
+            slot_step: 1,
+            mints_by_block: vec![],
+            plain_txs: false,
+            extra_outputs_by_block: vec![],
         }
     }
 }
@@ -191,12 +255,31 @@ pub struct SyntheticVectors {
     pub pool_id: String,
     pub drep_id: String,
     pub tx_cbor: Vec<u8>,
+    /// Present when the config sets `mint_redeemer`.
+    pub redeemers: Option<RedeemerVectors>,
 }
 
 #[derive(Clone, Debug)]
 pub struct AccountWithdrawalVector {
     pub tx_hash: String,
     pub amount: u64,
+}
+
+/// Test vectors for the opt-in mint redeemer execution.
+#[derive(Clone, Debug)]
+pub struct RedeemerVectors {
+    /// Hex hash of the executed script. Equals the redeemer policy.
+    pub script_hash: String,
+    /// Hex hash of the redeemer's plutus data.
+    pub data_hash: String,
+    /// Position of the redeemer policy in each valid tx's sorted mint set.
+    pub redeemer_index: u32,
+    pub unit_mem: u64,
+    pub unit_steps: u64,
+    /// Hash of the executing tx in every block, in chain order.
+    pub tx_hashes: Vec<String>,
+    /// Hash of the phase-2-invalid tx, when configured.
+    pub invalid_tx_hash: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -237,6 +320,8 @@ struct SyntheticFixtureExtras {
 struct SyntheticTxSpec {
     body: TransactionBody<'static>,
     witness_set: WitnessSet<'static>,
+    /// False marks the tx as phase-2-invalid in the block.
+    valid: bool,
 }
 
 pub fn build_synthetic_blocks(
@@ -353,6 +438,8 @@ pub fn build_synthetic_blocks(
     let mut account_address_bounds: std::collections::HashMap<String, (u64, u64)> =
         std::collections::HashMap::new();
     let mut account_withdrawals = Vec::new();
+    let mut redeemer_tx_hashes = Vec::new();
+    let mut invalid_redeemer_tx_hash: Option<String> = None;
 
     let txs_per_block = cfg.txs_per_block.max(1);
     let submit_tx_hash = tx_sequence_to_hash(block_count as u64 * txs_per_block as u64 + 1);
@@ -369,9 +456,10 @@ pub fn build_synthetic_blocks(
     let mut built_tx_hashes: Vec<Vec<Hash<32>>> = Vec::with_capacity(block_count);
 
     for (offset, asset_name) in asset_names.iter().enumerate() {
-        let slot = cfg.slot + offset as u64;
+        let slot = cfg.slot + offset as u64 * cfg.slot_step;
         let block_number = cfg.start_block + offset as u64;
         let asset_name = Bytes::from(asset_name.as_bytes().to_vec());
+        let ada_only = cfg.ada_only_by_block.get(offset).copied().unwrap_or(false);
         let mut tx_specs: Vec<SyntheticTxSpec> = Vec::with_capacity(txs_per_block);
         let mut tx_hashes = Vec::with_capacity(txs_per_block);
         let mut withdrawal_amounts = Vec::with_capacity(txs_per_block);
@@ -443,7 +531,8 @@ pub fn build_synthetic_blocks(
                 None
             };
 
-            let withdrawal_amount = (tx_offset == 0).then_some(1_000_000 + block_number);
+            let withdrawal_amount =
+                (tx_offset == 0 && !cfg.plain_txs).then_some(1_000_000 + block_number);
             withdrawal_amounts.push(withdrawal_amount);
 
             let gov_actions = gov_actions_by_block[offset]
@@ -488,6 +577,30 @@ pub fn build_synthetic_blocks(
                 .cloned()
                 .unwrap_or_default();
 
+            let mints = cfg.mints_by_block.get(offset).map(|txs| {
+                assert_eq!(
+                    txs.len(),
+                    txs_per_block,
+                    "mints_by_block needs one list per tx"
+                );
+                &txs[tx_offset]
+            });
+
+            let extra_outputs = cfg.extra_outputs_by_block.get(offset).map(|txs| {
+                assert_eq!(
+                    txs.len(),
+                    txs_per_block,
+                    "extra_outputs_by_block needs one list per tx"
+                );
+                &txs[tx_offset]
+            });
+
+            let mint_redeemer = if tx_offset == 0 {
+                cfg.mint_redeemer.as_ref()
+            } else {
+                None
+            };
+
             tx_specs.push(sample_transaction(
                 Bytes::from(output_address),
                 cfg.lovelace,
@@ -496,6 +609,7 @@ pub fn build_synthetic_blocks(
                 asset_name.clone(),
                 cfg.asset_amount,
                 cfg.mint_amount,
+                ada_only,
                 stake_cred.clone(),
                 pool_keyhash,
                 cfg.pool_relays.clone(),
@@ -508,7 +622,25 @@ pub fn build_synthetic_blocks(
                 voting_procedures,
                 extra_certs,
                 cfg.proposal_deposit,
+                mint_redeemer,
+                mints,
+                cfg.plain_txs,
+                extra_outputs,
             ));
+        }
+
+        // the first block also carries the phase-2-invalid execution when
+        // the config asks for one. its redeemer must never reach a response.
+        let has_invalid_tx = offset == 0
+            && cfg
+                .mint_redeemer
+                .as_ref()
+                .is_some_and(|mr| mr.include_invalid_tx);
+
+        if has_invalid_tx {
+            let mr = cfg.mint_redeemer.as_ref().expect("mint redeemer config");
+            tx_specs.push(phase2_invalid_redeemer_tx_spec(mr));
+            withdrawal_amounts.push(None);
         }
 
         let (mut block, hashes) = sample_block(
@@ -530,6 +662,16 @@ pub fn build_synthetic_blocks(
             if let Some(amount) = withdrawal_amounts[idx] {
                 account_withdrawals.push(AccountWithdrawalVector { tx_hash, amount });
             }
+        }
+
+        if cfg.mint_redeemer.is_some() && !ada_only {
+            // the first tx of every block carries the mint redeemer. an
+            // ADA-only block mints nothing, so it carries no redeemer.
+            redeemer_tx_hashes.push(tx_hashes[0].clone());
+        }
+
+        if has_invalid_tx {
+            invalid_redeemer_tx_hash = tx_hashes.last().cloned();
         }
 
         let block_hash = block.header.compute_hash();
@@ -587,6 +729,16 @@ pub fn build_synthetic_blocks(
         .collect::<Vec<_>>();
     account_address_bounds.sort_by(|a, b| a.0.cmp(&b.0));
 
+    let redeemers = cfg.mint_redeemer.as_ref().map(|mr| RedeemerVectors {
+        script_hash: hex::encode(mr.policy_id),
+        data_hash: mint_redeemer_data().compute_hash().to_string(),
+        redeemer_index: mint_redeemer_index(cfg.policy_id, mr.policy_id),
+        unit_mem: MINT_REDEEMER_EX_MEM,
+        unit_steps: MINT_REDEEMER_EX_STEPS,
+        tx_hashes: redeemer_tx_hashes,
+        invalid_tx_hash: invalid_redeemer_tx_hash,
+    });
+
     let vectors = SyntheticVectors {
         address: cfg.address,
         stake_address,
@@ -624,9 +776,96 @@ pub fn build_synthetic_blocks(
         pool_id,
         drep_id,
         tx_cbor,
+        redeemers,
     };
 
     (raw_blocks, vectors, chain_config)
+}
+
+/// Position of the redeemer policy in the sorted mint set of a valid
+/// synthetic tx. The mint set holds the base policy and the redeemer
+/// policy, ordered by bytes.
+fn mint_redeemer_index(base_policy: [u8; 28], redeemer_policy: [u8; 28]) -> u32 {
+    let mut policies = std::collections::BTreeSet::new();
+    policies.insert(Hash::from(base_policy));
+    policies.insert(Hash::from(redeemer_policy));
+
+    policies
+        .iter()
+        .position(|p| *p == Hash::from(redeemer_policy))
+        .expect("redeemer policy in mint set") as u32
+}
+
+/// A Mint redeemer that executes the policy at `index` in the mint set.
+fn mint_redeemer(index: u32) -> Redeemer {
+    Redeemer {
+        tag: RedeemerTag::Mint,
+        index,
+        data: mint_redeemer_data(),
+        ex_units: ExUnits {
+            mem: MINT_REDEEMER_EX_MEM,
+            steps: MINT_REDEEMER_EX_STEPS,
+        },
+    }
+}
+
+/// A phase-2-invalid tx that carries a Mint redeemer for the given policy.
+/// The tx must never contribute rows to redeemer endpoints. It consumes
+/// nothing: a failed tx consumes only collateral, and it declares none, so
+/// its input needs no seed UTxO.
+fn phase2_invalid_redeemer_tx_spec(mr: &MintRedeemerConfig) -> SyntheticTxSpec {
+    let input = TransactionInput {
+        transaction_id: tx_sequence_to_hash(u64::MAX),
+        index: 0,
+    };
+
+    let policy = Hash::from(mr.policy_id);
+    let amount = NonZeroInt::try_from(1).expect("non-zero mint amount");
+    let mut mint_assets = BTreeMap::new();
+    mint_assets.insert(Bytes::from(b"REDEEM".to_vec()), amount);
+    let mut mint = BTreeMap::new();
+    mint.insert(policy, mint_assets);
+
+    let body = TransactionBody {
+        inputs: Set::from(vec![input]),
+        outputs: vec![],
+        fee: 200_000,
+        ttl: None,
+        certificates: None,
+        withdrawals: None,
+        auxiliary_data_hash: None,
+        validity_interval_start: None,
+        mint: Some(mint),
+        script_data_hash: None,
+        collateral: None,
+        required_signers: None,
+        network_id: None,
+        collateral_return: None,
+        total_collateral: None,
+        reference_inputs: None,
+        voting_procedures: None,
+        proposal_procedures: None,
+        treasury_value: None,
+        donation: None,
+    };
+
+    let witness_set = WitnessSet {
+        vkeywitness: None,
+        native_script: None,
+        bootstrap_witness: None,
+        plutus_v1_script: None,
+        plutus_data: None,
+        // the tx mints one policy, so the redeemer index is 0
+        redeemer: Some(KeepRaw::from(Redeemers::List(vec![mint_redeemer(0)]))),
+        plutus_v2_script: None,
+        plutus_v3_script: None,
+    };
+
+    SyntheticTxSpec {
+        body,
+        witness_set,
+        valid: false,
+    }
 }
 
 fn build_datum_and_script_fixture() -> SyntheticFixtureExtras {
@@ -662,11 +901,12 @@ fn build_datum_and_script_fixture() -> SyntheticFixtureExtras {
 /// seeders from behaving like the two writers the merge removed.
 fn account_epoch_row<D: Domain>(
     domain: &D,
-    log_key: &LogKey,
+    slot: BlockSlot,
+    account: &AccountKey,
 ) -> Result<AccountEpochLog, ChainError> {
     let existing = domain
         .archive()
-        .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, log_key)
+        .read_log_typed::<AccountEpochLog>(slot, account)
         .map_err(ChainError::from)?;
 
     Ok(existing.unwrap_or_default())
@@ -686,7 +926,7 @@ pub fn seed_reward_logs<D: Domain>(
     let address = Address::from_bech32(stake_address)?;
     let (stake_cred, _) = dolos_cardano::pallas_extras::address_as_stake_cred(&address)
         .ok_or(ChainError::InvalidPoolParams)?;
-    let entity_key = credential_to_key(&stake_cred);
+    let account = AccountKey::from(stake_cred);
     let pool_keyhash =
         pool_keyhash_from_bech32(pool_id).map_err(|_| ChainError::InvalidPoolParams)?;
 
@@ -695,14 +935,12 @@ pub fn seed_reward_logs<D: Domain>(
 
     for epoch in epochs {
         let slot = summary.epoch_start(*epoch);
-        let log_key: LogKey = (TemporalKey::from(slot), entity_key.clone()).into();
-
-        let mut log = account_epoch_row(domain, &log_key)?;
+        let mut log = account_epoch_row(domain, slot, &account)?;
         log.member_reward = Some(42);
         log.pool_id = Some(pool_keyhash);
 
         writer
-            .write_log_typed(&log_key, &log)
+            .write_log_typed(slot, &account, &log)
             .map_err(ChainError::from)?;
     }
 
@@ -745,14 +983,14 @@ pub fn seed_account_stake_logs<D: Domain>(
         ];
 
         for (credential, amount) in entries {
-            let log_key: LogKey = (TemporalKey::from(slot), credential_to_key(credential)).into();
+            let account = AccountKey::from(credential);
 
-            let mut log = account_epoch_row(domain, &log_key)?;
+            let mut log = account_epoch_row(domain, slot, &account)?;
             log.active_stake = Some(amount);
             log.pool_id = Some(pool_keyhash);
 
             writer
-                .write_log_typed(&log_key, &log)
+                .write_log_typed(slot, &account, &log)
                 .map_err(ChainError::from)?;
         }
     }
@@ -769,11 +1007,10 @@ pub fn seed_epoch_logs<D: Domain>(domain: &D, epochs: &[u64]) -> Result<(), Chai
 
     for epoch in epochs {
         let slot = summary.epoch_start(*epoch);
-        let log_key = LogKey::from(TemporalKey::from(slot));
         let mut state = base.clone();
         state.number = *epoch;
         state.largest_stable_slot = slot;
-        writer.write_log_typed(&log_key, &state)?;
+        writer.write_log_typed(slot, &(), &state)?;
     }
 
     writer.commit()?;
@@ -803,6 +1040,7 @@ fn sample_transaction(
     asset_name: Bytes,
     asset_amount: u64,
     mint_amount: i64,
+    ada_only: bool,
     stake_cred: StakeCredential,
     pool_keyhash: Hash<28>,
     pool_relays: Vec<Relay>,
@@ -815,23 +1053,83 @@ fn sample_transaction(
     voting_procedures: Option<VotingProcedures>,
     extra_certs: Vec<Certificate>,
     proposal_deposit: u64,
+    mint_redeemer_cfg: Option<&MintRedeemerConfig>,
+    mints: Option<&TxMints>,
+    plain: bool,
+    extra_outputs: Option<&TxOutputs>,
 ) -> SyntheticTxSpec {
     let input = TransactionInput {
         transaction_id: tx_hash,
         index: 0,
     };
 
-    let mint_amount = NonZeroInt::try_from(mint_amount).expect("mint amount must be non-zero");
-    let mut mint_assets = BTreeMap::new();
-    mint_assets.insert(asset_name.clone(), mint_amount);
-    let mut mint = BTreeMap::new();
-    mint.insert(policy_id, mint_assets);
+    // an ADA-only tx mints nothing, so it carries no mint redeemer either
+    let (value, mint, redeemer) = if ada_only {
+        (Value::Coin(lovelace), None, None)
+    } else if let Some(mints) = mints {
+        let mut mint: BTreeMap<Hash<28>, BTreeMap<Bytes, NonZeroInt>> = BTreeMap::new();
+        let mut output_multiasset: BTreeMap<Hash<28>, BTreeMap<Bytes, PositiveCoin>> =
+            BTreeMap::new();
 
-    let asset_amount = PositiveCoin::try_from(asset_amount).expect("asset amount must be non-zero");
-    let mut output_assets = BTreeMap::new();
-    output_assets.insert(asset_name.clone(), asset_amount);
-    let mut output_multiasset = BTreeMap::new();
-    output_multiasset.insert(policy_id, output_assets);
+        for (policy, name, amount) in mints {
+            let name = Bytes::from(name.as_bytes().to_vec());
+            let quantity = NonZeroInt::try_from(*amount).expect("mint amount must be non-zero");
+            mint.entry(Hash::from(*policy))
+                .or_default()
+                .insert(name.clone(), quantity);
+
+            if *amount > 0 {
+                let amount = PositiveCoin::try_from(*amount as u64).expect("positive amount");
+                output_multiasset
+                    .entry(Hash::from(*policy))
+                    .or_default()
+                    .insert(name, amount);
+            }
+        }
+
+        let value = if output_multiasset.is_empty() {
+            Value::Coin(lovelace)
+        } else {
+            Value::Multiasset(lovelace, output_multiasset)
+        };
+
+        (value, (!mint.is_empty()).then_some(mint), None)
+    } else {
+        let mint_amount = NonZeroInt::try_from(mint_amount).expect("mint amount must be non-zero");
+        let mut mint_assets = BTreeMap::new();
+        mint_assets.insert(asset_name.clone(), mint_amount);
+        let mut mint = BTreeMap::new();
+        mint.insert(policy_id, mint_assets);
+
+        // the opt-in execution mints one extra asset under the redeemer policy
+        let redeemer = mint_redeemer_cfg.map(|mr| {
+            let policy = Hash::from(mr.policy_id);
+            let amount = NonZeroInt::try_from(1).expect("non-zero mint amount");
+            mint.entry(policy)
+                .or_default()
+                .insert(Bytes::from(b"REDEEM".to_vec()), amount);
+
+            let index = mint
+                .keys()
+                .position(|k| *k == policy)
+                .expect("redeemer policy in mint set") as u32;
+
+            mint_redeemer(index)
+        });
+
+        let asset_amount =
+            PositiveCoin::try_from(asset_amount).expect("asset amount must be non-zero");
+        let mut output_assets = BTreeMap::new();
+        output_assets.insert(asset_name.clone(), asset_amount);
+        let mut output_multiasset = BTreeMap::new();
+        output_multiasset.insert(policy_id, output_assets);
+
+        (
+            Value::Multiasset(lovelace, output_multiasset),
+            Some(mint),
+            redeemer,
+        )
+    };
 
     let datum_option = extras.map(|extras| KeepRaw::from(DatumOption::Hash(extras.datum_hash)));
     let script_ref = extras.map(|extras| {
@@ -842,7 +1140,7 @@ fn sample_transaction(
 
     let output = PostAlonzoTransactionOutput {
         address,
-        value: Value::Multiasset(lovelace, output_multiasset),
+        value,
         datum_option,
         script_ref,
     };
@@ -910,33 +1208,45 @@ fn sample_transaction(
     ];
     certificates.extend(extra_certs);
 
-    let certificates = NonEmptySet::try_from(certificates).expect("non-empty certificates");
+    let certificates =
+        (!plain).then(|| NonEmptySet::try_from(certificates).expect("non-empty certificates"));
 
-    let body = TransactionBody {
-        inputs: Set::from(vec![input]),
-        outputs: vec![TransactionOutput::PostAlonzo(KeepRaw::from(output))],
-        fee: 7,
-        ttl: Some(10),
-        certificates: Some(certificates),
-        withdrawals,
-        auxiliary_data_hash,
-        validity_interval_start: Some(5),
-        mint: Some(mint),
-        script_data_hash: None,
-        collateral: None,
-        required_signers: Some(
-            NonEmptySet::try_from(vec![AddrKeyhash::from([4u8; 28])])
-                .expect("non-empty required signers"),
-        ),
-        network_id: None,
-        collateral_return: None,
-        total_collateral: None,
-        reference_inputs: None,
-        voting_procedures,
-        proposal_procedures,
-        treasury_value: None,
-        donation: None,
-    };
+    let body =
+        TransactionBody {
+            inputs: Set::from(vec![input]),
+            outputs: std::iter::once(output)
+                .chain(extra_outputs.into_iter().flatten().map(|address| {
+                    PostAlonzoTransactionOutput {
+                        address: Bytes::from(address.clone()),
+                        value: Value::Coin(0),
+                        datum_option: None,
+                        script_ref: None,
+                    }
+                }))
+                .map(|output| TransactionOutput::PostAlonzo(KeepRaw::from(output)))
+                .collect(),
+            fee: 7,
+            ttl: Some(10),
+            certificates,
+            withdrawals,
+            auxiliary_data_hash,
+            validity_interval_start: Some(5),
+            mint,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: Some(
+                NonEmptySet::try_from(vec![AddrKeyhash::from([4u8; 28])])
+                    .expect("non-empty required signers"),
+            ),
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures,
+            proposal_procedures,
+            treasury_value: None,
+            donation: None,
+        };
 
     let witness_set = WitnessSet {
         vkeywitness: None,
@@ -949,7 +1259,7 @@ fn sample_transaction(
                     .expect("non-empty datum set"),
             )
         }),
-        redeemer: None,
+        redeemer: redeemer.map(|r| KeepRaw::from(Redeemers::List(vec![r]))),
         plutus_v2_script: extras.map(|extras| {
             NonEmptySet::try_from(vec![extras.plutus_script.clone()])
                 .expect("non-empty plutus script set")
@@ -957,7 +1267,11 @@ fn sample_transaction(
         plutus_v3_script: None,
     };
 
-    SyntheticTxSpec { body, witness_set }
+    SyntheticTxSpec {
+        body,
+        witness_set,
+        valid: true,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1001,6 +1315,17 @@ fn sample_block(
         .iter()
         .map(|spec| spec.body.compute_hash())
         .collect();
+
+    // stay `None` when every tx is valid: `Some(vec![])` changes the block
+    // bytes, and default-config block hashes must not move.
+    let invalid_transactions: Vec<u32> = tx_specs
+        .iter()
+        .enumerate()
+        .filter(|(_, spec)| !spec.valid)
+        .map(|(idx, _)| idx as u32)
+        .collect();
+    let invalid_transactions = (!invalid_transactions.is_empty()).then_some(invalid_transactions);
+
     let block = pallas::ledger::primitives::conway::Block {
         header: KeepRaw::from(header),
         transaction_bodies: tx_specs
@@ -1019,7 +1344,7 @@ fn sample_block(
             }
             None => BTreeMap::new(),
         },
-        invalid_transactions: None,
+        invalid_transactions,
     };
 
     (block, body_hashes)
@@ -1319,5 +1644,73 @@ mod tests {
         let txs = block.txs();
         let found = txs.iter().any(|tx| tx.metadata().find(label).is_some());
         assert!(found, "synthetic metadata label was not found in block");
+    }
+
+    #[test]
+    fn default_config_carries_no_redeemers() {
+        let (blocks, vectors, _cfg) = build_synthetic_blocks(SyntheticBlockConfig::default());
+
+        assert!(vectors.redeemers.is_none());
+
+        for raw in &blocks {
+            let block = MultiEraBlock::decode(raw).expect("failed to decode synthetic block");
+            for tx in block.txs() {
+                assert!(tx.is_valid());
+                assert!(tx.redeemers().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn mint_redeemer_config_executes_the_policy() {
+        let cfg = SyntheticBlockConfig {
+            mint_redeemer: Some(MintRedeemerConfig {
+                include_invalid_tx: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let (blocks, vectors, _cfg) = build_synthetic_blocks(cfg);
+        let redeemers = vectors.redeemers.as_ref().expect("redeemer vectors");
+        assert_eq!(redeemers.tx_hashes.len(), blocks.len());
+
+        let script_hash = Hash::<28>::from(
+            hex::decode(&redeemers.script_hash)
+                .expect("script hash hex")
+                .as_slice(),
+        );
+
+        for (raw, expected_hash) in blocks.iter().zip(&redeemers.tx_hashes) {
+            let block = MultiEraBlock::decode(raw).expect("failed to decode synthetic block");
+            let txs = block.txs();
+            let tx = &txs[0];
+
+            assert_eq!(tx.hash().to_string(), *expected_hash);
+            assert!(tx.is_valid());
+
+            let tx_redeemers = tx.redeemers();
+            assert_eq!(tx_redeemers.len(), 1);
+            assert_eq!(tx_redeemers[0].index(), redeemers.redeemer_index);
+
+            // a mint redeemer resolves from the tx body alone
+            let resolved = dolos_cardano::pallas_extras::redeemer_script_hash(
+                tx,
+                &tx_redeemers[0],
+                &mut |_| Ok::<_, ()>(None),
+            )
+            .expect("resolution failed");
+            assert_eq!(resolved, Some(script_hash));
+        }
+
+        // the first block carries the phase-2-invalid execution as its last tx
+        let invalid_hash = redeemers.invalid_tx_hash.as_ref().expect("invalid tx hash");
+        let block = MultiEraBlock::decode(&blocks[0]).expect("failed to decode synthetic block");
+        let txs = block.txs();
+        let invalid_tx = txs.last().expect("missing invalid tx");
+
+        assert_eq!(invalid_tx.hash().to_string(), *invalid_hash);
+        assert!(!invalid_tx.is_valid());
+        assert_eq!(invalid_tx.redeemers().len(), 1);
     }
 }

@@ -32,7 +32,7 @@ fn population_is_identical_across_batch_boundaries() {
         first.get_range(None, None).unwrap().collect::<Vec<_>>(),
         second.get_range(None, None).unwrap().collect::<Vec<_>>(),
     );
-    let range = shape.log_key(0, 0)..shape.log_key(shape.epochs, 0);
+    let range = shape.log_range(0..shape.epochs);
     assert_eq!(
         first
             .iter_logs("logs", range.clone())
@@ -56,7 +56,7 @@ fn logs_only_population_has_no_bodies_and_rejects_invalid_batch_size() {
     assert!(store.get_tip().unwrap().is_none());
     assert_eq!(
         store
-            .iter_logs("logs", shape.log_key(0, 0)..shape.log_key(2, 0))
+            .iter_logs("logs", shape.log_range(0..2))
             .unwrap()
             .count(),
         34
@@ -77,7 +77,7 @@ fn measurement_preserves_reverse_iteration_and_does_not_count_skips_as_reads() {
     assert_eq!(blocks.next_back().unwrap().0, 72);
     assert_eq!(archive.counters.snapshot().block_reads, 2);
     assert!(archive.counters.snapshot().decoded_bytes > 0);
-    let log_range = shape(8).log_key(0, 0)..shape(8).log_key(1, 0);
+    let log_range = shape(8).log_range(0..1);
     let mut logs = archive.iter_logs("account-epochs", log_range).unwrap();
     assert_eq!(archive.counters.snapshot().log_rows, 0);
     logs.next().unwrap().unwrap();

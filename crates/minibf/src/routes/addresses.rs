@@ -23,16 +23,18 @@ use pallas::ledger::{
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::AssetState,
-    pallas_extras, ChainSummary,
+    pallas_extras,
+    periods::stats,
+    AddressStatsKey, ChainSummary, PaymentKey,
 };
-use dolos_core::{BlockBody, BlockSlot, Domain, StateStore as _, TxoRef};
+use dolos_core::{BlockBody, BlockSlot, Domain, DomainError, StateStore as _, TxoRef};
 
 use crate::{
     error::Error,
     inputs::{tx_touches_output, InputDeps, InputResolver},
     mapping::{
-        aggregate_assets, AddressExtendedModelBuilder, AddressKind, AddressModelBuilder,
-        AssetTotals, IntoModel,
+        aggregate_assets, stats_amounts, AddressExtendedModelBuilder, AddressKind,
+        AddressModelBuilder, IntoModel,
     },
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
@@ -374,7 +376,9 @@ where
         return Err(Error::Code(StatusCode::NOT_FOUND));
     }
 
-    let utxos = super::utxos::load_utxo_models(&domain, refs, pagination).await?;
+    let utxos =
+        super::utxos::load_utxo_models(&domain, refs, pagination, super::utxos::UtxoFilter::All)
+            .await?;
 
     Ok(Json(utxos))
 }
@@ -389,10 +393,13 @@ where
 {
     let pagination = Pagination::try_from(params)?;
 
-    let mut should_filter = false;
-    let refs = if &asset == "lovelace" {
-        should_filter = true;
-        refs_for_address(&domain, &address)?
+    // `lovelace` lists the outputs without native assets. Any other asset
+    // narrows the refs to the outputs that hold it.
+    let (refs, filter) = if &asset == "lovelace" {
+        (
+            refs_for_address(&domain, &address)?,
+            super::utxos::UtxoFilter::AdaOnly,
+        )
     } else {
         let refs = refs_for_address(&domain, &address)?;
         let asset = super::assets::decode_asset_subject(&asset)?;
@@ -409,7 +416,10 @@ where
             }
         }
 
-        refs.intersection(&asset_refs).cloned().collect()
+        (
+            refs.intersection(&asset_refs).cloned().collect(),
+            super::utxos::UtxoFilter::All,
+        )
     };
 
     if refs.is_empty() {
@@ -419,12 +429,7 @@ where
         return Err(Error::Code(StatusCode::NOT_FOUND));
     }
 
-    let mut utxos: Vec<AddressUtxoContentInner> =
-        super::utxos::load_utxo_models(&domain, refs, pagination).await?;
-
-    if should_filter {
-        utxos.retain(|x| x.amount.iter().all(|x| x.unit == "lovelace"));
-    }
+    let utxos = super::utxos::load_utxo_models(&domain, refs, pagination, filter).await?;
 
     Ok(Json(utxos))
 }
@@ -454,59 +459,6 @@ fn has_address(
 
         Ok(address_matches(address, &candidate))
     })
-}
-
-async fn sum_block_txs<D>(
-    domain: &Facade<D>,
-    deps: &mut InputDeps,
-    address: &VKeyOrAddress,
-    block: &[u8],
-    received: &mut AssetTotals,
-    sent: &mut AssetTotals,
-    tx_count: &mut usize,
-) -> Result<(), StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let txs = block.txs();
-
-    let mut resolver = deps.prepare(domain, txs.iter()).await?;
-
-    for tx in txs.iter() {
-        let mut matched = false;
-
-        for (_, output) in tx.produces() {
-            let candidate = output
-                .address()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if address_matches(address, &candidate) {
-                received.add_output(&output);
-                matched = true;
-            }
-        }
-
-        for input in tx.consumes() {
-            if let Some(output) = resolver.resolve(&input)? {
-                let candidate = output
-                    .address()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                if address_matches(address, &candidate) {
-                    sent.add_output(&output);
-                    matched = true;
-                }
-            }
-        }
-
-        if matched {
-            *tx_count += 1;
-        }
-    }
-
-    Ok(())
 }
 
 async fn find_txs<D>(
@@ -678,6 +630,8 @@ where
     Ok(Json(transactions))
 }
 
+/// `GET /addresses/{address}/total`: lifetime sums and tx count of an address
+/// or of a payment credential's addresses, from the Stats period logs.
 pub async fn total<D>(
     Path(address): Path<String>,
     State(domain): State<Facade<D>>,
@@ -685,49 +639,60 @@ pub async fn total<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let end_slot = domain.get_tip_slot()?;
+    let parsed = parse_address(&address)?;
 
-    let (stream, parsed) =
-        blocks_for_address_stream(&domain, &address, 0, end_slot, SlotOrder::Asc)?;
+    let chain = domain.get_chain_summary()?;
+    let (tip_epoch, _) = chain.slot_epoch(domain.get_tip_slot()?);
+    let shelley = chain.first_shelley_epoch();
 
-    let mut received = AssetTotals::default();
-    let mut sent = AssetTotals::default();
-    let mut tx_count: usize = 0;
-    let mut deps = InputDeps::default();
+    let query = match parsed {
+        ParsedAddress::Payment { key, .. } => match <[u8; 28]>::try_from(key.as_slice()) {
+            Ok(hash) => Either::Left(PaymentKey(hash.into())),
+            Err(_) => return Err(StatusCode::NOT_FOUND.into()),
+        },
+        ParsedAddress::Shelley { key, .. } | ParsedAddress::Byron { key } => {
+            let address =
+                Address::from_bytes(&key).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Either::Right(address)
+        }
+    };
 
-    let mut stream = Box::pin(stream);
-    while let Some(res) = stream.next().await {
-        let (_slot, block) = res.map_err(|err| {
+    let totals = domain
+        .query()
+        .run_blocking(move |domain| {
+            match &query {
+                Either::Left(payment) => {
+                    stats::payment_totals(&domain, &chain, shelley..=tip_epoch, payment)
+                }
+                Either::Right(address) => {
+                    let from = match address {
+                        Address::Byron(_) => 0,
+                        _ => shelley,
+                    };
+
+                    let key = AddressStatsKey::of(address);
+                    stats::address_totals(&domain, &chain, from..=tip_epoch, &key)
+                }
+            }
+            .map_err(DomainError::from)
+        })
+        .await
+        .map_err(|err| {
             tracing::error!(?err);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-        let Some(block) = block else {
-            continue;
-        };
-
-        sum_block_txs(
-            &domain,
-            &mut deps,
-            &parsed,
-            &block,
-            &mut received,
-            &mut sent,
-            &mut tx_count,
-        )
-        .await
-        .map_err(Error::Code)?;
-    }
-
-    if tx_count == 0 {
+    if totals.tx_count == 0 {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
+    let (received_sum, sent_sum) = stats_amounts(&totals);
+
     let model = AddressContentTotal {
         address,
-        received_sum: received.into_amounts(),
-        sent_sum: sent.into_amounts(),
-        tx_count: tx_count as i32,
+        received_sum,
+        sent_sum,
+        tx_count: totals.tx_count as i32,
     };
 
     Ok(Json(model))
@@ -743,6 +708,7 @@ mod tests {
         address_transactions_content_inner::AddressTransactionsContentInner,
         address_utxo_content_inner::AddressUtxoContentInner,
     };
+    use dolos_testing::synthetic::SyntheticBlockConfig;
 
     fn invalid_address() -> &'static str {
         "not-an-address"
@@ -1312,6 +1278,115 @@ mod tests {
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/utxos");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    async fn utxo_page(app: &TestApp, path: &str) -> Vec<String> {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status for {path}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let page: Vec<AddressUtxoContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse address utxos");
+
+        page.into_iter()
+            .map(|x| format!("{}#{}", x.tx_hash, x.output_index))
+            .collect()
+    }
+
+    /// Walks `path` at `count` rows per page. Every page holds `count` rows
+    /// except the last, and the pages join into `full`.
+    async fn assert_pages_join(
+        app: &TestApp,
+        path: &str,
+        order: &str,
+        count: usize,
+        full: &[String],
+    ) {
+        let mut walked = Vec::new();
+
+        for page in 1..=full.len().div_ceil(count) + 1 {
+            let rows = utxo_page(
+                app,
+                &format!("{path}?order={order}&count={count}&page={page}"),
+            )
+            .await;
+            let left = full.len().saturating_sub((page - 1) * count);
+
+            assert_eq!(
+                rows.len(),
+                left.min(count),
+                "{path} order={order} count={count} page={page}"
+            );
+
+            walked.extend(rows);
+        }
+
+        assert_eq!(walked, full, "{path} order={order} count={count}");
+    }
+
+    #[tokio::test]
+    async fn addresses_utxos_lovelace_pages_are_full() {
+        // the token outputs come first, so a filter that runs after the page
+        // cut returns an empty first page
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 8,
+            txs_per_block: 1,
+            ada_only_by_block: vec![false, false, false, true, true, false, true, true],
+            ..Default::default()
+        });
+        let address = app.vectors().address.clone();
+        let path = format!("/addresses/{address}/utxos/lovelace");
+
+        for order in ["asc", "desc"] {
+            let (status, bytes) = app
+                .get_bytes(&format!(
+                    "/addresses/{address}/utxos?order={order}&count=100"
+                ))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let all: Vec<AddressUtxoContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse address utxos");
+            let ada_only: Vec<String> = all
+                .into_iter()
+                .filter(|x| x.amount.iter().all(|amount| amount.unit == "lovelace"))
+                .map(|x| format!("{}#{}", x.tx_hash, x.output_index))
+                .collect();
+
+            let full = utxo_page(&app, &format!("{path}?order={order}&count=100")).await;
+            assert_eq!(full.len(), 4);
+            assert_eq!(full, ada_only, "order={order}");
+
+            for count in [1, 2, 3] {
+                assert_pages_join(&app, &path, order, count, &full).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn addresses_utxos_asset_pages_are_full() {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 6,
+            txs_per_block: 1,
+            asset_names_by_block: ["A", "B", "A", "B", "A", "B"].map(String::from).to_vec(),
+            ..Default::default()
+        });
+        let address = app.vectors().address.clone();
+        let unit = format!("{}{}", app.vectors().policy_id, hex::encode("A"));
+        let path = format!("/addresses/{address}/utxos/{unit}");
+
+        for order in ["asc", "desc"] {
+            let full = utxo_page(&app, &format!("{path}?order={order}&count=100")).await;
+            assert_eq!(full.len(), 3);
+
+            for count in [1, 2] {
+                assert_pages_join(&app, &path, order, count, &full).await;
+            }
+        }
     }
 
     #[test]

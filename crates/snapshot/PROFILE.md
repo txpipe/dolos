@@ -49,11 +49,7 @@ Framing is the protocol's (SPEC.md, "Layer format"): zstd-compressed CBOR sequen
 [format_version = 1, profile: tstr, kind: tstr, scope: any]
 ```
 
-`scope` is opaque to the protocol. The Dolos profile encodes these scopes:
-
-- `[network_magic, epoch, start_slot, end_slot]` for epoch layers.
-- `[network_magic, epoch, shard]` for each state layer. All fifteen state kinds use this shape. A single-blob namespace has one layer, which is shard 0.
-- `[network_magic, epoch, last_immutable]` for the digests layer.
+`scope` is opaque to the protocol. The Dolos profile encodes `[network_magic, epoch, start_slot, end_slot]` for epoch layers, `[network_magic, epoch, shard]` for every state layer — one shape across all state kinds, single-blob namespaces included, whose one layer is shard 0 — and `[network_magic, epoch, last_immutable]` for the digests layer.
 
 The state layers carry **two roles over that one header shape**, and only the *descriptor* scope tells them apart: a tip is `{"shard": n}`, a retained dump is `{"epoch": E, "shard": n}`. The header is deliberately blind to the distinction, and that is what makes the dump a publish cuts at `sequence == E` the tip's own bytes rather than a copy of them — same header, same records, one `diffId`, one blob under two descriptors. See "State history" below.
 
@@ -63,33 +59,62 @@ Content records per kind (Dolos profile):
 |---|---|---|---|
 | `blocks` (per epoch) | `[slot, hash: bytes(32), body: bytes]`, body = raw wire CBOR verbatim | ascending slot, stream order for same-slot (Byron EBB) | `ArchiveWriter::apply` |
 | `indexes` (per epoch) | tags: `[0, dimension: tstr, key_hash: bytes(8), slot]` with `key_hash = xxh3_64(key)` BE — except dimension `metadata`, see below; exact: `[1, kind: tstr, key: bytes, slot]` for block-hash/block-number/tx | sorted, deduped | new `ArchiveWriter::append_prehashed` |
-| `log-{ns}` (per epoch, per log namespace, omitted when empty) | `[log_key: bytes(40), value: bytes]`, value = stored EntityValue verbatim | `log_key` | `ArchiveWriter::write_log` into the namespace the kind names |
+| `log-{ns}` (per epoch, per log namespace, omitted when empty) | `[log_key: bytes, value: bytes]`, log_key = `slot(8, BE) ‖` the namespace's typed key (see key layouts), value = stored EntityValue verbatim | `log_key` | `ArchiveWriter::write_log` into the namespace the kind names |
 | `state-{ns}` (tip or retained dump, per state namespace, `scope.shard` = 0..`parameters.shards[ns]`-1) | `[key: bytes, value: bytes]` | `key`; shard = first nibble of `key[0]` for a 16-way namespace, 0 for a single blob | dispatch on the kind: `state-utxos` → chunked `StateWriter::apply_utxoset` and derived `apply_utxo_tags` in the same commit, else `write_entity` into the namespace the kind names |
 | `digests` (tip, optional) | `[immutable_number, chunk: bytes(32), primary: bytes(32), secondary: bytes(32)]`, each sha256 over the raw file bytes | ascending `immutable_number` | none — verification metadata, not written to stores |
 
 One exception to the tag hashing rule is normative for `indexes` v1: records in dimension `metadata` carry the logical u64 metadata label **verbatim** (big-endian) in `key_hash`, never hashed. The stores keep metadata labels as raw labels rather than hashes, and the layer ships the stored form — that is the whole point of the pre-hashed design. `parameters.indexKeyHash` therefore describes every dimension *except* `metadata`. A publisher that hashes metadata labels produces structurally valid records that restore cleanly but can never be matched by a metadata query; conformance tooling must check this dimension specifically (#1149 tracks whether a future media-type version unifies the rule).
 
-State namespaces:
+State namespaces: the entity namespaces from `dolos_cardano::model::build_schema()` (key = the stored bytes of the namespace's typed key, value = stored minicbor verbatim) plus `utxos` (key = `tx_hash(32) ‖ output_index(4, BE)`, value = CBOR `[era: uint, body: bytes]`). The chain point lives in the inscription's `position`, not in a layer. Live-UTxO tags (`utxo::*`) are not shipped; they are rebuilt at restore into the state store via `utxo_index_delta_from_utxo_delta`.
 
-- The fourteen entity namespaces from `dolos_cardano::model::build_schema()`. The key is the 32-byte `EntityKey`, and the value is the stored minicbor. The profile copies both without change.
-- `utxos`. The key is `tx_hash(32) ‖ output_index(4, BE)`, and the value is the CBOR `[era: uint, body: bytes]`.
+Key layouts (decision 0051): every key is the encoding of one typed key struct per namespace, of whatever length its kind has, and both codecs refuse a record whose key does not decode exactly as its namespace's kind — so a key padded, truncated or borrowed from another namespace fails at the record rather than restoring into a row nothing reads. A log key is the slot followed by the log's key kind. Integers are big-endian.
 
-The chain point lives in the inscription's `position`, not in a layer. Live-UTxO tags (`utxo::*`) are not shipped; they are rebuilt at restore into the state store via `utxo_index_delta_from_utxo_delta`.
+| Namespace | State key | Log key, after `slot(8)` |
+|---|---|---|
+| `accounts`, `pending_rewards`, `pending_mirs` | `AccountKey`: CBOR stake credential, `0x82 ‖ variant ‖ 0x58 0x1c ‖ hash(28)`, 32 B | — |
+| `account-epochs` | — | `AccountKey`, 32 B |
+| `account-stats` | — | `AccountKey`, 32 B |
+| `address-stats` | — | `AddressStatsKey`: `0x01 ‖ AccountKey ‖ rest` for an address with a stake credential, `rest` being the address without its stake hash (a base address's header and payment hash), else `0x00 ‖ address`; 62 B for a base address |
+| `assets` | `AssetKey`: `blake2b256(policy ‖ name)`, 32 B | — |
+| `datums` | `DatumKey`: datum hash, 32 B | — |
+| `dreps` | `DRepKey`: `0x22` (key) or `0x23` (script) `‖ hash(28)`, 29 B; `0x00` abstain, `0x01` no-confidence, 1 B | — |
+| `epochs` | `()`: empty | `()`: empty |
+| `eras` | `EraProtocol`: protocol `u16`, 2 B | — |
+| `first-mints` | — | chunk `u32`, 4 B |
+| `gov` | `()`: empty | — |
+| `metadata-labels` | label `u64`, 8 B | — |
+| `payment-stats` | — | `PaymentKey`: payment hash, 28 B |
+| `policy-first-mints` | — | `PolicyKey ‖ u32`: `policy(28) ‖ chunk(4)`, 32 B |
+| `pools` | `PoolKey`: operator hash, 28 B | — |
+| `proposals` | `ProposalKey`: `idx(4) ‖ tx(32)`, 36 B | — |
+| `staged-account-stats` | `StagedKey<AccountKey, ()>`: `account(32) ‖ epoch(8)`, 40 B | — |
+| `staged-address-stats` | `(Epoch, AddressStatsKey)`: `epoch(8) ‖` the `address-stats` log key, epoch first, 70 B for a base address | — |
+| `staged-first-mints` | `StagedKey<PolicyKey, AssetKey>`: `policy(28) ‖ epoch(8) ‖ asset key(32)`, 68 B | — |
+| `staged-payment-addresses` | `StagedKey<PaymentKey, PaymentTail>`: `payment(28) ‖ epoch(8) ‖ tail`, the address without its payment hash, last, 65 B for a base address | — |
+| `staged-payment-stats` | `StagedKey<PaymentKey, ()>`: `payment(28) ‖ epoch(8)`, 36 B | — |
+| `staged-stake-addresses` | `StagedKey<AccountKey, AddressKey>`: `account(32) ‖ epoch(8) ‖ address`, the address whole and last, 69 B for a base address | — |
+| `stake-addresses` | — | `AccountKey`, 32 B |
+| `stakes` | — | `PoolKey`, 28 B |
+| `utxos` | `tx_hash(32) ‖ output_index(4)`, 36 B | — |
 
-State kinds: each state namespace has one state kind, and the set of 15 state kinds is closed. The name of a state kind is `state-` and then the namespace, with each `_` changed to `-`. The log kinds below use the same rule, for the same reasons. The namespace is therefore **not** in the record — it is the layer — which is what puts the fail-closed edge of a breaking change on exactly the namespace that broke, and lets a reader skip a namespace this profile does not define at the transport rather than choking on one shared layer. The shard count is **specification, never tuning**: `utxos`, `accounts`, `assets` and `datums` split 16 ways, every other namespace is a single blob, and `parameters.shards` reports the map so a reader never has to discover it from the data. Re-sharding a namespace is a media-type-version event for that namespace's kind.
+A state row under a log-only namespace is never written; one that arrives is held to the log's key kind.
 
-Each publish writes every shard of every kind, also the empty shards. As a result, the list of layers alone shows if the tip is complete. A restore requires all 15 kinds. For each kind, the restore requires exactly the number of shards that the shard map gives.
+`state-metadata-labels` carries `MetadataLabelState` values as CBOR `[tx_count: uint]`, with `tx_count` at field 0. Its key is the metadata label in big-endian byte order. Revision 2 uses the exact 8-byte u64 key; the value encoding is unchanged.
+
+State kinds: one per state namespace, and the set is closed — spelled `state-` followed by the namespace with `_` rewritten to `-`, by the same rule and for the same reasons as the log kinds below. The namespace is therefore **not** in the record — it is the layer — which is what puts the fail-closed edge of a breaking change on exactly the namespace that broke, and lets a reader skip a namespace this profile does not define at the transport rather than choking on one shared layer. The shard count is **specification, never tuning**: `utxos`, `accounts`, `assets` and `datums` split 16 ways, every other namespace is a single blob, and `parameters.shards` reports the map so a reader never has to discover it from the data. Re-sharding a namespace is a media-type-version event for that namespace's kind. Every shard of every kind is published, empty ones included, so tip completeness is structural: a restore requires every state kind and, per kind, exactly the shards its count promises.
 
 **State history: retained dumps at configured epochs, plus the moving tip.** A stele's state is the tip — the ledger as of `sequence`, swapped whole by every publish — and, for each epoch a publisher retains, an immutable **dump** of the state as of that epoch. The two are the same kinds, the same records and the same shard geometry; a dump differs from a tip in its descriptor scope, which names the epoch, and in nothing else.
 
-- **The retained set is configuration, not derivation.** `snapshot.state_epochs` names it. Era boundaries are one sensible criterion and cherry-picked epochs another; which epochs are worth a dump is operational, so nothing derives the list from the chain summary. The list is strictly ascending and never names epoch 0, and it is refused where it is read rather than where a dump is cut — it reaches `parameters` before any layer is written. Publishers are expected to keep it around 10–20: per-epoch dumps were rejected outright (~46k manifest descriptors on mainnet against a ~12k ceiling).
+- **The retained set is configuration, not derivation.** `snapshot.state_epochs` names it. Era boundaries are one sensible criterion and cherry-picked epochs another; which epochs are worth a dump is operational, so nothing derives the list from the chain summary. The list is strictly ascending and never names epoch 0, and it is refused where it is read rather than where a dump is cut — it reaches `parameters` before any layer is written. Publishers are expected to keep it around 10–20: per-epoch dumps were rejected outright (~50k manifest descriptors on mainnet against a ~12k ceiling).
 - **The list is signed input.** It is echoed verbatim into `parameters.stateEpochs`, so two publishers of one network configured differently produce different parameters, different inscription digests, and a divergence an operator reads out of a one-field diff instead of hunting through layers for. It is therefore **normative per network** and belongs pinned wherever the default repository is pinned: a publisher quietly running a different list self-ejects from co-signing.
 - **Production rule.** At the publish where `sequence` equals a retained epoch E, E's dump is cut from the tip: one walk of the store, one sink per shard, one blob, and the transport attests the result a second time under the dump's scope. Nothing is compressed twice and nothing crosses the wire twice. At a publish standing past E, the dump is adopted from the predecessor by the same scope equality every immutable layer uses. A dump for a past epoch that no predecessor carries is a **warning and a shorter stele**, never a failed publish: this publish's stores hold the tip, and the state as of an epoch it has moved past is not in them to be written. Producing one is a backfill run's job.
 - **Inheritance.** The rule "no state layer is ever inherited" was about the tip role, in two independent ways, and both still hold of it: the tip changes every publish, and its scope names no epoch, so scope equality could not tell one publish's shard from another's. A dump's scope does name its epoch, so it inherits, checkpoints and resumes exactly as a `blocks` layer does — including through the resumption record an interrupted publish leaves.
 - **Adoption is per shard.** A predecessor that can hand over fifteen of a dump's sixteen shards hands over fifteen. Adopting is an act — it puts the blob in the transport — so all-or-nothing would mean either leaving blobs the inscription does not describe (a refused seal) or refusing a publish over history that was never load-bearing.
 - **Restore reports dumps and does not consume them.** A restore builds a node standing at `sequence`, so the tip is what it reads; dumps are recorded in the plan, excluded from the byte accounting and from the disk preflight, and reported. Tip completeness is checked on the tip alone. Bootstrapping *at* a retained epoch — consuming a dump as the tip — is deliberately out of scope here and nothing forecloses it: the restore write path takes a kind and a descriptor, and a dump's are the tip's.
 
-Log kinds: one per namespace the ledger writes epoch-boundary logs under, and the set is closed — `log-account-epochs`, `log-epochs`, `log-stakes`. `account-epochs` is one `(account, epoch)` record holding everything an account did in an epoch; it replaced `account-stakes`, `leader-rewards`, `member-rewards` and `pool-deposit-refunds`, which were four identically-keyed namespaces and are now the profile's four retired ones (ADR-0027). The kind token is `log-` followed by the namespace with `_` rewritten to `-`, since a media type's kind token admits hyphens and not underscores; the mapping is injective, and a publisher spells the kinds out rather than composing them, so a namespace rename cannot silently rename a published kind. The namespace is therefore **not** in the record — it is the layer — and a restore writes a layer's records into the namespace its kind names. A publisher that finds logs under a namespace no kind covers **fails the publish** naming the namespace: the format has no layer to carry them, and shipping a snapshot that silently omits a slice of the ledger is the failure that costs most and shows least. Log layers wear the epoch scope unchanged, so per-(kind, scope) inheritance works across the split with no new scope shape.
+Log kinds: one per namespace the ledger writes epoch-boundary logs under, and the set is closed — `log-account-epochs`, `log-account-stats`, `log-address-stats`, `log-epochs`, `log-first-mints`, `log-payment-stats`, `log-policy-first-mints`, `log-stake-addresses`, `log-stakes`. `account-epochs` is one `(account, epoch)` record holding everything an account did in an epoch; it replaced `account-stakes`, `leader-rewards`, `member-rewards` and `pool-deposit-refunds`, which were four identically-keyed namespaces and are now the profile's four retired ones (ADR-0027).
+
+`first-mints` and `policy-first-mints` are period logs (decision 0049): API-only folds of history that ESTART seals per epoch once the epoch can no longer roll back. Epoch `e`'s rows key at `epoch_start(e)` and are written at the boundary opening `e + 2` on the public networks, so the stele cut at that boundary is the first whose `e` window carries them; until then they ride in the state tip as `state-staged-first-mints`. Both are lists in mint order, split into rows of at most 256 entries: `first-mints` holds the subjects an epoch first minted, keyed `chunk(4, BE)`, and `policy-first-mints` the names one policy first minted, keyed `policy(28) ‖ chunk(4, BE)`. Every row's field 0 is the list's total for the epoch. `stake-addresses` is a period log by the same rules, staged as `state-staged-stake-addresses`: one row per account an epoch saw an address under, keyed `AccountKey`, listing the epoch's addresses in order of first appearance within it. It is not chunked, because a reader removes repeats across epochs and so decodes every row it reaches. `address-stats`, `payment-stats` and `account-stats` are period logs by the same rules (decision 0050), staged as `state-staged-address-stats`, `state-staged-payment-addresses` with `state-staged-payment-stats`, and `state-staged-account-stats`. An `address-stats` row holds one address's epoch as `[{unit: [received, sent]}, tx_count]`, the unit empty for lovelace and `policy ‖ name` for an asset, each sum a CBOR unsigned integer or, past u64, a positive bignum; a `payment-stats` row holds `[tails, tx_count]`, the epoch's addresses of one payment credential without their payment hash, in byte order; an `account-stats` row holds `[tx_overlap]`, the txs an account's address rows count more than once, and exists only when nonzero. Staged address rows are keyed epoch first, unlike every other staged namespace, because an address has no fixed-width group to lead its key. The kind token is `log-` followed by the namespace with `_` rewritten to `-`, since a media type's kind token admits hyphens and not underscores; the mapping is injective, and a publisher spells the kinds out rather than composing them, so a namespace rename cannot silently rename a published kind. The namespace is therefore **not** in the record — it is the layer — and a restore writes a layer's records into the namespace its kind names. A publisher that finds logs under a namespace no kind covers **fails the publish** naming the namespace: the format has no layer to carry them, and shipping a snapshot that silently omits a slice of the ledger is the failure that costs most and shows least. Log layers wear the epoch scope unchanged, so per-(kind, scope) inheritance works across the split with no new scope shape.
 
 Empty log layers are omitted: **a `log-{ns}` layer exists if and only if it holds at least one record.** The rule is content-determined and not writer discretion — that is what keeps it deterministic across publishers, since two honest publishers agree about whether a layer exists exactly because they agree about whether a record does. Byron alone sheds ~1,200 empty blobs to it. Absence is normative and never a defect: a restore that finds no `log-stakes` for an epoch restores that epoch with no stake logs, exactly as the ledger had none. Every other kind keeps the arity it had — `blocks` and `indexes` are one layer per epoch whatever the window holds, and every state layer is always present, empty or not.
 
@@ -160,9 +185,7 @@ and the meaning of `sequence`:
      "scope": {"lastImmutable": 6187}} ] }
 ```
 
-`parameters` is the profile's compatibility declaration. Three of its four values are a consequence of publisher code rather than a free choice: `indexKeyHash` names the hash behind the pre-hashed index keys; `shards` is the per-namespace shard map above; and `schemas` is a per-namespace revision of the *record content* — the stored minicbor a `state-{ns}` or `log-{ns}` layer carries verbatim — which moves when that namespace's stored shape changes, plus one entry at revision `0` per retired namespace, per the removed-kind rule above. Twelve of the fifteen live revisions are 1. The revision of `epochs` is 2, and this was the first revision increase in the format (ADR-004, Limitations). The revisions of `gov` and `proposals` are 3. The four retired namespaces are also in `schemas`, at revision 0.
-
-Every live revision is pinned by a canary in `crates/snapshot/tests/field_registry.rs`, which fails the build when a record's field table moves without its revision, or the other way round. The split between the two is deliberate: a change to how a layer is *framed* moves that kind's media type and fails closed at the transport, while a change to what a record *contains* moves its schema revision, which a reader consults to decide whether it can interpret what it can already parse. The fourth, `stateEpochs`, is the exception that proves the rule: it is the publisher's configured retained set, and it is here precisely *because* it is a choice — declaring it is what turns a configuration difference between two publishers into a visible parameters difference instead of a silently divergent history.
+`parameters` is the profile's compatibility declaration. Three of its four values are a consequence of publisher code rather than a free choice: `indexKeyHash` names the hash behind the pre-hashed index keys; `shards` is the per-namespace shard map above; and `schemas` is a per-namespace revision of the *record content* — the stored minicbor a `state-{ns}` or `log-{ns}` layer carries verbatim — which moves when that namespace's stored shape changes, plus one entry at revision `0` per retired namespace, per the removed-kind rule above. `epochs` took the format's first bump (ADR-004, Limitations), `gov` and `proposals` appended fields, and the keys of `dreps`, `epochs`, `eras`, `first-mints`, `gov`, `pools`, `proposals`, `staged-first-mints` and `stakes` stopped being padded or truncated to a fixed width (decision 0051), a bump each; `metadata-labels` uses an unpadded u64 key at revision 2; the other live namespaces remain at 1, and the retired namespaces sit alongside them at 0. Every live revision is pinned by a canary in `crates/snapshot/tests/field_registry.rs`, which fails the build when a record's field table moves without its revision, or the other way round. The split between the two is deliberate: a change to how a layer is *framed* moves that kind's media type and fails closed at the transport, while a change to what a record *contains* moves its schema revision, which a reader consults to decide whether it can interpret what it can already parse. The fourth, `stateEpochs`, is the exception that proves the rule: it is the publisher's configured retained set, and it is here precisely *because* it is a choice — declaring it is what turns a configuration difference between two publishers into a visible parameters difference instead of a silently divergent history.
 
 `sequence` is the protocol's ordering key; this profile sets it to the epoch. The three opaque objects are canonicalized by JCS like every generic key (SPEC.md), so determinism holds without the protocol interpreting them — which is why every value in them must itself be deterministic, the property the compatibility contract above enforces.
 
@@ -171,27 +194,19 @@ Every live revision is pinned by a canary in `crates/snapshot/tests/field_regist
 The 4 MiB ceiling and its measurement are the protocol's (SPEC.md, "The
 manifest size ceiling"); what is profile-owned is the arithmetic that keeps a Dolos stele inside the
 ceiling, and it stays here: a descriptor with its annotations costs ~350
-bytes, so the ceiling falls near 12,000 layers. The maximum number of layers
-in a mainnet stele is the sum of these items:
-
-- ~600 epochs × 5 per-epoch kinds (`blocks`, `indexes` and the three
-  `log-{ns}`)
-- the 75 layers of the state tip (4 namespaces × 16 shards + 11 single
-  blobs)
-- 75 more layers for each retained state dump
-
-This profile expects a maximum of 20 retained epochs in a publisher
-configuration. With 20 retained epochs, the maximum is ~4,575 layers and a
-manifest of approximately 1.6 MB. This manifest size is much less than the
-4 MiB ceiling.
-
-The real count is less than this maximum. If a log layer of an epoch is
-empty, the stele does not include that layer. The ~200 Byron epochs have no
-reward logs and no stake logs. As a result, the real count is ~4,175.
-
-**This is the arithmetic that bounds the retained list**, and the reason
-per-epoch dumps were rejected: ~580 of them would be ~43,000 state layers on
-their own, more than three times the ceiling. (The Rationale's "~1,700 manifest descriptors" is decision-time
+bytes, so the ceiling falls near 12,000 layers. A mainnet stele is bounded
+above by ~600 epochs × 11 per-epoch kinds (`blocks`, `indexes` and the nine
+`log-{ns}`), plus the state tip's 87 layers (4 namespaces × 16 shards + 23
+single blobs), plus 87 more for every retained state dump — at 20 retained
+epochs, the ceiling of what a publisher is expected to configure, that is
+~8,427 layers and a manifest of roughly 2.9 MB, inside. The bound is loose
+in the direction that helps: the log kinds are omitted when empty, Byron's
+~200 epochs carry no reward, stake, stake-address, payment-stats or
+account-stats logs at all, and the ~250 epochs before Mary carry no
+first-mint logs, so the realized count sits near ~6,800. **This is the
+arithmetic that bounds the retained list**, and the reason per-epoch dumps
+were rejected: ~580 of them would be ~50,000 state layers on their own,
+about four times the ceiling. (The Rationale's "~1,700 manifest descriptors" is decision-time
 sizing of the pre-split artifact; this paragraph is the authoritative count,
 and it counts layers rather than epochs.)
 

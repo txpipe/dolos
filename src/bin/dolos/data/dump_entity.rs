@@ -1,7 +1,7 @@
 use dolos_cardano::{
-    model::AccountState, DRepState, EpochState, FixedNamespace, GovState, PoolState, ProposalState,
-    SingletonEntity,
+    model::AccountState, DRepState, EpochState, GovState, PoolState, ProposalState,
 };
+use dolos_core::{KeyCodec as _, StateEntity};
 use miette::IntoDiagnostic;
 
 use dolos::prelude::*;
@@ -12,26 +12,24 @@ pub struct Args {
     #[arg(long)]
     namespace: String,
 
-    /// key of the entity to update, for namespaces that hold more than one
+    /// hex key of the entity, for namespaces that hold more than one
     #[arg(long)]
     key: Option<String>,
 }
 
-pub fn run_typed<E: Entity + FixedNamespace + std::fmt::Debug, S: StateStore>(
+pub fn run_typed<E: StateEntity + std::fmt::Debug, S: StateStore>(
     state: &S,
     args: &Args,
 ) -> miette::Result<()> {
-    let key = args
-        .key
-        .as_deref()
-        .ok_or_else(|| miette::Error::msg("--key is required for this namespace"))?;
+    // a singleton's key is empty, so it needs no `--key`
+    let bytes = hex::decode(args.key.as_deref().unwrap_or_default()).into_diagnostic()?;
 
-    let key = hex::decode(key).into_diagnostic()?;
-    let key = EntityKey::from(key);
+    let key = E::Key::decode_key(&bytes).map_err(|err| match args.key {
+        Some(_) => miette::miette!("not a {} key: {err}", E::NS),
+        None => miette::miette!("--key is required for this namespace"),
+    })?;
 
-    let entity = state
-        .read_entity_typed::<E>(E::NS, &key)
-        .into_diagnostic()?;
+    let entity = state.read_entity_typed::<E>(&key).into_diagnostic()?;
 
     if let Some(entity) = entity {
         println!("{:#?}", entity);
@@ -55,18 +53,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         "pools" => run_typed::<PoolState, _>(&state, args)?,
         "proposals" => run_typed::<ProposalState, _>(&state, args)?,
         "dreps" => run_typed::<DRepState, _>(&state, args)?,
-        // the governance singleton has one key and it isn't the caller's to
-        // remember, so `--key` is neither needed nor read here
-        "gov" => {
-            let entity = state
-                .read_entity_typed::<GovState>(GovState::NS, &GovState::singleton_key())
-                .into_diagnostic()?;
-
-            match entity {
-                Some(entity) => println!("{entity:#?}"),
-                None => println!("entity not found"),
-            }
-        }
+        "gov" => run_typed::<GovState, _>(&state, args)?,
         _ => return Err(miette::Error::msg("invalid namespace")),
     };
 

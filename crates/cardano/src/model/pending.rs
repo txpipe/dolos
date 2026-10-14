@@ -1,17 +1,11 @@
-use dolos_core::{EntityKey, NsKey};
+use dolos_core::NsKey;
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     ledger::primitives::StakeCredential,
 };
 use serde::{Deserialize, Serialize};
 
-use super::{pools::PoolHash, FixedNamespace as _};
-
-/// Helper to derive EntityKey from StakeCredential.
-pub fn credential_to_key(cred: &StakeCredential) -> EntityKey {
-    let enc = minicbor::to_vec(cred).unwrap();
-    EntityKey::from(enc)
-}
+use super::{pools::PoolHash, AccountKey};
 
 /// Pending reward for a single account, waiting to be applied at the epoch
 /// boundary. Created by RUPD, consumed by `Ewrap` (the per-account
@@ -47,7 +41,11 @@ impl PendingRewardState {
     }
 }
 
-entity_boilerplate!(PendingRewardState, "pending_rewards");
+entity_boilerplate!(
+    PendingRewardState,
+    "pending_rewards",
+    state = super::AccountKey
+);
 
 /// Pending MIR (Move Instantaneous Reward) for a single account, waiting to
 /// be applied at the epoch boundary. Created during block roll when MIR
@@ -77,7 +75,7 @@ impl PendingMirState {
     }
 }
 
-entity_boilerplate!(PendingMirState, "pending_mirs");
+entity_boilerplate!(PendingMirState, "pending_mirs", state = super::AccountKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -142,7 +140,7 @@ impl dolos_core::EntityDelta for EnqueueReward {
     type Entity = PendingRewardState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PendingRewardState::NS, credential_to_key(&self.credential)))
+        NsKey::of::<PendingRewardState>(&AccountKey::from(&self.credential))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -182,7 +180,7 @@ impl dolos_core::EntityDelta for DequeueReward {
     type Entity = PendingRewardState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PendingRewardState::NS, credential_to_key(&self.credential)))
+        NsKey::of::<PendingRewardState>(&AccountKey::from(&self.credential))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -243,7 +241,7 @@ impl dolos_core::EntityDelta for EnqueueMir {
     type Entity = PendingMirState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PendingMirState::NS, credential_to_key(&self.credential)))
+        NsKey::of::<PendingMirState>(&AccountKey::from(&self.credential))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -300,7 +298,7 @@ impl dolos_core::EntityDelta for DequeueMir {
     type Entity = PendingMirState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((PendingMirState::NS, credential_to_key(&self.credential)))
+        NsKey::of::<PendingMirState>(&AccountKey::from(&self.credential))
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {

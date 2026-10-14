@@ -1,26 +1,11 @@
-use dolos_core::{EntityKey, NsKey};
+use dolos_core::NsKey;
 use pallas::codec::minicbor::{self, Decode, Encode};
 use serde::{Deserialize, Serialize};
 
-use super::FixedNamespace as _;
-
-/// Gives the entity key for a transaction-metadata label. The first eight
-/// bytes of the key contain the label in big-endian byte order. As a result,
-/// an iteration of the namespace gives the labels in numeric order.
-pub fn metadata_label_to_entity_key(label: u64) -> EntityKey {
-    EntityKey::from(&label.to_be_bytes())
-}
-
-/// Decodes the label that [`metadata_label_to_entity_key`] encoded into `key`.
-pub fn metadata_label_from_entity_key(key: &EntityKey) -> u64 {
-    let bytes: [u8; 8] = key.as_ref()[..8].try_into().unwrap();
-    u64::from_be_bytes(bytes)
-}
-
 /// The number of transactions that have a transaction-metadata label.
 ///
-/// The entity key is the label (see [`metadata_label_to_entity_key`]). The
-/// value does not contain the label again. Each valid transaction that has
+/// The entity key is the label. The value does not contain the label again.
+/// Each valid transaction that has
 /// the label in its auxiliary data adds 1 to the count. This count is equal to
 /// the number of `tx_metadata` rows for the label in db-sync.
 #[derive(Debug, Clone, Default, Encode, Decode, PartialEq, Eq)]
@@ -29,7 +14,7 @@ pub struct MetadataLabelState {
     pub tx_count: u64,
 }
 
-entity_boilerplate!(MetadataLabelState, "metadata-labels");
+entity_boilerplate!(MetadataLabelState, "metadata-labels", state = u64);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -74,10 +59,7 @@ impl dolos_core::EntityDelta for MetadataLabelTxInc {
     type Entity = MetadataLabelState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((
-            MetadataLabelState::NS,
-            metadata_label_to_entity_key(self.label),
-        ))
+        NsKey::of::<MetadataLabelState>(&self.label)
     }
 
     fn apply(&mut self, entity: &mut Option<MetadataLabelState>) {
@@ -109,22 +91,49 @@ mod tests {
     use super::testing::any_metadata_label_state;
     use super::*;
     use crate::model::testing::{assert_delta_roundtrip, assert_delta_serde_roundtrip};
-    use dolos_core::EntityDelta;
+    use dolos_core::{EntityDelta, EntityKey, KeyError, StateEntity};
     use proptest::prelude::*;
 
     #[test]
     fn entity_key_round_trips_the_label() {
         for label in [0, 1, 674, 61284, u64::MAX] {
-            let key = metadata_label_to_entity_key(label);
-            assert_eq!(metadata_label_from_entity_key(&key), label);
+            let key = EntityKey::of(&label);
+            assert_eq!(key.as_ref(), label.to_be_bytes());
+            assert_eq!(
+                key.decode::<<MetadataLabelState as StateEntity>::Key>(),
+                Ok(label)
+            );
+            assert_eq!(
+                MetadataLabelTxInc::new(label, 1).key(),
+                NsKey::of::<MetadataLabelState>(&label)
+            );
+        }
+    }
+
+    #[test]
+    fn entity_keys_refuse_short_and_padded_labels() {
+        for len in [0, 7, 9, 32] {
+            let key = EntityKey::from_raw(&vec![0; len]);
+            let result = key.decode::<<MetadataLabelState as StateEntity>::Key>();
+            if len < 8 {
+                assert_eq!(
+                    result,
+                    Err(KeyError::Short {
+                        expected: 8,
+                        found: len
+                    })
+                );
+            } else {
+                assert_eq!(result, Err(KeyError::Trailing(len - 8)));
+            }
         }
     }
 
     #[test]
     fn entity_keys_sort_in_label_order() {
         let keys: Vec<_> = [0u64, 1, 255, 256, 674, 61284, u64::MAX]
-            .into_iter()
-            .map(metadata_label_to_entity_key)
+            .iter()
+            .map(EntityKey::of)
             .collect();
 
         assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
@@ -154,6 +163,36 @@ mod tests {
 
         delta.undo(&mut entity);
         assert_eq!(entity, Some(MetadataLabelState { tx_count: 5 }));
+    }
+
+    #[test]
+    fn wal_rollback_restores_a_label_across_multiple_blocks() {
+        use crate::{CardanoDelta, CardanoEntity};
+
+        for initial in [None, Some(MetadataLabelState { tx_count: 5 })] {
+            let mut entity: Option<CardanoEntity> = initial.clone().map(Into::into);
+            let mut wal = Vec::new();
+
+            for count in [2, 3] {
+                let mut delta: CardanoDelta = MetadataLabelTxInc::new(674, count).into();
+                delta.apply(&mut entity);
+                wal.push(bincode::serialize(&delta).unwrap());
+            }
+
+            let state: Option<MetadataLabelState> = entity.clone().and_then(Into::into);
+            assert_eq!(
+                state.unwrap().tx_count,
+                initial.as_ref().map_or(0, |x| x.tx_count) + 5
+            );
+
+            for encoded in wal.into_iter().rev() {
+                let delta: CardanoDelta = bincode::deserialize(&encoded).unwrap();
+                delta.undo(&mut entity);
+            }
+
+            let restored: Option<MetadataLabelState> = entity.and_then(Into::into);
+            assert_eq!(restored, initial);
+        }
     }
 
     prop_compose! {

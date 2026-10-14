@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ops::Deref as _, sync::Arc};
 
-use dolos_core::{ChainError, EntityKey, Genesis, TxOrder, TxoRef};
+use dolos_core::{ChainError, Genesis, TxOrder, TxoRef};
 use pallas::ledger::{
     primitives::{
         conway::{self, DRep, Voter},
@@ -11,12 +11,11 @@ use pallas::ledger::{
 
 use super::WorkDeltas;
 use crate::{
-    drep_to_entity_key,
     owned::OwnedMultiEraOutput,
     pallas_extras::{self, stake_cred_to_drep},
     roll::BlockVisitor,
-    DRepActivity, DRepAnchorUpdate, DRepDormancyRelease, DRepExpiryUpdate, DRepRegistration,
-    DRepUnRegistration, GovDormancyReset, PParamsSet,
+    DRepActivity, DRepAnchorUpdate, DRepDormancyRelease, DRepExpiryUpdate, DRepKey,
+    DRepRegistration, DRepUnRegistration, GovDormancyReset, PParamsSet,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -43,21 +42,21 @@ fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
 #[derive(Clone, Default)]
 pub struct DormancyContext {
     pub dormant_epochs: u64,
-    pub drep_keys: Arc<Vec<EntityKey>>,
+    pub drep_keys: Arc<Vec<DRepKey>>,
 
     /// Keys of DReps registered (in valid txs) after the batch-start
     /// snapshot was taken, while the counter was still non-zero. The
     /// Haskell `updateDormantDRepExpiry` maps over the live DRep map,
     /// which includes these; the snapshot alone would miss them.
-    pub batch_registrations: Vec<EntityKey>,
+    pub batch_registrations: Vec<DRepKey>,
 }
 
 impl DormancyContext {
     /// Keys targeted by a dormancy-release fan-out: the batch-start
     /// snapshot plus the registrations seen since, deduplicated (a DRep
     /// re-registering within the batch appears in both).
-    fn release_targets(&self) -> Vec<EntityKey> {
-        let mut targets: Vec<EntityKey> = self
+    fn release_targets(&self) -> Vec<DRepKey> {
+        let mut targets: Vec<DRepKey> = self
             .drep_keys
             .iter()
             .chain(self.batch_registrations.iter())
@@ -180,7 +179,7 @@ impl BlockVisitor for DRepStateVisitor {
             return Ok(());
         };
 
-        for (voter, _) in voting_procedures.iter() {
+        for voter in voting_procedures.keys() {
             let drep = match voter {
                 Voter::DRepKey(hash) => DRep::Key(*hash),
                 Voter::DRepScript(hash) => DRep::Script(*hash),
@@ -262,7 +261,7 @@ impl BlockVisitor for DRepStateVisitor {
                     if self.dormancy.dormant_epochs > 0 {
                         self.dormancy
                             .batch_registrations
-                            .push(drep_to_entity_key(&drep));
+                            .push(DRepKey(drep.clone()));
                     }
                 }
                 conway::Certificate::UnRegDRepCert(_, _) => {
@@ -300,7 +299,7 @@ mod tests {
 
     #[test]
     fn release_targets_union_snapshot_and_batch_registrations() {
-        let key = |b: u8| EntityKey::from([b; 32].as_slice());
+        let key = |b: u8| DRepKey(DRep::Key([b; 28].into()));
 
         let dormancy = DormancyContext {
             dormant_epochs: 3,

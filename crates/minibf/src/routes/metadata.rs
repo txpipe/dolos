@@ -10,9 +10,9 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, SlotOrder},
-    model::{metadata_label_from_entity_key, FixedNamespace as _, MetadataLabelState},
+    model::{FixedNamespace as _, MetadataLabelState},
 };
-use dolos_core::{Domain, EntityKey, StateStore as _};
+use dolos_core::{Domain, KeyRange, StateError, StateStore as _};
 use futures_util::StreamExt;
 use pallas::{
     codec::minicbor,
@@ -286,7 +286,7 @@ where
                     continue;
                 }
 
-                page.push((metadata_label_from_entity_key(&key), state.tx_count));
+                page.push((key, state.tx_count));
             }
 
             page
@@ -294,19 +294,19 @@ where
         Order::Desc => {
             let keys = domain
                 .state()
-                .iter_entities(MetadataLabelState::NS, EntityKey::full_range())
+                .iter_entities(MetadataLabelState::NS, KeyRange::all())
                 .map_err(log_and_500("failed to iterate metadata labels"))?
-                .map(|item| item.map(|(key, _)| key))
+                .map(|item| item.and_then(|(key, _)| key.decode::<u64>().map_err(StateError::from)))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(log_and_500("failed to iterate metadata labels"))?;
 
             let end = keys.len().saturating_sub(pagination.skip());
             let start = end.saturating_sub(pagination.count);
-            let page_keys: Vec<&EntityKey> = keys[start..end].iter().rev().collect();
+            let page_keys: Vec<&u64> = keys[start..end].iter().rev().collect();
 
             let states = domain
                 .state()
-                .read_entities_typed::<MetadataLabelState>(MetadataLabelState::NS, &page_keys)
+                .read_entities_typed::<MetadataLabelState>(&page_keys)
                 .map_err(log_and_500("failed to read metadata labels"))?;
 
             // The keys and the values come from two snapshots. A rollback in
@@ -319,7 +319,7 @@ where
                 .map(|(key, state)| {
                     let state = state.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-                    Ok((metadata_label_from_entity_key(key), state.tx_count))
+                    Ok((*key, state.tx_count))
                 })
                 .collect::<Result<_, StatusCode>>()?
         }
@@ -738,6 +738,60 @@ mod tests {
             .await;
             assert_eq!(desc_page, std::slice::from_ref(item), "page {page}");
         }
+    }
+
+    #[tokio::test]
+    async fn metadata_labels_reject_malformed_keys_even_outside_the_page() {
+        use dolos_core::{Entity, EntityKey, StateWriter};
+
+        for len in [0, 7, 9, 32] {
+            let app =
+                TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+                    let writer = domain.state().start_writer().unwrap();
+                    let (ns, value) =
+                        MetadataLabelState::encode_entity(&MetadataLabelState { tx_count: 1 });
+                    writer
+                        .write_entity(ns, &EntityKey::from_raw(&vec![0; len]), &value)
+                        .unwrap();
+                    writer.commit().unwrap();
+                });
+
+            for query in [
+                "order=asc&count=1",
+                "order=asc&count=1&page=2",
+                "order=desc&count=1",
+                "order=desc&count=1&page=2",
+            ] {
+                assert_status(
+                    &app,
+                    &format!("/metadata/txs/labels?{query}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_labels_order_spans_the_full_u64_range() {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            metadata_entries: [u64::MAX, 256, 0, 255]
+                .into_iter()
+                .map(|label| (label, Metadatum::Int(1.into())))
+                .collect(),
+            ..Default::default()
+        });
+
+        let asc = get_labels(&app, "/metadata/txs/labels?order=asc").await;
+        assert_eq!(
+            label_names(&asc),
+            ["0", "255", "256", "18446744073709551615"]
+        );
+
+        let desc = get_labels(&app, "/metadata/txs/labels?order=desc").await;
+        let mut reversed = asc;
+        reversed.reverse();
+        assert_eq!(desc, reversed);
     }
 
     #[tokio::test]

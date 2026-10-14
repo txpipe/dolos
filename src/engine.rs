@@ -14,7 +14,7 @@ use dolos_core::config::{ChainConfig, RootConfig};
 pub use dolos_core::ReplayProgress;
 use dolos_core::{
     BootstrapExt as _, ChainLogic as _, ChainPoint, Domain as _, DomainError, Genesis,
-    ImportExt as _, RawBlock, StateStore as _,
+    ImportExt as _, QueryLimiter, RawBlock, StateStore as _,
 };
 use dolos_snapshot::source::{SnapshotSource, StoreSnapshot};
 
@@ -99,6 +99,7 @@ impl<'a> DomainBuilder<'a> {
             archive: stores.archive.clone(),
             mempool: stores.mempool.clone(),
             tip_broadcast,
+            query_limiter: QueryLimiter::default(),
         };
 
         domain.bootstrap().map_err(DomainBuildError::Bootstrap)?;

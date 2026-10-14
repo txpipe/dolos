@@ -115,10 +115,24 @@ pub fn make_conway_block_with_txs(
     )>,
     auxiliary_data: Option<alonzo::AuxiliaryData>,
 ) -> (ChainPoint, RawBlock) {
+    make_conway_block_with_txs_at(slot, 1, Some(Hash::from([9u8; 32])), txs, auxiliary_data)
+}
+
+/// [`make_conway_block_with_txs`] at a given height, after `prev_hash`.
+pub fn make_conway_block_with_txs_at(
+    slot: BlockSlot,
+    block_number: u64,
+    prev_hash: Option<Hash<32>>,
+    txs: Vec<(
+        pallas::ledger::primitives::conway::TransactionBody<'static>,
+        bool,
+    )>,
+    auxiliary_data: Option<alonzo::AuxiliaryData>,
+) -> (ChainPoint, RawBlock) {
     let header_body = HeaderBody {
-        block_number: 1,
+        block_number,
         slot,
-        prev_hash: Some(Hash::from([9u8; 32])),
+        prev_hash,
         issuer_vkey: Bytes::from(vec![0x10, 0x11]),
         vrf_vkey: Bytes::from(vec![0x12, 0x13]),
         vrf_result: VrfCert(Bytes::from(vec![0x14]), Bytes::from(vec![0x15])),

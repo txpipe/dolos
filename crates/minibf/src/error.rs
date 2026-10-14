@@ -19,6 +19,9 @@ pub enum Error {
     InvalidBlockNumber,
     InvalidBlockHash,
     InvalidEpochNumber,
+    NumberNotInteger,
+    InvalidSlotNumber,
+    SlotNumberNotInteger,
     InvalidXpub,
     InvalidDerivationRole,
     InvalidDerivationIndex,
@@ -139,6 +142,33 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "Missing, out of range or malformed epoch_number.",
+                )),
+            )
+                .into_response(),
+            Error::NumberNotInteger => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "params/number must be integer",
+                )),
+            )
+                .into_response(),
+            Error::InvalidSlotNumber => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Missing, out of range or malformed slot_number.",
+                )),
+            )
+                .into_response(),
+            Error::SlotNumberNotInteger => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "params/slot_number must be integer",
                 )),
             )
                 .into_response(),

@@ -58,7 +58,6 @@ impl BlockVisitor for MetadataLabelVisitor {
 
 #[cfg(test)]
 mod tests {
-    use dolos_core::NsKey;
     use pallas::ledger::primitives::alonzo;
 
     use super::*;
@@ -97,8 +96,14 @@ mod tests {
         deltas
             .entities
             .into_iter()
-            .flat_map(|(NsKey(ns, _), group)| {
-                assert_eq!(ns, MetadataLabelState::NS);
+            .flat_map(|(key, group)| {
+                assert_eq!(key.ns(), MetadataLabelState::NS);
+                let label = key.key().decode::<u64>().unwrap();
+                assert_eq!(group.len(), 1);
+                assert!(matches!(
+                    &group[0],
+                    CardanoDelta::MetadataLabelTxInc(inc) if inc.label == label
+                ));
                 group
             })
             .map(|delta| match delta {
@@ -106,6 +111,74 @@ mod tests {
                 other => panic!("the delta is not a MetadataLabelTxInc: {other:?}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn pipeline_rollback_removes_only_valid_transaction_contributions() {
+        use dolos_core::{
+            sync::SyncExt as _, Domain as _, EntityDelta as _, StateStore as _, WalStore as _,
+        };
+        use dolos_testing::{
+            synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+            toy_domain::ToyDomain,
+            MIN_UTXO_AMOUNT,
+        };
+
+        let labels = [0, 674, u64::MAX];
+        let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            plain_txs: true,
+            seed_amount: MIN_UTXO_AMOUNT + 7,
+            ada_only_by_block: vec![true; 3],
+            invalid_txs_by_block: vec![vec![0], vec![], vec![]],
+            metadata_entries: labels
+                .iter()
+                .map(|label| (*label, alonzo::Metadatum::Text("x".to_string())))
+                .collect(),
+            ..Default::default()
+        });
+        let genesis = std::sync::Arc::new(crate::include::preview::load());
+        let domain = ToyDomain::new_with_genesis_and_config(genesis, config, None, None);
+        let mut points = Vec::new();
+
+        let assert_count = |count| {
+            let rows: BTreeMap<_, _> = domain
+                .state()
+                .iter_entities_typed::<MetadataLabelState>(None)
+                .unwrap()
+                .map(|row| {
+                    let (label, state) = row.unwrap();
+                    (label, state.tx_count)
+                })
+                .collect();
+            let expected = if count == 0 {
+                BTreeMap::new()
+            } else {
+                labels.into_iter().map(|label| (label, count)).collect()
+            };
+            assert_eq!(rows, expected);
+        };
+
+        for (index, raw) in blocks.into_iter().enumerate() {
+            domain.roll_forward(raw.clone()).unwrap();
+            let block = OwnedMultiEraBlock::decode(raw).unwrap();
+            let point = dolos_core::ChainPoint::Specific(block.view().slot(), block.view().hash());
+            let wal = domain.wal().read_entry(&point).unwrap().unwrap();
+            let increments = wal
+                .delta
+                .iter()
+                .filter(|delta| delta.key().ns() == MetadataLabelState::NS)
+                .count();
+            assert_eq!(increments, if index == 0 { 0 } else { labels.len() });
+            points.push(point);
+            assert_count(index as u64);
+        }
+
+        domain.rollback(&points[1]).unwrap();
+        assert_count(1);
+        domain.rollback(&points[0]).unwrap();
+        assert_count(0);
     }
 
     #[test]
