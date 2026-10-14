@@ -186,13 +186,13 @@ impl<D: Domain> Facade<D> {
     where
         D: Clone + Send + Sync + 'static,
     {
-        let mut out = TxMap::new();
-        for hash in hashes.into_iter() {
-            let tx = self.get_tx(hash).await?;
-            out.insert(hash, tx);
-        }
+        let txs = self
+            .query()
+            .tx_cbor_batch(hashes)
+            .await
+            .map_err(log_and_500("failed to fetch tx cbor batch"))?;
 
-        Ok(out)
+        Ok(txs.into_iter().collect())
     }
 
     pub async fn get_block_with_tx_batch(

@@ -8,7 +8,7 @@ use itertools::Itertools as _;
 
 use tokio::sync::Semaphore;
 
-use pallas::ledger::traverse::MultiEraBlock;
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
 
 use crate::{
     archive::ArchiveStore, ArchiveError, BlockBody, BlockHash, BlockHeight, BlockSlot, ChainError,
@@ -352,6 +352,41 @@ where
 
     /// Resolve transaction metadata while reading and decoding each selected
     /// archive body at most once.
+    async fn block_meta_by_tx_hashes(
+        &self,
+        requested: Vec<TxHash>,
+    ) -> Result<(Vec<(TxHash, Option<BlockRefMeta>)>, usize), DomainError> {
+        self.extract_by_tx_hashes(requested, |block, tx_index, tx_hash, _| BlockRefMeta {
+            slot: block.slot(),
+            hash: block.hash(),
+            height: block.number(),
+            tx_hash,
+            tx_index,
+        })
+        .await
+    }
+
+    /// Fetch the CBOR of every requested transaction, reading and decoding
+    /// each archive body that holds them at most once.
+    ///
+    /// Answers follow the order of the distinct requested hashes; a hash the
+    /// archive does not hold answers `None`.
+    pub async fn tx_cbor_batch(
+        &self,
+        tx_hashes: impl IntoIterator<Item = TxHash>,
+    ) -> Result<Vec<(TxHash, Option<EraCbor>)>, DomainError> {
+        let requested = tx_hashes.into_iter().unique().collect();
+        let (fetched, _) = self
+            .extract_by_tx_hashes(requested, |block, _, _, tx| {
+                EraCbor(block.era().into(), tx.encode())
+            })
+            .await?;
+        Ok(fetched)
+    }
+
+    /// Run `extract` over each requested transaction found in the archive,
+    /// returning answers in the order of the distinct `requested` hashes along
+    /// with the number of bodies read.
     ///
     /// Exact index lookups are retained for every distinct transaction hash,
     /// [`LOCATE_CHUNK`] hashes per blocking task, one chunk after another.
@@ -359,10 +394,15 @@ where
     /// blocking task under the domain's limiter, at most
     /// [`QueryLimiter::fan_out`] at a time. Results are owned; decoded blocks
     /// and body buffers are dropped inside those bounded tasks.
-    async fn block_meta_by_tx_hashes(
+    async fn extract_by_tx_hashes<T, F>(
         &self,
         requested: Vec<TxHash>,
-    ) -> Result<(Vec<(TxHash, Option<BlockRefMeta>)>, usize), DomainError> {
+        extract: F,
+    ) -> Result<(Vec<(TxHash, Option<T>)>, usize), DomainError>
+    where
+        T: Clone + Send + 'static,
+        F: Fn(&MultiEraBlock, TxOrder, TxHash, &MultiEraTx) -> T + Clone + Send + 'static,
+    {
         let mut located = Vec::with_capacity(requested.len());
         for chunk in requested.chunks(LOCATE_CHUNK) {
             let chunk = chunk.to_vec();
@@ -394,12 +434,13 @@ where
         let query = self.clone();
         let tasks = stream::iter(groups.into_iter().map(move |(slot, tx_hashes)| {
             let query = query.clone();
+            let extract = extract.clone();
             async move {
                 query
                     .run_blocking(move |domain| {
                         let raws = domain.archive().get_blocks_by_slot(&slot)?;
                         let body_count = raws.len();
-                        let mut positions = HashMap::new();
+                        let mut found = HashMap::new();
                         let mut decode_error = None;
                         let requested: HashSet<_> = tx_hashes.iter().copied().collect();
                         for raw in raws {
@@ -415,21 +456,17 @@ where
                             for (tx_index, tx) in block.txs().iter().enumerate() {
                                 let tx_hash = tx.hash();
                                 if requested.contains(&tx_hash) {
-                                    positions.entry(tx_hash).or_insert_with(|| BlockRefMeta {
-                                        slot: block.slot(),
-                                        hash: block.hash(),
-                                        height: block.number(),
-                                        tx_hash,
-                                        tx_index,
-                                    });
+                                    found
+                                        .entry(tx_hash)
+                                        .or_insert_with(|| extract(&block, tx_index, tx_hash, tx));
                                 }
                             }
                         }
 
-                        // A corrupt sibling cannot hide metadata found in a
-                        // valid body, but an unresolved hash must not turn
+                        // A corrupt sibling cannot hide a transaction found in
+                        // a valid body, but an unresolved hash must not turn
                         // that corruption into a cached miss.
-                        if positions.len() != requested.len() {
+                        if found.len() != requested.len() {
                             if let Some(error) = decode_error {
                                 return Err(error);
                             }
@@ -439,8 +476,8 @@ where
                             tx_hashes
                                 .into_iter()
                                 .map(|tx_hash| {
-                                    let meta = positions.get(&tx_hash).cloned();
-                                    (tx_hash, meta)
+                                    let value = found.get(&tx_hash).cloned();
+                                    (tx_hash, value)
                                 })
                                 .collect::<Vec<_>>(),
                             body_count,
@@ -464,8 +501,8 @@ where
         let fetched = requested
             .into_iter()
             .map(|tx_hash| {
-                let meta = fetched.remove(&tx_hash).unwrap_or(None);
-                (tx_hash, meta)
+                let value = fetched.remove(&tx_hash).unwrap_or(None);
+                (tx_hash, value)
             })
             .collect();
         Ok((fetched, body_fetches))
