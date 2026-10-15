@@ -12,7 +12,7 @@ pub struct Args {}
 
 #[tokio::main]
 pub async fn run(config: &RootConfig, _args: &Args, _feedback: &Feedback) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+    let _tracing = crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let state = crate::common::open_state_store(config)?;
     let wal = crate::common::open_wal_store(config)?;

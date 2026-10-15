@@ -12,7 +12,7 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+    let _tracing = crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     if !args.force {
         bail!("refusing to clear all managed data without --force");
