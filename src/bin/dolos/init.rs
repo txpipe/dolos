@@ -832,11 +832,19 @@ pub fn run(
 
     let unparseable_existing = existing_config_is_unreadable(&config, Path::new(CONFIG_FILE));
 
-    config
+    let editor = config
         .map(|x| ConfigEditor(x, None))
         .unwrap_or_default()
         .fill_values_from_args(args)
-        .confirm_values(unparseable_existing)?
+        .confirm_values(unparseable_existing)?;
+
+    editor
+        .0
+        .validate()
+        .map_err(|e| miette::miette!("{e}"))
+        .context("validating configuration")?;
+
+    editor
         .include_genesis_files()?
         .save(&PathBuf::from(CONFIG_FILE))?;
 

@@ -6,6 +6,18 @@ Blockfrost-compatible HTTP API service for the Dolos Cardano data node.
 
 `dolos-minibf` provides a REST API that mimics the Blockfrost API, allowing existing Cardano ecosystem tools to work seamlessly with Dolos without requiring code changes. It serves as an API compatibility layer for existing Blockfrost clients.
 
+### Blockfrost Spec Compliance
+
+The official [Blockfrost OpenAPI specification](https://github.com/blockfrost/openapi) requires all endpoints to be served under the `/api/v0` base path. Dolos supports this via the `base_path` configuration option:
+
+```toml
+[serve.minibf]
+listen_address = "[::]:3000"
+base_path = "/api/v0"  # For full Blockfrost spec compliance
+```
+
+When `base_path` is set, **all routes** (including health and metrics) are served under that prefix (e.g., `/api/v0/blocks/latest`, `/api/v0/health`, `/api/v0/metrics`). If omitted, endpoints are served at the root for backward compatibility.
+
 ## Features
 
 ### API Compatibility
