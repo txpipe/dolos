@@ -196,9 +196,8 @@ pub fn registry() -> Vec<Entry> {
             enc_epochs,
             EpochState,
             canaries::epoch_state,
-            // A history that moved without a field append. Revision 1 is
-            // retained as a decode witness and nothing more: it is *one* of
-            // the orderings pre-fix code could emit for
+            // Revision 1 is retained as a decode witness and nothing more: it
+            // is *one* of the orderings pre-fix code could emit for
             // `RollingStats::registered_pools`, which was a hash container and
             // therefore had no single encoding. Stores synced before the fix
             // hold rows of this shape, so today's reader must still accept

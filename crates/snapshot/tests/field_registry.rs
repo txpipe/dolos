@@ -148,11 +148,13 @@ fn every_canary_matches_the_registry() {
     }
 }
 
-/// The append-only path, exercised on an entry whose history has actually
+/// The append-only path, exercised on a synthetic entry whose history has
 /// moved.
 ///
-/// The synthetic entry appends a field for real: revision 1's bytes stay
-/// pinned and must still decode under revision 2's type.
+/// It keeps the retained-canary assertions in [`check_entry`] exercised
+/// whatever the real namespaces' histories are. The entry appends a field for
+/// real: revision 1's bytes stay pinned and must still decode under revision
+/// 2's type.
 #[test]
 fn the_append_only_path_holds_on_a_history_that_moved() {
     check_entry(

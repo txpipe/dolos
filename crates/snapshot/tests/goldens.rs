@@ -15,12 +15,11 @@
 //! a re-run on unchanged code is encoding nondeterminism, which is a finding,
 //! never a re-pin.
 //!
-//! Between them these freeze: the media types, the tag string, the
-//! archive dimension names, the exact-record kind literals, the
-//! `log-{ns}` and `state-{ns}` kind strings — which is where
-//! the namespace strings live now that neither record names one —
-//! the layer header and scope shapes, and the `position`/`parameters` key
-//! spellings, the shard and schema maps included.
+//! Between them these freeze: every media type, the tag string, every archive
+//! dimension name and exact-record kind literal, every `log-{ns}` and
+//! `state-{ns}` kind string — which is where the namespace strings live now
+//! that neither record names one — the layer header and scope shapes, and the
+//! `position`/`parameters` key spellings, the shard and schema maps included.
 
 mod common;
 
@@ -904,7 +903,7 @@ const CANONICAL_INSCRIPTION: &str = concat!(
 /// Decode one record with the codec its layer kind names, so the streaming pass
 /// exercises every codec rather than only the framing underneath them.
 fn decode_one(kind: &str, record: &[u8]) {
-    // One codec for all log kinds: they differ in which namespace they
+    // One codec for every log kind: they differ in which namespace they
     // carry, never in how a record is written.
     if let Some(ns) = log_ns_for(kind) {
         logs::decode(ns, record).unwrap();
@@ -912,7 +911,7 @@ fn decode_one(kind: &str, record: &[u8]) {
         return;
     }
 
-    // And one codec for all state kinds, for the same reason — the
+    // And one codec for every state kind, for the same reason — the
     // namespace it needs is the one the kind names.
     if let Some(ns) = state_ns_for(kind) {
         state::decode(ns, record).unwrap();

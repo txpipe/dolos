@@ -1,6 +1,6 @@
 //! Walking a live Dolos store set into a stele.
 //!
-//! Everything the byte shapes need is already frozen: the five codecs in
+//! Everything the byte shapes need is already frozen: the codecs in
 //! [`crate::layers`], the scopes and `position`/`parameters` builders in
 //! [`crate`], and the record order each store iterator already promises. This
 //! module is the part that has to *drive* them — the one place that knows which
@@ -776,8 +776,8 @@ where
         }
     }
 
-    // One job per state kind: each walks its own namespace once, so the
-    // walks that ran in sequence overlap instead. The tip shards are
+    // One job per state kind: each walks its own namespace once, so the walks
+    // that ran in sequence overlap instead. The tip shards are
     // not offered to the predecessor; the dumps among them are. See
     // [`Predecessor::landed`].
     for (kind, ns, shards) in STATE_KINDS {

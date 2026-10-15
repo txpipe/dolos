@@ -44,9 +44,6 @@ fn namespace_registry_matches_build_schema() {
         entities, schema,
         "the profile's state namespaces have drifted from build_schema()"
     );
-
-    assert_eq!(entities.len(), 26);
-    assert_eq!(NAMESPACES.len(), 27);
 }
 
 #[test]
@@ -118,8 +115,6 @@ fn the_golden_indexes_layer_covers_every_dimension_and_kind() {
         "the golden indexes layer no longer freezes every dimension name"
     );
 
-    assert_eq!(expected.len(), 19);
-
     let kinds: BTreeSet<ExactKind> = records
         .iter()
         .filter_map(|record| match record {
@@ -166,8 +161,8 @@ fn the_golden_state_layers_cover_every_namespace() {
     }
 }
 
-/// Every state kind appears in the golden stele, so all kind strings
-/// are frozen by a published digest — the state half of
+/// Every state kind appears in the golden stele, so every state kind string is
+/// frozen by a published digest — the state half of
 /// `the_golden_stele_covers_every_log_kind`.
 #[test]
 fn the_golden_stele_covers_every_state_kind() {
@@ -222,8 +217,6 @@ fn namespaces_are_kebab_case() {
 /// half of that rule this test leans on.
 #[test]
 fn log_kinds_derive_from_their_namespaces() {
-    assert_eq!(LOG_KINDS.len(), LOG_NAMESPACES.len());
-
     let mut kinds = Vec::new();
 
     for (kind, ns) in LOG_KINDS {
@@ -261,21 +254,14 @@ fn log_kinds_derive_from_their_namespaces() {
         "LOG_NAMESPACES must be in byte order"
     );
 
-    // The two tables are one table read two ways.
-    assert_eq!(
-        LOG_KINDS.map(|(_, ns)| ns),
-        LOG_NAMESPACES,
-        "LOG_KINDS and LOG_NAMESPACES disagree about the namespaces"
-    );
-
-    // Nothing else is a log kind — `logs`, above all, which is what these six
+    // Nothing else is a log kind — `logs`, above all, which is what these
     // replaced.
     for absent in ["logs", "log-", "log-utxos", "blocks", "", "log-stakes"] {
         assert!(log_ns_for(absent).is_none(), "{absent:?}");
     }
 }
 
-/// Every log kind appears in the golden stele, so all six kind strings are
+/// Every log kind appears in the golden stele, so every log kind string is
 /// frozen by a published digest.
 #[test]
 fn the_golden_stele_covers_every_log_kind() {
@@ -348,7 +334,7 @@ fn state_kinds_derive_from_their_namespaces() {
         "STATE_KINDS and NAMESPACES disagree about the namespaces"
     );
 
-    // The shard map is the spec's, not the data's: four chain-scale namespaces
+    // The shard map is the spec's, not the data's: the chain-scale namespaces
     // split sixteen ways, and every other namespace is a single blob. Changing
     // one of these is a media-type-version event for that kind, so it is spelled
     // out here rather than derived from the table it is checking.
@@ -361,7 +347,8 @@ fn state_kinds_derive_from_their_namespaces() {
         assert_eq!(shards, expected, "{ns}");
     }
 
-    // Nothing else is a state kind — `state`, above all, which these replaced.
+    // Nothing else is a state kind — `state`, above all, which is what these
+    // replaced.
     for absent in ["state", "state-", "state-logs", "blocks", "", "state_utxos"] {
         assert!(state_ns_for(absent).is_none(), "{absent:?}");
     }

@@ -1899,8 +1899,8 @@ fn max_history_selects_epochs_and_never_the_tip() {
     for max_history in [None, Some(0), Some(u64::MAX)] {
         let plan = restore::plan(&stele, magic_of(&domain), max_history).unwrap();
 
-        // Keyed by namespace, so the tip has an entry per namespace and every
-        // layer under them.
+        // Keyed by namespace now, so the tip is one entry per state kind and
+        // every layer under them.
         assert_eq!(plan.state.len(), STATE_KINDS.len(), "{max_history:?}");
         assert_eq!(
             plan.tip_layers().count(),

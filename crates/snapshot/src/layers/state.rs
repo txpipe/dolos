@@ -6,21 +6,21 @@
 //!
 //! The namespace is not in the record: it is the layer's *kind*, one per state
 //! namespace (`crate::STATE_KINDS`), so a shape change to one namespace's
-//! records costs that namespace's kind a media-type move and leaves the other
-//! namespaces alone — and a namespace a reader does not know is skippable at
-//! the transport instead of poisoning one shared layer. Which is also why this
-//! module has one codec — the kinds differ in what they
-//! carry, never in how a record is written — and why its refusals name the
-//! record shape, `state`, rather than a layer.
+//! records costs that namespace's kind a media-type move and leaves the others
+//! alone — and a namespace a reader does not know is skippable at the
+//! transport instead of poisoning one shared layer. Which is also why this
+//! module has one codec for every kind — the kinds differ in what they carry,
+//! never in how a record is written — and why its refusals name the record
+//! shape, `state`, rather than a layer.
 //!
 //! ## One record shape, including for UTxOs
 //!
-//! ADR-004 puts the UTxO set in the namespace [`crate::UTXOS`], next to the
-//! entity namespaces. The UTxO set does not have a special layer kind.
-//! That is what keeps the format's state vocabulary to a single record, and it
-//! makes the planned refactor folding UTxOs into the entity system (#1042)
-//! invisible from outside: the day `utxos` becomes an ordinary namespace,
-//! nothing in this file changes.
+//! ADR-004 treats the UTxO set as namespace [`crate::UTXOS`] beside the entity
+//! namespaces, rather than as a special layer kind. That is
+//! what keeps the format's state vocabulary to a single record, and it makes
+//! the planned refactor folding UTxOs into the entity system (#1042) invisible
+//! from outside: the day `utxos` becomes an ordinary namespace, nothing in this
+//! file changes.
 //!
 //! The namespace still governs the *codec parameters* — the key kind above
 //! all — so [`encode`] and [`decode`] take it as an argument, derived by the
@@ -45,7 +45,7 @@
 //!
 //! ## Sharding
 //!
-//! The four chain-scale namespaces (`utxos`, `accounts`, `assets`, `datums`)
+//! The chain-scale namespaces (`utxos`, `accounts`, `assets`, `datums`)
 //! split sixteen ways by the first nibble of the first key byte. Keys are
 //! hash-derived (transaction hashes, credentials, script hashes), so the split
 //! is uniform without a hash of its own; shards can be fetched in parallel and
@@ -64,8 +64,8 @@ pub use crate::namespaces::UTXO_KEY_LEN;
 
 /// The name this codec refuses under.
 ///
-/// One record shape serves all `state-{ns}` kinds, so an error names
-/// the shape rather than a layer — the layer is already in the message the
+/// One record shape serves every `state-{ns}` kind, so an error names the
+/// shape rather than a layer — the layer is already in the message the
 /// caller wraps it in.
 const STATE: &str = "state";
 
