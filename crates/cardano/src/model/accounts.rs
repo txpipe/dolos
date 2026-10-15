@@ -12,7 +12,7 @@ use tracing::debug;
 
 use super::{
     epoch_value::{EpochValue, TransitionDefault},
-    eras::EraProtocol,
+    eras::EraKey,
     pools::PoolHash,
 };
 use crate::{
@@ -54,7 +54,7 @@ impl Stake {
         out
     }
 
-    pub fn total_for_era(&self, era: EraProtocol) -> u64 {
+    pub fn total_for_era(&self, era: EraKey) -> u64 {
         match era {
             x if x < 9 => self.total_pre_conway(),
             _ => self.total(),

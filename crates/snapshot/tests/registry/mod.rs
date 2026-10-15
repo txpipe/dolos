@@ -57,10 +57,10 @@ pub mod ground_rules;
 
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
-    EpochState, EraSummary, FirstMintChunk, FixedNamespace, GovState, MetadataLabelState,
-    PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk, PoolState, ProposalState,
-    StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
-    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow, StakeLog,
+    EpochState, EraState, FirstMintChunk, FixedNamespace, GovState, MetadataLabelState,
+    PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState,
+    ProposalState, StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
+    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -223,7 +223,7 @@ pub fn registry() -> Vec<Entry> {
         ),
         entity_entry!(
             enc_eras,
-            EraSummary,
+            EraState,
             canaries::era_summary,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged.
@@ -302,7 +302,7 @@ pub fn registry() -> Vec<Entry> {
             canaries::pending_mir_state,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/pending_mirs.rev1.hex"),
+                hex: include_str!("goldens/pending-mirs.rev1.hex"),
             }]
         ),
         entity_entry!(
@@ -311,7 +311,7 @@ pub fn registry() -> Vec<Entry> {
             canaries::pending_reward_state,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/pending_rewards.rev1.hex"),
+                hex: include_str!("goldens/pending-rewards.rev1.hex"),
             }]
         ),
         entity_entry!(
@@ -468,19 +468,19 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_stakes,
-            StakeLog,
-            canaries::stake_log,
+            enc_pool_epochs,
+            PoolEpochLog,
+            canaries::pool_epoch_log,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged.
             &[
                 Pinned {
                     rev: 1,
-                    hex: include_str!("goldens/stakes.rev1.hex"),
+                    hex: include_str!("goldens/pool-epochs.rev1.hex"),
                 },
                 Pinned {
                     rev: 2,
-                    hex: include_str!("goldens/stakes.rev2.hex"),
+                    hex: include_str!("goldens/pool-epochs.rev2.hex"),
                 },
             ]
         ),

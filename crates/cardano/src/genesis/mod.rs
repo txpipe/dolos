@@ -5,8 +5,8 @@ use dolos_core::{
 
 use crate::{
     gov_from_conway_genesis, indexes::utxo_index_delta_from_utxo_delta, pots::Pots,
-    utils::nonce_stability_window, EndStats, EpochState, EpochValue, EraBoundary, EraProtocol,
-    EraSummary, GovState, Lovelace, Nonces, PParamsSet, RollingStats,
+    utils::nonce_stability_window, EndStats, EpochState, EpochValue, EraBoundary, EraKey, EraState,
+    GovState, Lovelace, Nonces, PParamsSet, RollingStats,
 };
 
 mod staking;
@@ -103,7 +103,7 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
     let slot_length = pparams.ensure_slot_length()?;
     let protocol_major = pparams.protocol_major_or_default();
 
-    let era = EraSummary {
+    let era = EraState {
         start: EraBoundary {
             epoch: 0,
             slot: 0,
@@ -116,7 +116,7 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
     };
 
     let writer = state.start_writer()?;
-    writer.write_entity_typed(&EraProtocol::from(protocol_major), &era)?;
+    writer.write_entity_typed(&EraKey::from(protocol_major), &era)?;
     writer.commit()?;
 
     Ok(())

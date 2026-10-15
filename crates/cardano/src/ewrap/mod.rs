@@ -21,7 +21,7 @@ use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
 
 use crate::{
     eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountEpochLog,
-    AccountState, CardanoDelta, DRepState, EpochState, EraProtocol, GovDistr, GovState, PoolHash,
+    AccountState, CardanoDelta, DRepState, EpochState, EraKey, GovDistr, GovState, PoolHash,
     PoolState, ProposalOutcome, ProposalState,
 };
 
@@ -165,7 +165,7 @@ impl Ratification {
 pub struct BoundaryWork {
     // loaded
     pub(crate) ending_state: EpochState,
-    pub active_protocol: EraProtocol,
+    pub active_protocol: EraKey,
     pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,
     pub rewards: RewardMap<RupdWork>,
@@ -194,7 +194,7 @@ pub struct BoundaryWork {
     /// computed nothing — `RupdWork::relevant_epochs` returns `None` below
     /// epoch 4 and while the snapshot epoch is still at or before the first
     /// Shelley one, and the merged log has to agree with it epoch for epoch.
-    pub stake_snapshot: Option<(Epoch, EraProtocol)>,
+    pub stake_snapshot: Option<(Epoch, EraKey)>,
 
     /// The pools whose delegators are in [`Self::stake_snapshot`]'s
     /// distribution: those with a snapshot at that epoch that is not retired.
@@ -352,10 +352,10 @@ impl BoundaryWork {
     /// closes.
     ///
     /// Three of the four namespaces this record replaces already used it — the
-    /// stake temporal key, shared with the per-pool `StakeLog` so account- and
-    /// pool-level views of an epoch agree on its label by construction. The
-    /// reward family is what moves onto it (ADR-0027), which is also what lets
-    /// the merge deduplicate the `LogKey` and the pool hash.
+    /// stake temporal key, shared with the per-pool `PoolEpochLog` so account-
+    /// and pool-level views of an epoch agree on its label by construction.
+    /// The reward family is what moves onto it (ADR-0027), which is also
+    /// what lets the merge deduplicate the `LogKey` and the pool hash.
     pub fn account_epoch_slot(&self) -> BlockSlot {
         self.chain_summary
             .epoch_start(self.ending_state.number.saturating_sub(1))

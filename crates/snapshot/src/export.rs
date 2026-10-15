@@ -2029,14 +2029,14 @@ mod tests {
 
     /// A summary with one era: 100-slot epochs starting at slot 0.
     fn summary() -> ChainSummary {
-        use dolos_cardano::model::EraSummary;
+        use dolos_cardano::model::EraState;
         use dolos_cardano::EraBoundary;
 
         let mut chain = ChainSummary::default();
 
         chain.append_era(
             6,
-            EraSummary {
+            EraState {
                 start: EraBoundary {
                     epoch: 0,
                     slot: 0,

@@ -1,4 +1,4 @@
-use dolos_cardano::{load_era_summary, utils::nonce_stability_window, EraSummary, Nonces};
+use dolos_cardano::{load_era_summary, utils::nonce_stability_window, EraState, Nonces};
 use dolos_core::{ArchiveStore, Domain};
 use miette::{bail, Context, IntoDiagnostic};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
@@ -11,7 +11,7 @@ pub struct Args {
 }
 
 /// Get the previous block hash of the first block from the previous epoch.
-pub fn get_nh<D: Domain>(epoch: u64, domain: &D, summary: &EraSummary) -> miette::Result<Hash<32>> {
+pub fn get_nh<D: Domain>(epoch: u64, domain: &D, summary: &EraState) -> miette::Result<Hash<32>> {
     let slot = summary.epoch_start(epoch - 1);
     let (_, raw) = domain
         .archive()

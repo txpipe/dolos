@@ -910,7 +910,7 @@ mod tests {
             tx_content_metadata_inner::TxContentMetadataInner,
         };
 
-        use crate::mapping::TxModelBuilder;
+        use crate::mapping::txs::TxModelBuilder;
 
         let counts = |valid: bool| {
             let (_, raw) = dolos_testing::blocks::make_conway_block_with_metadata(

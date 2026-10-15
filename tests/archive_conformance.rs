@@ -30,7 +30,7 @@ use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_wi
 /// The namespaces the log tests write to. Two are enough to pin isolation;
 /// the names are the real ones so the suite reads like the node.
 const NS_A: &str = "account-epochs";
-const NS_B: &str = "stakes";
+const NS_B: &str = "pool-epochs";
 
 fn schema() -> StateSchema {
     let mut schema = StateSchema::default();

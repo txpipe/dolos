@@ -40,6 +40,9 @@ pub enum TestFault {
     /// [`StateStore::utxos_by_tag`] and [`StateStore::get_utxos`] sleep this
     /// long before answering, as a heavy lookup on a large store would.
     SlowUtxoReads(Duration),
+    /// [`StateStore::iter_entities`] sleeps this long before answering, as a
+    /// scan of a large store would.
+    SlowStateScans(Duration),
 }
 
 /// Whether a commit under `fault` comes after the crash, counting it if not.
@@ -121,6 +124,12 @@ impl FaultyStateStore {
             std::thread::sleep(delay);
         }
     }
+
+    fn slow_state_scan(&self) {
+        if let TestFault::SlowStateScans(delay) = self.fault {
+            std::thread::sleep(delay);
+        }
+    }
 }
 
 impl StateStore for FaultyStateStore {
@@ -166,6 +175,7 @@ impl StateStore for FaultyStateStore {
         if self.should_fault_ns(ns) {
             return Err(self.fault_err());
         }
+        self.slow_state_scan();
         self.inner.iter_entities(ns, range)
     }
 

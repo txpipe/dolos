@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     body::Body,
@@ -467,7 +470,7 @@ impl TestDomainBuilder {
 
 pub struct TestApp {
     router: Router,
-    _domain: dolos_testing::faults::FaultyToyDomain,
+    facade: Facade<dolos_testing::faults::FaultyToyDomain>,
     vectors: SyntheticVectors,
 }
 
@@ -528,16 +531,16 @@ impl TestApp {
         };
 
         let facade = Facade {
-            inner: domain.clone(),
+            inner: domain,
             config: cfg,
             cache: crate::cache::CacheService::default(),
         };
 
-        let router = build_router_with_facade(facade);
+        let router = build_router_with_facade(facade.clone());
 
         Self {
             router,
-            _domain: domain,
+            facade,
             vectors,
         }
     }
@@ -602,6 +605,10 @@ impl TestApp {
         (status, bytes.to_vec())
     }
 
+    pub fn facade(&self) -> Facade<dolos_testing::faults::FaultyToyDomain> {
+        self.facade.clone()
+    }
+
     pub fn vectors(&self) -> &SyntheticVectors {
         &self.vectors
     }
@@ -611,12 +618,12 @@ impl TestApp {
     pub fn tip_epoch(&self) -> u64 {
         let summary =
             dolos_cardano::eras::load_era_summary::<dolos_testing::faults::FaultyToyDomain>(
-                self._domain.state(),
+                self.facade.state(),
             )
             .expect("era summary");
 
         let tip = self
-            ._domain
+            .facade
             .state()
             .read_cursor()
             .expect("cursor read failed")
@@ -631,10 +638,102 @@ impl TestApp {
     pub fn epoch_start(&self, epoch: u64) -> u64 {
         let summary =
             dolos_cardano::eras::load_era_summary::<dolos_testing::faults::FaultyToyDomain>(
-                self._domain.state(),
+                self.facade.state(),
             )
             .expect("era summary");
 
         summary.epoch_start(epoch)
     }
+}
+
+/// The delay of a slow-read fault in a stall test.
+pub const SLOW_READ: Duration = Duration::from_secs(1);
+
+/// How long `/health` may take beside a slow request.
+pub const HEALTH_BUDGET: Duration = Duration::from_millis(300);
+
+/// Sends `path` and `/health` together and checks that `/health` answers
+/// within [`HEALTH_BUDGET`]. Returns the status of `path`.
+pub async fn health_beside(app: &TestApp, path: &str) -> StatusCode {
+    let started = Instant::now();
+    let heavy = app.get_bytes(path);
+    let health = async {
+        let (status, _) = app.get_bytes("/health").await;
+        (status, started.elapsed())
+    };
+
+    let ((status, _), (health_status, health_took)) = tokio::join!(heavy, health);
+
+    assert_eq!(health_status, StatusCode::OK);
+    assert!(
+        health_took < HEALTH_BUDGET,
+        "/health took {health_took:?} behind {path}"
+    );
+
+    status
+}
+
+/// Writes `copies` copies of every account and every pool under new keys, so
+/// that a scan of either reads several chunks. The account copies keep the
+/// delegations of the originals.
+pub fn replicate_accounts_and_pools(domain: &ToyDomain, copies: u8) {
+    use dolos_cardano::{
+        model::{AccountState, PoolState},
+        AccountKey, PoolKey,
+    };
+    use dolos_core::StateWriter as _;
+    use pallas::{crypto::hash::Hash, ledger::primitives::StakeCredential};
+
+    let accounts: Vec<_> = domain
+        .state()
+        .iter_entities_typed::<AccountState>(None)
+        .expect("account scan")
+        .collect::<Result<_, _>>()
+        .expect("account read");
+    let pools: Vec<_> = domain
+        .state()
+        .iter_entities_typed::<PoolState>(None)
+        .expect("pool scan")
+        .collect::<Result<_, _>>()
+        .expect("pool read");
+
+    let writer = domain.state().start_writer().expect("state writer");
+
+    for copy in 1..=copies {
+        for (_, account) in &accounts {
+            let mut account = account.clone();
+            account.credential = StakeCredential::AddrKeyhash(Hash::from([copy; 28]));
+            writer
+                .write_entity_typed(&AccountKey::from(&account.credential), &account)
+                .expect("account write");
+        }
+
+        for (_, pool) in &pools {
+            let mut pool = pool.clone();
+            pool.operator = Hash::from([copy; 28]);
+            writer
+                .write_entity_typed(&PoolKey(pool.operator), &pool)
+                .expect("pool write");
+        }
+    }
+
+    writer.commit().expect("state commit");
+}
+
+/// An app whose accounts and pools span several chunks of two.
+pub fn replicated_app() -> TestApp {
+    replicated_app_with_fault(None)
+}
+
+pub fn replicated_app_with_fault(fault: Option<TestFault>) -> TestApp {
+    let cfg = SyntheticBlockConfig {
+        block_count: 5,
+        txs_per_block: 3,
+        ..Default::default()
+    };
+
+    let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+    replicate_accounts_and_pools(&domain, 4);
+
+    TestApp::from_domain(domain, vectors, fault, None)
 }

@@ -24,7 +24,7 @@ use crate::{
     load_era_summary, load_gov, pallas_extras,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
-    AccountKey, AccountState, ChainSummary, DRepKey, DRepSnapshotEntry, DRepState, EraProtocol,
+    AccountKey, AccountState, ChainSummary, DRepKey, DRepSnapshotEntry, DRepState, EraKey,
     PendingMirState, PendingRewardState, PoolHash, PoolKey, PoolState, ProposalAction,
     ProposalOutcome, ProposalState,
 };
@@ -42,7 +42,7 @@ use crate::{
 /// The protocol is the era of `snapshot_epoch + 1`, not of the snapshot epoch:
 /// the Haskell ledger computes the mark snapshot under the *entering* epoch's
 /// rules, which is what decides whether pointer-address stake counts.
-fn stake_snapshot_of(ending_epoch: Epoch, chain: &ChainSummary) -> Option<(Epoch, EraProtocol)> {
+fn stake_snapshot_of(ending_epoch: Epoch, chain: &ChainSummary) -> Option<(Epoch, EraKey)> {
     if ending_epoch < 4 {
         return None;
     }
@@ -53,7 +53,7 @@ fn stake_snapshot_of(ending_epoch: Epoch, chain: &ChainSummary) -> Option<(Epoch
         return None;
     }
 
-    let protocol = EraProtocol::from(chain.era_for_epoch(snapshot_epoch + 1).protocol);
+    let protocol = EraKey::from(chain.era_for_epoch(snapshot_epoch + 1).protocol);
 
     Some((snapshot_epoch, protocol))
 }
@@ -92,7 +92,7 @@ impl BoundaryWork {
     ) -> Result<Self, ChainError> {
         let ending_state = crate::load_epoch::<D>(state)?;
         let chain_summary = load_era_summary::<D>(state)?;
-        let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
+        let active_protocol = EraKey::from(chain_summary.edge().protocol);
         let incentives = ending_state.incentives.clone().unwrap_or_default();
 
         let gov = load_gov::<D>(state)?;
@@ -2644,7 +2644,7 @@ mod tests {
             BoundaryWork::new_empty::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
 
         boundary.ending_state.number = STAKE_EPOCH + 3;
-        boundary.stake_snapshot = Some((STAKE_EPOCH, EraProtocol::from(7)));
+        boundary.stake_snapshot = Some((STAKE_EPOCH, EraKey::from(7)));
         boundary.stake_pools = pools.iter().copied().collect();
 
         boundary

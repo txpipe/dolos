@@ -5,45 +5,45 @@ use pallas::codec::minicbor::{self, Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EraProtocol(#[n(0)] u16);
+pub struct EraKey(#[n(0)] u16);
 
-impl EraProtocol {
+impl EraKey {
     pub fn is_shelley_or_later(&self) -> bool {
         self.0 >= 2
     }
 }
 
-impl std::fmt::Display for EraProtocol {
+impl std::fmt::Display for EraKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-impl PartialEq<u16> for EraProtocol {
+impl PartialEq<u16> for EraKey {
     fn eq(&self, other: &u16) -> bool {
         self.0 == *other
     }
 }
 
-impl PartialOrd<u16> for EraProtocol {
+impl PartialOrd<u16> for EraKey {
     fn partial_cmp(&self, other: &u16) -> Option<Ordering> {
         self.0.partial_cmp(other)
     }
 }
 
-impl From<u16> for EraProtocol {
+impl From<u16> for EraKey {
     fn from(value: u16) -> Self {
         Self(value)
     }
 }
 
-impl From<EraProtocol> for u16 {
-    fn from(value: EraProtocol) -> Self {
+impl From<EraKey> for u16 {
+    fn from(value: EraKey) -> Self {
         value.0
     }
 }
 
-impl KeyCodec for EraProtocol {
+impl KeyCodec for EraKey {
     fn encode_key(&self, out: &mut KeyBytes) {
         u16::from(*self).encode_key(out);
     }
@@ -53,17 +53,17 @@ impl KeyCodec for EraProtocol {
     }
 }
 
-impl FixedKey for EraProtocol {
+impl FixedKey for EraKey {
     const LEN: usize = 2;
 }
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EraTransition {
     #[n(0)]
-    pub prev_version: EraProtocol,
+    pub prev_version: EraKey,
 
     #[n(1)]
-    pub new_version: EraProtocol,
+    pub new_version: EraKey,
 }
 
 impl EraTransition {
@@ -99,7 +99,7 @@ pub struct EraBoundary {
 }
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
-pub struct EraSummary {
+pub struct EraState {
     #[n(0)]
     pub start: EraBoundary,
 
@@ -117,7 +117,7 @@ pub struct EraSummary {
     pub protocol: u16,
 }
 
-entity_boilerplate!(EraSummary, "eras", state = EraProtocol);
+entity_boilerplate!(EraState, "eras", state = EraKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -130,8 +130,8 @@ pub(crate) mod testing {
             new in 0u16..10u16,
         ) -> EraTransition {
             EraTransition {
-                prev_version: EraProtocol::from(prev),
-                new_version: EraProtocol::from(new),
+                prev_version: EraKey::from(prev),
+                new_version: EraKey::from(new),
             }
         }
     }
@@ -143,8 +143,8 @@ mod tests {
 
     fn transition(prev: u16, new: u16) -> EraTransition {
         EraTransition {
-            prev_version: EraProtocol::from(prev),
-            new_version: EraProtocol::from(new),
+            prev_version: EraKey::from(prev),
+            new_version: EraKey::from(new),
         }
     }
 
@@ -172,19 +172,19 @@ mod key_tests {
 
     #[test]
     fn layout_is_pinned() {
-        assert_eq!(encode(&EraProtocol::from(9)).to_vec(), [0, 9]);
+        assert_eq!(encode(&EraKey::from(9)).to_vec(), [0, 9]);
     }
 
     #[test]
     fn malformed_keys_are_refused() {
-        assert!(EraProtocol::decode_key(&[0; 32]).is_err());
+        assert!(EraKey::decode_key(&[0; 32]).is_err());
     }
 
     proptest! {
         #[test]
         fn keys_round_trip(era in any::<u16>()) {
-            let key = EraProtocol::from(era);
-            prop_assert_eq!(EraProtocol::decode_key(&encode(&key)), Ok(key));
+            let key = EraKey::from(era);
+            prop_assert_eq!(EraKey::decode_key(&encode(&key)), Ok(key));
         }
     }
 }

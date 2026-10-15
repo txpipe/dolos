@@ -1,6 +1,6 @@
 use axum::{extract::State, http::StatusCode, Json};
 use blockfrost_openapi::models::network_eras_inner::NetworkErasInner;
-use dolos_cardano::EraSummary;
+use dolos_cardano::EraState;
 use dolos_core::{Domain, StateStore};
 
 use crate::{
@@ -18,7 +18,7 @@ pub async fn eras<D: Domain>(
 
     let eras = domain
         .state()
-        .iter_entities_typed::<EraSummary>(None)
+        .iter_entities_typed::<EraState>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map(|x| {
             let (protocol, era) = x.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

@@ -1782,7 +1782,7 @@ mod tests {
         let layers = vec![
             epoch_descriptor(BLOCKS, 0, 1),
             epoch_descriptor(BLOCKS, 1, 2),
-            epoch_descriptor("log-stakes", 0, 3),
+            epoch_descriptor("log-pool-epochs", 0, 3),
             epoch_descriptor("log-epochs", 0, 5),
             epoch_descriptor(INDEXES, 1, 4),
         ];
@@ -1799,9 +1799,9 @@ mod tests {
         // were published: the other four log kinds are absent, not empty.
         assert_eq!(
             epochs[0].logs.keys().copied().collect::<Vec<_>>(),
-            ["epochs", "stakes"]
+            ["epochs", "pool-epochs"]
         );
-        assert_eq!(epochs[0].logs["stakes"].kind, "log-stakes");
+        assert_eq!(epochs[0].logs["pool-epochs"].kind, "log-pool-epochs");
 
         assert_eq!(epochs[1].epoch, 1);
         assert_eq!((epochs[1].start_slot, epochs[1].end_slot), (100, 199));
@@ -1820,7 +1820,7 @@ mod tests {
         // And so is one epoch carrying two different slot windows.
         let mut disagreeing = vec![epoch_descriptor(BLOCKS, 0, 1)];
         disagreeing.push(descriptor(
-            "log-stakes",
+            "log-pool-epochs",
             json!({"epoch": 0, "startSlot": 0, "endSlot": 50}),
             2,
         ));
