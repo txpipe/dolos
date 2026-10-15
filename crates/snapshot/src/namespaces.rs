@@ -1,16 +1,18 @@
-//! The closed set of state namespaces a Dolos stele carries.
+//! The closed set of namespaces a Dolos stele carries.
 //!
 //! ADR-004 defines state as one uniform key-value space: the entity
 //! namespaces of `dolos_cardano::model::build_schema()` plus [`UTXOS`], which
 //! is the UTxO set wearing the same shape as everything else. That uniformity
 //! is deliberate — it means the format has one state record, and the planned
 //! refactor folding UTxOs into the entity system (#1042) is invisible to it.
+//! The archive-only logs of `build_log_schema()` are namespaces too, carried
+//! by log layers alone.
 //!
 //! The names are not spelled here. The entity namespaces are read off the
 //! entity types' own `FixedNamespace::NS`, and `utxos` is defined here because
-//! nothing else in the tree defines it. A namespace that exists in
-//! `build_schema` and not in [`NAMESPACES`] would be silently dropped from
-//! every published stele, so `namespace_registry_matches_build_schema` in
+//! nothing else in the tree defines it. A namespace that exists in either
+//! schema and not in [`NAMESPACES`] would be silently dropped from every
+//! published stele, so `namespace_registry_matches_the_schemas` in
 //! `tests/coverage.rs` makes that a build failure instead.
 
 use dolos_cardano::model::{
@@ -30,10 +32,10 @@ use crate::Error;
 /// value is CBOR `[era, body]` — see [`crate::layers::state`].
 pub const UTXOS: Namespace = "utxos";
 
-/// Every state namespace, in ascending byte order.
+/// Every namespace, state or log, in ascending byte order.
 ///
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
-/// coverage test compares this list against `build_schema()` directly;
+/// coverage test compares this list against the schemas directly;
 /// `namespaces_are_sorted` keeps it that way.
 pub const NAMESPACES: [Namespace; 24] = [
     AccountAddressChunk::NS,
@@ -118,9 +120,8 @@ fn exact<K: KeyCodec>(key: &[u8]) -> Result<(), KeyError> {
 /// Refuse a state key that is not one `ns` stores: the exact encoding of the
 /// key kind its entity declares, or a UTxO ref under [`UTXOS`].
 ///
-/// A log namespace whose entity declares no state key holds no state rows; one
-/// that arrives is held to the key kind of the log, the only kind the
-/// namespace has.
+/// A log namespace whose entity declares no state key holds no state rows, so
+/// every key under it is refused.
 pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
     let checked = match ns {
         AccountAddressSet::NS => exact::<<AccountAddressSet as StateEntity>::Key>(key),
@@ -147,8 +148,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         | PaymentAddressChunk::NS
         | PolicyMintChunk::NS
         | PoolEpochLog::NS => {
-            return check_log_key(ns, key)
-                .map_err(|_| Error::malformed("state", format!("{ns} key: not a log key")));
+            return Err(Error::malformed("state", format!("{ns} holds no state")));
         }
         _ => return Err(Error::UnknownNamespace(ns.to_owned())),
     };

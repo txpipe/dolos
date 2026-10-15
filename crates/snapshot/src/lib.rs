@@ -139,10 +139,11 @@ pub use layers::digests::DIGESTS;
 /// The namespaces the ledger writes epoch-boundary logs under: the namespace
 /// column of [`LOG_KINDS`], byte-sorted.
 ///
-/// A subset of [`NAMESPACES`] — every log namespace is also a state namespace —
-/// and the closed set the `log-{ns}` kinds are drawn from. Another namespace
-/// acquiring logs would have no layer to travel in, which is why [`export`]
-/// refuses one rather than dropping it.
+/// A subset of [`NAMESPACES`], and the closed set the `log-{ns}` kinds are
+/// drawn from. A log namespace is a state namespace only where its entity also
+/// declares a state key; an archive-only log has no state kind. Another
+/// namespace acquiring logs would have no layer to travel in, which is why
+/// [`export`] refuses one rather than dropping it.
 pub const LOG_NAMESPACES: [Namespace; LOG_KINDS.len()] = {
     let mut namespaces = [""; LOG_KINDS.len()];
     let mut i = 0;
@@ -200,10 +201,8 @@ pub const LOG_KINDS: [(&str, Namespace); 9] = [
 /// single blob. Re-sharding a namespace is a media-type-version event for that
 /// namespace's kind, decided by the format's owner; it is not a constant to
 /// nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 24] = [
-    ("state-account-address-chunks", AccountAddressChunk::NS, 1),
+pub const STATE_KINDS: [(&str, Namespace, u8); 18] = [
     ("state-account-addresses", AccountAddressSet::NS, 1),
-    ("state-account-epochs", AccountEpochLog::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
     ("state-address-stats", AddressStats::NS, 1),
@@ -212,16 +211,12 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 24] = [
     ("state-dreps", DRepState::NS, 1),
     ("state-epochs", EpochState::NS, 1),
     ("state-eras", EraState::NS, 1),
-    ("state-first-mint-chunks", FirstMintChunk::NS, 1),
     ("state-first-mints", FirstMintSet::NS, 1),
     ("state-gov", GovState::NS, 1),
-    ("state-payment-address-chunks", PaymentAddressChunk::NS, 1),
     ("state-payment-addresses", PaymentAddressSet::NS, 1),
     ("state-payment-stats", PaymentStats::NS, 1),
     ("state-pending-mirs", PendingMirState::NS, 1),
     ("state-pending-rewards", PendingRewardState::NS, 1),
-    ("state-policy-mint-chunks", PolicyMintChunk::NS, 1),
-    ("state-pool-epochs", PoolEpochLog::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
     ("state-utxos", namespaces::UTXOS, 16),

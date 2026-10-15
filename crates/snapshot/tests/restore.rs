@@ -54,7 +54,7 @@ use dolos_snapshot::{
     is_state_kind,
     restore::{self, default_budget, progress_path_in, Budget, Checkpoint},
     state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL, KINDS,
-    NAMESPACES, STATE_KINDS, UTXOS,
+    LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::{
     faults::{FaultyStateStore, TestFault},
@@ -1115,11 +1115,7 @@ fn assert_archive_matches<A: ArchiveStore>(restored: &A, original: &A) {
 
     let mut any = false;
 
-    for ns in NAMESPACES {
-        if ns == UTXOS {
-            continue;
-        }
-
+    for ns in LOG_NAMESPACES {
         let left = logs_of(restored, ns);
         let right = logs_of(original, ns);
 

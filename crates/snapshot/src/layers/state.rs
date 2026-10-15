@@ -335,7 +335,6 @@ mod tests {
         let staged = |address: &[u8]| [credential.as_slice(), &[0; 8], address].concat();
         keyed(AccountAddressSet::NS, &staged(&staked)).unwrap();
         keyed(AccountAddressSet::NS, &staged(&unstaked)).unwrap();
-        keyed(AccountAddressChunk::NS, &credential).unwrap();
 
         // unsealed stats: an address's and an account's are keyed epoch
         // first, a payment credential's set and stats group first
@@ -363,6 +362,8 @@ mod tests {
             (AccountAddressSet::NS, staged(&[1; 57])),
             (AccountAddressSet::NS, credential.clone()),
             (AccountAddressChunk::NS, vec![1; 32]),
+            // an archive-only log holds no state, even under its log key
+            (AccountAddressChunk::NS, credential.clone()),
             (AddressStats::NS, [epoch.as_slice(), &credential].concat()),
             (AddressStats::NS, [epoch.as_slice(), &staked, &[1]].concat()),
             (

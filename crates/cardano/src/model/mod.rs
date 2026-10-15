@@ -274,32 +274,76 @@ impl dolos_core::Entity for CardanoEntity {
     }
 }
 
+fn register_state<E: StateEntity>(schema: &mut StateSchema) {
+    schema.insert(E::NS, NamespaceType::KeyValue);
+}
+
+fn register_log<E: LogEntity>(schema: &mut StateSchema) {
+    schema.insert(E::NS, NamespaceType::KeyValue);
+}
+
+/// The state store's namespaces: every entity declared with a state key.
+///
+/// An archive-only log has no state key, so it has no namespace here and a
+/// stele carries no state layer for it.
 pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
-    schema.insert(EraState::NS, NamespaceType::KeyValue);
-    schema.insert(AccountState::NS, NamespaceType::KeyValue);
-    schema.insert(AssetState::NS, NamespaceType::KeyValue);
-    schema.insert(PoolState::NS, NamespaceType::KeyValue);
-    schema.insert(EpochState::NS, NamespaceType::KeyValue);
-    schema.insert(DRepState::NS, NamespaceType::KeyValue);
-    schema.insert(ProposalState::NS, NamespaceType::KeyValue);
-    schema.insert(PoolEpochLog::NS, NamespaceType::KeyValue);
-    schema.insert(AccountEpochLog::NS, NamespaceType::KeyValue);
-    schema.insert(DatumState::NS, NamespaceType::KeyValue);
-    schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
-    schema.insert(PendingMirState::NS, NamespaceType::KeyValue);
-    schema.insert(GovState::NS, NamespaceType::KeyValue);
-    schema.insert(FirstMintSet::NS, NamespaceType::KeyValue);
-    schema.insert(FirstMintChunk::NS, NamespaceType::KeyValue);
-    schema.insert(PolicyMintChunk::NS, NamespaceType::KeyValue);
-    schema.insert(AccountAddressSet::NS, NamespaceType::KeyValue);
-    schema.insert(AccountAddressChunk::NS, NamespaceType::KeyValue);
-    schema.insert(AddressStats::NS, NamespaceType::KeyValue);
-    schema.insert(PaymentAddressSet::NS, NamespaceType::KeyValue);
-    schema.insert(PaymentStats::NS, NamespaceType::KeyValue);
-    schema.insert(PaymentAddressChunk::NS, NamespaceType::KeyValue);
-    schema.insert(AccountStats::NS, NamespaceType::KeyValue);
+    register_state::<EraState>(&mut schema);
+    register_state::<AccountState>(&mut schema);
+    register_state::<AssetState>(&mut schema);
+    register_state::<PoolState>(&mut schema);
+    register_state::<EpochState>(&mut schema);
+    register_state::<DRepState>(&mut schema);
+    register_state::<ProposalState>(&mut schema);
+    register_state::<DatumState>(&mut schema);
+    register_state::<PendingRewardState>(&mut schema);
+    register_state::<PendingMirState>(&mut schema);
+    register_state::<GovState>(&mut schema);
+    register_state::<FirstMintSet>(&mut schema);
+    register_state::<AccountAddressSet>(&mut schema);
+    register_state::<AddressStats>(&mut schema);
+    register_state::<PaymentAddressSet>(&mut schema);
+    register_state::<PaymentStats>(&mut schema);
+    register_state::<AccountStats>(&mut schema);
     schema
+}
+
+/// The archive store's log namespaces: every entity declared with a log key.
+pub fn build_log_schema() -> StateSchema {
+    let mut schema = StateSchema::default();
+    register_log::<EpochState>(&mut schema);
+    register_log::<PoolEpochLog>(&mut schema);
+    register_log::<AccountEpochLog>(&mut schema);
+    register_log::<FirstMintChunk>(&mut schema);
+    register_log::<PolicyMintChunk>(&mut schema);
+    register_log::<AccountAddressChunk>(&mut schema);
+    register_log::<AddressStats>(&mut schema);
+    register_log::<PaymentAddressChunk>(&mut schema);
+    register_log::<AccountStats>(&mut schema);
+    schema
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn archive_only_logs_register_in_the_archive_alone() {
+        let states = build_schema();
+        let logs = build_log_schema();
+
+        for ns in [
+            AccountEpochLog::NS,
+            PoolEpochLog::NS,
+            AccountAddressChunk::NS,
+            PaymentAddressChunk::NS,
+            PolicyMintChunk::NS,
+            FirstMintChunk::NS,
+        ] {
+            assert!(!states.contains_key(ns), "{ns} is a state namespace");
+            assert!(logs.contains_key(ns), "{ns} is not a log namespace");
+        }
+    }
 }
 
 // --- CardanoDelta ---
