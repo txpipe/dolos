@@ -23,12 +23,12 @@ use dolos_cardano::{
     indexes::archive_dimensions,
     model::{
         AccountEpochLog, AccountKey, AccountState, AccountStats, AddressKey, AddressStats,
-        AddressStatsKey, AssetKey, AssetState, DRepKey, DRepState, DatumKey, DatumState,
-        EpochState, EraKey, EraState, FirstMintChunk, FixedNamespace as _, GovState, PaymentKey,
-        PaymentStats, PaymentTail, PendingMirState, PendingRewardState, PolicyKey, PolicyMintChunk,
-        PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState, StagedAccountStats,
-        StagedAddressStats, StagedFirstMint, StagedPaymentAddress, StagedPaymentStats,
-        StagedStakeAddress, StakeAddressesRow,
+        AssetKey, AssetState, DRepKey, DRepState, DatumKey, DatumState, EpochState, EraKey,
+        EraState, FirstMintChunk, FixedNamespace as _, GovState, PaymentKey, PaymentStats,
+        PaymentTail, PendingMirState, PendingRewardState, PolicyKey, PolicyMintChunk, PoolEpochLog,
+        PoolKey, PoolState, ProposalKey, ProposalState, StagedAccountStats, StagedAddressStats,
+        StagedFirstMint, StagedPaymentAddress, StagedPaymentStats, StagedStakeAddress,
+        StakeAddressesRow,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
     periods::StagedKey,
@@ -92,9 +92,10 @@ pub fn populated_shards(ns: Namespace, shards: u8) -> Vec<u8> {
 pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
     let credential = AccountKey(StakeCredential::AddrKeyhash([byte; 28].into()));
     let payment = PaymentKey([byte; 28].into());
-    let address = AddressStatsKey::Staked {
+    // a base address's header and payment hash
+    let address = AddressKey::Staked {
         account: credential.clone(),
-        rest: vec![byte; 29],
+        rest: [[0x01].as_slice(), &[byte; 28]].concat(),
     };
 
     let key = match ns {
@@ -139,7 +140,7 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         StagedStakeAddress::NS => keys::encode(&StagedKey {
             group: credential,
             epoch: u64::from(byte),
-            member: AddressKey(vec![byte; 57]),
+            member: address,
         }),
         other => panic!("no fixture key for {other}"),
     };

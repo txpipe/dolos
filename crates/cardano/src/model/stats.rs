@@ -36,39 +36,54 @@ hash_key!(
 display_as_stored!(PaymentKey);
 
 const UNSTAKED: u8 = 0x00;
-const STAKED: u8 = 0x01;
 
 /// A stake hash closes every address that has a stake credential.
 const STAKE_HASH: usize = 28;
 
-/// The key of one address's stats.
+/// An address, keyed stake-first.
 ///
-/// `0x01 ‖ stake credential ‖ rest` for an address with a stake credential,
-/// where `rest` is the address without its stake hash (a base address's
-/// header and payment hash), and `0x00 ‖ address` for any other. Keyed
-/// stake-first, so an account's addresses of one epoch are one prefix range;
-/// the tag keeps the arms apart, and the variable part comes last.
+/// `AccountKey ‖ rest` for an address with a stake credential, where `rest`
+/// is the address without its stake hash (a base address's header and
+/// payment hash, a stake address's header), and `0x00 ‖ address` for any
+/// other. An `AccountKey` opens with its CBOR header `0x82`, so the first
+/// byte tells the forms apart, the header fixes the length of `rest`, and an
+/// account's addresses are its prefix range.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum AddressStatsKey {
+pub enum AddressKey {
     Staked { account: AccountKey, rest: Vec<u8> },
     Unstaked(Vec<u8>),
 }
 
-impl AddressStatsKey {
+impl AddressKey {
     pub fn of(address: &Address) -> Self {
-        let bytes = address.to_vec();
+        Self::split(
+            crate::pallas_extras::address_account(address).as_ref(),
+            address.to_vec(),
+        )
+    }
 
-        match crate::pallas_extras::address_account(address) {
-            Some(account) if bytes.len() > STAKE_HASH => {
-                let (rest, stake) = bytes.split_at(bytes.len() - STAKE_HASH);
-                debug_assert_eq!(stake, account_hash(&account).as_slice());
+    /// The key of an address's bytes, staked under `account` when they close
+    /// with its hash.
+    pub fn split(account: Option<&StakeCredential>, address: Vec<u8>) -> Self {
+        let staked = |account: &StakeCredential| {
+            address
+                .first()
+                .and_then(|header| rest_len(*header))
+                .is_some_and(|rest| address.len() == rest + STAKE_HASH)
+                && address.ends_with(account_hash(account).as_slice())
+        };
+
+        match account {
+            Some(account) if staked(account) => {
+                let mut rest = address;
+                rest.truncate(rest.len() - STAKE_HASH);
 
                 Self::Staked {
-                    account: AccountKey(account),
-                    rest: rest.to_vec(),
+                    account: AccountKey(account.clone()),
+                    rest,
                 }
             }
-            _ => Self::Unstaked(bytes),
+            _ => Self::Unstaked(address),
         }
     }
 
@@ -80,6 +95,16 @@ impl AddressStatsKey {
             }
             Self::Unstaked(address) => address.clone(),
         }
+    }
+}
+
+/// The length of a staked address's rest, by its header: a base address
+/// keeps its header and payment hash, a stake address its header alone.
+fn rest_len(header: u8) -> Option<usize> {
+    match header >> 4 {
+        0x0..=0x3 => Some(1 + 28),
+        0xe | 0xf => Some(1),
+        _ => None,
     }
 }
 
@@ -97,11 +122,10 @@ fn non_empty(bytes: &[u8], what: &str) -> Result<Vec<u8>, KeyError> {
     Ok(bytes.to_vec())
 }
 
-impl KeyCodec for AddressStatsKey {
+impl KeyCodec for AddressKey {
     fn encode_key(&self, out: &mut KeyBytes) {
         match self {
             Self::Staked { account, rest } => {
-                out.push(STAKED);
                 account.encode_key(out);
                 out.extend_from_slice(rest);
             }
@@ -113,59 +137,52 @@ impl KeyCodec for AddressStatsKey {
     }
 
     fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
-        let Some((tag, bytes)) = bytes.split_first() else {
-            return Err(KeyError::Short {
+        match bytes.split_first() {
+            None => Err(KeyError::Short {
                 expected: 1,
                 found: 0,
-            });
-        };
-
-        match *tag {
-            STAKED => {
-                if bytes.len() < AccountKey::LEN {
-                    return Err(KeyError::Short {
-                        expected: 1 + AccountKey::LEN,
-                        found: 1 + bytes.len(),
-                    });
-                }
-
+            }),
+            Some((&UNSTAKED, address)) => Ok(Self::Unstaked(non_empty(address, "address")?)),
+            Some(_) if bytes.len() < AccountKey::LEN => Err(KeyError::Short {
+                expected: AccountKey::LEN,
+                found: bytes.len(),
+            }),
+            Some(_) => {
                 let (account, rest) = bytes.split_at(AccountKey::LEN);
+                let account = AccountKey::decode_key(account)?;
 
-                Ok(Self::Staked {
-                    account: AccountKey::decode_key(account)?,
-                    rest: non_empty(rest, "address rest")?,
-                })
+                let Some(&header) = rest.first() else {
+                    return Err(KeyError::Short {
+                        expected: AccountKey::LEN + 1,
+                        found: bytes.len(),
+                    });
+                };
+
+                let Some(expected) = rest_len(header) else {
+                    return Err(KeyError::Malformed(format!(
+                        "staked address header {header:#04x}"
+                    )));
+                };
+
+                match rest.len() {
+                    len if len < expected => Err(KeyError::Short {
+                        expected: AccountKey::LEN + expected,
+                        found: bytes.len(),
+                    }),
+                    len if len > expected => Err(KeyError::Trailing(len - expected)),
+                    _ => Ok(Self::Staked {
+                        account,
+                        rest: rest.to_vec(),
+                    }),
+                }
             }
-            UNSTAKED => Ok(Self::Unstaked(non_empty(bytes, "address")?)),
-            other => Err(KeyError::Malformed(format!(
-                "address stats tag {other:#04x}"
-            ))),
         }
     }
 }
 
-display_as_stored!(AddressStatsKey);
+display_as_stored!(AddressKey);
 
-/// The prefix every address-stats key of one account starts with:
-/// `0x01 ‖ stake credential`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AccountAddresses(pub AccountKey);
-
-impl KeyCodec for AccountAddresses {
-    fn encode_key(&self, out: &mut KeyBytes) {
-        out.push(STAKED);
-        self.0.encode_key(out);
-    }
-
-    fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
-        match bytes.split_first() {
-            Some((&STAKED, account)) => Ok(Self(AccountKey::decode_key(account)?)),
-            _ => Err(KeyError::Malformed("not an account's address stats".into())),
-        }
-    }
-}
-
-impl KeyPrefix<AddressStatsKey> for AccountAddresses {}
+impl KeyPrefix<AddressKey> for AccountKey {}
 
 /// An address without its payment hash: the header, then the delegation part.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -274,7 +291,7 @@ impl UnitSums {
 ///
 /// The unit is empty for lovelace and `policy ‖ name` for an asset. Only a
 /// unit an output carried a quantity of is listed. Sealed at
-/// `epoch_start(e) ‖ AddressStatsKey`.
+/// `epoch_start(e) ‖ AddressKey`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub struct AddressStats {
     #[n(0)]
@@ -284,7 +301,7 @@ pub struct AddressStats {
     pub tx_count: u64,
 }
 
-entity_boilerplate!(AddressStats, "address-stats", log = AddressStatsKey);
+entity_boilerplate!(AddressStats, "address-stats", log = AddressKey);
 
 impl AddressStats {
     pub fn add(&mut self, other: &Self) {
@@ -325,7 +342,7 @@ impl AddressStats {
 
 /// An address's stats in an epoch that has not sealed.
 ///
-/// Keyed `epoch ‖ AddressStatsKey`, epoch first: an address has no
+/// Keyed `epoch ‖ AddressKey`, epoch first: an address has no
 /// fixed-width group to lead a staged key, so its rows are found by epoch, as
 /// the sealed ones are. The value is the sealed row's.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
@@ -336,7 +353,7 @@ pub struct StagedAddressStats(#[n(0)] pub AddressStats);
 entity_boilerplate!(
     StagedAddressStats,
     "staged-address-stats",
-    state = (Epoch, AddressStatsKey)
+    state = (Epoch, AddressKey)
 );
 
 impl SumRow for StagedAddressStats {
@@ -516,17 +533,24 @@ pub(crate) mod testing {
             })
     }
 
-    pub fn any_address_stats_key() -> impl Strategy<Value = AddressStatsKey> {
+    pub fn any_address_key() -> impl Strategy<Value = AddressKey> {
         prop_oneof![
             (
                 root::any_stake_credential(),
-                prop::collection::vec(any::<u8>(), 1..40)
+                prop_oneof![
+                    (0x00u8..0x40, any::<[u8; 28]>()).prop_map(|(header, payment)| [
+                        [header].as_slice(),
+                        &payment
+                    ]
+                    .concat()),
+                    (0xe0u8..=0xff).prop_map(|header| vec![header]),
+                ]
             )
-                .prop_map(|(account, rest)| AddressStatsKey::Staked {
+                .prop_map(|(account, rest)| AddressKey::Staked {
                     account: AccountKey(account),
                     rest,
                 }),
-            prop::collection::vec(any::<u8>(), 1..90).prop_map(AddressStatsKey::Unstaked),
+            prop::collection::vec(any::<u8>(), 1..90).prop_map(AddressKey::Unstaked),
         ]
     }
 
@@ -552,7 +576,7 @@ mod prop_tests {
         #[test]
         fn stage_address_stats_roundtrip(
             entity in prop::option::of(any_address_stats()),
-            key in any_address_stats_key(),
+            key in any_address_key(),
             delta in any_address_stats(),
         ) {
             let entity = entity.map(StagedAddressStats);
@@ -603,12 +627,12 @@ mod prop_tests {
         }
 
         #[test]
-        fn address_stats_keys_round_trip(key in any_address_stats_key()) {
+        fn address_stats_keys_round_trip(key in any_address_key()) {
             let raw = dolos_core::keys::encode(&key);
-            prop_assert_eq!(AddressStatsKey::decode_key(&raw), Ok(key.clone()));
+            prop_assert_eq!(AddressKey::decode_key(&raw), Ok(key.clone()));
 
             let staged = dolos_core::keys::encode(&(9u64, key.clone()));
-            prop_assert_eq!(<(Epoch, AddressStatsKey)>::decode_key(&staged), Ok((9, key)));
+            prop_assert_eq!(<(Epoch, AddressKey)>::decode_key(&staged), Ok((9, key)));
         }
     }
 
@@ -634,7 +658,7 @@ mod prop_tests {
             tx_count: 1,
         };
 
-        let key = (4, AddressStatsKey::Unstaked(vec![0x61; 29]));
+        let key = (4, AddressKey::Unstaked(vec![0x61; 29]));
         let mut a = StageAddressStats::new(key.clone(), StagedAddressStats(first.clone()));
         let mut b = StageAddressStats::new(key, StagedAddressStats(second));
 
@@ -654,10 +678,10 @@ mod prop_tests {
 
 #[cfg(test)]
 mod key_tests {
-    use dolos_core::{keys::encode, RangeOf};
+    use dolos_core::{keys::encode, KeyError, RangeOf};
     use pallas::ledger::addresses::{
-        Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart, StakeAddress,
-        StakePayload,
+        ByronAddress, Network, Pointer, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
+        StakeAddress, StakePayload,
     };
     use proptest::prelude::*;
 
@@ -684,16 +708,54 @@ mod key_tests {
         ))
     }
 
+    fn pointer(payment: u8) -> Address {
+        Address::Shelley(ShelleyAddress::new(
+            Network::Mainnet,
+            ShelleyPaymentPart::Key([payment; 28].into()),
+            ShelleyDelegationPart::Pointer(Pointer::new(13200, 526450, 149104513)),
+        ))
+    }
+
+    fn byron() -> Address {
+        let byron = ByronAddress::from_base58(
+            "Ae2tdPwUPEZ4YjgvykNpoFeYUxoyhNj2kg8KfKWN2FizsSpLUPv68MpTVDo",
+        )
+        .unwrap();
+
+        Address::Byron(byron)
+    }
+
+    fn stake(stake: StakeCredential) -> Address {
+        let payload = match stake {
+            StakeCredential::AddrKeyhash(hash) => StakePayload::Stake(hash),
+            StakeCredential::ScriptHash(hash) => StakePayload::Script(hash),
+        };
+
+        Address::Stake(StakeAddress::new(Network::Testnet, payload))
+    }
+
+    fn every_kind() -> Vec<Address> {
+        vec![
+            byron(),
+            enterprise(0x33),
+            pointer(0x44),
+            base(0x11, StakeCredential::AddrKeyhash([0x22; 28].into())),
+            base(0x11, StakeCredential::ScriptHash([0x22; 28].into())),
+            stake(StakeCredential::AddrKeyhash([0x22; 28].into())),
+            stake(StakeCredential::ScriptHash([0x22; 28].into())),
+        ]
+    }
+
     #[test]
     fn layouts_are_pinned() {
         let stake = StakeCredential::AddrKeyhash([0x22; 28].into());
         let address = base(0x11, stake.clone());
 
-        // stake-first: tag, the credential's CBOR, then header and payment hash
+        // stake-first: the credential's CBOR, then header and payment hash
         assert_eq!(
-            encode(&AddressStatsKey::of(&address)).to_vec(),
+            encode(&AddressKey::of(&address)).to_vec(),
             [
-                [0x01, 0x82, 0x00, 0x58, 0x1c].as_slice(),
+                [0x82, 0x00, 0x58, 0x1c].as_slice(),
                 &[0x22; 28],
                 &[0x11],
                 &[0x11; 28],
@@ -703,13 +765,8 @@ mod key_tests {
 
         let address = enterprise(0x33);
         assert_eq!(
-            encode(&AddressStatsKey::of(&address)).to_vec(),
+            encode(&AddressKey::of(&address)).to_vec(),
             [[0x00].as_slice(), &address.to_vec()].concat()
-        );
-
-        assert_eq!(
-            encode(&AccountAddresses(AccountKey(stake))).to_vec(),
-            [[0x01, 0x82, 0x00, 0x58, 0x1c].as_slice(), &[0x22; 28]].concat()
         );
 
         assert_eq!(
@@ -724,28 +781,42 @@ mod key_tests {
     }
 
     #[test]
-    fn keys_rebuild_their_address() {
-        let stake = StakeCredential::ScriptHash([0x22; 28].into());
+    fn every_kind_of_address_round_trips() {
+        for address in every_kind() {
+            let key = AddressKey::of(&address);
+            let raw = encode(&key);
 
-        for address in [
-            base(0x11, stake.clone()),
-            enterprise(0x33),
-            Address::Stake(StakeAddress::new(
-                Network::Testnet,
-                StakePayload::Script([0x22; 28].into()),
-            )),
-        ] {
-            assert_eq!(AddressStatsKey::of(&address).address(), address.to_vec());
+            assert_eq!(AddressKey::decode_key(&raw), Ok(key.clone()));
+            assert_eq!(key.address(), address.to_vec());
+            assert_eq!(
+                AddressKey::decode_key(&raw).unwrap().address(),
+                address.to_vec()
+            );
+
+            let staked = matches!(key, AddressKey::Staked { .. });
+            let has_account = crate::pallas_extras::address_account(&address).is_some();
+            assert_eq!(staked, has_account, "{address}");
         }
+    }
 
-        assert!(matches!(
-            AddressStatsKey::of(&base(0x11, stake)),
-            AddressStatsKey::Staked { .. }
-        ));
-        assert!(matches!(
-            AddressStatsKey::of(&enterprise(0x11)),
-            AddressStatsKey::Unstaked(_)
-        ));
+    #[test]
+    fn bytes_split_under_their_account_alone() {
+        let a = StakeCredential::AddrKeyhash([0x22; 28].into());
+        let b = StakeCredential::AddrKeyhash([0x23; 28].into());
+        let address = base(0x11, a.clone()).to_vec();
+
+        assert_eq!(
+            AddressKey::split(Some(&a), address.clone()),
+            AddressKey::of(&base(0x11, a))
+        );
+        assert_eq!(
+            AddressKey::split(Some(&b), address.clone()),
+            AddressKey::Unstaked(address.clone())
+        );
+        assert_eq!(
+            AddressKey::split(None, address.clone()),
+            AddressKey::Unstaked(address)
+        );
     }
 
     #[test]
@@ -764,14 +835,26 @@ mod key_tests {
         let b = AccountKey(StakeCredential::AddrKeyhash([0x23; 28].into()));
         let script = AccountKey(StakeCredential::ScriptHash([0x22; 28].into()));
 
+        let range = RangeOf::prefix(&a);
+        let unstaked = [byron(), enterprise(0x22), pointer(0x22)];
+
+        assert!(range.contains(&AddressKey::of(&base(0x00, a.0.clone()))));
+        assert!(range.contains(&AddressKey::of(&base(0xff, a.0.clone()))));
+        assert!(range.contains(&AddressKey::of(&stake(a.0.clone()))));
+        assert!(!range.contains(&AddressKey::of(&base(0x11, b.0.clone()))));
+        assert!(!range.contains(&AddressKey::of(&base(0x11, script.0.clone()))));
+        assert!(!range.contains(&AddressKey::of(&stake(script.0.clone()))));
+
+        for address in &unstaked {
+            assert!(!range.contains(&AddressKey::of(address)));
+        }
+
+        // within an epoch, as the staged rows are keyed
         let key = |account: &AccountKey, epoch, payment| {
-            (
-                epoch,
-                AddressStatsKey::of(&base(payment, account.0.clone())),
-            )
+            (epoch, AddressKey::of(&base(payment, account.0.clone())))
         };
 
-        let range = RangeOf::prefix(&(7u64, AccountAddresses(a.clone())));
+        let range = RangeOf::prefix(&(7u64, a.clone()));
 
         assert!(range.contains(&key(&a, 7, 0x00)));
         assert!(range.contains(&key(&a, 7, 0xff)));
@@ -780,20 +863,47 @@ mod key_tests {
         assert!(!range.contains(&key(&b, 7, 0x11)));
         assert!(!range.contains(&key(&script, 7, 0x11)));
 
-        let unstaked = (7u64, AddressStatsKey::Unstaked(vec![0x01; 60]));
-        assert!(!range.contains(&unstaked));
+        for address in &unstaked {
+            assert!(!range.contains(&(7u64, AddressKey::of(address))));
+        }
     }
 
     #[test]
     fn malformed_keys_are_refused() {
-        assert!(AddressStatsKey::decode_key(&[]).is_err());
-        assert!(AddressStatsKey::decode_key(&[0x00]).is_err());
-        assert!(AddressStatsKey::decode_key(&[0x02, 1, 2]).is_err());
+        assert!(AddressKey::decode_key(&[]).is_err());
+        assert!(AddressKey::decode_key(&[0x00]).is_err());
+        assert!(AddressKey::decode_key(&[0x02, 1, 2]).is_err());
 
         let account = encode(&AccountKey(StakeCredential::AddrKeyhash([0; 28].into())));
-        let staked = [[0x01].as_slice(), &account].concat();
-        assert!(AddressStatsKey::decode_key(&staked).is_err());
-        assert!(AddressStatsKey::decode_key(&staked[..20]).is_err());
+        assert!(AddressKey::decode_key(&account).is_err());
+        assert!(AddressKey::decode_key(&account[..20]).is_err());
+
+        // a rest neither a base nor a stake address header opens
+        let odd = [account.as_slice(), &[0x60], &[0x11; 28]].concat();
+        assert!(AddressKey::decode_key(&odd).is_err());
+
+        let staked = encode(&AddressKey::of(&base(
+            0x11,
+            StakeCredential::AddrKeyhash([0x22; 28].into()),
+        )));
+
+        assert!(matches!(
+            AddressKey::decode_key(&staked[..staked.len() - 1]),
+            Err(KeyError::Short { .. })
+        ));
+        assert_eq!(
+            AddressKey::decode_key(&[staked.as_slice(), &[0]].concat()),
+            Err(KeyError::Trailing(1))
+        );
+
+        let stake = encode(&AddressKey::of(&stake(StakeCredential::ScriptHash(
+            [0x22; 28].into(),
+        ))));
+        assert_eq!(
+            AddressKey::decode_key(&[stake.as_slice(), &[0; 28]].concat()),
+            Err(KeyError::Trailing(28))
+        );
+
         assert!(PaymentTail::decode_key(&[]).is_err());
     }
 

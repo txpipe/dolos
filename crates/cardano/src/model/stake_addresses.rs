@@ -1,39 +1,17 @@
-use dolos_core::{KeyBytes, KeyCodec, KeyError};
 use pallas::{
     codec::minicbor::{self, bytes::ByteVec, Decode, Encode},
     ledger::primitives::{Epoch, StakeCredential},
 };
 use serde::{Deserialize, Serialize};
 
-use super::AccountKey;
+use super::{AccountKey, AddressKey};
 use crate::periods::{StageIfAbsent, StagedKey, StagedRow};
-
-/// An address, keyed by its bytes, whole: the last part of a key, so its
-/// length needs no prefix.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AddressKey(pub Vec<u8>);
-
-impl KeyCodec for AddressKey {
-    fn encode_key(&self, out: &mut KeyBytes) {
-        out.extend_from_slice(&self.0);
-    }
-
-    fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
-        if bytes.is_empty() {
-            return Err(KeyError::Malformed("empty address".into()));
-        }
-
-        Ok(Self(bytes.to_vec()))
-    }
-}
-
-display_as_stored!(AddressKey);
 
 /// The first appearance of an address under a stake credential within one
 /// epoch, staged until the epoch seals.
 ///
-/// Keyed `account ‖ epoch ‖ address`, so one prefix scan returns every staged
-/// epoch of an account, and nothing else.
+/// Keyed `account ‖ epoch ‖ AddressKey`, so one prefix scan returns every
+/// staged epoch of an account, and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub struct StagedStakeAddress {
     #[n(0)]
@@ -74,7 +52,7 @@ impl StagedRow for StagedStakeAddress {
         StagedKey {
             group: AccountKey(self.account.clone()),
             epoch: self.epoch,
-            member: AddressKey(self.address.clone()),
+            member: AddressKey::split(Some(&self.account), self.address.clone()),
         }
     }
 
@@ -139,7 +117,7 @@ mod prop_tests {
 
 #[cfg(test)]
 mod key_tests {
-    use dolos_core::{keys::encode, RangeOf};
+    use dolos_core::{keys::encode, KeyCodec as _, RangeOf};
     use pallas::crypto::hash::Hash;
     use proptest::prelude::*;
 
@@ -151,25 +129,34 @@ mod key_tests {
         address: &[u8],
     ) -> StagedKey<AccountKey, AddressKey> {
         StagedKey {
-            group: AccountKey(account),
+            group: AccountKey(account.clone()),
             epoch,
-            member: AddressKey(address.to_vec()),
+            member: AddressKey::split(Some(&account), address.to_vec()),
         }
+    }
+
+    /// A base address with a script payment part, staked under `account`.
+    fn base(payment: u8, account: &StakeCredential) -> Vec<u8> {
+        let (StakeCredential::AddrKeyhash(hash) | StakeCredential::ScriptHash(hash)) = account;
+        [[0x31].as_slice(), &[payment; 28], hash.as_slice()].concat()
     }
 
     #[test]
     fn layouts_are_pinned() {
         let account = StakeCredential::ScriptHash(Hash::new([0x12; 28]));
-        let address = [0x31; 57];
+        let address = base(0x31, &account);
+        let header = [0x82, 0x01, 0x58, 0x1c];
 
-        assert_eq!(encode(&AddressKey(address.to_vec())).to_vec(), address);
         assert_eq!(
             encode(&key(account, 7, &address)).to_vec(),
             [
-                [0x82, 0x01, 0x58, 0x1c].as_slice(),
+                header.as_slice(),
                 &[0x12; 28],
                 &7u64.to_be_bytes(),
-                &address
+                &header,
+                &[0x12; 28],
+                &[0x31],
+                &[0x31; 28],
             ]
             .concat()
         );
@@ -183,10 +170,10 @@ mod key_tests {
 
         let range = RangeOf::prefix(&AccountKey(a.clone()));
 
-        assert!(range.contains(&key(a.clone(), 0, &[0])));
-        assert!(range.contains(&key(a, u64::MAX, &[0xff; 120])));
-        assert!(!range.contains(&key(b, 3, &[0])));
-        assert!(!range.contains(&key(script, 3, &[0])));
+        assert!(range.contains(&key(a.clone(), 0, &base(0x00, &a))));
+        assert!(range.contains(&key(a.clone(), u64::MAX, &base(0xff, &a))));
+        assert!(!range.contains(&key(b.clone(), 3, &base(0x00, &b))));
+        assert!(!range.contains(&key(script.clone(), 3, &base(0x00, &script))));
     }
 
     proptest! {
@@ -194,9 +181,10 @@ mod key_tests {
         fn staged_keys_round_trip(
             hash in any::<[u8; 28]>(),
             epoch in any::<u64>(),
-            address in prop::collection::vec(any::<u8>(), 1..120),
+            payment in any::<u8>(),
         ) {
-            let key = key(StakeCredential::AddrKeyhash(hash.into()), epoch, &address);
+            let account = StakeCredential::AddrKeyhash(hash.into());
+            let key = key(account.clone(), epoch, &base(payment, &account));
             let raw = encode(&key);
             prop_assert_eq!(StagedKey::decode_key(&raw), Ok(key));
         }
@@ -204,14 +192,10 @@ mod key_tests {
 
     #[test]
     fn an_empty_address_is_refused() {
-        assert!(AddressKey::decode_key(&[]).is_err());
-        assert!(
-            StagedKey::<AccountKey, AddressKey>::decode_key(&encode(&key(
-                StakeCredential::AddrKeyhash(Hash::new([0; 28])),
-                1,
-                &[]
-            )))
-            .is_err()
-        );
+        let account = StakeCredential::AddrKeyhash(Hash::new([0; 28]));
+        let empty = key(account, 1, &[]);
+
+        assert_eq!(empty.member, AddressKey::Unstaked(vec![]));
+        assert!(StagedKey::<AccountKey, AddressKey>::decode_key(&encode(&empty)).is_err());
     }
 }

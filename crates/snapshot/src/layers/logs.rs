@@ -180,10 +180,9 @@ mod tests {
         decode(StakeAddressesRow::NS, wire(&account).as_bytes()).unwrap();
         decode(AccountStats::NS, wire(&account).as_bytes()).unwrap();
 
-        // address stats take a tag, then an account and the rest of the
-        // address, or the address whole
-        let staked = [account.as_slice(), &[1; 29]].concat();
-        let staked = [&staked[..8], &[0x01], &staked[8..]].concat();
+        // address stats take an account and a base address's header and
+        // payment hash, or a tag and the address whole
+        let staked = [account.as_slice(), &[0x01], &[1; 28]].concat();
         decode(AddressStats::NS, wire(&staked).as_bytes()).unwrap();
         let unstaked = [slot.as_slice(), &[0x00], &[1; 29]].concat();
         decode(AddressStats::NS, wire(&unstaked).as_bytes()).unwrap();
@@ -200,6 +199,7 @@ mod tests {
             (AccountStats::NS, 32),
             (AddressStats::NS, 1),
             (AddressStats::NS, 32),
+            (AddressStats::NS, 33),
             (PaymentStats::NS, 32),
             (PoolEpochLog::NS, 32),
             (PoolEpochLog::NS, 0),
