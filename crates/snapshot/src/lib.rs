@@ -106,10 +106,10 @@ pub use stelae::progress;
 pub use stelae::{dir, inscription, transport, SteleReader};
 
 use dolos_cardano::model::{
-    AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
-    EpochState, EraState, FirstMintChunk, FixedNamespace, GovState, PaymentStats, PendingMirState,
-    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState, StagedFirstMint,
-    StagedPaymentAddress, StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
+    AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
+    AddressStats, AssetState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
+    FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
+    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -169,15 +169,15 @@ pub const LOG_NAMESPACES: [Namespace; LOG_KINDS.len()] = {
 /// the log namespaces are spelled, held to the entity types by
 /// `log_kinds_derive_from_their_namespaces` in `tests/coverage.rs`.
 pub const LOG_KINDS: [(&str, Namespace); 9] = [
+    ("log-account-address-chunks", AccountAddressChunk::NS),
     ("log-account-epochs", AccountEpochLog::NS),
     ("log-account-stats", AccountStats::NS),
     ("log-address-stats", AddressStats::NS),
     ("log-epochs", EpochState::NS),
-    ("log-first-mints", FirstMintChunk::NS),
-    ("log-payment-stats", PaymentStats::NS),
-    ("log-policy-first-mints", PolicyMintChunk::NS),
+    ("log-first-mint-chunks", FirstMintChunk::NS),
+    ("log-payment-address-chunks", PaymentAddressChunk::NS),
+    ("log-policy-mint-chunks", PolicyMintChunk::NS),
     ("log-pool-epochs", PoolEpochLog::NS),
-    ("log-stake-addresses", StakeAddressesRow::NS),
 ];
 
 /// The state layer kinds: the namespace each carries and the shard count its
@@ -201,6 +201,8 @@ pub const LOG_KINDS: [(&str, Namespace); 9] = [
 /// namespace's kind, decided by the format's owner; it is not a constant to
 /// nudge.
 pub const STATE_KINDS: [(&str, Namespace, u8); 24] = [
+    ("state-account-address-chunks", AccountAddressChunk::NS, 1),
+    ("state-account-addresses", AccountAddressSet::NS, 1),
     ("state-account-epochs", AccountEpochLog::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
@@ -210,24 +212,18 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 24] = [
     ("state-dreps", DRepState::NS, 1),
     ("state-epochs", EpochState::NS, 1),
     ("state-eras", EraState::NS, 1),
-    ("state-first-mints", FirstMintChunk::NS, 1),
+    ("state-first-mint-chunks", FirstMintChunk::NS, 1),
+    ("state-first-mints", FirstMintSet::NS, 1),
     ("state-gov", GovState::NS, 1),
+    ("state-payment-address-chunks", PaymentAddressChunk::NS, 1),
+    ("state-payment-addresses", PaymentAddressSet::NS, 1),
     ("state-payment-stats", PaymentStats::NS, 1),
     ("state-pending-mirs", PendingMirState::NS, 1),
     ("state-pending-rewards", PendingRewardState::NS, 1),
-    ("state-policy-first-mints", PolicyMintChunk::NS, 1),
+    ("state-policy-mint-chunks", PolicyMintChunk::NS, 1),
     ("state-pool-epochs", PoolEpochLog::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
-    ("state-staged-first-mints", StagedFirstMint::NS, 1),
-    (
-        "state-staged-payment-addresses",
-        StagedPaymentAddress::NS,
-        1,
-    ),
-    ("state-staged-payment-stats", StagedPaymentStats::NS, 1),
-    ("state-staged-stake-addresses", StagedStakeAddress::NS, 1),
-    ("state-stake-addresses", StakeAddressesRow::NS, 1),
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 

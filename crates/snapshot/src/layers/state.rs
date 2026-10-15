@@ -265,9 +265,9 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountEpochLog, AccountState, AccountStats, AddressStats, AssetKey, AssetState, DRepState,
-        EpochState, EraState, FixedNamespace, GovState, PoolState, ProposalState, StagedFirstMint,
-        StagedPaymentAddress, StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
+        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
+        AddressStats, AssetKey, AssetState, DRepState, EpochState, EraState, FirstMintSet,
+        FixedNamespace, GovState, PaymentAddressSet, PaymentStats, PoolState, ProposalState,
     };
 
     use super::*;
@@ -317,7 +317,7 @@ mod tests {
             (DRepState::NS, 1),
             (PoolState::NS, 28),
             (ProposalState::NS, 36),
-            (StagedFirstMint::NS, 68),
+            (FirstMintSet::NS, 68),
         ] {
             keyed(ns, &vec![1; len]).unwrap_or_else(|err| panic!("{ns}/{len}: {err:?}"));
         }
@@ -330,29 +330,25 @@ mod tests {
         let staked = [credential.as_slice(), &[0x01], &[1; 28]].concat();
         let unstaked = [[0x00].as_slice(), &[1; 29]].concat();
 
-        // a staged stake address: the account, the epoch, then the address's
-        // key, last
+        // an account address: the account, the epoch, then the address's key,
+        // last
         let staged = |address: &[u8]| [credential.as_slice(), &[0; 8], address].concat();
-        keyed(StagedStakeAddress::NS, &staged(&staked)).unwrap();
-        keyed(StagedStakeAddress::NS, &staged(&unstaked)).unwrap();
-        keyed(StakeAddressesRow::NS, &credential).unwrap();
+        keyed(AccountAddressSet::NS, &staged(&staked)).unwrap();
+        keyed(AccountAddressSet::NS, &staged(&unstaked)).unwrap();
+        keyed(AccountAddressChunk::NS, &credential).unwrap();
 
         // unsealed stats: an address's and an account's are keyed epoch
-        // first, a payment credential's group first
+        // first, a payment credential's set and stats group first
         let epoch = [0u8; 8];
         let address = [epoch.as_slice(), &staked].concat();
         keyed(AddressStats::NS, &address).unwrap();
         keyed(AddressStats::NS, &[epoch.as_slice(), &unstaked].concat()).unwrap();
         keyed(
-            StagedPaymentAddress::NS,
+            PaymentAddressSet::NS,
             &[[1; 28].as_slice(), &epoch, &[1; 29]].concat(),
         )
         .unwrap();
-        keyed(
-            StagedPaymentStats::NS,
-            &[[1; 28].as_slice(), &epoch].concat(),
-        )
-        .unwrap();
+        keyed(PaymentStats::NS, &[[1; 28].as_slice(), &epoch].concat()).unwrap();
         keyed(AccountStats::NS, &[epoch.as_slice(), &credential].concat()).unwrap();
 
         for (ns, key) in [
@@ -363,10 +359,10 @@ mod tests {
             (DRepState::NS, vec![0x22; 32]),
             (AccountState::NS, vec![1; 32]),
             (AccountEpochLog::NS, vec![1; 32]),
-            (StagedStakeAddress::NS, staged(&[])),
-            (StagedStakeAddress::NS, staged(&[1; 57])),
-            (StagedStakeAddress::NS, credential.clone()),
-            (StakeAddressesRow::NS, vec![1; 32]),
+            (AccountAddressSet::NS, staged(&[])),
+            (AccountAddressSet::NS, staged(&[1; 57])),
+            (AccountAddressSet::NS, credential.clone()),
+            (AccountAddressChunk::NS, vec![1; 32]),
             (AddressStats::NS, [epoch.as_slice(), &credential].concat()),
             (AddressStats::NS, [epoch.as_slice(), &staked, &[1]].concat()),
             (
@@ -375,12 +371,9 @@ mod tests {
             ),
             // a sealed row's key, without the epoch
             (AddressStats::NS, staked.clone()),
+            (PaymentAddressSet::NS, [[1; 28].as_slice(), &epoch].concat()),
             (
-                StagedPaymentAddress::NS,
-                [[1; 28].as_slice(), &epoch].concat(),
-            ),
-            (
-                StagedPaymentStats::NS,
+                PaymentStats::NS,
                 [[1; 28].as_slice(), &epoch, &[1]].concat(),
             ),
             (AccountStats::NS, credential.clone()),

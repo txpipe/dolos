@@ -22,15 +22,15 @@
 use dolos_cardano::{
     indexes::archive_dimensions,
     model::{
-        AccountEpochLog, AccountKey, AccountState, AccountStats, AddressKey, AddressStats,
-        AssetKey, AssetState, DRepKey, DRepState, DatumKey, DatumState, EpochState, EraKey,
-        EraState, FirstMintChunk, FixedNamespace as _, GovState, PaymentKey, PaymentStats,
-        PaymentTail, PendingMirState, PendingRewardState, PolicyKey, PolicyMintChunk, PoolEpochLog,
-        PoolKey, PoolState, ProposalKey, ProposalState, StagedFirstMint, StagedPaymentAddress,
-        StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
+        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountKey, AccountState,
+        AccountStats, AddressKey, AddressStats, AssetKey, AssetState, DRepKey, DRepState, DatumKey,
+        DatumState, EpochState, EraKey, EraState, FirstMintChunk, FirstMintSet,
+        FixedNamespace as _, GovState, PaymentAddressChunk, PaymentAddressKey, PaymentAddressSet,
+        PaymentKey, PaymentStats, PendingMirState, PendingRewardState, PolicyKey, PolicyMintChunk,
+        PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
-    periods::StagedKey,
+    periods::GroupKey,
 };
 use dolos_core::{
     key_hash, keys, BlockHash, EntityKey, EraCbor, ExactKind, ExactRecord, IndexRecord, LogKey,
@@ -102,16 +102,16 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         | AccountEpochLog::NS
         | PendingMirState::NS
         | PendingRewardState::NS
-        | StakeAddressesRow::NS => keys::encode(&credential),
+        | AccountAddressChunk::NS => keys::encode(&credential),
         AccountStats::NS => keys::encode(&(u64::from(byte), credential)),
         AddressStats::NS => keys::encode(&(u64::from(byte), address)),
-        PaymentStats::NS => keys::encode(&payment),
-        StagedPaymentAddress::NS => keys::encode(&StagedKey {
+        PaymentAddressChunk::NS => keys::encode(&payment),
+        PaymentAddressSet::NS => keys::encode(&GroupKey {
             group: payment,
             epoch: u64::from(byte),
-            member: PaymentTail(vec![byte; 29]),
+            member: PaymentAddressKey(vec![byte; 29]),
         }),
-        StagedPaymentStats::NS => keys::encode(&StagedKey {
+        PaymentStats::NS => keys::encode(&GroupKey {
             group: payment,
             epoch: u64::from(byte),
             member: (),
@@ -125,12 +125,12 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         PolicyMintChunk::NS => keys::encode(&(PolicyKey([byte; 28].into()), u32::from(byte))),
         PoolState::NS | PoolEpochLog::NS => keys::encode(&PoolKey([byte; 28].into())),
         ProposalState::NS => keys::encode(&ProposalKey::new([byte; 32].into(), u32::from(byte))),
-        StagedFirstMint::NS => keys::encode(&StagedKey {
+        FirstMintSet::NS => keys::encode(&GroupKey {
             group: PolicyKey([byte; 28].into()),
             epoch: u64::from(byte),
             member: AssetKey([byte; 32].into()),
         }),
-        StagedStakeAddress::NS => keys::encode(&StagedKey {
+        AccountAddressSet::NS => keys::encode(&GroupKey {
             group: credential,
             epoch: u64::from(byte),
             member: address,

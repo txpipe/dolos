@@ -26,7 +26,7 @@ use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::{AccountState, DRepState, PoolState},
     pallas_extras,
-    periods::{stake_addresses, stats},
+    periods::{account_addresses, stats},
     AccountEpochLog, AccountKey, ChainSummary, PoolHash,
 };
 use dolos_core::async_query::BlockMetaResolver;
@@ -337,7 +337,7 @@ where
     let addresses = domain
         .query()
         .run_blocking(move |domain| {
-            stake_addresses::page(&domain, &chain, epochs, &account, order, skip, count)
+            account_addresses::page(&domain, &chain, epochs, &account, order, skip, count)
                 .map_err(DomainError::from)
         })
         .await
@@ -2052,12 +2052,12 @@ mod tests {
 
         let sealed = domain
             .archive()
-            .iter_logs_typed::<dolos_cardano::StakeAddressesRow>(None)
+            .iter_logs_typed::<dolos_cardano::AccountAddressChunk>(None)
             .unwrap()
             .count();
         let staged = domain
             .state()
-            .iter_entities_typed::<dolos_cardano::StagedStakeAddress>(None)
+            .iter_entities_typed::<dolos_cardano::AccountAddressSet>(None)
             .unwrap()
             .count();
         assert!(

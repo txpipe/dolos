@@ -5,15 +5,15 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use super::{AccountKey, AddressKey};
-use crate::periods::{StageIfAbsent, StagedKey, StagedRow};
+use crate::periods::{GroupKey, GroupRow, StageIfAbsent};
 
-/// The first appearance of an address under a stake credential within one
-/// epoch, staged until the epoch seals.
+/// The first appearance of an address under an account within one epoch,
+/// held in state until the epoch seals into an [`AccountAddressChunk`].
 ///
 /// Keyed `account ‖ epoch ‖ AddressKey`, so one prefix scan returns every
-/// staged epoch of an account, and nothing else.
+/// unsealed epoch of an account, and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
-pub struct StagedStakeAddress {
+pub struct AccountAddressSet {
     #[n(0)]
     pub account: StakeCredential,
 
@@ -35,21 +35,21 @@ pub struct StagedStakeAddress {
 }
 
 entity_boilerplate!(
-    StagedStakeAddress,
-    "staged-stake-addresses",
-    state = StagedKey<AccountKey, AddressKey>
+    AccountAddressSet,
+    "account-addresses",
+    state = GroupKey<AccountKey, AddressKey>
 );
 
-impl StagedStakeAddress {
+impl AccountAddressSet {
     /// Chain order: slot, then tx index, then output index.
     pub fn chain_order(&self) -> (u64, u32, u32) {
         (self.slot, self.tx_index, self.output_index)
     }
 }
 
-impl StagedRow for StagedStakeAddress {
-    fn key(&self) -> StagedKey<AccountKey, AddressKey> {
-        StagedKey {
+impl GroupRow for AccountAddressSet {
+    fn key(&self) -> GroupKey<AccountKey, AddressKey> {
+        GroupKey {
             group: AccountKey(self.account.clone()),
             epoch: self.epoch,
             member: AddressKey::split(Some(&self.account), self.address.clone()),
@@ -61,20 +61,24 @@ impl StagedRow for StagedStakeAddress {
     }
 }
 
-pub type StageStakeAddress = StageIfAbsent<StagedStakeAddress>;
+pub type StageAccountAddress = StageIfAbsent<AccountAddressSet>;
 
-/// The addresses seen under a stake credential in one epoch, in order of
-/// first appearance within it.
+/// The addresses seen under an account in one epoch, in order of first
+/// appearance within it, built by the seal of [`AccountAddressSet`].
 ///
 /// Sealed at `epoch_start(e) ‖ account`. An address active in several epochs
 /// is listed in each; readers drop the repeats.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Default)]
-pub struct StakeAddressesRow {
+pub struct AccountAddressChunk {
     #[n(0)]
     pub addresses: Vec<ByteVec>,
 }
 
-entity_boilerplate!(StakeAddressesRow, "stake-addresses", log = AccountKey);
+entity_boilerplate!(
+    AccountAddressChunk,
+    "account-address-chunks",
+    log = AccountKey
+);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -83,34 +87,34 @@ pub(crate) mod testing {
     use proptest::prelude::*;
 
     prop_compose! {
-        pub fn any_staged_stake_address()(
+        pub fn any_account_address_set()(
             account in root::any_stake_credential(),
             address in prop::collection::vec(any::<u8>(), 1..64),
             epoch in 0u64..1000,
             slot in root::any_slot(),
             tx_index in 0u32..500,
             output_index in 0u32..500,
-        ) -> StagedStakeAddress {
-            StagedStakeAddress { account, address, epoch, slot, tx_index, output_index }
+        ) -> AccountAddressSet {
+            AccountAddressSet { account, address, epoch, slot, tx_index, output_index }
         }
     }
 }
 
 #[cfg(test)]
 mod prop_tests {
-    use super::testing::any_staged_stake_address;
+    use super::testing::any_account_address_set;
     use super::*;
     use crate::model::testing::{assert_delta_roundtrip, assert_delta_serde_roundtrip};
     use proptest::prelude::*;
 
     proptest! {
         #[test]
-        fn stage_stake_address_roundtrip(
-            entity in prop::option::of(any_staged_stake_address()),
-            row in any_staged_stake_address(),
+        fn stage_account_address_roundtrip(
+            entity in prop::option::of(any_account_address_set()),
+            row in any_account_address_set(),
         ) {
-            assert_delta_roundtrip(entity.clone(), StageStakeAddress::new(row.clone()));
-            assert_delta_serde_roundtrip(entity, StageStakeAddress::new(row));
+            assert_delta_roundtrip(entity.clone(), StageAccountAddress::new(row.clone()));
+            assert_delta_serde_roundtrip(entity, StageAccountAddress::new(row));
         }
     }
 }
@@ -127,8 +131,8 @@ mod key_tests {
         account: StakeCredential,
         epoch: Epoch,
         address: &[u8],
-    ) -> StagedKey<AccountKey, AddressKey> {
-        StagedKey {
+    ) -> GroupKey<AccountKey, AddressKey> {
+        GroupKey {
             group: AccountKey(account.clone()),
             epoch,
             member: AddressKey::split(Some(&account), address.to_vec()),
@@ -178,7 +182,7 @@ mod key_tests {
 
     proptest! {
         #[test]
-        fn staged_keys_round_trip(
+        fn group_keys_round_trip(
             hash in any::<[u8; 28]>(),
             epoch in any::<u64>(),
             payment in any::<u8>(),
@@ -186,7 +190,7 @@ mod key_tests {
             let account = StakeCredential::AddrKeyhash(hash.into());
             let key = key(account.clone(), epoch, &base(payment, &account));
             let raw = encode(&key);
-            prop_assert_eq!(StagedKey::decode_key(&raw), Ok(key));
+            prop_assert_eq!(GroupKey::decode_key(&raw), Ok(key));
         }
     }
 
@@ -196,6 +200,6 @@ mod key_tests {
         let empty = key(account, 1, &[]);
 
         assert_eq!(empty.member, AddressKey::Unstaked(vec![]));
-        assert!(StagedKey::<AccountKey, AddressKey>::decode_key(&encode(&empty)).is_err());
+        assert!(GroupKey::<AccountKey, AddressKey>::decode_key(&encode(&empty)).is_err());
     }
 }
