@@ -15,12 +15,11 @@
 //! a re-run on unchanged code is encoding nondeterminism, which is a finding,
 //! never a re-pin.
 //!
-//! Between them these freeze: the thirty-eight media types, the tag string, the
-//! seventeen archive dimension names, the three exact-record kind literals, the
-//! nine `log-{ns}` and twenty-six `state-{ns}` kind strings — which is where
-//! the twenty-six namespace strings live now that neither record names one —
-//! the layer header and scope shapes, and the `position`/`parameters` key
-//! spellings, the shard and schema maps included.
+//! Between them these freeze: every media type, the tag string, every archive
+//! dimension name and exact-record kind literal, every `log-{ns}` and
+//! `state-{ns}` kind string — which is where the namespace strings live now
+//! that neither record names one — the layer header and scope shapes, and the
+//! `position`/`parameters` key spellings, the shard and schema maps included.
 
 mod common;
 
@@ -49,9 +48,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
     ),
     (
         INDEXES,
-        "sha256:a792d43a501efd106665c365f4e4281e142c6b9d78c6425176e5b4803ed2ac20",
-        21,
-        561,
+        "sha256:a0179ae003b2f11abfb41885369b6cd1a6c8996630fa49aa3bed238a74d1b433",
+        23,
+        619,
     ),
     (
         "log-account-epochs",
@@ -465,7 +464,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:5bf070c612d0b98c5a2d6e76c84d8caff158c8f7b16c8b14201f275d4bdecde5";
+    "sha256:e0dc8f7b5c924dc45b59bb26655575402c1974c696f8077349b000b1b55cf752";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -667,9 +666,9 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106","kind":"blocks","#,
     r#""mediaType":"application/vnd.dolos.stele.blocks.v1+zstd","records":4,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":167},"#,
-    r#"{"diffId":"sha256:a792d43a501efd106665c365f4e4281e142c6b9d78c6425176e5b4803ed2ac20","kind":"indexes","#,
-    r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":21,"#,
-    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":561},"#,
+    r#"{"diffId":"sha256:a0179ae003b2f11abfb41885369b6cd1a6c8996630fa49aa3bed238a74d1b433","kind":"indexes","#,
+    r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":23,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":619},"#,
     r#"{"diffId":"sha256:3df20da5471b0991ffdaf69fa45f759fb8341c2d4e2d751fd5cba6ee8827c6b8","kind":"log-account-epochs","#,
     r#""mediaType":"application/vnd.dolos.stele.log-account-epochs.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":102},"#,
@@ -886,7 +885,7 @@ const CANONICAL_INSCRIPTION: &str = concat!(
 /// Decode one record with the codec its layer kind names, so the streaming pass
 /// exercises every codec rather than only the framing underneath them.
 fn decode_one(kind: &str, record: &[u8]) {
-    // One codec for all five log kinds: they differ in which namespace they
+    // One codec for every log kind: they differ in which namespace they
     // carry, never in how a record is written.
     if let Some(ns) = log_ns_for(kind) {
         logs::decode(ns, record).unwrap();
@@ -894,7 +893,7 @@ fn decode_one(kind: &str, record: &[u8]) {
         return;
     }
 
-    // And one codec for all twenty-six state kinds, for the same reason — the
+    // And one codec for every state kind, for the same reason — the
     // namespace it needs is the one the kind names.
     if let Some(ns) = state_ns_for(kind) {
         state::decode(ns, record).unwrap();

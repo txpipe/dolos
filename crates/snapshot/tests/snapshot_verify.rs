@@ -49,7 +49,7 @@ use registry_fixture::Fixture;
 
 /// Layers epoch 0 contributes, and therefore what sequence 1 inherits:
 /// `blocks`, `indexes`, and the two log layers the harness seeds. The other
-/// four log kinds have no records in the window, so they have no layer.
+/// log kinds have no records in the window, so they have no layer.
 const EPOCH_0: usize = 4;
 
 // ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ const EPOCH_0: usize = 4;
 /// The pass, before the refusals mean anything.
 ///
 /// The stele verified at `latest` is the interesting one: it inherited epoch
-/// 0's three layers from its predecessor, so a clean verification here is the
+/// 0's layers from its predecessor, so a clean verification here is the
 /// transport half of the trust-gap closure — every attested blob streamed and
 /// checked, whether or not this publish built it.
 #[test]
@@ -236,11 +236,11 @@ fn a_history_that_skips_a_sequence_is_refused() {
 /// The reproduction passes against the store the stele was published from,
 /// and a store standing at a different epoch is refused before the walk.
 ///
-/// The published stele inherited three layers it never rebuilt, so the pass
-/// here is the whole trust-gap closure in one assertion: every attested layer
-/// came back out of the stores byte-identical, history and all. The refusal
-/// is the same ledger one epoch earlier — which is what "a store at a
-/// different epoch" is — and it costs a comparison of two sequences, not
+/// The published stele inherited epoch 0's layers without rebuilding them, so
+/// the pass here is the whole trust-gap closure in one assertion: every
+/// attested layer came back out of the stores byte-identical, history and all.
+/// The refusal is the same ledger one epoch earlier — which is what "a store at
+/// a different epoch" is — and it costs a comparison of two sequences, not
 /// hours of compression.
 #[test]
 #[ignore = "spawns a registry"]

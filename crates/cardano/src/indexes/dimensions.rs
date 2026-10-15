@@ -132,7 +132,13 @@ pub mod archive {
         /// script bytes (reference scripts) and covers all purposes,
         /// including vote and propose.
         SCRIPT_REDEEMERS = "script_redeemers";
+
+        COMMITTEE_CERTS = "committee_certs";
+
+        COMMITTEE_VOTES = "committee_votes";
     }
+
+    pub(in crate::indexes) const COMMITTEE_VOTES_KEY: &[u8] = b"committee";
 }
 
 #[cfg(test)]
@@ -175,6 +181,8 @@ mod tests {
                 "voter_votes",
                 "action_votes",
                 "script_redeemers",
+                "committee_certs",
+                "committee_votes",
             ]
         );
     }

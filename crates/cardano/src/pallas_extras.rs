@@ -628,6 +628,18 @@ pub fn drep_id_bytes(cred: &StakeCredential) -> Vec<u8> {
     }
 }
 
+pub const CC_COLD_KEY_PREFIX: u8 = 0b00010010;
+pub const CC_COLD_SCRIPT_PREFIX: u8 = 0b00010011;
+
+pub fn committee_cold_id_bytes(cred: &StakeCredential) -> Vec<u8> {
+    match cred {
+        StakeCredential::AddrKeyhash(hash) => [&[CC_COLD_KEY_PREFIX][..], hash.as_slice()].concat(),
+        StakeCredential::ScriptHash(hash) => {
+            [&[CC_COLD_SCRIPT_PREFIX][..], hash.as_slice()].concat()
+        }
+    }
+}
+
 pub const CC_HOT_KEY_PREFIX: u8 = 0b00000010;
 pub const CC_HOT_SCRIPT_PREFIX: u8 = 0b00000011;
 
@@ -741,6 +753,19 @@ mod tests {
         224, 185, 111, 206, 243, 185, 53, 26, 246, 131, 75, 216, 80, 227, 169, 120, 89, 215, 189,
         91, 114, 157, 36, 191, 54, 70, 174, 172, 207,
     ];
+
+    #[test]
+    fn committee_cold_id_bytes_pins_cip129_key_and_script_headers() {
+        let hash = Hash::new([0x99; 28]);
+        let key = committee_cold_id_bytes(&StakeCredential::AddrKeyhash(hash));
+        let script = committee_cold_id_bytes(&StakeCredential::ScriptHash(hash));
+
+        assert_eq!(key, [&[0x12u8][..], hash.as_slice()].concat());
+        assert_eq!(script, [&[0x13u8][..], hash.as_slice()].concat());
+        assert_eq!(key.len(), 29);
+        assert_eq!(script.len(), 29);
+        assert_ne!(key, script);
+    }
 
     #[test]
     fn test_pool_reward_account() {
