@@ -177,7 +177,7 @@ impl ToyStores for MemoryStores {
     fn open() -> Self {
         Self {
             state: MemoryStateStore::new(),
-            archive: MemoryArchiveStore::new(dolos_cardano::model::build_schema()),
+            archive: MemoryArchiveStore::new(dolos_cardano::model::build_log_schema()),
         }
     }
 
@@ -215,7 +215,7 @@ impl FjallStores {
         let dir = tempfile::tempdir_in(parent)?;
         let state = dolos_fjall::StateStore::open(dir.path().join("state"), state_config)?;
         let archive = dolos_fjall::archive::ArchiveStore::open(
-            dolos_cardano::model::build_schema(),
+            dolos_cardano::model::build_log_schema(),
             dir.path().join("archive"),
             archive_config,
         )?;
@@ -246,7 +246,7 @@ impl ToyStores for FjallStores {
         .expect("opening the fjall state store");
 
         let archive = dolos_fjall::archive::ArchiveStore::open(
-            dolos_cardano::model::build_schema(),
+            dolos_cardano::model::build_log_schema(),
             dir.path().join("archive"),
             &dolos_core::config::FjallArchiveConfig::default(),
         )

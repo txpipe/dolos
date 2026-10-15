@@ -66,7 +66,7 @@ use dolos_cardano::{
     eras::ChainSummary, indexes::archive_dimensions, pallas::ledger::traverse::MultiEraBlock,
 };
 use dolos_core::{
-    ArchiveStore, BlockSlot, ChainPoint, IndexRecord, KeyRange, Namespace, StateStore,
+    ArchiveError, ArchiveStore, BlockSlot, ChainPoint, IndexRecord, KeyRange, Namespace, StateStore,
 };
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
@@ -1529,7 +1529,8 @@ pub(crate) fn log_layers<A: ArchiveStore>(
 /// built so the refusal costs a scan rather than an upload.
 ///
 /// `utxos` is excluded because the walk this replaced excluded it: the UTxO set
-/// is state, and no writer puts a log under it.
+/// is state, and no writer puts a log under it. A namespace the archive was not
+/// opened with holds no logs, so it is passed over rather than refused.
 fn refuse_uncovered_logs<A: ArchiveStore>(archive: &A, window: &EpochWindow) -> Result<(), Error> {
     let range = log_key_range(&window.slots());
 
@@ -1538,12 +1539,12 @@ fn refuse_uncovered_logs<A: ArchiveStore>(archive: &A, window: &EpochWindow) -> 
             continue;
         }
 
-        if archive
-            .iter_logs(ns, range.clone())?
-            .next()
-            .transpose()?
-            .is_some()
-        {
+        let mut logs = match archive.iter_logs(ns, range.clone()) {
+            Err(ArchiveError::NamespaceNotFound(_)) => continue,
+            logs => logs?,
+        };
+
+        if logs.next().transpose()?.is_some() {
             return Err(Error::UncoveredLogNamespace {
                 epoch: window.epoch,
                 ns: ns.to_owned(),

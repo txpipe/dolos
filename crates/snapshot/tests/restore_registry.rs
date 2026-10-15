@@ -55,7 +55,7 @@ use dolos_snapshot::{
     facade::RestoreInput,
     registry::{self, Point},
     restore::{self, default_budget, progress_path_in, Checkpoint},
-    state_layer_count, Error, Network, NAMESPACES, UTXOS,
+    state_layer_count, Error, Network, LOG_NAMESPACES, NAMESPACES, UTXOS,
 };
 use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores};
 use node::{harness, Blank};
@@ -735,11 +735,7 @@ fn assert_archive_matches<A: ArchiveStore>(left: &A, right: &A) {
 
     let mut any = false;
 
-    for ns in NAMESPACES {
-        if ns == UTXOS {
-            continue;
-        }
-
+    for ns in LOG_NAMESPACES {
         let a = logs_of(left, ns);
         let b = logs_of(right, ns);
 
