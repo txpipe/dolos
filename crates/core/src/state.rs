@@ -10,9 +10,25 @@ use crate::{
 
 pub type Namespace = &'static str;
 
+/// What a namespace is kept for.
+///
+/// The chain logic needs a ledger namespace to apply the next block. A view
+/// namespace is a projection of the chain kept for the queries and endpoints
+/// that read it, which the ledger never consults; a node may leave the views
+/// unmaterialized (`SyncConfig::materialized_views`) and lose nothing but
+/// the endpoints they serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NamespaceRole {
+    Ledger,
+    View,
+}
+
 /// A type whose rows live in one namespace.
 pub trait FixedNamespace {
     const NS: Namespace;
+
+    /// Ledger unless the type says otherwise: a view opts in.
+    const ROLE: NamespaceRole = NamespaceRole::Ledger;
 }
 
 /// An entity kept in one state namespace, under keys of one kind.

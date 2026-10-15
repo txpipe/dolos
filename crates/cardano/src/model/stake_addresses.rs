@@ -59,7 +59,8 @@ pub struct StagedStakeAddress {
 entity_boilerplate!(
     StagedStakeAddress,
     "staged-stake-addresses",
-    state = StagedKey<AccountKey, AddressKey>
+    state = StagedKey<AccountKey, AddressKey>,
+    role = View
 );
 
 impl StagedStakeAddress {
@@ -96,7 +97,12 @@ pub struct StakeAddressesRow {
     pub addresses: Vec<ByteVec>,
 }
 
-entity_boilerplate!(StakeAddressesRow, "stake-addresses", log = AccountKey);
+entity_boilerplate!(
+    StakeAddressesRow,
+    "stake-addresses",
+    log = AccountKey,
+    role = View
+);
 
 #[cfg(test)]
 pub(crate) mod testing {

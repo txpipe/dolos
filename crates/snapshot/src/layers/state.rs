@@ -7,10 +7,10 @@
 //! The namespace is not in the record: it is the layer's *kind*, one per state
 //! namespace (`crate::STATE_KINDS`), so a shape change to one namespace's
 //! records costs that namespace's kind a media-type move and leaves the other
-//! twenty-five alone — and a namespace a reader does not know is skippable at
+//! twenty-six alone — and a namespace a reader does not know is skippable at
 //! the transport instead of poisoning one shared layer. Which is also why this
-//! module has one codec rather than twenty-six — the kinds differ in what they
-//! carry, never in how a record is written — and why its refusals name the
+//! module has one codec rather than twenty-seven — the kinds differ in what
+//! they carry, never in how a record is written — and why its refusals name the
 //! record shape, `state`, rather than a layer.
 //!
 //! ## One record shape, including for UTxOs
@@ -64,9 +64,9 @@ pub use crate::namespaces::UTXO_KEY_LEN;
 
 /// The name this codec refuses under.
 ///
-/// One record shape serves all twenty-six `state-{ns}` kinds, so an error names
-/// the shape rather than a layer — the layer is already in the message the
-/// caller wraps it in.
+/// One record shape serves all twenty-seven `state-{ns}` kinds, so an error
+/// names the shape rather than a layer — the layer is already in the message
+/// the caller wraps it in.
 const STATE: &str = "state";
 
 /// The shard a state key belongs to under a kind published in `shards` shards:
@@ -268,7 +268,7 @@ mod tests {
         AccountEpochLog, AccountState, AddressStats, AssetKey, AssetState, DRepState, EpochState,
         EraSummary, FixedNamespace, GovState, PoolState, ProposalState, StagedAccountStats,
         StagedAddressStats, StagedFirstMint, StagedPaymentAddress, StagedPaymentStats,
-        StagedStakeAddress, StakeAddressesRow,
+        StagedStakeAddress, StakeAddressesRow, ViewsState,
     };
 
     use super::*;
@@ -314,6 +314,7 @@ mod tests {
         for (ns, len) in [
             (EpochState::NS, 0),
             (GovState::NS, 0),
+            (ViewsState::NS, 0),
             (EraSummary::NS, 2),
             (DRepState::NS, 1),
             (PoolState::NS, 28),
@@ -362,6 +363,7 @@ mod tests {
 
         for (ns, key) in [
             (EpochState::NS, vec![0x30]),
+            (ViewsState::NS, vec![0x30]),
             (EpochState::NS, [0x30].into_iter().chain([0; 31]).collect()),
             (PoolState::NS, vec![1; 32]),
             (ProposalState::NS, vec![1; 32]),

@@ -28,10 +28,13 @@ pub mod batch;
 pub mod datums;
 pub mod dreps;
 pub mod epochs;
+pub mod first_mints;
 pub mod pools;
 pub mod proposals;
+pub mod stake_addresses;
 pub mod stats;
 pub mod txs;
+pub mod views;
 pub mod work_unit;
 
 // Re-exports
@@ -44,8 +47,8 @@ use datums::DatumVisitor;
 use dreps::{DRepStateVisitor, DormancyContext};
 use epochs::EpochStateVisitor;
 use pools::PoolStateVisitor;
-use stats::StatsVisitor;
 use txs::TxLogVisitor;
+use views::ViewVisitors;
 
 pub trait BlockVisitor {
     #[allow(unused_variables)]
@@ -229,7 +232,9 @@ pub struct DeltaBuilder<'a> {
     pool_state: PoolStateVisitor,
     tx_logs: TxLogVisitor,
     proposal_logs: ProposalVisitor,
-    stats: StatsVisitor,
+
+    /// The materialized views, on a node that keeps them.
+    views: Option<ViewVisitors>,
 }
 
 impl<'a> DeltaBuilder<'a> {
@@ -243,6 +248,7 @@ impl<'a> DeltaBuilder<'a> {
         work: &'a mut WorkBlock,
         utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
         dormancy: DormancyContext,
+        views: bool,
     ) -> Self {
         Self {
             genesis,
@@ -260,7 +266,7 @@ impl<'a> DeltaBuilder<'a> {
             pool_state: Default::default(),
             tx_logs: Default::default(),
             proposal_logs: Default::default(),
-            stats: Default::default(),
+            views: views.then(ViewVisitors::default),
         }
     }
 
@@ -349,15 +355,17 @@ impl<'a> DeltaBuilder<'a> {
             self.epoch_start,
             self.protocol,
         )?;
-        self.stats.visit_root(
-            &mut deltas,
-            block,
-            &self.genesis,
-            self.active_params,
-            self.epoch,
-            self.epoch_start,
-            self.protocol,
-        )?;
+        if let Some(views) = self.views.as_mut() {
+            views.visit_root(
+                &mut deltas,
+                block,
+                &self.genesis,
+                self.active_params,
+                self.epoch,
+                self.epoch_start,
+                self.protocol,
+            )?;
+        }
 
         for (order, tx) in block.txs().iter().enumerate() {
             self.account_state
@@ -375,7 +383,9 @@ impl<'a> DeltaBuilder<'a> {
             self.tx_logs.visit_tx(&mut deltas, block, tx, self.utxos)?;
             self.proposal_logs
                 .visit_tx(&mut deltas, block, tx, self.utxos)?;
-            self.stats.visit_tx(&mut deltas, block, tx, self.utxos)?;
+            if let Some(views) = self.views.as_mut() {
+                views.visit_tx(&mut deltas, block, tx, self.utxos)?;
+            }
 
             for input in tx.consumes() {
                 let txoref = TxoRef::from(&input);
@@ -401,8 +411,9 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
                     self.proposal_logs
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
-                    self.stats
-                        .visit_input(&mut deltas, block, tx, &input, resolved)?;
+                    if let Some(views) = self.views.as_mut() {
+                        views.visit_input(&mut deltas, block, tx, &input, resolved)?;
+                    }
                     Result::<_, ChainError>::Ok(())
                 })?;
             }
@@ -466,8 +477,9 @@ impl<'a> DeltaBuilder<'a> {
                     index as u32,
                     &output,
                 )?;
-                self.stats
-                    .visit_output(&mut deltas, block, tx, &order, index as u32, &output)?;
+                if let Some(views) = self.views.as_mut() {
+                    views.visit_output(&mut deltas, block, tx, &order, index as u32, &output)?;
+                }
             }
 
             // The Conway LEDGER rule runs CERTS, GOV, the withdrawal drain and
@@ -495,8 +507,9 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                     self.proposal_logs
                         .visit_mint(&mut deltas, block, tx, &order, &mint)?;
-                    self.stats
-                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    if let Some(views) = self.views.as_mut() {
+                        views.visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    }
                 }
 
                 for cert in tx.certs() {
@@ -516,8 +529,9 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_cert(&mut deltas, block, tx, &order, &cert)?;
                     self.proposal_logs
                         .visit_cert(&mut deltas, block, tx, &order, &cert)?;
-                    self.stats
-                        .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                    if let Some(views) = self.views.as_mut() {
+                        views.visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                    }
                 }
 
                 for (account, amount) in tx.withdrawals().collect::<Vec<_>>() {
@@ -537,8 +551,9 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
                     self.proposal_logs
                         .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
-                    self.stats
-                        .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
+                    if let Some(views) = self.views.as_mut() {
+                        views.visit_withdrawal(&mut deltas, block, tx, account, amount)?;
+                    }
                 }
 
                 if let Some(update) = tx.update() {
@@ -558,8 +573,9 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_update(&mut deltas, block, Some(tx), &update)?;
                     self.proposal_logs
                         .visit_update(&mut deltas, block, Some(tx), &update)?;
-                    self.stats
-                        .visit_update(&mut deltas, block, Some(tx), &update)?;
+                    if let Some(views) = self.views.as_mut() {
+                        views.visit_update(&mut deltas, block, Some(tx), &update)?;
+                    }
                 }
             }
 
@@ -579,7 +595,9 @@ impl<'a> DeltaBuilder<'a> {
                 self.tx_logs.visit_datums(&mut deltas, block, tx, datum)?;
                 self.proposal_logs
                     .visit_datums(&mut deltas, block, tx, datum)?;
-                self.stats.visit_datums(&mut deltas, block, tx, datum)?;
+                if let Some(views) = self.views.as_mut() {
+                    views.visit_datums(&mut deltas, block, tx, datum)?;
+                }
             }
 
             // Same LEDGER gate as above: GOV never registers a proposal
@@ -602,8 +620,9 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
                     self.proposal_logs
                         .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
-                    self.stats
-                        .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
+                    if let Some(views) = self.views.as_mut() {
+                        views.visit_proposal(&mut deltas, block, tx, proposal, idx)?;
+                    }
                 }
             }
 
@@ -624,8 +643,9 @@ impl<'a> DeltaBuilder<'a> {
                     .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
                 self.proposal_logs
                     .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
-                self.stats
-                    .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
+                if let Some(views) = self.views.as_mut() {
+                    views.visit_redeemers(&mut deltas, block, tx, &redeemer)?;
+                }
             }
         }
 
@@ -646,7 +666,9 @@ impl<'a> DeltaBuilder<'a> {
                 .visit_update(&mut deltas, block, None, &update)?;
             self.proposal_logs
                 .visit_update(&mut deltas, block, None, &update)?;
-            self.stats.visit_update(&mut deltas, block, None, &update)?;
+            if let Some(views) = self.views.as_mut() {
+                views.visit_update(&mut deltas, block, None, &update)?;
+            }
         }
 
         self.account_state.flush(&mut deltas)?;
@@ -657,7 +679,9 @@ impl<'a> DeltaBuilder<'a> {
         self.pool_state.flush(&mut deltas)?;
         self.tx_logs.flush(&mut deltas)?;
         self.proposal_logs.flush(&mut deltas)?;
-        self.stats.flush(&mut deltas)?;
+        if let Some(views) = self.views.as_mut() {
+            views.flush(&mut deltas)?;
+        }
 
         self.work.deltas = deltas;
 
@@ -666,11 +690,14 @@ impl<'a> DeltaBuilder<'a> {
 }
 
 #[instrument(name = "roll", skip_all)]
+/// `views` says whether the batch also computes the materialized views
+/// (`SyncConfig::materialized_views`).
 pub(crate) fn compute_delta<D: Domain>(
     genesis: Arc<Genesis>,
     cache: &Cache,
     state: &D::State,
     batch: &mut WorkBatch,
+    views: bool,
 ) -> Result<(), ChainError> {
     let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
 
@@ -721,6 +748,7 @@ pub(crate) fn compute_delta<D: Domain>(
             block,
             &batch.utxos_decoded,
             std::mem::take(&mut dormancy),
+            views,
         );
 
         builder.crawl()?;
@@ -742,7 +770,7 @@ pub(crate) fn compute_delta<D: Domain>(
 mod tests {
     use std::collections::BTreeMap;
 
-    use dolos_core::EntityKey;
+    use dolos_core::{EntityKey, NsKey};
     use pallas::codec::utils::{NonEmptySet, NonZeroInt, Set};
     use pallas::crypto::hash::Hash;
     use pallas::ledger::primitives::conway::{
@@ -870,6 +898,11 @@ mod tests {
     /// Crawl a one-transaction Conway block whose transaction is valid or
     /// phase-2-invalid, and hand back the deltas it produced.
     fn crawl_single_tx_block(valid: bool) -> WorkDeltas {
+        crawl_block(valid, true)
+    }
+
+    /// `crawl_single_tx_block` on a node with or without the views.
+    fn crawl_block(valid: bool, views: bool) -> WorkDeltas {
         let (_, raw) =
             dolos_testing::blocks::make_conway_block_with_tx(SLOT, loaded_tx_body(), None, valid);
 
@@ -889,11 +922,50 @@ mod tests {
             &mut work,
             &utxos,
             DormancyContext::default(),
+            views,
         );
 
         builder.crawl().unwrap();
 
         work.deltas
+    }
+
+    /// A node without views crawls the same ledger deltas as one with them,
+    /// and nothing in a view namespace.
+    #[test]
+    fn without_views_the_crawl_writes_ledger_namespaces_only() {
+        use dolos_core::NamespaceRole;
+
+        let role = |key: &NsKey| crate::model::namespace_role(key.ns()).expect("a model namespace");
+
+        let ledger = |deltas: &WorkDeltas| -> BTreeMap<NsKey, String> {
+            deltas
+                .entities
+                .iter()
+                .filter(|(key, _)| role(key) == NamespaceRole::Ledger)
+                .map(|(key, group)| (key.clone(), format!("{group:?}")))
+                .collect()
+        };
+
+        let with = crawl_block(true, true);
+        let without = crawl_block(true, false);
+
+        assert!(
+            with.entities
+                .keys()
+                .any(|key| role(key) == NamespaceRole::View),
+            "the fixture block contributes to no view"
+        );
+
+        assert!(
+            without
+                .entities
+                .keys()
+                .all(|key| role(key) == NamespaceRole::Ledger),
+            "a view namespace was written without views"
+        );
+
+        assert_eq!(ledger(&with), ledger(&without));
     }
 
     fn keys_in(deltas: &WorkDeltas, ns: &str) -> Vec<EntityKey> {
@@ -1046,6 +1118,7 @@ mod tests {
             &mut work,
             &utxos,
             DormancyContext::default(),
+            true,
         )
         .crawl()
         .unwrap();

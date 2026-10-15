@@ -4,13 +4,17 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use dolos_cardano::{
-    model::{FirstMintChunk, StagedFirstMint, StagedStakeAddress, StakeAddressesRow},
+    model::{
+        namespace_role, namespaces_of, FirstMintChunk, StagedFirstMint, StagedStakeAddress,
+        StakeAddressesRow, ViewsState,
+    },
     periods::is_sealable,
     AccountKey, CardanoDelta,
 };
 use dolos_core::{
-    import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ChainPoint, Domain as _,
-    Genesis, StateStore as _, WalStore as _,
+    config::SyncConfig, import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ChainPoint,
+    Domain as _, EntityDelta as _, Genesis, KeyRange, NamespaceRole, StateStore as _,
+    WalStore as _,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
@@ -295,4 +299,161 @@ fn epochs_too_short_for_rupd_seal() {
 #[test]
 fn short_devnet_epochs_seal() {
     assert_epochs_seal(genesis_with(500, 5, 9), 14, 250);
+}
+
+/// A node with `sync.materialized_views` off keeps the ledger and nothing of
+/// the views: no staged row, no sealed log, no view delta in the WAL, and the
+/// epoch boundaries still pass.
+#[test]
+fn a_node_without_views_stages_and_seals_nothing() {
+    let blocks = 14;
+    let step = 250;
+    let names: Vec<String> = (0..blocks).map(|i| format!("M{i:03}")).collect();
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: blocks,
+        txs_per_block: 1,
+        slot: step,
+        slot_step: step,
+        asset_names_by_block: names,
+        ..Default::default()
+    });
+
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = genesis_with(500, 5, 9);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis.clone(), chain_config, None, None)
+        .with_sync_config(SyncConfig::default().with_materialized_views(false));
+
+    let mut points = Vec::new();
+
+    for block in &raw {
+        domain.roll_forward(block.clone()).unwrap();
+
+        let decoded = MultiEraBlock::decode(block).unwrap();
+        points.push(ChainPoint::Specific(decoded.slot(), decoded.hash()));
+    }
+
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let mutable = dolos_cardano::mutable_slots(&genesis);
+    let tip = points.last().unwrap().slot();
+    let (tip_epoch, _) = chain.slot_epoch(tip);
+
+    // the ledger crossed every boundary of the chain
+    assert_eq!(domain.state().read_cursor().unwrap().unwrap().slot(), tip);
+    let epoch = dolos_cardano::load_epoch::<ToyDomain>(domain.state()).unwrap();
+    assert_eq!(epoch.number, tip_epoch);
+    assert!(
+        (1..=blocks as u64).any(|i| is_sealable(
+            &chain,
+            mutable,
+            chain.slot_epoch(i * step).0,
+            tip_epoch
+        )),
+        "the chain is too short for a seal"
+    );
+
+    // nothing staged in any view namespace
+    for ns in namespaces_of(NamespaceRole::View) {
+        let rows = domain
+            .state()
+            .iter_entities(ns, KeyRange::all())
+            .unwrap()
+            .count();
+        assert_eq!(rows, 0, "{ns} has staged rows");
+    }
+
+    // nothing sealed for any epoch, sealable or not
+    let account = AccountKey(primary());
+
+    for epoch in 0..=tip_epoch {
+        let slot = chain.epoch_start(epoch);
+
+        assert!(domain
+            .archive()
+            .read_log_typed::<FirstMintChunk>(slot, &0)
+            .unwrap()
+            .is_none());
+        assert!(domain
+            .archive()
+            .read_log_typed::<StakeAddressesRow>(slot, &account)
+            .unwrap()
+            .is_none());
+    }
+
+    // and no view delta ever reached the WAL
+    for point in &points {
+        let entry = domain.wal().read_entry(point).unwrap().unwrap();
+
+        for delta in &entry.delta {
+            let ns = delta.key().ns();
+            assert_eq!(
+                namespace_role(ns),
+                Some(NamespaceRole::Ledger),
+                "{point}: a {ns} delta in the WAL"
+            );
+        }
+    }
+
+    // the store says since when the views are missing: the first block
+    assert_eq!(
+        domain.state().read_entity_typed::<ViewsState>(&()).unwrap(),
+        Some(ViewsState {
+            stale_since: Some(points[0].slot())
+        })
+    );
+    assert!(!dolos_cardano::views_materialized(&domain).unwrap());
+}
+
+/// The views fall behind the moment a batch rolls without them, and the
+/// store remembers: switching the views back on later neither revives them
+/// nor stages anything, and rolling the batch back takes the mark with it.
+#[test]
+fn views_switched_back_on_stay_stale() {
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 4,
+        txs_per_block: 1,
+        ..Default::default()
+    });
+
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let points: Vec<ChainPoint> = raw
+        .iter()
+        .map(|block| {
+            let decoded = MultiEraBlock::decode(block).unwrap();
+            ChainPoint::Specific(decoded.slot(), decoded.hash())
+        })
+        .collect();
+
+    let row = |domain: &ToyDomain| domain.state().read_entity_typed::<ViewsState>(&()).unwrap();
+
+    // the first block rolls with the views, the second without
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    domain.roll_forward(raw[0].clone()).unwrap();
+    assert_eq!(row(&domain), None);
+    assert!(dolos_cardano::views_materialized(&domain).unwrap());
+
+    let domain = domain.with_sync_config(SyncConfig::default().with_materialized_views(false));
+    domain.roll_forward(raw[1].clone()).unwrap();
+    let stale = ViewsState {
+        stale_since: Some(points[1].slot()),
+    };
+    assert_eq!(row(&domain), Some(stale.clone()));
+
+    // the switch back on changes nothing: the store knows better
+    let domain = domain.with_sync_config(SyncConfig::default());
+    domain.roll_forward(raw[2].clone()).unwrap();
+    domain.roll_forward(raw[3].clone()).unwrap();
+    assert_eq!(row(&domain), Some(stale));
+    assert!(!dolos_cardano::views_materialized(&domain).unwrap());
+
+    let staged_after = staged_addresses(&domain);
+    assert!(staged_after
+        .iter()
+        .all(|(_, _, slot)| *slot == points[0].slot()));
+
+    // rolling back past the batch that marked the views takes the mark out
+    domain.rollback(&points[0]).unwrap();
+    assert_eq!(row(&domain), None);
+    assert!(dolos_cardano::views_materialized(&domain).unwrap());
 }

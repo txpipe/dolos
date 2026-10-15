@@ -40,7 +40,7 @@ use stelae::{
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 72] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -456,6 +456,18 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
         91,
     ),
     (
+        "state-views",
+        "sha256:bc4695a9d65ff327b9e07508e052a6c3f2c1ce44f552144ca2e2c404fdb03132",
+        2,
+        51,
+    ),
+    (
+        "state-views",
+        "sha256:a18297c9610ec1677fe9211ebcf8c84b291dd7e271c83f4a2de657e4b73f6d5d",
+        2,
+        51,
+    ),
+    (
         DIGESTS,
         "sha256:13f9bbdf676ac47ad7238a52fa525f4413a88335c23d2d567c888abd8dedec80",
         3,
@@ -465,7 +477,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:1f47fa08b8c43599cd7fe661b33fd8cfacf3f31205b6a7195cd77942334e41bb";
+    "sha256:fbcf7bd2715497d3b53056f623ddbb28c7edddd09a04a225fc9be9d31e890a44";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -871,13 +883,19 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:1c8dcddafc12310582faa97eebda1e384a46ce8eb12bf1193e9a07a7d23548d8","kind":"state-utxos","#,
     r#""mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":2,"#,
     r#""scope":{"shard":1},"uncompressedSize":91},"#,
+    r#"{"diffId":"sha256:bc4695a9d65ff327b9e07508e052a6c3f2c1ce44f552144ca2e2c404fdb03132","kind":"state-views","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-views.v1+zstd","records":2,"#,
+    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":51},"#,
+    r#"{"diffId":"sha256:a18297c9610ec1677fe9211ebcf8c84b291dd7e271c83f4a2de657e4b73f6d5d","kind":"state-views","#,
+    r#""mediaType":"application/vnd.dolos.stele.state-views.v1+zstd","records":2,"#,
+    r#""scope":{"shard":0},"uncompressedSize":51},"#,
     r#"{"diffId":"sha256:13f9bbdf676ac47ad7238a52fa525f4413a88335c23d2d567c888abd8dedec80","kind":"digests","#,
     r#""mediaType":"application/vnd.dolos.stele.digests.v1+zstd","records":3,"#,
     r#""scope":{"lastImmutable":3},"uncompressedSize":250}"#,
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-epochs":1,"account-stakes":0,"account-stats":1,"accounts":1,"address-stats":1,"assets":1,"datums":1,"dreps":2,"epochs":3,"eras":2,"first-mints":2,"gov":4,"leader-rewards":0,"member-rewards":0,"payment-stats":1,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pool-deposit-refunds":0,"pools":2,"proposals":4,"staged-account-stats":1,"staged-address-stats":1,"staged-first-mints":2,"staged-payment-addresses":1,"staged-payment-stats":1,"staged-stake-addresses":1,"stake-addresses":1,"stakes":2,"utxos":1},"#,
-    r#""shards":{"account-epochs":1,"account-stats":1,"accounts":16,"address-stats":1,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"gov":1,"payment-stats":1,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pools":1,"proposals":1,"staged-account-stats":1,"staged-address-stats":1,"staged-first-mints":1,"staged-payment-addresses":1,"staged-payment-stats":1,"staged-stake-addresses":1,"stake-addresses":1,"stakes":1,"utxos":16},"#,
+    r#""schemas":{"account-epochs":1,"account-stakes":0,"account-stats":1,"accounts":1,"address-stats":1,"assets":1,"datums":1,"dreps":2,"epochs":3,"eras":2,"first-mints":2,"gov":4,"leader-rewards":0,"member-rewards":0,"payment-stats":1,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pool-deposit-refunds":0,"pools":2,"proposals":4,"staged-account-stats":1,"staged-address-stats":1,"staged-first-mints":2,"staged-payment-addresses":1,"staged-payment-stats":1,"staged-stake-addresses":1,"stake-addresses":1,"stakes":2,"utxos":1,"views":1},"#,
+    r#""shards":{"account-epochs":1,"account-stats":1,"accounts":16,"address-stats":1,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"gov":1,"payment-stats":1,"pending_mirs":1,"pending_rewards":1,"policy-first-mints":1,"pools":1,"proposals":1,"staged-account-stats":1,"staged-address-stats":1,"staged-first-mints":1,"staged-payment-addresses":1,"staged-payment-stats":1,"staged-stake-addresses":1,"stake-addresses":1,"stakes":1,"utxos":16,"views":1},"#,
     r#""stateEpochs":[4]"#,
     r#"},"position":{"#,
     r#""epoch":7,"network":{"magic":764824073,"name":"mainnet"},"#,

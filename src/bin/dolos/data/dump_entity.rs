@@ -1,5 +1,5 @@
 use dolos_cardano::{
-    model::AccountState, DRepState, EpochState, GovState, PoolState, ProposalState,
+    model::AccountState, DRepState, EpochState, GovState, PoolState, ProposalState, ViewsState,
 };
 use dolos_core::{KeyCodec as _, StateEntity};
 use miette::IntoDiagnostic;
@@ -54,6 +54,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         "proposals" => run_typed::<ProposalState, _>(&state, args)?,
         "dreps" => run_typed::<DRepState, _>(&state, args)?,
         "gov" => run_typed::<GovState, _>(&state, args)?,
+        "views" => run_typed::<ViewsState, _>(&state, args)?,
         _ => return Err(miette::Error::msg("invalid namespace")),
     };
 

@@ -1,6 +1,6 @@
 use dolos_core::{ChainError, EntityValue, Namespace, NamespaceType, NsKey, StateSchema};
 
-pub use dolos_core::{FixedNamespace, LogEntity, StateEntity};
+pub use dolos_core::{FixedNamespace, LogEntity, NamespaceRole, StateEntity};
 
 /// A namespace that holds exactly one row, at the empty key.
 ///
@@ -17,11 +17,22 @@ pub trait SingletonEntity: StateEntity<Key = ()> {
 
 /// `FixedNamespace` and `Entity` for an entity type, and the key kinds it is
 /// stored under: `state = K` for a state entity, `log = K` for an archive
-/// log (the part after the slot).
+/// log (the part after the slot). `role = View` declares a materialized view
+/// (`NamespaceRole::View`); a type that says nothing is ledger state.
 macro_rules! entity_boilerplate {
-    ($type:ident, $ns:literal $(, state = $state:ty)? $(, log = $log:ty)?) => {
+    (
+        $type:ident,
+        $ns:literal
+        $(, state = $state:ty)?
+        $(, log = $log:ty)?
+        $(, role = $role:ident)?
+    ) => {
         impl dolos_core::FixedNamespace for $type {
             const NS: &str = $ns;
+
+            $(
+                const ROLE: dolos_core::NamespaceRole = dolos_core::NamespaceRole::$role;
+            )?
         }
 
         impl dolos_core::Entity for $type {
@@ -118,6 +129,7 @@ pub mod pparams;
 pub mod proposals;
 pub mod stake_addresses;
 pub mod stats;
+pub mod views;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -138,11 +150,13 @@ pub use pparams::*;
 pub use proposals::*;
 pub use stake_addresses::*;
 pub use stats::*;
+pub use views::*;
 
 // --- CardanoEntity ---
 
 #[derive(Debug, Clone)]
 pub enum CardanoEntity {
+    // ledger state
     EraSummary(Box<EraSummary>),
     AccountState(Box<AccountState>),
     AssetState(Box<AssetState>),
@@ -156,6 +170,9 @@ pub enum CardanoEntity {
     PendingMirState(Box<PendingMirState>),
     GovState(Box<GovState>),
     AccountEpochLog(Box<AccountEpochLog>),
+    ViewsState(Box<ViewsState>),
+
+    // materialized views
     StagedFirstMint(Box<StagedFirstMint>),
     FirstMintChunk(Box<FirstMintChunk>),
     PolicyMintChunk(Box<PolicyMintChunk>),
@@ -202,6 +219,7 @@ variant_boilerplate!(PendingRewardState);
 variant_boilerplate!(PendingMirState);
 variant_boilerplate!(GovState);
 variant_boilerplate!(AccountEpochLog);
+variant_boilerplate!(ViewsState);
 variant_boilerplate!(StagedFirstMint);
 variant_boilerplate!(FirstMintChunk);
 variant_boilerplate!(PolicyMintChunk);
@@ -231,6 +249,7 @@ impl dolos_core::Entity for CardanoEntity {
             PendingMirState::NS => PendingMirState::decode_entity(ns, value).map(Into::into),
             GovState::NS => GovState::decode_entity(ns, value).map(Into::into),
             AccountEpochLog::NS => AccountEpochLog::decode_entity(ns, value).map(Into::into),
+            ViewsState::NS => ViewsState::decode_entity(ns, value).map(Into::into),
             StagedFirstMint::NS => StagedFirstMint::decode_entity(ns, value).map(Into::into),
             FirstMintChunk::NS => FirstMintChunk::decode_entity(ns, value).map(Into::into),
             PolicyMintChunk::NS => PolicyMintChunk::decode_entity(ns, value).map(Into::into),
@@ -264,6 +283,7 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PendingMirState(x) => PendingMirState::encode_entity(x),
             Self::GovState(x) => GovState::encode_entity(x),
             Self::AccountEpochLog(x) => AccountEpochLog::encode_entity(x),
+            Self::ViewsState(x) => ViewsState::encode_entity(x),
             Self::StagedFirstMint(x) => StagedFirstMint::encode_entity(x),
             Self::FirstMintChunk(x) => FirstMintChunk::encode_entity(x),
             Self::PolicyMintChunk(x) => PolicyMintChunk::encode_entity(x),
@@ -280,34 +300,73 @@ impl dolos_core::Entity for CardanoEntity {
     }
 }
 
-pub fn build_schema() -> StateSchema {
-    let mut schema = StateSchema::default();
-    schema.insert(EraSummary::NS, NamespaceType::KeyValue);
-    schema.insert(AccountState::NS, NamespaceType::KeyValue);
-    schema.insert(AssetState::NS, NamespaceType::KeyValue);
-    schema.insert(PoolState::NS, NamespaceType::KeyValue);
-    schema.insert(EpochState::NS, NamespaceType::KeyValue);
-    schema.insert(DRepState::NS, NamespaceType::KeyValue);
-    schema.insert(ProposalState::NS, NamespaceType::KeyValue);
-    schema.insert(StakeLog::NS, NamespaceType::KeyValue);
-    schema.insert(AccountEpochLog::NS, NamespaceType::KeyValue);
-    schema.insert(DatumState::NS, NamespaceType::KeyValue);
-    schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
-    schema.insert(PendingMirState::NS, NamespaceType::KeyValue);
-    schema.insert(GovState::NS, NamespaceType::KeyValue);
-    schema.insert(StagedFirstMint::NS, NamespaceType::KeyValue);
-    schema.insert(FirstMintChunk::NS, NamespaceType::KeyValue);
-    schema.insert(PolicyMintChunk::NS, NamespaceType::KeyValue);
-    schema.insert(StagedStakeAddress::NS, NamespaceType::KeyValue);
-    schema.insert(StakeAddressesRow::NS, NamespaceType::KeyValue);
-    schema.insert(StagedAddressStats::NS, NamespaceType::KeyValue);
-    schema.insert(AddressStats::NS, NamespaceType::KeyValue);
-    schema.insert(StagedPaymentAddress::NS, NamespaceType::KeyValue);
-    schema.insert(StagedPaymentStats::NS, NamespaceType::KeyValue);
-    schema.insert(PaymentStats::NS, NamespaceType::KeyValue);
-    schema.insert(StagedAccountStats::NS, NamespaceType::KeyValue);
-    schema.insert(AccountStats::NS, NamespaceType::KeyValue);
-    schema
+/// Every namespace the model keeps, ledger state first and the materialized
+/// views after it.
+///
+/// One list feeds both the schema the stores open and the role table, so a
+/// namespace cannot be in one and not the other. A view is declared twice on
+/// purpose: `role = View` on its type, and its place in this list, which
+/// `the_views_are_the_period_logs_and_stats` pins.
+macro_rules! namespaces {
+    ($($type:ident),* $(,)?) => {
+        pub fn build_schema() -> StateSchema {
+            let mut schema = StateSchema::default();
+            $( schema.insert($type::NS, NamespaceType::KeyValue); )*
+            schema
+        }
+
+        /// The role of every namespace of [`build_schema`], in its order.
+        pub const NAMESPACE_ROLES: &[(Namespace, NamespaceRole)] = &[
+            $( ($type::NS, $type::ROLE), )*
+        ];
+    };
+}
+
+namespaces!(
+    // ledger state
+    EraSummary,
+    AccountState,
+    AssetState,
+    PoolState,
+    EpochState,
+    DRepState,
+    ProposalState,
+    StakeLog,
+    AccountEpochLog,
+    DatumState,
+    PendingRewardState,
+    PendingMirState,
+    GovState,
+    ViewsState,
+    // materialized views
+    StagedFirstMint,
+    FirstMintChunk,
+    PolicyMintChunk,
+    StagedStakeAddress,
+    StakeAddressesRow,
+    StagedAddressStats,
+    AddressStats,
+    StagedPaymentAddress,
+    StagedPaymentStats,
+    PaymentStats,
+    StagedAccountStats,
+    AccountStats,
+);
+
+/// The role of `ns`, or `None` for a namespace the model doesn't keep.
+pub fn namespace_role(ns: Namespace) -> Option<NamespaceRole> {
+    NAMESPACE_ROLES
+        .iter()
+        .find(|(x, _)| *x == ns)
+        .map(|(_, role)| *role)
+}
+
+/// The namespaces of `role`, in [`build_schema`] order.
+pub fn namespaces_of(role: NamespaceRole) -> impl Iterator<Item = Namespace> {
+    NAMESPACE_ROLES
+        .iter()
+        .filter(move |(_, x)| *x == role)
+        .map(|(ns, _)| *ns)
 }
 
 // --- CardanoDelta ---
@@ -394,6 +453,7 @@ pub enum CardanoDelta {
     StagePaymentAddress(Box<StagePaymentAddress>),
     StagePaymentStats(Box<StagePaymentStats>),
     StageAccountStats(Box<StageAccountStats>),
+    MarkViewsStale(Box<MarkViewsStale>),
 }
 
 impl CardanoDelta {
@@ -505,6 +565,7 @@ delta_from!(StageAddressStats);
 delta_from!(StagePaymentAddress);
 delta_from!(StagePaymentStats);
 delta_from!(StageAccountStats);
+delta_from!(MarkViewsStale);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -583,6 +644,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => x.key(),
             Self::StagePaymentStats(x) => x.key(),
             Self::StageAccountStats(x) => x.key(),
+            Self::MarkViewsStale(x) => x.key(),
         }
     }
 
@@ -659,6 +721,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StagePaymentStats(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StageAccountStats(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::MarkViewsStale(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -735,6 +798,62 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StagePaymentStats(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StageAccountStats(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::MarkViewsStale(x) => Self::downcast_undo(x.as_ref(), entity),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The views are the period logs and stats (decisions 0049 and 0050);
+    /// everything else the model keeps is ledger state. A new view is declared
+    /// on purpose: on its type, in the namespace list, and here.
+    #[test]
+    fn the_views_are_the_period_logs_and_stats() {
+        let views: Vec<Namespace> = namespaces_of(NamespaceRole::View).collect();
+
+        assert_eq!(
+            views,
+            [
+                StagedFirstMint::NS,
+                FirstMintChunk::NS,
+                PolicyMintChunk::NS,
+                StagedStakeAddress::NS,
+                StakeAddressesRow::NS,
+                StagedAddressStats::NS,
+                AddressStats::NS,
+                StagedPaymentAddress::NS,
+                StagedPaymentStats::NS,
+                PaymentStats::NS,
+                StagedAccountStats::NS,
+                AccountStats::NS,
+            ]
+        );
+
+        assert_eq!(
+            namespace_role(AccountState::NS),
+            Some(NamespaceRole::Ledger)
+        );
+        // the state of the views is ledger state: the switch and a stele
+        // must both carry it
+        assert_eq!(namespace_role(ViewsState::NS), Some(NamespaceRole::Ledger));
+        assert_eq!(namespace_role("utxos"), None);
+    }
+
+    #[test]
+    fn every_schema_namespace_has_one_role() {
+        let schema = build_schema();
+
+        assert_eq!(NAMESPACE_ROLES.len(), schema.len());
+
+        for ns in schema.keys() {
+            assert!(namespace_role(ns).is_some(), "{ns} has no role");
+        }
+
+        let ledger = namespaces_of(NamespaceRole::Ledger).count();
+        let views = namespaces_of(NamespaceRole::View).count();
+        assert_eq!(ledger + views, schema.len());
     }
 }

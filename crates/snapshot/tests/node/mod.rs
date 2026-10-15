@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use dolos_core::{import::ImportExt as _, Domain as _, StateStore as _};
+use dolos_core::{config::SyncConfig, import::ImportExt as _, Domain as _, StateStore as _};
 use dolos_snapshot::{
     export::{self, First, Plan},
     Network, RetainedEpochs,
@@ -45,6 +45,16 @@ use stelae::{dir::SteleDir, inscription::Inscription, progress::Observer};
 /// Deterministic: two calls build byte-identical ledgers, which is what lets
 /// the restore suite cross-check against an independently built node.
 pub fn harness<B: ToyStores>() -> ToyDomain<B> {
+    harness_with_sync(SyncConfig::default())
+}
+
+/// [`harness`] on a node that synced with `sync.materialized_views` off: the
+/// same ledger, no view rows, and a `views` row saying since when.
+pub fn harness_without_views<B: ToyStores>() -> ToyDomain<B> {
+    harness_with_sync(SyncConfig::default().with_materialized_views(false))
+}
+
+fn harness_with_sync<B: ToyStores>(sync: SyncConfig) -> ToyDomain<B> {
     let genesis = Arc::new(dolos_cardano::include::preview::load());
 
     let cfg = SyntheticBlockConfig {
@@ -56,7 +66,8 @@ pub fn harness<B: ToyStores>() -> ToyDomain<B> {
 
     let (blocks, vectors, chain_config) = build_synthetic_blocks(cfg);
 
-    let domain: ToyDomain<B> = ToyDomain::with_backend(genesis, chain_config, None, None);
+    let domain: ToyDomain<B> =
+        ToyDomain::with_backend(genesis, chain_config, None, None).with_sync_config(sync);
     domain.import_blocks(blocks).unwrap();
 
     let summary = dolos_cardano::eras::load_era_summary::<ToyDomain<B>>(domain.state()).unwrap();

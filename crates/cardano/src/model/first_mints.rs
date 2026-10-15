@@ -45,7 +45,8 @@ display_as_stored!(PolicyKey);
 entity_boilerplate!(
     StagedFirstMint,
     "staged-first-mints",
-    state = StagedKey<PolicyKey, AssetKey>
+    state = StagedKey<PolicyKey, AssetKey>,
+    role = View
 );
 
 impl StagedFirstMint {
@@ -95,7 +96,7 @@ pub struct FirstMintChunk {
     pub subjects: Vec<ByteVec>,
 }
 
-entity_boilerplate!(FirstMintChunk, "first-mints", log = u32);
+entity_boilerplate!(FirstMintChunk, "first-mints", log = u32, role = View);
 
 impl ChunkRow for FirstMintChunk {
     type Item = Vec<u8>;
@@ -129,7 +130,8 @@ pub struct PolicyMintChunk {
 entity_boilerplate!(
     PolicyMintChunk,
     "policy-first-mints",
-    log = (PolicyKey, u32)
+    log = (PolicyKey, u32),
+    role = View
 );
 
 impl ChunkRow for PolicyMintChunk {

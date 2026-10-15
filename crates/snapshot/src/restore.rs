@@ -16,7 +16,12 @@
 //!    not a state a node recovers from.
 //! 2. Select layers ([`plan`]) and preflight free space ([`Plan::preflight`]).
 //!    Selection is profile-side by necessity: a layer's `scope` is opaque to
-//!    the protocol, so nothing but this crate can read an epoch out of one.
+//!    the protocol, so nothing but this crate can read an epoch out of one. A
+//!    node with `sync.materialized_views` off also leaves the layers of the
+//!    materialized views in the stele ([`Plan::skipped_views`]): it would never
+//!    read them, and a view it does not keep current is one it must not hold.
+//!    It writes the `views` row saying so after the tip, so the switch turned
+//!    on later finds the views stale rather than trusts them.
 //! 3. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
 //!    `indexes` — all three into the archive store.
 //! 4. The state tip — every shard of every `state-{ns}` kind. Derive the
@@ -134,10 +139,13 @@ use std::{
     sync::Arc,
 };
 
-use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
+use dolos_cardano::{
+    indexes::utxo_index_delta_from_utxo_delta,
+    model::{namespace_role, ViewsState},
+};
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, IndexRecord, Namespace, StateStore,
-    StateWriter, UtxoSetDelta,
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, IndexRecord, Namespace, NamespaceRole,
+    StateStore, StateWriter, UtxoSetDelta,
 };
 use stelae::{
     frame::Limits,
@@ -245,6 +253,14 @@ pub struct Plan {
     pub state_dumps: BTreeMap<u64, BTreeMap<Namespace, Vec<LayerDescriptor>>>,
     /// Epochs the stele carries and `sync.max_history` excludes.
     pub skipped_epochs: usize,
+    /// Whether the node materializes the views, as it asked
+    /// (`sync.materialized_views`). Off, the view layers stay in the stele
+    /// ([`Plan::skipped_views`]) and the restore records in the store that
+    /// the views it holds are none.
+    pub materialized_views: bool,
+    /// Layers of the materialized views that `sync.materialized_views = false`
+    /// leaves in the stele, at the tip and per epoch — see [`drop_views`].
+    pub skipped_views: usize,
     /// Layers of a kind this build does not implement, which it skips rather
     /// than refuses — see [`unknown_layers`].
     ///
@@ -502,10 +518,13 @@ pub struct Staging<'a> {
 /// from [`restore`]. `max_history` is `sync.max_history` in slots: epochs whose
 /// layers fall entirely below `cursor - max_history` are dropped, which is what
 /// ADR-004 replaced the old `full`/`ledger` snapshot variants with.
+/// `materialized_views` is `sync.materialized_views`: off, the layers of the
+/// views are dropped too ([`drop_views`]).
 pub fn plan<R: SteleReader>(
     stele: &R,
     network_magic: u64,
     max_history: Option<u64>,
+    materialized_views: bool,
 ) -> Result<Plan, Error> {
     let inscription = stele.read_inscription()?;
 
@@ -529,15 +548,23 @@ pub fn plan<R: SteleReader>(
     }
 
     let epochs = select_epochs(&inscription)?;
-    let selected = retain_history(epochs, position.point.slot(), max_history);
-    let state = select_state(&inscription)?;
+    let (mut epochs, skipped_epochs) = retain_history(epochs, position.point.slot(), max_history);
+    let mut state = select_state(&inscription)?;
+
+    let skipped_views = if materialized_views {
+        0
+    } else {
+        drop_views(&mut epochs, &mut state.tip)
+    };
 
     Ok(Plan {
         sequence: inscription.sequence,
         state: state.tip,
         state_dumps: state.dumps,
-        epochs: selected.0,
-        skipped_epochs: selected.1,
+        epochs,
+        skipped_epochs,
+        materialized_views,
+        skipped_views,
         skipped_unknown,
         position,
     })
@@ -699,7 +726,7 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
 /// a record codec, and the scope is the only field that tells them apart.
 ///
 /// Completeness is structural, in both dimensions — **for the tip**. Every one
-/// of the twenty-six kinds must be there, and per kind exactly the shards its
+/// of the twenty-seven kinds must be there, and per kind exactly the shards its
 /// spec'd count promises, empty ones included. A missing piece is a missing
 /// slice of the ledger that no later step would notice — the write path
 /// dispatches on the kind, not the shard — so it is refused rather than
@@ -809,6 +836,36 @@ fn retain_history(
     (kept, skipped)
 }
 
+/// Leave the layers of the materialized views in the stele, and count them.
+///
+/// A node with `sync.materialized_views` off never reads a view and writes
+/// none as blocks roll, so a view restored here would stand still at the
+/// stele's tip: not empty, and not current. Dropping its layers keeps the
+/// namespaces empty, which is the one state the endpoints' refusal describes.
+/// The role is the namespace's own (`NamespaceRole`), so a view this profile
+/// learns later is dropped with the rest, and a namespace with no role — the
+/// UTxO set — is the ledger's and stays.
+fn drop_views(
+    epochs: &mut [EpochLayers],
+    tip: &mut BTreeMap<Namespace, Vec<LayerDescriptor>>,
+) -> usize {
+    let is_view = |ns: Namespace| namespace_role(ns) == Some(NamespaceRole::View);
+
+    let mut dropped = 0;
+
+    for epoch in epochs.iter_mut() {
+        let before = epoch.logs.len();
+        epoch.logs.retain(|ns, _| !is_view(ns));
+        dropped += before - epoch.logs.len();
+    }
+
+    let before: usize = tip.values().map(Vec::len).sum();
+    tip.retain(|ns, _| !is_view(ns));
+    dropped += before - tip.values().map(Vec::len).sum::<usize>();
+
+    dropped
+}
+
 /// A `u64` field of a layer's profile-owned scope.
 fn scope_uint(descriptor: &LayerDescriptor, field: &str) -> Result<u64, Error> {
     descriptor
@@ -912,6 +969,9 @@ pub struct Restoring<'a> {
     pub network_magic: u64,
     /// `sync.max_history` in slots, bounding how much chain history is read.
     pub max_history: Option<u64>,
+    /// `sync.materialized_views`: off, the layers of the views stay in the
+    /// stele ([`Plan::skipped_views`]).
+    pub materialized_views: bool,
     /// `storage.path` — where the stores live, and with them the progress file.
     pub storage_path: &'a Path,
     /// The operator's `--continue`.
@@ -1026,6 +1086,20 @@ where
         }
     }
 
+    // A node without views restored none of them, whatever the stele's own
+    // row said: write that down, so a switch turned on later finds the views
+    // stale rather than empty and trusted.
+    if !plan.materialized_views {
+        let writer = state.start_writer()?;
+        writer.save_entity_typed::<ViewsState>(
+            &(),
+            Some(&ViewsState {
+                stale_since: Some(0),
+            }),
+        )?;
+        writer.commit()?;
+    }
+
     // The last write of the restore, the live-utxo dimensions above included:
     // until this commit lands `has_existing_data()` reports an empty node
     // rather than a half-restored one.
@@ -1068,7 +1142,12 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
-    let plan = plan(stele, node.network_magic, node.max_history)?;
+    let plan = plan(
+        stele,
+        node.network_magic,
+        node.max_history,
+        node.materialized_views,
+    )?;
 
     let identity = stele.read_inscription()?.digest()?;
     let mut checkpoint =
@@ -1679,7 +1758,7 @@ mod tests {
         let err = select_state(&inscription(short)).unwrap_err();
         assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
 
-        // An absent kind: tip completeness is all twenty-six, not "what's there".
+        // An absent kind: tip completeness is all twenty-seven, not "what's there".
         let absent: Vec<LayerDescriptor> = state_layers()
             .into_iter()
             .filter(|layer| layer.kind != "state-epochs")
@@ -1878,6 +1957,45 @@ mod tests {
         );
     }
 
+    /// A node without views leaves their layers in the stele, at the tip and
+    /// per epoch, and counts what it left; a namespace with no role stays.
+    #[test]
+    fn without_views_the_view_layers_stay_in_the_stele() {
+        let mut layers = state_layers();
+        layers.push(epoch_descriptor("log-first-mints", 0, 0xa0));
+        layers.push(epoch_descriptor("log-stakes", 0, 0xa1));
+        let stele = inscription(layers);
+
+        let mut epochs = select_epochs(&stele).unwrap();
+        let mut tip = select_state(&stele).unwrap().tip;
+
+        let views_at_tip: usize = STATE_KINDS
+            .iter()
+            .filter(|(_, ns, _)| namespace_role(ns) == Some(NamespaceRole::View))
+            .map(|(_, _, shards)| usize::from(*shards))
+            .sum();
+        assert!(views_at_tip > 0);
+
+        let dropped = drop_views(&mut epochs, &mut tip);
+
+        assert_eq!(dropped, views_at_tip + 1);
+        assert!(tip
+            .keys()
+            .all(|ns| namespace_role(ns) != Some(NamespaceRole::View)));
+        assert!(
+            tip.contains_key(UTXOS),
+            "the UTxO set has no role and stays"
+        );
+        assert_eq!(
+            epochs[0].logs.keys().copied().collect::<Vec<_>>(),
+            vec!["stakes"]
+        );
+        assert_eq!(
+            epochs[0].logs["stakes"].diff_id,
+            Digest::from_bytes([0xa1; 32])
+        );
+    }
+
     #[test]
     fn the_selected_size_is_the_selected_layers_and_not_the_document() {
         let mut layers = state_layers();
@@ -1895,6 +2013,8 @@ mod tests {
             state: select_state(&stele).unwrap().tip,
             state_dumps: BTreeMap::new(),
             skipped_epochs: skipped,
+            materialized_views: true,
+            skipped_views: 0,
             skipped_unknown: Vec::new(),
         };
 
@@ -2016,7 +2136,7 @@ mod tests {
 
         // The two halves of the rule compose: a `state-{ns}` this build has no
         // namespace for is skipped like any other unknown kind, and the tip is
-        // still complete, because completeness is counted over the twenty-six
+        // still complete, because completeness is counted over the twenty-seven
         // kinds this profile defines rather than over the state layers present.
         assert_eq!(select_state(&stele).unwrap().tip.len(), STATE_KINDS.len());
 
@@ -2164,6 +2284,8 @@ mod tests {
             state: select_state(&inscription(state_layers())).unwrap().tip,
             state_dumps: BTreeMap::new(),
             skipped_epochs: 0,
+            materialized_views: true,
+            skipped_views: 0,
             skipped_unknown: Vec::new(),
         };
 
@@ -2194,6 +2316,7 @@ mod tests {
             Restoring {
                 network_magic: 0,
                 max_history: None,
+                materialized_views: true,
                 storage_path: temp.path(),
                 resume: false,
                 skip_space_check: true,
@@ -2229,6 +2352,8 @@ mod tests {
             state: select_state(&stele).unwrap().tip,
             state_dumps: BTreeMap::new(),
             skipped_epochs: 0,
+            materialized_views: true,
+            skipped_views: 0,
             skipped_unknown: Vec::new(),
         };
 
@@ -2307,6 +2432,8 @@ mod tests {
             state: BTreeMap::new(),
             state_dumps: BTreeMap::new(),
             skipped_epochs: 0,
+            materialized_views: true,
+            skipped_views: 0,
             skipped_unknown: Vec::new(),
         };
 

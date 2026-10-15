@@ -60,7 +60,7 @@ use dolos_cardano::model::{
     EpochState, EraSummary, FirstMintChunk, FixedNamespace, GovState, PaymentStats,
     PendingMirState, PendingRewardState, PolicyMintChunk, PoolState, ProposalState,
     StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
-    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow, StakeLog,
+    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow, StakeLog, ViewsState,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -478,6 +478,15 @@ pub fn registry() -> Vec<Entry> {
             encode: encode_utxos,
             decode: decode_utxos,
         },
+        entity_entry!(
+            enc_views,
+            ViewsState,
+            canaries::views_state,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/views.rev1.hex"),
+            }]
+        ),
     ]
 }
 

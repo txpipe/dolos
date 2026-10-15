@@ -197,6 +197,7 @@ fn restoring(storage: &std::path::Path, magic: u64, resume: bool) -> restore::Re
     restore::Restoring {
         network_magic: magic,
         max_history: None,
+        materialized_views: true,
         storage_path: storage,
         resume,
         skip_space_check: false,
@@ -345,7 +346,7 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
 
     let stele = Point::Latest.pull(&repository).unwrap();
     let identity = stele.read_inscription().unwrap().digest().unwrap();
-    let plan = restore::plan(&stele, node.magic, None).unwrap();
+    let plan = restore::plan(&stele, node.magic, None, true).unwrap();
     let index = stele.blob_index().unwrap();
 
     let epoch_layers: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
@@ -458,7 +459,7 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
     // carries commits, the tip does not.
     let first = Point::Epoch(0).pull(&repository).unwrap();
     let identity = first.read_inscription().unwrap().digest().unwrap();
-    let plan = restore::plan(&first, node.magic, None).unwrap();
+    let plan = restore::plan(&first, node.magic, None, true).unwrap();
     let index = first.blob_index().unwrap();
 
     let shards: Vec<Digest> = plan.tip_layers().map(|l| l.diff_id).collect();
@@ -941,7 +942,7 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
     {
         let stele = Point::Latest.pull(&repository).unwrap();
         let identity = stele.read_inscription().unwrap().digest().unwrap();
-        let plan = restore::plan(&stele, node.magic, None).unwrap();
+        let plan = restore::plan(&stele, node.magic, None, true).unwrap();
         let index = stele.blob_index().unwrap();
 
         let epoch_layers: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
