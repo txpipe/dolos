@@ -1,17 +1,17 @@
 //! The closed set of state namespaces a Dolos stele carries.
 //!
-//! ADR-004 defines state as one uniform key-value space: the twenty-five entity
+//! ADR-004 defines state as one uniform key-value space: the entity
 //! namespaces of `dolos_cardano::model::build_schema()` plus [`UTXOS`], which
 //! is the UTxO set wearing the same shape as everything else. That uniformity
 //! is deliberate — it means the format has one state record, and the planned
 //! refactor folding UTxOs into the entity system (#1042) is invisible to it.
 //!
-//! The names are not spelled here. Twenty-five of them are read off the entity
-//! types' own `FixedNamespace::NS`, and `utxos` is defined here because nothing
-//! else in the tree defines it. A namespace that exists in `build_schema` and
-//! not in [`NAMESPACES`] would be silently dropped from every published stele,
-//! so `namespace_registry_matches_build_schema` in `tests/coverage.rs` makes
-//! that a build failure instead.
+//! The names are not spelled here. The entity namespaces are read off the
+//! entity types' own `FixedNamespace::NS`, and `utxos` is defined here because
+//! nothing else in the tree defines it. A namespace that exists in
+//! `build_schema` and not in [`NAMESPACES`] would be silently dropped from
+//! every published stele, so `namespace_registry_matches_build_schema` in
+//! `tests/coverage.rs` makes that a build failure instead.
 
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
@@ -205,8 +205,8 @@ pub const RETIRED_SCHEMA_REV: u64 = 0;
 /// So the retirement is declared instead of inferred, and
 /// [`crate::restore::plan`] fails closed on it. The declaration only binds
 /// readers from the version that reads it forward; what protects the ones
-/// already deployed is that all four of the namespaces retired here are also
-/// *state* namespaces, and the state tip's completeness check refuses a stele
+/// already deployed is that every namespace retired here is also a *state*
+/// namespace, and the state tip's completeness check refuses a stele
 /// missing any kind it expects. A log-only namespace would have had no such
 /// backstop, which is the case this rule exists for.
 ///
