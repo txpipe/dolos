@@ -26,7 +26,7 @@ use dolos_cardano::{
     cip151,
     indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
     model::{AccountState, PoolState},
-    pallas_extras, AccountKey, PoolDelegation, PoolHash, PoolKey, StakeLog,
+    pallas_extras, AccountKey, PoolDelegation, PoolEpochLog, PoolHash, PoolKey,
 };
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use futures::{future::join_all, StreamExt};
@@ -1643,7 +1643,7 @@ where
 // This is not strictly correct, as the operator share has much more involved
 // formula. This method is a workaround to make the data compatible with the
 // blockfrost dbsync version.
-fn bf_compatible_fees(log: &StakeLog) -> u64 {
+fn bf_compatible_fees(log: &PoolEpochLog) -> u64 {
     let margin = log
         .margin_cost
         .as_ref()
@@ -1694,7 +1694,7 @@ where
     let (epoch, _) = summary.slot_epoch(tip);
 
     let mut entries = domain
-        .iter_cardano_logs_per_epoch::<StakeLog>(&PoolKey(hash), 0..epoch)
+        .iter_cardano_logs_per_epoch::<PoolEpochLog>(&PoolKey(hash), 0..epoch)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Apply order before pagination

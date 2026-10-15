@@ -3,7 +3,7 @@ use blockfrost_openapi::models::epoch_content::EpochContent;
 use dolos_cardano::{
     model::{AccountEpochLog, AccountState, EpochState, PoolState},
     rupd::loading::GlobalsPoolPass,
-    AccountKey, ChainSummary, EraProtocol, PoolHash,
+    AccountKey, ChainSummary, EraKey, PoolHash,
 };
 use dolos_core::{BlockSlot, Domain, KeyRange, LogRangeOf};
 use pallas::ledger::primitives::Epoch;
@@ -130,7 +130,7 @@ async fn derive_current_active_stake<D: Domain>(
     // A distribution goes live -> mark -> set -> go, so the active stake of
     // epoch E is the stake live at E-2.
     let stake_epoch = current.saturating_sub(2);
-    let protocol = EraProtocol::from(chain.era_for_epoch(stake_epoch.saturating_add(1)).protocol);
+    let protocol = EraKey::from(chain.era_for_epoch(stake_epoch.saturating_add(1)).protocol);
 
     active_stake_sum(domain, current, stake_epoch, protocol, ENTITY_CHUNK).await
 }
@@ -141,7 +141,7 @@ async fn active_stake_sum<D: Domain>(
     domain: &Facade<D>,
     current: Epoch,
     stake_epoch: Epoch,
-    protocol: EraProtocol,
+    protocol: EraKey,
     chunk: usize,
 ) -> Result<u64, StatusCode> {
     let pools = EntityScan::<PoolState>::all(chunk)
@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(active_stake_for(&mainnet, 20), with_value());
 
         // With no value passed, a gap epoch is null without reading the
-        // StakeLogs (the archive fault would 500).
+        // PoolEpochLogs (the archive fault would 500).
         let faulty_preprod = Facade {
             inner: dolos_testing::faults::FaultyToyDomain::new(
                 preprod.inner.clone(),
@@ -632,8 +632,7 @@ mod tests {
         let chain = facade.get_chain_summary().expect("chain summary");
         let current = app.tip_epoch();
         let stake_epoch = current.saturating_sub(2);
-        let protocol =
-            EraProtocol::from(chain.era_for_epoch(stake_epoch.saturating_add(1)).protocol);
+        let protocol = EraKey::from(chain.era_for_epoch(stake_epoch.saturating_add(1)).protocol);
 
         let whole = dolos_cardano::rupd::StakeSnapshot::load_globals::<
             dolos_testing::faults::FaultyToyDomain,

@@ -15,10 +15,10 @@
 
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
-    EpochState, EraSummary, FirstMintChunk, FixedNamespace, GovState, PaymentStats,
-    PendingMirState, PendingRewardState, PolicyMintChunk, PoolState, ProposalState,
+    EpochState, EraState, FirstMintChunk, FixedNamespace, GovState, PaymentStats, PendingMirState,
+    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
     StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
-    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow, StakeLog,
+    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -45,13 +45,14 @@ pub const NAMESPACES: [Namespace; 26] = [
     DatumState::NS,
     DRepState::NS,
     EpochState::NS,
-    EraSummary::NS,
+    EraState::NS,
     FirstMintChunk::NS,
     GovState::NS,
     PaymentStats::NS,
     PendingMirState::NS,
     PendingRewardState::NS,
     PolicyMintChunk::NS,
+    PoolEpochLog::NS,
     PoolState::NS,
     ProposalState::NS,
     StagedAccountStats::NS,
@@ -61,7 +62,6 @@ pub const NAMESPACES: [Namespace; 26] = [
     StagedPaymentStats::NS,
     StagedStakeAddress::NS,
     StakeAddressesRow::NS,
-    StakeLog::NS,
     UTXOS,
 ];
 
@@ -79,8 +79,8 @@ pub const NAMESPACES: [Namespace; 26] = [
 /// `epochs` reached 2 when `RollingStats::registered_pools` stopped being a
 /// `HashSet`, whose per-instance iteration order made the namespace's bytes
 /// irreproducible across publishers of identical state. The keys of `dreps`,
-/// `epochs`, `eras`, `first-mints`, `gov`, `pools`, `proposals`,
-/// `staged-first-mints` and `stakes` stopped being padded or truncated to a
+/// `epochs`, `eras`, `first-mints`, `gov`, `pool-epochs`, `pools`,
+/// `proposals` and `staged-first-mints` stopped being padded or truncated to a
 /// fixed width (decision 0051), and each of those moved one revision for it.
 /// Kept beside [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
@@ -93,13 +93,14 @@ pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
     (DatumState::NS, 1),
     (DRepState::NS, 2),
     (EpochState::NS, 3),
-    (EraSummary::NS, 2),
+    (EraState::NS, 2),
     (FirstMintChunk::NS, 2),
     (GovState::NS, 4),
     (PaymentStats::NS, 1),
     (PendingMirState::NS, 1),
     (PendingRewardState::NS, 1),
     (PolicyMintChunk::NS, 1),
+    (PoolEpochLog::NS, 2),
     (PoolState::NS, 2),
     (ProposalState::NS, 4),
     (StagedAccountStats::NS, 1),
@@ -109,7 +110,6 @@ pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
     (StagedPaymentStats::NS, 1),
     (StagedStakeAddress::NS, 1),
     (StakeAddressesRow::NS, 1),
-    (StakeLog::NS, 2),
     (UTXOS, 1),
 ];
 
@@ -132,7 +132,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         DatumState::NS => exact::<<DatumState as StateEntity>::Key>(key),
         DRepState::NS => exact::<<DRepState as StateEntity>::Key>(key),
         EpochState::NS => exact::<<EpochState as StateEntity>::Key>(key),
-        EraSummary::NS => exact::<<EraSummary as StateEntity>::Key>(key),
+        EraState::NS => exact::<<EraState as StateEntity>::Key>(key),
         GovState::NS => exact::<<GovState as StateEntity>::Key>(key),
         PendingMirState::NS => exact::<<PendingMirState as StateEntity>::Key>(key),
         PendingRewardState::NS => exact::<<PendingRewardState as StateEntity>::Key>(key),
@@ -152,7 +152,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         | PaymentStats::NS
         | PolicyMintChunk::NS
         | StakeAddressesRow::NS
-        | StakeLog::NS => {
+        | PoolEpochLog::NS => {
             return check_log_key(ns, key)
                 .map_err(|_| Error::malformed("state", format!("{ns} key: not a log key")));
         }
@@ -174,7 +174,7 @@ pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         PaymentStats::NS => exact::<<PaymentStats as LogEntity>::Key>(key),
         PolicyMintChunk::NS => exact::<<PolicyMintChunk as LogEntity>::Key>(key),
         StakeAddressesRow::NS => exact::<<StakeAddressesRow as LogEntity>::Key>(key),
-        StakeLog::NS => exact::<<StakeLog as LogEntity>::Key>(key),
+        PoolEpochLog::NS => exact::<<PoolEpochLog as LogEntity>::Key>(key),
         _ => return Err(Error::UnknownNamespace(ns.to_owned())),
     };
 

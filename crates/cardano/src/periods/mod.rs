@@ -605,7 +605,7 @@ mod tests {
         let mut chain = ChainSummary::default();
         chain.append_era(
             0,
-            crate::EraSummary {
+            crate::EraState {
                 start: crate::EraBoundary {
                     epoch: 0,
                     slot: 0,

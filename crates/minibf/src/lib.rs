@@ -8,7 +8,7 @@ use dolos_cardano::{
     model::{
         gov::GovState, AccountState, AssetState, DRepState, EpochState, PoolState, ProposalState,
     },
-    ChainSummary, PParamsSet, StakeLog,
+    ChainSummary, PParamsSet, PoolEpochLog,
 };
 use pallas::{
     crypto::hash::Hash,
@@ -269,13 +269,14 @@ impl<D: Domain> Facade<D> {
 
         let iter = self
             .archive()
-            .iter_logs_typed::<StakeLog>(Some(LogRangeOf::slot(slot)))
-            .map_err(log_and_500("failed to iterate stake logs for epoch"))?;
+            .iter_logs_typed::<PoolEpochLog>(Some(LogRangeOf::slot(slot)))
+            .map_err(log_and_500("failed to iterate pool epoch logs for epoch"))?;
 
         let mut total = 0u64;
         let mut found = false;
         for entry in iter {
-            let (_, _, log) = entry.map_err(log_and_500("failed to read stake log for epoch"))?;
+            let (_, _, log) =
+                entry.map_err(log_and_500("failed to read pool epoch log for epoch"))?;
             total += log.total_stake;
             found = true;
         }
@@ -283,7 +284,7 @@ impl<D: Domain> Facade<D> {
         Ok(found.then_some(total))
     }
 
-    // Dolos starts to write `StakeLog`s only after the stake-snapshot pipeline
+    // Dolos starts to write `PoolEpochLog`s only after the stake-snapshot pipeline
     // is ready. So the first snapshot epoch has logs, but the epoch just before
     // it has none. Both epochs share the same genesis stake distribution, and
     // the reference implementation reports the same value for both. For that one

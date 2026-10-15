@@ -266,7 +266,7 @@ impl OrderCheck {
 mod tests {
     use dolos_cardano::model::{
         AccountEpochLog, AccountState, AddressStats, AssetKey, AssetState, DRepState, EpochState,
-        EraSummary, FixedNamespace, GovState, PoolState, ProposalState, StagedAccountStats,
+        EraState, FixedNamespace, GovState, PoolState, ProposalState, StagedAccountStats,
         StagedAddressStats, StagedFirstMint, StagedPaymentAddress, StagedPaymentStats,
         StagedStakeAddress, StakeAddressesRow,
     };
@@ -314,7 +314,7 @@ mod tests {
         for (ns, len) in [
             (EpochState::NS, 0),
             (GovState::NS, 0),
-            (EraSummary::NS, 2),
+            (EraState::NS, 2),
             (DRepState::NS, 1),
             (PoolState::NS, 28),
             (ProposalState::NS, 36),
