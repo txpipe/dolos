@@ -22,7 +22,7 @@
 //! a snapshot exists to avoid — so they travel, and the value is the stored
 //! minicbor of the entity, byte for byte. This codec never decodes an entity: a
 //! log value is an opaque byte string here, which is also why an entity holding
-//! a float (`StakeLog::relative_size`) does not collide with the layer's
+//! a float (`PoolEpochLog::relative_size`) does not collide with the layer's
 //! no-floats encoding rule. The rule governs the record's own CBOR, and the
 //! value is a byte string within it.
 //!
@@ -126,7 +126,7 @@ impl OrderCheck {
 mod tests {
     use dolos_cardano::model::{
         AccountStats, AddressStats, EpochState, FirstMintChunk, FixedNamespace as _, PaymentStats,
-        PolicyKey, PolicyMintChunk, PoolKey, StakeAddressesRow, StakeLog,
+        PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, StakeAddressesRow,
     };
 
     use super::*;
@@ -147,9 +147,12 @@ mod tests {
     #[test]
     fn round_trips() {
         let original = LogRecord::new(key(432_000, 0xab), vec![0x82, 0x01]);
-        let encoded = encode(StakeLog::NS, &original).unwrap();
+        let encoded = encode(PoolEpochLog::NS, &original).unwrap();
 
-        assert_eq!(decode(StakeLog::NS, encoded.as_bytes()).unwrap(), original);
+        assert_eq!(
+            decode(PoolEpochLog::NS, encoded.as_bytes()).unwrap(),
+            original
+        );
     }
 
     /// Each log takes exactly the keys of its kind after the slot: none for
@@ -163,7 +166,7 @@ mod tests {
             (EpochState::NS, 0),
             (FirstMintChunk::NS, 4),
             (PolicyMintChunk::NS, 32),
-            (StakeLog::NS, 28),
+            (PoolEpochLog::NS, 28),
         ] {
             let key = [slot.as_slice(), &vec![1; len]].concat();
             decode(ns, wire(&key).as_bytes()).unwrap_or_else(|err| panic!("{ns}: {err:?}"));
@@ -198,8 +201,8 @@ mod tests {
             (AddressStats::NS, 1),
             (AddressStats::NS, 32),
             (PaymentStats::NS, 32),
-            (StakeLog::NS, 32),
-            (StakeLog::NS, 0),
+            (PoolEpochLog::NS, 32),
+            (PoolEpochLog::NS, 0),
         ] {
             let key = [slot.as_slice(), &vec![1; len]].concat();
             let err = decode(ns, wire(&key).as_bytes()).unwrap_err();
@@ -222,14 +225,14 @@ mod tests {
     fn the_pre_split_three_element_record_is_refused() {
         let wire = frame::encode(|e| {
             e.array(3)?
-                .str("stakes")?
+                .str("pool-epochs")?
                 .bytes(key(1, 0).as_ref())?
                 .bytes(&[])?;
             Ok(())
         })
         .unwrap();
 
-        let err = decode(StakeLog::NS, wire.as_bytes()).unwrap_err();
+        let err = decode(PoolEpochLog::NS, wire.as_bytes()).unwrap_err();
         assert!(matches!(err, Error::MalformedRecord { .. }), "{err:?}");
     }
 

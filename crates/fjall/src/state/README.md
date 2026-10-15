@@ -109,8 +109,8 @@ This approach:
 | `datums` | Datum reference counts |
 | `eras` | Era summary information |
 | `rewards` | Reward log entries |
-| `stakes` | Stake log entries |
-| `pending_rewards` | Pending reward state |
+| `pool-epochs` | Pool epoch logs |
+| `pending-rewards` | Pending reward state |
 
 ## Module Structure
 

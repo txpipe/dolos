@@ -69,3 +69,25 @@ Two fjall databases, eight keyspaces:
 | archive | `archive-blocks`, `archive-logs`, `archive-tags`, `index-exact` | block locations + logs + archive tags + exact lookups |
 
 Source: `crates/core/src/{state,archive,wal,indexes,mempool}.rs`, `crates/redb3/src/*`, `crates/fjall/src/*`, and storage configuration in `crates/core/src/config.rs`.
+
+## Entity naming
+
+The Cardano entity types in `crates/cardano/src/model/` follow one naming convention, so a type's name says how its rows behave and its namespace says what one row is.
+
+**The suffix names the stereotype.**
+
+| Suffix | One row is | Changes by | Stores |
+| ------ | ---------- | ---------- | ------ |
+| `State` | the current state of one ledger object | deltas | state; `EpochState` also writes one archive row per epoch |
+| `Log` | a boundary's record for one object | one write at a boundary | archive |
+| `Stats` | an additive per-epoch aggregate for one key | a sum staged per block | state until its epoch seals, then archive |
+| `Set` | a member's first appearance in an epoch | an insert-if-absent staged per block | state until its epoch seals, then archive |
+| `Chunk` | a page of an ordered list, built at seal | one write at seal | archive |
+
+A `Stats` or `Set` type is one type under one namespace in both stores: its seal moves an epoch's rows to the archive at the epoch's start slot, and may drop rows but never reshapes them.
+
+**Vocabulary.** *Account* is a stake credential, *payment* is a payment credential and *address* is a whole address. *Stake* names only an amount of stake, so a pool's record for one epoch is a `PoolEpochLog`, not a stake log.
+
+**Keys.** Each identity has one key type, named `{Thing}Key`: `AccountKey`, `PoolKey`, `EraKey` (an era's protocol version), and so on. A key that groups others is the prefix of the keys it groups.
+
+**Namespaces** are kebab-case and name the plural of what one row is: `eras` holds `EraState` rows, `pool-epochs` holds `PoolEpochLog` rows, and `pending-rewards` and `pending-mirs` hold `PendingRewardState` and `PendingMirState` rows. `gov` stays singular. A stele carries each namespace verbatim in its kind, `state-{ns}` or `log-{ns}`, and `dolos data dump-state` and `dolos data dump-logs` take the namespace as their argument.

@@ -108,10 +108,10 @@ pub use stelae::{dir, inscription, transport, SteleReader};
 
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
-    EpochState, EraSummary, FirstMintChunk, FixedNamespace, GovState, PaymentStats,
-    PendingMirState, PendingRewardState, PolicyMintChunk, PoolState, ProposalState,
+    EpochState, EraState, FirstMintChunk, FixedNamespace, GovState, PaymentStats, PendingMirState,
+    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
     StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
-    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow, StakeLog,
+    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -154,16 +154,16 @@ pub const LOG_NAMESPACES: [Namespace; 9] = [
     FirstMintChunk::NS,
     PaymentStats::NS,
     PolicyMintChunk::NS,
+    PoolEpochLog::NS,
     StakeAddressesRow::NS,
-    StakeLog::NS,
 ];
 
 /// The log layer kinds and the namespace each carries, in inscription order.
 ///
 /// One kind per namespace, so a change to one namespace's record shape costs a
 /// backfill of that namespace's blobs rather than of every log layer ever
-/// published (decision 0026). The kind is `log-` followed by the namespace with
-/// `_` rewritten to `-`, because a media type's kind token admits hyphens and
+/// published (decision 0026). The kind is `log-` followed by the namespace,
+/// which is kebab-case because a media type's kind token admits hyphens and
 /// not underscores — but it is *spelled out* here rather than composed, so the
 /// wire vocabulary is greppable and a namespace rename cannot silently rename a
 /// published kind. The derivation is a test, not a constructor.
@@ -175,8 +175,8 @@ pub const LOG_KINDS: [(&str, Namespace); 9] = [
     ("log-first-mints", FirstMintChunk::NS),
     ("log-payment-stats", PaymentStats::NS),
     ("log-policy-first-mints", PolicyMintChunk::NS),
+    ("log-pool-epochs", PoolEpochLog::NS),
     ("log-stake-addresses", StakeAddressesRow::NS),
-    ("log-stakes", StakeLog::NS),
 ];
 
 /// The state layer kinds: the namespace each carries and the shard count its
@@ -187,7 +187,7 @@ pub const LOG_KINDS: [(&str, Namespace); 9] = [
 /// moves that kind's media type and fails closed on exactly the namespace that
 /// broke, and a namespace this profile does not know is skippable at the
 /// transport rather than poisoning one shared layer. The kind is `state-`
-/// followed by the namespace with `_` rewritten to `-` — a media type's kind
+/// followed by the namespace, which is kebab-case — a media type's kind
 /// token admits hyphens and not underscores — but it is *spelled out* here
 /// rather than composed, so the wire vocabulary is greppable and a namespace
 /// rename cannot silently rename a published kind. The derivation is a test,
@@ -208,13 +208,14 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
     ("state-datums", DatumState::NS, 16),
     ("state-dreps", DRepState::NS, 1),
     ("state-epochs", EpochState::NS, 1),
-    ("state-eras", EraSummary::NS, 1),
+    ("state-eras", EraState::NS, 1),
     ("state-first-mints", FirstMintChunk::NS, 1),
     ("state-gov", GovState::NS, 1),
     ("state-payment-stats", PaymentStats::NS, 1),
     ("state-pending-mirs", PendingMirState::NS, 1),
     ("state-pending-rewards", PendingRewardState::NS, 1),
     ("state-policy-first-mints", PolicyMintChunk::NS, 1),
+    ("state-pool-epochs", PoolEpochLog::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
     ("state-staged-account-stats", StagedAccountStats::NS, 1),
@@ -228,7 +229,6 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
     ("state-staged-payment-stats", StagedPaymentStats::NS, 1),
     ("state-staged-stake-addresses", StagedStakeAddress::NS, 1),
     ("state-stake-addresses", StakeAddressesRow::NS, 1),
-    ("state-stakes", StakeLog::NS, 1),
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 

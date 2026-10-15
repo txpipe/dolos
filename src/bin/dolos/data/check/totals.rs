@@ -117,7 +117,7 @@ use std::collections::{HashMap, HashSet};
 
 use dolos_cardano::eras::load_chain_summary_from_state;
 use dolos_cardano::model::{
-    AccountKey, AccountState, DRepDelegation, DRepKey, DRepState, EpochState, EraSummary,
+    AccountKey, AccountState, DRepDelegation, DRepKey, DRepState, EpochState, EraState,
     PoolDelegation, PoolHash, PoolKey, PoolState,
 };
 use dolos_cardano::pots::{apply_delta, EpochIncentives, PotDelta, Pots};
@@ -979,7 +979,7 @@ pub fn load_anchors<S: StateStore>(
 /// a store an operator already suspects must not.
 fn chain_summary<S: StateStore>(state: &S) -> miette::Result<Option<ChainSummary>> {
     let mut eras = state
-        .iter_entities_typed::<EraSummary>(None)
+        .iter_entities_typed::<EraState>(None)
         .into_diagnostic()
         .context("iterating era summaries")?;
 
