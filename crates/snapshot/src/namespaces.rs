@@ -16,9 +16,8 @@
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
     EpochState, EraState, FirstMintChunk, FixedNamespace, GovState, PaymentStats, PendingMirState,
-    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
-    StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
-    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
+    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState, StagedFirstMint,
+    StagedPaymentAddress, StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -36,7 +35,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against `build_schema()` directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 26] = [
+pub const NAMESPACES: [Namespace; 24] = [
     AccountEpochLog::NS,
     AccountStats::NS,
     AccountState::NS,
@@ -55,8 +54,6 @@ pub const NAMESPACES: [Namespace; 26] = [
     PoolEpochLog::NS,
     PoolState::NS,
     ProposalState::NS,
-    StagedAccountStats::NS,
-    StagedAddressStats::NS,
     StagedFirstMint::NS,
     StagedPaymentAddress::NS,
     StagedPaymentStats::NS,
@@ -84,7 +81,7 @@ pub const NAMESPACES: [Namespace; 26] = [
 /// fixed width (decision 0051), and each of those moved one revision for it.
 /// Kept beside [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 24] = [
     (AccountEpochLog::NS, 1),
     (AccountStats::NS, 1),
     (AccountState::NS, 1),
@@ -103,8 +100,6 @@ pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
     (PoolEpochLog::NS, 2),
     (PoolState::NS, 2),
     (ProposalState::NS, 4),
-    (StagedAccountStats::NS, 1),
-    (StagedAddressStats::NS, 1),
     (StagedFirstMint::NS, 2),
     (StagedPaymentAddress::NS, 1),
     (StagedPaymentStats::NS, 1),
@@ -123,11 +118,14 @@ fn exact<K: KeyCodec>(key: &[u8]) -> Result<(), KeyError> {
 /// Refuse a state key that is not one `ns` stores: the exact encoding of the
 /// key kind its entity declares, or a UTxO ref under [`UTXOS`].
 ///
-/// No state row is written under a log namespace; one that arrives is held to
-/// the key kind of the log, the only kind the namespace has.
+/// A log namespace whose entity declares no state key holds no state rows; one
+/// that arrives is held to the key kind of the log, the only kind the
+/// namespace has.
 pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
     let checked = match ns {
         AccountState::NS => exact::<<AccountState as StateEntity>::Key>(key),
+        AccountStats::NS => exact::<<AccountStats as StateEntity>::Key>(key),
+        AddressStats::NS => exact::<<AddressStats as StateEntity>::Key>(key),
         AssetState::NS => exact::<<AssetState as StateEntity>::Key>(key),
         DatumState::NS => exact::<<DatumState as StateEntity>::Key>(key),
         DRepState::NS => exact::<<DRepState as StateEntity>::Key>(key),
@@ -138,16 +136,12 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         PendingRewardState::NS => exact::<<PendingRewardState as StateEntity>::Key>(key),
         PoolState::NS => exact::<<PoolState as StateEntity>::Key>(key),
         ProposalState::NS => exact::<<ProposalState as StateEntity>::Key>(key),
-        StagedAccountStats::NS => exact::<<StagedAccountStats as StateEntity>::Key>(key),
-        StagedAddressStats::NS => exact::<<StagedAddressStats as StateEntity>::Key>(key),
         StagedFirstMint::NS => exact::<<StagedFirstMint as StateEntity>::Key>(key),
         StagedPaymentAddress::NS => exact::<<StagedPaymentAddress as StateEntity>::Key>(key),
         StagedPaymentStats::NS => exact::<<StagedPaymentStats as StateEntity>::Key>(key),
         StagedStakeAddress::NS => exact::<<StagedStakeAddress as StateEntity>::Key>(key),
         UTXOS => exact::<[u8; UTXO_KEY_LEN]>(key),
         AccountEpochLog::NS
-        | AccountStats::NS
-        | AddressStats::NS
         | FirstMintChunk::NS
         | PaymentStats::NS
         | PolicyMintChunk::NS

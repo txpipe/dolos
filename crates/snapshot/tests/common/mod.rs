@@ -26,9 +26,8 @@ use dolos_cardano::{
         AssetKey, AssetState, DRepKey, DRepState, DatumKey, DatumState, EpochState, EraKey,
         EraState, FirstMintChunk, FixedNamespace as _, GovState, PaymentKey, PaymentStats,
         PaymentTail, PendingMirState, PendingRewardState, PolicyKey, PolicyMintChunk, PoolEpochLog,
-        PoolKey, PoolState, ProposalKey, ProposalState, StagedAccountStats, StagedAddressStats,
-        StagedFirstMint, StagedPaymentAddress, StagedPaymentStats, StagedStakeAddress,
-        StakeAddressesRow,
+        PoolKey, PoolState, ProposalKey, ProposalState, StagedFirstMint, StagedPaymentAddress,
+        StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
     periods::StagedKey,
@@ -101,18 +100,12 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
     let key = match ns {
         AccountState::NS
         | AccountEpochLog::NS
-        | AccountStats::NS
         | PendingMirState::NS
         | PendingRewardState::NS
         | StakeAddressesRow::NS => keys::encode(&credential),
-        AddressStats::NS => keys::encode(&address),
+        AccountStats::NS => keys::encode(&(u64::from(byte), credential)),
+        AddressStats::NS => keys::encode(&(u64::from(byte), address)),
         PaymentStats::NS => keys::encode(&payment),
-        StagedAccountStats::NS => keys::encode(&StagedKey {
-            group: credential,
-            epoch: u64::from(byte),
-            member: (),
-        }),
-        StagedAddressStats::NS => keys::encode(&(u64::from(byte), address)),
         StagedPaymentAddress::NS => keys::encode(&StagedKey {
             group: payment,
             epoch: u64::from(byte),
@@ -325,7 +318,15 @@ pub fn digests() -> Vec<ImmutableDigests> {
 
 /// A key of `ns`'s log at `slot`, made from `byte`.
 pub fn log_key(ns: Namespace, slot: u64, byte: u8) -> LogKey {
-    LogKey::from_raw(&[slot.to_be_bytes().as_slice(), &state_key(ns, byte)].concat()).unwrap()
+    let key = state_key(ns, byte);
+
+    // a period type's state key is its log key behind the epoch
+    let key = match ns {
+        AccountStats::NS | AddressStats::NS => &key[8..],
+        _ => &key[..],
+    };
+
+    LogKey::from_raw(&[slot.to_be_bytes().as_slice(), key].concat()).unwrap()
 }
 
 pub fn encode_all<T>(

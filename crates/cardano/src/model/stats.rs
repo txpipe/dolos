@@ -290,8 +290,10 @@ impl UnitSums {
 /// that moved them.
 ///
 /// The unit is empty for lovelace and `policy ‖ name` for an asset. Only a
-/// unit an output carried a quantity of is listed. Sealed at
-/// `epoch_start(e) ‖ AddressKey`.
+/// unit an output carried a quantity of is listed. Held in state at
+/// `epoch ‖ AddressKey` until the epoch seals, then in the archive at
+/// `epoch_start(e) ‖ AddressKey`. Epoch first: an address has no fixed-width
+/// group to lead its key, so its rows are found by epoch in both stores.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub struct AddressStats {
     #[n(0)]
@@ -301,7 +303,12 @@ pub struct AddressStats {
     pub tx_count: u64,
 }
 
-entity_boilerplate!(AddressStats, "address-stats", log = AddressKey);
+entity_boilerplate!(
+    AddressStats,
+    "address-stats",
+    state = (Epoch, AddressKey),
+    log = AddressKey
+);
 
 impl AddressStats {
     pub fn add(&mut self, other: &Self) {
@@ -340,37 +347,21 @@ impl AddressStats {
     }
 }
 
-/// An address's stats in an epoch that has not sealed.
-///
-/// Keyed `epoch ‖ AddressKey`, epoch first: an address has no
-/// fixed-width group to lead a staged key, so its rows are found by epoch, as
-/// the sealed ones are. The value is the sealed row's.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
-#[cbor(transparent)]
-#[serde(transparent)]
-pub struct StagedAddressStats(#[n(0)] pub AddressStats);
-
-entity_boilerplate!(
-    StagedAddressStats,
-    "staged-address-stats",
-    state = (Epoch, AddressKey)
-);
-
-impl SumRow for StagedAddressStats {
+impl SumRow for AddressStats {
     fn add(&mut self, other: &Self) {
-        self.0.add(&other.0);
+        AddressStats::add(self, other);
     }
 
     fn sub(&mut self, other: &Self) {
-        self.0.sub(&other.0);
+        AddressStats::sub(self, other);
     }
 
     fn is_zero(&self) -> bool {
-        self.0.is_zero()
+        AddressStats::is_zero(self)
     }
 }
 
-pub type StageAddressStats = StageSum<StagedAddressStats>;
+pub type StageAddressStats = StageSum<AddressStats>;
 
 /// A payment credential's addresses that moved value in one epoch, as
 /// tails, and the txs that moved any of them.
@@ -457,47 +448,41 @@ impl SumRow for StagedPaymentStats {
 
 pub type StagePaymentStats = StageSum<StagedPaymentStats>;
 
-/// The txs an account's address rows count more than once in one epoch: a
-/// tx moving value through `n` of its addresses adds `n - 1`.
+/// The distinct txs that moved value through any of an account's addresses
+/// in one epoch.
 ///
-/// Sealed at `epoch_start(e) ‖ AccountKey`, only when nonzero.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode)]
+/// One row per (epoch, account) whose addresses moved value, so the rows name
+/// the epochs an account was active in. Held in state at `epoch ‖ AccountKey`
+/// until the epoch seals, then in the archive at `epoch_start(e) ‖
+/// AccountKey`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub struct AccountStats {
     #[n(0)]
-    pub tx_overlap: u64,
-}
-
-entity_boilerplate!(AccountStats, "account-stats", log = AccountKey);
-
-/// An account's tx overlap in an epoch that has not sealed, keyed
-/// `account ‖ epoch`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
-pub struct StagedAccountStats {
-    #[n(0)]
-    pub tx_overlap: u64,
+    pub tx_count: u64,
 }
 
 entity_boilerplate!(
-    StagedAccountStats,
-    "staged-account-stats",
-    state = StagedKey<AccountKey, ()>
+    AccountStats,
+    "account-stats",
+    state = (Epoch, AccountKey),
+    log = AccountKey
 );
 
-impl SumRow for StagedAccountStats {
+impl SumRow for AccountStats {
     fn add(&mut self, other: &Self) {
-        self.tx_overlap = self.tx_overlap.saturating_add(other.tx_overlap);
+        self.tx_count = self.tx_count.saturating_add(other.tx_count);
     }
 
     fn sub(&mut self, other: &Self) {
-        self.tx_overlap = self.tx_overlap.saturating_sub(other.tx_overlap);
+        self.tx_count = self.tx_count.saturating_sub(other.tx_count);
     }
 
     fn is_zero(&self) -> bool {
-        self.tx_overlap == 0
+        self.tx_count == 0
     }
 }
 
-pub type StageAccountStats = StageSum<StagedAccountStats>;
+pub type StageAccountStats = StageSum<AccountStats>;
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -579,8 +564,7 @@ mod prop_tests {
             key in any_address_key(),
             delta in any_address_stats(),
         ) {
-            let entity = entity.map(StagedAddressStats);
-            let delta = StageAddressStats::new((7, key), StagedAddressStats(delta));
+            let delta = StageAddressStats::new((7, key), delta);
 
             assert_delta_roundtrip(entity.clone(), delta.clone());
             assert_delta_serde_roundtrip(entity, delta);
@@ -597,13 +581,9 @@ mod prop_tests {
             assert_delta_roundtrip(rows.clone(), stage.clone());
             assert_delta_serde_roundtrip(rows, stage);
 
-            let key = StagedKey {
-                group: AccountKey(StakeCredential::AddrKeyhash([2; 28].into())),
-                epoch: 3,
-                member: (),
-            };
-            let stage = StageAccountStats::new(key, StagedAccountStats { tx_overlap: delta });
-            let entity = entity.map(|tx_overlap| StagedAccountStats { tx_overlap });
+            let key = (3, AccountKey(StakeCredential::AddrKeyhash([2; 28].into())));
+            let stage = StageAccountStats::new(key, AccountStats { tx_count: delta });
+            let entity = entity.map(|tx_count| AccountStats { tx_count });
             assert_delta_roundtrip(entity.clone(), stage.clone());
             assert_delta_serde_roundtrip(entity, stage);
         }
@@ -620,10 +600,7 @@ mod prop_tests {
         #[test]
         fn address_stats_encode_and_decode_back(stats in any_address_stats()) {
             let raw = minicbor::to_vec(&stats).unwrap();
-            prop_assert_eq!(minicbor::decode::<AddressStats>(&raw).unwrap(), stats.clone());
-
-            // the staged row encodes as the sealed one
-            prop_assert_eq!(minicbor::to_vec(StagedAddressStats(stats)).unwrap(), raw);
+            prop_assert_eq!(minicbor::decode::<AddressStats>(&raw).unwrap(), stats);
         }
 
         #[test]
@@ -659,17 +636,17 @@ mod prop_tests {
         };
 
         let key = (4, AddressKey::Unstaked(vec![0x61; 29]));
-        let mut a = StageAddressStats::new(key.clone(), StagedAddressStats(first.clone()));
-        let mut b = StageAddressStats::new(key, StagedAddressStats(second));
+        let mut a = StageAddressStats::new(key.clone(), first.clone());
+        let mut b = StageAddressStats::new(key, second);
 
         let mut row = None;
         dolos_core::EntityDelta::apply(&mut a, &mut row);
         dolos_core::EntityDelta::apply(&mut b, &mut row);
-        assert_eq!(row.as_ref().unwrap().0.tx_count, 2);
+        assert_eq!(row.as_ref().unwrap().tx_count, 2);
 
         // the unit only the second brought leaves with it
         dolos_core::EntityDelta::undo(&b, &mut row);
-        assert_eq!(row, Some(StagedAddressStats(first)));
+        assert_eq!(row, Some(first));
 
         dolos_core::EntityDelta::undo(&a, &mut row);
         assert_eq!(row, None);

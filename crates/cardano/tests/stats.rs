@@ -3,7 +3,7 @@
 //! still staged, and rollback takes a block's contributions back out exactly.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -13,15 +13,15 @@ use dolos_cardano::{
     periods::stats::{
         account_totals, address_totals, payment_totals, sum_account_block_txs, sum_block_txs,
     },
-    AccountKey, AddressKey, AddressStats, CardanoDelta, ChainSummary, PaymentKey,
-    StagedAddressStats, UnitSums,
+    AccountKey, AccountStats, AddressKey, AddressStats, CardanoDelta, ChainSummary, PaymentKey,
+    UnitSums,
 };
 use dolos_core::{
     config::{CardanoConfig, CustomUtxo},
     import::ImportExt as _,
     sync::SyncExt as _,
-    ChainError, ChainPoint, Domain as _, EraCbor, Genesis, RawBlock, StateStore as _, TxoRef,
-    WalStore as _,
+    ArchiveStore as _, ChainError, ChainPoint, Domain as _, EraCbor, Genesis, RawBlock,
+    StateStore as _, TxoRef, WalStore as _,
 };
 use dolos_testing::{blocks::make_conway_block_with_txs_at, toy_domain::ToyDomain};
 use pallas::{
@@ -551,7 +551,7 @@ fn totals_equal_the_lifted_fold() {
     // the read spans both stores
     let staged: Vec<u64> = domain
         .state()
-        .iter_entities_typed::<StagedAddressStats>(None)
+        .iter_entities_typed::<AddressStats>(None)
         .unwrap()
         .map(|row| row.unwrap().0 .0)
         .collect();
@@ -597,6 +597,68 @@ fn totals_equal_the_lifted_fold() {
     // nothing for what the chain never touched
     assert_eq!(by_address[&staked(0x09, B)], &AddressStats::default());
     assert_eq!(expected.last().unwrap(), &AddressStats::default());
+}
+
+/// Done criterion 3: the account rows are dense. Every (epoch, account) with
+/// a staked address row has an account row, staged and sealed alike, holding
+/// the account's distinct tx count in that epoch, and no other account row
+/// exists.
+#[test]
+fn every_active_account_epoch_has_an_account_row() {
+    let blocks = raw_blocks();
+    let oracle = Oracle::new(&blocks);
+
+    let domain = ToyDomain::new_with_genesis_and_config(genesis(), config(), None, None);
+    domain
+        .import_blocks(blocks.iter().map(|(_, raw)| raw.clone()).collect())
+        .unwrap();
+
+    let chain = summary(&domain);
+    let (state, archive) = (domain.state(), domain.archive());
+
+    let mut active: HashSet<(u64, AccountKey)> = HashSet::new();
+
+    for row in state.iter_entities_typed::<AddressStats>(None).unwrap() {
+        if let ((epoch, AddressKey::Staked { account, .. }), _) = row.unwrap() {
+            active.insert((epoch, account));
+        }
+    }
+
+    for row in archive.iter_logs_typed::<AddressStats>(None).unwrap() {
+        if let (slot, AddressKey::Staked { account, .. }, _) = row.unwrap() {
+            active.insert((chain.slot_epoch(slot).0, account));
+        }
+    }
+
+    let mut accounts: HashMap<(u64, AccountKey), AccountStats> = HashMap::new();
+    let mut stores = (0, 0);
+
+    for row in state.iter_entities_typed::<AccountStats>(None).unwrap() {
+        let (key, row) = row.unwrap();
+        accounts.insert(key, row);
+        stores.0 += 1;
+    }
+
+    for row in archive.iter_logs_typed::<AccountStats>(None).unwrap() {
+        let (slot, account, row) = row.unwrap();
+        accounts.insert((chain.slot_epoch(slot).0, account), row);
+        stores.1 += 1;
+    }
+
+    // both stores hold account rows
+    assert!(stores.0 > 0 && stores.1 > 0, "{stores:?}");
+
+    assert_eq!(accounts.keys().cloned().collect::<HashSet<_>>(), active);
+
+    for ((epoch, account), row) in &accounts {
+        let expected = oracle.fold(|totals, block, consumed| {
+            if chain.slot_epoch(block.slot()).0 == *epoch {
+                sum_account_block_txs(totals, block, consumed, &account.0).unwrap();
+            }
+        });
+
+        assert_eq!(row.tx_count, expected.tx_count, "epoch {epoch}");
+    }
 }
 
 /// Rollback: undoing a block takes exactly its contributions back out of

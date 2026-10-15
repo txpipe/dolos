@@ -161,12 +161,10 @@ pub enum CardanoEntity {
     PolicyMintChunk(Box<PolicyMintChunk>),
     StagedStakeAddress(Box<StagedStakeAddress>),
     StakeAddressesRow(Box<StakeAddressesRow>),
-    StagedAddressStats(Box<StagedAddressStats>),
     AddressStats(Box<AddressStats>),
     StagedPaymentAddress(Box<StagedPaymentAddress>),
     StagedPaymentStats(Box<StagedPaymentStats>),
     PaymentStats(Box<PaymentStats>),
-    StagedAccountStats(Box<StagedAccountStats>),
     AccountStats(Box<AccountStats>),
 }
 
@@ -207,12 +205,10 @@ variant_boilerplate!(FirstMintChunk);
 variant_boilerplate!(PolicyMintChunk);
 variant_boilerplate!(StagedStakeAddress);
 variant_boilerplate!(StakeAddressesRow);
-variant_boilerplate!(StagedAddressStats);
 variant_boilerplate!(AddressStats);
 variant_boilerplate!(StagedPaymentAddress);
 variant_boilerplate!(StagedPaymentStats);
 variant_boilerplate!(PaymentStats);
-variant_boilerplate!(StagedAccountStats);
 variant_boilerplate!(AccountStats);
 
 impl dolos_core::Entity for CardanoEntity {
@@ -236,14 +232,12 @@ impl dolos_core::Entity for CardanoEntity {
             PolicyMintChunk::NS => PolicyMintChunk::decode_entity(ns, value).map(Into::into),
             StagedStakeAddress::NS => StagedStakeAddress::decode_entity(ns, value).map(Into::into),
             StakeAddressesRow::NS => StakeAddressesRow::decode_entity(ns, value).map(Into::into),
-            StagedAddressStats::NS => StagedAddressStats::decode_entity(ns, value).map(Into::into),
             AddressStats::NS => AddressStats::decode_entity(ns, value).map(Into::into),
             StagedPaymentAddress::NS => {
                 StagedPaymentAddress::decode_entity(ns, value).map(Into::into)
             }
             StagedPaymentStats::NS => StagedPaymentStats::decode_entity(ns, value).map(Into::into),
             PaymentStats::NS => PaymentStats::decode_entity(ns, value).map(Into::into),
-            StagedAccountStats::NS => StagedAccountStats::decode_entity(ns, value).map(Into::into),
             AccountStats::NS => AccountStats::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
@@ -269,12 +263,10 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PolicyMintChunk(x) => PolicyMintChunk::encode_entity(x),
             Self::StagedStakeAddress(x) => StagedStakeAddress::encode_entity(x),
             Self::StakeAddressesRow(x) => StakeAddressesRow::encode_entity(x),
-            Self::StagedAddressStats(x) => StagedAddressStats::encode_entity(x),
             Self::AddressStats(x) => AddressStats::encode_entity(x),
             Self::StagedPaymentAddress(x) => StagedPaymentAddress::encode_entity(x),
             Self::StagedPaymentStats(x) => StagedPaymentStats::encode_entity(x),
             Self::PaymentStats(x) => PaymentStats::encode_entity(x),
-            Self::StagedAccountStats(x) => StagedAccountStats::encode_entity(x),
             Self::AccountStats(x) => AccountStats::encode_entity(x),
         }
     }
@@ -300,12 +292,10 @@ pub fn build_schema() -> StateSchema {
     schema.insert(PolicyMintChunk::NS, NamespaceType::KeyValue);
     schema.insert(StagedStakeAddress::NS, NamespaceType::KeyValue);
     schema.insert(StakeAddressesRow::NS, NamespaceType::KeyValue);
-    schema.insert(StagedAddressStats::NS, NamespaceType::KeyValue);
     schema.insert(AddressStats::NS, NamespaceType::KeyValue);
     schema.insert(StagedPaymentAddress::NS, NamespaceType::KeyValue);
     schema.insert(StagedPaymentStats::NS, NamespaceType::KeyValue);
     schema.insert(PaymentStats::NS, NamespaceType::KeyValue);
-    schema.insert(StagedAccountStats::NS, NamespaceType::KeyValue);
     schema.insert(AccountStats::NS, NamespaceType::KeyValue);
     schema
 }

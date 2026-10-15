@@ -210,7 +210,7 @@ pub fn seal_staged<D: Domain>(
     stats::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)
 }
 
-/// Seal staged rows in chunks of whole groups.
+/// Seal group-first staged rows in chunks of whole groups.
 ///
 /// `rows` come in key order, and a chunk closes at the first group boundary
 /// after it holds `batch` rows. `seal` writes the chunk's archive rows, which
@@ -268,6 +268,92 @@ where
     }
 
     Ok(())
+}
+
+/// Seal an epoch-first period type: the rows of every epoch `sealable`
+/// accepts move from state to the archive, the key `(e, key)` becoming
+/// `epoch_start(e) ‖ key`.
+///
+/// Rows are keyed epoch first, so the sealable ones lead the namespace and
+/// the scan stops at the first that isn't. They seal in chunks of `batch`
+/// rows, each committing its archive rows before it deletes them from state.
+/// A row seals on its own, so a chunk may close anywhere, even inside a
+/// group's rows of one epoch; readers merge the two stores key by key. A
+/// re-run writes the same rows again.
+pub fn seal_epochs<D, E, K>(
+    state: &D::State,
+    archive: &D::Archive,
+    chain: &ChainSummary,
+    sealable: &dyn Fn(Epoch) -> bool,
+    batch: usize,
+) -> Result<(), ChainError>
+where
+    D: Domain,
+    E: SumRow<Key = (Epoch, K)> + LogEntity<Key = K>,
+    K: KeyCodec,
+{
+    let mut range = RangeOf::<(Epoch, K)>::all();
+
+    loop {
+        let mut chunk = Vec::new();
+        let mut rest = None;
+
+        for row in state.iter_entities_typed::<E>(Some(range.clone()))? {
+            let (key, row) = row?;
+
+            // epoch first: every row after an unsealable one is newer
+            if !sealable(key.0) {
+                break;
+            }
+
+            if chunk.len() == batch {
+                rest = Some(key);
+                break;
+            }
+
+            chunk.push((key, row));
+        }
+
+        if chunk.is_empty() {
+            return Ok(());
+        }
+
+        let writer = archive.start_writer()?;
+
+        for ((epoch, key), row) in &chunk {
+            if !row.is_zero() {
+                writer.write_log_typed::<E>(chain.epoch_start(*epoch), key, row)?;
+            }
+        }
+
+        writer.commit()?;
+
+        let writer = state.start_writer()?;
+
+        for (key, _) in &chunk {
+            writer.save_entity_typed::<E>(key, None)?;
+        }
+
+        writer.commit()?;
+
+        match rest {
+            Some(key) => range = range.starting_at(&key),
+            None => return Ok(()),
+        }
+    }
+}
+
+/// The oldest epoch an epoch-first period type holds rows of in state: the
+/// namespace's first key names it.
+pub fn oldest_staged<S, E, K>(state: &S) -> Result<Option<Epoch>, ChainError>
+where
+    S: StateStore,
+    E: StateEntity<Key = (Epoch, K)>,
+    K: KeyCodec,
+{
+    let mut rows = state.iter_entities_typed::<E>(None)?;
+
+    Ok(rows.next().transpose()?.map(|((epoch, _), _)| epoch))
 }
 
 /// Staged rows in `range`, by epoch, in key order within each.

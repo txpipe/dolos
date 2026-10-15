@@ -265,10 +265,9 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountEpochLog, AccountState, AddressStats, AssetKey, AssetState, DRepState, EpochState,
-        EraState, FixedNamespace, GovState, PoolState, ProposalState, StagedAccountStats,
-        StagedAddressStats, StagedFirstMint, StagedPaymentAddress, StagedPaymentStats,
-        StagedStakeAddress, StakeAddressesRow,
+        AccountEpochLog, AccountState, AccountStats, AddressStats, AssetKey, AssetState, DRepState,
+        EpochState, EraState, FixedNamespace, GovState, PoolState, ProposalState, StagedFirstMint,
+        StagedPaymentAddress, StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
     };
 
     use super::*;
@@ -338,16 +337,12 @@ mod tests {
         keyed(StagedStakeAddress::NS, &staged(&unstaked)).unwrap();
         keyed(StakeAddressesRow::NS, &credential).unwrap();
 
-        // staged stats: an address's are keyed epoch first, a payment
-        // credential's and an account's group first
+        // unsealed stats: an address's and an account's are keyed epoch
+        // first, a payment credential's group first
         let epoch = [0u8; 8];
         let address = [epoch.as_slice(), &staked].concat();
-        keyed(StagedAddressStats::NS, &address).unwrap();
-        keyed(
-            StagedAddressStats::NS,
-            &[epoch.as_slice(), &unstaked].concat(),
-        )
-        .unwrap();
+        keyed(AddressStats::NS, &address).unwrap();
+        keyed(AddressStats::NS, &[epoch.as_slice(), &unstaked].concat()).unwrap();
         keyed(
             StagedPaymentAddress::NS,
             &[[1; 28].as_slice(), &epoch, &[1; 29]].concat(),
@@ -358,12 +353,7 @@ mod tests {
             &[[1; 28].as_slice(), &epoch].concat(),
         )
         .unwrap();
-        keyed(
-            StagedAccountStats::NS,
-            &[credential.as_slice(), &epoch].concat(),
-        )
-        .unwrap();
-        keyed(AddressStats::NS, &address[8..]).unwrap();
+        keyed(AccountStats::NS, &[epoch.as_slice(), &credential].concat()).unwrap();
 
         for (ns, key) in [
             (EpochState::NS, vec![0x30]),
@@ -377,18 +367,14 @@ mod tests {
             (StagedStakeAddress::NS, staged(&[1; 57])),
             (StagedStakeAddress::NS, credential.clone()),
             (StakeAddressesRow::NS, vec![1; 32]),
+            (AddressStats::NS, [epoch.as_slice(), &credential].concat()),
+            (AddressStats::NS, [epoch.as_slice(), &staked, &[1]].concat()),
             (
-                StagedAddressStats::NS,
-                [epoch.as_slice(), &credential].concat(),
-            ),
-            (
-                StagedAddressStats::NS,
-                [epoch.as_slice(), &staked, &[1]].concat(),
-            ),
-            (
-                StagedAddressStats::NS,
+                AddressStats::NS,
                 [epoch.as_slice(), &[0x02], &[1; 29]].concat(),
             ),
+            // a sealed row's key, without the epoch
+            (AddressStats::NS, staked.clone()),
             (
                 StagedPaymentAddress::NS,
                 [[1; 28].as_slice(), &epoch].concat(),
@@ -397,7 +383,8 @@ mod tests {
                 StagedPaymentStats::NS,
                 [[1; 28].as_slice(), &epoch, &[1]].concat(),
             ),
-            (StagedAccountStats::NS, credential.clone()),
+            (AccountStats::NS, credential.clone()),
+            (AccountStats::NS, [credential.as_slice(), &epoch].concat()),
         ] {
             let err = keyed(ns, &key).unwrap_err();
             assert!(

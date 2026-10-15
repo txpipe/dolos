@@ -6,12 +6,13 @@
 //! - `address-stats` holds one row per (epoch, address), keyed stake-first.
 //! - `payment-stats` lists, per (epoch, payment credential), the credential's
 //!   addresses as tails, with its tx count.
-//! - `account-stats` holds, per (epoch, account), the txs its address rows
-//!   count more than once, only when nonzero.
+//! - `account-stats` holds one row per (epoch, account) whose addresses moved
+//!   value, with the account's tx count.
 //!
-//! Address rows are staged epoch first and sealed in chunks of rows, which
-//! may split an account's rows of one epoch. So readers join staged and sealed
-//! address rows per key, not per epoch; the sealed row wins.
+//! Address and account rows are one type each in both stores, keyed epoch
+//! first, and seal in chunks of rows, which may split an account's rows of
+//! one epoch. So readers join the two stores per key, not per epoch; the
+//! sealed row wins.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -20,7 +21,7 @@ use std::{
 
 use dolos_core::{
     ArchiveStore as _, ArchiveWriter as _, ChainError, Domain, Entity as _, EntityKey, EntityValue,
-    LogKey, LogRangeOf, RangeOf, StateStore, StateWriter as _,
+    LogKey, LogRangeOf, RangeOf, StateStore as _, StateWriter as _,
 };
 use pallas::{
     codec::{
@@ -35,11 +36,11 @@ use pallas::{
     },
 };
 
-use super::StagedKey;
+use super::{oldest_staged, seal_epochs, StagedKey};
 use crate::{
     model::stats::join_payment, pallas_extras, AccountKey, AccountStats, AddressKey, AddressStats,
-    ChainSummary, FixedNamespace as _, PaymentKey, PaymentStats, StagedAccountStats,
-    StagedAddressStats, StagedPaymentAddress, StagedPaymentStats, Sum, UnitSums,
+    ChainSummary, FixedNamespace as _, PaymentKey, PaymentStats, StagedPaymentAddress,
+    StagedPaymentStats, Sum, UnitSums,
 };
 
 /// Address rows read per round trip.
@@ -197,71 +198,9 @@ pub(crate) fn seal<D: Domain>(
     sealable: &dyn Fn(Epoch) -> bool,
     batch: usize,
 ) -> Result<(), ChainError> {
-    seal_addresses::<D>(state, archive, chain, sealable, batch)?;
+    seal_epochs::<D, AddressStats, _>(state, archive, chain, sealable, batch)?;
     seal_payments::<D>(state, archive, chain, sealable, batch)?;
-    seal_accounts::<D>(state, archive, chain, sealable, batch)
-}
-
-/// Address rows seal in chunks of `batch` rows, oldest epoch first, each
-/// chunk committing its archive rows before it deletes the staged ones. A row
-/// seals on its own, so a chunk may close anywhere, and a re-run writes the
-/// same rows again.
-fn seal_addresses<D: Domain>(
-    state: &D::State,
-    archive: &D::Archive,
-    chain: &ChainSummary,
-    sealable: &dyn Fn(Epoch) -> bool,
-    batch: usize,
-) -> Result<(), ChainError> {
-    let mut range = RangeOf::<(Epoch, AddressKey)>::all();
-
-    loop {
-        let mut chunk = Vec::new();
-        let mut rest = None;
-
-        for row in state.iter_entities_typed::<StagedAddressStats>(Some(range.clone()))? {
-            let (key, row) = row?;
-
-            // epoch first: every row after an unsealable one is newer
-            if !sealable(key.0) {
-                break;
-            }
-
-            if chunk.len() == batch {
-                rest = Some(key);
-                break;
-            }
-
-            chunk.push((key, row));
-        }
-
-        if chunk.is_empty() {
-            return Ok(());
-        }
-
-        let writer = archive.start_writer()?;
-
-        for ((epoch, key), row) in &chunk {
-            if !row.0.is_zero() {
-                writer.write_log_typed(chain.epoch_start(*epoch), key, &row.0)?;
-            }
-        }
-
-        writer.commit()?;
-
-        let writer = state.start_writer()?;
-
-        for (key, _) in &chunk {
-            writer.save_entity_typed::<StagedAddressStats>(key, None)?;
-        }
-
-        writer.commit()?;
-
-        match rest {
-            Some(key) => range = range.starting_at(&key),
-            None => return Ok(()),
-        }
-    }
+    seal_epochs::<D, AccountStats, _>(state, archive, chain, sealable, batch)
 }
 
 /// One (credential, epoch) of payment stats, staged.
@@ -374,47 +313,6 @@ fn seal_payments<D: Domain>(
     Ok(())
 }
 
-/// Account rows are one per (account, epoch) and seal by groups.
-fn seal_accounts<D: Domain>(
-    state: &D::State,
-    archive: &D::Archive,
-    chain: &ChainSummary,
-    sealable: &dyn Fn(Epoch) -> bool,
-    batch: usize,
-) -> Result<(), ChainError> {
-    let mut rows = Vec::new();
-
-    for row in state.iter_entities_typed::<StagedAccountStats>(None)? {
-        let (key, row) = row?;
-
-        if sealable(key.epoch) {
-            rows.push(Ok((key, row)));
-        }
-    }
-
-    super::seal_groups::<D, StagedAccountStats, _, _, _>(
-        state,
-        archive,
-        rows,
-        batch,
-        |chunk, writer| {
-            for (key, row) in chunk {
-                if row.tx_overlap > 0 {
-                    writer.write_log_typed(
-                        chain.epoch_start(key.epoch),
-                        &key.group,
-                        &AccountStats {
-                            tx_overlap: row.tx_overlap,
-                        },
-                    )?;
-                }
-            }
-
-            Ok(())
-        },
-    )
-}
-
 /// A running fold of address rows.
 ///
 /// Keyed by a hash map, since the heaviest reads fold millions of unit
@@ -486,14 +384,6 @@ impl Fold {
     }
 }
 
-/// The oldest epoch with staged address rows: address rows are staged epoch
-/// first, so the namespace's first key names it.
-fn oldest_staged<S: StateStore>(state: &S) -> Result<Option<Epoch>, ChainError> {
-    let mut rows = state.iter_entities_typed::<StagedAddressStats>(None)?;
-
-    Ok(rows.next().transpose()?.map(|((epoch, _), _)| epoch))
-}
-
 /// Fold the address rows at `keys` into `fold`, each from wherever it lives.
 ///
 /// Per round trip, the staged rows are read before the sealed ones, and the
@@ -506,7 +396,7 @@ fn fold_address_rows<D: Domain>(
     keys: &[(Epoch, AddressKey)],
     fold: &mut Fold,
 ) -> Result<(), ChainError> {
-    let staged_from = oldest_staged(domain.state())?;
+    let staged_from = oldest_staged::<_, AddressStats, _>(domain.state())?;
 
     for batch in keys.chunks(READ_BATCH) {
         let staged_keys: Vec<(usize, EntityKey)> = batch
@@ -517,7 +407,7 @@ fn fold_address_rows<D: Domain>(
             .collect();
 
         let staged_values = domain.state().read_entities(
-            StagedAddressStats::NS,
+            AddressStats::NS,
             &staged_keys.iter().map(|(_, key)| key).collect::<Vec<_>>(),
         )?;
 
@@ -628,13 +518,54 @@ pub fn payment_totals<D: Domain>(
     Ok(totals)
 }
 
+/// The tx count of `account` in each epoch of `epochs` it was active in.
+///
+/// Point reads, staged rows first and sealed ones second, the sealed row
+/// winning. A seal commits the archive before it deletes from state, so in
+/// that order a row missing from the staged read is in the sealed one.
+fn account_epochs<D: Domain>(
+    domain: &D,
+    chain: &ChainSummary,
+    epochs: RangeInclusive<Epoch>,
+    account: &AccountKey,
+) -> Result<BTreeMap<Epoch, u64>, ChainError> {
+    let state = domain.state();
+    let staged_from = oldest_staged::<_, AccountStats, _>(state)?;
+
+    let staged_keys: Vec<(Epoch, AccountKey)> = epochs
+        .clone()
+        .filter(|epoch| staged_from.is_some_and(|from| *epoch >= from))
+        .map(|epoch| (epoch, account.clone()))
+        .collect();
+
+    let staged =
+        state.read_entities_typed::<AccountStats>(&staged_keys.iter().collect::<Vec<_>>())?;
+
+    let mut out: BTreeMap<Epoch, u64> = staged_keys
+        .iter()
+        .zip(staged)
+        .filter_map(|((epoch, _), row)| row.map(|row| (*epoch, row.tx_count)))
+        .collect();
+
+    let sealed = super::read_sealed::<_, AccountStats>(domain.archive(), chain, epochs, |_| {
+        account.clone()
+    })?;
+
+    for (epoch, raw) in sealed {
+        out.insert(
+            epoch,
+            AccountStats::decode_entity(AccountStats::NS, &raw)?.tx_count,
+        );
+    }
+
+    Ok(out)
+}
+
 /// What the addresses of `account` received and sent over `epochs`, and the
 /// txs that moved any of it.
 ///
-/// One range scan per epoch reads the account's address rows. Their tx
-/// counts add up to more than the account's where a tx moved several of its
-/// addresses; the account rows of the epochs that had address rows hold the
-/// difference.
+/// The account rows give the tx count and name the epochs the account was
+/// active in; one range scan per active epoch reads its address rows.
 pub fn account_totals<D: Domain>(
     domain: &D,
     chain: &ChainSummary,
@@ -642,65 +573,39 @@ pub fn account_totals<D: Domain>(
     account: &AccountKey,
 ) -> Result<AddressStats, ChainError> {
     let (state, archive) = (domain.state(), domain.archive());
-    let staged_from = oldest_staged(state)?;
+
+    let active = account_epochs(domain, chain, epochs, account)?;
+    let staged_from = oldest_staged::<_, AddressStats, _>(state)?;
 
     let mut fold = Fold::default();
-    let mut active = Vec::new();
 
-    for epoch in epochs {
-        let mut staged: HashMap<Vec<u8>, StagedAddressStats> = HashMap::new();
+    for &epoch in active.keys() {
+        let mut staged: HashMap<Vec<u8>, AddressStats> = HashMap::new();
 
         if staged_from.is_some_and(|from| epoch >= from) {
             let range = RangeOf::prefix(&(epoch, account.clone()));
 
-            for row in state.iter_entities_typed::<StagedAddressStats>(Some(range))? {
+            for row in state.iter_entities_typed::<AddressStats>(Some(range))? {
                 let ((_, key), row) = row?;
                 staged.insert(dolos_core::keys::encode(&key).to_vec(), row);
             }
         }
 
         let range = LogRangeOf::<AddressKey>::prefix(chain.epoch_start(epoch), account);
-        let mut any = !staged.is_empty();
 
         for row in archive.iter_logs(AddressStats::NS, range.into_raw())? {
             let (key, raw) = row?;
             staged.remove(key.entity());
             fold.add_raw(&raw)?;
-            any = true;
         }
 
         for row in staged.values() {
-            fold.add_stats(&row.0);
-        }
-
-        if any {
-            active.push(epoch);
+            fold.add_stats(row);
         }
     }
-
-    let mut overlaps: BTreeMap<Epoch, u64> = BTreeMap::new();
-
-    for row in state.iter_entities_typed::<StagedAccountStats>(Some(RangeOf::prefix(account)))? {
-        let (key, row) = row?;
-        overlaps.insert(key.epoch, row.tx_overlap);
-    }
-
-    let sealed =
-        super::read_sealed::<_, AccountStats>(archive, chain, active.iter().copied(), |_| {
-            account.clone()
-        })?;
-
-    for (epoch, raw) in sealed {
-        overlaps.insert(
-            epoch,
-            AccountStats::decode_entity(AccountStats::NS, &raw)?.tx_overlap,
-        );
-    }
-
-    let overlap: u64 = active.iter().filter_map(|epoch| overlaps.get(epoch)).sum();
 
     let mut totals = fold.finish();
-    totals.tx_count = totals.tx_count.saturating_sub(overlap);
+    totals.tx_count = active.values().sum();
 
     Ok(totals)
 }
@@ -803,10 +708,7 @@ mod tests {
                 };
 
                 writer
-                    .write_entity_typed(
-                        &(epoch, AddressKey::of(&address)),
-                        &StagedAddressStats(stats),
-                    )
+                    .write_entity_typed(&(epoch, AddressKey::of(&address)), &stats)
                     .unwrap();
 
                 let (payment, tail) = split_payment(&address).unwrap();
@@ -837,18 +739,13 @@ mod tests {
                     .unwrap();
             }
 
-            writer
-                .write_entity_typed(
-                    &StagedKey {
-                        group: AccountKey(a()),
-                        epoch,
-                        member: (),
-                    },
-                    &StagedAccountStats {
-                        tx_overlap: epoch - 4,
-                    },
-                )
-                .unwrap();
+            // a tx moving value through several of `a`'s addresses counts
+            // once for the account: `a`'s rows count 6 in each epoch
+            for (account, tx_count) in [(a(), 10 - epoch), (b(), 4)] {
+                writer
+                    .write_entity_typed(&(epoch, AccountKey(account)), &AccountStats { tx_count })
+                    .unwrap();
+            }
         }
 
         writer.commit().unwrap();
@@ -902,7 +799,7 @@ mod tests {
 
         (
             state
-                .iter_entities_typed::<StagedAddressStats>(None)
+                .iter_entities_typed::<AddressStats>(None)
                 .unwrap()
                 .count(),
             state
@@ -914,7 +811,7 @@ mod tests {
                 .unwrap()
                 .count(),
             state
-                .iter_entities_typed::<StagedAccountStats>(None)
+                .iter_entities_typed::<AccountStats>(None)
                 .unwrap()
                 .count(),
         )
@@ -953,18 +850,18 @@ mod tests {
         seal_as(&domain, &domain).unwrap();
 
         // only epoch 7 stays staged
-        assert_eq!(staged(&domain), (6, 6, 4, 1));
+        assert_eq!(staged(&domain), (6, 6, 4, 2));
 
         let (addresses, payments, accounts) = logs(&domain);
         assert_eq!(
             (addresses.len(), payments.len(), accounts.len()),
-            (12, 8, 2)
+            (12, 8, 4)
         );
 
         assert_eq!(totals(&domain), before);
 
-        // account a: three addresses over three epochs, its overlaps taken
-        // out of the tx count
+        // account a: three addresses over three epochs, its tx count the
+        // account rows' rather than the address rows' sum
         let a = &before[before.len() - 2];
         assert_eq!(a.tx_count, 3 * (1 + 2 + 3) - (1 + 2 + 3));
 
@@ -1017,11 +914,70 @@ mod tests {
                 "after a crash following commit {crash_after}"
             );
 
+            // no state row of a sealed epoch is left behind
+            let state = domain.state();
+            let epochs: Vec<Epoch> = state
+                .iter_entities_typed::<AddressStats>(None)
+                .unwrap()
+                .map(|row| row.unwrap().0 .0)
+                .chain(
+                    state
+                        .iter_entities_typed::<AccountStats>(None)
+                        .unwrap()
+                        .map(|row| row.unwrap().0 .0),
+                )
+                .collect();
+            assert!(epochs.iter().all(|epoch| *epoch == 7), "{epochs:?}");
+
             crash_after += 1;
         }
 
         // address rows split mid-account at two rows a chunk
         assert!(crash_after >= 6, "only {crash_after} commits");
+    }
+
+    /// An account's address rows are read only in the epochs its account rows
+    /// name: a row in any other epoch is not folded, staged or sealed.
+    #[test]
+    fn account_totals_scan_only_the_epochs_the_account_rows_name() {
+        let domain = seeded();
+        let before = totals(&domain);
+
+        let stray = AddressStats {
+            units: [(Bytes::from(vec![]), sums(1_000, 0))]
+                .into_iter()
+                .collect(),
+            tx_count: 1,
+        };
+        let key = AddressKey::of(&base(0x44, b()));
+
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(&(7, key.clone()), &stray)
+            .unwrap();
+        writer
+            .save_entity_typed::<AccountStats>(&(7, AccountKey(b())), None)
+            .unwrap();
+        writer.commit().unwrap();
+
+        let chain = chain(&domain);
+        let writer = domain.archive().start_writer().unwrap();
+        writer
+            .write_log_typed(chain.epoch_start(3), &key, &stray)
+            .unwrap();
+        writer.commit().unwrap();
+
+        // `b` lost epoch 7: its address row there and the stray rows go
+        // unread
+        let account = AccountKey(b());
+        let after = account_totals(&domain, &chain, 0..=BOUNDARY, &account).unwrap();
+        let b = &before[before.len() - 1];
+
+        assert_eq!(after.tx_count, b.tx_count - 4);
+        assert_eq!(
+            after.units[&Bytes::from(vec![])].received.0,
+            b.units[&Bytes::from(vec![])].received.0 - (7 * 10 + 3)
+        );
     }
 
     /// A read landing between any two commits of a seal answers every total

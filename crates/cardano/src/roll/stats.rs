@@ -18,9 +18,9 @@ use pallas::{
 use super::{BlockVisitor, WorkDeltas};
 use crate::{
     model::stats::split_payment, owned::OwnedMultiEraOutput, periods::stats::tx_stats,
-    periods::StagedKey, AccountKey, AddressKey, AddressStats, Genesis, PParamsSet, PaymentKey,
-    StageAccountStats, StageAddressStats, StagePaymentAddress, StagePaymentStats,
-    StagedAccountStats, StagedAddressStats, StagedPaymentAddress, StagedPaymentStats,
+    periods::StagedKey, AccountKey, AccountStats, AddressKey, AddressStats, Genesis, PParamsSet,
+    PaymentKey, StageAccountStats, StageAddressStats, StagePaymentAddress, StagePaymentStats,
+    StagedPaymentAddress, StagedPaymentStats,
 };
 
 #[derive(Default)]
@@ -29,7 +29,7 @@ pub struct StatsVisitor {
     addresses: HashMap<AddressKey, AddressStats>,
     members: HashSet<(Hash<28>, Vec<u8>)>,
     payments: HashMap<Hash<28>, u64>,
-    overlaps: HashMap<AccountKey, u64>,
+    accounts: HashMap<AccountKey, u64>,
 }
 
 impl BlockVisitor for StatsVisitor {
@@ -70,7 +70,7 @@ impl BlockVisitor for StatsVisitor {
         )?;
 
         let mut payments = HashSet::new();
-        let mut accounts: HashMap<AccountKey, u64> = HashMap::new();
+        let mut accounts = HashSet::new();
 
         for (address, stats) in moved {
             if let Some((payment, tail)) = split_payment(&address) {
@@ -81,7 +81,7 @@ impl BlockVisitor for StatsVisitor {
             let key = AddressKey::of(&address);
 
             if let AddressKey::Staked { account, .. } = &key {
-                *accounts.entry(account.clone()).or_default() += 1;
+                accounts.insert(account.clone());
             }
 
             self.addresses.entry(key).or_default().add(&stats);
@@ -91,12 +91,10 @@ impl BlockVisitor for StatsVisitor {
             *self.payments.entry(payment).or_default() += 1;
         }
 
-        // a tx moving value through `n` of an account's addresses counts `n`
-        // times in their rows and once for the account
-        for (account, addresses) in accounts {
-            if addresses > 1 {
-                *self.overlaps.entry(account).or_default() += addresses - 1;
-            }
+        // a tx moving value through several of an account's addresses counts
+        // once for the account
+        for account in accounts {
+            *self.accounts.entry(account).or_default() += 1;
         }
 
         Ok(())
@@ -108,10 +106,7 @@ impl BlockVisitor for StatsVisitor {
         };
 
         for (key, stats) in self.addresses.drain() {
-            deltas.add_for_entity(StageAddressStats::new(
-                (epoch, key),
-                StagedAddressStats(stats),
-            ));
+            deltas.add_for_entity(StageAddressStats::new((epoch, key), stats));
         }
 
         for (payment, tail) in self.members.drain() {
@@ -133,14 +128,10 @@ impl BlockVisitor for StatsVisitor {
             ));
         }
 
-        for (account, tx_overlap) in self.overlaps.drain() {
+        for (account, tx_count) in self.accounts.drain() {
             deltas.add_for_entity(StageAccountStats::new(
-                StagedKey {
-                    group: account,
-                    epoch,
-                    member: (),
-                },
-                StagedAccountStats { tx_overlap },
+                (epoch, account),
+                AccountStats { tx_count },
             ));
         }
 

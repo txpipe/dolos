@@ -108,9 +108,8 @@ pub use stelae::{dir, inscription, transport, SteleReader};
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
     EpochState, EraState, FirstMintChunk, FixedNamespace, GovState, PaymentStats, PendingMirState,
-    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
-    StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
-    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
+    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState, StagedFirstMint,
+    StagedPaymentAddress, StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -201,7 +200,7 @@ pub const LOG_KINDS: [(&str, Namespace); 9] = [
 /// single blob. Re-sharding a namespace is a media-type-version event for that
 /// namespace's kind, decided by the format's owner; it is not a constant to
 /// nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
+pub const STATE_KINDS: [(&str, Namespace, u8); 24] = [
     ("state-account-epochs", AccountEpochLog::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
@@ -220,8 +219,6 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
     ("state-pool-epochs", PoolEpochLog::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
-    ("state-staged-account-stats", StagedAccountStats::NS, 1),
-    ("state-staged-address-stats", StagedAddressStats::NS, 1),
     ("state-staged-first-mints", StagedFirstMint::NS, 1),
     (
         "state-staged-payment-addresses",
@@ -286,8 +283,8 @@ pub fn shards_for(ns: Namespace) -> Option<u8> {
         .map(|(_, _, shards)| shards)
 }
 
-/// How many state layers every publish writes: the shard counts summed — 86
-/// today. Every shard of every namespace kind is written even when empty, so
+/// How many state layers every publish writes: the shard counts summed. Every
+/// shard of every namespace kind is written even when empty, so
 /// tip completeness stays structural rather than data-dependent.
 pub const fn state_layer_count() -> usize {
     let mut total = 0;
