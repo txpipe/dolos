@@ -16,7 +16,7 @@ use pallas::{
         addresses::Address,
         primitives::{
             alonzo::InstantaneousRewardTarget,
-            conway::{DatumOption, VotingProcedures},
+            conway::{DatumOption, Voter, VotingProcedures},
         },
         traverse::{MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraValue},
     },
@@ -296,6 +296,17 @@ impl CardanoIndexDeltaBuilder {
                 pallas_extras::drep_id_bytes(&cred),
             ));
         }
+
+        let cold = pallas_extras::cert_as_committee_auth(cert)
+            .map(|x| x.cold)
+            .or_else(|| pallas_extras::cert_as_committee_resign(cert).map(|x| x.cold));
+
+        if let Some(cred) = cold {
+            self.current_block().tags.push(Tag::new(
+                archive::COMMITTEE_CERTS,
+                pallas_extras::committee_cold_id_bytes(&cred),
+            ));
+        }
     }
 
     /// Add withdrawal tags to the current block.
@@ -326,6 +337,16 @@ impl CardanoIndexDeltaBuilder {
     pub fn add_votes(&mut self, procedures: &VotingProcedures) {
         for (voter, ballot) in procedures {
             self.add_vote_tag(archive::VOTER_VOTES, pallas_extras::voter_id_bytes(voter));
+
+            if matches!(
+                voter,
+                Voter::ConstitutionalCommitteeKey(_) | Voter::ConstitutionalCommitteeScript(_)
+            ) {
+                self.add_vote_tag(
+                    archive::COMMITTEE_VOTES,
+                    archive::COMMITTEE_VOTES_KEY.to_vec(),
+                );
+            }
 
             for action in ballot.keys() {
                 let key = ProposalKey::new(action.transaction_id, action.action_index);
@@ -741,6 +762,16 @@ mod tests {
             Certificate::UpdateDRepCert(StakeCredential::AddrKeyhash(Hash::new([0x88; 28])), None);
         builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(drep_update))));
 
+        let committee_auth = Certificate::AuthCommitteeHot(
+            StakeCredential::AddrKeyhash(Hash::new([0x99; 28])),
+            StakeCredential::ScriptHash(Hash::new([0xaa; 28])),
+        );
+        builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(committee_auth))));
+        builder.add_votes(&BTreeMap::from([(
+            Voter::ConstitutionalCommitteeKey(Hash::new([0xaa; 28])),
+            BTreeMap::from([(gov_action(0xbb, 0), voting_procedure(Vote::Yes))]),
+        )]));
+
         // POOL_BLOCKS
         builder.add_block_issuer(&[0x88; 32]);
 
@@ -897,6 +928,176 @@ mod tests {
             keys::encode(&DRepKey::from(&DRep::Key(hash))).as_slice(),
             key_id.as_slice()
         );
+    }
+
+    #[test]
+    fn committee_certificates_tag_the_cip129_cold_id() {
+        use pallas::ledger::primitives::{conway::Certificate, StakeCredential};
+        use std::borrow::Cow;
+
+        let hash = Hash::new([0x99; 28]);
+        let key = StakeCredential::AddrKeyhash(hash);
+        let script = StakeCredential::ScriptHash(hash);
+        let hot = StakeCredential::AddrKeyhash(Hash::new([0xaa; 28]));
+        let certs = [
+            Certificate::AuthCommitteeHot(key.clone(), hot.clone()),
+            Certificate::ResignCommitteeCold(key, None),
+            Certificate::AuthCommitteeHot(script.clone(), hot),
+            Certificate::ResignCommitteeCold(script, None),
+            Certificate::UpdateDRepCert(StakeCredential::AddrKeyhash(hash), None),
+            Certificate::StakeRegistration(StakeCredential::AddrKeyhash(hash)),
+        ];
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.start_block(100, vec![0; 32], Some(50));
+
+        for cert in certs {
+            builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(cert))));
+        }
+
+        let archive = builder.build();
+        let key_id = [&[0x12u8][..], hash.as_slice()].concat();
+        let script_id = [&[0x13u8][..], hash.as_slice()].concat();
+
+        assert_eq!(
+            sorted_keys(&archive[0], archive::COMMITTEE_CERTS),
+            [key_id.clone(), key_id, script_id.clone(), script_id]
+        );
+    }
+
+    #[test]
+    fn committee_votes_tag_once_per_block_and_exclude_dreps_and_pools() {
+        use pallas::ledger::traverse::MultiEraBlock;
+        use std::collections::BTreeMap;
+
+        let ballot = BTreeMap::from([
+            (gov_action(0xa0, 0), voting_procedure(Vote::Yes)),
+            (gov_action(0xa0, 1), voting_procedure(Vote::No)),
+        ]);
+        let committees = BTreeMap::from([
+            (
+                Voter::ConstitutionalCommitteeKey(Hash::new([0x01; 28])),
+                ballot.clone(),
+            ),
+            (
+                Voter::ConstitutionalCommitteeScript(Hash::new([0x02; 28])),
+                ballot.clone(),
+            ),
+        ]);
+        let other_voters = BTreeMap::from([
+            (Voter::DRepKey(Hash::new([0x03; 28])), ballot.clone()),
+            (Voter::DRepScript(Hash::new([0x04; 28])), ballot.clone()),
+            (Voter::StakePoolKey(Hash::new([0x05; 28])), ballot),
+        ]);
+        let mut body = empty_tx_body();
+        body.voting_procedures = Some(committees.clone());
+        let mut other_body = empty_tx_body();
+        other_body.voting_procedures = Some(other_voters);
+
+        let (_, raw) = dolos_testing::blocks::make_conway_block_with_txs(
+            100,
+            vec![
+                (body.clone(), true),
+                (body, true),
+                (other_body.clone(), true),
+            ],
+            None,
+        );
+        let block = MultiEraBlock::decode(&raw).unwrap();
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.index_block(&block, &std::collections::HashMap::new());
+
+        let (_, other_raw) =
+            dolos_testing::blocks::make_conway_block_with_tx(101, other_body, None, true);
+        let other_block = MultiEraBlock::decode(&other_raw).unwrap();
+        builder.index_block(&other_block, &std::collections::HashMap::new());
+
+        for (index, (voter, ballot)) in committees.into_iter().enumerate() {
+            builder.start_block(102 + index as u64, vec![0; 32], None);
+            builder.add_votes(&BTreeMap::from([(voter, ballot)]));
+        }
+
+        let archive = builder.build();
+        assert_eq!(
+            sorted_keys(&archive[0], archive::COMMITTEE_VOTES),
+            [b"committee".to_vec()]
+        );
+        assert_eq!(sorted_keys(&archive[0], archive::VOTER_VOTES).len(), 5);
+        assert_eq!(sorted_keys(&archive[0], archive::ACTION_VOTES).len(), 2);
+        assert!(sorted_keys(&archive[1], archive::COMMITTEE_VOTES).is_empty());
+        assert_eq!(sorted_keys(&archive[1], archive::VOTER_VOTES).len(), 3);
+        for block in &archive[2..] {
+            assert_eq!(
+                sorted_keys(block, archive::COMMITTEE_VOTES),
+                [b"committee".to_vec()]
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_transactions_keep_committee_certificate_and_vote_candidates() {
+        use pallas::codec::utils::NonEmptySet;
+        use pallas::ledger::primitives::{conway::Certificate, StakeCredential};
+        use pallas::ledger::traverse::MultiEraBlock;
+        use std::collections::BTreeMap;
+
+        let hash = Hash::new([0x99; 28]);
+        let key = StakeCredential::AddrKeyhash(hash);
+        let script = StakeCredential::ScriptHash(hash);
+        let hot = StakeCredential::AddrKeyhash(Hash::new([0xaa; 28]));
+        let mut body = empty_tx_body();
+        body.certificates = Some(
+            NonEmptySet::try_from(vec![
+                Certificate::AuthCommitteeHot(key.clone(), hot.clone()),
+                Certificate::ResignCommitteeCold(key, None),
+                Certificate::AuthCommitteeHot(script.clone(), hot),
+                Certificate::ResignCommitteeCold(script, None),
+            ])
+            .unwrap(),
+        );
+        let ballot = BTreeMap::from([(gov_action(0xbb, 0), voting_procedure(Vote::Yes))]);
+        body.voting_procedures = Some(BTreeMap::from([
+            (
+                Voter::ConstitutionalCommitteeKey(Hash::new([0xaa; 28])),
+                ballot.clone(),
+            ),
+            (
+                Voter::ConstitutionalCommitteeScript(Hash::new([0xaa; 28])),
+                ballot,
+            ),
+        ]));
+
+        for valid in [true, false] {
+            let (_, raw) =
+                dolos_testing::blocks::make_conway_block_with_tx(100, body.clone(), None, valid);
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            assert_eq!(block.txs()[0].is_valid(), valid);
+            let mut builder = CardanoIndexDeltaBuilder::new();
+            builder.index_block(&block, &std::collections::HashMap::new());
+            let archive = builder.build();
+            let key_id = [&[0x12u8][..], hash.as_slice()].concat();
+            let script_id = [&[0x13u8][..], hash.as_slice()].concat();
+
+            assert_eq!(
+                sorted_keys(&archive[0], archive::COMMITTEE_CERTS),
+                [key_id.clone(), key_id, script_id.clone(), script_id]
+            );
+            assert_eq!(
+                sorted_keys(&archive[0], archive::COMMITTEE_VOTES),
+                [b"committee".to_vec()]
+            );
+            assert_eq!(
+                sorted_keys(&archive[0], archive::VOTER_VOTES),
+                [
+                    [&[0x02u8][..], &[0xaa; 28]].concat(),
+                    [&[0x03u8][..], &[0xaa; 28]].concat(),
+                ]
+            );
+            assert_eq!(
+                sorted_keys(&archive[0], archive::ACTION_VOTES),
+                [keys::encode(&ProposalKey::new(Hash::new([0xbb; 32]), 0)).to_vec()]
+            );
+        }
     }
 
     /// The dimension registry has to hold every dimension this builder emits.
