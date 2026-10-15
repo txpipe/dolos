@@ -820,6 +820,16 @@ mod key_tests {
     }
 
     #[test]
+    fn payment_tails_rebuild_their_address() {
+        let stake = StakeCredential::AddrKeyhash([0x22; 28].into());
+
+        for address in [base(0x11, stake), enterprise(0x33)] {
+            let (payment, tail) = split_payment(&address).unwrap();
+            assert_eq!(join_payment(&payment, &tail), address.to_vec());
+        }
+    }
+
+    #[test]
     fn an_account_prefix_holds_its_addresses_alone() {
         let a = AccountKey(StakeCredential::AddrKeyhash([0x22; 28].into()));
         let b = AccountKey(StakeCredential::AddrKeyhash([0x23; 28].into()));

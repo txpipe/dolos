@@ -331,8 +331,8 @@ mod tests {
         let staked = [credential.as_slice(), &[0x01], &[1; 28]].concat();
         let unstaked = [[0x00].as_slice(), &[1; 29]].concat();
 
-        // a staged stake address: the account, the epoch, then the address,
-        // which takes whatever width is left
+        // a staged stake address: the account, the epoch, then the address's
+        // key, last
         let staged = |address: &[u8]| [credential.as_slice(), &[0; 8], address].concat();
         keyed(StagedStakeAddress::NS, &staged(&staked)).unwrap();
         keyed(StagedStakeAddress::NS, &staged(&unstaked)).unwrap();
