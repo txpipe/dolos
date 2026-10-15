@@ -436,10 +436,15 @@ where
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&address, network)?;
 
+    let stake = account_key.address.to_vec();
     let refs = domain
-        .state()
-        .utxos_by_stake(&account_key.address.to_vec())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .blocking(move |domain| {
+            domain
+                .state()
+                .utxos_by_stake(&stake)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        })
+        .await?;
 
     let utxos =
         super::utxos::load_utxo_models(&domain, refs, pagination, super::utxos::UtxoFilter::All)

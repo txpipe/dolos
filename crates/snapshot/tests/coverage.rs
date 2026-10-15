@@ -198,14 +198,30 @@ fn the_log_namespaces_are_state_namespaces() {
     assert!(!logs.contains(UTXOS), "the utxo set is not a log");
 }
 
+/// Namespaces are kebab-case (decision 0056): lowercase ASCII words joined by
+/// hyphens, so a kind is the namespace verbatim and needs no rewrite.
+#[test]
+fn namespaces_are_kebab_case() {
+    for ns in NAMESPACES {
+        assert!(
+            !ns.is_empty()
+                && !ns.starts_with('-')
+                && !ns.ends_with('-')
+                && !ns.contains("--")
+                && ns.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'),
+            "{ns:?} is not kebab-case"
+        );
+    }
+}
+
 /// Done criterion 2: the KIND↔NS table, held to its own rule.
 ///
 /// The table is spelled out rather than composed — house style, and what makes
 /// the wire vocabulary greppable — so the rule that produced the spelling has
-/// to be a test or it is nothing. `_` becomes `-` because a media type's kind
-/// token admits hyphens and not underscores; no log namespace carries an
-/// underscore today, and the mapping is pinned anyway, because the namespace
-/// that does will arrive without anyone reading this comment first.
+/// to be a test or it is nothing. The kind is the namespace verbatim, because
+/// namespaces are kebab-case (decision 0056) and a media type's kind token
+/// admits hyphens and not underscores; `namespaces_are_kebab_case` pins the
+/// half of that rule this test leans on.
 #[test]
 fn log_kinds_derive_from_their_namespaces() {
     assert_eq!(LOG_KINDS.len(), LOG_NAMESPACES.len());
@@ -213,7 +229,7 @@ fn log_kinds_derive_from_their_namespaces() {
     let mut kinds = Vec::new();
 
     for (kind, ns) in LOG_KINDS {
-        assert_eq!(kind, format!("log-{}", ns.replace('_', "-")), "{ns}");
+        assert_eq!(kind, format!("log-{ns}"), "{ns}");
 
         // Both directions of the lookup, against the spelling and not against
         // the derivation: a table entry nothing can find is a layer nothing can
@@ -256,7 +272,7 @@ fn log_kinds_derive_from_their_namespaces() {
 
     // Nothing else is a log kind — `logs`, above all, which is what these six
     // replaced.
-    for absent in ["logs", "log-", "log-utxos", "blocks", "", "log_stakes"] {
+    for absent in ["logs", "log-", "log-utxos", "blocks", "", "log-stakes"] {
         assert!(log_ns_for(absent).is_none(), "{absent:?}");
     }
 }
@@ -295,7 +311,7 @@ fn state_kinds_derive_from_their_namespaces() {
     let mut kinds = Vec::new();
 
     for (kind, ns, shards) in STATE_KINDS {
-        assert_eq!(kind, format!("state-{}", ns.replace('_', "-")), "{ns}");
+        assert_eq!(kind, format!("state-{ns}"), "{ns}");
 
         // Both directions of the lookup, against the spelling and not against
         // the derivation: a table entry nothing can find is a layer nothing can
@@ -307,13 +323,10 @@ fn state_kinds_derive_from_their_namespaces() {
         kinds.push(kind);
     }
 
-    // The underscore rewrite is not hypothetical here, as it is for the logs:
-    // two state namespaces carry one.
-    assert_eq!(
-        state_kind_for("pending_rewards"),
-        Some("state-pending-rewards")
-    );
-    assert_eq!(state_kind_for("pending_mirs"), Some("state-pending-mirs"));
+    // The pre-0056 spellings are not aliases: v2 steles are a fresh lineage.
+    for retired in ["pending_rewards", "pending_mirs", "stakes"] {
+        assert!(state_kind_for(retired).is_none(), "{retired}");
+    }
 
     // Injective in both columns. Two namespaces sharing a kind would publish one
     // namespace's tip under another's name; two kinds sharing a namespace would

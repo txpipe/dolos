@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     epoch_value::{EpochValue, TransitionDefault},
-    eras::{EraProtocol, EraTransition},
+    eras::{EraKey, EraTransition},
 };
 use crate::pallas_extras::{
     default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices, default_ex_units,
@@ -283,8 +283,8 @@ impl EpochValue<PParamsSet> {
         }
 
         Some(EraTransition {
-            prev_version: EraProtocol::from(original),
-            new_version: EraProtocol::from(update),
+            prev_version: EraKey::from(original),
+            new_version: EraKey::from(update),
         })
     }
 }

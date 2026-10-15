@@ -154,9 +154,13 @@ where
     let pagination = Pagination::try_from(params)?;
 
     let refs = domain
-        .state()
-        .utxos_by_script_ref(hash.as_slice())
-        .map_err(log_and_500("failed to query script_ref index"))?;
+        .blocking(move |domain| {
+            domain
+                .state()
+                .utxos_by_script_ref(hash.as_slice())
+                .map_err(log_and_500("failed to query script_ref index"))
+        })
+        .await?;
 
     // an unknown script is a 404. a known script that no live UTxO holds as a
     // reference script is an empty page. the index cannot tell the two apart,

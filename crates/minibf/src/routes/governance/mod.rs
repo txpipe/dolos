@@ -64,6 +64,7 @@ use crate::{
         IntoModel, Unrounded,
     },
     pagination::{Order, Pagination, PaginationParameters},
+    scan::{EntityScan, ENTITY_CHUNK},
     Facade,
 };
 
@@ -413,6 +414,22 @@ fn delegates_to(
     }
 }
 
+/// The accounts that Blockfrost counts as delegators of `drep`, in key order,
+/// `chunk` accounts per blocking task.
+async fn load_drep_delegator_rows<D: Domain>(
+    domain: &Facade<D>,
+    drep: DRep,
+    registered_at: Option<(BlockSlot, TxOrder)>,
+    chunk: usize,
+) -> Result<Vec<DrepDelegatorRow>, StatusCode> {
+    EntityScan::<AccountState>::all(chunk)
+        .filter_map(domain, move |key, account| {
+            delegates_to(&account, &drep, registered_at)
+                .then(|| DrepDelegatorRow::new(EntityKey::of(&key), account))
+        })
+        .await
+}
+
 pub async fn drep_delegators<D>(
     Path(drep_id): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -441,17 +458,7 @@ where
 
     let network = domain.get_network_id()?;
 
-    let scan = domain.clone();
-    let mut rows =
-        tokio::task::spawn_blocking(move || -> Result<Vec<DrepDelegatorRow>, StatusCode> {
-            scan.iter_cardano_entities::<AccountState>(None)?
-                .filter_ok(|(_, account)| delegates_to(account, &drep, registered_at))
-                .map_ok(|(key, account)| DrepDelegatorRow::new(EntityKey::of(&key), account))
-                .collect::<Result<_, _>>()
-                .map_err(log_and_500("failed to scan drep delegators"))
-        })
-        .await
-        .map_err(log_and_500("drep delegators scan task failed"))??;
+    let mut rows = load_drep_delegator_rows(&domain, drep, registered_at, ENTITY_CHUNK).await?;
 
     rows.sort_unstable_by(|a, b| a.sort_key().cmp(&b.sort_key()));
 
@@ -7678,5 +7685,43 @@ mod tests {
                 STABLE_CURSOR_ATTEMPTS
             )
         );
+    }
+
+    #[tokio::test]
+    async fn chunked_drep_delegator_rows_match_unchunked() {
+        let app = crate::test_support::replicated_app();
+        let facade = app.facade();
+        let drep = synthetic_drep();
+        let registered_at = facade
+            .read_cardano_entity::<DRepState>(&DRepKey::from(&drep))
+            .expect("drep read")
+            .expect("drep state")
+            .registered_at;
+
+        let rows = |registered_at, chunk| {
+            let facade = facade.clone();
+            let drep = drep.clone();
+            async move {
+                load_drep_delegator_rows(&facade, drep, registered_at, chunk)
+                    .await
+                    .expect("delegator rows")
+                    .into_iter()
+                    .map(|row| (row.key.to_string(), row.live_stake))
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        assert!(
+            rows(None, usize::MAX).await.len() > 2,
+            "too few delegators to split into chunks"
+        );
+
+        for registered_at in [None, registered_at] {
+            let whole = rows(registered_at, usize::MAX).await;
+
+            for chunk in [1, 2] {
+                assert_eq!(rows(registered_at, chunk).await, whole);
+            }
+        }
     }
 }

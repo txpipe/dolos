@@ -222,7 +222,7 @@ impl WorkBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{EraBoundary, EraSummary};
+    use crate::model::{EraBoundary, EraState};
     use dolos_testing::blocks::make_conway_block;
 
     /// Single Conway era, epoch_length=100, slot_length=1.
@@ -231,7 +231,7 @@ mod tests {
         let mut summary = ChainSummary::default();
         summary.append_era(
             7, // Conway protocol
-            EraSummary {
+            EraState {
                 start: EraBoundary {
                     epoch: 0,
                     slot: 0,

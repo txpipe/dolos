@@ -56,7 +56,7 @@ pub struct Args {
     #[arg(long)]
     ephemeral: bool,
 
-    /// Also re-write the derived log records the archive carries (StakeLog,
+    /// Also re-write the derived log records the archive carries (PoolEpochLog,
     /// reward logs, EpochState, period logs); in-place mode only
     #[arg(long, conflicts_with_all = ["target", "ephemeral"])]
     rewrite_logs: bool,
