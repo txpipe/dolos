@@ -31,8 +31,8 @@ use dolos_cardano::{
         StakeAddressesRow, VoteEntry,
     },
     model::{
-        AccountStats, AddressStats, PaymentStats, StagedAccountStats, StagedAddressStats,
-        StagedPaymentAddress, StagedPaymentStats, Sum, UnitSums,
+        AccountStats, AddressStats, PaymentStats, StagedPaymentAddress, StagedPaymentStats, Sum,
+        UnitSums,
     },
     pallas::{
         codec::utils::Bytes,
@@ -248,10 +248,6 @@ pub fn address_stats() -> AddressStats {
     }
 }
 
-pub fn staged_address_stats() -> StagedAddressStats {
-    StagedAddressStats(address_stats())
-}
-
 pub fn payment_stats() -> PaymentStats {
     PaymentStats {
         tails: vec![
@@ -275,11 +271,7 @@ pub fn staged_payment_stats() -> StagedPaymentStats {
 }
 
 pub fn account_stats() -> AccountStats {
-    AccountStats { tx_overlap: 5 }
-}
-
-pub fn staged_account_stats() -> StagedAccountStats {
-    StagedAccountStats { tx_overlap: 7 }
+    AccountStats { tx_count: 5 }
 }
 
 pub fn staged_stake_address() -> StagedStakeAddress {
