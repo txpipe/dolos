@@ -3,8 +3,7 @@
 //! [`stelae`] is the protocol: framing, canonicalization, digests and the
 //! naming rules that let vendors coexist in one registry. It knows nothing
 //! about Cardano. This crate is the other half — the *profile* — and it says
-//! what a Dolos stele actually contains: thirty-eight layer kinds, their media
-//! types,
+//! what a Dolos stele actually contains: its layer kinds, their media types,
 //! the tag a sequence renders as, what goes in `position`, `parameters` and
 //! each layer's `scope`, and the byte-exact codec for every record shape.
 //!
@@ -196,12 +195,12 @@ pub const LOG_KINDS: [(&str, Namespace); 9] = [
 /// rename cannot silently rename a published kind. The derivation is a test,
 /// not a constructor (`state_kinds_derive_from_their_namespaces`).
 ///
-/// The shard count is **specification, never tuning**: the four namespaces
-/// whose populations are chain-scale — the UTxO set, accounts, assets and
-/// datums — shard sixteen ways by the first key nibble, and every other
-/// namespace is a single blob. Re-sharding a namespace is a media-type-version
-/// event for that namespace's kind, decided by the format's owner; it is not a
-/// constant to nudge.
+/// The shard count is **specification, never tuning**: the namespaces whose
+/// populations are chain-scale — the UTxO set, accounts, assets and datums —
+/// shard sixteen ways by the first key nibble, and every other namespace is a
+/// single blob. Re-sharding a namespace is a media-type-version event for that
+/// namespace's kind, decided by the format's owner; it is not a constant to
+/// nudge.
 pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
     ("state-account-epochs", AccountEpochLog::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
@@ -235,7 +234,7 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 
-/// The twenty-six state kind names alone: what [`StateScope`] answers for
+/// The state kind names alone: what [`StateScope`] answers for
 /// [`Scope::kinds`].
 pub const STATE_KIND_NAMES: [&str; STATE_KINDS.len()] = {
     let mut names = [""; STATE_KINDS.len()];
@@ -271,7 +270,7 @@ pub fn state_ns_for(kind: &str) -> Option<Namespace> {
         .map(|(_, ns, _)| ns)
 }
 
-/// Whether `kind` is one of the twenty-six state kinds — the tip predicate the
+/// Whether `kind` is one of the state kinds — the tip predicate the
 /// driver's staging arithmetic sums under, reaching it through
 /// [`stelae_driver::DriverProfile::is_state_kind`].
 pub fn is_state_kind(kind: &str) -> bool {
@@ -419,12 +418,12 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
 ///
 /// The log kinds are the exception, and the only one: a log layer exists if and
 /// only if its namespace has at least one record in the window, so an epoch
-/// contributes between two and eleven layers. Split out because the two arities
-/// are what the layer arithmetic in [`export::export`] and
-/// [`registry::preview`] is made of.
+/// contributes these plus one layer per log namespace it has records for. Split
+/// out because the two arities are what the layer arithmetic in
+/// [`export::export`] and [`registry::preview`] is made of.
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
-/// The thirty-eight layer kinds, in the order the inscription lists them.
+/// Every layer kind, in the order the inscription lists them.
 pub const KINDS: [&str; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 1] = {
     let mut kinds = [""; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 1];
     let at = fill(&mut kinds, 0, &EPOCH_KINDS);
@@ -434,8 +433,8 @@ pub const KINDS: [&str; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 1] = {
     kinds
 };
 
-/// The kinds whose scope is an epoch range. The remaining two are tip layers
-/// and carry their own scope shapes.
+/// The kinds whose scope is an epoch range. The state kinds and `digests` carry
+/// their own scope shapes.
 ///
 /// The namespace lives in the kind rather than in the scope, so a log layer
 /// wears the same [`EpochScope`] as `blocks` and `indexes` do — which is what
@@ -1197,7 +1196,7 @@ pub enum StateRole {
 
 /// Scope of one shard of one state kind, in one of its two roles.
 ///
-/// Uniform across all twenty-six kinds, single-blob namespaces included — their
+/// Uniform across every state kind, single-blob namespaces included — their
 /// one layer is shard 0 — so the header and descriptor shapes stay one shape
 /// and a reader never dispatches on the kind to parse a scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

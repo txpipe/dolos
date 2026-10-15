@@ -179,8 +179,8 @@ fn an_empty_store_set_exports_the_pinned_skeleton() {
 /// Done criterion 2: a log under a namespace no `log-{ns}` kind carries stops
 /// the publish and names the namespace.
 ///
-/// The split traded an all-namespace walk for a closed list of six, and this is
-/// the price of that trade paid up front. Written straight into the archive
+/// The split traded an all-namespace walk for a closed list, and this is the
+/// price of that trade paid up front. Written straight into the archive
 /// rather than through a ledger phase, because no ledger phase writes one today
 /// — the point is what happens on the day one does.
 #[test]
