@@ -125,8 +125,9 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountStats, AddressStats, EpochState, FirstMintChunk, FixedNamespace as _, PaymentStats,
-        PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, StakeAddressesRow,
+        AccountAddressChunk, AccountStats, AddressStats, EpochState, FirstMintChunk,
+        FixedNamespace as _, PaymentAddressChunk, PolicyKey, PolicyMintChunk, PoolEpochLog,
+        PoolKey,
     };
 
     use super::*;
@@ -175,9 +176,9 @@ mod tests {
         let policy = LogKey::of(7, &(PolicyKey([1; 28].into()), 3u32));
         assert_eq!(policy.entity().len(), 32);
 
-        // stake addresses take an account: a credential header and its hash
+        // account address chunks take an account: a credential header and its hash
         let account = [slot.as_slice(), &[0x82, 0x01, 0x58, 0x1c], &[1; 28]].concat();
-        decode(StakeAddressesRow::NS, wire(&account).as_bytes()).unwrap();
+        decode(AccountAddressChunk::NS, wire(&account).as_bytes()).unwrap();
         decode(AccountStats::NS, wire(&account).as_bytes()).unwrap();
 
         // address stats take an account and a base address's header and
@@ -187,7 +188,7 @@ mod tests {
         let unstaked = [slot.as_slice(), &[0x00], &[1; 29]].concat();
         decode(AddressStats::NS, wire(&unstaked).as_bytes()).unwrap();
         decode(
-            PaymentStats::NS,
+            PaymentAddressChunk::NS,
             wire(&[slot.as_slice(), &[1; 28]].concat()).as_bytes(),
         )
         .unwrap();
@@ -195,12 +196,12 @@ mod tests {
         for (ns, len) in [
             (EpochState::NS, 32),
             (FirstMintChunk::NS, 32),
-            (StakeAddressesRow::NS, 32),
+            (AccountAddressChunk::NS, 32),
             (AccountStats::NS, 32),
             (AddressStats::NS, 1),
             (AddressStats::NS, 32),
             (AddressStats::NS, 33),
-            (PaymentStats::NS, 32),
+            (PaymentAddressChunk::NS, 32),
             (PoolEpochLog::NS, 32),
             (PoolEpochLog::NS, 0),
         ] {

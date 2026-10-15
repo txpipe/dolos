@@ -8,6 +8,12 @@
 //! staged rows. Readers take the staged rows first and the sealed ones second,
 //! and per epoch the sealed row wins, so a seal running beside a read leaves
 //! its answer unchanged.
+//!
+//! A `Stats` type is one type in both stores, keyed epoch first. A `Set`
+//! (decision 0057) lives in state only, one row per member keyed by a
+//! [`GroupKey`], and its seal builds a `Chunk` in the archive: one list per
+//! group and epoch. `PaymentStats` lives in state only too, sealing into the
+//! same `Chunk` as its `Set`.
 
 use std::{collections::BTreeMap, ops::Range};
 
@@ -21,8 +27,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{indexes::SlotOrder, ChainSummary};
 
+pub mod account_addresses;
 pub mod first_mints;
-pub mod stake_addresses;
 pub mod stats;
 
 /// Most entries one sealed list row holds; a longer list spans several rows.
@@ -31,19 +37,19 @@ pub const CHUNK_LEN: usize = 256;
 /// Staged rows a seal handles per commit pair.
 const SEAL_BATCH: usize = 50_000;
 
-/// The key of a staged row: `group ‖ epoch (8 B) ‖ member`.
+/// The key of a `Set` row: `group ‖ epoch (8 B) ‖ member`.
 ///
 /// Group-major, so one prefix scan over a group returns every staged epoch of
 /// it, in epoch order. The key is exact: no two rows share it, and readers
 /// take a group's rows without filtering.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct StagedKey<G, M> {
+pub struct GroupKey<G, M> {
     pub group: G,
     pub epoch: Epoch,
     pub member: M,
 }
 
-impl<G: FixedKey, M: KeyCodec> KeyCodec for StagedKey<G, M> {
+impl<G: FixedKey, M: KeyCodec> KeyCodec for GroupKey<G, M> {
     fn encode_key(&self, out: &mut KeyBytes) {
         self.group.encode_key(out);
         self.epoch.encode_key(out);
@@ -64,12 +70,13 @@ impl<G: FixedKey, M: KeyCodec> KeyCodec for StagedKey<G, M> {
 /// A group is the prefix of its staged keys. Declared per group kind: the
 /// prefix trait is core's, so a blanket impl over every group is not one this
 /// crate may write.
-impl<M: KeyCodec> dolos_core::KeyPrefix<StagedKey<crate::PolicyKey, M>> for crate::PolicyKey {}
-impl<M: KeyCodec> dolos_core::KeyPrefix<StagedKey<crate::AccountKey, M>> for crate::AccountKey {}
-impl<M: KeyCodec> dolos_core::KeyPrefix<StagedKey<crate::PaymentKey, M>> for crate::PaymentKey {}
+impl<M: KeyCodec> dolos_core::KeyPrefix<GroupKey<crate::PolicyKey, M>> for crate::PolicyKey {}
+impl<M: KeyCodec> dolos_core::KeyPrefix<GroupKey<crate::AccountKey, M>> for crate::AccountKey {}
+impl<M: KeyCodec> dolos_core::KeyPrefix<GroupKey<crate::PaymentKey, M>> for crate::PaymentKey {}
 
-/// A row staged in state until its epoch seals.
-pub trait StagedRow:
+/// A `Set` row: one member of a group in an epoch, held in state until the
+/// epoch seals into a `Chunk`.
+pub trait GroupRow:
     StateEntity<Key: Clone + std::fmt::Debug + Serialize + DeserializeOwned> + Clone + std::fmt::Debug
 {
     fn key(&self) -> Self::Key;
@@ -84,7 +91,7 @@ pub trait StagedRow:
 /// WAL, so visitors drop repeats within a block before emitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned"))]
-pub struct StageIfAbsent<E: StagedRow> {
+pub struct StageIfAbsent<E: GroupRow> {
     pub(crate) key: E::Key,
     pub(crate) row: E,
 
@@ -92,7 +99,7 @@ pub struct StageIfAbsent<E: StagedRow> {
     pub(crate) was_new: bool,
 }
 
-impl<E: StagedRow> StageIfAbsent<E> {
+impl<E: GroupRow> StageIfAbsent<E> {
     pub fn new(row: E) -> Self {
         Self {
             key: row.key(),
@@ -102,7 +109,7 @@ impl<E: StagedRow> StageIfAbsent<E> {
     }
 }
 
-impl<E: StagedRow> EntityDelta for StageIfAbsent<E> {
+impl<E: GroupRow> EntityDelta for StageIfAbsent<E> {
     type Entity = E;
 
     fn key(&self) -> NsKey {
@@ -206,11 +213,11 @@ pub fn seal_staged<D: Domain>(
     let sealable = |epoch| is_sealable(chain, mutable_slots, epoch, boundary);
 
     first_mints::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
-    stake_addresses::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
+    account_addresses::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
     stats::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)
 }
 
-/// Seal group-first staged rows in chunks of whole groups.
+/// Seal a `Set`'s rows in chunks of whole groups.
 ///
 /// `rows` come in key order, and a chunk closes at the first group boundary
 /// after it holds `batch` rows. `seal` writes the chunk's archive rows, which
@@ -220,22 +227,22 @@ pub fn seal_staged<D: Domain>(
 pub fn seal_groups<D, E, G, M, R>(
     state: &D::State,
     archive: &D::Archive,
-    rows: impl IntoIterator<Item = Result<(StagedKey<G, M>, R), ChainError>>,
+    rows: impl IntoIterator<Item = Result<(GroupKey<G, M>, R), ChainError>>,
     batch: usize,
     mut seal: impl FnMut(
-        &[(StagedKey<G, M>, R)],
+        &[(GroupKey<G, M>, R)],
         &<D::Archive as ArchiveStore>::Writer,
     ) -> Result<(), ChainError>,
 ) -> Result<(), ChainError>
 where
     D: Domain,
-    E: StateEntity<Key = StagedKey<G, M>>,
+    E: StateEntity<Key = GroupKey<G, M>>,
     G: FixedKey + PartialEq,
     M: KeyCodec,
 {
-    let mut chunk: Vec<(StagedKey<G, M>, R)> = Vec::new();
+    let mut chunk: Vec<(GroupKey<G, M>, R)> = Vec::new();
 
-    let mut flush = |chunk: &mut Vec<(StagedKey<G, M>, R)>| -> Result<(), ChainError> {
+    let mut flush = |chunk: &mut Vec<(GroupKey<G, M>, R)>| -> Result<(), ChainError> {
         let writer = archive.start_writer()?;
         seal(chunk, &writer)?;
         writer.commit()?;
@@ -363,7 +370,7 @@ pub fn read_staged<S, E>(
 ) -> Result<BTreeMap<Epoch, Vec<E>>, ChainError>
 where
     S: StateStore,
-    E: StagedRow,
+    E: GroupRow,
 {
     let mut out: BTreeMap<Epoch, Vec<E>> = BTreeMap::new();
 
@@ -621,10 +628,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn staged_keys_are_exact_and_group_by_prefix() {
+    fn group_keys_are_exact_and_group_by_prefix() {
         use crate::{AssetKey, PolicyKey};
 
-        type Key = StagedKey<PolicyKey, AssetKey>;
+        type Key = GroupKey<PolicyKey, AssetKey>;
 
         let group = PolicyKey([7u8; 28].into());
         let key = |group, epoch| Key {
@@ -659,26 +666,26 @@ mod tests {
 
     proptest::proptest! {
         #[test]
-        fn staged_keys_round_trip_and_decode_exactly(
+        fn group_keys_round_trip_and_decode_exactly(
             group in proptest::prelude::any::<[u8; 28]>(),
             epoch in proptest::prelude::any::<u64>(),
             member in proptest::prelude::any::<[u8; 32]>(),
         ) {
             use crate::{AssetKey, PolicyKey};
 
-            let key = StagedKey {
+            let key = GroupKey {
                 group: PolicyKey(group.into()),
                 epoch,
                 member: AssetKey(member.into()),
             };
 
             let raw = dolos_core::keys::encode(&key);
-            proptest::prop_assert_eq!(StagedKey::decode_key(&raw), Ok(key));
+            proptest::prop_assert_eq!(GroupKey::decode_key(&raw), Ok(key));
             proptest::prop_assert!(
-                StagedKey::<PolicyKey, AssetKey>::decode_key(&raw[..raw.len() - 1]).is_err()
+                GroupKey::<PolicyKey, AssetKey>::decode_key(&raw[..raw.len() - 1]).is_err()
             );
             proptest::prop_assert!(
-                StagedKey::<PolicyKey, AssetKey>::decode_key(&[raw.as_slice(), &[0]].concat())
+                GroupKey::<PolicyKey, AssetKey>::decode_key(&[raw.as_slice(), &[0]].concat())
                     .is_err()
             );
         }

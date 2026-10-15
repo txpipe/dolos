@@ -23,7 +23,7 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use super::AccountKey;
-use crate::periods::{StageIfAbsent, StageSum, StagedKey, StagedRow, SumRow};
+use crate::periods::{GroupKey, GroupRow, StageIfAbsent, StageSum, SumRow};
 
 hash_key!(
     /// A payment credential, by its hash alone: what `/addresses/{address}/total`
@@ -184,17 +184,19 @@ display_as_stored!(AddressKey);
 
 impl KeyPrefix<AddressKey> for AccountKey {}
 
-/// An address without its payment hash: the header, then the delegation part.
+/// An address without the payment hash of its group: the header, then the
+/// delegation part: the tail [`split_payment`] returns and [`join_payment`]
+/// takes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PaymentTail(pub Vec<u8>);
+pub struct PaymentAddressKey(pub Vec<u8>);
 
-impl KeyCodec for PaymentTail {
+impl KeyCodec for PaymentAddressKey {
     fn encode_key(&self, out: &mut KeyBytes) {
         out.extend_from_slice(&self.0);
     }
 
     fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
-        non_empty(bytes, "payment tail").map(Self)
+        non_empty(bytes, "payment address key").map(Self)
     }
 }
 
@@ -364,11 +366,12 @@ impl SumRow for AddressStats {
 pub type StageAddressStats = StageSum<AddressStats>;
 
 /// A payment credential's addresses that moved value in one epoch, as
-/// tails, and the txs that moved any of them.
+/// tails, and the txs that moved any of them: the seal of a
+/// [`PaymentAddressSet`] and its [`PaymentStats`] together.
 ///
 /// Sealed at `epoch_start(e) ‖ PaymentKey`, the tails in byte order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode)]
-pub struct PaymentStats {
+pub struct PaymentAddressChunk {
     #[n(0)]
     pub tails: Vec<ByteVec>,
 
@@ -376,15 +379,19 @@ pub struct PaymentStats {
     pub tx_count: u64,
 }
 
-entity_boilerplate!(PaymentStats, "payment-stats", log = PaymentKey);
+entity_boilerplate!(
+    PaymentAddressChunk,
+    "payment-address-chunks",
+    log = PaymentKey
+);
 
-/// One address of a payment credential that moved value in an epoch, staged
-/// until the epoch seals.
+/// One address of a payment credential that moved value in an epoch, held in
+/// state until the epoch seals into a [`PaymentAddressChunk`].
 ///
-/// Keyed `payment ‖ epoch ‖ tail`, so one prefix scan returns every staged
+/// Keyed `payment ‖ epoch ‖ tail`, so one prefix scan returns every unsealed
 /// epoch of a credential.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
-pub struct StagedPaymentAddress {
+pub struct PaymentAddressSet {
     #[n(0)]
     pub payment: Hash<28>,
 
@@ -397,17 +404,17 @@ pub struct StagedPaymentAddress {
 }
 
 entity_boilerplate!(
-    StagedPaymentAddress,
-    "staged-payment-addresses",
-    state = StagedKey<PaymentKey, PaymentTail>
+    PaymentAddressSet,
+    "payment-addresses",
+    state = GroupKey<PaymentKey, PaymentAddressKey>
 );
 
-impl StagedRow for StagedPaymentAddress {
-    fn key(&self) -> StagedKey<PaymentKey, PaymentTail> {
-        StagedKey {
+impl GroupRow for PaymentAddressSet {
+    fn key(&self) -> GroupKey<PaymentKey, PaymentAddressKey> {
+        GroupKey {
             group: PaymentKey(self.payment),
             epoch: self.epoch,
-            member: PaymentTail(self.tail.clone()),
+            member: PaymentAddressKey(self.tail.clone()),
         }
     }
 
@@ -416,23 +423,26 @@ impl StagedRow for StagedPaymentAddress {
     }
 }
 
-pub type StagePaymentAddress = StageIfAbsent<StagedPaymentAddress>;
+pub type StagePaymentAddress = StageIfAbsent<PaymentAddressSet>;
 
 /// The txs that moved value through a payment credential's addresses in an
 /// epoch that has not sealed, keyed `payment ‖ epoch`.
+///
+/// In state only: its count seals into the [`PaymentAddressChunk`] beside the
+/// addresses.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
-pub struct StagedPaymentStats {
+pub struct PaymentStats {
     #[n(0)]
     pub tx_count: u64,
 }
 
 entity_boilerplate!(
-    StagedPaymentStats,
-    "staged-payment-stats",
-    state = StagedKey<PaymentKey, ()>
+    PaymentStats,
+    "payment-stats",
+    state = GroupKey<PaymentKey, ()>
 );
 
-impl SumRow for StagedPaymentStats {
+impl SumRow for PaymentStats {
     fn add(&mut self, other: &Self) {
         self.tx_count = self.tx_count.saturating_add(other.tx_count);
     }
@@ -446,7 +456,7 @@ impl SumRow for StagedPaymentStats {
     }
 }
 
-pub type StagePaymentStats = StageSum<StagedPaymentStats>;
+pub type StagePaymentStats = StageSum<PaymentStats>;
 
 /// The distinct txs that moved value through any of an account's addresses
 /// in one epoch.
@@ -540,12 +550,12 @@ pub(crate) mod testing {
     }
 
     prop_compose! {
-        pub fn any_staged_payment_address()(
+        pub fn any_payment_address_set()(
             payment in root::any_hash_28(),
             epoch in 0u64..1000,
             tail in prop::collection::vec(any::<u8>(), 1..64),
-        ) -> StagedPaymentAddress {
-            StagedPaymentAddress { payment, epoch, tail }
+        ) -> PaymentAddressSet {
+            PaymentAddressSet { payment, epoch, tail }
         }
     }
 }
@@ -575,9 +585,9 @@ mod prop_tests {
             entity in prop::option::of(1u64..1_000_000),
             delta in 1u64..1_000_000,
         ) {
-            let key = StagedKey { group: PaymentKey([1; 28].into()), epoch: 3, member: () };
-            let stage = StagePaymentStats::new(key, StagedPaymentStats { tx_count: delta });
-            let rows = entity.map(|tx_count| StagedPaymentStats { tx_count });
+            let key = GroupKey { group: PaymentKey([1; 28].into()), epoch: 3, member: () };
+            let stage = StagePaymentStats::new(key, PaymentStats { tx_count: delta });
+            let rows = entity.map(|tx_count| PaymentStats { tx_count });
             assert_delta_roundtrip(rows.clone(), stage.clone());
             assert_delta_serde_roundtrip(rows, stage);
 
@@ -590,8 +600,8 @@ mod prop_tests {
 
         #[test]
         fn stage_payment_address_roundtrip(
-            entity in prop::option::of(any_staged_payment_address()),
-            row in any_staged_payment_address(),
+            entity in prop::option::of(any_payment_address_set()),
+            row in any_payment_address_set(),
         ) {
             assert_delta_roundtrip(entity.clone(), StagePaymentAddress::new(row.clone()));
             assert_delta_serde_roundtrip(entity, StagePaymentAddress::new(row));
@@ -747,10 +757,10 @@ mod key_tests {
         );
 
         assert_eq!(
-            encode(&StagedKey {
+            encode(&GroupKey {
                 group: PaymentKey([0x44; 28].into()),
                 epoch: 5,
-                member: PaymentTail(vec![0x60, 0x01]),
+                member: PaymentAddressKey(vec![0x60, 0x01]),
             })
             .to_vec(),
             [[0x44; 28].as_slice(), &5u64.to_be_bytes(), &[0x60, 0x01]].concat()
@@ -881,7 +891,7 @@ mod key_tests {
             Err(KeyError::Trailing(28))
         );
 
-        assert!(PaymentTail::decode_key(&[]).is_err());
+        assert!(PaymentAddressKey::decode_key(&[]).is_err());
     }
 
     #[test]

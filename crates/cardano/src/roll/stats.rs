@@ -18,9 +18,9 @@ use pallas::{
 use super::{BlockVisitor, WorkDeltas};
 use crate::{
     model::stats::split_payment, owned::OwnedMultiEraOutput, periods::stats::tx_stats,
-    periods::StagedKey, AccountKey, AccountStats, AddressKey, AddressStats, Genesis, PParamsSet,
-    PaymentKey, StageAccountStats, StageAddressStats, StagePaymentAddress, StagePaymentStats,
-    StagedPaymentAddress, StagedPaymentStats,
+    periods::GroupKey, AccountKey, AccountStats, AddressKey, AddressStats, Genesis, PParamsSet,
+    PaymentAddressSet, PaymentKey, PaymentStats, StageAccountStats, StageAddressStats,
+    StagePaymentAddress, StagePaymentStats,
 };
 
 #[derive(Default)]
@@ -110,7 +110,7 @@ impl BlockVisitor for StatsVisitor {
         }
 
         for (payment, tail) in self.members.drain() {
-            deltas.add_for_entity(StagePaymentAddress::new(StagedPaymentAddress {
+            deltas.add_for_entity(StagePaymentAddress::new(PaymentAddressSet {
                 payment,
                 epoch,
                 tail,
@@ -119,12 +119,12 @@ impl BlockVisitor for StatsVisitor {
 
         for (payment, tx_count) in self.payments.drain() {
             deltas.add_for_entity(StagePaymentStats::new(
-                StagedKey {
+                GroupKey {
                     group: PaymentKey(payment),
                     epoch,
                     member: (),
                 },
-                StagedPaymentStats { tx_count },
+                PaymentStats { tx_count },
             ));
         }
 

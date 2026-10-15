@@ -4,8 +4,9 @@
 //! `/accounts/{stake}/addresses/total`.
 //!
 //! - `address-stats` holds one row per (epoch, address), keyed stake-first.
-//! - `payment-stats` lists, per (epoch, payment credential), the credential's
-//!   addresses as tails, with its tx count.
+//! - `payment-addresses` (a `Set`) and `payment-stats` hold, in state, a
+//!   payment credential's addresses as tails and its tx count; they seal
+//!   together into one `payment-address-chunks` row per (epoch, credential).
 //! - `account-stats` holds one row per (epoch, account) whose addresses moved
 //!   value, with the account's tx count.
 //!
@@ -36,11 +37,11 @@ use pallas::{
     },
 };
 
-use super::{oldest_staged, seal_epochs, StagedKey};
+use super::{oldest_staged, seal_epochs, GroupKey};
 use crate::{
     model::stats::join_payment, pallas_extras, AccountKey, AccountStats, AddressKey, AddressStats,
-    ChainSummary, FixedNamespace as _, PaymentKey, PaymentStats, StagedPaymentAddress,
-    StagedPaymentStats, Sum, UnitSums,
+    ChainSummary, FixedNamespace as _, PaymentAddressChunk, PaymentAddressSet, PaymentKey,
+    PaymentStats, Sum, UnitSums,
 };
 
 /// Address rows read per round trip.
@@ -203,9 +204,10 @@ pub(crate) fn seal<D: Domain>(
     seal_epochs::<D, AccountStats, _>(state, archive, chain, sealable, batch)
 }
 
-/// One (credential, epoch) of payment stats, staged.
+/// One (credential, epoch) of payment addresses and tx count, from either
+/// store.
 #[derive(Default)]
-struct StagedPayment {
+struct PaymentEpoch {
     tails: Vec<Vec<u8>>,
     tx_count: u64,
 }
@@ -220,9 +222,9 @@ fn seal_payments<D: Domain>(
     sealable: &dyn Fn(Epoch) -> bool,
     batch: usize,
 ) -> Result<(), ChainError> {
-    let mut staged: BTreeMap<(Hash<28>, Epoch), StagedPayment> = BTreeMap::new();
+    let mut staged: BTreeMap<(Hash<28>, Epoch), PaymentEpoch> = BTreeMap::new();
 
-    for row in state.iter_entities_typed::<StagedPaymentAddress>(None)? {
+    for row in state.iter_entities_typed::<PaymentAddressSet>(None)? {
         let (_, row) = row?;
 
         if sealable(row.epoch) {
@@ -234,7 +236,7 @@ fn seal_payments<D: Domain>(
         }
     }
 
-    for row in state.iter_entities_typed::<StagedPaymentStats>(None)? {
+    for row in state.iter_entities_typed::<PaymentStats>(None)? {
         let (key, row) = row?;
 
         if sealable(key.epoch) {
@@ -272,7 +274,7 @@ fn seal_payments<D: Domain>(
             writer.write_log_typed(
                 chain.epoch_start(*epoch),
                 &PaymentKey(*payment),
-                &PaymentStats {
+                &PaymentAddressChunk {
                     tails: tails.into_iter().map(Into::into).collect(),
                     tx_count: row.tx_count,
                 },
@@ -285,20 +287,17 @@ fn seal_payments<D: Domain>(
 
         for ((payment, epoch), row) in &chunk {
             for tail in &row.tails {
-                let key = StagedPaymentAddress {
+                let key = PaymentAddressSet {
                     payment: *payment,
                     epoch: *epoch,
                     tail: tail.clone(),
                 };
 
-                writer.save_entity_typed::<StagedPaymentAddress>(
-                    &super::StagedRow::key(&key),
-                    None,
-                )?;
+                writer.save_entity_typed::<PaymentAddressSet>(&super::GroupRow::key(&key), None)?;
             }
 
-            writer.save_entity_typed::<StagedPaymentStats>(
-                &StagedKey {
+            writer.save_entity_typed::<PaymentStats>(
+                &GroupKey {
                     group: PaymentKey(*payment),
                     epoch: *epoch,
                     member: (),
@@ -465,22 +464,24 @@ pub fn payment_totals<D: Domain>(
 ) -> Result<AddressStats, ChainError> {
     let state = domain.state();
 
-    let mut staged: BTreeMap<Epoch, StagedPayment> = BTreeMap::new();
+    let mut staged: BTreeMap<Epoch, PaymentEpoch> = BTreeMap::new();
 
-    for row in state.iter_entities_typed::<StagedPaymentAddress>(Some(RangeOf::prefix(payment)))? {
+    for row in state.iter_entities_typed::<PaymentAddressSet>(Some(RangeOf::prefix(payment)))? {
         let (_, row) = row?;
         staged.entry(row.epoch).or_default().tails.push(row.tail);
     }
 
-    for row in state.iter_entities_typed::<StagedPaymentStats>(Some(RangeOf::prefix(payment)))? {
+    for row in state.iter_entities_typed::<PaymentStats>(Some(RangeOf::prefix(payment)))? {
         let (key, row) = row?;
         staged.entry(key.epoch).or_default().tx_count = row.tx_count;
     }
 
-    let sealed =
-        super::read_sealed::<_, PaymentStats>(domain.archive(), chain, epochs.clone(), |_| {
-            *payment
-        })?;
+    let sealed = super::read_sealed::<_, PaymentAddressChunk>(
+        domain.archive(),
+        chain,
+        epochs.clone(),
+        |_| *payment,
+    )?;
 
     let mut tx_count = 0u64;
     let mut keys = Vec::new();
@@ -488,9 +489,9 @@ pub fn payment_totals<D: Domain>(
     for epoch in epochs {
         let row = match sealed.get(&epoch) {
             Some(raw) => {
-                let row = PaymentStats::decode_entity(PaymentStats::NS, raw)?;
+                let row = PaymentAddressChunk::decode_entity(PaymentAddressChunk::NS, raw)?;
 
-                StagedPayment {
+                PaymentEpoch {
                     tails: row.tails.into_iter().map(Vec::from).collect(),
                     tx_count: row.tx_count,
                 }
@@ -712,13 +713,13 @@ mod tests {
                     .unwrap();
 
                 let (payment, tail) = split_payment(&address).unwrap();
-                let row = StagedPaymentAddress {
+                let row = PaymentAddressSet {
                     payment,
                     epoch,
                     tail,
                 };
                 writer
-                    .write_entity_typed(&super::super::StagedRow::key(&row), &row)
+                    .write_entity_typed(&super::super::GroupRow::key(&row), &row)
                     .unwrap();
 
                 *payments.entry(payment).or_default() += 1 + i;
@@ -727,12 +728,12 @@ mod tests {
             for (payment, tx_count) in payments {
                 writer
                     .write_entity_typed(
-                        &StagedKey {
+                        &GroupKey {
                             group: PaymentKey(payment),
                             epoch,
                             member: (),
                         },
-                        &StagedPaymentStats {
+                        &PaymentStats {
                             tx_count: tx_count - 1,
                         },
                     )
@@ -768,7 +769,7 @@ mod tests {
 
     type Logs = (
         Vec<(BlockSlot, AddressKey, AddressStats)>,
-        Vec<(BlockSlot, PaymentKey, PaymentStats)>,
+        Vec<(BlockSlot, PaymentKey, PaymentAddressChunk)>,
         Vec<(BlockSlot, AccountKey, AccountStats)>,
     );
 
@@ -782,7 +783,7 @@ mod tests {
                 .map(Result::unwrap)
                 .collect(),
             archive
-                .iter_logs_typed::<PaymentStats>(None)
+                .iter_logs_typed::<PaymentAddressChunk>(None)
                 .unwrap()
                 .map(Result::unwrap)
                 .collect(),
@@ -803,11 +804,11 @@ mod tests {
                 .unwrap()
                 .count(),
             state
-                .iter_entities_typed::<StagedPaymentAddress>(None)
+                .iter_entities_typed::<PaymentAddressSet>(None)
                 .unwrap()
                 .count(),
             state
-                .iter_entities_typed::<StagedPaymentStats>(None)
+                .iter_entities_typed::<PaymentStats>(None)
                 .unwrap()
                 .count(),
             state
