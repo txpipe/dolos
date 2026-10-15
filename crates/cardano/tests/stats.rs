@@ -13,7 +13,7 @@ use dolos_cardano::{
     periods::stats::{
         account_totals, address_totals, payment_totals, sum_account_block_txs, sum_block_txs,
     },
-    AccountKey, AddressStats, AddressStatsKey, CardanoDelta, ChainSummary, PaymentKey,
+    AccountKey, AddressKey, AddressStats, CardanoDelta, ChainSummary, PaymentKey,
     StagedAddressStats, UnitSums,
 };
 use dolos_core::{
@@ -494,7 +494,7 @@ fn totals(domain: &ToyDomain) -> Vec<AddressStats> {
     let mut out = Vec::new();
 
     for address in addresses() {
-        let key = AddressStatsKey::of(&Address::from_bytes(&address).unwrap());
+        let key = AddressKey::of(&Address::from_bytes(&address).unwrap());
         out.push(address_totals(domain, &chain, epochs(), &key).unwrap());
     }
 
