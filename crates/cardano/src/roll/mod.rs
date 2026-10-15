@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
-    ChainError, Domain, EntityKey, Genesis, InvariantViolation, StateError, StateStore as _,
-    TxOrder, TxoRef,
+    ChainError, Domain, Genesis, InvariantViolation, RangeOf, StateError, StateStore as _, TxOrder,
+    TxoRef,
 };
 use pallas::{
     codec::utils::KeepRaw,
@@ -18,7 +18,7 @@ use tracing::{debug, instrument};
 
 use crate::{
     load_effective_pparams, load_gov, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor,
-    utxoset, Cache, DRepState, FixedNamespace as _, PParamsSet,
+    utxoset, Cache, DRepKey, DRepState, FixedNamespace as _, PParamsSet,
 };
 
 // Sub-modules
@@ -30,6 +30,7 @@ pub mod dreps;
 pub mod epochs;
 pub mod pools;
 pub mod proposals;
+pub mod stats;
 pub mod txs;
 pub mod work_unit;
 
@@ -43,6 +44,7 @@ use datums::DatumVisitor;
 use dreps::{DRepStateVisitor, DormancyContext};
 use epochs::EpochStateVisitor;
 use pools::PoolStateVisitor;
+use stats::StatsVisitor;
 use txs::TxLogVisitor;
 
 pub trait BlockVisitor {
@@ -101,6 +103,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        order: &TxOrder,
         index: u32,
         output: &MultiEraOutput,
     ) -> Result<(), ChainError> {
@@ -115,6 +118,7 @@ pub trait BlockVisitor {
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        order: &TxOrder,
         mint: &MultiEraPolicyAssets,
     ) -> Result<(), ChainError> {
         Ok(())
@@ -225,6 +229,7 @@ pub struct DeltaBuilder<'a> {
     pool_state: PoolStateVisitor,
     tx_logs: TxLogVisitor,
     proposal_logs: ProposalVisitor,
+    stats: StatsVisitor,
 }
 
 impl<'a> DeltaBuilder<'a> {
@@ -255,6 +260,7 @@ impl<'a> DeltaBuilder<'a> {
             pool_state: Default::default(),
             tx_logs: Default::default(),
             proposal_logs: Default::default(),
+            stats: Default::default(),
         }
     }
 
@@ -343,6 +349,15 @@ impl<'a> DeltaBuilder<'a> {
             self.epoch_start,
             self.protocol,
         )?;
+        self.stats.visit_root(
+            &mut deltas,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
+        )?;
 
         for (order, tx) in block.txs().iter().enumerate() {
             self.account_state
@@ -360,6 +375,7 @@ impl<'a> DeltaBuilder<'a> {
             self.tx_logs.visit_tx(&mut deltas, block, tx, self.utxos)?;
             self.proposal_logs
                 .visit_tx(&mut deltas, block, tx, self.utxos)?;
+            self.stats.visit_tx(&mut deltas, block, tx, self.utxos)?;
 
             for input in tx.consumes() {
                 let txoref = TxoRef::from(&input);
@@ -385,27 +401,73 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
                     self.proposal_logs
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
+                    self.stats
+                        .visit_input(&mut deltas, block, tx, &input, resolved)?;
                     Result::<_, ChainError>::Ok(())
                 })?;
             }
 
             for (index, output) in tx.produces() {
-                self.account_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.asset_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.datum_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.drep_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.epoch_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.pool_state
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                self.account_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.asset_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.datum_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.drep_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.epoch_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.pool_state.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
                 self.tx_logs
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
-                self.proposal_logs
-                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                    .visit_output(&mut deltas, block, tx, &order, index as u32, &output)?;
+                self.proposal_logs.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
+                self.stats
+                    .visit_output(&mut deltas, block, tx, &order, index as u32, &output)?;
             }
 
             // The Conway LEDGER rule runs CERTS, GOV, the withdrawal drain and
@@ -418,15 +480,23 @@ impl<'a> DeltaBuilder<'a> {
             if tx.is_valid() {
                 for mint in tx.mints() {
                     self.account_state
-                        .visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.asset_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.datum_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.drep_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.epoch_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.pool_state.visit_mint(&mut deltas, block, tx, &mint)?;
-                    self.tx_logs.visit_mint(&mut deltas, block, tx, &mint)?;
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.asset_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.datum_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.drep_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.epoch_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.pool_state
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.tx_logs
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                     self.proposal_logs
-                        .visit_mint(&mut deltas, block, tx, &mint)?;
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.stats
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                 }
 
                 for cert in tx.certs() {
@@ -445,6 +515,8 @@ impl<'a> DeltaBuilder<'a> {
                     self.tx_logs
                         .visit_cert(&mut deltas, block, tx, &order, &cert)?;
                     self.proposal_logs
+                        .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                    self.stats
                         .visit_cert(&mut deltas, block, tx, &order, &cert)?;
                 }
 
@@ -465,6 +537,8 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
                     self.proposal_logs
                         .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
+                    self.stats
+                        .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
                 }
 
                 if let Some(update) = tx.update() {
@@ -483,6 +557,8 @@ impl<'a> DeltaBuilder<'a> {
                     self.tx_logs
                         .visit_update(&mut deltas, block, Some(tx), &update)?;
                     self.proposal_logs
+                        .visit_update(&mut deltas, block, Some(tx), &update)?;
+                    self.stats
                         .visit_update(&mut deltas, block, Some(tx), &update)?;
                 }
             }
@@ -503,6 +579,7 @@ impl<'a> DeltaBuilder<'a> {
                 self.tx_logs.visit_datums(&mut deltas, block, tx, datum)?;
                 self.proposal_logs
                     .visit_datums(&mut deltas, block, tx, datum)?;
+                self.stats.visit_datums(&mut deltas, block, tx, datum)?;
             }
 
             // Same LEDGER gate as above: GOV never registers a proposal
@@ -525,6 +602,8 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
                     self.proposal_logs
                         .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
+                    self.stats
+                        .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
                 }
             }
 
@@ -544,6 +623,8 @@ impl<'a> DeltaBuilder<'a> {
                 self.tx_logs
                     .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
                 self.proposal_logs
+                    .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
+                self.stats
                     .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
             }
         }
@@ -565,6 +646,7 @@ impl<'a> DeltaBuilder<'a> {
                 .visit_update(&mut deltas, block, None, &update)?;
             self.proposal_logs
                 .visit_update(&mut deltas, block, None, &update)?;
+            self.stats.visit_update(&mut deltas, block, None, &update)?;
         }
 
         self.account_state.flush(&mut deltas)?;
@@ -575,6 +657,7 @@ impl<'a> DeltaBuilder<'a> {
         self.pool_state.flush(&mut deltas)?;
         self.tx_logs.flush(&mut deltas)?;
         self.proposal_logs.flush(&mut deltas)?;
+        self.stats.flush(&mut deltas)?;
 
         self.work.deltas = deltas;
 
@@ -618,9 +701,11 @@ pub(crate) fn compute_delta<D: Domain>(
         let mut keys = Vec::new();
 
         // raw iteration: only the keys matter, skip the CBOR decode
-        for record in state.iter_entities(DRepState::NS, EntityKey::full_range())? {
+        let all = RangeOf::<DRepKey>::all().into_raw();
+
+        for record in state.iter_entities(DRepState::NS, all)? {
             let (key, _) = record?;
-            keys.push(key);
+            keys.push(key.decode::<DRepKey>().map_err(StateError::from)?);
         }
 
         dormancy.drep_keys = Arc::new(keys);
@@ -657,7 +742,7 @@ pub(crate) fn compute_delta<D: Domain>(
 mod tests {
     use std::collections::BTreeMap;
 
-    use dolos_core::NsKey;
+    use dolos_core::EntityKey;
     use pallas::codec::utils::{NonEmptySet, NonZeroInt, Set};
     use pallas::crypto::hash::Hash;
     use pallas::ledger::primitives::conway::{
@@ -666,7 +751,7 @@ mod tests {
     };
     use pallas::ledger::primitives::{StakeCredential, UnitInterval};
 
-    use crate::model::{EpochStatsUpdate, PParamValue as Val};
+    use crate::model::{EpochStatsUpdate, PParamValue as Val, PoolKey};
     use crate::{CardanoDelta, OwnedMultiEraBlock};
 
     use super::*;
@@ -815,8 +900,8 @@ mod tests {
         deltas
             .entities
             .keys()
-            .filter(|NsKey(namespace, _)| *namespace == ns)
-            .map(|NsKey(_, key)| key.clone())
+            .filter(|key| key.ns() == ns)
+            .map(|key| key.key().clone())
             .collect()
     }
 
@@ -824,7 +909,7 @@ mod tests {
         deltas
             .entities
             .iter()
-            .filter(|(NsKey(ns, _), _)| *ns == "epochs")
+            .filter(|(key, _)| key.ns() == "epochs")
             .flat_map(|(_, group)| group.iter())
             .find_map(|delta| match delta {
                 CardanoDelta::EpochStatsUpdate(stats) => Some((**stats).clone()),
@@ -836,7 +921,7 @@ mod tests {
     /// The operator hash of the fixture's `PoolRegistration` certificate,
     /// which `PoolRegistration::key` uses as the `pools` entity key.
     fn cert_pool_key() -> EntityKey {
-        EntityKey::from([0x77u8; 28].as_slice())
+        EntityKey::of(&PoolKey([0x77u8; 28].into()))
     }
 
     /// The block issuer's operator hash, which `PoolStateVisitor::visit_root`
@@ -847,7 +932,7 @@ mod tests {
         let block = OwnedMultiEraBlock::decode(issuer.1).unwrap();
         let key = block.view().header().issuer_vkey().unwrap().to_vec();
         let operator = pallas::crypto::hash::Hasher::<224>::hash(&key);
-        EntityKey::from(operator.as_slice())
+        EntityKey::of(&PoolKey(operator))
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::Duration,
 };
 
@@ -25,13 +26,12 @@ use dolos_cardano::{
     cip151,
     indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
     model::{AccountState, PoolState},
-    pallas_extras, PoolDelegation, PoolHash, StakeLog,
+    pallas_extras, AccountKey, PoolDelegation, PoolHash, PoolKey, StakeLog,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use futures::{future::join_all, StreamExt};
 use itertools::Itertools;
 use pallas::{
-    codec::minicbor,
     crypto::hash::Hasher,
     ledger::{
         addresses::Network,
@@ -42,7 +42,6 @@ use pallas::{
         traverse::MultiEraBlock,
     },
 };
-use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::{
@@ -54,14 +53,13 @@ use crate::{
     },
     pagination::{Pagination, PaginationParameters},
     routes::governance::voter_casts,
+    scan::{EntityScan, ENTITY_CHUNK},
     Facade,
 };
 
-const ACCOUNT_SCAN_CHUNK_SIZE: usize = 4096;
-
 type ActivePools = HashSet<PoolHash>;
 
-#[derive(Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 struct PoolMetrics {
     live_stake: u64,
     active_stake: u64,
@@ -128,8 +126,8 @@ fn reduce_account_chunk(
     active_pools: &ActivePools,
 ) -> PoolMetrics {
     accounts
-        .par_iter()
-        .fold(PoolMetrics::default, |mut metrics, account| {
+        .iter()
+        .fold(PoolMetrics::default(), |mut metrics, account| {
             let live_stake = account.live_stake();
 
             if live_stake_denominator_pool(account, active_pools).is_some() {
@@ -155,32 +153,25 @@ fn reduce_account_chunk(
 
             metrics
         })
-        .reduce(PoolMetrics::default, |a, b| a.merge(b))
 }
 
-fn load_active_pools<D>(domain: &Facade<D>) -> Result<ActivePools, StatusCode>
+/// The pools whose live snapshot is not retired, `chunk` pools per blocking
+/// task.
+async fn load_active_pools<D>(domain: &Facade<D>, chunk: usize) -> Result<ActivePools, StatusCode>
 where
-    D: Domain,
+    D: Domain + Clone + Send + Sync + 'static,
     Option<PoolState>: From<D::Entity>,
 {
-    let mut active_pools = ActivePools::default();
+    let active = EntityScan::<PoolState>::all(chunk)
+        .filter_map(domain, |_, pool| {
+            pool.snapshot
+                .live()
+                .is_some_and(|snapshot| !snapshot.is_retired)
+                .then_some(pool.operator)
+        })
+        .await?;
 
-    for item in domain
-        .iter_cardano_entities::<PoolState>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    {
-        let (_, pool) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        if pool
-            .snapshot
-            .live()
-            .is_some_and(|snapshot| !snapshot.is_retired)
-        {
-            active_pools.insert(pool.operator);
-        }
-    }
-
-    Ok(active_pools)
+    Ok(active.into_iter().collect())
 }
 
 fn compute_live_pledge<D: Domain>(
@@ -192,10 +183,9 @@ where
     Option<AccountState>: From<D::Entity>,
 {
     owners.iter().try_fold(0u64, |acc, owner| {
-        let credential = StakeCredential::AddrKeyhash(*owner);
-        let key = minicbor::to_vec(&credential).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let key = AccountKey(StakeCredential::AddrKeyhash(*owner));
 
-        let Some(account) = domain.read_cardano_entity::<AccountState>(key)? else {
+        let Some(account) = domain.read_cardano_entity::<AccountState>(&key)? else {
             return Ok(acc);
         };
 
@@ -215,39 +205,31 @@ where
     })
 }
 
-fn compute_pool_metrics_sync<D: Domain>(
-    domain: Facade<D>,
+/// The stake metrics of `target_pool`, from a scan of every account, `chunk`
+/// accounts per blocking task.
+async fn compute_pool_metrics<D>(
+    domain: &Facade<D>,
     target_pool: PoolHash,
     active_pools: ActivePools,
     owners: Vec<pallas::crypto::hash::Hash<28>>,
+    chunk: usize,
 ) -> Result<PoolMetrics, StatusCode>
 where
+    D: Domain + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
 {
-    let mut accounts = domain.iter_cardano_entities::<AccountState>(None)?;
-    let mut chunk = Vec::with_capacity(ACCOUNT_SCAN_CHUNK_SIZE);
-    let mut metrics = PoolMetrics::default();
+    let active_pools = Arc::new(active_pools);
 
-    loop {
-        chunk.clear();
+    let mut metrics = EntityScan::<AccountState>::all(chunk)
+        .fold(domain, PoolMetrics::default(), move |metrics, accounts| {
+            let accounts: Vec<_> = accounts.into_iter().map(|(_, account)| account).collect();
+            Ok(metrics.merge(reduce_account_chunk(&accounts, target_pool, &active_pools)))
+        })
+        .await?;
 
-        for _ in 0..ACCOUNT_SCAN_CHUNK_SIZE {
-            let Some(item) = accounts.next() else {
-                break;
-            };
-
-            let (_, account) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            chunk.push(account);
-        }
-
-        if chunk.is_empty() {
-            break;
-        }
-
-        metrics = metrics.merge(reduce_account_chunk(&chunk, target_pool, &active_pools));
-    }
-
-    metrics.live_pledge = compute_live_pledge(&domain, target_pool, &owners)?;
+    metrics.live_pledge = domain
+        .blocking(move |domain| compute_live_pledge(&domain, target_pool, &owners))
+        .await?;
 
     Ok(metrics)
 }
@@ -317,10 +299,8 @@ fn pool_hash_from_bytes(bytes: &[u8]) -> Option<PoolHash> {
 /// Gives the hash only for the canonical ID: the lowercase Bech32 text of 28
 /// bytes.
 ///
-/// An `EntityKey` has 32 bytes. `EntityKey::from(&[u8])` adds zero bytes to a
-/// short value and cuts a long value to 32 bytes. Thus, a 29-byte value that
-/// ends with `0x00` finds the pool of its first 28 bytes. The parsers return a
-/// `PoolHash` for this reason.
+/// A pool is keyed by exactly its 28-byte hash, so the parsers return a
+/// `PoolHash` rather than the bytes they decoded.
 fn canonical_pool_hash(input: &str) -> Option<PoolHash> {
     let (_, bytes) = bech32::decode(input).ok()?;
     let hash = pool_hash_from_bytes(&bytes)?;
@@ -644,7 +624,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
     let pool = domain
-        .read_cardano_entity::<PoolState>(hash)?
+        .read_cardano_entity::<PoolState>(&PoolKey(hash))?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let snapshot = pool
@@ -663,18 +643,10 @@ where
         .ensure_k()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let active_pools = load_active_pools(&domain)?;
+    let active_pools = load_active_pools(&domain, ENTITY_CHUNK).await?;
     let owners = params.pool_owners.clone();
-    let operator = pool.operator;
-    let domain_clone = domain.clone();
-    let metrics = tokio::task::spawn_blocking(move || {
-        compute_pool_metrics_sync(domain_clone, operator, active_pools, owners)
-    })
-    .await
-    .map_err(|err| {
-        tracing::error!(error = ?err, "pool metrics task failed");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })??;
+    let metrics =
+        compute_pool_metrics(&domain, pool.operator, active_pools, owners, ENTITY_CHUNK).await?;
 
     let (registration, retirement) = load_pool_cert_hashes(&domain, pool.operator).await?;
     let calidus_key = load_pool_calidus_key(&domain, pool.operator).await?;
@@ -948,38 +920,79 @@ where
     Ok(Json(out))
 }
 
-pub async fn all_extended<D: Domain>(
+/// Live and active stake per pool.
+#[derive(Debug, Default, PartialEq)]
+struct PoolStakes {
+    live: HashMap<PoolHash, u64>,
+    active: HashMap<PoolHash, u64>,
+}
+
+impl PoolStakes {
+    fn add_account(&mut self, state: &AccountState) {
+        if let Some(hash) = live_stake_pool(state) {
+            *self.live.entry(hash).or_default() += state.live_stake();
+        }
+
+        if let Some(hash) = active_stake_pool(state) {
+            *self.active.entry(hash).or_default() +=
+                state.stake.set().map(|x| x.total()).unwrap_or(0);
+        }
+    }
+}
+
+/// The stakes of every pool, from a scan of every account, `chunk` accounts
+/// per blocking task.
+async fn load_pool_stakes<D>(domain: &Facade<D>, chunk: usize) -> Result<PoolStakes, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<AccountState>: From<D::Entity>,
+{
+    EntityScan::<AccountState>::all(chunk)
+        .fold(domain, PoolStakes::default(), |mut stakes, accounts| {
+            for (_, state) in &accounts {
+                stakes.add_account(state);
+            }
+            Ok(stakes)
+        })
+        .await
+}
+
+/// The pools whose live snapshot is not retired, keyed by registration slot
+/// and operator, `chunk` pools per blocking task.
+async fn load_listed_pools<D>(
+    domain: &Facade<D>,
+    chunk: usize,
+) -> Result<Vec<((BlockSlot, PoolHash), (PoolKey, PoolState))>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<PoolState>: From<D::Entity>,
+{
+    EntityScan::<PoolState>::all(chunk)
+        .filter_map(domain, |key, state| {
+            if state.snapshot.live().map(|x| x.is_retired).unwrap_or(false) {
+                return None;
+            }
+            Some(((state.register_slot, state.operator), (key, state)))
+        })
+        .await
+}
+
+pub async fn all_extended<D>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<PoolListExtendedInner>>, Error>
 where
+    D: Domain + Clone + Send + Sync + 'static,
     Option<PoolState>: From<D::Entity>,
     Option<AccountState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
 
-    let mut live_stake_map = HashMap::new();
-    let mut active_stake_map = HashMap::new();
-    for x in domain
-        .iter_cardano_entities::<AccountState>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    {
-        let (_, state) = x.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if let Some(hash) = live_stake_pool(&state) {
-            let stake = state.live_stake();
-            live_stake_map
-                .entry(hash)
-                .and_modify(|entry| *entry += stake)
-                .or_insert(stake);
-        };
-        if let Some(hash) = active_stake_pool(&state) {
-            let stake = state.stake.set().map(|x| x.total()).unwrap_or(0);
-            active_stake_map
-                .entry(hash)
-                .and_modify(|entry| *entry += stake)
-                .or_insert(stake);
-        };
-    }
+    let PoolStakes {
+        live: live_stake_map,
+        active: active_stake_map,
+    } = load_pool_stakes(&domain, ENTITY_CHUNK).await?;
+
     let circulating_supply = dolos_cardano::load_epoch::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .initial_pots
@@ -989,19 +1002,7 @@ where
         .ensure_k()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut pools = domain
-        .iter_cardano_entities::<PoolState>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .flat_map(|x| {
-            let Ok((key, state)) = x else {
-                return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
-            };
-            if state.snapshot.live().map(|x| x.is_retired).unwrap_or(false) {
-                return None;
-            }
-            Some(Ok(((state.register_slot, state.operator), (key, state))))
-        })
-        .collect::<Result<Vec<((BlockSlot, PoolHash), (EntityKey, PoolState))>, StatusCode>>()?;
+    let mut pools = load_listed_pools(&domain, ENTITY_CHUNK).await?;
 
     pools.sort_by(|a, b| Ord::cmp(&a.0, &b.0));
 
@@ -1064,42 +1065,223 @@ where
     Ok(Json(out))
 }
 
-fn select_retiring_pools(
+/// The place of the latest retirement certificate of a pool on chain: the
+/// slot, the transaction index in the block, and the certificate index in the
+/// transaction.
+type RetirementPosition = (BlockSlot, usize, usize);
+
+fn retiring_candidates(
     pools: impl IntoIterator<Item = PoolState>,
     current_epoch: u64,
-    pagination: &Pagination,
 ) -> Vec<(u64, PoolHash)> {
-    let mut retiring: Vec<(u64, BlockSlot, PoolHash)> = pools
+    pools
         .into_iter()
         .filter_map(|pool| {
             let retiring_epoch = pool.retiring_epoch?;
-            (retiring_epoch > current_epoch).then_some((
-                retiring_epoch,
-                pool.register_slot,
-                pool.operator,
-            ))
+            (retiring_epoch > current_epoch).then_some((retiring_epoch, pool.operator))
         })
-        .collect();
-
-    retiring.sort_unstable_by_key(|(epoch, slot, operator)| (*epoch, *slot, *operator));
-
-    if matches!(pagination.order, crate::pagination::Order::Desc) {
-        retiring.reverse();
-    }
-
-    retiring
-        .into_iter()
-        .skip(pagination.skip())
-        .take(pagination.count)
-        .map(|(retiring_epoch, _, operator)| (retiring_epoch, operator))
         .collect()
 }
 
-pub async fn all_retiring<D: Domain>(
+fn retired_candidates(pools: impl IntoIterator<Item = PoolState>) -> Vec<(u64, PoolHash)> {
+    pools
+        .into_iter()
+        .filter_map(|pool| {
+            let is_retired = pool.snapshot.live().map(|x| x.is_retired).unwrap_or(false);
+            let retiring_epoch = pool.retiring_epoch?;
+            is_retired.then_some((retiring_epoch, pool.operator))
+        })
+        .collect()
+}
+
+/// Returns the epochs that the page touches and that have more than one pool.
+/// Only the pools of these epochs need a retirement position.
+fn tied_epochs_on_page(list: &[(u64, PoolHash)], pagination: &Pagination) -> HashSet<u64> {
+    let mut epochs: Vec<u64> = list.iter().map(|(epoch, _)| *epoch).collect();
+    epochs.sort_unstable();
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        epochs.reverse();
+    }
+
+    let sizes = epochs.iter().counts();
+
+    epochs
+        .iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .filter(|epoch| sizes[*epoch] > 1)
+        .copied()
+        .collect()
+}
+
+/// Reads the retirement position of each pool in `pools`.
+///
+/// A registration cancels an earlier retirement. So the newest certificate of
+/// a retiring or retired pool is its latest retirement. The pool certificate
+/// index gives the slot of that certificate without a block read. Pools with
+/// the same slot also need the transaction index, so the function reads that
+/// block once.
+///
+/// The lookup has no upper slot bound. So it also finds a certificate from a
+/// block that the state store applied after the request started.
+fn retirement_positions<D: Domain>(
+    domain: &D,
+    pools: &[PoolHash],
+) -> Result<HashMap<PoolHash, RetirementPosition>, StatusCode> {
+    let archive = domain.archive();
+    let mut by_slot: HashMap<BlockSlot, Vec<PoolHash>> = HashMap::new();
+
+    for pool in pools {
+        let slot = archive
+            .slots_by_pool_certs(pool.as_slice(), 0, BlockSlot::MAX)
+            .map_err(log_and_500("failed to read the pool certs index"))?
+            .next_back()
+            .transpose()
+            .map_err(log_and_500("failed to read the pool certs index"))?;
+
+        // A pruned archive can lack the certificate. Then the pool gets no
+        // position.
+        if let Some(slot) = slot {
+            by_slot.entry(slot).or_default().push(*pool);
+        }
+    }
+
+    let mut out = HashMap::new();
+
+    for (slot, shared) in by_slot {
+        if let [pool] = shared.as_slice() {
+            out.insert(*pool, (slot, 0, 0));
+            continue;
+        }
+
+        let Some(body) = archive
+            .get_block_by_slot(&slot)
+            .map_err(log_and_500("failed to read a pool certs block"))?
+        else {
+            continue;
+        };
+
+        let block = MultiEraBlock::decode(&body)
+            .map_err(log_and_500("failed to decode a pool certs block"))?;
+
+        for (tx_index, tx) in block.txs().iter().enumerate() {
+            for (cert_index, cert) in tx.certs().iter().enumerate() {
+                let Some(cert) = pallas_extras::cert_as_pool_retirement(cert) else {
+                    continue;
+                };
+
+                // A later certificate replaces an earlier one. So the map
+                // keeps the latest retirement in the block.
+                if shared.contains(&cert.operator) {
+                    out.insert(cert.operator, (slot, tx_index, cert_index));
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Sorts the list by epoch, then by retirement position, then by operator.
+/// Returns one page of the result.
+///
+/// A pool without a position counts as the oldest retirement in its epoch.
+/// A pool gets no position when a pruned archive lacks its certificate. Then
+/// its retirement is older than the kept history.
+fn order_page(
+    list: Vec<(u64, PoolHash)>,
+    positions: &HashMap<PoolHash, RetirementPosition>,
+    pagination: &Pagination,
+) -> Vec<(u64, PoolHash)> {
+    let mut keyed: Vec<(u64, Option<RetirementPosition>, PoolHash)> = list
+        .into_iter()
+        .map(|(epoch, pool)| (epoch, positions.get(&pool).copied(), pool))
+        .collect();
+
+    keyed.sort_unstable();
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        keyed.reverse();
+    }
+
+    keyed
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(epoch, _, pool)| (epoch, pool))
+        .collect()
+}
+
+/// Orders the list like Blockfrost and returns one page.
+///
+/// Blockfrost sorts the pools by retirement epoch. Inside one epoch, it sorts
+/// them by the transaction of the latest retirement certificate. Blockfrost
+/// gives no order to pools that retire in one transaction. Here the
+/// certificate index orders them.
+fn page_retirements<D: Domain>(
+    domain: &D,
+    list: Vec<(u64, PoolHash)>,
+    pagination: &Pagination,
+) -> Result<Vec<(u64, PoolHash)>, StatusCode> {
+    let tied = tied_epochs_on_page(&list, pagination);
+
+    let pools: Vec<PoolHash> = list
+        .iter()
+        .filter(|(epoch, _)| tied.contains(epoch))
+        .map(|(_, pool)| *pool)
+        .collect();
+
+    let positions = retirement_positions(domain, &pools)?;
+
+    Ok(order_page(list, &positions, pagination))
+}
+
+fn retire_list_model(list: Vec<(u64, PoolHash)>) -> Result<Vec<PoolListRetireInner>, StatusCode> {
+    list.into_iter()
+        .map(|(retiring_epoch, operator)| {
+            Ok(PoolListRetireInner {
+                pool_id: bech32_pool(operator)?,
+                epoch: retiring_epoch as i32,
+            })
+        })
+        .collect()
+}
+
+/// Reads every pool state and returns one page of the pools that `select`
+/// keeps.
+///
+/// The pool states are read in chunks on the blocking pool. The page then
+/// reads the archive in one more blocking task.
+async fn load_retirement_page<D, F>(
+    domain: Facade<D>,
+    pagination: Pagination,
+    select: F,
+) -> Result<Vec<PoolListRetireInner>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<PoolState>: From<D::Entity>,
+    F: FnOnce(Vec<PoolState>) -> Vec<(u64, PoolHash)> + Send + 'static,
+{
+    let pools = EntityScan::<PoolState>::all(ENTITY_CHUNK)
+        .filter_map(&domain, |_, pool| Some(pool))
+        .await?;
+
+    domain
+        .blocking(move |domain| {
+            let page = page_retirements(&domain.inner, select(pools), &pagination)?;
+
+            retire_list_model(page)
+        })
+        .await
+}
+
+pub async fn all_retiring<D>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<PoolListRetireInner>>, Error>
 where
+    D: Domain + Clone + Send + Sync + 'static,
     Option<PoolState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
@@ -1108,78 +1290,25 @@ where
     let summary = domain.get_chain_summary()?;
     let (current_epoch, _) = summary.slot_epoch(tip);
 
-    let pools = domain
-        .iter_cardano_entities::<PoolState>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(|item| item.map(|(_, pool)| pool))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let out = select_retiring_pools(pools, current_epoch, &pagination)
-        .into_iter()
-        .map(|(retiring_epoch, operator)| {
-            Ok(PoolListRetireInner {
-                pool_id: bech32_pool(operator)?,
-                epoch: retiring_epoch as i32,
-            })
-        })
-        .collect::<Result<Vec<_>, StatusCode>>()?;
+    let out = load_retirement_page(domain, pagination, move |pools| {
+        retiring_candidates(pools, current_epoch)
+    })
+    .await?;
 
     Ok(Json(out))
 }
 
-fn select_retired_pools(
-    pools: impl IntoIterator<Item = PoolState>,
-    pagination: &Pagination,
-) -> Vec<(u64, PoolHash)> {
-    let mut retired: Vec<(u64, BlockSlot, PoolHash)> = pools
-        .into_iter()
-        .filter_map(|pool| {
-            let is_retired = pool.snapshot.live().map(|x| x.is_retired).unwrap_or(false);
-            let retiring_epoch = pool.retiring_epoch?;
-            is_retired.then_some((retiring_epoch, pool.register_slot, pool.operator))
-        })
-        .collect();
-
-    retired.sort_unstable_by_key(|(epoch, slot, operator)| (*epoch, *slot, *operator));
-
-    if matches!(pagination.order, crate::pagination::Order::Desc) {
-        retired.reverse();
-    }
-
-    retired
-        .into_iter()
-        .skip(pagination.skip())
-        .take(pagination.count)
-        .map(|(retiring_epoch, _, operator)| (retiring_epoch, operator))
-        .collect()
-}
-
-pub async fn all_retired<D: Domain>(
+pub async fn all_retired<D>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<PoolListRetireInner>>, Error>
 where
+    D: Domain + Clone + Send + Sync + 'static,
     Option<PoolState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
 
-    let pools = domain
-        .iter_cardano_entities::<PoolState>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(|item| item.map(|(_, pool)| pool))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let out = select_retired_pools(pools, &pagination)
-        .into_iter()
-        .map(|(retiring_epoch, operator)| {
-            Ok(PoolListRetireInner {
-                pool_id: bech32_pool(operator)?,
-                epoch: retiring_epoch as i32,
-            })
-        })
-        .collect::<Result<Vec<_>, StatusCode>>()?;
+    let out = load_retirement_page(domain, pagination, retired_candidates).await?;
 
     Ok(Json(out))
 }
@@ -1195,7 +1324,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
     let pool = domain
-        .read_cardano_entity::<PoolState>(hash)?
+        .read_cardano_entity::<PoolState>(&PoolKey(hash))?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let onchain = pool
@@ -1220,7 +1349,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
     let pool = domain
-        .read_cardano_entity::<PoolState>(hash)?
+        .read_cardano_entity::<PoolState>(&PoolKey(hash))?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let relays = pool
@@ -1262,6 +1391,80 @@ impl IntoModel<PoolDelegatorsInner> for PoolDelegatorModelBuilder {
     }
 }
 
+/// Pool block index slots read per blocking task while a page is located.
+const POOL_BLOCKS_CHUNK: usize = 4096;
+
+/// The slots of one page of the blocks `pool` minted up to `tip`, and whether
+/// the pool minted any. The index is read `chunk` slots per blocking task; a
+/// pool tags at most one block per slot, so each chunk resumes past the last
+/// slot it read.
+async fn pool_block_page_slots<D>(
+    domain: &Facade<D>,
+    pool: PoolHash,
+    tip: BlockSlot,
+    order: crate::pagination::Order,
+    skip: usize,
+    count: usize,
+    chunk: usize,
+) -> Result<(Vec<BlockSlot>, bool), StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let (mut start, mut end) = (0, tip);
+    let mut seen = 0usize;
+    let mut page = Vec::new();
+    let mut minted_any = false;
+
+    loop {
+        // Never read past the page.
+        let want = (skip + count).saturating_sub(seen).clamp(1, chunk.max(1));
+
+        let slots = domain
+            .blocking(move |domain| {
+                let slots = domain
+                    .archive()
+                    .slots_by_pool_blocks(pool.as_slice(), start, end)
+                    .map_err(log_and_500("failed to read the pool blocks index"))?;
+
+                match order {
+                    crate::pagination::Order::Asc => {
+                        slots.take(want).collect::<Result<Vec<_>, _>>()
+                    }
+                    crate::pagination::Order::Desc => {
+                        slots.rev().take(want).collect::<Result<Vec<_>, _>>()
+                    }
+                }
+                .map_err(log_and_500("failed to page the pool blocks index"))
+            })
+            .await?;
+
+        minted_any |= !slots.is_empty();
+
+        for slot in &slots {
+            if seen >= skip && page.len() < count {
+                page.push(*slot);
+            }
+            seen += 1;
+        }
+
+        let Some(&last) = slots.last() else {
+            break;
+        };
+
+        if slots.len() < want || page.len() >= count {
+            break;
+        }
+
+        match order {
+            crate::pagination::Order::Asc => start = last + 1,
+            crate::pagination::Order::Desc if last == 0 => break,
+            crate::pagination::Order::Desc => end = last - 1,
+        }
+    }
+
+    Ok((page, minted_any))
+}
+
 /// Blocks minted by a pool, oldest first.
 ///
 /// The `pool_blocks` archive dimension tags each block with its issuer pool,
@@ -1289,38 +1492,23 @@ where
 
     let tip = domain.get_tip_slot()?;
 
-    let inner = domain.inner.clone();
-    let skip = pagination.skip();
-    let count = pagination.count;
-    let order = pagination.order;
+    let (page_slots, minted_any) = pool_block_page_slots(
+        &domain,
+        pool,
+        tip,
+        pagination.order,
+        pagination.skip(),
+        pagination.count,
+        POOL_BLOCKS_CHUNK,
+    )
+    .await?;
 
-    let (page, minted_any) =
-        tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), StatusCode> {
-            let mut slots = inner
-                .archive()
-                .slots_by_pool_blocks(pool.as_slice(), 0, tip)
-                .map_err(log_and_500("failed to read the pool blocks index"))?
-                .peekable();
-
-            // Whether the pool minted anything at all. The 404 rule below
-            // needs it, and the slots are already in memory.
-            let minted_any = slots.peek().is_some();
-
-            // Page over the slots alone, so no block outside the page is read.
-            let page_slots: Vec<BlockSlot> = match order {
-                crate::pagination::Order::Asc => {
-                    slots.skip(skip).take(count).collect::<Result<_, _>>()
-                }
-                crate::pagination::Order::Desc => {
-                    slots.rev().skip(skip).take(count).collect::<Result<_, _>>()
-                }
-            }
-            .map_err(log_and_500("failed to page the pool blocks index"))?;
-
+    let page = domain
+        .blocking(move |domain| {
             let mut page = Vec::with_capacity(page_slots.len());
 
             for slot in page_slots {
-                let body = inner
+                let body = domain
                     .archive()
                     .get_block_by_slot(&slot)
                     .map_err(log_and_500("failed to read a block of a pool"))?;
@@ -1332,7 +1520,7 @@ where
                     continue;
                 };
 
-                let Some(header) = super::epochs::decode_block_header(&body)? else {
+                let Some(header) = crate::mapping::blocks::decode_block_header(&body)? else {
                     tracing::warn!(slot, "pool blocks index points at a Byron block");
                     continue;
                 };
@@ -1340,28 +1528,74 @@ where
                 page.push(header.hash().to_string());
             }
 
-            Ok((page, minted_any))
+            Ok(page)
         })
-        .await
-        .map_err(log_and_500("pool blocks scan task failed"))??;
+        .await?;
 
     // Blockfrost 404s a pool that db-sync never saw. The `PoolState` entity
     // covers every pool that registered on chain, and a pool must register
     // before it can mint. The index acts as a second proof of existence, for
     // any issuer that has no entity.
-    if !minted_any && !domain.cardano_entity_exists::<PoolState>(pool)? {
+    if !minted_any && !domain.cardano_entity_exists::<PoolState>(&PoolKey(pool))? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
     Ok(Json(page))
 }
 
-pub async fn by_id_delegators<D: Domain>(
+/// One page of the accounts whose live stake goes to `pool`, in key order,
+/// `chunk` accounts per blocking task. The scan stops once the page is full.
+async fn load_delegators_page<D>(
+    domain: &Facade<D>,
+    pool: PoolHash,
+    skip: usize,
+    count: usize,
+    chunk: usize,
+) -> Result<Vec<(AccountKey, AccountState)>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<AccountState>: From<D::Entity>,
+{
+    let mut accounts = EntityScan::<AccountState>::all(chunk);
+    let mut seen = 0usize;
+    let mut page = Vec::new();
+
+    while page.len() < count {
+        let Some(delegators) = accounts
+            .next(domain, move |accounts| {
+                accounts
+                    .into_iter()
+                    .filter(|(_, account)| {
+                        account
+                            .delegated_pool_live()
+                            .or(account.retired_pool.as_ref())
+                            .is_some_and(|f| *f == pool)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await?
+        else {
+            break;
+        };
+
+        for delegator in delegators {
+            if seen >= skip && page.len() < count {
+                page.push(delegator);
+            }
+            seen += 1;
+        }
+    }
+
+    Ok(page)
+}
+
+pub async fn by_id_delegators<D>(
     Path(id): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<PoolDelegatorsInner>>, Error>
 where
+    D: Domain + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
 {
@@ -1369,34 +1603,25 @@ where
     let Some(hash) = parse_pool_id_bounded(&id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    if !domain.cardano_entity_exists::<PoolState>(hash)? {
+    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(hash))? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
     let network = domain.get_network_id()?;
 
-    let iter = domain
-        .iter_cardano_entities::<AccountState>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let filtered = iter.filter_ok(|(_, account)| {
-        account
-            .delegated_pool_live()
-            .or(account.retired_pool.as_ref())
-            .is_some_and(|f| *f == hash)
-    });
-
-    let page: Vec<_> = filtered
-        .skip(pagination.skip())
-        .take(pagination.count)
-        .collect::<Result<_, _>>()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let page = load_delegators_page(
+        &domain,
+        hash,
+        pagination.skip(),
+        pagination.count,
+        ENTITY_CHUNK,
+    )
+    .await?;
 
     let mapped: Vec<_> = page
         .into_iter()
         .map(|(delegator, account)| {
-            let delegator: StakeCredential = minicbor::decode(delegator.as_ref())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let delegator = StakeCredential::from(delegator);
 
             let builder = PoolDelegatorModelBuilder {
                 delegator,
@@ -1460,7 +1685,7 @@ where
     let Some(hash) = hash else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    if !domain.cardano_entity_exists::<PoolState>(hash)? {
+    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(hash))? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1469,7 +1694,7 @@ where
     let (epoch, _) = summary.slot_epoch(tip);
 
     let mut entries = domain
-        .iter_cardano_logs_per_epoch::<StakeLog>(hash.into(), 0..epoch)
+        .iter_cardano_logs_per_epoch::<StakeLog>(&PoolKey(hash), 0..epoch)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Apply order before pagination
@@ -1512,7 +1737,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
 
-    if !domain.cardano_entity_exists::<PoolState>(pool)? {
+    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(pool))? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1577,7 +1802,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
 
-    if !domain.cardano_entity_exists::<PoolState>(pool)? {
+    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(pool))? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1610,9 +1835,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pagination::Order;
     use crate::test_support::{
-        bech32_encode_values, bech32_values_from_bytes, pool_id_cases, PoolIdCase, TestApp,
-        TestFault, REG_POOL_HEX, REG_POOL_ID,
+        bech32_encode_values, bech32_values_from_bytes, health_beside, pool_id_cases,
+        replicated_app, PoolIdCase, TestApp, TestFault, REG_POOL_HEX, REG_POOL_ID, SLOW_READ,
     };
     use blockfrost_openapi::models::{
         pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
@@ -1621,6 +1847,7 @@ mod tests {
     };
     use dolos_cardano::cip151;
     use dolos_cardano::model::{DRepDelegation, EpochValue, PoolParams, PoolSnapshot, Stake};
+    use dolos_core::{StateStore as _, StateWriter as _};
     use dolos_testing::synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote};
     use pallas::{
         codec::utils::Bytes,
@@ -2265,67 +2492,199 @@ mod tests {
     }
 
     #[test]
-    fn select_retiring_pools_filters_and_orders() {
+    fn retiring_candidates_keep_future_retirements() {
         let pools = vec![
-            // scheduled in the past/current: excluded
+            // The retirement epoch is past or current, so the pool is left out.
             retiring_pool([1u8; 28], 10, Some(5)),
             retiring_pool([2u8; 28], 20, Some(10)),
-            // not retiring: excluded
+            // The pool does not retire, so it is left out.
             retiring_pool([3u8; 28], 30, None),
-            // future retirements: included
+            // The retirement epoch is in the future, so the pool stays.
             retiring_pool([4u8; 28], 40, Some(12)),
             retiring_pool([5u8; 28], 50, Some(11)),
-            // same epoch as above, later register_slot -> stable tie-break
-            retiring_pool([6u8; 28], 60, Some(11)),
         ];
 
-        let pagination = Pagination::default();
-        let selected = select_retiring_pools(pools.clone(), 10, &pagination);
+        let mut selected = retiring_candidates(pools, 10);
+        selected.sort_unstable();
 
         assert_eq!(
             selected,
-            vec![
-                (11, Hash::from([5u8; 28])),
-                (11, Hash::from([6u8; 28])),
-                (12, Hash::from([4u8; 28])),
-            ]
-        );
-
-        // Descending order reverses the listing.
-        let desc = Pagination {
-            order: crate::pagination::Order::Desc,
-            ..Pagination::default()
-        };
-        let selected_desc = select_retiring_pools(pools, 10, &desc);
-        assert_eq!(
-            selected_desc,
-            vec![
-                (12, Hash::from([4u8; 28])),
-                (11, Hash::from([6u8; 28])),
-                (11, Hash::from([5u8; 28])),
-            ]
+            vec![(11, Hash::from([5u8; 28])), (12, Hash::from([4u8; 28]))]
         );
     }
 
     #[test]
-    fn select_retiring_pools_paginates() {
-        let pools = vec![
-            retiring_pool([1u8; 28], 10, Some(11)),
-            retiring_pool([2u8; 28], 20, Some(12)),
-            retiring_pool([3u8; 28], 30, Some(13)),
-        ];
+    fn tied_epochs_on_page_selects_tie_groups_in_the_window() {
+        // Ascending epochs: 5, 10, 10, 10, 11, 12, 12.
+        let list: Vec<(u64, PoolHash)> = [5, 10, 10, 10, 11, 12, 12]
+            .into_iter()
+            .enumerate()
+            .map(|(i, epoch)| (epoch, Hash::from([i as u8; 28])))
+            .collect();
 
-        let params = PaginationParameters {
-            count: Some("1".to_string()),
-            page: Some("2".to_string()),
-            order: None,
-            from: None,
-            to: None,
+        let page = |page: u64, count: usize, order: crate::pagination::Order| Pagination {
+            page,
+            count,
+            order,
+            ..Pagination::default()
         };
-        let pagination = Pagination::try_from(params).expect("valid pagination");
+        let asc = crate::pagination::Order::Asc;
+        let desc = crate::pagination::Order::Desc;
 
-        let selected = select_retiring_pools(pools, 10, &pagination);
-        assert_eq!(selected, vec![(12, Hash::from([2u8; 28]))]);
+        assert_eq!(
+            tied_epochs_on_page(&list, &Pagination::default()),
+            HashSet::from([10, 12])
+        );
+        // The window holds epochs 5 and 10. Epoch 5 has one pool.
+        assert_eq!(
+            tied_epochs_on_page(&list, &page(1, 2, asc)),
+            HashSet::from([10])
+        );
+        // The window holds epochs 11 and 12. Epoch 11 has one pool.
+        assert_eq!(
+            tied_epochs_on_page(&list, &page(3, 2, asc)),
+            HashSet::from([12])
+        );
+        // In descending order, the first window holds epoch 12 only.
+        assert_eq!(
+            tied_epochs_on_page(&list, &page(1, 2, desc)),
+            HashSet::from([12])
+        );
+        // The window holds epoch 5 only, which has one pool.
+        assert!(tied_epochs_on_page(&list, &page(1, 1, asc)).is_empty());
+    }
+
+    #[test]
+    fn order_page_sorts_an_epoch_by_retirement_position() {
+        let pool = |byte: u8| Hash::from([byte; 28]);
+        let list = vec![
+            (10, pool(1)),
+            (10, pool(2)),
+            (10, pool(3)),
+            (10, pool(4)),
+            (10, pool(6)),
+            (5, pool(5)),
+        ];
+        // Pool 4 has no position, and pool 5 is alone in its epoch.
+        let positions = HashMap::from([
+            (pool(1), (200, 0, 0)),
+            (pool(2), (100, 1, 0)),
+            (pool(3), (100, 0, 1)),
+            (pool(6), (100, 0, 0)),
+        ]);
+
+        let asc = order_page(list.clone(), &positions, &Pagination::default());
+        let expected = vec![
+            (5, pool(5)),
+            // No position sorts first.
+            (10, pool(4)),
+            // Slot 100, transaction 0: the certificate index decides.
+            (10, pool(6)),
+            (10, pool(3)),
+            // Slot 100, transaction 1.
+            (10, pool(2)),
+            (10, pool(1)),
+        ];
+        assert_eq!(asc, expected);
+
+        let desc = Pagination {
+            order: crate::pagination::Order::Desc,
+            ..Pagination::default()
+        };
+        let reversed: Vec<_> = expected.iter().rev().copied().collect();
+        assert_eq!(order_page(list.clone(), &positions, &desc), reversed);
+
+        let second_page = Pagination {
+            count: 2,
+            page: 2,
+            ..Pagination::default()
+        };
+        assert_eq!(
+            order_page(list, &positions, &second_page),
+            vec![(10, pool(6)), (10, pool(3))]
+        );
+    }
+
+    const RETIRE_ORDER_POOLS: [[u8; 28]; 4] = [[0x11; 28], [0x33; 28], [0x44; 28], [0x22; 28]];
+
+    /// Builds a chain where four pools retire in epoch 100.
+    ///
+    /// Pools B and C retire in block 1, in transaction 0 and transaction 1.
+    /// Pool A retires in block 0. Pool A then retires again in block 2, in the
+    /// transaction where pool D retires, after pool D. So Blockfrost lists B,
+    /// C, D, A. The register slots give the order C, A, D, B, and the operator
+    /// hashes give the order A, D, B, C. Neither order gives B, C, D, A in
+    /// either direction. So only the retirement position gives the expected
+    /// order.
+    fn retirement_order_app(is_retired: bool) -> TestApp {
+        use pallas::ledger::primitives::conway::Certificate;
+
+        let [a, b, c, d] = RETIRE_ORDER_POOLS;
+        let retire = |pool: [u8; 28]| Certificate::PoolRetirement(Hash::from(pool), 100);
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            extra_certs_by_block: vec![
+                vec![vec![retire(a)], vec![]],
+                vec![vec![retire(b)], vec![retire(c)]],
+                vec![vec![retire(d), retire(a)], vec![]],
+            ],
+            ..Default::default()
+        };
+
+        TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
+            let writer = domain.state().start_writer().expect("state writer");
+
+            for (register_slot, operator) in [c, a, d, b].into_iter().enumerate() {
+                let pool = retired_pool(operator, register_slot as u64, Some(100), is_retired);
+                writer
+                    .write_entity_typed(&PoolKey(operator.into()), &pool)
+                    .expect("failed to write pool state");
+            }
+
+            writer.commit().expect("failed to commit pool state");
+        })
+    }
+
+    async fn assert_retirement_order(app: &TestApp, path: &str) {
+        let [a, b, c, d] = RETIRE_ORDER_POOLS;
+        let expected: Vec<PoolListRetireInner> = [b, c, d, a]
+            .into_iter()
+            .map(|operator| PoolListRetireInner {
+                pool_id: bech32_pool(Hash::from(operator)).expect("bech32 pool id"),
+                epoch: 100,
+            })
+            .collect();
+
+        for (query, expected) in [
+            ("", expected.clone()),
+            ("?order=desc", expected.into_iter().rev().collect()),
+        ] {
+            let (status, bytes) = app.get_bytes(&format!("{path}{query}")).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "unexpected status {status} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+
+            let rows: Vec<PoolListRetireInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse pool list retire");
+            assert_eq!(rows, expected, "{path}{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn pools_retiring_orders_an_epoch_by_retirement_position() {
+        let app = retirement_order_app(false);
+        assert_retirement_order(&app, "/pools/retiring").await;
+    }
+
+    #[tokio::test]
+    async fn pools_retired_orders_an_epoch_by_retirement_position() {
+        let app = retirement_order_app(true);
+        assert_retirement_order(&app, "/pools/retired").await;
     }
 
     #[tokio::test]
@@ -2378,69 +2737,25 @@ mod tests {
     }
 
     #[test]
-    fn select_retired_pools_filters_and_orders() {
+    fn retired_candidates_keep_retired_pools() {
         let pools = vec![
-            // These pools are retired. The sort key is
-            // (retiring_epoch, register_slot, operator).
+            // The pools are retired, so they stay.
             retired_pool([1u8; 28], 10, Some(5), true),
             retired_pool([2u8; 28], 20, Some(10), true),
-            // This pool has the same epoch but a later register_slot.
-            // The register_slot makes the tie-break stable.
-            retired_pool([6u8; 28], 60, Some(10), true),
-            // This pool has a retirement epoch but is not retired. The scan
-            // removes it.
+            // The pool has a retirement epoch but is not retired yet, so it is
+            // left out.
             retired_pool([3u8; 28], 30, Some(12), false),
-            // This pool has no retirement. The scan removes it.
+            // The pool does not retire, so it is left out.
             retired_pool([4u8; 28], 40, None, false),
         ];
 
-        let pagination = Pagination::default();
-        let selected = select_retired_pools(pools.clone(), &pagination);
+        let mut selected = retired_candidates(pools);
+        selected.sort_unstable();
 
         assert_eq!(
             selected,
-            vec![
-                (5, Hash::from([1u8; 28])),
-                (10, Hash::from([2u8; 28])),
-                (10, Hash::from([6u8; 28])),
-            ]
+            vec![(5, Hash::from([1u8; 28])), (10, Hash::from([2u8; 28]))]
         );
-
-        // A descending order reverses the list.
-        let desc = Pagination {
-            order: crate::pagination::Order::Desc,
-            ..Pagination::default()
-        };
-        let selected_desc = select_retired_pools(pools, &desc);
-        assert_eq!(
-            selected_desc,
-            vec![
-                (10, Hash::from([6u8; 28])),
-                (10, Hash::from([2u8; 28])),
-                (5, Hash::from([1u8; 28])),
-            ]
-        );
-    }
-
-    #[test]
-    fn select_retired_pools_paginates() {
-        let pools = vec![
-            retired_pool([1u8; 28], 10, Some(11), true),
-            retired_pool([2u8; 28], 20, Some(12), true),
-            retired_pool([3u8; 28], 30, Some(13), true),
-        ];
-
-        let params = PaginationParameters {
-            count: Some("1".to_string()),
-            page: Some("2".to_string()),
-            order: None,
-            from: None,
-            to: None,
-        };
-        let pagination = Pagination::try_from(params).expect("valid pagination");
-
-        let selected = select_retired_pools(pools, &pagination);
-        assert_eq!(selected, vec![(12, Hash::from([2u8; 28]))]);
     }
 
     #[tokio::test]
@@ -3547,5 +3862,159 @@ mod tests {
                 .expect("Cannot encode the Bech32m ID."),
             encode(&registered, 0x2bc8_30a3)
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_extended_listing_does_not_stall_health() {
+        let app = TestApp::new_with_fault(Some(TestFault::SlowStateScans(SLOW_READ)));
+
+        assert_eq!(health_beside(&app, "/pools/extended").await, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_delegators_listing_does_not_stall_health() {
+        let app = TestApp::new_with_fault(Some(TestFault::SlowStateScans(SLOW_READ)));
+        let path = format!("/pools/{}/delegators", app.vectors().pool_id);
+
+        assert_eq!(health_beside(&app, &path).await, StatusCode::OK);
+    }
+
+    fn vector_pool(app: &TestApp) -> PoolHash {
+        parse_pool_id_bounded(&app.vectors().pool_id)
+            .expect("pool id")
+            .expect("pool hash")
+    }
+
+    #[tokio::test]
+    async fn chunked_pool_scans_match_unchunked() {
+        let app = replicated_app();
+        let facade = app.facade();
+        let operator = vector_pool(&app);
+        let owners = facade
+            .read_cardano_entity::<PoolState>(&PoolKey(operator))
+            .expect("pool read")
+            .expect("pool state")
+            .snapshot
+            .live()
+            .expect("live snapshot")
+            .params
+            .pool_owners
+            .clone();
+
+        let active = load_active_pools(&facade, usize::MAX).await.expect("pools");
+        assert!(active.len() > 2, "too few pools to split into chunks");
+
+        let metrics = compute_pool_metrics(
+            &facade,
+            operator,
+            active.clone(),
+            owners.clone(),
+            usize::MAX,
+        )
+        .await
+        .expect("metrics");
+        assert!(
+            metrics.live_delegators > 2,
+            "too few accounts to split into chunks"
+        );
+
+        let stakes = load_pool_stakes(&facade, usize::MAX).await.expect("stakes");
+        let listed: Vec<_> = load_listed_pools(&facade, usize::MAX)
+            .await
+            .expect("pools")
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+
+        for chunk in [1, 2] {
+            assert_eq!(
+                load_active_pools(&facade, chunk).await.expect("pools"),
+                active
+            );
+            assert_eq!(
+                compute_pool_metrics(&facade, operator, active.clone(), owners.clone(), chunk)
+                    .await
+                    .expect("metrics"),
+                metrics
+            );
+            assert_eq!(
+                load_pool_stakes(&facade, chunk).await.expect("stakes"),
+                stakes
+            );
+
+            let chunked: Vec<_> = load_listed_pools(&facade, chunk)
+                .await
+                .expect("pools")
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect();
+            assert_eq!(chunked, listed);
+        }
+    }
+
+    #[tokio::test]
+    async fn chunked_delegator_pages_match_unchunked() {
+        let app = replicated_app();
+        let facade = app.facade();
+        let operator = vector_pool(&app);
+
+        let page = |skip, count, chunk| {
+            let facade = facade.clone();
+            async move {
+                load_delegators_page(&facade, operator, skip, count, chunk)
+                    .await
+                    .expect("delegators")
+                    .into_iter()
+                    .map(|(key, _)| key)
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        assert!(
+            page(0, 100, usize::MAX).await.len() > 2,
+            "too few delegators to split into chunks"
+        );
+
+        for (skip, count) in [(0, 100), (1, 2), (2, 1), (4, 3), (10, 5)] {
+            let whole = page(skip, count, usize::MAX).await;
+
+            for chunk in [1, 2] {
+                assert_eq!(
+                    page(skip, count, chunk).await,
+                    whole,
+                    "skip {skip}, count {count}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn chunked_pool_block_pages_match_unchunked() {
+        let app = TestApp::new();
+        let facade = app.facade();
+        let pool = Hasher::<224>::hash(&[0x10, 0x11]);
+        let tip = facade.get_tip_slot().expect("tip");
+
+        let whole_asc = pool_block_page_slots(&facade, pool, tip, Order::Asc, 0, 100, usize::MAX)
+            .await
+            .expect("slots");
+        assert!(whole_asc.0.len() > 2, "too few blocks to split into chunks");
+
+        for order in [Order::Asc, Order::Desc] {
+            for (skip, count) in [(0, 100), (1, 2), (2, 1), (3, 5), (10, 5)] {
+                let whole =
+                    pool_block_page_slots(&facade, pool, tip, order, skip, count, usize::MAX)
+                        .await
+                        .expect("slots");
+
+                for chunk in [1, 2] {
+                    let chunked =
+                        pool_block_page_slots(&facade, pool, tip, order, skip, count, chunk)
+                            .await
+                            .expect("slots");
+                    assert_eq!(chunked, whole, "{order:?}, skip {skip}, count {count}");
+                }
+            }
+        }
     }
 }

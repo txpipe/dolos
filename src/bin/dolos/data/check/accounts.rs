@@ -17,9 +17,8 @@
 //! That reading comes first in the report, because it explains every lagging
 //! account that follows it.
 
-use dolos_cardano::model::{AccountState, EpochState, SingletonEntity as _};
-use dolos_cardano::FixedNamespace as _;
-use dolos_core::{EntityKey, StateStore};
+use dolos_cardano::model::{AccountKey, AccountState, EpochState};
+use dolos_core::StateStore;
 use indicatif::ProgressBar;
 use miette::{Context as _, IntoDiagnostic as _};
 use pallas::ledger::primitives::Epoch;
@@ -87,7 +86,7 @@ fn lagging_values(account: &AccountState, current: Epoch) -> Vec<String> {
 /// the walk: an undecodable account is precisely the kind of damage this
 /// command exists to name, and the accounts after it are still worth reading.
 pub fn check_account_epochs<E: std::fmt::Display>(
-    accounts: impl Iterator<Item = Result<(EntityKey, AccountState), E>>,
+    accounts: impl Iterator<Item = Result<(AccountKey, AccountState), E>>,
     current: Epoch,
     mut on_progress: impl FnMut(u64),
 ) -> Vec<Issue> {
@@ -145,7 +144,7 @@ pub fn check_account_epochs<E: std::fmt::Display>(
 pub fn run(stores: &crate::common::Stores, progress: &ProgressBar) -> miette::Result<Vec<Issue>> {
     let epoch = stores
         .state
-        .read_entity_typed::<EpochState>(EpochState::NS, &EpochState::singleton_key())
+        .read_entity_typed::<EpochState>(&())
         .into_diagnostic()
         .context("reading the live epoch state")?;
 
@@ -159,7 +158,7 @@ pub fn run(stores: &crate::common::Stores, progress: &ProgressBar) -> miette::Re
 
     let accounts = stores
         .state
-        .iter_entities_typed::<AccountState>(AccountState::NS, None)
+        .iter_entities_typed::<AccountState>(None)
         .into_diagnostic()
         .context("iterating accounts")?;
 
@@ -182,11 +181,11 @@ mod tests {
         StakeCredential::AddrKeyhash([seed; 28].into())
     }
 
-    fn account(epoch: Epoch, seed: u8) -> (EntityKey, AccountState) {
+    fn account(epoch: Epoch, seed: u8) -> (AccountKey, AccountState) {
         let mut state = AccountState::new(epoch, credential(seed));
         state.stake = EpochValue::with_live(epoch, Stake::default());
 
-        (EntityKey::from(vec![seed]), state)
+        (AccountKey(credential(seed)), state)
     }
 
     fn epoch_state(number: Epoch) -> EpochState {

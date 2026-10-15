@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     body::Body,
@@ -204,6 +207,198 @@ pub fn pool_id_cases() -> Vec<PoolIdCase> {
     ]
 }
 
+/// Policies of [`first_mint_chain`]. `SIBLING` shares `ALPHA`'s first fourteen
+/// bytes, the prefix staged first mints are grouped by.
+pub mod first_mint_policies {
+    pub const ALPHA: [u8; 28] = [0x11; 28];
+    pub const BETA: [u8; 28] = [0x22; 28];
+    pub const GAMMA: [u8; 28] = [0x33; 28];
+    pub const SIBLING: [u8; 28] = [
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x99,
+        0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99,
+    ];
+}
+
+/// Twelve blocks over preview epochs 2 to 7, two per epoch, whose mints cover
+/// what first-mint order has to get right: several mints in one tx, several
+/// policies in one block and in one tx, re-mints within and across epochs, a
+/// full burn minted again, a repeat across the txs of one block, a policy
+/// sharing another's staged-key prefix, and an epoch with more first mints than
+/// a sealed chunk holds. The tip's epoch seals epochs 2 to 5 and leaves 6 and 7
+/// staged.
+pub fn first_mint_chain() -> SyntheticBlockConfig {
+    use first_mint_policies::*;
+
+    let mint = |policy: [u8; 28], name: &str, amount: i64| (policy, name.to_string(), amount);
+
+    let many: Vec<_> = (0..300)
+        .map(|i| mint(BETA, &format!("N{i:03}"), 1))
+        .collect();
+
+    let mints_by_block = vec![
+        vec![
+            vec![mint(ALPHA, "A", 1), mint(ALPHA, "B", 1)],
+            vec![mint(BETA, "X", 5)],
+        ],
+        vec![vec![mint(ALPHA, "A", 1)], vec![mint(SIBLING, "A", 1)]],
+        vec![
+            vec![mint(ALPHA, "A", -2)],
+            vec![mint(GAMMA, "Z", 1), mint(BETA, "Y", 1)],
+        ],
+        vec![vec![mint(ALPHA, "C", 1)], many],
+        vec![
+            vec![mint(ALPHA, "A", 1)],
+            vec![mint(ALPHA, "E", 1), mint(ALPHA, "D", 1), mint(BETA, "W", 1)],
+        ],
+        vec![vec![], vec![mint(GAMMA, "Z", -1)]],
+        vec![vec![mint(ALPHA, "F", 1)], vec![mint(ALPHA, "B", 1)]],
+        vec![vec![mint(BETA, "V", 1)], vec![]],
+        vec![
+            vec![mint(ALPHA, "G", 1), mint(ALPHA, "H", 1)],
+            vec![mint(ALPHA, "G", 1)],
+        ],
+        vec![vec![mint(GAMMA, "Y", 1)], vec![mint(SIBLING, "B", 1)]],
+        vec![vec![mint(BETA, "U", 1)], vec![mint(ALPHA, "I", 1)]],
+        vec![vec![mint(ALPHA, "A", 1)], vec![mint(ALPHA, "J", 1)]],
+    ];
+
+    SyntheticBlockConfig {
+        block_count: mints_by_block.len(),
+        txs_per_block: 2,
+        slot_step: 43_200,
+        mints_by_block,
+        plain_txs: true,
+        // each tx pays a fee of 7 out of its seed, so the pots balance across
+        // the boundaries
+        seed_amount: dolos_testing::MIN_UTXO_AMOUNT + 7,
+        ..Default::default()
+    }
+}
+
+/// Accounts of [`stake_address_chain`].
+pub mod stake_address_accounts {
+    use pallas::ledger::{
+        addresses::{
+            Address, Network, Pointer, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
+        },
+        primitives::StakeCredential,
+    };
+
+    use dolos_testing::synthetic::SyntheticBlockConfig;
+
+    /// The synthetic chain's own account: every tx's first output pays it.
+    pub fn primary() -> StakeCredential {
+        let address = Address::from_bech32(&SyntheticBlockConfig::default().address).unwrap();
+        dolos_cardano::pallas_extras::address_as_stake_cred(&address)
+            .unwrap()
+            .0
+    }
+
+    /// Another key account, paid only by extra outputs.
+    pub fn other() -> StakeCredential {
+        StakeCredential::AddrKeyhash([0x5a; 28].into())
+    }
+
+    /// A script account sharing `other`'s hash.
+    pub fn script() -> StakeCredential {
+        StakeCredential::ScriptHash([0x5a; 28].into())
+    }
+
+    /// The base address paying `payment` under `account`.
+    pub fn base(account: &StakeCredential, payment: u8) -> Vec<u8> {
+        let delegation = match account {
+            StakeCredential::AddrKeyhash(hash) => ShelleyDelegationPart::Key(*hash),
+            StakeCredential::ScriptHash(hash) => ShelleyDelegationPart::Script(*hash),
+        };
+
+        ShelleyAddress::new(
+            Network::Testnet,
+            ShelleyPaymentPart::Key([payment; 28].into()),
+            delegation,
+        )
+        .to_vec()
+    }
+
+    /// Addresses no account lists: an enterprise address and a pointer one.
+    pub fn unlisted(payment: u8) -> [Vec<u8>; 2] {
+        let payment = ShelleyPaymentPart::Key([payment; 28].into());
+
+        [
+            ShelleyAddress::new(
+                Network::Testnet,
+                payment.clone(),
+                ShelleyDelegationPart::Null,
+            )
+            .to_vec(),
+            ShelleyAddress::new(
+                Network::Testnet,
+                payment,
+                // one the pointer table resolves, which the ledger needs
+                ShelleyDelegationPart::Pointer(Pointer::new(53_004_562, 9, 0)),
+            )
+            .to_vec(),
+        ]
+    }
+}
+
+/// Twelve blocks over preview epochs 2 to 7, two per epoch, of three txs each,
+/// whose outputs cover what first-appearance order has to get right. Each tx
+/// pays the primary account first, and the builder's own outputs reuse
+/// addresses across consecutive blocks and every epoch. Extra outputs add
+/// several addresses of one account in one tx, an address repeated within a
+/// tx and a block, addresses whose bytes sort against their chain order, one
+/// returning epochs after it first appeared, a hundred and fifty fresh ones in
+/// one tx for deep pages, and other accounts and unlisted addresses between
+/// them. The tip's epoch seals epochs 2 to 5 and leaves 6 and 7 staged.
+pub fn stake_address_chain() -> SyntheticBlockConfig {
+    use stake_address_accounts::*;
+
+    let (a, b, c) = (primary(), other(), script());
+
+    let none = || vec![vec![], vec![], vec![]];
+
+    let mut extra = vec![none(); 12];
+
+    // several outputs to one account in one tx, against byte order, with a
+    // repeat inside the tx and another account in between
+    extra[0][1] = vec![
+        base(&a, 0x90),
+        base(&b, 0x91),
+        base(&a, 0x80),
+        base(&a, 0x90),
+    ];
+    // the repeat again in the next tx of the same block, and unlisted ones
+    let [enterprise, pointer] = unlisted(0x92);
+    extra[0][2] = vec![enterprise, base(&a, 0x90), pointer, base(&c, 0x93)];
+
+    // a hundred and fifty fresh addresses in one tx
+    extra[3][0] = (0..150u8).rev().map(|i| base(&a, i)).collect();
+
+    // an epoch-2 address returning in epoch 6, beside a fresh one
+    extra[8][1] = vec![base(&a, 0x80), base(&a, 0xa0), base(&b, 0x91)];
+
+    // a staged epoch with the script account and more fresh ones
+    extra[10][2] = vec![
+        base(&c, 0x93),
+        base(&c, 0xa1),
+        base(&a, 0xa2),
+        base(&a, 0x05),
+    ];
+
+    SyntheticBlockConfig {
+        block_count: 12,
+        txs_per_block: 3,
+        slot_step: 43_200,
+        plain_txs: true,
+        ada_only_by_block: vec![true; 12],
+        extra_outputs_by_block: extra,
+        // each tx pays a fee of 7 out of its seed, so the pots balance across
+        // the boundaries
+        seed_amount: dolos_testing::MIN_UTXO_AMOUNT + 7,
+        ..Default::default()
+    }
+}
+
 pub struct TestDomainBuilder {
     domain: ToyDomain,
     vectors: SyntheticVectors,
@@ -275,7 +470,7 @@ impl TestDomainBuilder {
 
 pub struct TestApp {
     router: Router,
-    _domain: dolos_testing::faults::FaultyToyDomain,
+    facade: Facade<dolos_testing::faults::FaultyToyDomain>,
     vectors: SyntheticVectors,
 }
 
@@ -358,16 +553,16 @@ impl TestApp {
         };
 
         let facade = Facade {
-            inner: domain.clone(),
+            inner: domain,
             config: minibf,
             cache: crate::cache::CacheService::default(),
         };
 
-        let router = build_router_with_facade(facade);
+        let router = build_router_with_facade(facade.clone());
 
         Self {
             router,
-            _domain: domain,
+            facade,
             vectors,
         }
     }
@@ -432,6 +627,10 @@ impl TestApp {
         (status, bytes.to_vec())
     }
 
+    pub fn facade(&self) -> Facade<dolos_testing::faults::FaultyToyDomain> {
+        self.facade.clone()
+    }
+
     pub fn vectors(&self) -> &SyntheticVectors {
         &self.vectors
     }
@@ -441,12 +640,12 @@ impl TestApp {
     pub fn tip_epoch(&self) -> u64 {
         let summary =
             dolos_cardano::eras::load_era_summary::<dolos_testing::faults::FaultyToyDomain>(
-                self._domain.state(),
+                self.facade.state(),
             )
             .expect("era summary");
 
         let tip = self
-            ._domain
+            .facade
             .state()
             .read_cursor()
             .expect("cursor read failed")
@@ -461,10 +660,103 @@ impl TestApp {
     pub fn epoch_start(&self, epoch: u64) -> u64 {
         let summary =
             dolos_cardano::eras::load_era_summary::<dolos_testing::faults::FaultyToyDomain>(
-                self._domain.state(),
+                self.facade.state(),
             )
             .expect("era summary");
 
         summary.epoch_start(epoch)
     }
+}
+
+/// The delay of a slow-read fault in a stall test.
+pub const SLOW_READ: Duration = Duration::from_secs(1);
+
+/// How long `/health` may take beside a slow request.
+pub const HEALTH_BUDGET: Duration = Duration::from_millis(300);
+
+/// Sends `path` and `/health` together and checks that `/health` answers
+/// within [`HEALTH_BUDGET`]. Returns the status of `path`.
+pub async fn health_beside(app: &TestApp, path: &str) -> StatusCode {
+    let started = Instant::now();
+    let heavy = app.get_bytes(path);
+    let health = async {
+        let (status, _) = app.get_bytes("/health").await;
+        (status, started.elapsed())
+    };
+
+    let ((status, _), (health_status, health_took)) = tokio::join!(heavy, health);
+
+    assert_eq!(health_status, StatusCode::OK);
+    assert!(
+        health_took < HEALTH_BUDGET,
+        "/health took {health_took:?} behind {path}"
+    );
+
+    status
+}
+
+/// Writes `copies` copies of every account and every pool under new keys, so
+/// that a scan of either reads several chunks. The account copies keep the
+/// delegations of the originals.
+pub fn replicate_accounts_and_pools(domain: &ToyDomain, copies: u8) {
+    use dolos_cardano::{
+        model::{AccountState, PoolState},
+        AccountKey, PoolKey,
+    };
+    use dolos_core::StateWriter as _;
+    use pallas::{crypto::hash::Hash, ledger::primitives::StakeCredential};
+
+    let accounts: Vec<_> = domain
+        .state()
+        .iter_entities_typed::<AccountState>(None)
+        .expect("account scan")
+        .collect::<Result<_, _>>()
+        .expect("account read");
+    let pools: Vec<_> = domain
+        .state()
+        .iter_entities_typed::<PoolState>(None)
+        .expect("pool scan")
+        .collect::<Result<_, _>>()
+        .expect("pool read");
+
+    let writer = domain.state().start_writer().expect("state writer");
+
+    for copy in 1..=copies {
+        for (_, account) in &accounts {
+            let mut account = account.clone();
+            account.credential = StakeCredential::AddrKeyhash(Hash::from([copy; 28]));
+            writer
+                .write_entity_typed(&AccountKey::from(&account.credential), &account)
+                .expect("account write");
+        }
+
+        for (_, pool) in &pools {
+            let mut pool = pool.clone();
+            pool.operator = Hash::from([copy; 28]);
+            writer
+                .write_entity_typed(&PoolKey(pool.operator), &pool)
+                .expect("pool write");
+        }
+    }
+
+    writer.commit().expect("state commit");
+}
+
+/// An app whose accounts and pools span several chunks of two.
+pub fn replicated_app() -> TestApp {
+    replicated_app_with_fault(None)
+}
+
+pub fn replicated_app_with_fault(fault: Option<TestFault>) -> TestApp {
+    let cfg = SyntheticBlockConfig {
+        block_count: 5,
+        txs_per_block: 3,
+        ..Default::default()
+    };
+
+    let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+    replicate_accounts_and_pools(&domain, 4);
+
+    let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+    TestApp::from_domain(domain, vectors, fault, minibf)
 }

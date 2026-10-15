@@ -31,6 +31,7 @@ pub mod hacks;
 pub mod indexes;
 pub mod model;
 pub mod owned;
+pub mod periods;
 pub mod pots;
 pub mod rewards;
 pub mod shard;
@@ -589,7 +590,7 @@ pub fn load_gov<D: Domain>(state: &D::State) -> Result<GovState, ChainError> {
 pub fn read_singleton<D: Domain, E: SingletonEntity>(
     state: &D::State,
 ) -> Result<Option<E>, ChainError> {
-    Ok(state.read_entity_typed::<E>(E::NS, &E::singleton_key())?)
+    Ok(state.read_entity_typed::<E>(&())?)
 }
 
 #[cfg(test)]

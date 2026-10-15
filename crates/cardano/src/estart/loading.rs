@@ -9,16 +9,16 @@
 //! `AvvmReclamation::at_boundary`, which the work unit hoists into
 //! `initialize`.
 
-use std::{ops::Range, sync::Arc};
+use std::sync::Arc;
 
-use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore};
+use dolos_core::{ChainError, Domain, Genesis, RangeOf, StateStore};
 
 use crate::{
     estart::{avvm::AvvmReclamation, BoundaryVisitor as _, WorkContext},
     gov_from_conway_genesis, load_era_summary,
     roll::WorkDeltas,
-    AccountState, DRepState, EStartProgress, EraProtocol, FixedNamespace as _, GovGenesisInit,
-    PoolState, ProposalState,
+    AccountKey, AccountState, DRepState, EStartProgress, EraProtocol, GovGenesisInit, PoolState,
+    ProposalState,
 };
 
 impl WorkContext {
@@ -34,7 +34,7 @@ impl WorkContext {
         let mut visitor_nonces = super::nonces::BoundaryVisitor;
         let mut visitor_reset = super::reset::BoundaryVisitor;
 
-        let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
+        let pools = state.iter_entities_typed::<PoolState>(None)?;
 
         for pool in pools {
             let (pool_id, pool) = pool?;
@@ -43,7 +43,7 @@ impl WorkContext {
             visitor_reset.visit_pool(self, &pool_id, &pool)?;
         }
 
-        let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
+        let dreps = state.iter_entities_typed::<DRepState>(None)?;
 
         for drep in dreps {
             let (drep_id, drep) = drep?;
@@ -52,7 +52,7 @@ impl WorkContext {
             visitor_reset.visit_drep(self, &drep_id, &drep)?;
         }
 
-        let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+        let proposals = state.iter_entities_typed::<ProposalState>(None)?;
 
         for proposal in proposals {
             let (proposal_id, proposal) = proposal?;
@@ -119,7 +119,6 @@ impl WorkContext {
             genesis,
             avvm_reclamation,
             deltas: WorkDeltas::default(),
-            logs: Default::default(),
         })
     }
 
@@ -143,15 +142,14 @@ impl WorkContext {
     fn compute_shard_deltas<D: Domain>(
         &mut self,
         state: &D::State,
-        ranges: Vec<Range<EntityKey>>,
+        ranges: Vec<RangeOf<AccountKey>>,
         shard_index: u32,
         total_shards: u32,
     ) -> Result<(), ChainError> {
         let mut visitor_reset = super::reset::BoundaryVisitor;
 
         for range in ranges {
-            let accounts =
-                state.iter_entities_typed::<AccountState>(AccountState::NS, Some(range))?;
+            let accounts = state.iter_entities_typed::<AccountState>(Some(range))?;
 
             for record in accounts {
                 let (account_id, account) = record?;
@@ -174,7 +172,7 @@ impl WorkContext {
         avvm_reclamation: AvvmReclamation,
         shard_index: u32,
         total_shards: u32,
-        ranges: Vec<Range<EntityKey>>,
+        ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<Self, ChainError> {
         let mut ctx = Self::new_empty_with_avvm::<D>(state, genesis, avvm_reclamation)?;
         ctx.compute_shard_deltas::<D>(state, ranges, shard_index, total_shards)?;

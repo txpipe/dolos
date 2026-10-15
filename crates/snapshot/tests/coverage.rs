@@ -45,10 +45,10 @@ fn namespace_registry_matches_build_schema() {
         "the profile's state namespaces have drifted from build_schema()"
     );
 
-    // ADR-004 says thirteen entity namespaces plus `utxos`. If that count
+    // ADR-004 says twenty-five entity namespaces plus `utxos`. If that count
     // moves, the sentence in the ADR moves with it.
-    assert_eq!(entities.len(), 13);
-    assert_eq!(NAMESPACES.len(), 14);
+    assert_eq!(entities.len(), 25);
+    assert_eq!(NAMESPACES.len(), 26);
 }
 
 #[test]
@@ -120,10 +120,10 @@ fn the_golden_indexes_layer_covers_every_dimension_and_kind() {
         "the golden indexes layer no longer freezes every dimension name"
     );
 
-    // Sixteen, as the module documentation of `tests/goldens.rs` states.
+    // Seventeen, as the module documentation of `tests/goldens.rs` states.
     // Pinned here so that prose cannot go stale while every other test still
     // passes.
-    assert_eq!(expected.len(), 16);
+    assert_eq!(expected.len(), 17);
 
     let kinds: BTreeSet<ExactKind> = records
         .iter()
@@ -171,7 +171,7 @@ fn the_golden_state_layers_cover_every_namespace() {
     }
 }
 
-/// Every state kind appears in the golden stele, so all seventeen kind strings
+/// Every state kind appears in the golden stele, so all twenty-six kind strings
 /// are frozen by a published digest — the state half of
 /// `the_golden_stele_covers_every_log_kind`.
 #[test]

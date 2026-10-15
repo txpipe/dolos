@@ -1,6 +1,9 @@
-use std::{collections::HashMap, ops::Deref, sync::OnceLock, time::Duration};
-
-use indexmap::IndexSet;
+use std::{
+    collections::HashMap,
+    ops::Deref,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use axum::{
     extract::{Path, Query, State},
@@ -22,9 +25,12 @@ use dolos_cardano::{
     },
     indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::AssetState,
+    periods::first_mints,
     ChainSummary,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EraCbor, StateStore as _};
+use dolos_core::{
+    ArchiveStore as _, BlockBody, BlockSlot, Domain, DomainError, EraCbor, StateStore as _, TxoRef,
+};
 use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
@@ -32,7 +38,7 @@ use pallas::{
     crypto::hash::Hash,
     ledger::{
         primitives::{BigInt, Metadatum, PlutusData},
-        traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx},
+        traverse::{MultiEraOutput, MultiEraTx},
         validate::phase2::to_plutus_data::ToPlutusData,
     },
 };
@@ -40,7 +46,7 @@ use serde::Deserialize;
 
 use crate::{
     error::Error,
-    inputs::{tx_touches_output, InputDeps, InputResolver},
+    inputs::{match_block_txs, tx_touches_output, InputDeps, InputResolver},
     mapping::{asset_fingerprint, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
@@ -414,8 +420,8 @@ impl AssetModelBuilder {
         };
 
         if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
-            let entity_key = pallas::crypto::hash::Hasher::<256>::hash(ref_asset_bytes.as_slice());
-            let ref_state = domain.read_cardano_entity::<AssetState>(entity_key.as_slice())?;
+            let asset_key = dolos_cardano::AssetKey::of(ref_asset_bytes);
+            let ref_state = domain.read_cardano_entity::<AssetState>(&asset_key)?;
 
             if let Some(metadata_tx) = ref_state.and_then(|state| state.metadata_tx) {
                 if let Some(EraCbor(era, cbor)) = domain
@@ -561,9 +567,9 @@ where
 {
     let subject = decode_asset_subject(subject)?;
 
-    let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
+    let asset_key = dolos_cardano::AssetKey::of(&subject);
     let state = domain
-        .read_cardano_entity::<AssetState>(entity_key.as_slice())?
+        .read_cardano_entity::<AssetState>(&asset_key)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok((subject, state))
@@ -673,6 +679,15 @@ where
     Ok(Json(model.into_model(&domain).await?))
 }
 
+/// UTxOs of an asset read, decoded and located per blocking task. Each one
+/// also costs an archive index lookup, so one chunk holds its permit for a
+/// few milliseconds.
+const ASSET_ADDRESS_CHUNK: usize = 256;
+
+/// Per address: the earliest chain position of a UTxO holding the asset, and
+/// the quantity held.
+type AssetHoldings = HashMap<String, ((BlockSlot, u32), u128)>;
+
 pub async fn by_subject_addresses<D>(
     Path(subject): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -685,57 +700,7 @@ where
     let pagination = Pagination::try_from(params)?;
     let (asset, _) = resolve_asset_state(&domain, &subject)?;
 
-    let utxoset = domain
-        .state()
-        .utxos_by_asset(&asset)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .into_iter()
-        .collect_vec();
-
-    let utxos = domain
-        .state()
-        .get_utxos(utxoset)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut addresses: HashMap<String, ((BlockSlot, u32), u128)> = HashMap::new();
-    for (txoref, eracbor) in utxos {
-        let sort = (
-            domain
-                .archive()
-                .slot_by_tx_hash(txoref.0.as_slice())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
-            txoref.1,
-        );
-
-        let utxo = MultiEraOutput::decode(eracbor.0.try_into().unwrap(), &eracbor.1)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let amount = utxo
-            .value()
-            .assets()
-            .iter()
-            .flat_map(|x| {
-                let subject = x.policy().to_vec();
-                x.assets()
-                    .iter()
-                    .find(|x| [subject.as_slice(), x.name()].concat() == asset.as_slice())
-                    .map(|x| x.any_coin() as u128)
-            })
-            .sum();
-
-        addresses
-            .entry(
-                utxo.address()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                    .to_string(),
-            )
-            .and_modify(|entry| {
-                entry.0 = entry.0.min(sort);
-                entry.1 += amount;
-            })
-            .or_insert((sort, amount));
-    }
+    let addresses = asset_holdings(&domain, asset, ASSET_ADDRESS_CHUNK).await?;
 
     let mut items = addresses
         .into_iter()
@@ -757,6 +722,113 @@ where
         .collect_vec();
 
     Ok(Json(sorted))
+}
+
+/// The holdings of every address with a UTxO that holds `asset`, `chunk`
+/// UTxOs per blocking task.
+async fn asset_holdings<D>(
+    domain: &Facade<D>,
+    asset: Vec<u8>,
+    chunk: usize,
+) -> Result<AssetHoldings, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let asset = Arc::new(asset);
+
+    let utxoset = {
+        let asset = asset.clone();
+        domain
+            .blocking(move |domain| {
+                domain
+                    .state()
+                    .utxos_by_asset(&asset)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            })
+            .await?
+    };
+
+    let mut refs = utxoset.into_iter().collect_vec();
+    refs.sort();
+
+    let mut addresses = AssetHoldings::new();
+
+    for refs in refs.chunks(chunk.max(1)) {
+        let refs = refs.to_vec();
+        let asset = asset.clone();
+
+        let holdings = domain
+            .blocking(move |domain| chunk_holdings(&domain, refs, &asset))
+            .await?;
+
+        for (address, (sort, amount)) in holdings {
+            addresses
+                .entry(address)
+                .and_modify(|entry| {
+                    entry.0 = entry.0.min(sort);
+                    entry.1 += amount;
+                })
+                .or_insert((sort, amount));
+        }
+    }
+
+    Ok(addresses)
+}
+
+fn chunk_holdings<D>(
+    domain: &Facade<D>,
+    refs: Vec<TxoRef>,
+    asset: &[u8],
+) -> Result<AssetHoldings, StatusCode>
+where
+    D: Domain,
+{
+    let utxos = domain
+        .state()
+        .get_utxos(refs)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut addresses = AssetHoldings::new();
+    for (txoref, eracbor) in utxos {
+        let sort = (
+            domain
+                .archive()
+                .slot_by_tx_hash(txoref.0.as_slice())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+            txoref.1,
+        );
+
+        let utxo = MultiEraOutput::decode(eracbor.0.try_into().unwrap(), &eracbor.1)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let amount = utxo
+            .value()
+            .assets()
+            .iter()
+            .flat_map(|x| {
+                let subject = x.policy().to_vec();
+                x.assets()
+                    .iter()
+                    .find(|x| [subject.as_slice(), x.name()].concat() == asset)
+                    .map(|x| x.any_coin() as u128)
+            })
+            .sum();
+
+        addresses
+            .entry(
+                utxo.address()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    .to_string(),
+            )
+            .and_modify(|entry| {
+                entry.0 = entry.0.min(sort);
+                entry.1 += amount;
+            })
+            .or_insert((sort, amount));
+    }
+
+    Ok(addresses)
 }
 
 fn subject_matches(subject: &[u8], policy: &[u8], name: &[u8]) -> bool {
@@ -790,40 +862,26 @@ async fn find_txs<D>(
     subject: &[u8],
     chain: &ChainSummary,
     pagination: &Pagination,
-    block: &[u8],
+    block: BlockBody,
 ) -> Result<Vec<AssetTransactionsInner>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let subject = subject.to_vec();
+    let matched = match_block_txs(domain, deps, pagination, block, move |resolver, tx| {
+        tx_has_subject(resolver, &subject, tx)
+    })
+    .await?;
 
-    let txs = block.txs();
-
-    // only the txs that will actually be scanned contribute dependencies
-    let scanned = txs
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| !pagination.should_skip(block.number(), *idx))
-        .map(|(_, tx)| tx);
-
-    let mut resolver = deps.prepare(domain, scanned).await?;
-
-    let mut matches = vec![];
-
-    for (idx, tx) in txs.iter().enumerate() {
-        if !pagination.should_skip(block.number(), idx)
-            && tx_has_subject(&mut resolver, subject, tx)?
-        {
-            let model = AssetTransactionsInner {
-                tx_hash: hex::encode(tx.hash().as_slice()),
-                tx_index: idx as i32,
-                block_height: block.number() as i32,
-                block_time: chain.slot_time(block.slot()) as i32,
-            };
-
-            matches.push(model);
-        }
-    }
+    let mut matches: Vec<_> = matched
+        .into_iter()
+        .map(|tx| AssetTransactionsInner {
+            tx_hash: hex::encode(tx.hash.as_slice()),
+            tx_index: tx.index as i32,
+            block_height: tx.block_number as i32,
+            block_time: chain.slot_time(tx.block_slot) as i32,
+        })
+        .collect();
 
     if matches!(pagination.order, Order::Desc) {
         matches = matches.into_iter().rev().collect();
@@ -869,7 +927,7 @@ where
             continue;
         };
 
-        let mut txs = find_txs(&domain, &mut deps, &subject, &chain, &pagination, &block)
+        let mut txs = find_txs(&domain, &mut deps, &subject, &chain, &pagination, block)
             .await
             .map_err(Error::Code)?;
         matches.append(&mut txs);
@@ -911,34 +969,8 @@ where
     Ok(Json(hashes))
 }
 
-fn collect_minted_subjects(
-    block: &[u8],
-    policy: &[u8],
-    seen: &mut IndexSet<Vec<u8>>,
-) -> Result<(), StatusCode> {
-    // Blockfrost groups the `ma_tx_mint` rows by policy and name. Then it sorts
-    // the rows by the first mint event. The caller supplies blocks in ascending
-    // slot order. `seen` keeps the first subject for each name. The set skips a
-    // repeated name in O(1) and keeps the first-mint order.
-    let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    for tx in block.txs() {
-        for policy_assets in tx.mints() {
-            if policy_assets.policy().as_slice() != policy {
-                continue;
-            }
-
-            for asset in policy_assets.assets() {
-                let mut subject = policy.to_vec();
-                subject.extend_from_slice(asset.name());
-                seen.insert(subject);
-            }
-        }
-    }
-
-    Ok(())
-}
-
+/// `GET /assets/policy/{policy}`: the assets a policy minted, ordered by
+/// first mint, from the first-mint period logs.
 pub async fn by_policy<D>(
     Path(policy_hex): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -951,51 +983,48 @@ where
     let pagination = Pagination::try_from(params)?;
 
     let policy = hex::decode(&policy_hex).map_err(|_| Error::InvalidPolicy)?;
-    if policy.len() != 28 {
-        return Err(Error::InvalidPolicy);
-    }
+    let policy: Hash<28> = <[u8; 28]>::try_from(policy.as_slice())
+        .map_err(|_| Error::InvalidPolicy)?
+        .into();
 
-    // Pagination depends on first-mint order. An ascending scan stops after it
-    // collects the requested prefix. A descending scan reads all asset names and
-    // then reverses them, because one name can occur in many blocks.
-    let end_slot = domain.get_tip_slot()?;
-    let stream = domain
+    let chain = domain.get_chain_summary()?;
+    let Some(mary_epoch) = chain.first_mary_epoch() else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+    let (tip_epoch, _) = chain.slot_epoch(domain.get_tip_slot()?);
+
+    let order = match pagination.order {
+        Order::Asc => SlotOrder::Asc,
+        Order::Desc => SlotOrder::Desc,
+    };
+    let (skip, count) = (pagination.skip(), pagination.count);
+
+    let subjects = domain
         .query()
-        .blocks_by_policy_stream(&policy, 0, end_slot, SlotOrder::Asc);
-    let mut stream = Box::pin(stream);
-
-    let needed_unique =
-        matches!(pagination.order, Order::Asc).then(|| pagination.from() + pagination.count);
-    let mut subjects: IndexSet<Vec<u8>> = IndexSet::new();
-    while let Some(res) = stream.next().await {
-        let (_slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let Some(block) = block else {
-            continue;
-        };
-        collect_minted_subjects(&block, &policy, &mut subjects)?;
-        if needed_unique.is_some_and(|needed| subjects.len() >= needed) {
-            break;
-        }
-    }
+        .run_blocking(move |domain| {
+            first_mints::policy_page(
+                &domain,
+                &chain,
+                mary_epoch..=tip_epoch,
+                &policy,
+                order,
+                skip,
+                count,
+            )
+            .map_err(DomainError::from)
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Blockfrost returns 404 when the policy has no mint operations.
-    if subjects.is_empty() {
-        return Err(StatusCode::NOT_FOUND.into());
-    }
+    let subjects = subjects.ok_or(StatusCode::NOT_FOUND)?;
 
-    // The scan collects the subjects in ascending first-mint order. For `desc`,
-    // reverse this order.
-    let ordered: Box<dyn Iterator<Item = Vec<u8>>> = if matches!(pagination.order, Order::Desc) {
-        Box::new(subjects.into_iter().rev())
-    } else {
-        Box::new(subjects.into_iter())
-    };
+    let mut items = Vec::with_capacity(subjects.len());
 
-    let mut items = Vec::new();
-    for subject in ordered.skip(pagination.skip()).take(pagination.count) {
-        let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
+    for subject in subjects {
+        let asset_key = dolos_cardano::AssetKey::of(&subject);
         let asset_state = domain
-            .read_cardano_entity::<AssetState>(entity_key.as_slice())?
+            .read_cardano_entity::<AssetState>(&asset_key)?
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
         items.push(AssetPolicyInner {
@@ -1010,9 +1039,55 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{
+        first_mint_chain, first_mint_policies, health_beside, TestApp, TestFault, SLOW_READ,
+    };
     use blockfrost_openapi::models::asset::Asset;
-    use dolos_testing::synthetic::SyntheticBlockConfig;
+    use dolos_cardano::model::PolicyMintChunk;
+    use dolos_core::AsyncQueryFacade;
+    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
+    use pallas::ledger::traverse::MultiEraBlock;
+
+    /// The scan the period logs replaced: the policy's tagged blocks from
+    /// genesis, each name kept at its first appearance in a mint.
+    async fn scan_policy(domain: &ToyDomain, policy: &[u8]) -> Vec<Vec<u8>> {
+        let end_slot = domain.state().read_cursor().unwrap().unwrap().slot();
+        let stream = AsyncQueryFacade::new(domain.clone()).blocks_by_policy_stream(
+            policy,
+            0,
+            end_slot,
+            SlotOrder::Asc,
+        );
+        let mut stream = Box::pin(stream);
+
+        let mut seen = std::collections::HashSet::new();
+        let mut subjects = Vec::new();
+
+        while let Some(res) = stream.next().await {
+            let Some(block) = res.unwrap().1 else {
+                continue;
+            };
+            let block = MultiEraBlock::decode(&block).unwrap();
+
+            for tx in block.txs() {
+                for policy_assets in tx.mints() {
+                    if policy_assets.policy().as_slice() != policy {
+                        continue;
+                    }
+
+                    for asset in policy_assets.assets() {
+                        let subject = [policy, asset.name()].concat();
+
+                        if seen.insert(subject.clone()) {
+                            subjects.push(subject);
+                        }
+                    }
+                }
+            }
+        }
+
+        subjects
+    }
 
     fn invalid_assets() -> Vec<String> {
         vec![
@@ -1433,6 +1508,62 @@ mod tests {
         }
     }
 
+    /// Every page in both orders of every policy, as the scan the logs
+    /// replaced answers it, over a chain whose first epochs are sealed and
+    /// whose last are staged.
+    #[tokio::test]
+    async fn assets_by_policy_matches_the_policy_scan() {
+        use first_mint_policies::*;
+
+        let mut domain = None;
+        let app = TestApp::new_with_cfg_and_setup(first_mint_chain(), |inner, _| {
+            domain = Some(inner.clone())
+        });
+        let domain = domain.expect("setup ran");
+
+        let sealed = domain
+            .archive()
+            .iter_logs_typed::<PolicyMintChunk>(None)
+            .unwrap()
+            .count();
+        assert!(sealed > 4, "{sealed} sealed rows");
+
+        for policy in [ALPHA, BETA, GAMMA, SIBLING] {
+            let all = scan_policy(&domain, &policy).await;
+            assert!(!all.is_empty());
+
+            for (order, name) in [(Order::Asc, "asc"), (Order::Desc, "desc")] {
+                let ordered: Vec<String> = match order {
+                    Order::Asc => all.iter().map(hex::encode).collect(),
+                    Order::Desc => all.iter().rev().map(hex::encode).collect(),
+                };
+
+                for count in [1, 3, 100] {
+                    for page in 1..=all.len().div_ceil(count) + 1 {
+                        let skip = (page - 1) * count;
+                        let expected: Vec<String> =
+                            ordered.iter().skip(skip).take(count).cloned().collect();
+
+                        let path = format!(
+                            "/assets/policy/{}?order={name}&count={count}&page={page}",
+                            hex::encode(policy)
+                        );
+                        let (status, bytes) = app.get_bytes(&path).await;
+                        assert_eq!(status, StatusCode::OK, "{path}");
+
+                        let got: Vec<AssetPolicyInner> = serde_json::from_slice(&bytes).unwrap();
+                        let got: Vec<String> = got.into_iter().map(|x| x.asset).collect();
+
+                        assert_eq!(got, expected, "{path}");
+                    }
+                }
+            }
+        }
+
+        let path = format!("/assets/policy/{}", unminted_policy());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
     #[tokio::test]
     async fn assets_by_policy_bad_request() {
         let app = TestApp::new();
@@ -1455,5 +1586,34 @@ mod tests {
         let policy = app.vectors().policy_id.clone();
         let path = format!("/assets/policy/{policy}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_asset_addresses_do_not_stall_health() {
+        let app = TestApp::new_with_fault(Some(TestFault::SlowUtxoReads(SLOW_READ)));
+        let path = format!("/assets/{}/addresses", app.vectors().asset_unit);
+
+        assert_eq!(health_beside(&app, &path).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chunked_asset_holdings_match_unchunked() {
+        let app = TestApp::new();
+        let facade = app.facade();
+        let asset = decode_asset_subject(&app.vectors().asset_unit).expect("asset subject");
+
+        let utxos = facade.state().utxos_by_asset(&asset).expect("asset refs");
+        assert!(utxos.len() > 2, "too few utxos to split into chunks");
+
+        let whole = asset_holdings(&facade, asset.clone(), usize::MAX)
+            .await
+            .expect("holdings");
+
+        for chunk in [1, 2] {
+            let chunked = asset_holdings(&facade, asset.clone(), chunk)
+                .await
+                .expect("holdings");
+            assert_eq!(chunked, whole);
+        }
     }
 }

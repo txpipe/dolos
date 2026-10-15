@@ -57,7 +57,7 @@ pub struct Args {
     ephemeral: bool,
 
     /// Also re-write the derived log records the archive carries (StakeLog,
-    /// reward logs, EpochState); in-place mode only
+    /// reward logs, EpochState, period logs); in-place mode only
     #[arg(long, conflicts_with_all = ["target", "ephemeral"])]
     rewrite_logs: bool,
 
@@ -261,6 +261,7 @@ fn build_domain(
         archive,
         mempool: MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
         tip_broadcast,
+        query_limiter: QueryLimiter::default(),
     })
 }
 

@@ -28,7 +28,16 @@ impl DatumState {
     }
 }
 
-entity_boilerplate!(DatumState, "datums");
+hash_key!(
+    /// A datum, keyed by its hash.
+    DatumKey,
+    Hash<32>,
+    32
+);
+
+display_as_stored!(DatumKey);
+
+entity_boilerplate!(DatumState, "datums", state = DatumKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -75,7 +84,7 @@ impl dolos_core::EntityDelta for DatumRefIncrement {
     type Entity = DatumState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DATUM_NS, self.datum_hash))
+        NsKey::of::<DatumState>(&DatumKey(self.datum_hash))
     }
 
     fn apply(&mut self, entity: &mut Option<DatumState>) {
@@ -128,7 +137,7 @@ impl dolos_core::EntityDelta for DatumRefDecrement {
     type Entity = DatumState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DATUM_NS, self.datum_hash))
+        NsKey::of::<DatumState>(&DatumKey(self.datum_hash))
     }
 
     fn apply(&mut self, entity: &mut Option<DatumState>) {
@@ -261,6 +270,30 @@ mod tests {
             delta in any_datum_ref_decrement(),
         ) {
             assert_delta_roundtrip(entity, delta);
+        }
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use dolos_core::{keys::encode, KeyCodec};
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn layout_is_pinned() {
+        assert_eq!(
+            encode(&DatumKey(Hash::new([0x13; 32]))).to_vec(),
+            [0x13; 32]
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn keys_round_trip(hash in any::<[u8; 32]>()) {
+            let key = DatumKey(hash.into());
+            prop_assert_eq!(DatumKey::decode_key(&encode(&key)), Ok(key));
         }
     }
 }
