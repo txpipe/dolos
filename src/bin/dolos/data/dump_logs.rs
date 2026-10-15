@@ -4,14 +4,12 @@ use comfy_table::Table;
 use dolos_cardano::{
     eras::load_chain_summary_from_state,
     eras::log_epoch_range_to_key_range,
-    model::{AccountEpochLog, PParamKind},
-    ChainSummary, EpochState, StakeLog,
+    model::{AccountEpochLog, AccountKey, PParamKind, PoolKey},
+    ChainSummary, EpochState, PoolEpochLog,
 };
-use dolos_core::config::RootConfig;
+use dolos_core::{config::RootConfig, LogEntity, LogRangeOf};
 use miette::{IntoDiagnostic, WrapErr};
-use pallas::codec::minicbor;
 use pallas::ledger::addresses::Network as AddressNetwork;
-use pallas::ledger::primitives::StakeCredential;
 
 use crate::data::OutputFormat;
 use dolos::prelude::*;
@@ -51,20 +49,28 @@ struct RowContext {
     summary: Option<ChainSummary>,
 }
 
-trait TableRow: Entity {
+/// The key of the log a view renders, after the slot.
+type KeyOf<T> = <<T as TableRow>::Log as LogEntity>::Key;
+
+trait TableRow: Sized {
+    /// The log this view renders.
+    type Log: LogEntity;
+
+    fn view(log: Self::Log) -> Self;
+
     fn header(format: OutputFormat) -> Vec<&'static str>;
 
     /// The row this record renders as, or empty where it has nothing to say in
     /// this view.
-    fn row(&self, key: &LogKey, ctx: &RowContext) -> Vec<String>;
+    fn row(&self, slot: BlockSlot, key: &KeyOf<Self>, ctx: &RowContext) -> Vec<String>;
 
     /// Every output row this record renders as.
     ///
     /// One record is one row for all but the merged account-epoch log, whose
     /// reward view renders one row per list element — which is the whole point
     /// of the lists, and the reason this is not just [`Self::row`].
-    fn rows(&self, key: &LogKey, ctx: &RowContext) -> Vec<Vec<String>> {
-        match self.row(key, ctx) {
+    fn rows(&self, slot: BlockSlot, key: &KeyOf<Self>, ctx: &RowContext) -> Vec<Vec<String>> {
+        match self.row(slot, key, ctx) {
             row if row.is_empty() => Vec::new(),
             row => vec![row],
         }
@@ -72,6 +78,12 @@ trait TableRow: Entity {
 }
 
 impl TableRow for EpochState {
+    type Log = EpochState;
+
+    fn view(log: Self::Log) -> Self {
+        log
+    }
+
     fn header(format: OutputFormat) -> Vec<&'static str> {
         match format {
             OutputFormat::Default => vec![
@@ -107,7 +119,7 @@ impl TableRow for EpochState {
         }
     }
 
-    fn row(&self, _key: &LogKey, ctx: &RowContext) -> Vec<String> {
+    fn row(&self, _slot: BlockSlot, _key: &(), ctx: &RowContext) -> Vec<String> {
         match ctx.format {
             OutputFormat::Default => {
                 let pparams = self.pparams.live();
@@ -208,9 +220,25 @@ fn format_nonce(nonces: &Option<dolos_cardano::Nonces>) -> String {
     format!("{prefix}...{suffix}")
 }
 
+/// The epoch of a log row's slot, for a column headed `epoch`. A slot there is
+/// off by orders of magnitude and says nothing about being wrong, so without a
+/// summary absence renders as absence.
+fn epoch_of(slot: BlockSlot, ctx: &RowContext) -> String {
+    ctx.summary
+        .as_ref()
+        .map(|summary| summary.slot_epoch(slot).0.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 
-impl TableRow for StakeLog {
+impl TableRow for PoolEpochLog {
+    type Log = PoolEpochLog;
+
+    fn view(log: Self::Log) -> Self {
+        log
+    }
+
     fn header(format: OutputFormat) -> Vec<&'static str> {
         if matches!(format, OutputFormat::Dbsync) {
             todo!("dbsync format not supported for stakes logs (#1032)");
@@ -229,20 +257,16 @@ impl TableRow for StakeLog {
         ]
     }
 
-    fn row(&self, key: &LogKey, ctx: &RowContext) -> Vec<String> {
+    fn row(&self, slot: BlockSlot, pool: &PoolKey, ctx: &RowContext) -> Vec<String> {
         if matches!(ctx.format, OutputFormat::Dbsync) {
             todo!("dbsync format not supported for stakes logs (#1032)");
         }
-        let temporal = TemporalKey::from(key.clone());
-        let epoch = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
-        let entity_key = EntityKey::from(key.clone());
-        let pool_hash = entity_key.as_ref()[..28].try_into().unwrap();
-        let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool_hash).unwrap();
+        let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool.0.as_ref()).unwrap();
 
         vec![
             //format!("{}", pool_hex),
             format!("{}", pool_bech32),
-            format!("{}", epoch),
+            epoch_of(slot, ctx),
             format!("{}", self.blocks_minted),
             format!("{}", self.total_stake),
             format!("{}", self.delegators_count),
@@ -263,6 +287,12 @@ impl TableRow for StakeLog {
 /// reward this epoch without being in its distribution, which the stake view
 /// has never had a line for.
 impl TableRow for AccountEpochLog {
+    type Log = AccountEpochLog;
+
+    fn view(log: Self::Log) -> Self {
+        log
+    }
+
     fn header(format: OutputFormat) -> Vec<&'static str> {
         match format {
             OutputFormat::Default => vec![
@@ -278,12 +308,8 @@ impl TableRow for AccountEpochLog {
         }
     }
 
-    fn row(&self, key: &LogKey, ctx: &RowContext) -> Vec<String> {
-        let temporal = TemporalKey::from(key.clone());
-        let entity = EntityKey::from(key.clone());
-        let slot = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
-
-        let stake = render_stake_address(&entity, ctx);
+    fn row(&self, slot: BlockSlot, account: &AccountKey, ctx: &RowContext) -> Vec<String> {
+        let stake = render_stake_address(account, ctx);
         let pool = self
             .pool_id
             .map(render_pool)
@@ -319,17 +345,13 @@ impl TableRow for AccountEpochLog {
 /// epoch it describes, so the `- 1` those dumps applied went with their key.
 struct AccountEpochRewards(AccountEpochLog);
 
-impl Entity for AccountEpochRewards {
-    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, dolos_core::ChainError> {
-        AccountEpochLog::decode_entity(ns, value).map(AccountEpochRewards)
-    }
-
-    fn encode_entity(value: &Self) -> (Namespace, EntityValue) {
-        AccountEpochLog::encode_entity(&value.0)
-    }
-}
-
 impl TableRow for AccountEpochRewards {
+    type Log = AccountEpochLog;
+
+    fn view(log: Self::Log) -> Self {
+        AccountEpochRewards(log)
+    }
+
     fn header(format: OutputFormat) -> Vec<&'static str> {
         match format {
             OutputFormat::Default => vec!["epoch", "stake", "pool", "type", "amount"],
@@ -337,24 +359,14 @@ impl TableRow for AccountEpochRewards {
         }
     }
 
-    fn row(&self, _key: &LogKey, _ctx: &RowContext) -> Vec<String> {
+    fn row(&self, _slot: BlockSlot, _account: &AccountKey, _ctx: &RowContext) -> Vec<String> {
         unreachable!("the reward view renders through `rows`")
     }
 
-    fn rows(&self, key: &LogKey, ctx: &RowContext) -> Vec<Vec<String>> {
-        let temporal = TemporalKey::from(key.clone());
-        let entity = EntityKey::from(key.clone());
-        let slot = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
+    fn rows(&self, slot: BlockSlot, account: &AccountKey, ctx: &RowContext) -> Vec<Vec<String>> {
+        let epoch = epoch_of(slot, ctx);
 
-        // A slot under a column headed `epoch` is off by orders of magnitude and
-        // says nothing about being wrong, so absence renders as absence.
-        let epoch = ctx
-            .summary
-            .as_ref()
-            .map(|summary| summary.slot_epoch(slot).0.to_string())
-            .unwrap_or_else(|| "-".to_string());
-
-        let stake = render_stake_address(&entity, ctx);
+        let stake = render_stake_address(account, ctx);
 
         let member = self
             .0
@@ -399,20 +411,10 @@ impl TableRow for AccountEpochRewards {
     }
 }
 
-/// An undecodable key means the row isn't a credential-keyed log at all (wrong
-/// namespace, corruption). Report it as `<invalid>` rather than falling back to
-/// a zero credential, which would render as a well-formed stake address and
-/// silently mislabel the account — and collapse every failed row onto the same
-/// address in a dbsync diff.
-fn render_stake_address(entity: &EntityKey, ctx: &RowContext) -> String {
-    decode_stake_credential(entity)
-        .ok()
-        .and_then(|credential| {
-            pallas_extras::stake_credential_to_address(ctx.network, &credential)
-                .to_bech32()
-                .ok()
-        })
-        .unwrap_or_else(|| "<invalid>".to_string())
+fn render_stake_address(account: &AccountKey, ctx: &RowContext) -> String {
+    pallas_extras::stake_credential_to_address(ctx.network, account.credential())
+        .to_bech32()
+        .unwrap_or_else(|_| "<invalid>".to_string())
 }
 
 fn render_pool(pool: dolos_cardano::PoolHash) -> String {
@@ -435,17 +437,13 @@ fn render_pool_amounts(entries: &[(dolos_cardano::PoolHash, u64)]) -> String {
 /// Wrapper around EpochState that outputs protocol parameters as CSV columns.
 struct EpochPParams(EpochState);
 
-impl Entity for EpochPParams {
-    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, dolos_core::ChainError> {
-        EpochState::decode_entity(ns, value).map(EpochPParams)
-    }
-
-    fn encode_entity(value: &Self) -> (Namespace, EntityValue) {
-        EpochState::encode_entity(&value.0)
-    }
-}
-
 impl TableRow for EpochPParams {
+    type Log = EpochState;
+
+    fn view(log: Self::Log) -> Self {
+        EpochPParams(log)
+    }
+
     fn header(format: OutputFormat) -> Vec<&'static str> {
         match format {
             OutputFormat::Default | OutputFormat::Dbsync => vec![
@@ -466,7 +464,7 @@ impl TableRow for EpochPParams {
         }
     }
 
-    fn row(&self, _key: &LogKey, _ctx: &RowContext) -> Vec<String> {
+    fn row(&self, _slot: BlockSlot, _key: &(), _ctx: &RowContext) -> Vec<String> {
         let pparams = self.0.pparams.live();
         let pparams = match pparams.as_ref() {
             Some(p) => p,
@@ -541,8 +539,8 @@ impl<T: TableRow> Formatter<T> {
         }
     }
 
-    fn write(&mut self, key: LogKey, value: T, ctx: &RowContext) {
-        for row in value.rows(&key, ctx) {
+    fn write(&mut self, slot: BlockSlot, key: KeyOf<T>, value: T, ctx: &RowContext) {
+        for row in value.rows(slot, &key, ctx) {
             match self {
                 Formatter::Table(table, _) => {
                     table.add_row(row);
@@ -563,13 +561,12 @@ impl<T: TableRow> Formatter<T> {
 #[allow(clippy::too_many_arguments)]
 fn dump_logs<T: TableRow>(
     archive: &impl ArchiveStore,
-    ns: Namespace,
     skip: usize,
     take: usize,
     ctx: &RowContext,
     start_slot: Option<u64>,
     end_slot: Option<u64>,
-    range: Option<std::ops::Range<LogKey>>,
+    range: Option<std::ops::Range<BlockSlot>>,
 ) -> miette::Result<()> {
     let mut formatter = Formatter::<T>::new(ctx.format);
 
@@ -578,12 +575,11 @@ fn dump_logs<T: TableRow>(
     let take_limit = if take == 0 { None } else { Some(take) };
 
     archive
-        .iter_logs_typed(ns, range)
+        .iter_logs_typed::<T::Log>(range.map(LogRangeOf::slots))
         .into_diagnostic()
         .wrap_err("iterating logs")?
         .for_each(|x| match x {
-            Ok((key, value)) => {
-                let log_slot = log_slot_from_key(&key);
+            Ok((log_slot, key, value)) => {
                 if let Some(start) = start_slot {
                     if log_slot < start {
                         return;
@@ -606,7 +602,7 @@ fn dump_logs<T: TableRow>(
                     }
                 }
 
-                formatter.write(key, value, ctx);
+                formatter.write(log_slot, key, T::view(value), ctx);
                 taken += 1;
             }
             Err(e) => panic!("{e}"),
@@ -626,11 +622,15 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let use_epoch_filter = args.epoch_start.is_some() || args.epoch_end.is_some();
 
-    // The reward view heads a column `epoch`, and only the summary turns the
-    // log's slot key into one, so it pays the state-store open in every format.
+    // The stakes and reward views head a column `epoch`, and only the summary
+    // turns the log's slot key into one, so they pay the state-store open in
+    // every format.
     let need_summary = use_epoch_filter
         || matches!(args.format, OutputFormat::Dbsync)
-        || args.namespace == "account-epochs/rewards";
+        || matches!(
+            args.namespace.as_str(),
+            "pool-epochs" | "account-epochs/rewards"
+        );
     let summary = if need_summary {
         let state = crate::common::open_state_store(config)?;
         Some(load_chain_summary_from_state(&state).map_err(|err| miette::miette!("{err:?}"))?)
@@ -654,43 +654,24 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         (None, None, None)
     };
 
+    let (skip, take) = (args.skip, args.take);
+
     match args.namespace.as_str() {
-        "stakes" => dump_logs::<StakeLog>(
-            &archive,
-            "stakes",
-            args.skip,
-            args.take,
-            &ctx,
-            start_slot,
-            end_slot,
-            range.clone(),
-        )?,
-        "account-epochs" => dump_logs::<AccountEpochLog>(
-            &archive,
-            "account-epochs",
-            args.skip,
-            args.take,
-            &ctx,
-            start_slot,
-            end_slot,
-            range.clone(),
-        )?,
+        "pool-epochs" => {
+            dump_logs::<PoolEpochLog>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
+        }
+        "account-epochs" => {
+            dump_logs::<AccountEpochLog>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
+        }
         "account-epochs/rewards" => dump_logs::<AccountEpochRewards>(
-            &archive,
-            "account-epochs",
-            args.skip,
-            args.take,
-            &ctx,
-            start_slot,
-            end_slot,
-            range.clone(),
+            &archive, skip, take, &ctx, start_slot, end_slot, range,
         )?,
-        "epochs" => dump_logs::<EpochState>(
-            &archive, "epochs", args.skip, args.take, &ctx, start_slot, end_slot, range,
-        )?,
-        "epochs/pparams" => dump_logs::<EpochPParams>(
-            &archive, "epochs", args.skip, args.take, &ctx, start_slot, end_slot, range,
-        )?,
+        "epochs" => {
+            dump_logs::<EpochState>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
+        }
+        "epochs/pparams" => {
+            dump_logs::<EpochPParams>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
+        }
         _ => todo!(),
     }
 
@@ -712,14 +693,4 @@ fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette
     }
 
     crate::common::setup_tracing(&config.logging, &config.telemetry)
-}
-
-fn decode_stake_credential(key: &EntityKey) -> Result<StakeCredential, dolos_core::ChainError> {
-    let mut decoder = minicbor::Decoder::new(key.as_ref());
-    decoder.decode().map_err(Into::into)
-}
-
-fn log_slot_from_key(key: &LogKey) -> u64 {
-    let temporal = TemporalKey::from(key.clone());
-    u64::from_be_bytes(temporal.as_ref().try_into().unwrap())
 }

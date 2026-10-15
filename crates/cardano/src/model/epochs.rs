@@ -22,8 +22,6 @@ use crate::pots::{EpochIncentives, Pots};
 
 pub type Lovelace = u64;
 
-pub const CURRENT_EPOCH_KEY: &[u8] = b"0";
-
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Nonces {
     #[n(0)]
@@ -364,11 +362,9 @@ impl Default for EpochState {
     }
 }
 
-entity_boilerplate!(EpochState, "epochs");
+entity_boilerplate!(EpochState, "epochs", state = (), log = ());
 
-impl SingletonEntity for EpochState {
-    const KEY: &'static [u8] = CURRENT_EPOCH_KEY;
-}
+impl SingletonEntity for EpochState {}
 
 #[cfg(test)]
 pub(crate) mod testing {

@@ -1,4 +1,4 @@
-//! The seventeen canaries: one fully-populated value per namespace.
+//! The canaries: one fully-populated value per namespace.
 //!
 //! A canary is a value in which **every field is present and distinctive** —
 //! every `Option` is `Some`, every collection is non-empty, every nested type
@@ -24,10 +24,15 @@ use dolos_cardano::{
     model::{
         AccountEpochLog, AccountState, AssetState, AuthHistory, Committee, CommitteeAuthorization,
         Constitution, DRepDelegation, DRepExpiry, DRepState, DatumState, EndStats, EpochState,
-        EpochValue, EraBoundary, EraSummary, GovDistr, GovRoots, GovState, Nonces, PParamValue,
-        PParamsSet, PendingMirState, PendingRewardState, PoolDelegation, PoolParams, PoolSnapshot,
-        PoolState, ProposalAction, ProposalState, RollingStats, ShardProgress, Stake, StakeLog,
-        VoteEntry,
+        EpochValue, EraBoundary, EraState, FirstMintChunk, GovDistr, GovRoots, GovState, Nonces,
+        PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
+        PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction,
+        ProposalState, RollingStats, ShardProgress, StagedFirstMint, StagedStakeAddress, Stake,
+        StakeAddressesRow, VoteEntry,
+    },
+    model::{
+        AccountStats, AddressStats, PaymentStats, StagedAccountStats, StagedAddressStats,
+        StagedPaymentAddress, StagedPaymentStats, Sum, UnitSums,
     },
     pallas::{
         codec::utils::Bytes,
@@ -125,8 +130,8 @@ pub fn account_epoch_log() -> AccountEpochLog {
 /// `relative_size` is pinned at an exactly-representable power of two, so the
 /// golden fixes the IEEE-754 bits and nothing else: a value that needed
 /// rounding would pin the rounding rather than the field.
-pub fn stake_log() -> StakeLog {
-    StakeLog {
+pub fn pool_epoch_log() -> PoolEpochLog {
+    PoolEpochLog {
         blocks_minted: 42,
         total_stake: 123_456_789_000,
         relative_size: 0.015625,
@@ -187,6 +192,117 @@ pub fn asset_state() -> AssetState {
         initial_slot: Some(44_444),
         mint_tx_count: 19,
         metadata_tx: Some(hash32(0x82)),
+    }
+}
+
+pub fn first_mint_chunk() -> FirstMintChunk {
+    FirstMintChunk {
+        count: 258,
+        subjects: vec![
+            [hash28(0xb0).as_slice(), b"first"].concat().into(),
+            [hash28(0xb1).as_slice(), b"second"].concat().into(),
+        ],
+    }
+}
+
+pub fn policy_mint_chunk() -> PolicyMintChunk {
+    PolicyMintChunk {
+        count: 257,
+        names: vec![b"first".to_vec().into(), b"second".to_vec().into()],
+    }
+}
+
+pub fn staged_first_mint() -> StagedFirstMint {
+    StagedFirstMint {
+        policy: hash28(0xb2),
+        name: b"staged".to_vec(),
+        epoch: 611,
+        slot: 163_000_123,
+        tx_index: 17,
+    }
+}
+
+/// Lovelace and one asset, the asset's received sum past u64 so the bignum
+/// arm is pinned too.
+pub fn address_stats() -> AddressStats {
+    AddressStats {
+        units: [
+            (
+                Bytes::from(vec![]),
+                UnitSums {
+                    received: Sum(1_234_567),
+                    sent: Sum(0),
+                },
+            ),
+            (
+                Bytes::from([hash28(0xc0).as_slice(), b"TOKEN"].concat()),
+                UnitSums {
+                    received: Sum(u128::from(u64::MAX) + 7),
+                    sent: Sum(42),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        tx_count: 17,
+    }
+}
+
+pub fn staged_address_stats() -> StagedAddressStats {
+    StagedAddressStats(address_stats())
+}
+
+pub fn payment_stats() -> PaymentStats {
+    PaymentStats {
+        tails: vec![
+            [[0x01].as_slice(), &[0xc2; 28]].concat().into(),
+            vec![0x61].into(),
+        ],
+        tx_count: 9,
+    }
+}
+
+pub fn staged_payment_address() -> StagedPaymentAddress {
+    StagedPaymentAddress {
+        payment: hash28(0xc1),
+        epoch: 612,
+        tail: [[0x01].as_slice(), &[0xc2; 28]].concat(),
+    }
+}
+
+pub fn staged_payment_stats() -> StagedPaymentStats {
+    StagedPaymentStats { tx_count: 23 }
+}
+
+pub fn account_stats() -> AccountStats {
+    AccountStats { tx_overlap: 5 }
+}
+
+pub fn staged_account_stats() -> StagedAccountStats {
+    StagedAccountStats { tx_overlap: 7 }
+}
+
+pub fn staged_stake_address() -> StagedStakeAddress {
+    StagedStakeAddress {
+        account: StakeCredential::ScriptHash(hash28(0xb3)),
+        address: [[0x11].as_slice(), &[0xb4; 28], &[0xb3; 28]].concat(),
+        epoch: 612,
+        slot: 163_400_321,
+        tx_index: 19,
+        output_index: 4,
+    }
+}
+
+pub fn stake_addresses_row() -> StakeAddressesRow {
+    StakeAddressesRow {
+        addresses: vec![
+            [[0x01].as_slice(), &[0xb5; 28], &[0xb6; 28]]
+                .concat()
+                .into(),
+            [[0x31].as_slice(), &[0xb7; 28], &[0xb6; 28]]
+                .concat()
+                .into(),
+        ],
     }
 }
 
@@ -354,8 +470,8 @@ pub fn epoch_state() -> EpochState {
     }
 }
 
-pub fn era_summary() -> EraSummary {
-    EraSummary {
+pub fn era_summary() -> EraState {
+    EraState {
         start: EraBoundary {
             epoch: 208,
             slot: 4_492_800,

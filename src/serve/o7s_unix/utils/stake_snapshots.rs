@@ -1,6 +1,5 @@
 use crate::prelude::*;
-use dolos_cardano::FixedNamespace as _;
-use dolos_cardano::{load_epoch, load_era_summary, AccountState, EraProtocol, PoolState};
+use dolos_cardano::{load_epoch, load_era_summary, AccountState, EraKey, PoolState};
 use dolos_core::StateStore;
 use pallas::codec::minicbor;
 use pallas::codec::utils::{AnyCbor, Bytes, KeyValuePairs, TagWrap};
@@ -32,15 +31,15 @@ pub fn build_stake_snapshots_response<D: Domain>(
 
     let mut stake_snapshots: Vec<(Bytes, q16::Stakes)> = Vec::new();
 
-    let protocol_for_epoch = |epoch: u64| -> EraProtocol {
+    let protocol_for_epoch = |epoch: u64| -> EraKey {
         let era = chain_summary.era_for_epoch(epoch);
-        EraProtocol::from(era.protocol)
+        EraKey::from(era.protocol)
     };
 
     type StakeSnapshotArg = (BTreeSet<Vec<u8>>, HashMap<Vec<u8>, u64>, u64);
 
     let gather_for_epoch = |stake_epoch: u64,
-                            protocol: EraProtocol,
+                            protocol: EraKey,
                             filter_set: &Option<BTreeSet<Vec<u8>>>,
                             state: &D::State|
      -> Result<StakeSnapshotArg, Error> {
@@ -49,7 +48,7 @@ pub fn build_stake_snapshots_response<D: Domain>(
         let mut total_active: u64 = 0;
 
         let pools_iter = state
-            .iter_entities_typed::<PoolState>(PoolState::NS, None)
+            .iter_entities_typed::<PoolState>(None)
             .map_err(|e| Error::server(format!("failed to iterate pools: {e}")))?;
 
         let mut all_active_pools: BTreeSet<Vec<u8>> = BTreeSet::new();
@@ -69,7 +68,7 @@ pub fn build_stake_snapshots_response<D: Domain>(
         }
 
         let accounts_iter = state
-            .iter_entities_typed::<AccountState>(AccountState::NS, None)
+            .iter_entities_typed::<AccountState>(None)
             .map_err(|e| Error::server(format!("failed to iterate accounts: {e}")))?;
 
         for record in accounts_iter {

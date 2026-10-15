@@ -21,8 +21,8 @@ use std::sync::Arc;
 use dolos_cardano::indexes::archive_dimensions;
 use dolos_core::{
     builtin::MemoryArchiveStore, ArchiveIndexDelta, ArchiveStore as CoreArchiveStore,
-    ArchiveWriter as _, BlockSlot, ChainPoint, EntityKey, LogKey, NamespaceType, RawBlock,
-    StateSchema, Tag, TemporalKey,
+    ArchiveWriter as _, BlockSlot, ChainPoint, KeyRange, LogKey, LogRangeOf, NamespaceType,
+    RawBlock, StateSchema, Tag,
 };
 
 use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
@@ -30,7 +30,7 @@ use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_wi
 /// The namespaces the log tests write to. Two are enough to pin isolation;
 /// the names are the real ones so the suite reads like the node.
 const NS_A: &str = "account-epochs";
-const NS_B: &str = "stakes";
+const NS_B: &str = "pool-epochs";
 
 fn schema() -> StateSchema {
     let mut schema = StateSchema::default();
@@ -109,9 +109,20 @@ fn stored_slots<S: CoreArchiveStore>(store: &S) -> Vec<BlockSlot> {
 }
 
 fn log_key(slot: u64, entity: u8) -> LogKey {
-    let temporal = TemporalKey::from(slot);
-    let entity = EntityKey::from(&[entity; 32]);
-    LogKey::from((temporal, entity))
+    LogKey::of(slot, &[entity; 32])
+}
+
+/// A log key whose part after the slot is `len` bytes of `entity`.
+fn log_key_of(slot: u64, entity: u8, len: usize) -> LogKey {
+    LogKey::from_raw(&[slot.to_be_bytes().as_slice(), &vec![entity; len]].concat()).unwrap()
+}
+
+fn walk_logs<S: CoreArchiveStore>(store: &S, ns: &'static str, range: KeyRange) -> Vec<LogKey> {
+    store
+        .iter_logs(ns, range)
+        .unwrap()
+        .map(|r| r.unwrap().0)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -861,7 +872,7 @@ fn log_roundtrip<B: Backend>() {
 
     // A full iteration yields every row in key order.
     let walked: Vec<(LogKey, Vec<u8>)> = store
-        .iter_logs(NS_A, LogKey::full_range())
+        .iter_logs(NS_A, KeyRange::all())
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -888,7 +899,7 @@ fn log_namespaces_are_isolated<B: Backend>() {
     );
 
     let walked: Vec<(LogKey, Vec<u8>)> = store
-        .iter_logs(NS_B, LogKey::full_range())
+        .iter_logs(NS_B, KeyRange::all())
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -907,7 +918,7 @@ fn log_range_is_start_inclusive_end_exclusive<B: Backend>() {
     writer.commit().unwrap();
 
     let walked: Vec<(LogKey, Vec<u8>)> = store
-        .iter_logs(NS_A, log_key(10, 0x01)..log_key(30, 0x01))
+        .iter_logs(NS_A, KeyRange::slots(10..30))
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -934,7 +945,7 @@ fn the_last_write_to_a_log_key_wins<B: Backend>() {
     );
 
     let walked: Vec<(LogKey, Vec<u8>)> = store
-        .iter_logs(NS_A, LogKey::full_range())
+        .iter_logs(NS_A, KeyRange::all())
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -953,7 +964,7 @@ fn an_unknown_namespace_is_refused<B: Backend>() {
 
     assert!(store.read_logs("no-such-namespace", &[&key]).is_err());
     assert!(store
-        .iter_logs("no-such-namespace", LogKey::full_range())
+        .iter_logs("no-such-namespace", KeyRange::all())
         .is_err());
 }
 
@@ -979,7 +990,7 @@ fn prune_keeps_logs_at_the_cutoff_slot<B: Backend>() {
     assert!(done);
 
     let walked: Vec<LogKey> = store
-        .iter_logs(NS_A, LogKey::full_range())
+        .iter_logs(NS_A, KeyRange::all())
         .unwrap()
         .map(|r| r.unwrap().0)
         .collect();
@@ -1011,7 +1022,7 @@ fn truncate_front_drops_logs_at_the_cut_slot<B: Backend>() {
     assert_eq!(stored_slots(&store), vec![100, 200]);
 
     let walked: Vec<LogKey> = store
-        .iter_logs(NS_A, LogKey::full_range())
+        .iter_logs(NS_A, KeyRange::all())
         .unwrap()
         .map(|r| r.unwrap().0)
         .collect();
@@ -1038,6 +1049,102 @@ fn logs_and_blocks_share_one_writer_commit<B: Backend>() {
         store.read_logs(NS_A, &[&log_key(100, 0x01)]).unwrap(),
         vec![Some(b"epoch_row".to_vec())]
     );
+}
+
+/// Keys of any width share one namespace: an empty part after the slot, a
+/// single byte, a hash, and a composite longer than the old 32 bytes, all
+/// read back, walked in byte order, and bounded by slot.
+fn logs_of_mixed_widths_round_trip_in_byte_order<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let keys = [
+        log_key_of(10, 0x00, 0),
+        log_key_of(10, 0x00, 1),
+        log_key_of(10, 0x01, 1),
+        log_key_of(10, 0x01, 28),
+        log_key_of(10, 0xff, 32),
+        log_key_of(10, 0xff, 68),
+        log_key_of(11, 0x00, 0),
+    ];
+
+    let writer = store.start_writer().unwrap();
+    for (i, key) in keys.iter().enumerate().rev() {
+        writer.write_log(NS_A, key, &vec![i as u8]).unwrap();
+    }
+    writer.commit().unwrap();
+
+    assert_eq!(walk_logs(&store, NS_A, KeyRange::all()), keys.to_vec());
+
+    let read = store
+        .read_logs(NS_A, &keys.iter().collect::<Vec<_>>())
+        .unwrap();
+    assert_eq!(
+        read,
+        (0..keys.len())
+            .map(|i| Some(vec![i as u8]))
+            .collect::<Vec<_>>()
+    );
+
+    // a key and its own prefix are two rows, not one
+    assert_eq!(
+        store.read_logs(NS_A, &[&log_key_of(10, 0xff, 33)]).unwrap(),
+        vec![None]
+    );
+
+    let at_ten = LogRangeOf::<()>::slot(10).into_raw();
+    assert_eq!(walk_logs(&store, NS_A, at_ten), keys[..6].to_vec());
+
+    let prefixed = LogRangeOf::<(u8, [u8; 27])>::prefix(10, &0x01u8).into_raw();
+    assert_eq!(walk_logs(&store, NS_A, prefixed), keys[2..4].to_vec());
+
+    // the open end reaches a key of all `0xff`, which a fixed-width bound
+    // could not
+    let top = log_key_of(u64::MAX, 0xff, 40);
+    let writer = store.start_writer().unwrap();
+    writer.write_log(NS_A, &top, &vec![0xff]).unwrap();
+    writer.commit().unwrap();
+
+    assert_eq!(walk_logs(&store, NS_A, KeyRange::all()).last(), Some(&top));
+    assert_eq!(walk_logs(&store, NS_B, KeyRange::all()), Vec::new());
+}
+
+/// Prune and truncate cut by slot alone, whatever follows the slot: every
+/// width at the cut slot goes the same way.
+fn prune_and_truncate_cut_every_width_at_the_slot<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let writer = store.start_writer().unwrap();
+    for slot in [0, 1_000] {
+        writer
+            .apply(&point(slot), &Arc::new(fake_block(slot)))
+            .unwrap();
+    }
+    for slot in [499, 500, 700, 701] {
+        for len in [0, 1, 32, 68] {
+            writer
+                .write_log(NS_A, &log_key_of(slot, 0xff, len), &vec![len as u8])
+                .unwrap();
+        }
+    }
+    writer.commit().unwrap();
+
+    assert!(store.prune_history(500, None, None).unwrap());
+
+    let slots = |store: &B::Store| -> Vec<u64> {
+        walk_logs(store, NS_A, KeyRange::all())
+            .iter()
+            .map(LogKey::slot)
+            .collect()
+    };
+
+    assert_eq!(
+        slots(&store),
+        [500, 500, 500, 500, 700, 700, 700, 700, 701, 701, 701, 701]
+    );
+
+    store.truncate_front(&point(700)).unwrap();
+
+    assert_eq!(slots(&store), [500, 500, 500, 500]);
 }
 
 // Index entries: the archive's projection of its blocks
@@ -1403,12 +1510,12 @@ fn backends_agree_on_identical_writes() {
     }
 
     let from_memory: Vec<(LogKey, Vec<u8>)> = memory
-        .iter_logs(NS_A, LogKey::full_range())
+        .iter_logs(NS_A, KeyRange::all())
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
     let from_fjall: Vec<(LogKey, Vec<u8>)> = fjall
-        .iter_logs(NS_A, LogKey::full_range())
+        .iter_logs(NS_A, KeyRange::all())
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -1494,6 +1601,8 @@ macro_rules! full_suite {
                 prune_keeps_logs_at_the_cutoff_slot,
                 truncate_front_drops_logs_at_the_cut_slot,
                 logs_and_blocks_share_one_writer_commit,
+                logs_of_mixed_widths_round_trip_in_byte_order,
+                prune_and_truncate_cut_every_width_at_the_slot,
                 apply_index_then_slot_by_tx_hash_resolves,
                 undo_index_removes_exactly_what_apply_index_added,
                 slots_by_tag_bounds_are_inclusive,

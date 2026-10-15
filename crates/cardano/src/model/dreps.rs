@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, EntityKey, NsKey, TxOrder};
+use dolos_core::{keys::exact, BlockSlot, KeyBytes, KeyCodec, KeyError, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     ledger::primitives::{
@@ -9,52 +9,7 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::FixedNamespace as _;
-use crate::pallas_extras;
-
-pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
-    let bytes = match value {
-        DRep::Key(key) => [vec![pallas_extras::DREP_KEY_PREFIX], key.to_vec()].concat(),
-        DRep::Script(key) => [vec![pallas_extras::DREP_SCRIPT_PREFIX], key.to_vec()].concat(),
-        // Invented keys for convenience
-        DRep::Abstain => vec![0],
-        DRep::NoConfidence => vec![1],
-    };
-
-    EntityKey::from(bytes)
-}
-
-/// Decodes the DRep that [`drep_to_entity_key`] encoded into `key`.
-///
-/// Returns `None` when the bytes are not a padded DRep key.
-pub fn drep_from_entity_key(key: &EntityKey) -> Option<DRep> {
-    let bytes = key.as_ref();
-
-    // Regular DReps use 29 bytes, the special ones 1. The store pads both to
-    // the fixed key size with zeros.
-    let (head, padding) = match bytes.first()? {
-        &pallas_extras::DREP_KEY_PREFIX | &pallas_extras::DREP_SCRIPT_PREFIX => {
-            bytes.split_at_checked(29)?
-        }
-        _ => bytes.split_at(1),
-    };
-
-    if padding.iter().any(|x| *x != 0) {
-        return None;
-    }
-
-    match head {
-        [0] => Some(DRep::Abstain),
-        [1] => Some(DRep::NoConfidence),
-        [pallas_extras::DREP_KEY_PREFIX, hash @ ..] => {
-            <[u8; 28]>::try_from(hash).ok().map(|x| DRep::Key(x.into()))
-        }
-        [pallas_extras::DREP_SCRIPT_PREFIX, hash @ ..] => <[u8; 28]>::try_from(hash)
-            .ok()
-            .map(|x| DRep::Script(x.into())),
-        _ => None,
-    }
-}
+use crate::pallas_extras::{DREP_KEY_PREFIX, DREP_SCRIPT_PREFIX};
 
 /// Epoch-based DRep expiry, stored exactly as the Haskell ledger stores
 /// `drepExpiry`: **without** dormant-epoch credit. The actual expiry is
@@ -181,7 +136,90 @@ impl DRepState {
     }
 }
 
-entity_boilerplate!(DRepState, "dreps");
+/// A DRep: the CIP-129 credential header (key or script) and its hash, 29 B,
+/// or a single byte for the predefined abstain (`0`) and no-confidence (`1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DRepKey(pub DRep);
+
+/// Hashes the stored bytes, which tell DReps apart exactly as `Eq` does.
+impl std::hash::Hash for DRepKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        dolos_core::keys::encode(self).hash(state);
+    }
+}
+
+/// Orders by the stored bytes, the order the store keeps DReps in.
+impl Ord for DRepKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        dolos_core::keys::encode(self).cmp(&dolos_core::keys::encode(other))
+    }
+}
+
+impl PartialOrd for DRepKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl From<DRep> for DRepKey {
+    fn from(value: DRep) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&DRep> for DRepKey {
+    fn from(value: &DRep) -> Self {
+        Self(value.clone())
+    }
+}
+
+impl From<DRepKey> for DRep {
+    fn from(value: DRepKey) -> Self {
+        value.0
+    }
+}
+
+impl KeyCodec for DRepKey {
+    fn encode_key(&self, out: &mut KeyBytes) {
+        match &self.0 {
+            DRep::Key(hash) => {
+                out.push(DREP_KEY_PREFIX);
+                out.extend_from_slice(hash.as_slice());
+            }
+            DRep::Script(hash) => {
+                out.push(DREP_SCRIPT_PREFIX);
+                out.extend_from_slice(hash.as_slice());
+            }
+            DRep::Abstain => out.push(0),
+            DRep::NoConfidence => out.push(1),
+        }
+    }
+
+    fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
+        let Some((header, hash)) = bytes.split_first() else {
+            return Err(KeyError::Short {
+                expected: 1,
+                found: 0,
+            });
+        };
+
+        let drep = match *header {
+            0 => exact::<0>(hash).map(|_| DRep::Abstain)?,
+            1 => exact::<0>(hash).map(|_| DRep::NoConfidence)?,
+            DREP_KEY_PREFIX => DRep::Key(exact::<28>(hash)?.into()),
+            DREP_SCRIPT_PREFIX => DRep::Script(exact::<28>(hash)?.into()),
+            other => {
+                return Err(KeyError::Malformed(format!("drep header {other:#04x}")));
+            }
+        };
+
+        Ok(Self(drep))
+    }
+}
+
+display_as_stored!(DRepKey);
+
+entity_boilerplate!(DRepState, "dreps", state = DRepKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -269,7 +307,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
+        NsKey::of::<DRepState>(&DRepKey::from(&self.drep))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -329,7 +367,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
+        NsKey::of::<DRepState>(&DRepKey::from(&self.drep))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -379,7 +417,7 @@ impl dolos_core::EntityDelta for DRepActivity {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
+        NsKey::of::<DRepState>(&DRepKey::from(&self.drep))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -435,7 +473,7 @@ impl dolos_core::EntityDelta for DRepAnchorUpdate {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
+        NsKey::of::<DRepState>(&DRepKey::from(&self.drep))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -461,12 +499,12 @@ impl dolos_core::EntityDelta for DRepAnchorUpdate {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepExpiration {
-    pub(crate) drep_id: EntityKey,
+    pub(crate) drep_id: DRepKey,
     pub(crate) prev_expired: bool,
 }
 
 impl DRepExpiration {
-    pub fn new(drep_id: EntityKey) -> Self {
+    pub fn new(drep_id: DRepKey) -> Self {
         Self {
             drep_id,
             prev_expired: false,
@@ -478,7 +516,7 @@ impl dolos_core::EntityDelta for DRepExpiration {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, self.drep_id.clone()))
+        NsKey::of::<DRepState>(&self.drep_id)
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -541,7 +579,7 @@ impl dolos_core::EntityDelta for DRepExpiryUpdate {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
+        NsKey::of::<DRepState>(&DRepKey::from(&self.drep))
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -604,7 +642,7 @@ impl dolos_core::EntityDelta for DRepExpiryUpdate {
 /// (pre-upgrade) are skipped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepDormancyRelease {
-    pub(crate) drep_id: EntityKey,
+    pub(crate) drep_id: DRepKey,
     pub(crate) dormant_epochs: u64,
     pub(crate) epoch: Epoch,
 
@@ -614,7 +652,7 @@ pub struct DRepDormancyRelease {
 }
 
 impl DRepDormancyRelease {
-    pub fn new(drep_id: EntityKey, dormant_epochs: u64, epoch: Epoch) -> Self {
+    pub fn new(drep_id: DRepKey, dormant_epochs: u64, epoch: Epoch) -> Self {
         Self {
             drep_id,
             dormant_epochs,
@@ -629,7 +667,7 @@ impl dolos_core::EntityDelta for DRepDormancyRelease {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, self.drep_id.clone()))
+        NsKey::of::<DRepState>(&self.drep_id)
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -680,7 +718,7 @@ impl dolos_core::EntityDelta for DRepDormancyRelease {
 /// index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepPowerUpdate {
-    pub(crate) drep_id: EntityKey,
+    pub(crate) drep_id: DRepKey,
     pub(crate) power: u64,
 
     // undo
@@ -688,7 +726,7 @@ pub struct DRepPowerUpdate {
 }
 
 impl DRepPowerUpdate {
-    pub fn new(drep_id: EntityKey, power: u64) -> Self {
+    pub fn new(drep_id: DRepKey, power: u64) -> Self {
         Self {
             drep_id,
             power,
@@ -701,7 +739,7 @@ impl dolos_core::EntityDelta for DRepPowerUpdate {
     type Entity = DRepState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DRepState::NS, self.drep_id.clone()))
+        NsKey::of::<DRepState>(&self.drep_id)
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
@@ -715,41 +753,6 @@ impl dolos_core::EntityDelta for DRepPowerUpdate {
         let entity = entity.as_mut().expect("existing drep");
 
         entity.voting_power = self.prev_power;
-    }
-}
-
-#[cfg(test)]
-mod key_tests {
-    use super::*;
-
-    #[test]
-    fn drep_entity_key_roundtrip_covers_every_variant() {
-        let dreps = [
-            DRep::Key([7u8; 28].into()),
-            DRep::Script([8u8; 28].into()),
-            DRep::Abstain,
-            DRep::NoConfidence,
-        ];
-
-        for drep in dreps {
-            let key = drep_to_entity_key(&drep);
-            assert_eq!(drep_from_entity_key(&key), Some(drep));
-        }
-    }
-
-    #[test]
-    fn drep_from_entity_key_rejects_foreign_keys() {
-        // unknown prefix
-        assert_eq!(drep_from_entity_key(&EntityKey::from(vec![0x42; 29])), None);
-
-        // regular key with non-zero padding
-        let mut bytes = [0u8; 32];
-        bytes[0] = pallas_extras::DREP_KEY_PREFIX;
-        bytes[31] = 1;
-        assert_eq!(drep_from_entity_key(&EntityKey::from(bytes.to_vec())), None);
-
-        // special key with non-zero padding
-        assert_eq!(drep_from_entity_key(&EntityKey::from(vec![1, 1])), None);
     }
 }
 
@@ -804,7 +807,7 @@ mod prop_tests {
         fn any_drep_expiration()(
             drep in root::any_drep(),
         ) -> DRepExpiration {
-            DRepExpiration::new(drep_to_entity_key(&drep))
+            DRepExpiration::new(DRepKey(drep))
         }
     }
 
@@ -824,7 +827,7 @@ mod prop_tests {
             drep in root::any_drep(),
             power in root::any_lovelace(),
         ) -> DRepPowerUpdate {
-            DRepPowerUpdate::new(drep_to_entity_key(&drep), power)
+            DRepPowerUpdate::new(DRepKey(drep), power)
         }
     }
 
@@ -834,7 +837,7 @@ mod prop_tests {
             dormant_epochs in 1u64..32u64,
             epoch in root::any_epoch(),
         ) -> DRepDormancyRelease {
-            DRepDormancyRelease::new(drep_to_entity_key(&drep), dormant_epochs, epoch)
+            DRepDormancyRelease::new(DRepKey(drep), dormant_epochs, epoch)
         }
     }
 
@@ -1022,7 +1025,7 @@ mod expiry_tests {
     #[test]
     fn dormancy_release_folds_but_never_resurrects() {
         let drep = DRep::Key([1u8; 28].into());
-        let key = drep_to_entity_key(&drep);
+        let key = DRepKey(drep.clone());
 
         // active drep: counter folds into the stored value
         let mut state = DRepState::new(drep.clone());
@@ -1142,5 +1145,45 @@ mod compat_tests {
         let bytes = minicbor::to_vec(&state).unwrap();
         let decoded: DRepState = minicbor::decode(&bytes).unwrap();
         assert_eq!(decoded, state);
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use dolos_core::keys::encode;
+    use pallas::crypto::hash::Hash;
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::model::testing as root;
+
+    #[test]
+    fn layouts_are_pinned() {
+        assert_eq!(
+            hex::encode(encode(&DRepKey(DRep::Key(Hash::new([0x14; 28]))))),
+            format!("22{}", "14".repeat(28))
+        );
+        assert_eq!(
+            hex::encode(encode(&DRepKey(DRep::Script(Hash::new([0x15; 28]))))),
+            format!("23{}", "15".repeat(28))
+        );
+        assert_eq!(encode(&DRepKey(DRep::Abstain)).to_vec(), [0]);
+        assert_eq!(encode(&DRepKey(DRep::NoConfidence)).to_vec(), [1]);
+    }
+
+    #[test]
+    fn malformed_keys_are_refused() {
+        assert!(DRepKey::decode_key(&[]).is_err());
+        assert!(DRepKey::decode_key(&[0, 0]).is_err());
+        assert!(DRepKey::decode_key(&[DREP_KEY_PREFIX; 28]).is_err());
+        assert!(DRepKey::decode_key(&[DREP_KEY_PREFIX; 30]).is_err());
+        assert!(DRepKey::decode_key(&[0x42; 29]).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn keys_round_trip(key in root::any_drep().prop_map(DRepKey)) {
+            prop_assert_eq!(DRepKey::decode_key(&encode(&key)), Ok(key));
+        }
     }
 }

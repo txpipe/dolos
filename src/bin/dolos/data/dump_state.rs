@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use comfy_table::Table;
 use dolos_cardano::{
-    model::AccountState, DRepState, DatumState, EpochState, EpochValue, EraSummary,
+    model::AccountState, DRepState, DatumState, EpochState, EpochValue, EraState,
     PendingRewardState, PoolSnapshot, PoolState, ProposalAction, ProposalState,
 };
 use miette::{Context, IntoDiagnostic};
@@ -29,9 +29,9 @@ pub struct Args {
     count: usize,
 }
 
-trait TableRow: Entity {
+trait TableRow: StateEntity {
     fn header(format: OutputFormat) -> Vec<&'static str>;
-    fn row(&self, key: &EntityKey, network: AddressNetwork, format: OutputFormat) -> Vec<String>;
+    fn row(&self, key: &Self::Key, network: AddressNetwork, format: OutputFormat) -> Vec<String>;
 }
 
 fn format_stake_at(account: &AccountState, epoch: Epoch) -> String {
@@ -70,14 +70,14 @@ impl TableRow for AccountState {
         ]
     }
 
-    fn row(&self, key: &EntityKey, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
+    fn row(&self, key: &Self::Key, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
         if matches!(format, OutputFormat::Dbsync) {
             todo!("dbsync format not supported for accounts state (#1032)");
         }
         let epoch = self.stake.epoch().unwrap_or_default();
 
         vec![
-            format!("{}", hex::encode(key)),
+            format!("{}", EntityKey::of(key)),
             format!("{}", self.registered_at.unwrap_or_default()),
             format!("{}", self.deregistered_at.unwrap_or_default()),
             format_stake_at(self, epoch - 3),
@@ -114,7 +114,7 @@ impl TableRow for EpochState {
         ]
     }
 
-    fn row(&self, _key: &EntityKey, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
+    fn row(&self, _key: &Self::Key, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
         if matches!(format, OutputFormat::Dbsync) {
             todo!("dbsync format not supported for epochs state (#1032)");
         }
@@ -157,7 +157,7 @@ impl TableRow for EpochState {
     }
 }
 
-impl TableRow for EraSummary {
+impl TableRow for EraState {
     fn header(format: OutputFormat) -> Vec<&'static str> {
         if matches!(format, OutputFormat::Dbsync) {
             return vec!["protocol", "start_epoch", "epoch_length", "slot_length"];
@@ -175,7 +175,7 @@ impl TableRow for EraSummary {
         ]
     }
 
-    fn row(&self, key: &EntityKey, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
+    fn row(&self, key: &Self::Key, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
         if matches!(format, OutputFormat::Dbsync) {
             return vec![
                 self.protocol.to_string(),
@@ -186,7 +186,7 @@ impl TableRow for EraSummary {
         }
 
         vec![
-            format!("{}", hex::encode(key)),
+            format!("{}", EntityKey::of(key)),
             format!("{}", self.start.epoch),
             format!("{}", self.start.slot),
             format!("{}", self.start.timestamp),
@@ -219,11 +219,11 @@ impl TableRow for PendingRewardState {
         ]
     }
 
-    fn row(&self, key: &EntityKey, network: AddressNetwork, format: OutputFormat) -> Vec<String> {
+    fn row(&self, key: &Self::Key, network: AddressNetwork, format: OutputFormat) -> Vec<String> {
         if matches!(format, OutputFormat::Dbsync) {
             todo!("dbsync format not supported for pending rewards state (#1032)");
         }
-        let stake_hex = hex::encode(key.as_ref());
+        let stake_hex = EntityKey::of(key).to_string();
         let stake_bech32 = pallas_extras::stake_credential_to_address(network, &self.credential)
             .to_bech32()
             .unwrap_or_else(|_| "<invalid>".to_string());
@@ -248,9 +248,9 @@ impl TableRow for DatumState {
         vec!["hash", "refcount", "bytes"]
     }
 
-    fn row(&self, key: &EntityKey, _network: AddressNetwork, _format: OutputFormat) -> Vec<String> {
+    fn row(&self, key: &Self::Key, _network: AddressNetwork, _format: OutputFormat) -> Vec<String> {
         vec![
-            hex::encode(key.as_ref()),
+            hex::encode(key.0),
             self.refcount.to_string(),
             hex::encode(&self.bytes),
         ]
@@ -293,12 +293,11 @@ impl TableRow for PoolState {
         ]
     }
 
-    fn row(&self, key: &EntityKey, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
+    fn row(&self, key: &Self::Key, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
         if matches!(format, OutputFormat::Dbsync) {
             todo!("dbsync format not supported for pools state (#1032)");
         }
-        let entity_key = key.clone();
-        let pool_hash = entity_key.as_ref()[..28].try_into().unwrap();
+        let pool_hash: &[u8] = key.0.as_ref();
         let pool_hex = hex::encode(pool_hash);
         let pool_bech32 = bech32::encode::<bech32::Bech32>(POOL_HRP, pool_hash).unwrap();
 
@@ -337,7 +336,7 @@ impl TableRow for DRepState {
         ]
     }
 
-    fn row(&self, _key: &EntityKey, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
+    fn row(&self, _key: &Self::Key, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
         if matches!(format, OutputFormat::Dbsync) {
             todo!("dbsync format not supported for dreps state (#1032)");
         }
@@ -387,7 +386,7 @@ impl TableRow for ProposalState {
         ]
     }
 
-    fn row(&self, key: &EntityKey, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
+    fn row(&self, key: &Self::Key, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
         if matches!(format, OutputFormat::Dbsync) {
             todo!("dbsync format not supported for proposals state (#1032)");
         }
@@ -409,7 +408,7 @@ impl TableRow for ProposalState {
         };
 
         vec![
-            format!("{}", hex::encode(key)),
+            format!("{}", EntityKey::of(key)),
             format!("{}", hex::encode(self.tx)),
             format!("{}", self.idx),
             format!("{}", action),
@@ -460,7 +459,7 @@ impl<T: TableRow> Formatter<T> {
         }
     }
 
-    fn write(&mut self, key: EntityKey, value: T, network: AddressNetwork, format: OutputFormat) {
+    fn write(&mut self, key: T::Key, value: T, network: AddressNetwork, format: OutputFormat) {
         match self {
             Formatter::Table(table, _) => {
                 let row = value.row(&key, network, format);
@@ -483,7 +482,6 @@ impl<T: TableRow> Formatter<T> {
 
 fn dump_state<T: TableRow>(
     state: &impl StateStore,
-    ns: Namespace,
     count: usize,
     network: AddressNetwork,
     format: OutputFormat,
@@ -491,7 +489,7 @@ fn dump_state<T: TableRow>(
     let mut formatter = Formatter::<T>::new(format);
 
     let iter = state
-        .iter_entities_typed::<T>(ns, None)
+        .iter_entities_typed::<T>(None)
         .into_diagnostic()
         .context("iterating entities")?;
 
@@ -522,26 +520,16 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let network = network_from_genesis(&genesis);
 
     match args.namespace.as_str() {
-        "eras" => dump_state::<EraSummary>(&state, "eras", args.count, network, args.format)?,
-        "epochs" => dump_state::<EpochState>(&state, "epochs", args.count, network, args.format)?,
-        "accounts" => {
-            dump_state::<AccountState>(&state, "accounts", args.count, network, args.format)?
-        }
-        "pools" => dump_state::<PoolState>(&state, "pools", args.count, network, args.format)?,
-        "proposals" => {
-            dump_state::<ProposalState>(&state, "proposals", args.count, network, args.format)?
-        }
-        "dreps" => dump_state::<DRepState>(&state, "dreps", args.count, network, args.format)?,
+        "eras" => dump_state::<EraState>(&state, args.count, network, args.format)?,
+        "epochs" => dump_state::<EpochState>(&state, args.count, network, args.format)?,
+        "accounts" => dump_state::<AccountState>(&state, args.count, network, args.format)?,
+        "pools" => dump_state::<PoolState>(&state, args.count, network, args.format)?,
+        "proposals" => dump_state::<ProposalState>(&state, args.count, network, args.format)?,
+        "dreps" => dump_state::<DRepState>(&state, args.count, network, args.format)?,
         "pending-rewards" => {
-            dump_state::<PendingRewardState>(
-                &state,
-                "pending_rewards",
-                args.count,
-                network,
-                args.format,
-            )?;
+            dump_state::<PendingRewardState>(&state, args.count, network, args.format)?;
         }
-        "datums" => dump_state::<DatumState>(&state, "datums", args.count, network, args.format)?,
+        "datums" => dump_state::<DatumState>(&state, args.count, network, args.format)?,
         _ => todo!(),
     }
 

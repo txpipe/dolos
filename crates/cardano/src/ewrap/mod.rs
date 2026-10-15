@@ -16,13 +16,13 @@ use std::{
     sync::Arc,
 };
 
-use dolos_core::{BlockSlot, ChainError, EntityKey, Genesis, TxOrder};
+use dolos_core::{BlockSlot, ChainError, Genesis, TxOrder};
 use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
 
 use crate::{
     eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountEpochLog,
-    AccountState, CardanoDelta, CardanoEntity, DRepState, EpochState, EraProtocol, GovDistr,
-    GovState, PoolHash, PoolState, ProposalOutcome, ProposalState,
+    AccountState, CardanoDelta, DRepState, EpochState, EraKey, GovDistr, GovState, PoolHash,
+    PoolState, ProposalOutcome, ProposalState,
 };
 
 pub mod commit;
@@ -130,10 +130,10 @@ pub trait BoundaryVisitor {
     }
 }
 
-pub type AccountId = EntityKey;
-pub type PoolId = EntityKey;
-pub type DRepId = EntityKey;
-pub type ProposalId = EntityKey;
+pub type AccountId = crate::AccountKey;
+pub type PoolId = crate::PoolKey;
+pub type DRepId = crate::DRepKey;
+pub type ProposalId = crate::ProposalKey;
 
 /// One boundary's ruling on the live governance forest: the proposals it
 /// removes, each with the class of removal, plus the order the accepted
@@ -165,7 +165,7 @@ impl Ratification {
 pub struct BoundaryWork {
     // loaded
     pub(crate) ending_state: EpochState,
-    pub active_protocol: EraProtocol,
+    pub active_protocol: EraKey,
     pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,
     pub rewards: RewardMap<RupdWork>,
@@ -194,7 +194,7 @@ pub struct BoundaryWork {
     /// computed nothing — `RupdWork::relevant_epochs` returns `None` below
     /// epoch 4 and while the snapshot epoch is still at or before the first
     /// Shelley one, and the merged log has to agree with it epoch for epoch.
-    pub stake_snapshot: Option<(Epoch, EraProtocol)>,
+    pub stake_snapshot: Option<(Epoch, EraKey)>,
 
     /// The pools whose delegators are in [`Self::stake_snapshot`]'s
     /// distribution: those with a snapshot at that epoch that is not retired.
@@ -249,14 +249,16 @@ pub struct BoundaryWork {
     /// finalize.
     pub boundary_dreps: BTreeMap<StakeCredential, crate::DRepSnapshotEntry>,
 
-    /// Entity keys of the DReps registered at this boundary, which opens the
-    /// next epoch. Distribution accumulation skips delegations to any other
-    /// target (`AlwaysAbstain` / `AlwaysNoConfidence` excepted).
-    pub snapshot_registered_dreps: HashSet<EntityKey>,
+    /// The DReps registered at this boundary, which opens the next epoch.
+    /// Distribution accumulation skips delegations to any other target
+    /// (`AlwaysAbstain` / `AlwaysNoConfidence` excepted).
+    pub snapshot_registered_dreps: HashSet<DRepId>,
 
     // computed via visitors
     pub deltas: WorkDeltas,
-    pub logs: Vec<(EntityKey, CardanoEntity)>,
+    /// The merged account-epoch rows of the shard, written under
+    /// [`Self::account_epoch_slot`].
+    pub logs: Vec<(AccountId, AccountEpochLog)>,
 
     /// Credentials whose rewards were applied (need to be dequeued from state).
     pub applied_reward_credentials: Vec<StakeCredential>,
@@ -280,6 +282,14 @@ pub struct BoundaryWork {
     /// in via `GovDistrBoundaryCredit`. The pool leg is unaffected — the
     /// ledger's pool snapshot (SNAP) is taken before POOLREAP and ENACT.
     pub boundary_drep_credits: BTreeMap<DRep, u64>,
+
+    /// Deposits of the proposals this boundary removes, per pool their
+    /// return account delegates to as of the snapshot. The shard
+    /// accumulation added them to both legs; the ledger's pool leg never
+    /// had them (SNAP precedes `returnProposalDeposits`, and the pulser
+    /// adds only the deposits of proposals still open), so the finalize
+    /// pass takes them out via `GovDistrBoundaryCredit`.
+    pub boundary_pool_debits: BTreeMap<PoolHash, u64>,
 
     /// Enacted treasury withdrawals delivered to registered accounts
     /// (moved treasury → rewards at the boundary).
@@ -342,10 +352,10 @@ impl BoundaryWork {
     /// closes.
     ///
     /// Three of the four namespaces this record replaces already used it — the
-    /// stake temporal key, shared with the per-pool `StakeLog` so account- and
-    /// pool-level views of an epoch agree on its label by construction. The
-    /// reward family is what moves onto it (ADR-0027), which is also what lets
-    /// the merge deduplicate the `LogKey` and the pool hash.
+    /// stake temporal key, shared with the per-pool `PoolEpochLog` so account-
+    /// and pool-level views of an epoch agree on its label by construction.
+    /// The reward family is what moves onto it (ADR-0027), which is also
+    /// what lets the merge deduplicate the `LogKey` and the pool hash.
     pub fn account_epoch_slot(&self) -> BlockSlot {
         self.chain_summary
             .epoch_start(self.ending_state.number.saturating_sub(1))

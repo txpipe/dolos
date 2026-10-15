@@ -31,7 +31,7 @@ The boundary work splits into a *close* half (`Ewrap`, ending epoch N) and an *o
 
 `Rupd` is a third sharded unit, firing mid-epoch at the randomness stability window. It computes rewards from the E-3 stake snapshot and writes one `PendingRewardState` entity per rewarded account in this shard's range; `Ewrap` consumes those entries to apply the rewards.
 
-All three sharded units share credential-key partitioning (`crate::shard::shard_key_ranges`) and the `crate::shard::ACCOUNT_SHARDS` constant; progress for each is tracked separately on `EpochState.ewrap_progress`, `EpochState.estart_progress`, and `EpochState.rupd_progress`. The shard count is captured at the first per-shard commit and persisted on `ShardProgress.total` so a value change between shards (e.g. across a crash and restart on a newer build) can't break an in-flight pipeline.
+All three sharded units share credential-key partitioning (`AccountKey::shard_ranges`) and the `crate::shard::ACCOUNT_SHARDS` constant; progress for each is tracked separately on `EpochState.ewrap_progress`, `EpochState.estart_progress`, and `EpochState.rupd_progress`. The shard count is captured at the first per-shard commit and persisted on `ShardProgress.total` so a value change between shards (e.g. across a crash and restart on a newer build) can't break an in-flight pipeline.
 
 The sections below walk the cycle starting at `Estart` (the first phase of every epoch).
 
@@ -60,7 +60,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 - Builds a fresh `WorkContext` via `WorkContext::load_finalize` (using the AVVM total computed in `initialize`).
 - Iterates pools / dreps / proposals; emits transition deltas via the `nonces` and `reset` visitors.
 - Emits the closing `EpochTransition` delta (rotates `number` / `initial_pots` / `rolling` / `pparams`, seeds `EpochState.end = Some(EndStats::default())`, resets *both* `ewrap_progress = None` and `estart_progress = None`).
-- Direct writes: `EraSummary` writes during era transitions (Shelley→Allegra etc.).
+- Direct writes: `EraState` writes during era transitions (Shelley→Allegra etc.).
 - **Sets the cursor** to `ChainPoint::Slot(boundary_slot)` — the only phase across all work units that moves the cursor. A crash before `finalize()` restarts from the boundary block.
 - Deltas emitted in finalize:
   - `NonceTransition` — `estart/nonces.rs:40`. Targets `epochs`.
@@ -105,7 +105,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
   - **Epoch rolling stats** (`roll/epochs.rs`):
     - `EpochStatsUpdate:99`
     - `NoncesUpdate:115`
-- Namespaces touched: `accounts`, `pools`, `dreps`, `proposals`, `assets`, `datums`, `epochs`, `pending_mirs`.
+- Namespaces touched: `accounts`, `pools`, `dreps`, `proposals`, `assets`, `datums`, `epochs`, `pending-mirs`.
 
 ## 3. `RupdWorkUnit` — computes rewards at the stability window (sharded body + Rupd finalize)
 
@@ -121,23 +121,23 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 ### Per-shard body — per-credential reward emission
 
 - Each shard is scoped to a first-byte prefix bucket of the credential key space.
-- `load(shard)` extends the globals with shard-scoped `accounts_by_pool` (delegators in range) and `registered_accounts` (registered creds in range) by streaming `AccountState` only over the shard's two `EntityKey` ranges. Stashes the ranges on `RupdWork.shard_ranges` so `should_include` can gate emissions.
+- `load(shard)` extends the globals with shard-scoped `accounts_by_pool` (delegators in range) and `registered_accounts` (registered creds in range) by streaming `AccountState` only over the shard's two `AccountKey` ranges. Stashes the ranges on `RupdWork.shard_ranges` so `should_include` can gate emissions.
 - `compute(shard)` runs `define_rewards` over **every pool** (pool rewards depend on global pool stake / blocks, both hoisted to `initialize`) but emits only credentials this shard owns:
   - delegator rewards are filtered naturally — `pool_delegators(pool)` returns only in-range creds
   - leader rewards are gated by `should_include(operator_account)`; the shard whose range contains the operator credential is the sole emitter for that pool's leader reward
-- `commit_state(shard)` writes the in-range `PendingRewardState` entities (overwrite-by-key, idempotent) and emits a single `RupdProgress` delta to advance `EpochState.rupd_progress`. Per-pool reward + delegator-count contributions are accumulated on the work unit (O(pools)) for the finalize-phase StakeLog.
+- `commit_state(shard)` writes the in-range `PendingRewardState` entities (overwrite-by-key, idempotent) and emits a single `RupdProgress` delta to advance `EpochState.rupd_progress`. Per-pool reward + delegator-count contributions are accumulated on the work unit (O(pools)) for the finalize-phase PoolEpochLog.
 - Deltas emitted per shard:
   - `RupdProgress` — `rupd/work_unit.rs:commit_state`. Single per shard. Targets `epochs` — advances `rupd_progress = Some(ShardProgress { committed: shard_index + 1, total })`. Idempotency + ordering + total-mismatch guarded, mirroring `EWrapProgress` / `EStartProgress`.
 
 ### `finalize()` — Rupd global pass
 
 - Direct write: `EpochState.incentives = Some(work.incentives)` and `EpochState.rupd_progress = None`. Single one-shot write so concurrent shard commits can't race.
-- Direct writes: per-pool `StakeLog` archive entries from the shard-accumulator (`total_rewards`, `operator_share`, `delegators_count` rolled up across shards; `blocks_minted`, `total_stake`, `relative_size`, `declared_pledge`, `fixed_cost`, `margin_cost` from globals).
+- Direct writes: per-pool `PoolEpochLog` archive entries from the shard-accumulator (`total_rewards`, `operator_share`, `delegators_count` rolled up across shards; `blocks_minted`, `total_stake`, `relative_size`, `declared_pledge`, `fixed_cost`, `margin_cost` from globals).
 - No deltas emitted in finalize.
 
 `PendingRewardState` writes are overwrite-by-key, so true mid-shard resume is safe (rerunning a shard rewrites the same credentials with identical data).
 
-- Namespaces touched: `accounts` (read only, shard range, per shard), `pending_rewards` (write, shard range, per shard), `epochs` (`rupd_progress` per shard via delta; `incentives` direct-write in finalize).
+- Namespaces touched: `accounts` (read only, shard range, per shard), `pending-rewards` (write, shard range, per shard), `epochs` (`rupd_progress` per shard via delta; `incentives` direct-write in finalize).
 
 ## 4. `EwrapWorkUnit` — close half (sharded body + Ewrap finalize)
 
@@ -186,14 +186,14 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
   - **MIR processing** (`ewrap/loading.rs`):
     - `AssignRewards:207` (one per registered MIR recipient)
 
-- Namespaces touched: `accounts` (shard range, per shard; MIR recipients in finalize), `pools`, `dreps`, `proposals`, `epochs`. Deletes from `pending_rewards` (per shard) and `pending_mirs` (in finalize).
+- Namespaces touched: `accounts` (shard range, per shard; MIR recipients in finalize), `pools`, `dreps`, `proposals`, `epochs`. Deletes from `pending-rewards` (per shard) and `pending-mirs` (in finalize).
 
 ## 5. `GenesisWorkUnit` — one-time chain bootstrap
 
 - Variants: `CardanoWorkUnit::Genesis` / `InternalWorkUnit::Genesis`.
 - Struct: `genesis::GenesisWorkUnit` (`crates/cardano/src/genesis/mod.rs`).
 - Purpose: bootstrap state from genesis configs (Byron/Shelley/Alonzo/Conway).
-- Deltas: **none**. Writes `EpochState` and `EraSummary` entities directly via `bootstrap_epoch` / `bootstrap_eras`.
+- Deltas: **none**. Writes `EpochState` and `EraState` entities directly via `bootstrap_epoch` / `bootstrap_eras`.
 - Namespaces touched: `epochs`, `eras`.
 
 ## 6. `ForcedStop` — sentinel

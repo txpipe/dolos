@@ -1,11 +1,9 @@
 use dolos_core::NsKey;
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
-    crypto::hash::Hash,
+    crypto::hash::{Hash, Hasher},
 };
 use serde::{Deserialize, Serialize};
-
-use super::FixedNamespace as _;
 
 #[derive(Debug, Encode, Decode, Clone, Default, PartialEq, Eq)]
 pub struct AssetState {
@@ -26,7 +24,33 @@ pub struct AssetState {
     pub metadata_tx: Option<Hash<32>>,
 }
 
-entity_boilerplate!(AssetState, "assets");
+hash_key!(
+    /// An asset, keyed by `blake2b256(policy ‖ name)`; [`AssetKey::of`] and
+    /// [`AssetKey::of_parts`] are the only places that hash is taken.
+    AssetKey,
+    Hash<32>,
+    32
+);
+
+impl AssetKey {
+    /// The key of the asset whose subject is `policy ‖ name`.
+    pub fn of(subject: &[u8]) -> Self {
+        Self(Hasher::<256>::hash(subject))
+    }
+
+    /// The key of the asset `name` under `policy`, without building the
+    /// subject.
+    pub fn of_parts(policy: &[u8], name: &[u8]) -> Self {
+        let mut hasher = Hasher::<256>::new();
+        hasher.input(policy);
+        hasher.input(name);
+        Self(hasher.finalize())
+    }
+}
+
+display_as_stored!(AssetKey);
+
+entity_boilerplate!(AssetState, "assets", state = AssetKey);
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -111,12 +135,7 @@ impl dolos_core::EntityDelta for MintStatsUpdate {
     type Entity = AssetState;
 
     fn key(&self) -> NsKey {
-        let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
-        hasher.input(self.policy.as_slice());
-        hasher.input(self.asset.as_slice());
-        let key = hasher.finalize();
-        let key = key.as_slice();
-        NsKey::from((AssetState::NS, key))
+        NsKey::of::<AssetState>(&AssetKey::of_parts(self.policy.as_slice(), &self.asset))
     }
 
     fn apply(&mut self, entity: &mut Option<AssetState>) {
@@ -178,12 +197,7 @@ impl dolos_core::EntityDelta for MetadataTxUpdate {
     type Entity = AssetState;
 
     fn key(&self) -> NsKey {
-        let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
-        hasher.input(self.policy.as_slice());
-        hasher.input(self.asset.as_slice());
-        let key = hasher.finalize();
-        let key = key.as_slice();
-        NsKey::from((AssetState::NS, key))
+        NsKey::of::<AssetState>(&AssetKey::of_parts(self.policy.as_slice(), &self.asset))
     }
 
     fn apply(&mut self, entity: &mut Option<AssetState>) {
@@ -247,6 +261,34 @@ mod prop_tests {
             delta in any_metadata_tx_update(),
         ) {
             assert_delta_roundtrip(entity, delta);
+        }
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use dolos_core::{keys::encode, KeyCodec};
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn layout_is_pinned() {
+        assert_eq!(
+            hex::encode(encode(&AssetKey::of(b"policy-and-name"))),
+            hex::encode(Hasher::<256>::hash(b"policy-and-name"))
+        );
+        assert_eq!(
+            AssetKey::of_parts(b"policy-and-", b"name"),
+            AssetKey::of(b"policy-and-name")
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn keys_round_trip(hash in any::<[u8; 32]>()) {
+            let key = AssetKey(hash.into());
+            prop_assert_eq!(AssetKey::decode_key(&encode(&key)), Ok(key));
         }
     }
 }

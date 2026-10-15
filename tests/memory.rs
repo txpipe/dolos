@@ -40,7 +40,7 @@ fn assert_lazy_iter<S: CoreStateStore>(store: &S) {
         for i in written..batch_end {
             let mut key_bytes = [0u8; 32];
             key_bytes[..8].copy_from_slice(&i.to_be_bytes());
-            let key = EntityKey::from(&key_bytes);
+            let key = EntityKey::of(&key_bytes);
             writer
                 .write_entity(NS, &key, &value)
                 .expect("write_entity failed");
@@ -52,7 +52,7 @@ fn assert_lazy_iter<S: CoreStateStore>(store: &S) {
     let reg = Region::new(GLOBAL);
 
     let iter = store
-        .iter_entities(NS, EntityKey::full_range())
+        .iter_entities(NS, dolos_core::KeyRange::all())
         .expect("iter_entities failed");
 
     let stats = reg.change();
@@ -128,7 +128,7 @@ fn seed_account_namespace<S: CoreStateStore>(store: &S) {
             let mut key_bytes = [0u8; 32];
             key_bytes[0] = (i % 256) as u8;
             key_bytes[1..9].copy_from_slice(&i.to_be_bytes());
-            let key = EntityKey::from(&key_bytes);
+            let key = EntityKey::of(&key_bytes);
             writer
                 .write_entity(NS, &key, &value)
                 .expect("write_entity failed");
@@ -141,15 +141,11 @@ fn seed_account_namespace<S: CoreStateStore>(store: &S) {
 fn assert_shard_range_iter<S: CoreStateStore>(store: &S) {
     seed_account_namespace(store);
 
-    // Build a half-open Range<EntityKey> spanning one first-byte prefix
-    // bucket — this is the same shape EwrapWorkUnit uses.
-    let mut start_bytes = [0u8; 32];
-    start_bytes[0] = SHARD_KEY_PREFIX_RANGE.start;
-    let mut end_bytes = [0u8; 32];
-    end_bytes[0] = SHARD_KEY_PREFIX_RANGE.end;
-    let range = std::ops::Range {
-        start: EntityKey::from(&start_bytes),
-        end: EntityKey::from(&end_bytes),
+    // A half-open range spanning one first-byte prefix bucket — the shape
+    // the boundary work units' shard ranges take.
+    let range = dolos_core::KeyRange {
+        start: [SHARD_KEY_PREFIX_RANGE.start].as_slice().into(),
+        end: Some([SHARD_KEY_PREFIX_RANGE.end].as_slice().into()),
     };
 
     let reg = Region::new(GLOBAL);

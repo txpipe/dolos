@@ -117,13 +117,12 @@ use std::collections::{HashMap, HashSet};
 
 use dolos_cardano::eras::load_chain_summary_from_state;
 use dolos_cardano::model::{
-    drep_to_entity_key, AccountState, DRepDelegation, DRepState, EpochState, EraSummary,
-    PoolDelegation, PoolHash, PoolState, SingletonEntity as _,
+    AccountKey, AccountState, DRepDelegation, DRepKey, DRepState, EpochState, EraState,
+    PoolDelegation, PoolHash, PoolKey, PoolState,
 };
 use dolos_cardano::pots::{apply_delta, EpochIncentives, PotDelta, Pots};
 use dolos_cardano::ChainSummary;
-use dolos_cardano::FixedNamespace as _;
-use dolos_core::{ArchiveStore as _, BlockSlot, EntityKey, Genesis, StateStore, TxOrder};
+use dolos_core::{ArchiveStore as _, BlockSlot, Genesis, StateStore, TxOrder};
 use indicatif::ProgressBar;
 use miette::{Context as _, IntoDiagnostic as _};
 use pallas::ledger::primitives::conway::DRep;
@@ -642,9 +641,9 @@ pub fn check_pots(claimed: &Pots, found: &Recomputed, supply: SupplyCheck) -> Ch
 /// What one DRep row says, reduced to what the referent rules ask of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DRepFacts {
-    /// The identifier the row carries. [`drep_to_entity_key`] derives the key
-    /// a row is stored under from this, class prefix included, so a row that
-    /// disagrees with its own key was not written by the node.
+    /// The identifier the row carries. Its [`DRepKey`] is the key the row is
+    /// stored under, class prefix included, so a row that disagrees with its
+    /// own key was not written by the node.
     pub identifier: DRep,
 
     /// Where the retirement happened, on a row that is currently
@@ -675,23 +674,19 @@ pub struct Anchors {
 /// The entities a delegation can point at, loaded once so the account pass is
 /// a map lookup rather than a read per account.
 ///
-/// Keyed by [`EntityKey`] rather than by the raw hash a delegation carries.
-/// An `EntityKey` is a fixed-width, zero-padded 32 bytes, so a 28-byte pool
-/// hash compared against a stored key by raw bytes never matches — and the
-/// check would report every delegated account on the network as dangling.
-/// Going through the same conversion the writers use is what makes the
-/// lookup ask the question the store answers.
+/// Keyed by the typed keys the writers store rows under, which is what makes
+/// the lookup ask the question the store answers.
 #[derive(Debug, Default)]
 pub struct Referents {
-    pub pools: HashSet<EntityKey>,
+    pub pools: HashSet<PoolKey>,
     pub registered_pools: u64,
-    pub dreps: HashMap<EntityKey, DRepFacts>,
+    pub dreps: HashMap<DRepKey, DRepFacts>,
     pub anchors: Anchors,
 }
 
 impl Referents {
     fn has_pool(&self, pool: &PoolHash) -> bool {
-        self.pools.contains(&EntityKey::from(*pool))
+        self.pools.contains(&PoolKey(*pool))
     }
 }
 
@@ -759,8 +754,8 @@ fn dangling_pool_referents(account: &AccountState, referents: &Referents) -> Vec
 /// 1. **A row agrees with its own key.** The key is derived from the
 ///    identifier, class prefix and all, so a row reached through a `DRep::Key`
 ///    that identifies itself as a `DRep::Script` — or as another hash
-///    altogether — was not written by [`drep_to_entity_key`]. There is no
-///    history in which that is legitimate.
+///    altogether — was not keyed by its own [`DRepKey`]. There is no history in
+///    which that is legitimate.
 /// 2. **A retirement the boundary owed a drop has had it.** When a DRep
 ///    unregisters, the next boundary drops every delegation older than the
 ///    retirement: `BoundaryWork::clears_drep_delegation`, applied once, at the
@@ -794,7 +789,7 @@ fn dangling_vote_referent(account: &AccountState, referents: &Referents) -> Opti
         return None;
     }
 
-    let Some(facts) = referents.dreps.get(&drep_to_entity_key(drep)) else {
+    let Some(facts) = referents.dreps.get(&DRepKey::from(drep)) else {
         // Rule 3.
         let delegated_at = account.vote_delegated_at?;
         let pv10 = referents.anchors.pv10_boundary?;
@@ -854,7 +849,7 @@ fn dangling_referents(account: &AccountState, referents: &Referents) -> Vec<Stri
 /// One pass over every account: count the registered ones and check their
 /// delegations. Both need the account namespace, so they share the walk.
 pub fn scan_accounts<E: std::fmt::Display>(
-    accounts: impl Iterator<Item = Result<(EntityKey, AccountState), E>>,
+    accounts: impl Iterator<Item = Result<(AccountKey, AccountState), E>>,
     referents: &Referents,
     mut on_progress: impl FnMut(u64),
 ) -> (u64, Vec<Issue>) {
@@ -909,7 +904,7 @@ pub fn load_referents<S: StateStore>(state: &S, anchors: Anchors) -> miette::Res
     let mut registered_pools = 0;
 
     for record in state
-        .iter_entities_typed::<PoolState>(PoolState::NS, None)
+        .iter_entities_typed::<PoolState>(None)
         .into_diagnostic()
         .context("iterating pools")?
     {
@@ -929,7 +924,7 @@ pub fn load_referents<S: StateStore>(state: &S, anchors: Anchors) -> miette::Res
     let mut dreps = HashMap::new();
 
     for record in state
-        .iter_entities_typed::<DRepState>(DRepState::NS, None)
+        .iter_entities_typed::<DRepState>(None)
         .into_diagnostic()
         .context("iterating dreps")?
     {
@@ -984,7 +979,7 @@ pub fn load_anchors<S: StateStore>(
 /// a store an operator already suspects must not.
 fn chain_summary<S: StateStore>(state: &S) -> miette::Result<Option<ChainSummary>> {
     let mut eras = state
-        .iter_entities_typed::<EraSummary>(EraSummary::NS, None)
+        .iter_entities_typed::<EraState>(None)
         .into_diagnostic()
         .context("iterating era summaries")?;
 
@@ -1028,7 +1023,7 @@ pub fn sum_drep_deposits<S: StateStore>(state: &S) -> miette::Result<u64> {
     let mut total = 0u64;
 
     for record in state
-        .iter_entities_typed::<DRepState>(DRepState::NS, None)
+        .iter_entities_typed::<DRepState>(None)
         .into_diagnostic()
         .context("iterating dreps")?
     {
@@ -1056,7 +1051,7 @@ pub fn recompute<S: StateStore>(
     let referents = load_referents(state, anchors)?;
 
     let accounts = state
-        .iter_entities_typed::<AccountState>(AccountState::NS, None)
+        .iter_entities_typed::<AccountState>(None)
         .into_diagnostic()
         .context("iterating accounts")?;
 
@@ -1080,7 +1075,7 @@ pub fn run(
 ) -> miette::Result<CheckResult> {
     let epoch = stores
         .state
-        .read_entity_typed::<EpochState>(EpochState::NS, &EpochState::singleton_key())
+        .read_entity_typed::<EpochState>(&())
         .into_diagnostic()
         .context("reading the live epoch state")?;
 
@@ -1092,14 +1087,14 @@ pub fn run(
 
     let snapshots = stores
         .archive
-        .iter_logs_typed::<EpochState>(EpochState::NS, None)
+        .iter_logs_typed::<EpochState>(None)
         .into_diagnostic()
         .context("iterating the `epochs` log")?;
 
     progress.set_message("totals: replaying the epoch boundaries");
 
     let boundaries = check_boundaries(
-        snapshots.map(|record| record.map(|(_, snapshot)| snapshot)),
+        snapshots.map(|record| record.map(|(_, _, snapshot)| snapshot)),
         Some(&epoch),
     );
 
@@ -1193,12 +1188,13 @@ mod tests {
         }
     }
 
-    fn account(epoch: Epoch, seed: u8) -> (EntityKey, AccountState) {
-        let mut state = AccountState::new(epoch, StakeCredential::AddrKeyhash([seed; 28].into()));
+    fn account(epoch: Epoch, seed: u8) -> (AccountKey, AccountState) {
+        let credential = StakeCredential::AddrKeyhash([seed; 28].into());
+        let mut state = AccountState::new(epoch, credential.clone());
         state.stake = EpochValue::with_live(epoch, Stake::default());
         state.registered_at = Some(1);
 
-        (EntityKey::from(vec![seed]), state)
+        (AccountKey(credential), state)
     }
 
     fn pool_hash(seed: u8) -> Hash<28> {
@@ -1207,12 +1203,12 @@ mod tests {
 
     fn referents_with_pool(seed: u8) -> Referents {
         Referents {
-            pools: HashSet::from([EntityKey::from(pool_hash(seed))]),
+            pools: HashSet::from([PoolKey(pool_hash(seed))]),
             ..Referents::default()
         }
     }
 
-    fn scan(accounts: Vec<(EntityKey, AccountState)>, referents: &Referents) -> (u64, Vec<Issue>) {
+    fn scan(accounts: Vec<(AccountKey, AccountState)>, referents: &Referents) -> (u64, Vec<Issue>) {
         scan_accounts(accounts.into_iter().map(Ok::<_, String>), referents, |_| {})
     }
 
@@ -1819,7 +1815,7 @@ mod tests {
     }
 
     /// An account whose live vote delegation names `drep`, made at `slot`.
-    fn voter(seed: u8, drep: DRep, slot: BlockSlot) -> (EntityKey, AccountState) {
+    fn voter(seed: u8, drep: DRep, slot: BlockSlot) -> (AccountKey, AccountState) {
         let (key, mut account) = account(42, seed);
         account.drep = EpochValue::with_live(42, DRepDelegation::Delegated(drep));
         account.vote_delegated_at = Some((slot, 0));
@@ -1829,7 +1825,7 @@ mod tests {
 
     fn referents_with_drep(drep: &DRep, facts: DRepFacts, anchors: Anchors) -> Referents {
         Referents {
-            dreps: HashMap::from([(drep_to_entity_key(drep), facts)]),
+            dreps: HashMap::from([(DRepKey::from(drep), facts)]),
             anchors,
             ..Referents::default()
         }

@@ -36,6 +36,7 @@ pub mod config;
 pub mod crawl;
 pub mod import;
 pub mod indexes;
+pub mod keys;
 pub mod mempool;
 pub mod point;
 pub mod state;
@@ -113,6 +114,10 @@ pub type LogSeq = u64;
 pub use archive::*;
 pub use async_query::*;
 pub use indexes::*;
+pub use keys::{
+    EntityKey, FixedKey, KeyBytes, KeyCodec, KeyError, KeyPrefix, KeyRange, LogKey, LogRangeOf,
+    RangeOf,
+};
 pub use mempool::*;
 pub use point::*;
 pub use state::*;
@@ -665,6 +670,10 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn storage_config(&self) -> &config::StorageConfig;
     fn sync_config(&self) -> &config::SyncConfig;
     fn genesis(&self) -> Arc<Genesis>;
+
+    /// The one limiter every query facade built from this domain runs its
+    /// blocking work under.
+    fn query_limiter(&self) -> &QueryLimiter;
 
     fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain>;
     fn write_chain(&self) -> std::sync::RwLockWriteGuard<'_, Self::Chain>;

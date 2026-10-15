@@ -1,10 +1,15 @@
 use axum::http::StatusCode;
 use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraOutput;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
-use dolos_core::async_query::BlockMetaResolver;
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _, TxHash, TxoIdx, TxoRef};
+use dolos_core::async_query::{BlockMetaResolver, BlockRefMeta, LOCATE_CHUNK};
+use dolos_core::{
+    ArchiveStore as _, BlockSlot, Domain, EraCbor, StateStore as _, TxHash, TxoIdx, TxoRef,
+};
 
 use crate::{
     mapping::{IntoModel, UtxoOutputModelBuilder},
@@ -36,6 +41,10 @@ impl UtxoFilter {
     }
 }
 
+/// UTxO refs read, decoded and filtered per blocking task. One chunk holds
+/// its permit for a few milliseconds.
+const UTXO_CHUNK: usize = 1024;
+
 /// Loads one page of the UTxOs in `refs` that `filter` keeps. Only the last
 /// page can have fewer than `count` rows.
 pub async fn load_utxo_models<D, T>(
@@ -53,7 +62,11 @@ where
     // page's outputs. Keep the refs that pass before the window is cut.
     let refs = match filter {
         UtxoFilter::All => refs,
-        _ => kept_refs(domain, refs, filter)?,
+        _ => select_utxos(domain, refs, filter, UTXO_CHUNK)
+            .await?
+            .into_iter()
+            .map(|(txo_ref, _)| txo_ref)
+            .collect(),
     };
 
     let mut rows = page_rows(domain, refs, &pagination).await?;
@@ -63,27 +76,23 @@ where
         return Ok(Vec::new());
     }
 
-    let mut utxos = domain
-        .state()
-        .get_utxos(window.refs())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut utxos = select_utxos(
+        domain,
+        window.refs().into_iter().collect(),
+        UtxoFilter::All,
+        UTXO_CHUNK,
+    )
+    .await?;
 
     // Refresh once if a block spent listed refs after the tag read.
     if utxos.len() != window.rows.len() {
-        let pagination = pagination.clone();
-        (window, utxos) = domain
-            .query()
-            .run_blocking(move |domain| {
-                let refs = rows.iter().map(|(_, txo_ref)| txo_ref.clone()).collect();
-                let mut utxos = domain.state().get_utxos(refs)?;
-                rows.retain(|(_, txo_ref)| utxos.contains_key(txo_ref));
-                let window = select_window(&rows, &pagination);
-                let refs: HashSet<_> = window.refs().into_iter().collect();
-                utxos.retain(|txo_ref, _| refs.contains(txo_ref));
-                Ok((window, utxos))
-            })
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let refs = rows.iter().map(|(_, txo_ref)| txo_ref.clone()).collect();
+        utxos = select_utxos(domain, refs, UtxoFilter::All, UTXO_CHUNK).await?;
+        let live: HashSet<_> = utxos.iter().map(|(txo_ref, _)| txo_ref.clone()).collect();
+        rows.retain(|(_, txo_ref)| live.contains(txo_ref));
+        window = select_window(&rows, &pagination);
+        let refs: HashSet<_> = window.refs().into_iter().collect();
+        utxos.retain(|(txo_ref, _)| refs.contains(txo_ref));
     }
 
     let PageWindow { rows, skip } = window;
@@ -92,58 +101,53 @@ where
         .map(|(slot, txo_ref)| (txo_ref, slot))
         .collect();
 
-    // decoded
-    let utxos: HashMap<_, _> = utxos
-        .iter()
-        .map(|(k, v)| MultiEraOutput::try_from(v.as_ref()).map(|x| (k, x)))
-        .try_collect()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     let mut block_meta = BlockMetaResolver::new(domain.query());
     let block_deps = block_meta
-        .resolve_batch(utxos.keys().map(|txo_ref| txo_ref.0))
+        .resolve_batch(utxos.iter().map(|(txo_ref, _)| txo_ref.0))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut models: Vec<_> = utxos
+    let mut rows: Vec<_> = utxos
         .into_iter()
-        .map(|(TxoRef(tx_hash, txo_idx), txo)| {
-            let builder = UtxoOutputModelBuilder::from_output(*tx_hash, *txo_idx, txo);
-            let block_data = block_deps.get(tx_hash).cloned();
-
-            if let Some(x) = block_data {
-                builder.with_block_data(x)
-            } else {
-                builder
-            }
-        })
         // The window cut the page by its slot, so sort by that slot first. A
         // block that `sync.max_history` pruned keeps its index slot until the
         // sweep but has no block data, and `page_sort_key` alone would move its
         // rows out of their slot and cut the page in a different place.
-        .map(|x| {
-            let slot = window_slots.get(&x.txo_ref()).copied().flatten();
-            ((slot, page_sort_key::<T>(&x)), x)
+        .map(|(txo_ref, cbor)| {
+            let block_data = block_deps.get(&txo_ref.0).cloned();
+            let slot = window_slots.get(&txo_ref).copied().flatten();
+            (
+                (slot, page_sort_key(&txo_ref, block_data.as_ref())),
+                txo_ref,
+                cbor,
+                block_data,
+            )
         })
         .collect();
 
     match pagination.order {
         Order::Asc => {
-            models.sort_by_key(|(sort_key, _)| *sort_key);
+            rows.sort_by_key(|(sort_key, ..)| *sort_key);
         }
         Order::Desc => {
-            models.sort_by_key(|(sort_key, _)| *sort_key);
-            models.reverse();
+            rows.sort_by_key(|(sort_key, ..)| *sort_key);
+            rows.reverse();
         }
     }
 
     let mut out = Vec::new();
-    for builder in models
-        .into_iter()
-        .map(|(_, builder)| builder)
-        .skip(skip)
-        .take(pagination.count)
-    {
+    for (_, txo_ref, cbor, block_data) in rows.into_iter().skip(skip).take(pagination.count) {
+        let output = MultiEraOutput::try_from(cbor.as_ref())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let TxoRef(tx_hash, txo_idx) = txo_ref;
+        let builder = UtxoOutputModelBuilder::from_output(tx_hash, txo_idx, output);
+
+        let builder = if let Some(x) = block_data {
+            builder.with_block_data(x)
+        } else {
+            builder
+        };
+
         out.push(<UtxoOutputModelBuilder<'_> as IntoModel<T>>::into_model(
             builder,
         )?);
@@ -168,28 +172,6 @@ impl PageWindow {
     }
 }
 
-/// The refs in `refs` whose output `filter` keeps.
-fn kept_refs<D: Domain>(
-    domain: &Facade<D>,
-    refs: HashSet<TxoRef>,
-    filter: UtxoFilter,
-) -> Result<HashSet<TxoRef>, StatusCode> {
-    let utxos = domain
-        .state()
-        .get_utxos(refs.into_iter().collect())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    utxos
-        .iter()
-        .filter_map(
-            |(txo_ref, cbor)| match MultiEraOutput::try_from(cbor.as_ref()) {
-                Ok(output) => filter.keeps(&output).then(|| Ok(txo_ref.clone())),
-                Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
-            },
-        )
-        .collect()
-}
-
 /// Every row of the listing as `(slot, ref)`, in page order.
 ///
 /// The page order (`page_sort_key`) needs each row's transaction index, and
@@ -208,19 +190,24 @@ where
 {
     let tx_hashes: Vec<TxHash> = refs.iter().map(|txo_ref| txo_ref.0).unique().collect();
 
-    let slots: HashMap<TxHash, BlockSlot> = domain
-        .query()
-        .run_blocking(move |domain| {
-            let mut slots = HashMap::with_capacity(tx_hashes.len());
-            for hash in tx_hashes {
-                if let Some(slot) = domain.archive().slot_by_tx_hash(hash.as_slice())? {
-                    slots.insert(hash, slot);
+    let mut slots = HashMap::with_capacity(tx_hashes.len());
+    for hashes in tx_hashes.chunks(LOCATE_CHUNK) {
+        let hashes = hashes.to_vec();
+        let located = domain
+            .query()
+            .run_blocking(move |domain| {
+                let mut slots = HashMap::with_capacity(hashes.len());
+                for hash in hashes {
+                    if let Some(slot) = domain.archive().slot_by_tx_hash(hash.as_slice())? {
+                        slots.insert(hash, slot);
+                    }
                 }
-            }
-            Ok(slots)
-        })
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                Ok(slots)
+            })
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        slots.extend(located);
+    }
 
     let mut rows: Vec<_> = refs
         .into_iter()
@@ -274,6 +261,52 @@ fn select_window(rows: &[(Option<BlockSlot>, TxoRef)], pagination: &Pagination) 
     }
 }
 
+/// Read and decode the outputs behind `refs`, `chunk` refs per blocking
+/// task, and keep those that `filter` keeps. Every output must decode.
+async fn select_utxos<D>(
+    domain: &Facade<D>,
+    refs: HashSet<TxoRef>,
+    filter: UtxoFilter,
+    chunk: usize,
+) -> Result<Vec<(TxoRef, Arc<EraCbor>)>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let mut refs: Vec<_> = refs.into_iter().collect();
+    refs.sort();
+
+    let mut selected = Vec::new();
+
+    for refs in refs.chunks(chunk.max(1)) {
+        let refs = refs.to_vec();
+
+        let kept = domain
+            .blocking(move |domain| {
+                let utxos = domain
+                    .state()
+                    .get_utxos(refs)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                let mut kept = Vec::with_capacity(utxos.len());
+                for (txo_ref, cbor) in utxos {
+                    let output = MultiEraOutput::try_from(cbor.as_ref())
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                    if filter.keeps(&output) {
+                        kept.push((txo_ref, cbor));
+                    }
+                }
+
+                Ok(kept)
+            })
+            .await?;
+
+        selected.extend(kept);
+    }
+
+    Ok(selected)
+}
+
 /// The page order for UTxO models in the same window slot: chain position
 /// first, `TxoRef` second.
 ///
@@ -286,17 +319,14 @@ fn select_window(rows: &[(Option<BlockSlot>, TxoRef)], pagination: &Pagination) 
 ///
 /// `None` sorts before every known position, which approximates chain order:
 /// a pruned creation block is older than every retained one.
-fn page_sort_key<T>(
-    builder: &UtxoOutputModelBuilder<'_>,
-) -> (Option<(u64, usize, u32)>, TxHash, TxoIdx)
-where
-    T: serde::Serialize,
-    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
-{
-    let TxoRef(tx_hash, txo_idx) = builder.txo_ref();
+fn page_sort_key(
+    txo_ref: &TxoRef,
+    block_data: Option<&BlockRefMeta>,
+) -> (Option<(u64, usize, u32)>, TxHash, TxoIdx) {
+    let TxoRef(tx_hash, txo_idx) = *txo_ref;
 
     (
-        <UtxoOutputModelBuilder<'_> as IntoModel<T>>::sort_key(builder),
+        block_data.map(|data| (data.slot, data.tx_index, txo_idx)),
         tx_hash,
         txo_idx,
     )
@@ -310,7 +340,6 @@ mod tests {
     use axum::http::Request;
     use blockfrost_openapi::models::address_utxo_content_inner::AddressUtxoContentInner;
     use dolos_cardano::indexes::CardanoStateIndexExt as _;
-    use dolos_core::async_query::BlockRefMeta;
     use dolos_core::config::MinibfConfig;
     use dolos_core::import::ImportExt as _;
     use dolos_core::{ArchiveWriter as _, ChainPoint, StateWriter as _, UtxoSetDelta};
@@ -318,40 +347,19 @@ mod tests {
     use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
     use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores as _};
     use http_body_util::BodyExt as _;
-    use pallas::codec::minicbor;
     use pallas::crypto::hash::Hash;
     use pallas::ledger::addresses::Address;
-    use pallas::ledger::primitives::conway::{PostAlonzoTransactionOutput, Value};
-    use pallas::ledger::traverse::Era;
-    use std::sync::Arc;
     use tower::util::ServiceExt as _;
-
-    fn output_bytes() -> Vec<u8> {
-        let output = PostAlonzoTransactionOutput {
-            address: vec![0x60; 29].into(),
-            value: Value::Coin(1_000_000),
-            datum_option: None,
-            script_ref: None,
-        };
-
-        minicbor::to_vec(&output).unwrap()
-    }
 
     /// Pins the pruned-row ordering contract: no chain position means the
     /// `TxoRef` decides, deterministically, and the whole unknowable group
     /// sorts before any row with a known position.
     #[test]
     fn page_sort_key_orders_pruned_rows_by_txo_ref() {
-        let bytes = output_bytes();
-        fn output(b: &[u8]) -> MultiEraOutput<'_> {
-            MultiEraOutput::decode(Era::Conway, b).unwrap()
-        }
-        let key = page_sort_key::<AddressUtxoContentInner>;
-
-        let low = UtxoOutputModelBuilder::from_output(Hash::from([0xaa; 32]), 1, output(&bytes));
-        let high = UtxoOutputModelBuilder::from_output(Hash::from([0xbb; 32]), 0, output(&bytes));
-        let low_later =
-            UtxoOutputModelBuilder::from_output(Hash::from([0xaa; 32]), 2, output(&bytes));
+        let low = TxoRef(Hash::from([0xaa; 32]), 1);
+        let high = TxoRef(Hash::from([0xbb; 32]), 0);
+        let low_later = TxoRef(Hash::from([0xaa; 32]), 2);
+        let key = |txo_ref: &TxoRef| page_sort_key(txo_ref, None);
 
         // no block data: the TxoRef alone decides, tx hash before output index
         assert!(key(&low) < key(&high));
@@ -360,17 +368,52 @@ mod tests {
 
         // a known chain position sorts after the whole unknowable group,
         // regardless of its TxoRef
-        let positioned =
-            UtxoOutputModelBuilder::from_output(Hash::from([0x00; 32]), 0, output(&bytes))
-                .with_block_data(BlockRefMeta {
-                    slot: 1,
-                    hash: Hash::from([0x11; 32]),
-                    height: 1,
-                    tx_hash: Hash::from([0x00; 32]),
-                    tx_index: 0,
-                });
+        let block = BlockRefMeta {
+            slot: 1,
+            hash: Hash::from([0x11; 32]),
+            height: 1,
+            tx_hash: Hash::from([0x00; 32]),
+            tx_index: 0,
+        };
+        let positioned = page_sort_key(&TxoRef(Hash::from([0x00; 32]), 0), Some(&block));
 
-        assert!(key(&high) < key(&positioned));
+        assert!(key(&high) < positioned);
+    }
+
+    async fn selected(app: &TestApp, filter: UtxoFilter, chunk: usize) -> Vec<TxoRef> {
+        let facade = app.facade();
+        let address = pallas::ledger::addresses::Address::from_bech32(&app.vectors().address)
+            .expect("vector address");
+        let refs = facade
+            .state()
+            .utxos_by_address(&address.to_vec())
+            .expect("address refs");
+
+        let mut refs: Vec<_> = select_utxos(&facade, refs, filter, chunk)
+            .await
+            .expect("selected utxos")
+            .into_iter()
+            .map(|(txo_ref, _)| txo_ref)
+            .collect();
+        refs.sort();
+        refs
+    }
+
+    #[tokio::test]
+    async fn chunked_utxo_selection_matches_unchunked() {
+        let app = TestApp::new();
+
+        for filter in [UtxoFilter::All, UtxoFilter::AdaOnly] {
+            let whole = selected(&app, filter, usize::MAX).await;
+            let chunked = selected(&app, filter, 2).await;
+
+            assert_eq!(chunked, whole);
+        }
+
+        assert!(
+            selected(&app, UtxoFilter::All, usize::MAX).await.len() > 2,
+            "too few utxos to split into chunks"
+        );
     }
 
     fn txo(byte: u8, idx: TxoIdx) -> TxoRef {
@@ -585,8 +628,9 @@ mod tests {
 
     #[tokio::test]
     async fn many_spent_refs_need_only_one_refresh() {
+        let block_count = UTXO_CHUNK + 100;
         let (blocks, vectors, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
-            block_count: 500,
+            block_count,
             txs_per_block: 1,
             slot: 1,
             ..Default::default()
@@ -601,7 +645,7 @@ mod tests {
         domain.import_blocks(blocks).unwrap();
         let address = Address::from_bech32(&vectors.address).unwrap().to_vec();
         let refs = domain.state().utxos_by_address(&address).unwrap();
-        assert_eq!(refs.len(), 500);
+        assert_eq!(refs.len(), block_count);
         let facade = Facade {
             inner: domain,
             config: MinibfConfig::new("[::]:0".parse().unwrap()),
@@ -610,7 +654,7 @@ mod tests {
         let rows = page_rows(&facade, refs.clone(), &pagination(Order::Asc, 100, 1))
             .await
             .unwrap();
-        let spent: Vec<_> = rows[99..499]
+        let spent: Vec<_> = rows[99..block_count - 1]
             .iter()
             .map(|(_, txo_ref)| txo_ref.clone())
             .collect();

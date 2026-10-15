@@ -1300,7 +1300,7 @@ fn cost_summary() -> dolos_cardano::eras::ChainSummary {
 
     chain.append_era(
         6,
-        dolos_cardano::model::EraSummary {
+        dolos_cardano::model::EraState {
             start: dolos_cardano::EraBoundary {
                 epoch: 0,
                 slot: 0,

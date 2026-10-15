@@ -799,7 +799,7 @@ fn assert_utxo_tags_match<S: StateStore>(left: &S, right: &S) {
 
 fn entities_of<S: StateStore>(store: &S, ns: &'static str) -> Vec<(EntityKey, Vec<u8>)> {
     store
-        .iter_entities(ns, EntityKey::full_range())
+        .iter_entities(ns, dolos_core::KeyRange::all())
         .unwrap()
         .map(Result::unwrap)
         .collect()
@@ -815,7 +815,7 @@ fn blocks_of<A: ArchiveStore>(store: &A) -> Vec<(u64, Vec<u8>)> {
 
 fn logs_of<A: ArchiveStore>(store: &A, ns: &'static str) -> Vec<(LogKey, Vec<u8>)> {
     store
-        .iter_logs(ns, LogKey::full_range())
+        .iter_logs(ns, dolos_core::KeyRange::all())
         .unwrap()
         .map(Result::unwrap)
         .collect()

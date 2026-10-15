@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
-use dolos_core::{ChainError, EntityKey, Genesis};
+use dolos_core::{ChainError, Genesis};
 
 use crate::{
-    eras::ChainSummary, roll::WorkDeltas, AccountState, CardanoDelta, CardanoEntity, DRepState,
-    EpochState, EraProtocol, PoolState, ProposalState,
+    eras::ChainSummary, roll::WorkDeltas, AccountState, CardanoDelta, DRepState, EpochState,
+    EraKey, PoolState, ProposalState,
 };
 
 pub mod avvm;
@@ -80,16 +80,16 @@ pub trait BoundaryVisitor {
     }
 }
 
-pub type AccountId = EntityKey;
-pub type PoolId = EntityKey;
-pub type DRepId = EntityKey;
-pub type ProposalId = EntityKey;
+pub type AccountId = crate::AccountKey;
+pub type PoolId = crate::PoolKey;
+pub type DRepId = crate::DRepKey;
+pub type ProposalId = crate::ProposalKey;
 
 pub struct WorkContext {
     // loaded
     ended_state: EpochState,
 
-    pub active_protocol: EraProtocol,
+    pub active_protocol: EraKey,
     pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,
 
@@ -100,7 +100,6 @@ pub struct WorkContext {
 
     // computed via visitors
     pub deltas: WorkDeltas,
-    pub logs: Vec<(EntityKey, CardanoEntity)>,
 }
 
 impl WorkContext {

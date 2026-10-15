@@ -61,7 +61,7 @@ impl TestDomainBuilder {
 
 pub struct TestApp {
     router: Router,
-    _domain: dolos_testing::faults::FaultyToyDomain,
+    domain: dolos_testing::faults::FaultyToyDomain,
     vectors: SyntheticVectors,
 }
 
@@ -98,7 +98,7 @@ impl TestApp {
 
         Self {
             router,
-            _domain: domain,
+            domain,
             vectors: SyntheticVectors {
                 address: String::new(),
                 stake_address: String::new(),
@@ -121,6 +121,7 @@ impl TestApp {
                 drep_id: String::new(),
                 tx_cbor: vec![],
                 account_withdrawals: vec![],
+                redeemers: None,
             },
         }
     }
@@ -140,7 +141,7 @@ impl TestApp {
 
         Self {
             router,
-            _domain: domain,
+            domain,
             vectors,
         }
     }
@@ -187,6 +188,10 @@ impl TestApp {
 
     pub fn vectors(&self) -> &SyntheticVectors {
         &self.vectors
+    }
+
+    pub fn domain(&self) -> &dolos_testing::faults::FaultyToyDomain {
+        &self.domain
     }
 }
 

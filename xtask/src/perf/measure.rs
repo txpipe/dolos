@@ -133,9 +133,23 @@ pub fn disk_counters_available() -> bool {
 /// transient memory is the peak it drove above the level it started at.
 pub struct PeakAlloc;
 
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-static INSTALLED: AtomicUsize = AtomicUsize::new(0);
+/// A counter on its own cache line (128 bytes on Apple silicon). Every
+/// allocation updates these from every thread, so a static the linker puts on
+/// the same line would make the harness's cost depend on the build's layout.
+#[repr(align(128))]
+struct Counter(AtomicUsize);
+
+impl std::ops::Deref for Counter {
+    type Target = AtomicUsize;
+
+    fn deref(&self) -> &AtomicUsize {
+        &self.0
+    }
+}
+
+static CURRENT: Counter = Counter(AtomicUsize::new(0));
+static PEAK: Counter = Counter(AtomicUsize::new(0));
+static INSTALLED: Counter = Counter(AtomicUsize::new(0));
 
 unsafe impl GlobalAlloc for PeakAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {

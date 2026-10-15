@@ -13,7 +13,7 @@
 //! credentials, persists the in-range `PendingRewardState` entities, and
 //! emits a `RupdProgress` delta to advance `EpochState.rupd_progress`.
 //! `finalize()` writes `EpochState.incentives` once and emits the per-pool
-//! `StakeLog` entries, deriving their figures from the rebuilt snapshot
+//! `PoolEpochLog` entries, deriving their figures from the rebuilt snapshot
 //! globals and the persisted `PendingRewardState` entities rather than from
 //! any tally carried across shards.
 //!
@@ -28,17 +28,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, Domain, DomainError, EntityDelta as _, EntityKey,
-    Genesis, LogKey, StateStore, StateWriter, TemporalKey, WorkUnit,
+    ArchiveStore, ArchiveWriter, BlockSlot, Domain, DomainError, EntityDelta as _, Genesis,
+    StateStore, StateWriter, WorkUnit,
 };
 use tracing::{debug, info};
 
 use crate::{
     rewards::{Reward, RewardMap},
-    rupd::credential_to_key,
-    shard::{shard_key_ranges, ACCOUNT_SHARDS},
-    CardanoLogic, ChainPoint, EpochState, FixedNamespace, PendingRewardState, PoolHash,
-    SingletonEntity as _, StakeLog,
+    shard::ACCOUNT_SHARDS,
+    AccountKey, CardanoLogic, EpochState, PendingRewardState, PoolEpochLog, PoolHash, PoolKey,
 };
 
 use super::RupdWork;
@@ -61,7 +59,7 @@ fn aggregate_pending_pool_rewards<S: StateStore>(
 ) -> Result<HashMap<PoolHash, (u64, u64)>, DomainError> {
     let mut out: HashMap<PoolHash, (u64, u64)> = HashMap::new();
 
-    for record in state.iter_entities_typed::<PendingRewardState>(PendingRewardState::NS, None)? {
+    for record in state.iter_entities_typed::<PendingRewardState>(None)? {
         let (_, pending) = record?;
 
         // Iterate the two reward lists directly (`into_log_entries` would
@@ -183,7 +181,7 @@ impl RupdWorkUnit {
         // entities. Writes are overwrite-by-key, so a crashed shard
         // re-run is idempotent.
         for (credential, reward) in rewards.iter_pending() {
-            let key = credential_to_key(credential);
+            let key = AccountKey::from(credential);
 
             let (as_leader, as_delegator) = match reward {
                 Reward::MultiPool(r) => (
@@ -216,13 +214,11 @@ impl RupdWorkUnit {
         // current EpochState, apply the delta, and write back. The
         // delta's idempotency / ordering / total-mismatch guards make
         // this safe to repeat on crash recovery.
-        let epoch_key = EpochState::singleton_key();
-        let mut epoch_entity: Option<EpochState> =
-            state.read_entity_typed::<EpochState>(EpochState::NS, &epoch_key)?;
+        let mut epoch_entity: Option<EpochState> = state.read_entity_typed::<EpochState>(&())?;
         let mut progress_delta = crate::RupdProgress::new(shard_index, self.total_shards);
         progress_delta.apply(&mut epoch_entity);
         if let Some(epoch_state) = epoch_entity {
-            writer.write_entity_typed(&epoch_key, &epoch_state)?;
+            writer.write_entity_typed(&(), &epoch_state)?;
         }
 
         writer.commit()?;
@@ -230,7 +226,7 @@ impl RupdWorkUnit {
         Ok(())
     }
 
-    /// Emit the per-pool `StakeLog` entries for the epoch this RUPD covers.
+    /// Emit the per-pool `PoolEpochLog` entries for the epoch this RUPD covers.
     ///
     /// Every field comes from data that `initialize()` rebuilds or that the
     /// shards persisted, never from an in-memory tally spanning shards:
@@ -255,8 +251,7 @@ impl RupdWorkUnit {
             return Ok(());
         };
 
-        let start_of_epoch = ChainPoint::Slot(work.chain.epoch_start(epoch));
-        let temporal_key = TemporalKey::from(&start_of_epoch);
+        let start_of_epoch = work.chain.epoch_start(epoch);
 
         let pool_rewards = aggregate_pending_pool_rewards(state)?;
 
@@ -264,7 +259,6 @@ impl RupdWorkUnit {
         let archive_writer = archive.start_writer()?;
 
         for (pool_hash, pool_state) in snapshot.pools.iter() {
-            let pool_id = EntityKey::from(pool_hash.as_slice());
             let pool_stake = snapshot.get_pool_stake(pool_hash);
             let relative_size = if snapshot.active_stake_sum > 0 {
                 (pool_stake as f64) / snapshot.active_stake_sum as f64
@@ -280,7 +274,7 @@ impl RupdWorkUnit {
             let (total_rewards, operator_share) =
                 pool_rewards.get(pool_hash).copied().unwrap_or((0, 0));
 
-            let log = StakeLog {
+            let log = PoolEpochLog {
                 blocks_minted,
                 total_stake: pool_stake,
                 relative_size,
@@ -293,8 +287,7 @@ impl RupdWorkUnit {
                 margin_cost,
             };
 
-            let log_key = LogKey::from((temporal_key.clone(), pool_id));
-            archive_writer.write_log_typed(&log_key, &log)?;
+            archive_writer.write_log_typed(start_of_epoch, &PoolKey(*pool_hash), &log)?;
         }
 
         archive_writer.commit()?;
@@ -356,7 +349,7 @@ where
         // delegators.
         self.reset_for_next_shard();
 
-        let ranges = shard_key_ranges(shard_index, self.total_shards);
+        let ranges = AccountKey::shard_ranges(shard_index, self.total_shards);
 
         debug!(
             slot = self.slot,
@@ -407,7 +400,7 @@ where
     }
 
     fn commit_archive(&mut self, _domain: &D, _shard_index: u32) -> Result<(), DomainError> {
-        // Per-pool StakeLog entries are written in finalize(), once every
+        // Per-pool PoolEpochLog entries are written in finalize(), once every
         // shard's pending rewards have landed in state. The per-account leg of
         // the distribution is no longer RUPD's to write: it is one field of the
         // merged account-epoch row EWRAP assembles at the boundary (ADR-0027).
@@ -430,20 +423,16 @@ where
         // shard commits can't race on this field.
         let writer = domain.state().start_writer()?;
 
-        let epoch_key = EpochState::singleton_key();
-        if let Some(mut epoch_state) = domain
-            .state()
-            .read_entity_typed::<crate::EpochState>(crate::EpochState::NS, &epoch_key)?
-        {
+        if let Some(mut epoch_state) = domain.state().read_entity_typed::<crate::EpochState>(&())? {
             epoch_state.incentives = Some(work.incentives.clone());
             // Clear the RUPD progress cursor — this RUPD is complete.
             epoch_state.rupd_progress = None;
-            writer.write_entity_typed(&epoch_key, &epoch_state)?;
+            writer.write_entity_typed(&(), &epoch_state)?;
         }
 
         writer.commit()?;
 
-        // ---- Archive: per-pool StakeLog entries ----
+        // ---- Archive: per-pool PoolEpochLog entries ----
         self.write_stake_logs(domain.state(), domain.archive())?;
 
         debug!("rupd finalize committed");
@@ -453,7 +442,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use dolos_core::{ArchiveStore as _, Domain as _, EntityKey, LogKey, TemporalKey};
+    use dolos_core::{ArchiveStore as _, Domain as _};
     use dolos_testing::{
         faults::{FaultyToyDomain, TestFault},
         toy_domain::ToyDomain,
@@ -497,7 +486,7 @@ mod tests {
         let mut summary = crate::ChainSummary::default();
         summary.append_era(
             7,
-            crate::model::EraSummary {
+            crate::model::EraState {
                 start: crate::model::EraBoundary {
                     epoch: 0,
                     slot: 0,
@@ -566,7 +555,7 @@ mod tests {
         assert_eq!(committed_shards(&domain), Some(1));
     }
 
-    // --- per-pool StakeLog figures survive a mid-RUPD restart ---
+    // --- per-pool PoolEpochLog figures survive a mid-RUPD restart ---
 
     fn pool_params(pledge: u64, cost: u64) -> crate::PoolParams {
         crate::PoolParams {
@@ -582,7 +571,7 @@ mod tests {
     }
 
     /// A pool snapshot aligned to `CURRENT_EPOCH`: `go` carries the params
-    /// `StakeLog` reports, `mark` the blocks minted.
+    /// `PoolEpochLog` reports, `mark` the blocks minted.
     fn pool_snapshot(
         pledge: u64,
         cost: u64,
@@ -620,25 +609,23 @@ mod tests {
 
         let writer = domain.state().start_writer().unwrap();
         writer
-            .write_entity_typed(&credential_to_key(&credential), &pending)
+            .write_entity_typed(&AccountKey::from(&credential), &pending)
             .unwrap();
         writer.commit().unwrap();
     }
 
-    fn read_stake_log<D: Domain>(domain: &D, slot: u64, pool: PoolHash) -> Option<StakeLog> {
-        let log_key = LogKey::from((TemporalKey::from(slot), EntityKey::from(pool.as_slice())));
-
+    fn read_stake_log<D: Domain>(domain: &D, slot: u64, pool: PoolHash) -> Option<PoolEpochLog> {
         domain
             .archive()
-            .read_log_typed::<StakeLog>(StakeLog::NS, &log_key)
+            .read_log_typed::<PoolEpochLog>(slot, &PoolKey(pool))
             .unwrap()
     }
 
     /// The bug three reviewers flagged: `finalize` used to read a per-pool
     /// tally accumulated by each shard's `commit_state`, but a restart builds a
     /// fresh work unit and `initialize` skips already-committed shards — so a
-    /// resumed RUPD wrote `StakeLog` with under-counted rewards and delegators,
-    /// or zeros if every shard had committed before the crash.
+    /// resumed RUPD wrote `PoolEpochLog` with under-counted rewards and
+    /// delegators, or zeros if every shard had committed before the crash.
     ///
     /// This drives exactly that state: a work unit that ran no shards at all
     /// (`start_shard == total_shards`), with the shards' `PendingRewardState`
@@ -671,7 +658,7 @@ mod tests {
             .expect("write_stake_logs");
 
         let log = read_stake_log(&domain, chain.epoch_start(CURRENT_EPOCH - 1), pool)
-            .expect("missing stake log");
+            .expect("missing pool epoch log");
 
         assert_eq!(log.total_stake, 1_000);
         assert_eq!(log.delegators_count, 2);

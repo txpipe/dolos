@@ -1,11 +1,11 @@
-use dolos_core::{BlockSlot, ChainError, Domain, LogKey, StateStore, TemporalKey};
+use dolos_core::{BlockSlot, ChainError, Domain, StateStore};
 use pallas::ledger::primitives::Epoch;
 
-use crate::{model::EraSummary, EraBoundary, EraProtocol, FixedNamespace as _};
+use crate::{model::EraState, EraBoundary, EraKey};
 
 pub type EpochSlot = u32;
 
-impl EraSummary {
+impl EraState {
     /// Resolve epoch and sub-epoch slot from a slot number and a chain summary.
     pub fn slot_epoch(&self, slot: u64) -> (Epoch, EpochSlot) {
         if slot < self.start.slot {
@@ -58,9 +58,9 @@ const MS_PER_SECOND: u64 = 1000;
 
 #[derive(Debug, Default, Clone)]
 pub struct ChainSummary {
-    past: Vec<EraSummary>,
+    past: Vec<EraState>,
     protocols: Vec<u16>,
-    edge: Option<EraSummary>,
+    edge: Option<EraState>,
 }
 
 impl ChainSummary {
@@ -101,7 +101,7 @@ impl ChainSummary {
         }
     }
 
-    pub fn append_era(&mut self, protocol: u16, era: EraSummary) {
+    pub fn append_era(&mut self, protocol: u16, era: EraState) {
         if let Some(edge) = self.edge.take() {
             self.past.push(edge);
         }
@@ -110,7 +110,7 @@ impl ChainSummary {
         self.edge = Some(era);
     }
 
-    pub fn first(&self) -> &EraSummary {
+    pub fn first(&self) -> &EraState {
         if let Some(era) = self.past.first() {
             era
         } else {
@@ -124,7 +124,7 @@ impl ChainSummary {
     /// about. This generally represents the current era except when the
     /// chain has already received a hardfork update that is going to be applied
     /// in the next epoch.
-    pub fn edge(&self) -> &EraSummary {
+    pub fn edge(&self) -> &EraState {
         // safe to unwrap since it's a business invariant
         self.edge.as_ref().unwrap()
     }
@@ -133,7 +133,7 @@ impl ChainSummary {
     ///
     /// This method will scan the different eras looking for one that includes
     /// the given epoch.
-    pub fn era_for_epoch(&self, epoch: u64) -> &EraSummary {
+    pub fn era_for_epoch(&self, epoch: u64) -> &EraState {
         self.protocol_and_era_for_epoch(epoch).1
     }
 
@@ -141,7 +141,7 @@ impl ChainSummary {
     ///
     /// This method will scan the different eras looking for one that includes
     /// the given epoch.
-    pub fn protocol_and_era_for_epoch(&self, epoch: u64) -> (&u16, &EraSummary) {
+    pub fn protocol_and_era_for_epoch(&self, epoch: u64) -> (&u16, &EraState) {
         if epoch >= self.edge().start.epoch {
             return (self.protocols.last().unwrap(), self.edge());
         }
@@ -157,7 +157,7 @@ impl ChainSummary {
     ///
     /// This method will scan the different eras looking for one that includes
     /// the given slot.
-    pub fn era_for_slot(&self, slot: u64) -> &EraSummary {
+    pub fn era_for_slot(&self, slot: u64) -> &EraState {
         if slot >= self.edge().start.slot {
             return self.edge();
         }
@@ -171,7 +171,7 @@ impl ChainSummary {
     #[allow(unused)]
     pub(crate) fn apply_hacks<F>(&mut self, epoch: u64, change: F)
     where
-        F: Fn(&mut EraSummary),
+        F: Fn(&mut EraState),
     {
         if epoch >= self.edge().start.epoch {
             change(self.edge.as_mut().unwrap());
@@ -187,15 +187,15 @@ impl ChainSummary {
         }
     }
 
-    pub fn iter_all(&self) -> impl Iterator<Item = &EraSummary> {
+    pub fn iter_all(&self) -> impl Iterator<Item = &EraState> {
         self.past.iter().chain(std::iter::once(self.edge()))
     }
 
-    pub fn iter_past(&self) -> impl Iterator<Item = &EraSummary> {
+    pub fn iter_past(&self) -> impl Iterator<Item = &EraState> {
         self.past.iter()
     }
 
-    pub fn iter_past_with_protocol(&self) -> impl Iterator<Item = (&u16, &EraSummary)> {
+    pub fn iter_past_with_protocol(&self) -> impl Iterator<Item = (&u16, &EraState)> {
         self.protocols.iter().zip(self.past.iter())
     }
 
@@ -246,13 +246,12 @@ impl ChainSummary {
 }
 
 pub fn load_era_summary<D: Domain>(state: &D::State) -> Result<ChainSummary, ChainError> {
-    let eras = state.iter_entities_typed(EraSummary::NS, None)?;
+    let eras = state.iter_entities_typed::<EraState>(None)?;
 
     let mut chain = ChainSummary::default();
 
     for result in eras {
-        let (key, era) = result?;
-        let protocol = EraProtocol::from(key);
+        let (protocol, era) = result?;
         chain.append_era(protocol.into(), era);
     }
 
@@ -260,52 +259,38 @@ pub fn load_era_summary<D: Domain>(state: &D::State) -> Result<ChainSummary, Cha
 }
 
 pub fn load_chain_summary_from_state(state: &impl StateStore) -> Result<ChainSummary, ChainError> {
-    let eras = state.iter_entities_typed(EraSummary::NS, None)?;
+    let eras = state.iter_entities_typed::<EraState>(None)?;
 
     let mut chain = ChainSummary::default();
 
     for result in eras {
-        let (key, era) = result?;
-        let protocol = EraProtocol::from(key);
+        let (protocol, era) = result?;
         chain.append_era(protocol.into(), era);
     }
 
     Ok(chain)
 }
 
+/// The slots that start `start_epoch` and `end_epoch`, and, when both are
+/// given, the half-open slot range between them that bounds a log scan.
 pub fn log_epoch_range_to_key_range(
     summary: &ChainSummary,
     start_epoch: Option<u64>,
     end_epoch: Option<u64>,
-) -> (Option<u64>, Option<u64>, Option<std::ops::Range<LogKey>>) {
+) -> (Option<u64>, Option<u64>, Option<std::ops::Range<BlockSlot>>) {
     let start_slot = start_epoch.map(|epoch| summary.epoch_start(epoch));
     let end_slot = end_epoch.map(|epoch| summary.epoch_start(epoch));
-    let range = match (start_slot, end_slot) {
-        (Some(start), Some(end)) => {
-            let start_key = LogKey::from(TemporalKey::from(start));
-            let end_key = LogKey::from(TemporalKey::from(end));
-            Some(std::ops::Range {
-                start: start_key,
-                end: end_key,
-            })
-        }
-        _ => None,
-    };
+    let range = start_slot.zip(end_slot).map(|(start, end)| start..end);
 
     (start_slot, end_slot, range)
 }
 
-pub fn load_active_era<D: Domain>(
-    state: &D::State,
-) -> Result<(EraProtocol, EraSummary), ChainError> {
-    let eras = state.iter_entities_typed::<EraSummary>(EraSummary::NS, None)?;
+pub fn load_active_era<D: Domain>(state: &D::State) -> Result<(EraKey, EraState), ChainError> {
+    let eras = state.iter_entities_typed::<EraState>(None)?;
 
     match eras.last() {
         Some(x) => match x {
-            Ok((key, summary)) => {
-                let protocol = EraProtocol::from(key);
-                Ok((protocol, summary))
-            }
+            Ok((protocol, summary)) => Ok((protocol, summary)),
             Err(_) => Err(ChainError::EraNotFound),
         },
         None => Err(ChainError::EraNotFound),
@@ -322,7 +307,7 @@ mod tests {
         let mut summary = ChainSummary::default();
         summary.append_era(
             2,
-            EraSummary {
+            EraState {
                 start: EraBoundary {
                     epoch: 208,
                     slot: 4_492_800,
@@ -343,8 +328,8 @@ mod tests {
         assert_eq!(sc.zero_time, 1_596_059_091_000);
     }
 
-    fn era(protocol: u16, start_epoch: u64) -> EraSummary {
-        EraSummary {
+    fn era(protocol: u16, start_epoch: u64) -> EraState {
+        EraState {
             start: EraBoundary {
                 epoch: start_epoch,
                 slot: start_epoch * 100,

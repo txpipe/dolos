@@ -161,6 +161,7 @@ impl BlockVisitor for EpochStateVisitor {
         _: &mut WorkDeltas,
         _: &MultiEraBlock,
         _: &MultiEraTx,
+        _: &TxOrder,
         _: u32,
         output: &pallas::ledger::traverse::MultiEraOutput,
     ) -> Result<(), ChainError> {

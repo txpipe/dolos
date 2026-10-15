@@ -1,19 +1,17 @@
 use std::collections::HashSet;
 
-use dolos_core::{ChainError, EntityKey};
+use dolos_core::ChainError;
 use pallas::ledger::primitives::{conway::GovActionId, StakeCredential};
 
 use crate::{
     ewrap::{BoundaryWork, ProposalId},
-    AccountState, CardanoDelta, CardanoEntity, CommitteeUpdate, Constitution, ConstitutionUpdate,
-    GovRootsUpdate, PParamValue, PParamsSet, PParamsUpdate, ProposalAction, ProposalState,
-    TreasuryWithdrawal,
+    AccountState, CardanoDelta, CommitteeUpdate, Constitution, ConstitutionUpdate, GovRootsUpdate,
+    PParamValue, PParamsSet, PParamsUpdate, ProposalAction, ProposalState, TreasuryWithdrawal,
 };
 
 #[derive(Default)]
 pub struct BoundaryVisitor {
     deltas: Vec<CardanoDelta>,
-    logs: Vec<(EntityKey, CardanoEntity)>,
 }
 
 /// The state effects an enacted proposal carries: the action's own effect
@@ -150,10 +148,6 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             ctx.add_delta(delta);
         }
 
-        for (key, log) in self.logs.drain(..) {
-            ctx.logs.push((key, log));
-        }
-
         Ok(())
     }
 }
@@ -210,10 +204,10 @@ mod tests {
     /// keyed at another namespace (pparams, treasury) are skipped, as the
     /// commit path skips them when it streams the `"gov"` singleton.
     fn apply_gov(state: GovState, deltas: Vec<CardanoDelta>) -> GovState {
-        let mut entity: Option<CardanoEntity> = Some(state.into());
+        let mut entity: Option<crate::CardanoEntity> = Some(state.into());
 
         for mut delta in deltas {
-            if delta.key().0 == GovState::NS {
+            if delta.key().ns() == GovState::NS {
                 delta.apply(&mut entity);
             }
         }
@@ -233,7 +227,7 @@ mod tests {
     #[test]
     fn enactment_without_recorded_purpose_claims_no_lineage_root() {
         let action = ProposalAction::ParamChange(PParamsSet::default());
-        let id = ProposalId::from(b"legacy".to_vec());
+        let id = ProposalId::new([9u8; 32].into(), 0);
 
         let legacy = proposal([9u8; 32].into(), 0, action.clone());
         assert_eq!(legacy.purpose, None);
@@ -286,7 +280,7 @@ mod tests {
             (unregistered.clone(), 5_000_000),
         ]);
 
-        let id = ProposalId::from(b"withdrawal".to_vec());
+        let id = ProposalId::new([3u8; 32].into(), 0);
         let row = proposal([3u8; 32].into(), 0, action);
 
         let deliverable = HashSet::from([registered.clone()]);
@@ -346,7 +340,7 @@ mod tests {
 
         for (action, purpose) in cases {
             let is_info = matches!(action, ProposalAction::Info);
-            let id = ProposalId::from(b"proposal".to_vec());
+            let id = ProposalId::new([7u8; 32].into(), 0);
             let mut row = proposal([7u8; 32].into(), 0, action.clone());
             row.purpose = purpose;
             let deltas = enactment_deltas(&id, &row, &deliverable);
@@ -414,7 +408,7 @@ mod tests {
             guardrail_script: Some([2u8; 28].into()),
         };
 
-        let id = ProposalId::from(constitution_tx.to_vec());
+        let id = ProposalId::new(constitution_tx, 0);
         let mut row = proposal(
             constitution_tx,
             0,
@@ -426,7 +420,7 @@ mod tests {
         row.purpose = Some(GovPurpose::Constitution);
         state = apply_gov(state, enactment_deltas(&id, &row, &HashSet::new()));
 
-        let id = ProposalId::from(committee_tx.to_vec());
+        let id = ProposalId::new(committee_tx, 0);
         let mut row = proposal(
             committee_tx,
             0,

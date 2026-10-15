@@ -81,10 +81,10 @@ impl AccountEpochLog {
     }
 }
 
-entity_boilerplate!(AccountEpochLog, "account-epochs");
+entity_boilerplate!(AccountEpochLog, "account-epochs", log = super::AccountKey);
 
 #[derive(Debug, Clone, PartialEq, Decode, Encode, Default)]
-pub struct StakeLog {
+pub struct PoolEpochLog {
     /// Number of blocks created by pool
     #[n(0)]
     pub blocks_minted: u64,
@@ -126,4 +126,4 @@ pub struct StakeLog {
     pub margin_cost: Option<RationalNumber>,
 }
 
-entity_boilerplate!(StakeLog, "stakes");
+entity_boilerplate!(PoolEpochLog, "pool-epochs", log = super::PoolKey);

@@ -1,33 +1,26 @@
-use dolos_core::{
-    ChainError, Entity, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateSchema,
-};
+use dolos_core::{ChainError, EntityValue, Namespace, NamespaceType, NsKey, StateSchema};
 
-pub trait FixedNamespace {
-    const NS: &'static str;
-}
+pub use dolos_core::{FixedNamespace, LogEntity, StateEntity};
 
-/// A namespace that holds exactly one row at a fixed key.
+/// A namespace that holds exactly one row, at the empty key.
 ///
 /// Singletons don't fit the population-shaped machinery (namespace
 /// streams, key ranges): readers address the row directly
 /// (`crate::read_singleton`) and boundary commits apply deltas through
 /// `WorkDeltas::apply_singleton`, which — unlike the streams — handles
 /// the row not existing yet.
-pub trait SingletonEntity: Entity + FixedNamespace {
-    const KEY: &'static [u8];
-
-    fn singleton_key() -> EntityKey {
-        EntityKey::from(Self::KEY)
-    }
-
+pub trait SingletonEntity: StateEntity<Key = ()> {
     fn ns_key() -> NsKey {
-        NsKey::from((Self::NS, Self::singleton_key()))
+        NsKey::of::<Self>(&())
     }
 }
 
+/// `FixedNamespace` and `Entity` for an entity type, and the key kinds it is
+/// stored under: `state = K` for a state entity, `log = K` for an archive
+/// log (the part after the slot).
 macro_rules! entity_boilerplate {
-    ($type:ident, $ns:literal) => {
-        impl super::FixedNamespace for $type {
+    ($type:ident, $ns:literal $(, state = $state:ty)? $(, log = $log:ty)?) => {
+        impl dolos_core::FixedNamespace for $type {
             const NS: &str = $ns;
         }
 
@@ -36,16 +29,76 @@ macro_rules! entity_boilerplate {
                 ns: dolos_core::Namespace,
                 value: &dolos_core::EntityValue,
             ) -> Result<Self, dolos_core::ChainError> {
-                assert_eq!(ns, <$type as super::FixedNamespace>::NS);
+                assert_eq!(ns, <$type as dolos_core::FixedNamespace>::NS);
                 let value = pallas::codec::minicbor::decode(value)?;
                 Ok(value)
             }
 
             fn encode_entity(value: &Self) -> (dolos_core::Namespace, dolos_core::EntityValue) {
                 let value = pallas::codec::minicbor::to_vec(value).unwrap();
-                (<$type as super::FixedNamespace>::NS, value)
+                (<$type as dolos_core::FixedNamespace>::NS, value)
             }
         }
+
+        $(
+            impl dolos_core::StateEntity for $type {
+                type Key = $state;
+            }
+        )?
+
+        $(
+            impl dolos_core::LogEntity for $type {
+                type Key = $log;
+            }
+        )?
+    };
+}
+
+/// A key that is a hash, stored as the hash's bytes.
+macro_rules! hash_key {
+    ($(#[$doc:meta])* $name:ident, $hash:ty, $len:literal) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+        pub struct $name(pub $hash);
+
+        impl From<$hash> for $name {
+            fn from(value: $hash) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$name> for $hash {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl dolos_core::KeyCodec for $name {
+            fn encode_key(&self, out: &mut dolos_core::KeyBytes) {
+                out.extend_from_slice(self.0.as_slice());
+            }
+
+            fn decode_key(bytes: &[u8]) -> Result<Self, dolos_core::KeyError> {
+                dolos_core::keys::exact::<$len>(bytes).map(|hash| Self(hash.into()))
+            }
+        }
+
+        impl dolos_core::FixedKey for $name {
+            const LEN: usize = $len;
+        }
+    };
+}
+
+/// Keys display as the hex of their stored bytes.
+macro_rules! display_as_stored {
+    ($($name:ty),*) => {
+        $(
+            impl std::fmt::Display for $name {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str(&hex::encode(dolos_core::keys::encode(self)))
+                }
+            }
+        )*
     };
 }
 
@@ -56,12 +109,15 @@ pub mod dreps;
 pub mod epoch_value;
 pub mod epochs;
 pub mod eras;
+pub mod first_mints;
 pub mod gov;
 pub mod logs;
 pub mod pending;
 pub mod pools;
 pub mod pparams;
 pub mod proposals;
+pub mod stake_addresses;
+pub mod stats;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -73,30 +129,45 @@ pub use dreps::*;
 pub use epoch_value::*;
 pub use epochs::*;
 pub use eras::*;
+pub use first_mints::*;
 pub use gov::*;
 pub use logs::*;
 pub use pending::*;
 pub use pools::*;
 pub use pparams::*;
 pub use proposals::*;
+pub use stake_addresses::*;
+pub use stats::*;
 
 // --- CardanoEntity ---
 
 #[derive(Debug, Clone)]
 pub enum CardanoEntity {
-    EraSummary(Box<EraSummary>),
+    EraState(Box<EraState>),
     AccountState(Box<AccountState>),
     AssetState(Box<AssetState>),
     PoolState(Box<PoolState>),
     EpochState(Box<EpochState>),
     DRepState(Box<DRepState>),
     ProposalState(Box<ProposalState>),
-    StakeLog(Box<StakeLog>),
+    PoolEpochLog(Box<PoolEpochLog>),
     DatumState(Box<DatumState>),
     PendingRewardState(Box<PendingRewardState>),
     PendingMirState(Box<PendingMirState>),
     GovState(Box<GovState>),
     AccountEpochLog(Box<AccountEpochLog>),
+    StagedFirstMint(Box<StagedFirstMint>),
+    FirstMintChunk(Box<FirstMintChunk>),
+    PolicyMintChunk(Box<PolicyMintChunk>),
+    StagedStakeAddress(Box<StagedStakeAddress>),
+    StakeAddressesRow(Box<StakeAddressesRow>),
+    StagedAddressStats(Box<StagedAddressStats>),
+    AddressStats(Box<AddressStats>),
+    StagedPaymentAddress(Box<StagedPaymentAddress>),
+    StagedPaymentStats(Box<StagedPaymentStats>),
+    PaymentStats(Box<PaymentStats>),
+    StagedAccountStats(Box<StagedAccountStats>),
+    AccountStats(Box<AccountStats>),
 }
 
 macro_rules! variant_boilerplate {
@@ -118,74 +189,124 @@ macro_rules! variant_boilerplate {
     };
 }
 
-variant_boilerplate!(EraSummary);
+variant_boilerplate!(EraState);
 variant_boilerplate!(AccountState);
 variant_boilerplate!(AssetState);
 variant_boilerplate!(PoolState);
 variant_boilerplate!(EpochState);
 variant_boilerplate!(DRepState);
 variant_boilerplate!(ProposalState);
-variant_boilerplate!(StakeLog);
+variant_boilerplate!(PoolEpochLog);
 variant_boilerplate!(DatumState);
 variant_boilerplate!(PendingRewardState);
 variant_boilerplate!(PendingMirState);
 variant_boilerplate!(GovState);
 variant_boilerplate!(AccountEpochLog);
+variant_boilerplate!(StagedFirstMint);
+variant_boilerplate!(FirstMintChunk);
+variant_boilerplate!(PolicyMintChunk);
+variant_boilerplate!(StagedStakeAddress);
+variant_boilerplate!(StakeAddressesRow);
+variant_boilerplate!(StagedAddressStats);
+variant_boilerplate!(AddressStats);
+variant_boilerplate!(StagedPaymentAddress);
+variant_boilerplate!(StagedPaymentStats);
+variant_boilerplate!(PaymentStats);
+variant_boilerplate!(StagedAccountStats);
+variant_boilerplate!(AccountStats);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
         match ns {
-            EraSummary::NS => EraSummary::decode_entity(ns, value).map(Into::into),
+            EraState::NS => EraState::decode_entity(ns, value).map(Into::into),
             AccountState::NS => AccountState::decode_entity(ns, value).map(Into::into),
             AssetState::NS => AssetState::decode_entity(ns, value).map(Into::into),
             PoolState::NS => PoolState::decode_entity(ns, value).map(Into::into),
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
             DRepState::NS => DRepState::decode_entity(ns, value).map(Into::into),
             ProposalState::NS => ProposalState::decode_entity(ns, value).map(Into::into),
-            StakeLog::NS => StakeLog::decode_entity(ns, value).map(Into::into),
+            PoolEpochLog::NS => PoolEpochLog::decode_entity(ns, value).map(Into::into),
             DatumState::NS => DatumState::decode_entity(ns, value).map(Into::into),
             PendingRewardState::NS => PendingRewardState::decode_entity(ns, value).map(Into::into),
             PendingMirState::NS => PendingMirState::decode_entity(ns, value).map(Into::into),
             GovState::NS => GovState::decode_entity(ns, value).map(Into::into),
             AccountEpochLog::NS => AccountEpochLog::decode_entity(ns, value).map(Into::into),
+            StagedFirstMint::NS => StagedFirstMint::decode_entity(ns, value).map(Into::into),
+            FirstMintChunk::NS => FirstMintChunk::decode_entity(ns, value).map(Into::into),
+            PolicyMintChunk::NS => PolicyMintChunk::decode_entity(ns, value).map(Into::into),
+            StagedStakeAddress::NS => StagedStakeAddress::decode_entity(ns, value).map(Into::into),
+            StakeAddressesRow::NS => StakeAddressesRow::decode_entity(ns, value).map(Into::into),
+            StagedAddressStats::NS => StagedAddressStats::decode_entity(ns, value).map(Into::into),
+            AddressStats::NS => AddressStats::decode_entity(ns, value).map(Into::into),
+            StagedPaymentAddress::NS => {
+                StagedPaymentAddress::decode_entity(ns, value).map(Into::into)
+            }
+            StagedPaymentStats::NS => StagedPaymentStats::decode_entity(ns, value).map(Into::into),
+            PaymentStats::NS => PaymentStats::decode_entity(ns, value).map(Into::into),
+            StagedAccountStats::NS => StagedAccountStats::decode_entity(ns, value).map(Into::into),
+            AccountStats::NS => AccountStats::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
 
     fn encode_entity(value: &Self) -> (Namespace, EntityValue) {
         match value {
-            Self::EraSummary(x) => EraSummary::encode_entity(x),
+            Self::EraState(x) => EraState::encode_entity(x),
             Self::AccountState(x) => AccountState::encode_entity(x),
             Self::AssetState(x) => AssetState::encode_entity(x),
             Self::PoolState(x) => PoolState::encode_entity(x),
             Self::EpochState(x) => EpochState::encode_entity(x),
             Self::DRepState(x) => DRepState::encode_entity(x),
             Self::ProposalState(x) => ProposalState::encode_entity(x),
-            Self::StakeLog(x) => StakeLog::encode_entity(x),
+            Self::PoolEpochLog(x) => PoolEpochLog::encode_entity(x),
             Self::DatumState(x) => DatumState::encode_entity(x),
             Self::PendingRewardState(x) => PendingRewardState::encode_entity(x),
             Self::PendingMirState(x) => PendingMirState::encode_entity(x),
             Self::GovState(x) => GovState::encode_entity(x),
             Self::AccountEpochLog(x) => AccountEpochLog::encode_entity(x),
+            Self::StagedFirstMint(x) => StagedFirstMint::encode_entity(x),
+            Self::FirstMintChunk(x) => FirstMintChunk::encode_entity(x),
+            Self::PolicyMintChunk(x) => PolicyMintChunk::encode_entity(x),
+            Self::StagedStakeAddress(x) => StagedStakeAddress::encode_entity(x),
+            Self::StakeAddressesRow(x) => StakeAddressesRow::encode_entity(x),
+            Self::StagedAddressStats(x) => StagedAddressStats::encode_entity(x),
+            Self::AddressStats(x) => AddressStats::encode_entity(x),
+            Self::StagedPaymentAddress(x) => StagedPaymentAddress::encode_entity(x),
+            Self::StagedPaymentStats(x) => StagedPaymentStats::encode_entity(x),
+            Self::PaymentStats(x) => PaymentStats::encode_entity(x),
+            Self::StagedAccountStats(x) => StagedAccountStats::encode_entity(x),
+            Self::AccountStats(x) => AccountStats::encode_entity(x),
         }
     }
 }
 
 pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
-    schema.insert(EraSummary::NS, NamespaceType::KeyValue);
+    schema.insert(EraState::NS, NamespaceType::KeyValue);
     schema.insert(AccountState::NS, NamespaceType::KeyValue);
     schema.insert(AssetState::NS, NamespaceType::KeyValue);
     schema.insert(PoolState::NS, NamespaceType::KeyValue);
     schema.insert(EpochState::NS, NamespaceType::KeyValue);
     schema.insert(DRepState::NS, NamespaceType::KeyValue);
     schema.insert(ProposalState::NS, NamespaceType::KeyValue);
-    schema.insert(StakeLog::NS, NamespaceType::KeyValue);
+    schema.insert(PoolEpochLog::NS, NamespaceType::KeyValue);
     schema.insert(AccountEpochLog::NS, NamespaceType::KeyValue);
     schema.insert(DatumState::NS, NamespaceType::KeyValue);
     schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
     schema.insert(PendingMirState::NS, NamespaceType::KeyValue);
     schema.insert(GovState::NS, NamespaceType::KeyValue);
+    schema.insert(StagedFirstMint::NS, NamespaceType::KeyValue);
+    schema.insert(FirstMintChunk::NS, NamespaceType::KeyValue);
+    schema.insert(PolicyMintChunk::NS, NamespaceType::KeyValue);
+    schema.insert(StagedStakeAddress::NS, NamespaceType::KeyValue);
+    schema.insert(StakeAddressesRow::NS, NamespaceType::KeyValue);
+    schema.insert(StagedAddressStats::NS, NamespaceType::KeyValue);
+    schema.insert(AddressStats::NS, NamespaceType::KeyValue);
+    schema.insert(StagedPaymentAddress::NS, NamespaceType::KeyValue);
+    schema.insert(StagedPaymentStats::NS, NamespaceType::KeyValue);
+    schema.insert(PaymentStats::NS, NamespaceType::KeyValue);
+    schema.insert(StagedAccountStats::NS, NamespaceType::KeyValue);
+    schema.insert(AccountStats::NS, NamespaceType::KeyValue);
     schema
 }
 
@@ -267,6 +388,12 @@ pub enum CardanoDelta {
     ProposalResolved(Box<ProposalResolved>),
     GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
     GovDRepSnapshot(Box<GovDRepSnapshot>),
+    StageFirstMint(Box<StageFirstMint>),
+    StageStakeAddress(Box<StageStakeAddress>),
+    StageAddressStats(Box<StageAddressStats>),
+    StagePaymentAddress(Box<StagePaymentAddress>),
+    StagePaymentStats(Box<StagePaymentStats>),
+    StageAccountStats(Box<StageAccountStats>),
 }
 
 impl CardanoDelta {
@@ -372,6 +499,12 @@ delta_from!(GovDistrRotate);
 delta_from!(GovDRepSnapshot);
 delta_from!(GovDistrBoundaryCredit);
 delta_from!(ProposalResolved);
+delta_from!(StageFirstMint);
+delta_from!(StageStakeAddress);
+delta_from!(StageAddressStats);
+delta_from!(StagePaymentAddress);
+delta_from!(StagePaymentStats);
+delta_from!(StageAccountStats);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -444,6 +577,12 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => x.key(),
             Self::SetEpochIncentives(x) => x.key(),
             Self::DequeueReward(x) => x.key(),
+            Self::StageFirstMint(x) => x.key(),
+            Self::StageStakeAddress(x) => x.key(),
+            Self::StageAddressStats(x) => x.key(),
+            Self::StagePaymentAddress(x) => x.key(),
+            Self::StagePaymentStats(x) => x.key(),
+            Self::StageAccountStats(x) => x.key(),
         }
     }
 
@@ -514,6 +653,12 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::SetEpochIncentives(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DequeueReward(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageFirstMint(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageStakeAddress(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageAddressStats(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StagePaymentAddress(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StagePaymentStats(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageAccountStats(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -584,6 +729,12 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::SetEpochIncentives(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DequeueReward(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageFirstMint(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageStakeAddress(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageAddressStats(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StagePaymentAddress(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StagePaymentStats(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageAccountStats(x) => Self::downcast_undo(x.as_ref(), entity),
         }
     }
 }

@@ -719,7 +719,7 @@ fn protocol_to_era_name(protocol: u16) -> &'static str {
 }
 
 fn map_era_summary(
-    era: &dolos_cardano::EraSummary,
+    era: &dolos_cardano::EraState,
     active_protocol: u16,
     active_params: &u5c::cardano::PParams,
 ) -> u5c::cardano::EraSummary {

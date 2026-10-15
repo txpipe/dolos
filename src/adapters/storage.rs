@@ -12,9 +12,7 @@
 use std::{ops::Range, path::Path, path::PathBuf};
 
 use dolos_core::{
-    archive::{
-        ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, LogKey,
-    },
+    archive::{ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter},
     builtin::{
         EmptyBlockIter, EmptyLogIter, EmptySlotIter, MemoryArchiveStore, MemoryStateStore,
         MemoryStateWriter, NoOpArchiveStore, NoOpArchiveWriter,
@@ -24,10 +22,11 @@ use dolos_core::{
         RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
     },
     ArchiveIndexDelta, BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
-    ExactRecord, IndexRecord, LogEntry, LogValue, MempoolError, MempoolEvent, MempoolStore,
-    MempoolTx, Namespace, RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
-    StateWriter as CoreStateWriter, TagDimension, TagRecord, TxHash, TxStatus, TxoRef, UtxoEntry,
-    UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
+    ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey, LogValue, MempoolError, MempoolEvent,
+    MempoolStore, MempoolTx, Namespace, RawBlock, StateError, StateSchema,
+    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TagRecord, TxHash,
+    TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError,
+    WalStore,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -652,7 +651,7 @@ impl CoreStateStore for StateStoreBackend {
     fn iter_entities(
         &self,
         ns: Namespace,
-        range: Range<EntityKey>,
+        range: KeyRange,
     ) -> Result<Self::EntityIter, StateError> {
         match self {
             Self::Redb(s) => s.iter_entities(ns, range).map(StateEntityIterBackend::Redb),
@@ -1058,11 +1057,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         }
     }
 
-    fn iter_logs(
-        &self,
-        ns: Namespace,
-        range: Range<LogKey>,
-    ) -> Result<Self::LogIter, ArchiveError> {
+    fn iter_logs(&self, ns: Namespace, range: KeyRange) -> Result<Self::LogIter, ArchiveError> {
         match self {
             Self::Memory(s) => CoreArchiveStore::iter_logs(s, ns, range)
                 .map(|iter| ArchiveLogIterBackend::Memory(Box::new(iter))),
