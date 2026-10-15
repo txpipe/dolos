@@ -224,8 +224,6 @@ fn namespaces_are_kebab_case() {
 /// half of that rule this test leans on.
 #[test]
 fn log_kinds_derive_from_their_namespaces() {
-    assert_eq!(LOG_KINDS.len(), LOG_NAMESPACES.len());
-
     let mut kinds = Vec::new();
 
     for (kind, ns) in LOG_KINDS {
@@ -261,13 +259,6 @@ fn log_kinds_derive_from_their_namespaces() {
     assert_eq!(
         LOG_NAMESPACES, sorted,
         "LOG_NAMESPACES must be in byte order"
-    );
-
-    // The two tables are one table read two ways.
-    assert_eq!(
-        LOG_KINDS.map(|(_, ns)| ns),
-        LOG_NAMESPACES,
-        "LOG_KINDS and LOG_NAMESPACES disagree about the namespaces"
     );
 
     // Nothing else is a log kind — `logs`, above all, which is what these six

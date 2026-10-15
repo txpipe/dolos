@@ -138,25 +138,24 @@ pub const INDEXES: &str = "indexes";
 /// one definition on both sides of the crate boundary.
 pub use layers::digests::DIGESTS;
 
-/// The namespaces the ledger writes epoch-boundary logs under, byte-sorted.
+/// The namespaces the ledger writes epoch-boundary logs under: the namespace
+/// column of [`LOG_KINDS`], byte-sorted.
 ///
 /// A subset of [`NAMESPACES`] — every log namespace is also a state namespace —
-/// and the closed set the `log-{ns}` kinds are drawn from. Nothing in the tree
-/// marks an entity as log-bearing, so the nine are spelled here and held to
-/// the entity types by `log_kinds_derive_from_their_namespaces` in
-/// `tests/coverage.rs`. Another namespace acquiring logs would have no layer
-/// to travel in, which is why [`export`] refuses one rather than dropping it.
-pub const LOG_NAMESPACES: [Namespace; 9] = [
-    AccountEpochLog::NS,
-    AccountStats::NS,
-    AddressStats::NS,
-    EpochState::NS,
-    FirstMintChunk::NS,
-    PaymentStats::NS,
-    PolicyMintChunk::NS,
-    PoolEpochLog::NS,
-    StakeAddressesRow::NS,
-];
+/// and the closed set the `log-{ns}` kinds are drawn from. Another namespace
+/// acquiring logs would have no layer to travel in, which is why [`export`]
+/// refuses one rather than dropping it.
+pub const LOG_NAMESPACES: [Namespace; LOG_KINDS.len()] = {
+    let mut namespaces = [""; LOG_KINDS.len()];
+    let mut i = 0;
+
+    while i < LOG_KINDS.len() {
+        namespaces[i] = LOG_KINDS[i].1;
+        i += 1;
+    }
+
+    namespaces
+};
 
 /// The log layer kinds and the namespace each carries, in inscription order.
 ///
@@ -167,6 +166,10 @@ pub const LOG_NAMESPACES: [Namespace; 9] = [
 /// not underscores — but it is *spelled out* here rather than composed, so the
 /// wire vocabulary is greppable and a namespace rename cannot silently rename a
 /// published kind. The derivation is a test, not a constructor.
+///
+/// Nothing in the tree marks an entity as log-bearing, so this table is where
+/// the log namespaces are spelled, held to the entity types by
+/// `log_kinds_derive_from_their_namespaces` in `tests/coverage.rs`.
 pub const LOG_KINDS: [(&str, Namespace); 9] = [
     ("log-account-epochs", AccountEpochLog::NS),
     ("log-account-stats", AccountStats::NS),
@@ -234,34 +237,17 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 26] = [
 
 /// The twenty-six state kind names alone: what [`StateScope`] answers for
 /// [`Scope::kinds`].
-pub const STATE_KIND_NAMES: [&str; 26] = [
-    STATE_KINDS[0].0,
-    STATE_KINDS[1].0,
-    STATE_KINDS[2].0,
-    STATE_KINDS[3].0,
-    STATE_KINDS[4].0,
-    STATE_KINDS[5].0,
-    STATE_KINDS[6].0,
-    STATE_KINDS[7].0,
-    STATE_KINDS[8].0,
-    STATE_KINDS[9].0,
-    STATE_KINDS[10].0,
-    STATE_KINDS[11].0,
-    STATE_KINDS[12].0,
-    STATE_KINDS[13].0,
-    STATE_KINDS[14].0,
-    STATE_KINDS[15].0,
-    STATE_KINDS[16].0,
-    STATE_KINDS[17].0,
-    STATE_KINDS[18].0,
-    STATE_KINDS[19].0,
-    STATE_KINDS[20].0,
-    STATE_KINDS[21].0,
-    STATE_KINDS[22].0,
-    STATE_KINDS[23].0,
-    STATE_KINDS[24].0,
-    STATE_KINDS[25].0,
-];
+pub const STATE_KIND_NAMES: [&str; STATE_KINDS.len()] = {
+    let mut names = [""; STATE_KINDS.len()];
+    let mut i = 0;
+
+    while i < STATE_KINDS.len() {
+        names[i] = STATE_KINDS[i].0;
+        i += 1;
+    }
+
+    names
+};
 
 /// The kind carrying `ns`'s state tip, or `None` where the namespace is not one
 /// this profile defines.
@@ -439,46 +425,14 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
 /// The thirty-eight layer kinds, in the order the inscription lists them.
-pub const KINDS: [&str; 38] = [
-    BLOCKS,
-    INDEXES,
-    LOG_KINDS[0].0,
-    LOG_KINDS[1].0,
-    LOG_KINDS[2].0,
-    LOG_KINDS[3].0,
-    LOG_KINDS[4].0,
-    LOG_KINDS[5].0,
-    LOG_KINDS[6].0,
-    LOG_KINDS[7].0,
-    LOG_KINDS[8].0,
-    STATE_KIND_NAMES[0],
-    STATE_KIND_NAMES[1],
-    STATE_KIND_NAMES[2],
-    STATE_KIND_NAMES[3],
-    STATE_KIND_NAMES[4],
-    STATE_KIND_NAMES[5],
-    STATE_KIND_NAMES[6],
-    STATE_KIND_NAMES[7],
-    STATE_KIND_NAMES[8],
-    STATE_KIND_NAMES[9],
-    STATE_KIND_NAMES[10],
-    STATE_KIND_NAMES[11],
-    STATE_KIND_NAMES[12],
-    STATE_KIND_NAMES[13],
-    STATE_KIND_NAMES[14],
-    STATE_KIND_NAMES[15],
-    STATE_KIND_NAMES[16],
-    STATE_KIND_NAMES[17],
-    STATE_KIND_NAMES[18],
-    STATE_KIND_NAMES[19],
-    STATE_KIND_NAMES[20],
-    STATE_KIND_NAMES[21],
-    STATE_KIND_NAMES[22],
-    STATE_KIND_NAMES[23],
-    STATE_KIND_NAMES[24],
-    STATE_KIND_NAMES[25],
-    DIGESTS,
-];
+pub const KINDS: [&str; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 1] = {
+    let mut kinds = [""; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 1];
+    let at = fill(&mut kinds, 0, &EPOCH_KINDS);
+    let at = fill(&mut kinds, at, &STATE_KIND_NAMES);
+    kinds[at] = DIGESTS;
+
+    kinds
+};
 
 /// The kinds whose scope is an epoch range. The remaining two are tip layers
 /// and carry their own scope shapes.
@@ -486,19 +440,31 @@ pub const KINDS: [&str; 38] = [
 /// The namespace lives in the kind rather than in the scope, so a log layer
 /// wears the same [`EpochScope`] as `blocks` and `indexes` do — which is what
 /// keeps per-(kind, scope) inheritance working across the split.
-pub const EPOCH_KINDS: [&str; 11] = [
-    DENSE_EPOCH_KINDS[0],
-    DENSE_EPOCH_KINDS[1],
-    LOG_KINDS[0].0,
-    LOG_KINDS[1].0,
-    LOG_KINDS[2].0,
-    LOG_KINDS[3].0,
-    LOG_KINDS[4].0,
-    LOG_KINDS[5].0,
-    LOG_KINDS[6].0,
-    LOG_KINDS[7].0,
-    LOG_KINDS[8].0,
-];
+pub const EPOCH_KINDS: [&str; DENSE_EPOCH_KINDS.len() + LOG_KINDS.len()] = {
+    let mut kinds = [""; DENSE_EPOCH_KINDS.len() + LOG_KINDS.len()];
+    let at = fill(&mut kinds, 0, &DENSE_EPOCH_KINDS);
+    let mut i = 0;
+
+    while i < LOG_KINDS.len() {
+        kinds[at + i] = LOG_KINDS[i].0;
+        i += 1;
+    }
+
+    kinds
+};
+
+/// Copies `from` into `into` from slot `at`, returning the slot after the last
+/// one written: the concatenation the kind tables are built from.
+const fn fill(into: &mut [&'static str], at: usize, from: &[&'static str]) -> usize {
+    let mut i = 0;
+
+    while i < from.len() {
+        into[at + i] = from[i];
+        i += 1;
+    }
+
+    at + from.len()
+}
 
 /// The kind carrying `ns`'s logs, or `None` where the namespace has no log
 /// layer.
