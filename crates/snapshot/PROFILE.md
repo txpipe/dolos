@@ -74,7 +74,7 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 | `accounts`, `pending-rewards`, `pending-mirs` | `AccountKey`: CBOR stake credential, `0x82 ‖ variant ‖ 0x58 0x1c ‖ hash(28)`, 32 B | — |
 | `account-epochs` | — | `AccountKey`, 32 B |
 | `account-stats` | — | `AccountKey`, 32 B |
-| `address-stats` | — | `AddressStatsKey`: `0x01 ‖ AccountKey ‖ rest` for an address with a stake credential, `rest` being the address without its stake hash (a base address's header and payment hash), else `0x00 ‖ address`; 62 B for a base address |
+| `address-stats` | — | `AddressKey`: `AccountKey ‖ rest` for an address with a stake credential, `rest` being the address without its stake hash (a base address's header and payment hash, a stake address's header), else `0x00 ‖ address`; the first byte, `0x82` or `0x00`, tells the forms apart; 61 B for a base address |
 | `assets` | `AssetKey`: `blake2b256(policy ‖ name)`, 32 B | — |
 | `datums` | `DatumKey`: datum hash, 32 B | — |
 | `dreps` | `DRepKey`: `0x22` (key) or `0x23` (script) `‖ hash(28)`, 29 B; `0x00` abstain, `0x01` no-confidence, 1 B | — |
@@ -89,11 +89,11 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 | `pools` | `PoolKey`: operator hash, 28 B | — |
 | `proposals` | `ProposalKey`: `idx(4) ‖ tx(32)`, 36 B | — |
 | `staged-account-stats` | `StagedKey<AccountKey, ()>`: `account(32) ‖ epoch(8)`, 40 B | — |
-| `staged-address-stats` | `(Epoch, AddressStatsKey)`: `epoch(8) ‖` the `address-stats` log key, epoch first, 70 B for a base address | — |
+| `staged-address-stats` | `(Epoch, AddressKey)`: `epoch(8) ‖` the `address-stats` log key, epoch first, 69 B for a base address | — |
 | `staged-first-mints` | `StagedKey<PolicyKey, AssetKey>`: `policy(28) ‖ epoch(8) ‖ asset key(32)`, 68 B | — |
 | `staged-payment-addresses` | `StagedKey<PaymentKey, PaymentTail>`: `payment(28) ‖ epoch(8) ‖ tail`, the address without its payment hash, last, 65 B for a base address | — |
 | `staged-payment-stats` | `StagedKey<PaymentKey, ()>`: `payment(28) ‖ epoch(8)`, 36 B | — |
-| `staged-stake-addresses` | `StagedKey<AccountKey, AddressKey>`: `account(32) ‖ epoch(8) ‖ address`, the address whole and last, 69 B for a base address | — |
+| `staged-stake-addresses` | `StagedKey<AccountKey, AddressKey>`: `account(32) ‖ epoch(8) ‖` the `address-stats` log key, last, 101 B for a base address | — |
 | `stake-addresses` | — | `AccountKey`, 32 B |
 | `utxos` | `tx_hash(32) ‖ output_index(4)`, 36 B | — |
 

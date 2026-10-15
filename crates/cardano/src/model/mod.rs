@@ -795,7 +795,7 @@ mod wal_tests {
             (
                 67,
                 StageAddressStats::new(
-                    (7, AddressStatsKey::Unstaked(vec![0x33; 29])),
+                    (7, AddressKey::Unstaked(vec![0x33; 29])),
                     StagedAddressStats(AddressStats::default()),
                 )
                 .into(),

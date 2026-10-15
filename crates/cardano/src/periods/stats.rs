@@ -37,10 +37,9 @@ use pallas::{
 
 use super::StagedKey;
 use crate::{
-    model::stats::join_payment, pallas_extras, AccountAddresses, AccountKey, AccountStats,
-    AddressStats, AddressStatsKey, ChainSummary, FixedNamespace as _, PaymentKey, PaymentStats,
-    StagedAccountStats, StagedAddressStats, StagedPaymentAddress, StagedPaymentStats, Sum,
-    UnitSums,
+    model::stats::join_payment, pallas_extras, AccountKey, AccountStats, AddressKey, AddressStats,
+    ChainSummary, FixedNamespace as _, PaymentKey, PaymentStats, StagedAccountStats,
+    StagedAddressStats, StagedPaymentAddress, StagedPaymentStats, Sum, UnitSums,
 };
 
 /// Address rows read per round trip.
@@ -214,7 +213,7 @@ fn seal_addresses<D: Domain>(
     sealable: &dyn Fn(Epoch) -> bool,
     batch: usize,
 ) -> Result<(), ChainError> {
-    let mut range = RangeOf::<(Epoch, AddressStatsKey)>::all();
+    let mut range = RangeOf::<(Epoch, AddressKey)>::all();
 
     loop {
         let mut chunk = Vec::new();
@@ -504,7 +503,7 @@ fn oldest_staged<S: StateStore>(state: &S) -> Result<Option<Epoch>, ChainError> 
 fn fold_address_rows<D: Domain>(
     domain: &D,
     chain: &ChainSummary,
-    keys: &[(Epoch, AddressStatsKey)],
+    keys: &[(Epoch, AddressKey)],
     fold: &mut Fold,
 ) -> Result<(), ChainError> {
     let staged_from = oldest_staged(domain.state())?;
@@ -552,7 +551,7 @@ pub fn address_totals<D: Domain>(
     domain: &D,
     chain: &ChainSummary,
     epochs: RangeInclusive<Epoch>,
-    key: &AddressStatsKey,
+    key: &AddressKey,
 ) -> Result<AddressStats, ChainError> {
     let keys: Vec<_> = epochs.map(|epoch| (epoch, key.clone())).collect();
 
@@ -616,7 +615,7 @@ pub fn payment_totals<D: Domain>(
 
         for tail in row.tails {
             let address = Address::from_bytes(&join_payment(&payment.0, &tail))?;
-            keys.push((epoch, AddressStatsKey::of(&address)));
+            keys.push((epoch, AddressKey::of(&address)));
         }
     }
 
@@ -643,7 +642,6 @@ pub fn account_totals<D: Domain>(
     account: &AccountKey,
 ) -> Result<AddressStats, ChainError> {
     let (state, archive) = (domain.state(), domain.archive());
-    let prefix = AccountAddresses(account.clone());
     let staged_from = oldest_staged(state)?;
 
     let mut fold = Fold::default();
@@ -653,7 +651,7 @@ pub fn account_totals<D: Domain>(
         let mut staged: HashMap<Vec<u8>, StagedAddressStats> = HashMap::new();
 
         if staged_from.is_some_and(|from| epoch >= from) {
-            let range = RangeOf::prefix(&(epoch, prefix.clone()));
+            let range = RangeOf::prefix(&(epoch, account.clone()));
 
             for row in state.iter_entities_typed::<StagedAddressStats>(Some(range))? {
                 let ((_, key), row) = row?;
@@ -661,7 +659,7 @@ pub fn account_totals<D: Domain>(
             }
         }
 
-        let range = LogRangeOf::<AddressStatsKey>::prefix(chain.epoch_start(epoch), &prefix);
+        let range = LogRangeOf::<AddressKey>::prefix(chain.epoch_start(epoch), account);
         let mut any = !staged.is_empty();
 
         for row in archive.iter_logs(AddressStats::NS, range.into_raw())? {
@@ -806,7 +804,7 @@ mod tests {
 
                 writer
                     .write_entity_typed(
-                        &(epoch, AddressStatsKey::of(&address)),
+                        &(epoch, AddressKey::of(&address)),
                         &StagedAddressStats(stats),
                     )
                     .unwrap();
@@ -872,7 +870,7 @@ mod tests {
     }
 
     type Logs = (
-        Vec<(BlockSlot, AddressStatsKey, AddressStats)>,
+        Vec<(BlockSlot, AddressKey, AddressStats)>,
         Vec<(BlockSlot, PaymentKey, PaymentStats)>,
         Vec<(BlockSlot, AccountKey, AccountStats)>,
     );
@@ -930,7 +928,7 @@ mod tests {
         let mut out = Vec::new();
 
         for address in addresses() {
-            let key = AddressStatsKey::of(&address);
+            let key = AddressKey::of(&address);
             out.push(address_totals(domain, &chain, epochs(), &key).unwrap());
         }
 

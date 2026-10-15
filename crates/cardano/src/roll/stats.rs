@@ -18,7 +18,7 @@ use pallas::{
 use super::{BlockVisitor, WorkDeltas};
 use crate::{
     model::stats::split_payment, owned::OwnedMultiEraOutput, periods::stats::tx_stats,
-    periods::StagedKey, AccountKey, AddressStats, AddressStatsKey, Genesis, PParamsSet, PaymentKey,
+    periods::StagedKey, AccountKey, AddressKey, AddressStats, Genesis, PParamsSet, PaymentKey,
     StageAccountStats, StageAddressStats, StagePaymentAddress, StagePaymentStats,
     StagedAccountStats, StagedAddressStats, StagedPaymentAddress, StagedPaymentStats,
 };
@@ -26,7 +26,7 @@ use crate::{
 #[derive(Default)]
 pub struct StatsVisitor {
     epoch: Option<Epoch>,
-    addresses: HashMap<AddressStatsKey, AddressStats>,
+    addresses: HashMap<AddressKey, AddressStats>,
     members: HashSet<(Hash<28>, Vec<u8>)>,
     payments: HashMap<Hash<28>, u64>,
     overlaps: HashMap<AccountKey, u64>,
@@ -78,9 +78,9 @@ impl BlockVisitor for StatsVisitor {
                 self.members.insert((payment, tail));
             }
 
-            let key = AddressStatsKey::of(&address);
+            let key = AddressKey::of(&address);
 
-            if let AddressStatsKey::Staked { account, .. } = &key {
+            if let AddressKey::Staked { account, .. } = &key {
                 *accounts.entry(account.clone()).or_default() += 1;
             }
 

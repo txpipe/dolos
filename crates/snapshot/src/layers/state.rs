@@ -327,21 +327,26 @@ mod tests {
         keyed(AccountState::NS, &credential).unwrap();
         keyed(DRepState::NS, &[[0x22].as_slice(), &[7; 28]].concat()).unwrap();
 
-        // a staged stake address: the account, the epoch, then the address,
-        // which takes whatever width is left
+        // an address: an account and a base address's header and payment
+        // hash, or a tag and the address whole
+        let staked = [credential.as_slice(), &[0x01], &[1; 28]].concat();
+        let unstaked = [[0x00].as_slice(), &[1; 29]].concat();
+
+        // a staged stake address: the account, the epoch, then the address's
+        // key, last
         let staged = |address: &[u8]| [credential.as_slice(), &[0; 8], address].concat();
-        keyed(StagedStakeAddress::NS, &staged(&[1; 57])).unwrap();
-        keyed(StagedStakeAddress::NS, &staged(&[1; 29])).unwrap();
+        keyed(StagedStakeAddress::NS, &staged(&staked)).unwrap();
+        keyed(StagedStakeAddress::NS, &staged(&unstaked)).unwrap();
         keyed(StakeAddressesRow::NS, &credential).unwrap();
 
         // staged stats: an address's are keyed epoch first, a payment
         // credential's and an account's group first
         let epoch = [0u8; 8];
-        let address = [epoch.as_slice(), &[0x01], &credential, &[1; 29]].concat();
+        let address = [epoch.as_slice(), &staked].concat();
         keyed(StagedAddressStats::NS, &address).unwrap();
         keyed(
             StagedAddressStats::NS,
-            &[epoch.as_slice(), &[0x00], &[1; 29]].concat(),
+            &[epoch.as_slice(), &unstaked].concat(),
         )
         .unwrap();
         keyed(
@@ -373,11 +378,16 @@ mod tests {
             (AccountState::NS, vec![1; 32]),
             (AccountEpochLog::NS, vec![1; 32]),
             (StagedStakeAddress::NS, staged(&[])),
+            (StagedStakeAddress::NS, staged(&[1; 57])),
             (StagedStakeAddress::NS, credential.clone()),
             (StakeAddressesRow::NS, vec![1; 32]),
             (
                 StagedAddressStats::NS,
-                [epoch.as_slice(), &[0x01], &credential].concat(),
+                [epoch.as_slice(), &credential].concat(),
+            ),
+            (
+                StagedAddressStats::NS,
+                [epoch.as_slice(), &staked, &[1]].concat(),
             ),
             (
                 StagedAddressStats::NS,

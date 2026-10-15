@@ -66,9 +66,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 72] = [
     ),
     (
         "log-address-stats",
-        "sha256:6ca11f3dbee0c09bdda2815cd691528d7a1af6340ca91ec16b12a4d96340b538",
+        "sha256:4f8f663f48d7c5d2108d1d769ea77f2e4a050af5e45472cf061510f36736c4a8",
         2,
-        131,
+        130,
     ),
     (
         "log-epochs",
@@ -144,15 +144,15 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 72] = [
     ),
     (
         "state-address-stats",
-        "sha256:2e49916b8fdea1b021c6fa4b6ed2ddeb7132f57edd669cdabb93bea27866c3ba",
+        "sha256:e8e15edea005b44367dd7439b522f9e53a678f361120ca37a877226efcfa1bdc",
         2,
-        122,
+        121,
     ),
     (
         "state-address-stats",
-        "sha256:a239d0362c64a0b0f8947c4ed793371a07585418e4c8b9671ffe4c9c3ca3569c",
+        "sha256:d381a5bfa73458f237ec86598ce69ed6241f6279119584fe0ce48659071cd948",
         2,
-        122,
+        121,
     ),
     (
         "state-assets",
@@ -372,15 +372,15 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 72] = [
     ),
     (
         "state-staged-address-stats",
-        "sha256:6f049e6789df4ea62c4f884682199e904f2ba405be83e58b8b6bd1e79cc6c821",
+        "sha256:917e17ff1dc12ccee43f4d159692162c2505535eeacefaea42e53f3b7432058e",
         2,
-        138,
+        137,
     ),
     (
         "state-staged-address-stats",
-        "sha256:2ebcd49311d0bac758d0877257c7a3634ec00e85a00464f3d1bb47a14288a87b",
+        "sha256:9946320a55289d1c6657572996a300e66ec85ce9cf8f7f1fc6d357b8a4de1dd9",
         2,
-        138,
+        137,
     ),
     (
         "state-staged-first-mints",
@@ -420,15 +420,15 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 72] = [
     ),
     (
         "state-staged-stake-addresses",
-        "sha256:20c856eba953f9b377afb2eccd4b938ce8e15fbff1d4179ff3a91979186e3edd",
+        "sha256:7139144776cebf12cea18c477037fca52d64e3baec90338e824ccbb722826251",
         2,
-        167,
+        171,
     ),
     (
         "state-staged-stake-addresses",
-        "sha256:70be7b89c10565ac3385f440523710efa3fa5328171b715bf4b4d5991726d368",
+        "sha256:985b16d02c1ab144f8dadc59d717bbfaf396a1c642a2ff2359876e8d967bfbe1",
         2,
-        167,
+        171,
     ),
     (
         "state-stake-addresses",
@@ -476,7 +476,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 72] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:390151faad8f606f5888bbc417c6fcd47f968db01b763a6fdaa7781b67cb7199";
+    "sha256:8bf08f59eab3e4888c77f950050bf9c7710d761fd30e25ab3ba3ddd0d10779a8";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -687,9 +687,9 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:d6014c07f910e41a978b494aabc982461446d354f6ea69e3ef9b0a4ce5dd02dd","kind":"log-account-stats","#,
     r#""mediaType":"application/vnd.dolos.stele.log-account-stats.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":101},"#,
-    r#"{"diffId":"sha256:6ca11f3dbee0c09bdda2815cd691528d7a1af6340ca91ec16b12a4d96340b538","kind":"log-address-stats","#,
+    r#"{"diffId":"sha256:4f8f663f48d7c5d2108d1d769ea77f2e4a050af5e45472cf061510f36736c4a8","kind":"log-address-stats","#,
     r#""mediaType":"application/vnd.dolos.stele.log-address-stats.v1+zstd","records":2,"#,
-    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":131},"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":130},"#,
     r#"{"diffId":"sha256:8155dd8e69e45910de973dfa5e12cc472dad8f2d5340343b9c72accd998fd2eb","kind":"log-epochs","#,
     r#""mediaType":"application/vnd.dolos.stele.log-epochs.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":61},"#,
@@ -726,12 +726,12 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:91d697028d46280181c6c4d367a99cb6cd31dee1c2ab173fb27ad94a3f9c25e7","kind":"state-accounts","#,
     r#""mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":2,"#,
     r#""scope":{"shard":8},"uncompressedSize":87},"#,
-    r#"{"diffId":"sha256:2e49916b8fdea1b021c6fa4b6ed2ddeb7132f57edd669cdabb93bea27866c3ba","kind":"state-address-stats","#,
+    r#"{"diffId":"sha256:e8e15edea005b44367dd7439b522f9e53a678f361120ca37a877226efcfa1bdc","kind":"state-address-stats","#,
     r#""mediaType":"application/vnd.dolos.stele.state-address-stats.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":122},"#,
-    r#"{"diffId":"sha256:a239d0362c64a0b0f8947c4ed793371a07585418e4c8b9671ffe4c9c3ca3569c","kind":"state-address-stats","#,
+    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":121},"#,
+    r#"{"diffId":"sha256:d381a5bfa73458f237ec86598ce69ed6241f6279119584fe0ce48659071cd948","kind":"state-address-stats","#,
     r#""mediaType":"application/vnd.dolos.stele.state-address-stats.v1+zstd","records":2,"#,
-    r#""scope":{"shard":0},"uncompressedSize":122},"#,
+    r#""scope":{"shard":0},"uncompressedSize":121},"#,
     r#"{"diffId":"sha256:6576a9ad942f385cd8e4a50aa02e99f029edbbd879a874561bf9fb510a026d4f","kind":"state-assets","#,
     r#""mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":85},"#,
@@ -840,12 +840,12 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:e50b14a1d0339fed41b80dfa521ecfb8b2b3382902e7bb727982606f3718f2a6","kind":"state-staged-account-stats","#,
     r#""mediaType":"application/vnd.dolos.stele.state-staged-account-stats.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":108},"#,
-    r#"{"diffId":"sha256:6f049e6789df4ea62c4f884682199e904f2ba405be83e58b8b6bd1e79cc6c821","kind":"state-staged-address-stats","#,
+    r#"{"diffId":"sha256:917e17ff1dc12ccee43f4d159692162c2505535eeacefaea42e53f3b7432058e","kind":"state-staged-address-stats","#,
     r#""mediaType":"application/vnd.dolos.stele.state-staged-address-stats.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":138},"#,
-    r#"{"diffId":"sha256:2ebcd49311d0bac758d0877257c7a3634ec00e85a00464f3d1bb47a14288a87b","kind":"state-staged-address-stats","#,
+    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":137},"#,
+    r#"{"diffId":"sha256:9946320a55289d1c6657572996a300e66ec85ce9cf8f7f1fc6d357b8a4de1dd9","kind":"state-staged-address-stats","#,
     r#""mediaType":"application/vnd.dolos.stele.state-staged-address-stats.v1+zstd","records":2,"#,
-    r#""scope":{"shard":0},"uncompressedSize":138},"#,
+    r#""scope":{"shard":0},"uncompressedSize":137},"#,
     r#"{"diffId":"sha256:a72c49692b3f118edbff4fc6f629f38ac0e3d54693095df0f14db75aa186e48e","kind":"state-staged-first-mints","#,
     r#""mediaType":"application/vnd.dolos.stele.state-staged-first-mints.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":134},"#,
@@ -864,12 +864,12 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:0d845a66d3cbb16fc35735e1eebdafd3447e5c89e9f275e96c5d5bc978b80981","kind":"state-staged-payment-stats","#,
     r#""mediaType":"application/vnd.dolos.stele.state-staged-payment-stats.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":104},"#,
-    r#"{"diffId":"sha256:20c856eba953f9b377afb2eccd4b938ce8e15fbff1d4179ff3a91979186e3edd","kind":"state-staged-stake-addresses","#,
+    r#"{"diffId":"sha256:7139144776cebf12cea18c477037fca52d64e3baec90338e824ccbb722826251","kind":"state-staged-stake-addresses","#,
     r#""mediaType":"application/vnd.dolos.stele.state-staged-stake-addresses.v1+zstd","records":2,"#,
-    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":167},"#,
-    r#"{"diffId":"sha256:70be7b89c10565ac3385f440523710efa3fa5328171b715bf4b4d5991726d368","kind":"state-staged-stake-addresses","#,
+    r#""scope":{"epoch":4,"shard":0},"uncompressedSize":171},"#,
+    r#"{"diffId":"sha256:985b16d02c1ab144f8dadc59d717bbfaf396a1c642a2ff2359876e8d967bfbe1","kind":"state-staged-stake-addresses","#,
     r#""mediaType":"application/vnd.dolos.stele.state-staged-stake-addresses.v1+zstd","records":2,"#,
-    r#""scope":{"shard":0},"uncompressedSize":167},"#,
+    r#""scope":{"shard":0},"uncompressedSize":171},"#,
     r#"{"diffId":"sha256:d82680a8c61dafa8c44b553f77268c34873e9a6da1f6d5e9ddc6123c4b300ff0","kind":"state-stake-addresses","#,
     r#""mediaType":"application/vnd.dolos.stele.state-stake-addresses.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":94},"#,
