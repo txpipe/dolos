@@ -3426,6 +3426,7 @@ mod tests {
             voter: voter.clone(),
             proposal: SyntheticProposalRef { block, tx, action },
             vote,
+            anchor: None,
         }
     }
 

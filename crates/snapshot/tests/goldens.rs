@@ -49,9 +49,9 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 72] = [
     ),
     (
         INDEXES,
-        "sha256:a792d43a501efd106665c365f4e4281e142c6b9d78c6425176e5b4803ed2ac20",
-        21,
-        561,
+        "sha256:a0179ae003b2f11abfb41885369b6cd1a6c8996630fa49aa3bed238a74d1b433",
+        23,
+        619,
     ),
     (
         "log-account-epochs",
@@ -477,7 +477,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 72] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:8011e5db11d4d0d858c1e577c9e5a147b60981009d626d573dcab159e2b281da";
+    "sha256:390151faad8f606f5888bbc417c6fcd47f968db01b763a6fdaa7781b67cb7199";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -679,9 +679,9 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106","kind":"blocks","#,
     r#""mediaType":"application/vnd.dolos.stele.blocks.v1+zstd","records":4,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":167},"#,
-    r#"{"diffId":"sha256:a792d43a501efd106665c365f4e4281e142c6b9d78c6425176e5b4803ed2ac20","kind":"indexes","#,
-    r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":21,"#,
-    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":561},"#,
+    r#"{"diffId":"sha256:a0179ae003b2f11abfb41885369b6cd1a6c8996630fa49aa3bed238a74d1b433","kind":"indexes","#,
+    r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":23,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":619},"#,
     r#"{"diffId":"sha256:3df20da5471b0991ffdaf69fa45f759fb8341c2d4e2d751fd5cba6ee8827c6b8","kind":"log-account-epochs","#,
     r#""mediaType":"application/vnd.dolos.stele.log-account-epochs.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":102},"#,
