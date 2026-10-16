@@ -56,11 +56,10 @@ pub mod enums;
 pub mod ground_rules;
 
 use dolos_cardano::model::{
-    AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
-    EpochState, EraState, FirstMintChunk, FixedNamespace, GovState, PaymentStats, PendingMirState,
-    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
-    StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
-    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
+    AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
+    AddressStats, AssetState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
+    FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
+    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -202,9 +201,8 @@ pub fn registry() -> Vec<Entry> {
             enc_epochs,
             EpochState,
             canaries::epoch_state,
-            // The one namespace whose history has moved. Revision 1 is
-            // retained as a decode witness and nothing more: it is *one* of
-            // the orderings pre-fix code could emit for
+            // Revision 1 is retained as a decode witness and nothing more: it
+            // is *one* of the orderings pre-fix code could emit for
             // `RollingStats::registered_pools`, which was a hash container and
             // therefore had no single encoding. Stores synced before the fix
             // hold rows of this shape, so today's reader must still accept
@@ -245,7 +243,7 @@ pub fn registry() -> Vec<Entry> {
             ]
         ),
         entity_entry!(
-            enc_first_mints,
+            enc_first_mint_chunks,
             FirstMintChunk,
             canaries::first_mint_chunk,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
@@ -253,11 +251,11 @@ pub fn registry() -> Vec<Entry> {
             &[
                 Pinned {
                     rev: 1,
-                    hex: include_str!("goldens/first-mints.rev1.hex"),
+                    hex: include_str!("goldens/first-mint-chunks.rev1.hex"),
                 },
                 Pinned {
                     rev: 2,
-                    hex: include_str!("goldens/first-mints.rev2.hex"),
+                    hex: include_str!("goldens/first-mint-chunks.rev2.hex"),
                 },
             ]
         ),
@@ -306,12 +304,12 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_policy_first_mints,
+            enc_policy_mint_chunks,
             PolicyMintChunk,
             canaries::policy_mint_chunk,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/policy-first-mints.rev1.hex"),
+                hex: include_str!("goldens/policy-mint-chunks.rev1.hex"),
             }]
         ),
         entity_entry!(
@@ -361,19 +359,19 @@ pub fn registry() -> Vec<Entry> {
             ]
         ),
         entity_entry!(
-            enc_staged_first_mints,
-            StagedFirstMint,
-            canaries::staged_first_mint,
+            enc_first_mints,
+            FirstMintSet,
+            canaries::first_mint_set,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged.
             &[
                 Pinned {
                     rev: 1,
-                    hex: include_str!("goldens/staged-first-mints.rev1.hex"),
+                    hex: include_str!("goldens/first-mints.rev1.hex"),
                 },
                 Pinned {
                     rev: 2,
-                    hex: include_str!("goldens/staged-first-mints.rev2.hex"),
+                    hex: include_str!("goldens/first-mints.rev2.hex"),
                 },
             ]
         ),
@@ -396,6 +394,24 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
+            enc_payment_address_chunks,
+            PaymentAddressChunk,
+            canaries::payment_address_chunk,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/payment-address-chunks.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_payment_addresses,
+            PaymentAddressSet,
+            canaries::payment_address_set,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/payment-addresses.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
             enc_payment_stats,
             PaymentStats,
             canaries::payment_stats,
@@ -405,57 +421,21 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_staged_account_stats,
-            StagedAccountStats,
-            canaries::staged_account_stats,
+            enc_account_addresses,
+            AccountAddressSet,
+            canaries::account_address_set,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/staged-account-stats.rev1.hex"),
+                hex: include_str!("goldens/account-addresses.rev1.hex"),
             }]
         ),
         entity_entry!(
-            enc_staged_address_stats,
-            StagedAddressStats,
-            canaries::staged_address_stats,
+            enc_account_address_chunks,
+            AccountAddressChunk,
+            canaries::account_address_chunk,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/staged-address-stats.rev1.hex"),
-            }]
-        ),
-        entity_entry!(
-            enc_staged_payment_addresses,
-            StagedPaymentAddress,
-            canaries::staged_payment_address,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/staged-payment-addresses.rev1.hex"),
-            }]
-        ),
-        entity_entry!(
-            enc_staged_payment_stats,
-            StagedPaymentStats,
-            canaries::staged_payment_stats,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/staged-payment-stats.rev1.hex"),
-            }]
-        ),
-        entity_entry!(
-            enc_staged_stake_addresses,
-            StagedStakeAddress,
-            canaries::staged_stake_address,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/staged-stake-addresses.rev1.hex"),
-            }]
-        ),
-        entity_entry!(
-            enc_stake_addresses,
-            StakeAddressesRow,
-            canaries::stake_addresses_row,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/stake-addresses.rev1.hex"),
+                hex: include_str!("goldens/account-address-chunks.rev1.hex"),
             }]
         ),
         entity_entry!(

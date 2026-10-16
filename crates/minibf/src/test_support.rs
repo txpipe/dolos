@@ -223,7 +223,7 @@ pub mod first_mint_policies {
 /// what first-mint order has to get right: several mints in one tx, several
 /// policies in one block and in one tx, re-mints within and across epochs, a
 /// full burn minted again, a repeat across the txs of one block, a policy
-/// sharing another's staged-key prefix, and an epoch with more first mints than
+/// sharing another's group-key prefix, and an epoch with more first mints than
 /// a sealed chunk holds. The tip's epoch seals epochs 2 to 5 and leaves 6 and 7
 /// staged.
 pub fn first_mint_chain() -> SyntheticBlockConfig {

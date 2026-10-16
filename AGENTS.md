@@ -259,7 +259,7 @@ pub trait EntityDelta {
 - Enables efficient rollbacks without full state snapshots
 
 ### Typed Keys
-Entity and log keys are byte strings of any length (decision 0051). Every key kind has one struct implementing `KeyCodec` — in `dolos-cardano`, `AccountKey`, `PoolKey`, `DRepKey`, `ProposalKey`, `AssetKey`, `DatumKey`, `EraKey`, `StagedKey<G, M>` and `()` for the singletons — and readers and writers of a namespace both go through it:
+Entity and log keys are byte strings of any length (decision 0051). Every key kind has one struct implementing `KeyCodec` — in `dolos-cardano`, `AccountKey`, `PoolKey`, `DRepKey`, `ProposalKey`, `AssetKey`, `DatumKey`, `EraKey`, `GroupKey<G, M>` and `()` for the singletons — and readers and writers of a namespace both go through it:
 
 - `StateEntity` and `LogEntity` bind an entity type to its namespace and key kind; the `_typed` store methods take and yield that kind (`read_entity_typed::<E>(&key)`, `write_log_typed::<E>(slot, &key, &entity)`).
 - `EntityKey::of(&key)` and `LogKey::of(slot, &key)` build the stored form; `from_raw` is for backends, the snapshot crate, CLI tools and tests only.
