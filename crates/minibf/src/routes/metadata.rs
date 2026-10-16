@@ -717,6 +717,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metadata_labels_pages_through_a_hundred_labels() {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            metadata_entries: (0..100u64)
+                .map(|label| (label, Metadatum::Int(1.into())))
+                .collect(),
+            ..Default::default()
+        });
+        let numbers = |items: &[TxMetadataLabelsInner]| -> Vec<u64> {
+            items.iter().map(|x| x.label.parse().unwrap()).collect()
+        };
+
+        let asc = get_labels(&app, "/metadata/txs/labels").await;
+        assert_eq!(numbers(&asc), (0..100).collect::<Vec<_>>());
+
+        let desc = get_labels(&app, "/metadata/txs/labels?order=desc").await;
+        assert_eq!(numbers(&desc), (0..100).rev().collect::<Vec<_>>());
+
+        let asc_page = get_labels(&app, "/metadata/txs/labels?page=44&count=2").await;
+        assert_eq!(label_names(&asc_page), ["86", "87"]);
+
+        let desc_page = get_labels(&app, "/metadata/txs/labels?page=44&count=2&order=desc").await;
+        assert_eq!(label_names(&desc_page), ["13", "12"]);
+    }
+
+    #[tokio::test]
+    async fn metadata_labels_skip_phase_2_invalid_transactions() {
+        // only the first tx of a synthetic block carries metadata
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 4,
+            txs_per_block: 2,
+            metadata_entries: vec![(674, Metadatum::Text("message".into()))],
+            invalid_txs_by_block: vec![vec![], vec![0], vec![1], vec![0]],
+            ..Default::default()
+        });
+
+        for order in ["asc", "desc"] {
+            let items = get_labels(&app, &format!("/metadata/txs/labels?order={order}")).await;
+            assert_eq!(label_names(&items), ["674"]);
+            assert_eq!(items[0].count, "2", "order={order}");
+        }
+    }
+
+    #[tokio::test]
     async fn metadata_labels_desc_pages_are_the_reverse_of_asc_pages() {
         let app = labels_app();
 
@@ -775,7 +818,7 @@ mod tests {
     #[tokio::test]
     async fn metadata_labels_order_spans_the_full_u64_range() {
         let app = TestApp::new_with_cfg(SyntheticBlockConfig {
-            metadata_entries: [u64::MAX, 256, 0, 255]
+            metadata_entries: [u64::MAX, 1 << 32, 256, 0, u64::from(u32::MAX), 255]
                 .into_iter()
                 .map(|label| (label, Metadatum::Int(1.into())))
                 .collect(),
@@ -785,7 +828,14 @@ mod tests {
         let asc = get_labels(&app, "/metadata/txs/labels?order=asc").await;
         assert_eq!(
             label_names(&asc),
-            ["0", "255", "256", "18446744073709551615"]
+            [
+                "0",
+                "255",
+                "256",
+                "4294967295",
+                "4294967296",
+                "18446744073709551615"
+            ]
         );
 
         let desc = get_labels(&app, "/metadata/txs/labels?order=desc").await;
