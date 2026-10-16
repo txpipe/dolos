@@ -108,8 +108,9 @@ pub use stelae::{dir, inscription, transport, SteleReader};
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
     AddressStats, AssetState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
-    FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
-    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
+    FirstMintSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -201,7 +202,7 @@ pub const LOG_KINDS: [(&str, Namespace); 9] = [
 /// single blob. Re-sharding a namespace is a media-type-version event for that
 /// namespace's kind, decided by the format's owner; it is not a constant to
 /// nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 18] = [
+pub const STATE_KINDS: [(&str, Namespace, u8); 19] = [
     ("state-account-addresses", AccountAddressSet::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
@@ -213,6 +214,7 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 18] = [
     ("state-eras", EraState::NS, 1),
     ("state-first-mints", FirstMintSet::NS, 1),
     ("state-gov", GovState::NS, 1),
+    ("state-metadata-labels", MetadataLabelState::NS, 1),
     ("state-payment-addresses", PaymentAddressSet::NS, 1),
     ("state-payment-stats", PaymentStats::NS, 1),
     ("state-pending-mirs", PendingMirState::NS, 1),

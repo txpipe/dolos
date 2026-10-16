@@ -25,9 +25,9 @@ use dolos_cardano::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountKey, AccountState,
         AccountStats, AddressKey, AddressStats, AssetKey, AssetState, DRepKey, DRepState, DatumKey,
         DatumState, EpochState, EraKey, EraState, FirstMintChunk, FirstMintSet,
-        FixedNamespace as _, GovState, PaymentAddressChunk, PaymentAddressKey, PaymentAddressSet,
-        PaymentKey, PaymentStats, PendingMirState, PendingRewardState, PolicyKey, PolicyMintChunk,
-        PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState,
+        FixedNamespace as _, GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressKey,
+        PaymentAddressSet, PaymentKey, PaymentStats, PendingMirState, PendingRewardState,
+        PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
     periods::GroupKey,
@@ -120,6 +120,7 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         DatumState::NS => keys::encode(&DatumKey([byte; 32].into())),
         DRepState::NS => keys::encode(&DRepKey(DRep::Key([byte; 28].into()))),
         EpochState::NS | GovState::NS => keys::encode(&()),
+        MetadataLabelState::NS => keys::encode(&u64::from(byte)),
         EraState::NS => keys::encode(&EraKey::from(u16::from(byte))),
         FirstMintChunk::NS => keys::encode(&u32::from(byte)),
         PolicyMintChunk::NS => keys::encode(&(PolicyKey([byte; 28].into()), u32::from(byte))),
@@ -279,7 +280,7 @@ pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
 ///
 /// The namespace is no longer in the record — it is the layer's kind — so what
 /// distinguishes one state layer's content from another's is the record's key
-/// and value, both derived from the namespace's position in [`NAMESPACES`].
+/// and value, derived from [`NAMESPACES`] with `metadata-labels` last.
 /// The namespace strings are frozen by the kinds in the layer headers instead,
 /// which is where they now live on the wire.
 ///
@@ -290,7 +291,10 @@ pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
 pub fn state(ns: Namespace, shard: u8) -> Vec<StateRecord> {
     let i = NAMESPACES
         .iter()
-        .position(|known| *known == ns)
+        .copied()
+        .filter(|known| *known != MetadataLabelState::NS)
+        .chain([MetadataLabelState::NS])
+        .position(|known| known == ns)
         .expect("a state namespace") as u8;
 
     let byte = (shard << 4) | (i & 0x0f);

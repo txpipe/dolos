@@ -25,10 +25,10 @@ use dolos_cardano::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AssetState,
         AuthHistory, Committee, CommitteeAuthorization, Constitution, DRepDelegation, DRepExpiry,
         DRepState, DatumState, EndStats, EpochState, EpochValue, EraBoundary, EraState,
-        FirstMintChunk, FirstMintSet, GovDistr, GovRoots, GovState, Nonces, PParamValue,
-        PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation,
-        PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
-        RollingStats, ShardProgress, Stake, VoteEntry,
+        FirstMintChunk, FirstMintSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces,
+        PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
+        PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction,
+        ProposalState, RollingStats, ShardProgress, Stake, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, PaymentAddressChunk, PaymentAddressSet, PaymentStats, Sum,
@@ -555,6 +555,12 @@ fn gov_distr(seed: u8, epoch_offset: Epoch) -> GovDistr {
             (hash28(seed.wrapping_add(3)), 666_000_000),
         ]),
         pool_total: 1_221_000_000,
+    }
+}
+
+pub fn metadata_label_state() -> MetadataLabelState {
+    MetadataLabelState {
+        tx_count: 20_912_422,
     }
 }
 
