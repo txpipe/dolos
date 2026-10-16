@@ -304,8 +304,8 @@ mod tests {
         assert_eq!(page_of(&domain, B, SlotOrder::Asc, 0, 10).len(), 3);
     }
 
-    /// Done criterion 4: whichever commit the seal dies after, a re-run writes
-    /// the same chunk rows and leaves no staged row of a sealed epoch.
+    /// Whichever commit the seal dies after, a re-run writes the same chunk
+    /// rows and leaves no staged row of a sealed epoch.
     #[test]
     fn a_crash_at_any_commit_seals_the_same_rows() {
         let clean = seeded();

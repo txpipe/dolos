@@ -228,9 +228,9 @@ mod tests {
         }
     }
 
-    /// Done criterion 2: Blockfrost refuses no page, so neither does this one;
-    /// the chain mints the asset in 3,120 txs, and the pages past item 3,000
-    /// answer in both orders.
+    /// Blockfrost refuses no page, so neither does this one: the chain mints
+    /// the asset in 3,120 txs, and the pages past item 3,000 answer in both
+    /// orders.
     #[tokio::test]
     async fn assets_by_subject_history_pages_past_item_3000() {
         let app = TestApp::new_with_cfg(SyntheticBlockConfig {
@@ -422,8 +422,7 @@ mod tests {
         }
     }
 
-    /// Done criterion 2: neither the zero-quantity entry nor the
-    /// phase-2-invalid burn is a row.
+    /// Neither the zero-quantity entry nor the phase-2-invalid burn is a row.
     #[tokio::test]
     async fn assets_by_subject_history_skips_zero_quantities_and_invalid_txs() {
         let app = history_app();

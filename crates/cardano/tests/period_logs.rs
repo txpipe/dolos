@@ -214,8 +214,8 @@ fn staged_mints(domain: &ToyDomain) -> BTreeSet<(u64, u64, u32, i64)> {
         .collect()
 }
 
-/// Done criterion 3: undoing a block removes exactly the asset-mint rows it
-/// staged, one per (valid tx, asset), and nothing another block staged.
+/// Undoing a block removes exactly the asset-mint rows it staged, one per
+/// (valid tx, asset), and nothing another block staged.
 #[test]
 fn rollback_unstages_exactly_the_mints_its_block_created() {
     let policy = [0x44u8; 28];
