@@ -14,7 +14,10 @@ use super::WorkDeltas;
 use crate::cip25::{cip25_metadata_for_tx, cip25_metadata_has_asset};
 use crate::cip68::{has_cip25_metadata, parse_cip67_label_from_asset_name};
 use crate::roll::BlockVisitor;
-use crate::{FirstMintSet, MetadataTxUpdate, MintStatsUpdate, PParamsSet, StageFirstMint};
+use crate::{
+    AssetKey, FirstMintSet, MetadataTxUpdate, MintStatsUpdate, PParamsSet, StageAssetMint,
+    StageFirstMint,
+};
 
 #[derive(Default, Clone)]
 pub struct AssetStateVisitor {
@@ -59,7 +62,8 @@ impl BlockVisitor for AssetStateVisitor {
         for asset in mint.assets() {
             trace!(%policy, asset = %hex::encode(asset.name()), "detected mint");
 
-            let quantity: i128 = asset.mint_coin().unwrap_or_default().into();
+            let amount = asset.mint_coin().unwrap_or_default();
+            let quantity: i128 = amount.into();
 
             deltas.add_for_entity(MintStatsUpdate::new(
                 *policy,
@@ -68,6 +72,17 @@ impl BlockVisitor for AssetStateVisitor {
                 tx.hash(),
                 block.slot(),
             ));
+
+            // db-sync stores no zero-quantity entry, so the history lists none
+            if amount != 0 {
+                deltas.add_for_entity(StageAssetMint::mint(
+                    AssetKey::of_parts(policy.as_slice(), asset.name()),
+                    self.epoch,
+                    (block.slot(), *order as u32),
+                    tx.hash(),
+                    amount,
+                ));
+            }
 
             if self.staged.insert((*policy, asset.name().to_vec())) {
                 deltas.add_for_entity(StageFirstMint::new(FirstMintSet {

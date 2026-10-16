@@ -1363,30 +1363,32 @@ fn sample_block(
 }
 
 /// A minimal Alonzo block holding one tx that carries the given
-/// certificates.
+/// certificates and mint.
 ///
-/// MIR certificates exist only in pre-Conway eras, so a test that needs one
-/// appends this block to a synthetic chain. `input` must name a live UTxO of
-/// that chain — the roll pipeline resolves every input it applies. Returns
-/// the raw block, its hash and the tx hash.
-pub fn sample_alonzo_cert_block(
+/// MIR certificates exist only in pre-Conway eras, and so does a
+/// zero-quantity mint entry, so a test that needs one appends this block to a
+/// synthetic chain. `input` must name a live UTxO of that chain — the roll
+/// pipeline resolves every input it applies. Returns the raw block, its hash
+/// and the tx hash.
+pub fn sample_alonzo_block(
     block_number: u64,
     slot: u64,
     prev_hash: Option<Hash<32>>,
     input: TransactionInput,
     certificates: Vec<alonzo::Certificate>,
+    mint: Option<alonzo::Mint>,
 ) -> (RawBlock, Hash<32>, Hash<32>) {
     let body = alonzo::TransactionBody {
         inputs: vec![input],
         outputs: vec![],
         fee: 7,
         ttl: None,
-        certificates: Some(certificates),
+        certificates: (!certificates.is_empty()).then_some(certificates),
         withdrawals: None,
         update: None,
         auxiliary_data_hash: None,
         validity_interval_start: None,
-        mint: None,
+        mint,
         script_data_hash: None,
         collateral: None,
         required_signers: None,

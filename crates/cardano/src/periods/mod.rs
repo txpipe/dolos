@@ -28,6 +28,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::{indexes::SlotOrder, ChainSummary};
 
 pub mod account_addresses;
+pub mod asset_mints;
 pub mod first_mints;
 pub mod first_scripts;
 pub mod stats;
@@ -91,15 +92,31 @@ impl FixedKey for Ungrouped {
 impl<M: KeyCodec> dolos_core::KeyPrefix<GroupKey<crate::PolicyKey, M>> for crate::PolicyKey {}
 impl<M: KeyCodec> dolos_core::KeyPrefix<GroupKey<crate::AccountKey, M>> for crate::AccountKey {}
 impl<M: KeyCodec> dolos_core::KeyPrefix<GroupKey<crate::PaymentKey, M>> for crate::PaymentKey {}
+impl<M: KeyCodec> dolos_core::KeyPrefix<GroupKey<crate::AssetKey, M>> for crate::AssetKey {}
 
-/// A `Set` row: one member of a group in an epoch, held in state until the
-/// epoch seals into a `Chunk`.
-pub trait GroupRow:
+/// A `Set` row: one member of a group in an epoch, held in state under a
+/// [`GroupKey`] until the epoch seals into a `Chunk`.
+pub trait SetRow:
     StateEntity<Key: Clone + std::fmt::Debug + Serialize + DeserializeOwned> + Clone + std::fmt::Debug
 {
-    fn key(&self) -> Self::Key;
+    /// The epoch a staged key names.
+    fn staged_epoch(key: &Self::Key) -> Epoch;
+}
 
-    fn epoch(&self) -> Epoch;
+impl<E, G, M> SetRow for E
+where
+    E: StateEntity<Key = GroupKey<G, M>> + Clone + std::fmt::Debug,
+    G: FixedKey + Clone + std::fmt::Debug + Serialize + DeserializeOwned,
+    M: KeyCodec + Clone + std::fmt::Debug + Serialize + DeserializeOwned,
+{
+    fn staged_epoch(key: &GroupKey<G, M>) -> Epoch {
+        key.epoch
+    }
+}
+
+/// A `Set` row that holds its own key.
+pub trait GroupRow: SetRow {
+    fn key(&self) -> Self::Key;
 }
 
 /// Stage a row unless its key is already staged: the first contribution of a
@@ -109,7 +126,7 @@ pub trait GroupRow:
 /// WAL, so visitors drop repeats within a block before emitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned"))]
-pub struct StageIfAbsent<E: GroupRow> {
+pub struct StageIfAbsent<E: SetRow> {
     pub(crate) key: E::Key,
     pub(crate) row: E,
 
@@ -119,15 +136,22 @@ pub struct StageIfAbsent<E: GroupRow> {
 
 impl<E: GroupRow> StageIfAbsent<E> {
     pub fn new(row: E) -> Self {
+        Self::at(row.key(), row)
+    }
+}
+
+impl<E: SetRow> StageIfAbsent<E> {
+    /// Stage `row` at `key`, for a row whose value does not hold its key.
+    pub fn at(key: E::Key, row: E) -> Self {
         Self {
-            key: row.key(),
+            key,
             row,
             was_new: false,
         }
     }
 }
 
-impl<E: GroupRow> EntityDelta for StageIfAbsent<E> {
+impl<E: SetRow> EntityDelta for StageIfAbsent<E> {
     type Entity = E;
 
     fn key(&self) -> NsKey {
@@ -232,6 +256,7 @@ pub fn seal_staged<D: Domain>(
 
     first_mints::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
     first_scripts::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
+    asset_mints::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
     account_addresses::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
     stats::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)
 }
@@ -389,13 +414,13 @@ pub fn read_staged<S, E>(
 ) -> Result<BTreeMap<Epoch, Vec<E>>, ChainError>
 where
     S: StateStore,
-    E: GroupRow,
+    E: SetRow,
 {
     let mut out: BTreeMap<Epoch, Vec<E>> = BTreeMap::new();
 
     for row in state.iter_entities_typed::<E>(Some(range))? {
-        let (_, row) = row?;
-        out.entry(row.epoch()).or_default().push(row);
+        let (key, row) = row?;
+        out.entry(E::staged_epoch(&key)).or_default().push(row);
     }
 
     Ok(out)

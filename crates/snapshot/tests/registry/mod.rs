@@ -57,10 +57,11 @@ pub mod ground_rules;
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
-    FirstMintSet, FirstScriptChunk, FirstScriptSet, FixedNamespace, GovState, MetadataLabelState,
-    PaymentAddressChunk, PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState,
-    PolicyMintChunk, PoolEpochLog, PoolState, ProposalState, ScriptState,
+    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepState, DatumState, EpochState,
+    EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet, FixedNamespace,
+    GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
+    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
+    ScriptState,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -419,6 +420,24 @@ pub fn registry() -> Vec<Entry> {
             &[Pinned {
                 rev: 1,
                 hex: include_str!("goldens/payment-addresses.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_asset_mint_chunks,
+            AssetMintChunk,
+            canaries::asset_mint_chunk,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/asset-mint-chunks.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_asset_mints,
+            AssetMintSet,
+            canaries::asset_mint_set,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/asset-mints.rev1.hex"),
             }]
         ),
         entity_entry!(

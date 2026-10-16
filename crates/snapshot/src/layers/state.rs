@@ -266,9 +266,9 @@ impl OrderCheck {
 mod tests {
     use dolos_cardano::model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-        AddressStats, AssetKey, AssetState, DRepState, EpochState, EraState, FirstMintSet,
-        FixedNamespace, GovState, MetadataLabelState, PaymentAddressSet, PaymentStats, PoolState,
-        ProposalState,
+        AddressStats, AssetKey, AssetMintChunk, AssetMintSet, AssetState, DRepState, EpochState,
+        EraState, FirstMintSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressSet,
+        PaymentStats, PoolState, ProposalState,
     };
 
     use super::*;
@@ -320,6 +320,7 @@ mod tests {
             (PoolState::NS, 28),
             (ProposalState::NS, 36),
             (FirstMintSet::NS, 68),
+            (AssetMintSet::NS, 52),
         ] {
             keyed(ns, &vec![1; len]).unwrap_or_else(|err| panic!("{ns}/{len}: {err:?}"));
         }
@@ -367,6 +368,8 @@ mod tests {
             (AccountAddressSet::NS, staged(&[1; 57])),
             (AccountAddressSet::NS, credential.clone()),
             (AccountAddressChunk::NS, vec![1; 32]),
+            (AssetMintSet::NS, vec![1; 48]),
+            (AssetMintChunk::NS, vec![1; 36]),
             // an archive-only log holds no state, even under its log key
             (AccountAddressChunk::NS, credential.clone()),
             (AddressStats::NS, [epoch.as_slice(), &credential].concat()),
