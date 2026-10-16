@@ -25,7 +25,7 @@ use dolos_cardano::{
     model::AssetState,
     pallas_extras,
     periods::stats,
-    AddressStatsKey, ChainSummary, PaymentKey,
+    AddressKey, ChainSummary, PaymentKey,
 };
 use dolos_core::{BlockBody, BlockSlot, Domain, DomainError, StateStore as _, TxoRef};
 
@@ -668,7 +668,7 @@ where
                         _ => shelley,
                     };
 
-                    let key = AddressStatsKey::of(address);
+                    let key = AddressKey::of(address);
                     stats::address_totals(&domain, &chain, from..=tip_epoch, &key)
                 }
             }

@@ -703,8 +703,10 @@ where
             0,
             end_slot,
             |block| {
+                // the spent_txo tag follows `consumes()`, so a failed tx
+                // spends its collateral, not its ordinary inputs
                 for tx in block.txs().iter() {
-                    for input in tx.inputs() {
+                    for input in tx.consumes() {
                         let bytes: Vec<u8> = TxoRef::from(&input).into();
                         if bytes.as_slice() == spent.as_slice() {
                             return Some(tx.hash());

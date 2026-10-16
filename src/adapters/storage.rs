@@ -186,7 +186,7 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
     ensure_store_path(&path)?;
     Ok(ArchiveStoreBackend::open(
         &path,
-        dolos_cardano::model::build_schema(),
+        dolos_cardano::model::build_log_schema(),
         &config.storage.archive,
     )?)
 }

@@ -4,7 +4,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use dolos_cardano::{
-    model::{FirstMintChunk, StagedFirstMint, StagedStakeAddress, StakeAddressesRow},
+    model::{AccountAddressChunk, AccountAddressSet, FirstMintChunk, FirstMintSet},
     periods::is_sealable,
     AccountKey, CardanoDelta,
 };
@@ -36,7 +36,7 @@ fn plain(cfg: SyntheticBlockConfig) -> SyntheticBlockConfig {
 fn staged(domain: &ToyDomain) -> BTreeSet<(u64, Vec<u8>, u64)> {
     domain
         .state()
-        .iter_entities_typed::<StagedFirstMint>(None)
+        .iter_entities_typed::<FirstMintSet>(None)
         .unwrap()
         .map(|row| {
             let (_, row) = row.unwrap();
@@ -69,7 +69,7 @@ fn base(payment: u8) -> Vec<u8> {
 fn staged_addresses(domain: &ToyDomain) -> BTreeSet<(u64, Vec<u8>, u64)> {
     domain
         .state()
-        .iter_entities_typed::<StagedStakeAddress>(None)
+        .iter_entities_typed::<AccountAddressSet>(None)
         .unwrap()
         .map(|row| {
             let (_, row) = row.unwrap();
@@ -78,7 +78,7 @@ fn staged_addresses(domain: &ToyDomain) -> BTreeSet<(u64, Vec<u8>, u64)> {
         .collect()
 }
 
-/// Rollback for stake addresses: undoing a block removes exactly the staged
+/// Rollback for account addresses: undoing a block removes exactly the staged
 /// rows it created, and a repeat within a block never reaches the WAL.
 #[test]
 fn rollback_unstages_exactly_the_addresses_its_block_created() {
@@ -129,7 +129,7 @@ fn rollback_unstages_exactly_the_addresses_its_block_created() {
     let stagings = entry
         .delta
         .iter()
-        .filter(|delta| matches!(delta, CardanoDelta::StageStakeAddress(_)))
+        .filter(|delta| matches!(delta, CardanoDelta::StageAccountAddress(_)))
         .count();
     assert_eq!(stagings, after[0].len());
 
@@ -254,7 +254,7 @@ fn assert_epochs_seal(genesis: Arc<Genesis>, blocks: usize, step: u64) {
 
         let addresses = domain
             .archive()
-            .read_log_typed::<StakeAddressesRow>(chain.epoch_start(epoch), &account)
+            .read_log_typed::<AccountAddressChunk>(chain.epoch_start(epoch), &account)
             .unwrap();
 
         if is_sealable(&chain, mutable, epoch, tip_epoch) {

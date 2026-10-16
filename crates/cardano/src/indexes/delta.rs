@@ -386,9 +386,19 @@ impl CardanoIndexDeltaBuilder {
     /// Index all archive entries for a single block.
     ///
     /// Calls `start_block`, then iterates all transactions adding
-    /// tx hashes, metadata, inputs (with resolved UTxO lookups),
-    /// outputs (with script refs), witness scripts/datums, certs,
+    /// tx hashes, metadata, consumed inputs (with resolved UTxO lookups),
+    /// produced outputs (with script refs), witness scripts/datums, certs,
     /// redeemers, asset mints, and governance votes.
+    ///
+    /// Input-derived tags follow validity: a transaction is tagged by what it
+    /// consumes (`MultiEraTx::consumes`) and produces (`MultiEraTx::produces`),
+    /// so a phase-2-invalid one contributes its collateral and collateral
+    /// return, never its ordinary inputs. That is the set dependency loading
+    /// resolves, so every input looked up here is in `resolved_inputs` however
+    /// the blocks were split into work batches, and a map holding more than
+    /// that set changes nothing. It is also the set db-sync records as an
+    /// invalid transaction's inputs, which Blockfrost's address and UTxO
+    /// queries read.
     pub fn index_block(
         &mut self,
         block: &pallas::ledger::traverse::MultiEraBlock<'_>,
@@ -410,11 +420,13 @@ impl CardanoIndexDeltaBuilder {
                 self.add_metadata_label(label);
             }
 
-            for input in tx.inputs() {
-                self.add_spent_input(&input);
+            let consumes = tx.consumes();
+            let consumed: Vec<TxoRef> = consumes.iter().map(TxoRef::from).collect();
 
-                let txo_ref: TxoRef = (&input).into();
-                if let Some(resolved) = resolved_inputs.get(&txo_ref) {
+            for (input, txo_ref) in consumes.iter().zip(&consumed) {
+                self.add_spent_input(input);
+
+                if let Some(resolved) = resolved_inputs.get(txo_ref) {
                     resolved.with_dependent(|_, output| {
                         if let Ok(addr) = output.address() {
                             self.add_address(&addr);
@@ -470,20 +482,23 @@ impl CardanoIndexDeltaBuilder {
                 self.add_datum_hash(redeemer.data().compute_hash().to_vec());
             }
 
-            // tags are candidates, not response rows: phase-2-failed txs get
-            // tagged like every other dimension does, and the Blockfrost
-            // rule (db-sync stores no redeemers for failed txs) stays a
-            // query-time filter. resolution is best effort — a spend
-            // redeemer only tags when its declared input is in
-            // `resolved_inputs`.
+            // tags are candidates, not response rows: a phase-2-failed tx's
+            // redeemers get tagged, and the Blockfrost rule (db-sync stores
+            // no redeemers for failed txs) stays a query-time filter. A spend
+            // redeemer names an ordinary input, so it resolves only when that
+            // input is consumed: a failed tx's spend redeemers stay untagged,
+            // whatever else the batch loaded.
             for redeemer in tx.redeemers() {
                 let resolved =
                     crate::pallas_extras::redeemer_script_hash(&tx, &redeemer, &mut |input| {
                         let txo_ref: TxoRef = input.into();
+                        if !consumed.contains(&txo_ref) {
+                            return Ok::<_, std::convert::Infallible>(None);
+                        }
                         let address = resolved_inputs.get(&txo_ref).and_then(|resolved| {
                             resolved.with_dependent(|_, output| output.address().ok())
                         });
-                        Ok::<_, std::convert::Infallible>(address)
+                        Ok(address)
                     });
 
                 let Ok(Some(hash)) = resolved else {

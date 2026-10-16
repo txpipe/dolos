@@ -66,7 +66,7 @@ use watcher::Watcher;
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
-    "sha256:66d907f185e4bd2922bd038e5e2b9d4edef869a5e99eed3d994cf62e7cfc6bb2";
+    "sha256:144da65e4fb25d15d702af8ad8e3ac46fcaca075892adf321a775de2a516ea90";
 
 /// The chain point the skeleton fixture stands at: mid-epoch-2 under
 /// [`skeleton_summary`], so the export covers three epochs and the last window
@@ -106,7 +106,7 @@ fn skeleton_point() -> ChainPoint {
 
 /// An archive and a state store holding nothing but a cursor.
 fn empty_stores() -> (MemoryArchiveStore, MemoryStateStore) {
-    let archive = MemoryArchiveStore::new(dolos_cardano::model::build_schema());
+    let archive = MemoryArchiveStore::new(dolos_cardano::model::build_log_schema());
 
     let state = MemoryStateStore::new();
     let writer = state.start_writer().unwrap();
@@ -179,8 +179,8 @@ fn an_empty_store_set_exports_the_pinned_skeleton() {
 /// Done criterion 2: a log under a namespace no `log-{ns}` kind carries stops
 /// the publish and names the namespace.
 ///
-/// The split traded an all-namespace walk for a closed list of six, and this is
-/// the price of that trade paid up front. Written straight into the archive
+/// The split traded an all-namespace walk for a closed list, and this is the
+/// price of that trade paid up front. Written straight into the archive
 /// rather than through a ledger phase, because no ledger phase writes one today
 /// — the point is what happens on the day one does.
 #[test]
@@ -188,12 +188,16 @@ fn a_log_under_an_uncovered_namespace_fails_the_export() {
     let temp = tempfile::tempdir().unwrap();
     let stele = SteleDir::create(temp.path()).unwrap();
 
-    let (archive, state) = empty_stores();
+    let (_, state) = empty_stores();
 
     let stray = NAMESPACES
         .into_iter()
         .find(|ns| *ns != UTXOS && !LOG_NAMESPACES.contains(ns))
         .expect("a state namespace that carries no logs");
+
+    let mut schema = dolos_cardano::model::build_log_schema();
+    schema.insert(stray, dolos_core::NamespaceType::KeyValue);
+    let archive = MemoryArchiveStore::new(schema);
 
     let writer = archive.start_writer().unwrap();
     writer
@@ -1137,7 +1141,7 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:0517f93e76f9fe6059bcde6218af5c90f51020af09890c5e3a05cc8f3a32e447","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":99,"epoch":0,"startSlot":0},"uncompressedSize":44},"#,
     r#"{"diffId":"sha256:b64ae324280c4335089cdf9918ac0596fe7f429dbf5a54c2fd2d44f25280b935","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":45},"#,
     r#"{"diffId":"sha256:a76e2bb47934f8473a232a31da4930db8d50ce90a4cab2c232fc032644fff62e","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":250,"epoch":2,"startSlot":200},"uncompressedSize":45},"#,
-    r#"{"diffId":"sha256:fabc518edf099744b9871e87076bbf4bc0e4d308f3212983d62187070dc84c80","kind":"state-account-epochs","mediaType":"application/vnd.dolos.stele.state-account-epochs.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":55},"#,
+    r#"{"diffId":"sha256:8da91bb0d7584079f11981e96d72bc9fd638b339a93ae5cd01fe42eaf6cb204f","kind":"state-account-addresses","mediaType":"application/vnd.dolos.stele.state-account-addresses.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":58},"#,
     r#"{"diffId":"sha256:676465ffbf751fc1e1407fcad19d0c71c17b3e089903a20c79185e13c65f3311","kind":"state-account-stats","mediaType":"application/vnd.dolos.stele.state-account-stats.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":54},"#,
     r#"{"diffId":"sha256:02522facba4552263d4dfaded9dbb82ec8a90937284a15539f6f1f7a7a9ef4fd","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":49},"#,
     r#"{"diffId":"sha256:9c3e2a317428abc07cd8a29934c10d6ed406eef31b0ffebbaa95679ed11a4e89","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":49},"#,
@@ -1193,20 +1197,12 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:a53fdfbe13f40703e1e8cd661ddc5ba5bb54541b22bf7cdcb3b7aa9697fd9cb6","kind":"state-eras","mediaType":"application/vnd.dolos.stele.state-eras.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":45},"#,
     r#"{"diffId":"sha256:44040dbf942196735ba5eae62b2bb978c26618e62660156f45cf0ef6fef2db04","kind":"state-first-mints","mediaType":"application/vnd.dolos.stele.state-first-mints.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":52},"#,
     r#"{"diffId":"sha256:0a74ea019634f7c0135b1030e692d4e3680ff534c89462819fa04c15ada63114","kind":"state-gov","mediaType":"application/vnd.dolos.stele.state-gov.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":44},"#,
+    r#"{"diffId":"sha256:8c9c5bef47aa5ead3f5d7a913049385a75cfa6456dccff521c5bdd4d74cb6e44","kind":"state-payment-addresses","mediaType":"application/vnd.dolos.stele.state-payment-addresses.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":58},"#,
     r#"{"diffId":"sha256:30da56c590c6877fce53f5bfcdb692c728930d88210ec399b5ca74ab3923ce04","kind":"state-payment-stats","mediaType":"application/vnd.dolos.stele.state-payment-stats.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":54},"#,
     r#"{"diffId":"sha256:2e07a341e23cf37667da069d3e75ba7a7bf2665572f2183353ff0266369cf17f","kind":"state-pending-mirs","mediaType":"application/vnd.dolos.stele.state-pending-mirs.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":53},"#,
     r#"{"diffId":"sha256:ad5994d901c69e757457b2ad6bac6a2679e45ae25769cc616375c10c8c6dc582","kind":"state-pending-rewards","mediaType":"application/vnd.dolos.stele.state-pending-rewards.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":56},"#,
-    r#"{"diffId":"sha256:b712f6ec74b8fe66c58cbe17c96621beb80e5a02ce920c1100808cff0e87d7eb","kind":"state-policy-first-mints","mediaType":"application/vnd.dolos.stele.state-policy-first-mints.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":60},"#,
-    r#"{"diffId":"sha256:a50133d0b2a874b50347b6df30e0ec5a9711668ea7d41a4a143328e92a140bc4","kind":"state-pool-epochs","mediaType":"application/vnd.dolos.stele.state-pool-epochs.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":52},"#,
     r#"{"diffId":"sha256:da799488bcc20ea1d8c8e236169d7204e328b34f806075a951f266819bd35e34","kind":"state-pools","mediaType":"application/vnd.dolos.stele.state-pools.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:640c0f9db84510212ae0d71860df7c518244db6eed6728e9fcc6540d99bdcbe7","kind":"state-proposals","mediaType":"application/vnd.dolos.stele.state-proposals.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":50},"#,
-    r#"{"diffId":"sha256:49c25ebe40a5f4ed0f61d9cc22485a34e6b1bdcf074c72387540acc3fd287826","kind":"state-staged-account-stats","mediaType":"application/vnd.dolos.stele.state-staged-account-stats.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":62},"#,
-    r#"{"diffId":"sha256:fc370be879b9ecc338c78ea3c8a70d13c2c54498c1fb45dcc233b8b31e7a6d2c","kind":"state-staged-address-stats","mediaType":"application/vnd.dolos.stele.state-staged-address-stats.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":62},"#,
-    r#"{"diffId":"sha256:c73e0809fc599c3a80212c0e919f5d4b94513e34b28616569674c3d2ef93503d","kind":"state-staged-first-mints","mediaType":"application/vnd.dolos.stele.state-staged-first-mints.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":60},"#,
-    r#"{"diffId":"sha256:eafeeefb78be22fdd3b9bd3ae577d7cfde9839e940a8010b494313fe4f608a4d","kind":"state-staged-payment-addresses","mediaType":"application/vnd.dolos.stele.state-staged-payment-addresses.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":66},"#,
-    r#"{"diffId":"sha256:cf1eaf3245bd0ba4bff1129f0ebaa2394f213691be4aeede9d3f3c62342bf022","kind":"state-staged-payment-stats","mediaType":"application/vnd.dolos.stele.state-staged-payment-stats.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":62},"#,
-    r#"{"diffId":"sha256:5fb0b2682da73149a841b95f549fcbd8e9aa4c6d65354a3f5fa1200dd7c8f818","kind":"state-staged-stake-addresses","mediaType":"application/vnd.dolos.stele.state-staged-stake-addresses.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":64},"#,
-    r#"{"diffId":"sha256:d106478047c6695af7b7bfb05cb0c9364d4a2de0ed6241b632f80c8ba54cdcb7","kind":"state-stake-addresses","mediaType":"application/vnd.dolos.stele.state-stake-addresses.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":56},"#,
     r#"{"diffId":"sha256:6978ebcdd1accb802d0711afbe6c25747eea28f533de050c184ea24bade637a5","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:aa056a5c4a03811c52492eec692ba0612f7f32f9c447ddd63f64a4c7b1c5ed4a","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:c0055cfef082a8ebe5ada0637de774cc2613d00714d05f74b19690ced71e89c2","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":2},"uncompressedSize":46},"#,
@@ -1225,8 +1221,8 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:e59d8b7ec7144216a9caab188b2de8d09d98c7c419e228a41131722796b81711","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":46}"#,
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-epochs":1,"account-stakes":0,"account-stats":1,"accounts":1,"address-stats":1,"assets":1,"datums":1,"dreps":2,"epochs":3,"eras":2,"first-mints":2,"gov":4,"leader-rewards":0,"member-rewards":0,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-first-mints":1,"pool-deposit-refunds":0,"pool-epochs":2,"pools":2,"proposals":4,"staged-account-stats":1,"staged-address-stats":1,"staged-first-mints":2,"staged-payment-addresses":1,"staged-payment-stats":1,"staged-stake-addresses":1,"stake-addresses":1,"utxos":1},"#,
-    r#""shards":{"account-epochs":1,"account-stats":1,"accounts":16,"address-stats":1,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"gov":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-first-mints":1,"pool-epochs":1,"pools":1,"proposals":1,"staged-account-stats":1,"staged-address-stats":1,"staged-first-mints":1,"staged-payment-addresses":1,"staged-payment-stats":1,"staged-stake-addresses":1,"stake-addresses":1,"utxos":16},"#,
+    r#""schemas":{"account-address-chunks":1,"account-addresses":1,"account-epochs":1,"account-stakes":0,"account-stats":1,"accounts":1,"address-stats":1,"assets":1,"datums":1,"dreps":2,"epochs":3,"eras":2,"first-mint-chunks":2,"first-mints":2,"gov":4,"leader-rewards":0,"member-rewards":0,"payment-address-chunks":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-mint-chunks":1,"pool-deposit-refunds":0,"pool-epochs":2,"pools":2,"proposals":4,"utxos":1},"#,
+    r#""shards":{"account-addresses":1,"account-stats":1,"accounts":16,"address-stats":1,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"gov":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"utxos":16},"#,
     r#""stateEpochs":[]"#,
     r#"},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
 );
@@ -1629,7 +1625,7 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
 /// exact kinds a block produces. Nothing here has to be a real ledger: what the
 /// banded pass does with a record is decided by its slot alone.
 fn index_across_the_skeleton() -> MemoryArchiveStore {
-    let store = MemoryArchiveStore::new(dolos_cardano::model::build_schema());
+    let store = MemoryArchiveStore::new(dolos_cardano::model::build_log_schema());
     let writer = store.start_writer().unwrap();
 
     let mut archive = Vec::new();

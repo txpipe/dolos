@@ -74,7 +74,7 @@ mod tests {
     use super::*;
     use crate::test_support::{first_mint_chain, TestApp, TestFault};
     use blockfrost_openapi::models::asset::Asset;
-    use dolos_cardano::model::{FirstMintChunk, StagedFirstMint};
+    use dolos_cardano::model::{FirstMintChunk, FirstMintSet};
     use dolos_core::{ArchiveStore as _, StateStore as _};
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use itertools::Itertools;
@@ -280,7 +280,7 @@ mod tests {
             .count();
         let staged = domain
             .state()
-            .iter_entities_typed::<StagedFirstMint>(None)
+            .iter_entities_typed::<FirstMintSet>(None)
             .unwrap()
             .count();
         assert!(sealed > 2, "{sealed} sealed rows");
