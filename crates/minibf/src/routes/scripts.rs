@@ -598,8 +598,9 @@ mod tests {
     }
 
     /// An archive written before auxiliary scripts were tagged has no tag
-    /// for them, while a registry rebuilt by `doctor rebuild-state` lists
-    /// them. The lookup starts from the registry row, so it still resolves.
+    /// for them, while a state rebuilt by `doctor rebuild-state` lists them.
+    /// The lookup starts from the `scripts` witness row, so it still
+    /// resolves.
     #[tokio::test]
     async fn scripts_by_hash_listed_script_without_archive_tag() {
         use dolos_cardano::indexes::archive_dimensions::SCRIPT;

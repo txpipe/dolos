@@ -25,10 +25,10 @@ use dolos_cardano::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AssetState,
         AuthHistory, Committee, CommitteeAuthorization, Constitution, DRepDelegation, DRepExpiry,
         DRepState, DatumState, EndStats, EpochState, EpochValue, EraBoundary, EraState,
-        FirstMintChunk, FirstMintSet, GovDistr, GovRoots, GovState, Nonces, PParamValue,
-        PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation,
-        PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
-        RollingStats, ScriptSeqState, ScriptState, ShardProgress, Stake, VoteEntry,
+        FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet, GovDistr, GovRoots,
+        GovState, Nonces, PParamValue, PParamsSet, PendingMirState, PendingRewardState,
+        PolicyMintChunk, PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState,
+        ProposalAction, ProposalState, RollingStats, ScriptState, ShardProgress, Stake, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, PaymentAddressChunk, PaymentAddressSet, PaymentStats, Sum,
@@ -300,14 +300,24 @@ pub fn account_address_chunk() -> AccountAddressChunk {
 
 pub fn script_state() -> ScriptState {
     ScriptState {
-        seq: 1_234_567,
-        first_slot: 99_999_999,
+        slot: 99_999_999,
+        tx_index: 321,
+        order: 7,
     }
 }
 
-pub fn script_seq_state() -> ScriptSeqState {
-    ScriptSeqState {
-        script_hash: hash28(0xa0),
+pub fn first_script_set() -> FirstScriptSet {
+    FirstScriptSet {
+        slot: 88_888_888,
+        tx_index: 123,
+        order: 5,
+    }
+}
+
+pub fn first_script_chunk() -> FirstScriptChunk {
+    FirstScriptChunk {
+        count: 259,
+        hashes: vec![hash28(0xa0), hash28(0xa1)],
     }
 }
 

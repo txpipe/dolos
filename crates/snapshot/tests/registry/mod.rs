@@ -58,9 +58,9 @@ pub mod ground_rules;
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
     AddressStats, AssetState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
-    FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
-    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
-    ScriptSeqState, ScriptState,
+    FirstMintSet, FirstScriptChunk, FirstScriptSet, FixedNamespace, GovState, PaymentAddressChunk,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PoolEpochLog, PoolState, ProposalState, ScriptState,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -434,12 +434,21 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_script_seqs,
-            ScriptSeqState,
-            canaries::script_seq_state,
+            enc_first_scripts,
+            FirstScriptSet,
+            canaries::first_script_set,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/script-seqs.rev1.hex"),
+                hex: include_str!("goldens/first-scripts.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_first_script_chunks,
+            FirstScriptChunk,
+            canaries::first_script_chunk,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/first-script-chunks.rev1.hex"),
             }]
         ),
         entity_entry!(

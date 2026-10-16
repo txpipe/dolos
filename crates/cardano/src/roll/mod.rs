@@ -45,7 +45,7 @@ use datums::DatumVisitor;
 use dreps::{DRepStateVisitor, DormancyContext};
 use epochs::EpochStateVisitor;
 use pools::PoolStateVisitor;
-use scripts::{block_script_hashes, ScriptRegistryContext, ScriptRegistryVisitor};
+use scripts::{block_script_sightings, ScriptRegistryContext, ScriptRegistryVisitor};
 use stats::StatsVisitor;
 use txs::TxLogVisitor;
 
@@ -277,8 +277,8 @@ impl<'a> DeltaBuilder<'a> {
         self.drep_state.take_dormancy()
     }
 
-    /// The script registry context after this block's deltas: the scripts it
-    /// registered and the sequence numbers it used up.
+    /// The script context after this block's deltas: the scripts it saw
+    /// first.
     pub fn take_script_registry(&mut self) -> ScriptRegistryContext {
         self.script_registry.take_context()
     }
@@ -731,14 +731,13 @@ pub(crate) fn compute_delta<D: Domain>(
         dormancy.drep_keys = Arc::new(keys);
     }
 
-    // Script registry context: which of the scripts the batch carries are
-    // registered already, and the next free sequence number. Like dormancy it
-    // evolves across the blocks of the batch, so it's taken back after each
-    // crawl.
+    // Script context: which of the scripts the batch carries were seen before.
+    // Like dormancy it evolves across the blocks of the batch, so it's taken
+    // back after each crawl.
     let carried: Vec<_> = batch
         .blocks
         .iter()
-        .map(|block| block_script_hashes(block.decoded().view()))
+        .map(|block| block_script_sightings(block.decoded().view()))
         .collect();
 
     let mut script_registry = ScriptRegistryContext::load(state, &carried)?;

@@ -1,34 +1,43 @@
-//! The script registry: every script the chain has carried, in the order it
-//! first showed up.
+//! Scripts: every script the chain has carried, in the order cardano-db-sync
+//! first saw it (decision 0057).
 //!
 //! Nothing else enumerates scripts. They are not ledger state, and the archive
 //! index keeps a hash of the script hash, so it answers "where is this script"
-//! but not "which scripts are there". The registry is two namespaces:
+//! but not "which scripts are there". Three namespaces do:
 //!
-//! - `scripts`, keyed by script hash: what a block needs to tell a new script
-//!   from a repeat.
-//! - `script-seqs`, keyed by a dense sequence number: the listing. Sequence
-//!   numbers are handed out in the order cardano-db-sync numbers its `script`
-//!   rows, so a page of the listing is a key range and its position from either
-//!   end is arithmetic.
+//! - `scripts`, the witness, keyed by script hash: where the script was first
+//!   seen, which is what a block needs to tell a new script from a repeat and
+//!   what `/scripts/{hash}` starts its lookup from.
+//! - `first-scripts`, a `Set` keyed `epoch ‖ script hash`: the scripts an
+//!   unsealed epoch saw first.
+//! - `first-script-chunks`, the `Chunk` the set seals into: an epoch's scripts
+//!   in first-seen order, at `epoch_start(e) ‖ chunk`.
 
-use dolos_core::{NsKey, StateError, StateStore};
+use dolos_core::NsKey;
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
 };
 use serde::{Deserialize, Serialize};
 
-/// A script the chain has carried, keyed by its hash.
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ScriptState {
-    /// Position in the listing, see [`ScriptSeqState`].
-    #[n(0)]
-    pub seq: u64,
+use crate::periods::{ChunkRow, GroupKey, Ungrouped};
 
-    /// Slot of the block that carried it first.
+/// Where a script was first seen: its block's slot, its tx's index in the
+/// block and its place among the scripts the tx carries.
+///
+/// Field order is listing order, so the derived ordering is db-sync's.
+#[derive(
+    Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord,
+)]
+pub struct ScriptState {
+    #[n(0)]
+    pub slot: u64,
+
     #[n(1)]
-    pub first_slot: u64,
+    pub tx_index: u32,
+
+    #[n(2)]
+    pub order: u32,
 }
 
 hash_key!(
@@ -42,54 +51,62 @@ display_as_stored!(ScriptKey);
 
 entity_boilerplate!(ScriptState, "scripts", state = ScriptKey);
 
-/// The script at one position of the listing, keyed by that position.
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ScriptSeqState {
+/// A script an epoch saw first, held in state until the epoch seals into
+/// [`FirstScriptChunk`]s. The value is the script's [`ScriptState`].
+#[derive(
+    Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord,
+)]
+pub struct FirstScriptSet {
     #[n(0)]
-    pub script_hash: Hash<28>,
+    pub slot: u64,
+
+    #[n(1)]
+    pub tx_index: u32,
+
+    #[n(2)]
+    pub order: u32,
 }
 
-// The sequence number is the key, stored big-endian, so key order is listing
-// order.
-entity_boilerplate!(ScriptSeqState, "script-seqs", state = u64);
+/// The key of a `first-scripts` row: `epoch ‖ script hash`.
+pub type FirstScriptKey = GroupKey<Ungrouped, ScriptKey>;
 
-impl ScriptSeqState {
-    /// How many scripts the registry lists.
-    ///
-    /// Sequence numbers are dense (a rollback takes them off the top), so the
-    /// count is the first number with no row: found by doubling a probe until
-    /// it misses and halving the gap, a few dozen point reads instead of a
-    /// counter that every new script would have to update.
-    pub fn count<S: StateStore>(state: &S) -> Result<u64, StateError> {
-        let exists = |seq: u64| -> Result<bool, StateError> {
-            let found = state.read_entities_typed::<Self>(&[&seq])?;
-            Ok(found.into_iter().next().flatten().is_some())
-        };
+entity_boilerplate!(FirstScriptSet, "first-scripts", state = FirstScriptKey);
 
-        if !exists(0)? {
-            return Ok(0);
+impl From<ScriptState> for FirstScriptSet {
+    fn from(x: ScriptState) -> Self {
+        Self {
+            slot: x.slot,
+            tx_index: x.tx_index,
+            order: x.order,
         }
+    }
+}
 
-        // invariant: `present` has a row, `missing` has none
-        let mut present = 0u64;
-        let mut missing = 1u64;
+/// One chunk of the scripts an epoch saw first, in first-seen order.
+///
+/// Sealed at `epoch_start(e) ‖ chunk (4 B)`. Every chunk carries the epoch's
+/// total, so a reader learns how many scripts the epoch holds from its first
+/// chunk.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Default)]
+pub struct FirstScriptChunk {
+    #[n(0)]
+    pub count: u64,
 
-        while exists(missing)? {
-            present = missing;
-            missing = missing.saturating_mul(2);
-        }
+    #[n(1)]
+    pub hashes: Vec<Hash<28>>,
+}
 
-        while missing - present > 1 {
-            let middle = present + (missing - present) / 2;
+entity_boilerplate!(FirstScriptChunk, "first-script-chunks", log = u32);
 
-            if exists(middle)? {
-                present = middle;
-            } else {
-                missing = middle;
-            }
-        }
+impl ChunkRow for FirstScriptChunk {
+    type Item = Hash<28>;
 
-        Ok(missing)
+    fn new(count: u64, hashes: Vec<Hash<28>>) -> Self {
+        Self { count, hashes }
+    }
+
+    fn into_items(self) -> Vec<Hash<28>> {
+        self.hashes
     }
 }
 
@@ -101,45 +118,36 @@ pub(crate) mod testing {
 
     prop_compose! {
         pub fn any_script_state()(
-            seq in any::<u64>(),
-            first_slot in any::<u64>(),
+            slot in root::any_slot(),
+            tx_index in 0u32..500,
+            order in 0u32..50,
         ) -> ScriptState {
-            ScriptState { seq, first_slot }
-        }
-    }
-
-    prop_compose! {
-        pub fn any_script_seq_state()(
-            script_hash in root::any_hash_28(),
-        ) -> ScriptSeqState {
-            ScriptSeqState { script_hash }
+            ScriptState { slot, tx_index, order }
         }
     }
 }
 
 // --- Deltas ---
 
-/// Registers a script under its hash.
+/// Records where a script was first seen.
 ///
-/// Emitted once per script, by the block that carries it first. The roll
-/// decides that ahead of applying (it needs the sequence number for
-/// [`ScriptSeqAssigned`] too), so an existing row is left alone.
+/// Emitted once per script, by the block that carries it first: the roll
+/// tells new scripts from repeats ahead of applying, so an existing row is
+/// left alone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptFirstSeen {
     pub(crate) script_hash: Hash<28>,
-    pub(crate) seq: u64,
-    pub(crate) slot: u64,
+    pub(crate) first: ScriptState,
 
     /// For undo: did this delta create the row?
     pub(crate) was_new: bool,
 }
 
 impl ScriptFirstSeen {
-    pub fn new(script_hash: Hash<28>, seq: u64, slot: u64) -> Self {
+    pub fn new(script_hash: Hash<28>, first: ScriptState) -> Self {
         Self {
             script_hash,
-            seq,
-            slot,
+            first,
             was_new: false,
         }
     }
@@ -156,10 +164,7 @@ impl dolos_core::EntityDelta for ScriptFirstSeen {
         self.was_new = entity.is_none();
 
         if self.was_new {
-            *entity = Some(ScriptState {
-                seq: self.seq,
-                first_slot: self.slot,
-            });
+            *entity = Some(self.first);
         }
     }
 
@@ -170,71 +175,79 @@ impl dolos_core::EntityDelta for ScriptFirstSeen {
     }
 }
 
-/// Puts a script at its position of the listing.
+/// Stages a script in the `first-scripts` row of the epoch that saw it first.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScriptSeqAssigned {
-    pub(crate) seq: u64,
-    pub(crate) script_hash: Hash<28>,
+pub struct StageFirstScript {
+    pub(crate) key: FirstScriptKey,
+    pub(crate) row: FirstScriptSet,
 
-    /// For undo: whatever the position held before.
-    pub(crate) prev: Option<ScriptSeqState>,
+    /// For undo: did this delta create the row?
+    pub(crate) was_new: bool,
 }
 
-impl ScriptSeqAssigned {
-    pub fn new(seq: u64, script_hash: Hash<28>) -> Self {
+impl StageFirstScript {
+    pub fn new(epoch: u64, script_hash: Hash<28>, first: ScriptState) -> Self {
         Self {
-            seq,
-            script_hash,
-            prev: None,
+            key: GroupKey {
+                group: Ungrouped,
+                epoch,
+                member: ScriptKey(script_hash),
+            },
+            row: first.into(),
+            was_new: false,
         }
     }
 }
 
-impl dolos_core::EntityDelta for ScriptSeqAssigned {
-    type Entity = ScriptSeqState;
+impl dolos_core::EntityDelta for StageFirstScript {
+    type Entity = FirstScriptSet;
 
     fn key(&self) -> NsKey {
-        NsKey::of::<ScriptSeqState>(&self.seq)
+        NsKey::of::<FirstScriptSet>(&self.key)
     }
 
-    fn apply(&mut self, entity: &mut Option<ScriptSeqState>) {
-        self.prev = entity.take();
+    fn apply(&mut self, entity: &mut Option<FirstScriptSet>) {
+        self.was_new = entity.is_none();
 
-        *entity = Some(ScriptSeqState {
-            script_hash: self.script_hash,
-        });
+        if self.was_new {
+            *entity = Some(self.row);
+        }
     }
 
-    fn undo(&self, entity: &mut Option<ScriptSeqState>) {
-        *entity = self.prev.clone();
+    fn undo(&self, entity: &mut Option<FirstScriptSet>) {
+        if self.was_new {
+            *entity = None;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{any_script_seq_state, any_script_state};
+    use super::testing::any_script_state;
     use super::*;
     use crate::model::testing::{
         self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
     };
-    use dolos_core::EntityDelta as _;
+    use dolos_core::{EntityDelta as _, KeyCodec as _};
     use proptest::prelude::*;
 
+    fn first(slot: u64) -> ScriptState {
+        ScriptState {
+            slot,
+            tx_index: 1,
+            order: 2,
+        }
+    }
+
     #[test]
-    fn first_seen_registers_a_new_script() {
-        let mut delta = ScriptFirstSeen::new(Hash::new([1u8; 28]), 7, 42);
+    fn first_seen_records_a_new_script() {
+        let mut delta = ScriptFirstSeen::new(Hash::new([1u8; 28]), first(42));
         let mut entity = None;
 
         delta.apply(&mut entity);
 
         assert!(delta.was_new);
-        assert_eq!(
-            entity,
-            Some(ScriptState {
-                seq: 7,
-                first_slot: 42
-            })
-        );
+        assert_eq!(entity, Some(first(42)));
 
         delta.undo(&mut entity);
         assert_eq!(entity, None);
@@ -242,78 +255,62 @@ mod tests {
 
     #[test]
     fn first_seen_leaves_a_known_script_alone() {
-        let known = ScriptState {
-            seq: 3,
-            first_slot: 10,
-        };
-
-        let mut delta = ScriptFirstSeen::new(Hash::new([1u8; 28]), 7, 42);
-        let mut entity = Some(known.clone());
+        let mut delta = ScriptFirstSeen::new(Hash::new([1u8; 28]), first(42));
+        let mut entity = Some(first(10));
 
         delta.apply(&mut entity);
         assert!(!delta.was_new);
-        assert_eq!(entity, Some(known.clone()));
+        assert_eq!(entity, Some(first(10)));
 
         delta.undo(&mut entity);
-        assert_eq!(entity, Some(known));
+        assert_eq!(entity, Some(first(10)));
     }
 
     #[test]
-    fn count_is_the_first_sequence_number_with_no_row() {
-        use dolos_core::{builtin::MemoryStateStore, StateStore as _, StateWriter as _};
+    fn positions_order_as_db_sync_lists() {
+        let at = |slot, tx_index, order| ScriptState {
+            slot,
+            tx_index,
+            order,
+        };
 
-        let state = MemoryStateStore::new();
-        assert_eq!(ScriptSeqState::count(&state).unwrap(), 0);
+        let mut positions = vec![at(2, 0, 0), at(1, 3, 0), at(1, 0, 5), at(1, 0, 1)];
+        positions.sort();
 
-        let mut written = 0u64;
-
-        // around every power of two the probe doubles over, and one big jump
-        for total in [1u64, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 1_000] {
-            let writer = state.start_writer().unwrap();
-
-            for seq in written..total {
-                let row = ScriptSeqState {
-                    script_hash: Hash::new([seq as u8; 28]),
-                };
-                writer.write_entity_typed(&seq, &row).unwrap();
-            }
-
-            writer.commit().unwrap();
-            written = total;
-
-            assert_eq!(ScriptSeqState::count(&state).unwrap(), total);
-        }
+        assert_eq!(
+            positions,
+            vec![at(1, 0, 1), at(1, 0, 5), at(1, 3, 0), at(2, 0, 0)]
+        );
     }
 
     #[test]
-    fn seq_keys_sort_in_listing_order() {
-        let keys: Vec<_> = [0u64, 1, 255, 256, 65_536, u64::MAX]
-            .iter()
-            .map(dolos_core::keys::encode)
-            .collect();
+    fn first_script_keys_are_epoch_then_hash() {
+        let key = StageFirstScript::new(300, Hash::new([7u8; 28]), first(1)).key;
+        let raw = dolos_core::keys::encode(&key);
 
-        let mut sorted = keys.clone();
-        sorted.sort();
-
-        assert_eq!(keys, sorted);
+        assert_eq!(raw.len(), 8 + 28);
+        assert_eq!(raw[..8], 300u64.to_be_bytes());
+        assert_eq!(raw[8..], [7u8; 28]);
+        assert_eq!(FirstScriptKey::decode_key(&raw), Ok(key));
+        assert!(FirstScriptKey::decode_key(&raw[..35]).is_err());
     }
 
     prop_compose! {
         fn any_script_first_seen()(
             script_hash in root::any_hash_28(),
-            seq in any::<u64>(),
-            slot in any::<u64>(),
+            first in any_script_state(),
         ) -> ScriptFirstSeen {
-            ScriptFirstSeen::new(script_hash, seq, slot)
+            ScriptFirstSeen::new(script_hash, first)
         }
     }
 
     prop_compose! {
-        fn any_script_seq_assigned()(
-            seq in any::<u64>(),
+        fn any_stage_first_script()(
+            epoch in 0u64..1000,
             script_hash in root::any_hash_28(),
-        ) -> ScriptSeqAssigned {
-            ScriptSeqAssigned::new(seq, script_hash)
+            first in any_script_state(),
+        ) -> StageFirstScript {
+            StageFirstScript::new(epoch, script_hash, first)
         }
     }
 
@@ -323,16 +320,16 @@ mod tests {
             entity in prop::option::of(any_script_state()),
             delta in any_script_first_seen(),
         ) {
-            assert_delta_roundtrip(entity.clone(), delta.clone());
+            assert_delta_roundtrip(entity, delta.clone());
             assert_delta_serde_roundtrip(entity, delta);
         }
 
         #[test]
-        fn script_seq_assigned_roundtrip(
-            entity in prop::option::of(any_script_seq_state()),
-            delta in any_script_seq_assigned(),
+        fn stage_first_script_roundtrip(
+            entity in prop::option::of(any_script_state().prop_map(FirstScriptSet::from)),
+            delta in any_stage_first_script(),
         ) {
-            assert_delta_roundtrip(entity.clone(), delta.clone());
+            assert_delta_roundtrip(entity, delta.clone());
             assert_delta_serde_roundtrip(entity, delta);
         }
     }

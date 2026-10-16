@@ -6,8 +6,8 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::scripts_inner::ScriptsInner;
-use dolos_cardano::model::{ScriptKey, ScriptSeqState, ScriptState};
-use dolos_core::{ArchiveStore as _, ChainPoint, Domain, RangeOf, StateStore as _};
+use dolos_cardano::{indexes::SlotOrder, periods::first_scripts};
+use dolos_core::{ArchiveStore as _, Domain, DomainError};
 
 use crate::{
     error::Error,
@@ -15,145 +15,11 @@ use crate::{
     Facade,
 };
 
-/// How many times a page is read before one that the chain moved under is
-/// served anyway.
-const MAX_READS: usize = 8;
-
-/// One page of the script registry, read from a single state revision.
-///
-/// The state store has no read snapshot, and the total and the page are
-/// separate reads (the total alone is several), so a commit landing between
-/// them can pair a total from before a rollback with the rows after it: a
-/// `desc` page then starts at keys that no longer exist. Every state commit
-/// moves the cursor in the same batch as the rows, so a read the cursor did
-/// not move across saw one revision; one it moved across is read again.
-fn read_page<D: Domain>(domain: &D, pagination: &Pagination) -> Result<Vec<String>, StatusCode> {
-    let state = domain.state();
-
-    coherent_read(
-        || {
-            state
-                .read_cursor()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-        },
-        || read_page_once(domain, pagination),
-    )
-}
-
-/// Run `read` until `cursor` reads the same before and after it, at most
-/// [`MAX_READS`] times; the last read is served whatever the cursor did.
-fn coherent_read<T, E>(
-    cursor: impl Fn() -> Result<Option<ChainPoint>, E>,
-    read: impl Fn() -> Result<T, E>,
-) -> Result<T, E> {
-    let mut before = cursor()?;
-
-    for _ in 1..MAX_READS {
-        let value = read()?;
-        let after = cursor()?;
-
-        if after == before {
-            return Ok(value);
-        }
-
-        before = after;
-    }
-
-    read()
-}
-
-/// One page of the script registry, as the state reads right now.
-///
-/// The roll numbers scripts in the order Blockfrost lists them (the db-sync
-/// `script` row), densely, so a page is a key range: counted from the start
-/// for `asc` and from the total for `desc`. Nothing is scanned and no block is
-/// decoded, however deep the page is.
-fn read_page_once<D: Domain>(
-    domain: &D,
-    pagination: &Pagination,
-) -> Result<Vec<String>, StatusCode> {
-    let state = domain.state();
-
-    let total = ScriptSeqState::count(state).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let total = listed_total(domain, total)?;
-
-    let from = pagination.from() as u64;
-    let count = pagination.count as u64;
-
-    let (start, end) = match pagination.order {
-        Order::Asc => (from.min(total), from.saturating_add(count).min(total)),
-        Order::Desc => {
-            let end = total.saturating_sub(from);
-            (end.saturating_sub(count), end)
-        }
-    };
-
-    let range = RangeOf::<u64>::between(&start, &end);
-
-    let mut scripts: Vec<String> = state
-        .iter_entities_typed::<ScriptSeqState>(Some(range))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(|row| row.map(|(_, row)| row.script_hash.to_string()))
-        .collect::<Result<_, _>>()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if matches!(pagination.order, Order::Desc) {
-        scripts.reverse();
-    }
-
-    Ok(scripts)
-}
-
-/// How many of the registry's `total` rows the listing shows: those whose
-/// first block the archive holds.
-///
-/// The roll commits the registry, with the state cursor, before it commits
-/// the blocks of the same batch, so for a moment the registry runs ahead of
-/// the archive and `/scripts/{hash}` has nothing to serve for the newest
-/// scripts. Their sequence numbers are the highest, so the listing ends at
-/// the last script whose first block is archived. The gap is one batch of
-/// blocks, so this walks a handful of rows at most.
-fn listed_total<D: Domain>(domain: &D, total: u64) -> Result<u64, StatusCode> {
-    let state = domain.state();
-
-    let archived = domain
-        .archive()
-        .get_tip()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(|(slot, _)| slot);
-
-    let Some(archived) = archived else {
-        return Ok(0);
-    };
-
-    let mut total = total;
-
-    while let Some(seq) = total.checked_sub(1) {
-        let row = state
-            .read_entity_typed::<ScriptSeqState>(&seq)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let Some(row) = row else {
-            break;
-        };
-
-        let script = state
-            .read_entity_typed::<ScriptState>(&ScriptKey(row.script_hash))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let Some(script) = script else {
-            break;
-        };
-
-        if script.first_slot <= archived {
-            break;
-        }
-
-        total = seq;
-    }
-
-    Ok(total)
-}
-
 /// `GET /scripts`: every script seen on chain, ordered by first appearance.
+///
+/// The order is Blockfrost's, the order db-sync first sees scripts in. The
+/// page comes from the first-script period logs, which need no block decoding
+/// at any depth.
 pub async fn all<D>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
@@ -163,15 +29,43 @@ where
 {
     let pagination = Pagination::try_from(params)?;
 
+    // Scripts exist since Shelley, so nothing before that era can appear.
+    let chain = domain.get_chain_summary()?;
+    let shelley_epoch = chain.first_shelley_epoch();
+    let (tip_epoch, _) = chain.slot_epoch(domain.get_tip_slot()?);
+
+    let order = match pagination.order {
+        Order::Asc => SlotOrder::Asc,
+        Order::Desc => SlotOrder::Desc,
+    };
+    let (skip, count) = (pagination.skip(), pagination.count);
+
     let scripts = domain
         .query()
-        .run_blocking(move |domain| Ok(read_page(&domain, &pagination)))
+        .run_blocking(move |domain| {
+            let Some((archived, _)) = domain.archive().get_tip()? else {
+                return Ok(vec![]);
+            };
+
+            first_scripts::all_page(
+                &domain,
+                &chain,
+                shelley_epoch..=tip_epoch,
+                archived,
+                order,
+                skip,
+                count,
+            )
+            .map_err(DomainError::from)
+        })
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let items = scripts
         .into_iter()
-        .map(|script_hash| ScriptsInner { script_hash })
+        .map(|hash| ScriptsInner {
+            script_hash: hash.to_string(),
+        })
         .collect();
 
     Ok(Json(items))
@@ -181,56 +75,8 @@ where
 mod tests {
     use super::*;
     use crate::test_support::{TestApp, TestFault};
-    use dolos_testing::synthetic::SyntheticBlockConfig;
+    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use itertools::Itertools;
-    use std::cell::Cell;
-
-    /// A commit between the cursor reads makes the page be read again, and
-    /// the read the cursor held still across is the one served.
-    #[test]
-    fn coherent_read_rereads_when_the_cursor_moves() {
-        // the cursor moves across the first two reads, then holds
-        let cursors = [1u64, 2, 3, 3];
-        let cursor_reads = Cell::new(0);
-        let reads = Cell::new(0);
-
-        let page = coherent_read(
-            || {
-                let slot = cursors[cursor_reads.get()];
-                cursor_reads.set(cursor_reads.get() + 1);
-                Ok::<_, ()>(Some(ChainPoint::Slot(slot)))
-            },
-            || {
-                reads.set(reads.get() + 1);
-                Ok(reads.get())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(page, 3);
-        assert_eq!(cursor_reads.get(), 4);
-    }
-
-    /// A chain that never holds still still gets an answer: the last read.
-    #[test]
-    fn coherent_read_gives_up_after_max_reads() {
-        let cursor_reads = Cell::new(0u64);
-        let reads = Cell::new(0);
-
-        let page = coherent_read(
-            || {
-                cursor_reads.set(cursor_reads.get() + 1);
-                Ok::<_, ()>(Some(ChainPoint::Slot(cursor_reads.get())))
-            },
-            || {
-                reads.set(reads.get() + 1);
-                Ok(reads.get())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(page, MAX_READS);
-    }
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
@@ -284,12 +130,14 @@ mod tests {
         }
     }
 
-    /// The registry is committed before the archive gets the batch's blocks,
-    /// so a script the archive cannot serve yet is left off the listing, from
+    /// The roll commits state before the archive gets the batch's blocks, so
+    /// a script the archive cannot serve yet is left off the listing, from
     /// either end.
     #[tokio::test]
     async fn scripts_all_lists_only_archived_scripts() {
-        use dolos_core::StateWriter as _;
+        use dolos_cardano::model::{FirstScriptSet, ScriptKey, ScriptState};
+        use dolos_cardano::periods::{GroupKey, Ungrouped};
+        use dolos_core::{StateStore as _, StateWriter as _};
         use pallas::crypto::hash::Hash;
 
         let phantom = Hash::<28>::new([0xee; 28]);
@@ -300,24 +148,31 @@ mod tests {
                 ..Default::default()
             },
             |domain, _| {
-                // a fourth script, registered by a batch whose blocks the
+                // a fourth script, first seen by a batch whose blocks the
                 // archive does not hold yet
+                let chain =
+                    dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+                let cursor = domain.state().read_cursor().unwrap().unwrap().slot();
+                let (epoch, _) = chain.slot_epoch(cursor);
+
+                let first = ScriptState {
+                    slot: cursor + 1,
+                    tx_index: 0,
+                    order: 0,
+                };
+
                 let writer = domain.state().start_writer().unwrap();
                 writer
-                    .write_entity_typed(
-                        &3u64,
-                        &ScriptSeqState {
-                            script_hash: phantom,
-                        },
-                    )
+                    .write_entity_typed(&ScriptKey(phantom), &first)
                     .unwrap();
                 writer
                     .write_entity_typed(
-                        &ScriptKey(phantom),
-                        &ScriptState {
-                            seq: 3,
-                            first_slot: u64::MAX / 2,
+                        &GroupKey {
+                            group: Ungrouped,
+                            epoch,
+                            member: ScriptKey(phantom),
                         },
+                        &FirstScriptSet::from(first),
                     )
                     .unwrap();
                 writer.commit().unwrap();
@@ -390,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn scripts_all_does_not_depend_on_scan_budget() {
-        // a block budget of one: the listing reads the registry, not blocks
+        // a block budget of one: the listing reads the period logs, not blocks
         let app = TestApp::new_with_scan_limit(
             SyntheticBlockConfig {
                 block_count: 4,

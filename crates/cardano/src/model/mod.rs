@@ -169,7 +169,8 @@ pub enum CardanoEntity {
     PaymentAddressChunk(Box<PaymentAddressChunk>),
     AccountStats(Box<AccountStats>),
     ScriptState(Box<ScriptState>),
-    ScriptSeqState(Box<ScriptSeqState>),
+    FirstScriptSet(Box<FirstScriptSet>),
+    FirstScriptChunk(Box<FirstScriptChunk>),
 }
 
 macro_rules! variant_boilerplate {
@@ -215,7 +216,8 @@ variant_boilerplate!(PaymentStats);
 variant_boilerplate!(PaymentAddressChunk);
 variant_boilerplate!(AccountStats);
 variant_boilerplate!(ScriptState);
-variant_boilerplate!(ScriptSeqState);
+variant_boilerplate!(FirstScriptSet);
+variant_boilerplate!(FirstScriptChunk);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -248,7 +250,8 @@ impl dolos_core::Entity for CardanoEntity {
             }
             AccountStats::NS => AccountStats::decode_entity(ns, value).map(Into::into),
             ScriptState::NS => ScriptState::decode_entity(ns, value).map(Into::into),
-            ScriptSeqState::NS => ScriptSeqState::decode_entity(ns, value).map(Into::into),
+            FirstScriptSet::NS => FirstScriptSet::decode_entity(ns, value).map(Into::into),
+            FirstScriptChunk::NS => FirstScriptChunk::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -279,7 +282,8 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PaymentAddressChunk(x) => PaymentAddressChunk::encode_entity(x),
             Self::AccountStats(x) => AccountStats::encode_entity(x),
             Self::ScriptState(x) => ScriptState::encode_entity(x),
-            Self::ScriptSeqState(x) => ScriptSeqState::encode_entity(x),
+            Self::FirstScriptSet(x) => FirstScriptSet::encode_entity(x),
+            Self::FirstScriptChunk(x) => FirstScriptChunk::encode_entity(x),
         }
     }
 }
@@ -316,7 +320,7 @@ pub fn build_schema() -> StateSchema {
     register_state::<PaymentStats>(&mut schema);
     register_state::<AccountStats>(&mut schema);
     register_state::<ScriptState>(&mut schema);
-    register_state::<ScriptSeqState>(&mut schema);
+    register_state::<FirstScriptSet>(&mut schema);
     schema
 }
 
@@ -328,6 +332,7 @@ pub fn build_log_schema() -> StateSchema {
     register_log::<AccountEpochLog>(&mut schema);
     register_log::<FirstMintChunk>(&mut schema);
     register_log::<PolicyMintChunk>(&mut schema);
+    register_log::<FirstScriptChunk>(&mut schema);
     register_log::<AccountAddressChunk>(&mut schema);
     register_log::<AddressStats>(&mut schema);
     register_log::<PaymentAddressChunk>(&mut schema);
@@ -443,7 +448,7 @@ pub enum CardanoDelta {
     StagePaymentStats(Box<StagePaymentStats>),
     StageAccountStats(Box<StageAccountStats>),
     ScriptFirstSeen(Box<ScriptFirstSeen>),
-    ScriptSeqAssigned(Box<ScriptSeqAssigned>),
+    StageFirstScript(Box<StageFirstScript>),
 }
 
 impl CardanoDelta {
@@ -556,7 +561,7 @@ delta_from!(StagePaymentAddress);
 delta_from!(StagePaymentStats);
 delta_from!(StageAccountStats);
 delta_from!(ScriptFirstSeen);
-delta_from!(ScriptSeqAssigned);
+delta_from!(StageFirstScript);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -605,7 +610,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDistrBoundaryCredit(x) => x.key(),
             Self::ProposalResolved(x) => x.key(),
             Self::ScriptFirstSeen(x) => x.key(),
-            Self::ScriptSeqAssigned(x) => x.key(),
+            Self::StageFirstScript(x) => x.key(),
             Self::AssignRewards(x) => x.key(),
             Self::NonceTransition(x) => x.key(),
             Self::PoolTransition(x) => x.key(),
@@ -683,7 +688,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDistrBoundaryCredit(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::ProposalResolved(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::ScriptFirstSeen(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::ScriptSeqAssigned(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageFirstScript(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::AssignRewards(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NonceTransition(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolTransition(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -761,7 +766,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDistrBoundaryCredit(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::ProposalResolved(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::ScriptFirstSeen(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::ScriptSeqAssigned(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageFirstScript(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::AssignRewards(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NonceTransition(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolTransition(x) => Self::downcast_undo(x.as_ref(), entity),

@@ -235,15 +235,16 @@ impl CardanoIndexDeltaBuilder {
             .push(Tag::new(archive::SCRIPT_REDEEMERS, hash));
     }
 
-    /// Tag the current block with every script `tx` carries outside its
-    /// outputs: the witnesses and the auxiliary data.
+    /// Tag the current block with every script `tx` carries outside the
+    /// outputs it produces: the witnesses, the auxiliary data, and the
+    /// collateral return of a valid tx.
     ///
-    /// The auxiliary ones count because the script registry lists them
+    /// They count because `/scripts` lists them
     /// (`roll::scripts::tx_script_hashes`): a listed script is found through
     /// the archive index once the block that carried it first is pruned. The
     /// tags do not follow phase-2 validity; `script_by_hash` filters the
-    /// blocks it reads. A reference
-    /// script is tagged with its output, see [`Self::extract_utxo_tags`].
+    /// blocks it reads. A produced output's reference script is tagged with
+    /// it, see [`Self::extract_utxo_tags`].
     pub fn add_tx_scripts(&mut self, tx: &MultiEraTx) {
         use pallas::ledger::traverse::{ComputeHash as _, OriginalHash as _};
 
@@ -260,11 +261,19 @@ impl CardanoIndexDeltaBuilder {
             self.add_script_hash(script.compute_hash().to_vec());
         }
 
-        for script in tx.aux_native_scripts() {
-            self.add_script_hash(script.compute_hash().to_vec());
+        for script in pallas_extras::aux_native_scripts(tx) {
+            self.add_script_hash(pallas_extras::native_script_hash(&script).to_vec());
         }
         for script in tx.aux_plutus_v1_scripts() {
             self.add_script_hash(script.compute_hash().to_vec());
+        }
+
+        // a phase-2-invalid tx produces its collateral return, which is tagged
+        // with the other outputs it produces
+        let collateral_return = tx.collateral_return().filter(|_| tx.is_valid());
+
+        if let Some(script_ref) = collateral_return.as_ref().and_then(|x| x.script_ref()) {
+            self.add_script_hash(pallas_extras::script_ref_hash(&script_ref).to_vec());
         }
     }
 
@@ -825,6 +834,38 @@ mod tests {
                 plutus.compute_hash().as_slice()
             ]
         );
+    }
+
+    /// Every script `/scripts` counts a valid tx for, past the reference
+    /// scripts of the outputs it produces, gets a tag: the collateral return's,
+    /// the witnesses' and the auxiliary data's, an auxiliary native script
+    /// under the hash of its bytes as written.
+    #[test]
+    fn every_listed_script_outside_the_outputs_gets_a_script_tag() {
+        use pallas::ledger::traverse::MultiEraTx;
+
+        let (tx, listed) = crate::roll::scripts::tests::every_place();
+        let produced = tx.outputs.len();
+        let cbor = tx.cbor();
+        let tx = MultiEraTx::decode(&cbor).unwrap();
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.start_block(1, vec![0xaa; 32], Some(1));
+        builder.add_tx_scripts(&tx);
+
+        let mut tagged: Vec<Vec<u8>> = builder
+            .build()
+            .iter()
+            .flat_map(|block| block.tags.iter())
+            .filter(|tag| tag.dimension == archive::SCRIPT)
+            .map(|tag| tag.key.clone())
+            .collect();
+        tagged.sort();
+
+        let mut expected: Vec<Vec<u8>> = listed[produced..].iter().map(|x| x.to_vec()).collect();
+        expected.sort();
+
+        assert_eq!(tagged, expected);
     }
 
     /// Drive every tag-producing method on the builder once.
