@@ -74,10 +74,6 @@ impl GroupRow for FirstMintSet {
             member: self.asset_key(),
         }
     }
-
-    fn epoch(&self) -> Epoch {
-        self.epoch
-    }
 }
 
 pub type StageFirstMint = StageIfAbsent<FirstMintSet>;

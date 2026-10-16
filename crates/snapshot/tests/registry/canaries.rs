@@ -25,14 +25,15 @@ use dolos_cardano::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AssetState,
         AuthHistory, Committee, CommitteeAuthorization, Constitution, DRepDelegation, DRepExpiry,
         DRepSightingState, DRepState, DatumState, EndStats, EpochState, EpochValue, EraBoundary,
-        EraState, FirstMintChunk, FirstMintSet, GovDistr, GovRoots, GovState, Nonces, PParamValue,
-        PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation,
-        PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
-        RollingStats, ShardProgress, Stake, VoteEntry,
+        EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet, GovDistr,
+        GovRoots, GovState, MetadataLabelState, Nonces, PParamValue, PParamsSet, PendingMirState,
+        PendingRewardState, PolicyMintChunk, PoolDelegation, PoolEpochLog, PoolParams,
+        PoolSnapshot, PoolState, ProposalAction, ProposalState, RollingStats, ScriptState,
+        ShardProgress, Stake, VoteEntry,
     },
     model::{
-        AccountStats, AddressStats, PaymentAddressChunk, PaymentAddressSet, PaymentStats, Sum,
-        UnitSums,
+        AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
+        PaymentAddressSet, PaymentStats, Sum, UnitSums,
     },
     pallas::{
         codec::utils::Bytes,
@@ -270,6 +271,21 @@ pub fn payment_stats() -> PaymentStats {
     PaymentStats { tx_count: 23 }
 }
 
+/// A mint and a burn, so both signs of the amount are pinned.
+pub fn asset_mint_chunk() -> AssetMintChunk {
+    AssetMintChunk {
+        count: 259,
+        mints: vec![(hash32(0xd0), 1_000_000), (hash32(0xd1), -42)],
+    }
+}
+
+pub fn asset_mint_set() -> AssetMintSet {
+    AssetMintSet {
+        tx_hash: hash32(0xd2),
+        amount: -7,
+    }
+}
+
 pub fn account_stats() -> AccountStats {
     AccountStats { tx_count: 5 }
 }
@@ -295,6 +311,29 @@ pub fn account_address_chunk() -> AccountAddressChunk {
                 .concat()
                 .into(),
         ],
+    }
+}
+
+pub fn script_state() -> ScriptState {
+    ScriptState {
+        slot: 99_999_999,
+        tx_index: 321,
+        order: 7,
+    }
+}
+
+pub fn first_script_set() -> FirstScriptSet {
+    FirstScriptSet {
+        slot: 88_888_888,
+        tx_index: 123,
+        order: 5,
+    }
+}
+
+pub fn first_script_chunk() -> FirstScriptChunk {
+    FirstScriptChunk {
+        count: 259,
+        hashes: vec![hash28(0xa0), hash28(0xa1)],
     }
 }
 
@@ -562,6 +601,12 @@ fn gov_distr(seed: u8, epoch_offset: Epoch) -> GovDistr {
             (hash28(seed.wrapping_add(3)), 666_000_000),
         ]),
         pool_total: 1_221_000_000,
+    }
+}
+
+pub fn metadata_label_state() -> MetadataLabelState {
+    MetadataLabelState {
+        tx_count: 20_912_422,
     }
 }
 

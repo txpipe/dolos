@@ -55,10 +55,6 @@ impl GroupRow for AccountAddressSet {
             member: AddressKey::split(Some(&self.account), self.address.clone()),
         }
     }
-
-    fn epoch(&self) -> Epoch {
-        self.epoch
-    }
 }
 
 pub type StageAccountAddress = StageIfAbsent<AccountAddressSet>;

@@ -104,6 +104,7 @@ macro_rules! display_as_stored {
 
 pub mod account_addresses;
 pub mod accounts;
+pub mod asset_mints;
 pub mod assets;
 pub mod datums;
 pub mod drep_sightings;
@@ -114,10 +115,12 @@ pub mod eras;
 pub mod first_mints;
 pub mod gov;
 pub mod logs;
+pub mod metadata_labels;
 pub mod pending;
 pub mod pools;
 pub mod pparams;
 pub mod proposals;
+pub mod scripts;
 pub mod stats;
 
 #[cfg(test)]
@@ -125,6 +128,7 @@ pub(crate) mod testing;
 
 pub use account_addresses::*;
 pub use accounts::*;
+pub use asset_mints::*;
 pub use assets::*;
 pub use datums::*;
 pub use drep_sightings::*;
@@ -135,10 +139,12 @@ pub use eras::*;
 pub use first_mints::*;
 pub use gov::*;
 pub use logs::*;
+pub use metadata_labels::*;
 pub use pending::*;
 pub use pools::*;
 pub use pparams::*;
 pub use proposals::*;
+pub use scripts::*;
 pub use stats::*;
 
 // --- CardanoEntity ---
@@ -169,6 +175,12 @@ pub enum CardanoEntity {
     PaymentStats(Box<PaymentStats>),
     PaymentAddressChunk(Box<PaymentAddressChunk>),
     AccountStats(Box<AccountStats>),
+    ScriptState(Box<ScriptState>),
+    FirstScriptSet(Box<FirstScriptSet>),
+    FirstScriptChunk(Box<FirstScriptChunk>),
+    MetadataLabelState(Box<MetadataLabelState>),
+    AssetMintSet(Box<AssetMintSet>),
+    AssetMintChunk(Box<AssetMintChunk>),
 }
 
 macro_rules! variant_boilerplate {
@@ -214,6 +226,12 @@ variant_boilerplate!(PaymentAddressSet);
 variant_boilerplate!(PaymentStats);
 variant_boilerplate!(PaymentAddressChunk);
 variant_boilerplate!(AccountStats);
+variant_boilerplate!(ScriptState);
+variant_boilerplate!(FirstScriptSet);
+variant_boilerplate!(FirstScriptChunk);
+variant_boilerplate!(MetadataLabelState);
+variant_boilerplate!(AssetMintSet);
+variant_boilerplate!(AssetMintChunk);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -246,6 +264,12 @@ impl dolos_core::Entity for CardanoEntity {
                 PaymentAddressChunk::decode_entity(ns, value).map(Into::into)
             }
             AccountStats::NS => AccountStats::decode_entity(ns, value).map(Into::into),
+            ScriptState::NS => ScriptState::decode_entity(ns, value).map(Into::into),
+            FirstScriptSet::NS => FirstScriptSet::decode_entity(ns, value).map(Into::into),
+            FirstScriptChunk::NS => FirstScriptChunk::decode_entity(ns, value).map(Into::into),
+            MetadataLabelState::NS => MetadataLabelState::decode_entity(ns, value).map(Into::into),
+            AssetMintSet::NS => AssetMintSet::decode_entity(ns, value).map(Into::into),
+            AssetMintChunk::NS => AssetMintChunk::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -276,6 +300,12 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PaymentStats(x) => PaymentStats::encode_entity(x),
             Self::PaymentAddressChunk(x) => PaymentAddressChunk::encode_entity(x),
             Self::AccountStats(x) => AccountStats::encode_entity(x),
+            Self::ScriptState(x) => ScriptState::encode_entity(x),
+            Self::FirstScriptSet(x) => FirstScriptSet::encode_entity(x),
+            Self::FirstScriptChunk(x) => FirstScriptChunk::encode_entity(x),
+            Self::MetadataLabelState(x) => MetadataLabelState::encode_entity(x),
+            Self::AssetMintSet(x) => AssetMintSet::encode_entity(x),
+            Self::AssetMintChunk(x) => AssetMintChunk::encode_entity(x),
         }
     }
 }
@@ -312,6 +342,10 @@ pub fn build_schema() -> StateSchema {
     register_state::<PaymentAddressSet>(&mut schema);
     register_state::<PaymentStats>(&mut schema);
     register_state::<AccountStats>(&mut schema);
+    register_state::<ScriptState>(&mut schema);
+    register_state::<FirstScriptSet>(&mut schema);
+    register_state::<MetadataLabelState>(&mut schema);
+    register_state::<AssetMintSet>(&mut schema);
     schema
 }
 
@@ -323,10 +357,12 @@ pub fn build_log_schema() -> StateSchema {
     register_log::<AccountEpochLog>(&mut schema);
     register_log::<FirstMintChunk>(&mut schema);
     register_log::<PolicyMintChunk>(&mut schema);
+    register_log::<FirstScriptChunk>(&mut schema);
     register_log::<AccountAddressChunk>(&mut schema);
     register_log::<AddressStats>(&mut schema);
     register_log::<PaymentAddressChunk>(&mut schema);
     register_log::<AccountStats>(&mut schema);
+    register_log::<AssetMintChunk>(&mut schema);
     schema
 }
 
@@ -346,6 +382,7 @@ mod schema_tests {
             PaymentAddressChunk::NS,
             PolicyMintChunk::NS,
             FirstMintChunk::NS,
+            AssetMintChunk::NS,
         ] {
             assert!(!states.contains_key(ns), "{ns} is a state namespace");
             assert!(logs.contains_key(ns), "{ns} is not a log namespace");
@@ -437,6 +474,10 @@ pub enum CardanoDelta {
     StagePaymentAddress(Box<StagePaymentAddress>),
     StagePaymentStats(Box<StagePaymentStats>),
     StageAccountStats(Box<StageAccountStats>),
+    MetadataLabelTxInc(Box<MetadataLabelTxInc>),
+    ScriptFirstSeen(Box<ScriptFirstSeen>),
+    StageFirstScript(Box<StageFirstScript>),
+    StageAssetMint(Box<StageAssetMint>),
     DRepSighting(Box<DRepSighting>),
 }
 
@@ -550,6 +591,10 @@ delta_from!(StageAddressStats);
 delta_from!(StagePaymentAddress);
 delta_from!(StagePaymentStats);
 delta_from!(StageAccountStats);
+delta_from!(ScriptFirstSeen);
+delta_from!(StageFirstScript);
+delta_from!(MetadataLabelTxInc);
+delta_from!(StageAssetMint);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -598,6 +643,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDRepSnapshot(x) => x.key(),
             Self::GovDistrBoundaryCredit(x) => x.key(),
             Self::ProposalResolved(x) => x.key(),
+            Self::ScriptFirstSeen(x) => x.key(),
+            Self::StageFirstScript(x) => x.key(),
             Self::AssignRewards(x) => x.key(),
             Self::NonceTransition(x) => x.key(),
             Self::PoolTransition(x) => x.key(),
@@ -629,6 +676,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => x.key(),
             Self::StagePaymentStats(x) => x.key(),
             Self::StageAccountStats(x) => x.key(),
+            Self::MetadataLabelTxInc(x) => x.key(),
+            Self::StageAssetMint(x) => x.key(),
         }
     }
 
@@ -675,6 +724,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDRepSnapshot(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDistrBoundaryCredit(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::ProposalResolved(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::ScriptFirstSeen(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageFirstScript(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::AssignRewards(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NonceTransition(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolTransition(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -706,6 +757,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StagePaymentStats(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StageAccountStats(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::MetadataLabelTxInc(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageAssetMint(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -752,6 +805,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDRepSnapshot(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDistrBoundaryCredit(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::ProposalResolved(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::ScriptFirstSeen(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageFirstScript(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::AssignRewards(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NonceTransition(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolTransition(x) => Self::downcast_undo(x.as_ref(), entity),
@@ -783,6 +838,130 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StagePaymentStats(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StageAccountStats(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::MetadataLabelTxInc(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageAssetMint(x) => Self::downcast_undo(x.as_ref(), entity),
+        }
+    }
+}
+
+#[cfg(test)]
+mod wal_tests {
+    use super::*;
+    use crate::periods::GroupKey;
+    use pallas::ledger::primitives::StakeCredential;
+
+    #[test]
+    fn appended_delta_variant_indices_are_pinned() {
+        let account = AccountKey(StakeCredential::AddrKeyhash([0x11; 28].into()));
+        let deltas: Vec<(u32, CardanoDelta)> = vec![
+            (
+                64,
+                GovDRepSnapshot::new(DRepSnapshot {
+                    closing_epoch: 7,
+                    dreps: Default::default(),
+                })
+                .into(),
+            ),
+            (
+                65,
+                StageFirstMint::new(FirstMintSet {
+                    policy: [0x22; 28].into(),
+                    name: b"A".to_vec(),
+                    epoch: 7,
+                    slot: 100,
+                    tx_index: 0,
+                })
+                .into(),
+            ),
+            (
+                66,
+                StageAccountAddress::new(AccountAddressSet {
+                    account: account.0.clone(),
+                    address: vec![0x33; 29],
+                    epoch: 7,
+                    slot: 100,
+                    tx_index: 0,
+                    output_index: 0,
+                })
+                .into(),
+            ),
+            (
+                67,
+                StageAddressStats::new(
+                    (7, AddressKey::Unstaked(vec![0x33; 29])),
+                    AddressStats::default(),
+                )
+                .into(),
+            ),
+            (
+                68,
+                StagePaymentAddress::new(PaymentAddressSet {
+                    payment: [0x44; 28].into(),
+                    epoch: 7,
+                    tail: vec![0x60],
+                })
+                .into(),
+            ),
+            (
+                69,
+                StagePaymentStats::new(
+                    GroupKey {
+                        group: PaymentKey([0x44; 28].into()),
+                        epoch: 7,
+                        member: (),
+                    },
+                    PaymentStats { tx_count: 1 },
+                )
+                .into(),
+            ),
+            (
+                70,
+                StageAccountStats::new((7, account), AccountStats { tx_count: 1 }).into(),
+            ),
+            (71, MetadataLabelTxInc::new(674, 1).into()),
+            (
+                72,
+                ScriptFirstSeen::new(
+                    [0x55; 28].into(),
+                    ScriptState {
+                        slot: 100,
+                        tx_index: 0,
+                        order: 0,
+                    },
+                )
+                .into(),
+            ),
+            (
+                73,
+                StageFirstScript::new(
+                    7,
+                    [0x55; 28].into(),
+                    ScriptState {
+                        slot: 100,
+                        tx_index: 0,
+                        order: 0,
+                    },
+                )
+                .into(),
+            ),
+            (
+                74,
+                StageAssetMint::mint(
+                    AssetKey([0x66; 32].into()),
+                    7,
+                    (100, 0),
+                    [0x77; 32].into(),
+                    -5,
+                )
+                .into(),
+            ),
+        ];
+
+        for (index, delta) in deltas {
+            let encoded = bincode::serialize(&delta).unwrap();
+            assert_eq!(&encoded[..4], &index.to_le_bytes());
+            let decoded: CardanoDelta = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(bincode::serialize(&decoded).unwrap(), encoded);
         }
     }
 }

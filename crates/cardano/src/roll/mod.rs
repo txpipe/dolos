@@ -28,8 +28,10 @@ pub mod batch;
 pub mod datums;
 pub mod dreps;
 pub mod epochs;
+pub mod metadata_labels;
 pub mod pools;
 pub mod proposals;
+pub mod scripts;
 pub mod stats;
 pub mod txs;
 pub mod work_unit;
@@ -43,7 +45,9 @@ use assets::AssetStateVisitor;
 use datums::DatumVisitor;
 use dreps::{DRepStateVisitor, DormancyContext};
 use epochs::EpochStateVisitor;
+use metadata_labels::MetadataLabelVisitor;
 use pools::PoolStateVisitor;
+use scripts::{block_script_sightings, ScriptRegistryContext, ScriptRegistryVisitor};
 use stats::StatsVisitor;
 use txs::TxLogVisitor;
 
@@ -226,10 +230,12 @@ pub struct DeltaBuilder<'a> {
     datum_state: DatumVisitor,
     drep_state: DRepStateVisitor,
     epoch_state: EpochStateVisitor,
+    metadata_labels: MetadataLabelVisitor,
     pool_state: PoolStateVisitor,
     tx_logs: TxLogVisitor,
     proposal_logs: ProposalVisitor,
     stats: StatsVisitor,
+    script_registry: ScriptRegistryVisitor,
 }
 
 impl<'a> DeltaBuilder<'a> {
@@ -243,6 +249,7 @@ impl<'a> DeltaBuilder<'a> {
         work: &'a mut WorkBlock,
         utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
         dormancy: DormancyContext,
+        script_registry: ScriptRegistryVisitor,
     ) -> Self {
         Self {
             genesis,
@@ -257,10 +264,12 @@ impl<'a> DeltaBuilder<'a> {
             datum_state: Default::default(),
             drep_state: DRepStateVisitor::new(dormancy),
             epoch_state: Default::default(),
+            metadata_labels: Default::default(),
             pool_state: Default::default(),
             tx_logs: Default::default(),
             proposal_logs: Default::default(),
             stats: Default::default(),
+            script_registry,
         }
     }
 
@@ -270,6 +279,12 @@ impl<'a> DeltaBuilder<'a> {
     /// the context into the next block's builder.
     pub fn take_dormancy(&mut self) -> DormancyContext {
         self.drep_state.take_dormancy()
+    }
+
+    /// The script context after this block's deltas: the scripts it saw
+    /// first.
+    pub fn take_script_registry(&mut self) -> ScriptRegistryContext {
+        self.script_registry.take_context()
     }
 
     pub fn crawl(&mut self) -> Result<(), ChainError> {
@@ -322,6 +337,15 @@ impl<'a> DeltaBuilder<'a> {
             self.epoch_start,
             self.protocol,
         )?;
+        self.metadata_labels.visit_root(
+            &mut deltas,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
+        )?;
         self.pool_state.visit_root(
             &mut deltas,
             block,
@@ -358,6 +382,15 @@ impl<'a> DeltaBuilder<'a> {
             self.epoch_start,
             self.protocol,
         )?;
+        self.script_registry.visit_root(
+            &mut deltas,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
+        )?;
 
         for (order, tx) in block.txs().iter().enumerate() {
             self.account_state
@@ -369,6 +402,8 @@ impl<'a> DeltaBuilder<'a> {
             self.drep_state
                 .visit_tx(&mut deltas, block, tx, self.utxos)?;
             self.epoch_state
+                .visit_tx(&mut deltas, block, tx, self.utxos)?;
+            self.metadata_labels
                 .visit_tx(&mut deltas, block, tx, self.utxos)?;
             self.pool_state
                 .visit_tx(&mut deltas, block, tx, self.utxos)?;
@@ -394,6 +429,8 @@ impl<'a> DeltaBuilder<'a> {
                     self.drep_state
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
                     self.epoch_state
+                        .visit_input(&mut deltas, block, tx, &input, resolved)?;
+                    self.metadata_labels
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
                     self.pool_state
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
@@ -448,6 +485,14 @@ impl<'a> DeltaBuilder<'a> {
                     index as u32,
                     &output,
                 )?;
+                self.metadata_labels.visit_output(
+                    &mut deltas,
+                    block,
+                    tx,
+                    &order,
+                    index as u32,
+                    &output,
+                )?;
                 self.pool_state.visit_output(
                     &mut deltas,
                     block,
@@ -489,6 +534,8 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                     self.epoch_state
                         .visit_mint(&mut deltas, block, tx, &order, &mint)?;
+                    self.metadata_labels
+                        .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                     self.pool_state
                         .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                     self.tx_logs
@@ -509,6 +556,8 @@ impl<'a> DeltaBuilder<'a> {
                     self.drep_state
                         .visit_cert(&mut deltas, block, tx, &order, &cert)?;
                     self.epoch_state
+                        .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                    self.metadata_labels
                         .visit_cert(&mut deltas, block, tx, &order, &cert)?;
                     self.pool_state
                         .visit_cert(&mut deltas, block, tx, &order, &cert)?;
@@ -531,6 +580,13 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
                     self.epoch_state
                         .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
+                    self.metadata_labels.visit_withdrawal(
+                        &mut deltas,
+                        block,
+                        tx,
+                        account,
+                        amount,
+                    )?;
                     self.pool_state
                         .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
                     self.tx_logs
@@ -551,6 +607,8 @@ impl<'a> DeltaBuilder<'a> {
                     self.drep_state
                         .visit_update(&mut deltas, block, Some(tx), &update)?;
                     self.epoch_state
+                        .visit_update(&mut deltas, block, Some(tx), &update)?;
+                    self.metadata_labels
                         .visit_update(&mut deltas, block, Some(tx), &update)?;
                     self.pool_state
                         .visit_update(&mut deltas, block, Some(tx), &update)?;
@@ -574,6 +632,8 @@ impl<'a> DeltaBuilder<'a> {
                     .visit_datums(&mut deltas, block, tx, datum)?;
                 self.epoch_state
                     .visit_datums(&mut deltas, block, tx, datum)?;
+                self.metadata_labels
+                    .visit_datums(&mut deltas, block, tx, datum)?;
                 self.pool_state
                     .visit_datums(&mut deltas, block, tx, datum)?;
                 self.tx_logs.visit_datums(&mut deltas, block, tx, datum)?;
@@ -595,6 +655,8 @@ impl<'a> DeltaBuilder<'a> {
                     self.drep_state
                         .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
                     self.epoch_state
+                        .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
+                    self.metadata_labels
                         .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
                     self.pool_state
                         .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
@@ -618,6 +680,8 @@ impl<'a> DeltaBuilder<'a> {
                     .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
                 self.epoch_state
                     .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
+                self.metadata_labels
+                    .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
                 self.pool_state
                     .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
                 self.tx_logs
@@ -640,6 +704,8 @@ impl<'a> DeltaBuilder<'a> {
                 .visit_update(&mut deltas, block, None, &update)?;
             self.epoch_state
                 .visit_update(&mut deltas, block, None, &update)?;
+            self.metadata_labels
+                .visit_update(&mut deltas, block, None, &update)?;
             self.pool_state
                 .visit_update(&mut deltas, block, None, &update)?;
             self.tx_logs
@@ -654,6 +720,7 @@ impl<'a> DeltaBuilder<'a> {
         self.datum_state.flush(&mut deltas)?;
         self.drep_state.flush(&mut deltas)?;
         self.epoch_state.flush(&mut deltas)?;
+        self.metadata_labels.flush(&mut deltas)?;
         self.pool_state.flush(&mut deltas)?;
         self.tx_logs.flush(&mut deltas)?;
         self.proposal_logs.flush(&mut deltas)?;
@@ -711,7 +778,18 @@ pub(crate) fn compute_delta<D: Domain>(
         dormancy.drep_keys = Arc::new(keys);
     }
 
-    for block in batch.blocks.iter_mut() {
+    // Script context: which of the scripts the batch carries were seen before.
+    // Like dormancy it evolves across the blocks of the batch, so it's taken
+    // back after each crawl.
+    let carried: Vec<_> = batch
+        .blocks
+        .iter()
+        .map(|block| block_script_sightings(block.decoded().view()))
+        .collect();
+
+    let mut script_registry = ScriptRegistryContext::load(state, &carried)?;
+
+    for (block, carried) in batch.blocks.iter_mut().zip(carried) {
         let mut builder = DeltaBuilder::new(
             genesis.clone(),
             *protocol,
@@ -721,11 +799,13 @@ pub(crate) fn compute_delta<D: Domain>(
             block,
             &batch.utxos_decoded,
             std::mem::take(&mut dormancy),
+            ScriptRegistryVisitor::new(std::mem::take(&mut script_registry), carried),
         );
 
         builder.crawl()?;
 
         dormancy = builder.take_dormancy();
+        script_registry = builder.take_script_registry();
 
         // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
         // this into the entity system. (#1042)
@@ -868,10 +948,25 @@ mod tests {
     }
 
     /// Crawl a one-transaction Conway block whose transaction is valid or
-    /// phase-2-invalid, and hand back the deltas it produced.
+    /// phase-2-invalid, and hand back the deltas it produced. The transaction
+    /// also has metadata with the label 674.
     fn crawl_single_tx_block(valid: bool) -> WorkDeltas {
-        let (_, raw) =
-            dolos_testing::blocks::make_conway_block_with_tx(SLOT, loaded_tx_body(), None, valid);
+        let aux = pallas::ledger::primitives::alonzo::AuxiliaryData::ShelleyMa(
+            pallas::ledger::primitives::alonzo::ShelleyMaAuxiliaryData {
+                transaction_metadata: BTreeMap::from([(
+                    674,
+                    pallas::ledger::primitives::alonzo::Metadatum::Text("hello".to_string()),
+                )]),
+                auxiliary_scripts: None,
+            },
+        );
+
+        let (_, raw) = dolos_testing::blocks::make_conway_block_with_tx(
+            SLOT,
+            loaded_tx_body(),
+            Some(aux),
+            valid,
+        );
 
         let block = OwnedMultiEraBlock::decode(raw).unwrap();
         let mut work = WorkBlock::new(block);
@@ -889,6 +984,7 @@ mod tests {
             &mut work,
             &utxos,
             DormancyContext::default(),
+            ScriptRegistryVisitor::default(),
         );
 
         builder.crawl().unwrap();
@@ -939,7 +1035,13 @@ mod tests {
     fn invalid_tx_contributes_no_entity_state() {
         let deltas = crawl_single_tx_block(false);
 
-        for ns in ["accounts", "dreps", "proposals", "assets"] {
+        for ns in [
+            "accounts",
+            "dreps",
+            "proposals",
+            "assets",
+            "metadata-labels",
+        ] {
             assert!(
                 keys_in(&deltas, ns).is_empty(),
                 "phase-2-invalid tx wrote to the `{ns}` namespace"
@@ -1046,6 +1148,7 @@ mod tests {
             &mut work,
             &utxos,
             DormancyContext::default(),
+            ScriptRegistryVisitor::default(),
         )
         .crawl()
         .unwrap();
@@ -1084,7 +1187,14 @@ mod tests {
     fn valid_tx_contributes_entity_state() {
         let deltas = crawl_single_tx_block(true);
 
-        for ns in ["accounts", "dreps", "proposals", "assets", "pools"] {
+        for ns in [
+            "accounts",
+            "dreps",
+            "proposals",
+            "assets",
+            "pools",
+            "metadata-labels",
+        ] {
             assert!(
                 !keys_in(&deltas, ns).is_empty(),
                 "valid tx wrote nothing to the `{ns}` namespace — the fixture is wrong"

@@ -469,7 +469,7 @@ pub fn build_synthetic_blocks(
 
         let aux_data = alonzo::AuxiliaryData::ShelleyMa(alonzo::ShelleyMaAuxiliaryData {
             transaction_metadata: metadata,
-            auxiliary_scripts: None,
+            auxiliary_scripts: fixture_extras.as_ref().map(|_| vec![aux_script()]),
         });
         let aux_hash = aux_data.compute_hash();
 
@@ -867,6 +867,17 @@ fn phase2_invalid_redeemer_tx_spec(mr: &MintRedeemerConfig) -> SyntheticTxSpec {
         witness_set,
         valid: false,
     }
+}
+
+/// A native script the fixture blocks carry in their auxiliary data and
+/// nowhere else.
+pub fn aux_script() -> alonzo::NativeScript {
+    alonzo::NativeScript::InvalidBefore(400_001)
+}
+
+/// Hex hash of [`aux_script`].
+pub fn aux_script_hash() -> String {
+    aux_script().compute_hash().to_string()
 }
 
 fn build_datum_and_script_fixture() -> SyntheticFixtureExtras {
@@ -1352,30 +1363,32 @@ fn sample_block(
 }
 
 /// A minimal Alonzo block holding one tx that carries the given
-/// certificates.
+/// certificates and mint.
 ///
-/// MIR certificates exist only in pre-Conway eras, so a test that needs one
-/// appends this block to a synthetic chain. `input` must name a live UTxO of
-/// that chain — the roll pipeline resolves every input it applies. Returns
-/// the raw block, its hash and the tx hash.
-pub fn sample_alonzo_cert_block(
+/// MIR certificates exist only in pre-Conway eras, and so does a
+/// zero-quantity mint entry, so a test that needs one appends this block to a
+/// synthetic chain. `input` must name a live UTxO of that chain — the roll
+/// pipeline resolves every input it applies. Returns the raw block, its hash
+/// and the tx hash.
+pub fn sample_alonzo_block(
     block_number: u64,
     slot: u64,
     prev_hash: Option<Hash<32>>,
     input: TransactionInput,
     certificates: Vec<alonzo::Certificate>,
+    mint: Option<alonzo::Mint>,
 ) -> (RawBlock, Hash<32>, Hash<32>) {
     let body = alonzo::TransactionBody {
         inputs: vec![input],
         outputs: vec![],
         fee: 7,
         ttl: None,
-        certificates: Some(certificates),
+        certificates: (!certificates.is_empty()).then_some(certificates),
         withdrawals: None,
         update: None,
         auxiliary_data_hash: None,
         validity_interval_start: None,
-        mint: None,
+        mint,
         script_data_hash: None,
         collateral: None,
         required_signers: None,
