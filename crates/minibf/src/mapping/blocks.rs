@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use axum::http::StatusCode;
 use blockfrost_openapi::models::{
@@ -7,6 +7,7 @@ use blockfrost_openapi::models::{
     block_content_txs_cbor_inner::BlockContentTxsCborInner,
 };
 use dolos_cardano::ChainSummary;
+use dolos_core::Genesis;
 use itertools::Itertools as _;
 use pallas::{
     codec::minicbor,
@@ -14,7 +15,7 @@ use pallas::{
     ledger::traverse::{MultiEraBlock, MultiEraHeader, MultiEraTx},
 };
 
-use super::{bech32_pool, IntoModel};
+use super::{bech32_pool, collated, IntoModel};
 use crate::log_and_500;
 
 pub struct BlockModelBuilder<'a> {
@@ -24,6 +25,7 @@ pub struct BlockModelBuilder<'a> {
     next: Option<MultiEraBlock<'a>>,
     tip: Option<MultiEraBlock<'a>>,
     touched_addresses: Option<Vec<(String, BTreeSet<String>)>>,
+    genesis_delegates: Option<HashSet<Hash<28>>>,
 }
 
 impl<'a> BlockModelBuilder<'a> {
@@ -37,6 +39,7 @@ impl<'a> BlockModelBuilder<'a> {
             tip: None,
             chain: None,
             touched_addresses: None,
+            genesis_delegates: None,
         })
     }
 
@@ -63,6 +66,23 @@ impl<'a> BlockModelBuilder<'a> {
     pub fn with_chain(self, chain: &'a ChainSummary) -> Self {
         Self {
             chain: Some(chain),
+            ..self
+        }
+    }
+
+    /// The keys Shelley genesis delegates block production to, which db-sync
+    /// names `ShelleyGenesis-…` as slot leaders rather than as pools.
+    pub fn with_genesis_delegates(self, genesis: &Genesis) -> Self {
+        let delegates = genesis
+            .shelley
+            .gen_delegs
+            .iter()
+            .flatten()
+            .filter_map(|(_, x)| x.delegate.as_deref()?.parse().ok())
+            .collect();
+
+        Self {
+            genesis_delegates: Some(delegates),
             ..self
         }
     }
@@ -99,10 +119,6 @@ impl<'a> BlockModelBuilder<'a> {
         self.block.header().previous_hash()
     }
 
-    pub fn next_number(&self) -> u64 {
-        self.block.number() + 1
-    }
-
     fn format_block_vrf(&self) -> Result<Option<String>, StatusCode> {
         let header = self.block.header();
 
@@ -121,10 +137,7 @@ impl<'a> BlockModelBuilder<'a> {
     fn format_slot_leader(&self) -> Result<Option<String>, StatusCode> {
         let header = self.block.header();
 
-        let Some(use_bech32) = self.chain.map(|x| {
-            let epoch = x.slot_epoch(self.block.slot()).0;
-            epoch > x.first_shelley_epoch()
-        }) else {
+        let Some(genesis_delegates) = self.genesis_delegates.as_ref() else {
             return Ok(None);
         };
 
@@ -132,7 +145,9 @@ impl<'a> BlockModelBuilder<'a> {
             Some(key) => {
                 let hash: Hash<28> = Hasher::<224>::hash(key);
 
-                if use_bech32 {
+                // a genesis delegate can mint well past the first Shelley
+                // epoch, wherever the decentralisation parameter leaves it slots
+                if !genesis_delegates.contains(&hash) {
                     Ok(Some(bech32_pool(hash)?))
                 } else {
                     Ok(Some(format!(
@@ -223,6 +238,9 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
     fn into_model(self) -> Result<BlockContent, StatusCode> {
         let block = &self.block;
 
+        // db-sync gives a Byron epoch-boundary block no slot and no number
+        let is_boundary = matches!(block, MultiEraBlock::EpochBoundary(_));
+
         let (epoch, epoch_slot) = self
             .chain
             .as_ref()
@@ -263,46 +281,10 @@ impl<'a> IntoModel<BlockContent> for BlockModelBuilder<'a> {
             next_block,
             previous_block,
             epoch: epoch.map(|x| x as i32),
-            epoch_slot: match epoch_slot.map(|x| x as i32) {
-                Some(0) => {
-                    if matches!(
-                        self.block,
-                        MultiEraBlock::EpochBoundary(_) | MultiEraBlock::Byron(_)
-                    ) {
-                        None
-                    } else {
-                        Some(0)
-                    }
-                }
-                x => x,
-            },
+            epoch_slot: epoch_slot.filter(|_| !is_boundary).map(|x| x as i32),
             time: block_time.unwrap_or_default(),
-            slot: match block.slot() as i32 {
-                0 => {
-                    if matches!(
-                        self.block,
-                        MultiEraBlock::EpochBoundary(_) | MultiEraBlock::Byron(_)
-                    ) {
-                        None
-                    } else {
-                        Some(0)
-                    }
-                }
-                x => Some(x),
-            },
-            height: match block.number() as i32 {
-                0 => {
-                    if matches!(
-                        self.block,
-                        MultiEraBlock::EpochBoundary(_) | MultiEraBlock::Byron(_)
-                    ) {
-                        None
-                    } else {
-                        Some(0)
-                    }
-                }
-                x => Some(x),
-            },
+            slot: (!is_boundary).then_some(block.slot() as i32),
+            height: (!is_boundary).then_some(block.number() as i32),
             tx_count: block.txs().len() as i32,
             size: block.body_size().unwrap_or(block.size()) as i32,
             confirmations,
@@ -365,28 +347,37 @@ impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-        // sorted by address like Blockfrost; hashes stay in block order
-        let mut by_address: BTreeMap<String, Vec<String>> = BTreeMap::new();
-
-        for (tx_hash, touched_by_tx) in touched_addresses {
-            for address in touched_by_tx {
-                by_address.entry(address).or_default().push(tx_hash.clone());
-            }
-        }
-
-        let addresses = by_address
-            .into_iter()
-            .map(|(address, tx_hashes)| BlockContentAddressesInner {
-                address,
-                transactions: tx_hashes
-                    .into_iter()
-                    .map(|tx_hash| BlockContentAddressesInnerTransactionsInner { tx_hash })
-                    .collect(),
-            })
-            .collect();
-
-        Ok(addresses)
+        Ok(touched_addresses_model(touched_addresses))
     }
+}
+
+/// Each address the transactions touch, with the transactions that touch it,
+/// from `(tx hash, addresses)` pairs in block order. Sorted by address like
+/// Blockfrost (see `collated`); the hashes stay in block order.
+pub fn touched_addresses_model(
+    touched_addresses: impl IntoIterator<Item = (String, BTreeSet<String>)>,
+) -> Vec<BlockContentAddressesInner> {
+    let mut by_address: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for (tx_hash, touched_by_tx) in touched_addresses {
+        for address in touched_by_tx {
+            by_address.entry(address).or_default().push(tx_hash.clone());
+        }
+    }
+
+    let mut by_address: Vec<_> = by_address.into_iter().collect();
+    by_address.sort_by(|(a, _), (b, _)| collated(a, b));
+
+    by_address
+        .into_iter()
+        .map(|(address, tx_hashes)| BlockContentAddressesInner {
+            address,
+            transactions: tx_hashes
+                .into_iter()
+                .map(|tx_hash| BlockContentAddressesInnerTransactionsInner { tx_hash })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Parses the header of a stored block without decoding the transactions.

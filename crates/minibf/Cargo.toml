@@ -9,6 +9,7 @@ serde.workspace = true
 tokio = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 pallas.workspace = true
+base64.workspace = true
 tower = { workspace = true, features = ["util"] }
 tower-http.workspace = true
 itertools.workspace = true
