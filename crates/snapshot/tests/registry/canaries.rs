@@ -31,8 +31,8 @@ use dolos_cardano::{
         RollingStats, ShardProgress, Stake, VoteEntry,
     },
     model::{
-        AccountStats, AddressStats, PaymentAddressChunk, PaymentAddressSet, PaymentStats, Sum,
-        UnitSums,
+        AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
+        PaymentAddressSet, PaymentStats, Sum, UnitSums,
     },
     pallas::{
         codec::utils::Bytes,
@@ -268,6 +268,21 @@ pub fn payment_address_set() -> PaymentAddressSet {
 
 pub fn payment_stats() -> PaymentStats {
     PaymentStats { tx_count: 23 }
+}
+
+/// A mint and a burn, so both signs of the amount are pinned.
+pub fn asset_mint_chunk() -> AssetMintChunk {
+    AssetMintChunk {
+        count: 259,
+        mints: vec![(hash32(0xd0), 1_000_000), (hash32(0xd1), -42)],
+    }
+}
+
+pub fn asset_mint_set() -> AssetMintSet {
+    AssetMintSet {
+        tx_hash: hash32(0xd2),
+        amount: -7,
+    }
 }
 
 pub fn account_stats() -> AccountStats {

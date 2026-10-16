@@ -17,9 +17,10 @@
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
-    FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
-    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
+    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepState, DatumState, EpochState,
+    EraState, FirstMintChunk, FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -37,13 +38,15 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against the schemas directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 24] = [
+pub const NAMESPACES: [Namespace; 26] = [
     AccountAddressChunk::NS,
     AccountAddressSet::NS,
     AccountEpochLog::NS,
     AccountStats::NS,
     AccountState::NS,
     AddressStats::NS,
+    AssetMintChunk::NS,
+    AssetMintSet::NS,
     AssetState::NS,
     DatumState::NS,
     DRepState::NS,
@@ -83,13 +86,15 @@ pub const NAMESPACES: [Namespace; 24] = [
 /// a fixed width (decision 0051), and each of those moved one revision for it.
 /// Kept beside [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 24] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
     (AccountAddressChunk::NS, 1),
     (AccountAddressSet::NS, 1),
     (AccountEpochLog::NS, 1),
     (AccountStats::NS, 1),
     (AccountState::NS, 1),
     (AddressStats::NS, 1),
+    (AssetMintChunk::NS, 1),
+    (AssetMintSet::NS, 1),
     (AssetState::NS, 1),
     (DatumState::NS, 1),
     (DRepState::NS, 2),
@@ -128,6 +133,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         AccountState::NS => exact::<<AccountState as StateEntity>::Key>(key),
         AccountStats::NS => exact::<<AccountStats as StateEntity>::Key>(key),
         AddressStats::NS => exact::<<AddressStats as StateEntity>::Key>(key),
+        AssetMintSet::NS => exact::<<AssetMintSet as StateEntity>::Key>(key),
         AssetState::NS => exact::<<AssetState as StateEntity>::Key>(key),
         DatumState::NS => exact::<<DatumState as StateEntity>::Key>(key),
         DRepState::NS => exact::<<DRepState as StateEntity>::Key>(key),
@@ -144,6 +150,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         UTXOS => exact::<[u8; UTXO_KEY_LEN]>(key),
         AccountAddressChunk::NS
         | AccountEpochLog::NS
+        | AssetMintChunk::NS
         | FirstMintChunk::NS
         | PaymentAddressChunk::NS
         | PolicyMintChunk::NS
@@ -164,6 +171,7 @@ pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         AccountEpochLog::NS => exact::<<AccountEpochLog as LogEntity>::Key>(key),
         AccountStats::NS => exact::<<AccountStats as LogEntity>::Key>(key),
         AddressStats::NS => exact::<<AddressStats as LogEntity>::Key>(key),
+        AssetMintChunk::NS => exact::<<AssetMintChunk as LogEntity>::Key>(key),
         EpochState::NS => exact::<<EpochState as LogEntity>::Key>(key),
         FirstMintChunk::NS => exact::<<FirstMintChunk as LogEntity>::Key>(key),
         PaymentAddressChunk::NS => exact::<<PaymentAddressChunk as LogEntity>::Key>(key),
