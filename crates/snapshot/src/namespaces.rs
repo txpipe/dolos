@@ -18,9 +18,10 @@
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
     AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepState, DatumState, EpochState,
-    EraState, FirstMintChunk, FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk,
-    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolEpochLog, PoolState, ProposalState,
+    EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet, FixedNamespace,
+    GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
+    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
+    ScriptState,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -38,7 +39,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against the schemas directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 26] = [
+pub const NAMESPACES: [Namespace; 30] = [
     AccountAddressChunk::NS,
     AccountAddressSet::NS,
     AccountEpochLog::NS,
@@ -54,7 +55,10 @@ pub const NAMESPACES: [Namespace; 26] = [
     EraState::NS,
     FirstMintChunk::NS,
     FirstMintSet::NS,
+    FirstScriptChunk::NS,
+    FirstScriptSet::NS,
     GovState::NS,
+    MetadataLabelState::NS,
     PaymentAddressChunk::NS,
     PaymentAddressSet::NS,
     PaymentStats::NS,
@@ -64,6 +68,7 @@ pub const NAMESPACES: [Namespace; 26] = [
     PoolEpochLog::NS,
     PoolState::NS,
     ProposalState::NS,
+    ScriptState::NS,
     UTXOS,
 ];
 
@@ -82,11 +87,11 @@ pub const NAMESPACES: [Namespace; 26] = [
 /// `HashSet`, whose per-instance iteration order made the namespace's bytes
 /// irreproducible across publishers of identical state. The keys of `dreps`,
 /// `epochs`, `eras`, `first-mint-chunks`, `first-mints`, `gov`,
-/// `pool-epochs`, `pools` and `proposals` stopped being padded or truncated to
-/// a fixed width (decision 0051), and each of those moved one revision for it.
-/// Kept beside [`NAMESPACES`], in the same order, and held to it by
-/// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
+/// `metadata-labels`, `pool-epochs`, `pools` and `proposals` stopped being
+/// padded or truncated to a fixed width (decision 0051), and each of those
+/// moved one revision for it. Kept beside [`NAMESPACES`], in the same order,
+/// and held to it by `every_namespace_has_a_schema_rev` below.
+pub const SCHEMA_REVS: [(Namespace, u64); 30] = [
     (AccountAddressChunk::NS, 1),
     (AccountAddressSet::NS, 1),
     (AccountEpochLog::NS, 1),
@@ -102,7 +107,10 @@ pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
     (EraState::NS, 2),
     (FirstMintChunk::NS, 2),
     (FirstMintSet::NS, 2),
+    (FirstScriptChunk::NS, 1),
+    (FirstScriptSet::NS, 1),
     (GovState::NS, 4),
+    (MetadataLabelState::NS, 2),
     (PaymentAddressChunk::NS, 1),
     (PaymentAddressSet::NS, 1),
     (PaymentStats::NS, 1),
@@ -112,6 +120,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 26] = [
     (PoolEpochLog::NS, 2),
     (PoolState::NS, 2),
     (ProposalState::NS, 4),
+    (ScriptState::NS, 1),
     (UTXOS, 1),
 ];
 
@@ -140,11 +149,14 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         EpochState::NS => exact::<<EpochState as StateEntity>::Key>(key),
         EraState::NS => exact::<<EraState as StateEntity>::Key>(key),
         GovState::NS => exact::<<GovState as StateEntity>::Key>(key),
+        MetadataLabelState::NS => exact::<<MetadataLabelState as StateEntity>::Key>(key),
         PendingMirState::NS => exact::<<PendingMirState as StateEntity>::Key>(key),
         PendingRewardState::NS => exact::<<PendingRewardState as StateEntity>::Key>(key),
         PoolState::NS => exact::<<PoolState as StateEntity>::Key>(key),
         ProposalState::NS => exact::<<ProposalState as StateEntity>::Key>(key),
+        ScriptState::NS => exact::<<ScriptState as StateEntity>::Key>(key),
         FirstMintSet::NS => exact::<<FirstMintSet as StateEntity>::Key>(key),
+        FirstScriptSet::NS => exact::<<FirstScriptSet as StateEntity>::Key>(key),
         PaymentAddressSet::NS => exact::<<PaymentAddressSet as StateEntity>::Key>(key),
         PaymentStats::NS => exact::<<PaymentStats as StateEntity>::Key>(key),
         UTXOS => exact::<[u8; UTXO_KEY_LEN]>(key),
@@ -152,6 +164,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         | AccountEpochLog::NS
         | AssetMintChunk::NS
         | FirstMintChunk::NS
+        | FirstScriptChunk::NS
         | PaymentAddressChunk::NS
         | PolicyMintChunk::NS
         | PoolEpochLog::NS => {
@@ -174,6 +187,7 @@ pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         AssetMintChunk::NS => exact::<<AssetMintChunk as LogEntity>::Key>(key),
         EpochState::NS => exact::<<EpochState as LogEntity>::Key>(key),
         FirstMintChunk::NS => exact::<<FirstMintChunk as LogEntity>::Key>(key),
+        FirstScriptChunk::NS => exact::<<FirstScriptChunk as LogEntity>::Key>(key),
         PaymentAddressChunk::NS => exact::<<PaymentAddressChunk as LogEntity>::Key>(key),
         PolicyMintChunk::NS => exact::<<PolicyMintChunk as LogEntity>::Key>(key),
         PoolEpochLog::NS => exact::<<PoolEpochLog as LogEntity>::Key>(key),

@@ -108,9 +108,10 @@ pub use stelae::{dir, inscription, transport, SteleReader};
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
     AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepState, DatumState, EpochState,
-    EraState, FirstMintChunk, FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk,
-    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolEpochLog, PoolState, ProposalState,
+    EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet, FixedNamespace,
+    GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
+    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
+    ScriptState,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -170,7 +171,7 @@ pub const LOG_NAMESPACES: [Namespace; LOG_KINDS.len()] = {
 /// Nothing in the tree marks an entity as log-bearing, so this table is where
 /// the log namespaces are spelled, held to the entity types by
 /// `log_kinds_derive_from_their_namespaces` in `tests/coverage.rs`.
-pub const LOG_KINDS: [(&str, Namespace); 10] = [
+pub const LOG_KINDS: [(&str, Namespace); 11] = [
     ("log-account-address-chunks", AccountAddressChunk::NS),
     ("log-account-epochs", AccountEpochLog::NS),
     ("log-account-stats", AccountStats::NS),
@@ -178,6 +179,7 @@ pub const LOG_KINDS: [(&str, Namespace); 10] = [
     ("log-asset-mint-chunks", AssetMintChunk::NS),
     ("log-epochs", EpochState::NS),
     ("log-first-mint-chunks", FirstMintChunk::NS),
+    ("log-first-script-chunks", FirstScriptChunk::NS),
     ("log-payment-address-chunks", PaymentAddressChunk::NS),
     ("log-policy-mint-chunks", PolicyMintChunk::NS),
     ("log-pool-epochs", PoolEpochLog::NS),
@@ -198,12 +200,12 @@ pub const LOG_KINDS: [(&str, Namespace); 10] = [
 /// not a constructor (`state_kinds_derive_from_their_namespaces`).
 ///
 /// The shard count is **specification, never tuning**: the namespaces whose
-/// populations are chain-scale — the UTxO set, accounts, assets and datums —
-/// shard sixteen ways by the first key nibble, and every other namespace is a
-/// single blob. Re-sharding a namespace is a media-type-version event for that
-/// namespace's kind, decided by the format's owner; it is not a constant to
-/// nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 19] = [
+/// populations are chain-scale — the UTxO set, accounts, assets, datums and
+/// scripts — shard sixteen ways by the first key nibble, and every other
+/// namespace is a single blob. Re-sharding a namespace is a media-type-version
+/// event for that namespace's kind, decided by the format's owner; it is not a
+/// constant to nudge.
+pub const STATE_KINDS: [(&str, Namespace, u8); 22] = [
     ("state-account-addresses", AccountAddressSet::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
@@ -215,13 +217,16 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 19] = [
     ("state-epochs", EpochState::NS, 1),
     ("state-eras", EraState::NS, 1),
     ("state-first-mints", FirstMintSet::NS, 1),
+    ("state-first-scripts", FirstScriptSet::NS, 1),
     ("state-gov", GovState::NS, 1),
+    ("state-metadata-labels", MetadataLabelState::NS, 1),
     ("state-payment-addresses", PaymentAddressSet::NS, 1),
     ("state-payment-stats", PaymentStats::NS, 1),
     ("state-pending-mirs", PendingMirState::NS, 1),
     ("state-pending-rewards", PendingRewardState::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
+    ("state-scripts", ScriptState::NS, 16),
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 

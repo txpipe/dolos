@@ -375,7 +375,7 @@ fn state_kinds_derive_from_their_namespaces() {
     // out here rather than derived from the table it is checking.
     for (_, ns, shards) in STATE_KINDS {
         let expected = match ns {
-            "utxos" | "accounts" | "assets" | "datums" => 16,
+            "utxos" | "accounts" | "assets" | "datums" | "scripts" => 16,
             _ => 1,
         };
 

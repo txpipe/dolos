@@ -267,8 +267,8 @@ mod tests {
     use dolos_cardano::model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
         AddressStats, AssetKey, AssetMintChunk, AssetMintSet, AssetState, DRepState, EpochState,
-        EraState, FirstMintSet, FixedNamespace, GovState, PaymentAddressSet, PaymentStats,
-        PoolState, ProposalState,
+        EraState, FirstMintSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressSet,
+        PaymentStats, PoolState, ProposalState,
     };
 
     use super::*;
@@ -315,6 +315,7 @@ mod tests {
             (EpochState::NS, 0),
             (GovState::NS, 0),
             (EraState::NS, 2),
+            (MetadataLabelState::NS, 8),
             (DRepState::NS, 1),
             (PoolState::NS, 28),
             (ProposalState::NS, 36),
@@ -357,6 +358,9 @@ mod tests {
             (EpochState::NS, [0x30].into_iter().chain([0; 31]).collect()),
             (PoolState::NS, vec![1; 32]),
             (ProposalState::NS, vec![1; 32]),
+            (MetadataLabelState::NS, vec![1; 7]),
+            (MetadataLabelState::NS, vec![1; 9]),
+            (MetadataLabelState::NS, vec![1; 32]),
             (DRepState::NS, vec![0x22; 32]),
             (AccountState::NS, vec![1; 32]),
             (AccountEpochLog::NS, vec![1; 32]),

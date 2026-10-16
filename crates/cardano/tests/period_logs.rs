@@ -6,7 +6,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use dolos_cardano::{
     model::{
         AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, FirstMintChunk,
-        FirstMintSet,
+        FirstMintSet, FirstScriptSet, ScriptState,
     },
     periods::is_sealable,
     AccountKey, CardanoDelta,
@@ -264,6 +264,72 @@ fn rollback_unstages_exactly_the_mints_its_block_created() {
 
     domain.rollback(&points[0]).unwrap();
     assert_eq!(staged_mints(&domain), after[0]);
+}
+
+/// The script hashes the witness holds, and the `(epoch, script hash)` keys
+/// staged as first seen.
+type ScriptRows = (BTreeSet<[u8; 28]>, BTreeSet<(u64, [u8; 28])>);
+
+fn scripts(domain: &ToyDomain) -> ScriptRows {
+    let witness = domain
+        .state()
+        .iter_entities_typed::<ScriptState>(None)
+        .unwrap()
+        .map(|row| *row.unwrap().0 .0)
+        .collect();
+
+    let staged = domain
+        .state()
+        .iter_entities_typed::<FirstScriptSet>(None)
+        .unwrap()
+        .map(|row| {
+            let (key, _) = row.unwrap();
+            (key.epoch, *key.member.0)
+        })
+        .collect();
+
+    (witness, staged)
+}
+
+/// Rollback for first scripts: undoing the block that first carried a script
+/// removes its witness and set rows, and a block that only repeats scripts
+/// leaves them alone. The first block's tx failed phase-2 validation, so the
+/// scripts it carries count from the second block.
+#[test]
+fn rollback_removes_the_script_rows_of_the_block_that_first_carried_them() {
+    let cfg = SyntheticBlockConfig {
+        block_count: 3,
+        txs_per_block: 1,
+        invalid_txs_by_block: vec![vec![0], vec![], vec![]],
+        ..Default::default()
+    };
+
+    let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+    let mut points = Vec::new();
+    let mut after = Vec::new();
+
+    for block in &blocks {
+        domain.roll_forward(block.clone()).unwrap();
+
+        let decoded = MultiEraBlock::decode(block).unwrap();
+        points.push(ChainPoint::Specific(decoded.slot(), decoded.hash()));
+        after.push(scripts(&domain));
+    }
+
+    let none = (BTreeSet::new(), BTreeSet::new());
+    assert_eq!(after[0], none, "an invalid tx's witnesses were recorded");
+    assert_eq!(after[1].0.len(), 3);
+    assert_eq!(after[1].1.len(), 3);
+    assert_eq!(after[2], after[1]);
+
+    domain.rollback(&points[1]).unwrap();
+    assert_eq!(scripts(&domain), after[1]);
+
+    domain.rollback(&points[0]).unwrap();
+    assert_eq!(scripts(&domain), none);
 }
 
 /// A copy of the devnet genesis with `epoch_length`-slot epochs, security

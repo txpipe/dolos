@@ -30,6 +30,7 @@ use crate::{indexes::SlotOrder, ChainSummary};
 pub mod account_addresses;
 pub mod asset_mints;
 pub mod first_mints;
+pub mod first_scripts;
 pub mod stats;
 
 /// Most entries one sealed list row holds; a longer list spans several rows.
@@ -66,6 +67,23 @@ impl<G: FixedKey, M: KeyCodec> KeyCodec for GroupKey<G, M> {
             member,
         })
     }
+}
+
+/// The group of a `Set` whose members make one list per epoch: zero bytes, so
+/// its rows key `epoch ‖ member`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Ungrouped;
+
+impl KeyCodec for Ungrouped {
+    fn encode_key(&self, _: &mut KeyBytes) {}
+
+    fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
+        <()>::decode_key(bytes).map(|_| Self)
+    }
+}
+
+impl FixedKey for Ungrouped {
+    const LEN: usize = 0;
 }
 
 /// A group is the prefix of its staged keys. Declared per group kind: the
@@ -237,6 +255,7 @@ pub fn seal_staged<D: Domain>(
     let sealable = |epoch| is_sealable(chain, mutable_slots, epoch, boundary);
 
     first_mints::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
+    first_scripts::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
     asset_mints::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
     account_addresses::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
     stats::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)
