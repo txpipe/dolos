@@ -18,8 +18,9 @@
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
     AddressStats, AssetState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
-    FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
-    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
+    FirstMintSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -37,7 +38,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against the schemas directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 24] = [
+pub const NAMESPACES: [Namespace; 25] = [
     AccountAddressChunk::NS,
     AccountAddressSet::NS,
     AccountEpochLog::NS,
@@ -52,6 +53,7 @@ pub const NAMESPACES: [Namespace; 24] = [
     FirstMintChunk::NS,
     FirstMintSet::NS,
     GovState::NS,
+    MetadataLabelState::NS,
     PaymentAddressChunk::NS,
     PaymentAddressSet::NS,
     PaymentStats::NS,
@@ -79,11 +81,11 @@ pub const NAMESPACES: [Namespace; 24] = [
 /// `HashSet`, whose per-instance iteration order made the namespace's bytes
 /// irreproducible across publishers of identical state. The keys of `dreps`,
 /// `epochs`, `eras`, `first-mint-chunks`, `first-mints`, `gov`,
-/// `pool-epochs`, `pools` and `proposals` stopped being padded or truncated to
-/// a fixed width (decision 0051), and each of those moved one revision for it.
-/// Kept beside [`NAMESPACES`], in the same order, and held to it by
-/// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 24] = [
+/// `metadata-labels`, `pool-epochs`, `pools` and `proposals` stopped being
+/// padded or truncated to a fixed width (decision 0051), and each of those
+/// moved one revision for it. Kept beside [`NAMESPACES`], in the same order,
+/// and held to it by `every_namespace_has_a_schema_rev` below.
+pub const SCHEMA_REVS: [(Namespace, u64); 25] = [
     (AccountAddressChunk::NS, 1),
     (AccountAddressSet::NS, 1),
     (AccountEpochLog::NS, 1),
@@ -98,6 +100,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 24] = [
     (FirstMintChunk::NS, 2),
     (FirstMintSet::NS, 2),
     (GovState::NS, 4),
+    (MetadataLabelState::NS, 2),
     (PaymentAddressChunk::NS, 1),
     (PaymentAddressSet::NS, 1),
     (PaymentStats::NS, 1),
@@ -134,6 +137,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         EpochState::NS => exact::<<EpochState as StateEntity>::Key>(key),
         EraState::NS => exact::<<EraState as StateEntity>::Key>(key),
         GovState::NS => exact::<<GovState as StateEntity>::Key>(key),
+        MetadataLabelState::NS => exact::<<MetadataLabelState as StateEntity>::Key>(key),
         PendingMirState::NS => exact::<<PendingMirState as StateEntity>::Key>(key),
         PendingRewardState::NS => exact::<<PendingRewardState as StateEntity>::Key>(key),
         PoolState::NS => exact::<<PoolState as StateEntity>::Key>(key),

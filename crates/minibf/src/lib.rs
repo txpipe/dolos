@@ -6,7 +6,8 @@ use axum::{
 };
 use dolos_cardano::{
     model::{
-        gov::GovState, AccountState, AssetState, DRepState, EpochState, PoolState, ProposalState,
+        gov::GovState, AccountState, AssetState, DRepState, EpochState, MetadataLabelState,
+        PoolState, ProposalState,
     },
     ChainSummary, PParamsSet, PoolEpochLog,
 };
@@ -339,6 +340,7 @@ where
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
     Option<GovState>: From<D::Entity>,
+    Option<MetadataLabelState>: From<D::Entity>,
 {
     build_router_with_facade(Facade::<D> {
         inner: domain,
@@ -357,6 +359,7 @@ where
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
     Option<GovState>: From<D::Entity>,
+    Option<MetadataLabelState>: From<D::Entity>,
 {
     let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
@@ -600,6 +603,7 @@ where
             "/assets/{subject}/txs",
             get(routes::assets::by_subject_txs::<D>),
         )
+        .route("/metadata/txs/labels", get(routes::metadata::labels::<D>))
         .route(
             "/metadata/txs/labels/{label}",
             get(routes::metadata::by_label_json::<D>),
@@ -760,6 +764,7 @@ where
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
     Option<GovState>: From<D::Entity>,
+    Option<MetadataLabelState>: From<D::Entity>,
 {
     type Config = MinibfConfig;
 

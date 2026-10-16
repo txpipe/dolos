@@ -1172,7 +1172,7 @@ impl CoreArchiveStore for ArchiveStore {
 
         // Log rows with a temporal prefix strictly before the cutoff, per
         // namespace — the price of the shared keyspace's hash prefix.
-        for (&ns, _) in self.schema.iter() {
+        for &ns in self.schema.keys() {
             let range = snapshot.range(
                 &self.logs,
                 namespace_start(ns)..build_temporal_bound(ns, prune_before),
@@ -1234,7 +1234,7 @@ impl CoreArchiveStore for ArchiveStore {
         }
 
         // Log rows with a temporal prefix at or after the cut slot.
-        for (&ns, _) in self.schema.iter() {
+        for &ns in self.schema.keys() {
             let range = snapshot.range(
                 &self.logs,
                 (

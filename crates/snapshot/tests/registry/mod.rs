@@ -58,8 +58,9 @@ pub mod ground_rules;
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
     AddressStats, AssetState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
-    FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
-    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
+    FirstMintSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -276,6 +277,21 @@ pub fn registry() -> Vec<Entry> {
                 Pinned {
                     rev: 4,
                     hex: include_str!("goldens/gov.rev4.hex"),
+                },
+            ]
+        ),
+        entity_entry!(
+            enc_metadata_labels,
+            MetadataLabelState,
+            canaries::metadata_label_state,
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/metadata-labels.rev1.hex"),
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/metadata-labels.rev2.hex"),
                 },
             ]
         ),

@@ -85,6 +85,7 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 | `first-mint-chunks` | — | chunk `u32`, 4 B |
 | `first-mints` | `GroupKey<PolicyKey, AssetKey>`: `policy(28) ‖ epoch(8) ‖ asset key(32)`, 68 B | — |
 | `gov` | `()`: empty | — |
+| `metadata-labels` | label `u64`, 8 B | — |
 | `payment-address-chunks` | — | `PaymentKey`: payment hash, 28 B |
 | `payment-addresses` | `GroupKey<PaymentKey, PaymentAddressKey>`: `payment(28) ‖ epoch(8) ‖` the address without its payment hash, last, 65 B for a base address | — |
 | `payment-stats` | `GroupKey<PaymentKey, ()>`: `payment(28) ‖ epoch(8)`, 36 B | — |
@@ -95,6 +96,8 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 | `utxos` | `tx_hash(32) ‖ output_index(4)`, 36 B | — |
 
 A state row under a log-only namespace (`—` in the state key column) is never written; one that arrives is held to the log's key kind.
+
+`state-metadata-labels` carries `MetadataLabelState` values as CBOR `[tx_count: uint]`, with `tx_count` at field 0. Its key is the metadata label in big-endian byte order. Revision 2 uses the exact 8-byte u64 key; the value encoding is unchanged.
 
 State kinds: one per state namespace, and the set is closed — each spelled `state-` followed by the namespace with `_` rewritten to `-`, by the same rule and for the same reasons as the log kinds below. The namespace is therefore **not** in the record — it is the layer — which is what puts the fail-closed edge of a breaking change on exactly the namespace that broke, and lets a reader skip a namespace this profile does not define at the transport rather than choking on one shared layer. The shard count is **specification, never tuning**: `utxos`, `accounts`, `assets` and `datums` split 16 ways, every other namespace is a single blob, and `parameters.shards` reports the map so a reader never has to discover it from the data. Re-sharding a namespace is a media-type-version event for that namespace's kind. Every shard of every kind is published, empty ones included, so tip completeness is structural: a restore requires every state kind and, per kind, exactly the shards its count promises.
 
