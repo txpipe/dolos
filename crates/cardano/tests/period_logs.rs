@@ -4,7 +4,10 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use dolos_cardano::{
-    model::{AccountAddressChunk, AccountAddressSet, FirstMintChunk, FirstMintSet},
+    model::{
+        AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, FirstMintChunk,
+        FirstMintSet,
+    },
     periods::is_sealable,
     AccountKey, CardanoDelta,
 };
@@ -199,6 +202,70 @@ fn rollback_unstages_exactly_the_rows_its_block_created() {
     assert_eq!(staged(&domain), after[0]);
 }
 
+fn staged_mints(domain: &ToyDomain) -> BTreeSet<(u64, u64, u32, i64)> {
+    domain
+        .state()
+        .iter_entities_typed::<AssetMintSet>(None)
+        .unwrap()
+        .map(|row| {
+            let (key, row) = row.unwrap();
+            (key.epoch, key.member.0, key.member.1, row.amount)
+        })
+        .collect()
+}
+
+/// Done criterion 3: undoing a block removes exactly the asset-mint rows it
+/// staged, one per (valid tx, asset), and nothing another block staged.
+#[test]
+fn rollback_unstages_exactly_the_mints_its_block_created() {
+    let policy = [0x44u8; 28];
+    let mint = |name: &str, amount| (policy, name.to_string(), amount);
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 3,
+        txs_per_block: 2,
+        mints_by_block: vec![
+            vec![vec![mint("A", 5), mint("B", 1)], vec![mint("A", -2)]],
+            vec![vec![mint("A", 3)], vec![mint("C", 1)]],
+            vec![vec![mint("A", -1)], vec![]],
+        ],
+        ..Default::default()
+    });
+
+    let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+    let mut points = Vec::new();
+    let mut after = Vec::new();
+
+    for block in &blocks {
+        domain.roll_forward(block.clone()).unwrap();
+
+        let decoded = MultiEraBlock::decode(block).unwrap();
+        points.push(ChainPoint::Specific(decoded.slot(), decoded.hash()));
+        after.push(staged_mints(&domain));
+    }
+
+    assert_eq!(after[0].len(), 3);
+    assert_eq!(after[1].len(), 5);
+    assert_eq!(after[2].len(), 6);
+
+    let entry = domain.wal().read_entry(&points[0]).unwrap().unwrap();
+    let stagings = entry
+        .delta
+        .iter()
+        .filter(|delta| matches!(delta, CardanoDelta::StageAssetMint(_)))
+        .count();
+    assert_eq!(stagings, 3);
+
+    domain.rollback(&points[1]).unwrap();
+    assert_eq!(staged_mints(&domain), after[1]);
+
+    domain.rollback(&points[0]).unwrap();
+    assert_eq!(staged_mints(&domain), after[0]);
+}
+
 /// A copy of the devnet genesis with `epoch_length`-slot epochs, security
 /// parameter `k`, starting at `protocol`.
 fn genesis_with(epoch_length: u32, k: usize, protocol: usize) -> Arc<Genesis> {
@@ -238,6 +305,16 @@ fn assert_epochs_seal(genesis: Arc<Genesis>, blocks: usize, step: u64) {
         .collect();
 
     let staged_epochs: BTreeSet<u64> = staged(&domain).into_iter().map(|(e, _, _)| e).collect();
+    let staged_mint_epochs: BTreeSet<u64> = staged_mints(&domain)
+        .into_iter()
+        .map(|(e, _, _, _)| e)
+        .collect();
+    let sealed_mint_slots: BTreeSet<u64> = domain
+        .archive()
+        .iter_logs_typed::<AssetMintChunk>(None)
+        .unwrap()
+        .map(|row| row.unwrap().0)
+        .collect();
     let account = AccountKey(primary());
     let staged_account_epochs: BTreeSet<u64> = staged_addresses(&domain)
         .into_iter()
@@ -269,6 +346,8 @@ fn assert_epochs_seal(genesis: Arc<Genesis>, blocks: usize, step: u64) {
                 !staged_epochs.contains(&epoch),
                 "epoch {epoch} still staged"
             );
+            assert!(sealed_mint_slots.contains(&chain.epoch_start(epoch)));
+            assert!(!staged_mint_epochs.contains(&epoch));
             sealed += 1;
         } else {
             assert!(
@@ -278,6 +357,8 @@ fn assert_epochs_seal(genesis: Arc<Genesis>, blocks: usize, step: u64) {
             assert!(staged_account_epochs.contains(&epoch));
             assert!(row.is_none(), "epoch {epoch} sealed early");
             assert!(staged_epochs.contains(&epoch), "epoch {epoch} not staged");
+            assert!(!sealed_mint_slots.contains(&chain.epoch_start(epoch)));
+            assert!(staged_mint_epochs.contains(&epoch));
         }
     }
 

@@ -104,6 +104,7 @@ macro_rules! display_as_stored {
 
 pub mod account_addresses;
 pub mod accounts;
+pub mod asset_mints;
 pub mod assets;
 pub mod datums;
 pub mod dreps;
@@ -124,6 +125,7 @@ pub(crate) mod testing;
 
 pub use account_addresses::*;
 pub use accounts::*;
+pub use asset_mints::*;
 pub use assets::*;
 pub use datums::*;
 pub use dreps::*;
@@ -166,6 +168,8 @@ pub enum CardanoEntity {
     PaymentStats(Box<PaymentStats>),
     PaymentAddressChunk(Box<PaymentAddressChunk>),
     AccountStats(Box<AccountStats>),
+    AssetMintSet(Box<AssetMintSet>),
+    AssetMintChunk(Box<AssetMintChunk>),
 }
 
 macro_rules! variant_boilerplate {
@@ -210,6 +214,8 @@ variant_boilerplate!(PaymentAddressSet);
 variant_boilerplate!(PaymentStats);
 variant_boilerplate!(PaymentAddressChunk);
 variant_boilerplate!(AccountStats);
+variant_boilerplate!(AssetMintSet);
+variant_boilerplate!(AssetMintChunk);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -241,6 +247,8 @@ impl dolos_core::Entity for CardanoEntity {
                 PaymentAddressChunk::decode_entity(ns, value).map(Into::into)
             }
             AccountStats::NS => AccountStats::decode_entity(ns, value).map(Into::into),
+            AssetMintSet::NS => AssetMintSet::decode_entity(ns, value).map(Into::into),
+            AssetMintChunk::NS => AssetMintChunk::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -270,6 +278,8 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PaymentStats(x) => PaymentStats::encode_entity(x),
             Self::PaymentAddressChunk(x) => PaymentAddressChunk::encode_entity(x),
             Self::AccountStats(x) => AccountStats::encode_entity(x),
+            Self::AssetMintSet(x) => AssetMintSet::encode_entity(x),
+            Self::AssetMintChunk(x) => AssetMintChunk::encode_entity(x),
         }
     }
 }
@@ -305,6 +315,7 @@ pub fn build_schema() -> StateSchema {
     register_state::<PaymentAddressSet>(&mut schema);
     register_state::<PaymentStats>(&mut schema);
     register_state::<AccountStats>(&mut schema);
+    register_state::<AssetMintSet>(&mut schema);
     schema
 }
 
@@ -320,6 +331,7 @@ pub fn build_log_schema() -> StateSchema {
     register_log::<AddressStats>(&mut schema);
     register_log::<PaymentAddressChunk>(&mut schema);
     register_log::<AccountStats>(&mut schema);
+    register_log::<AssetMintChunk>(&mut schema);
     schema
 }
 
@@ -339,6 +351,7 @@ mod schema_tests {
             PaymentAddressChunk::NS,
             PolicyMintChunk::NS,
             FirstMintChunk::NS,
+            AssetMintChunk::NS,
         ] {
             assert!(!states.contains_key(ns), "{ns} is a state namespace");
             assert!(logs.contains_key(ns), "{ns} is not a log namespace");
@@ -430,6 +443,7 @@ pub enum CardanoDelta {
     StagePaymentAddress(Box<StagePaymentAddress>),
     StagePaymentStats(Box<StagePaymentStats>),
     StageAccountStats(Box<StageAccountStats>),
+    StageAssetMint(Box<StageAssetMint>),
 }
 
 impl CardanoDelta {
@@ -541,6 +555,7 @@ delta_from!(StageAddressStats);
 delta_from!(StagePaymentAddress);
 delta_from!(StagePaymentStats);
 delta_from!(StageAccountStats);
+delta_from!(StageAssetMint);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -619,6 +634,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => x.key(),
             Self::StagePaymentStats(x) => x.key(),
             Self::StageAccountStats(x) => x.key(),
+            Self::StageAssetMint(x) => x.key(),
         }
     }
 
@@ -695,6 +711,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StagePaymentStats(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StageAccountStats(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::StageAssetMint(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -771,6 +788,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StagePaymentStats(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StageAccountStats(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::StageAssetMint(x) => Self::downcast_undo(x.as_ref(), entity),
         }
     }
 }

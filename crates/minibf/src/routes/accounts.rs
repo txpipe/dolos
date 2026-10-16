@@ -3123,12 +3123,13 @@ mod tests {
                 index: 0,
             };
 
-            let (raw, block_hash, tx_hash) = dolos_testing::synthetic::sample_alonzo_cert_block(
+            let (raw, block_hash, tx_hash) = dolos_testing::synthetic::sample_alonzo_block(
                 number,
                 slot,
                 Some(prev),
                 input,
                 certs,
+                None,
             );
 
             prev = block_hash;

@@ -417,10 +417,6 @@ impl GroupRow for PaymentAddressSet {
             member: PaymentAddressKey(self.tail.clone()),
         }
     }
-
-    fn epoch(&self) -> Epoch {
-        self.epoch
-    }
 }
 
 pub type StagePaymentAddress = StageIfAbsent<PaymentAddressSet>;
