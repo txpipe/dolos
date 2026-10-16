@@ -113,6 +113,7 @@ pub mod eras;
 pub mod first_mints;
 pub mod gov;
 pub mod logs;
+pub mod metadata_labels;
 pub mod pending;
 pub mod pools;
 pub mod pparams;
@@ -134,6 +135,7 @@ pub use eras::*;
 pub use first_mints::*;
 pub use gov::*;
 pub use logs::*;
+pub use metadata_labels::*;
 pub use pending::*;
 pub use pools::*;
 pub use pparams::*;
@@ -171,6 +173,7 @@ pub enum CardanoEntity {
     ScriptState(Box<ScriptState>),
     FirstScriptSet(Box<FirstScriptSet>),
     FirstScriptChunk(Box<FirstScriptChunk>),
+    MetadataLabelState(Box<MetadataLabelState>),
 }
 
 macro_rules! variant_boilerplate {
@@ -218,6 +221,7 @@ variant_boilerplate!(AccountStats);
 variant_boilerplate!(ScriptState);
 variant_boilerplate!(FirstScriptSet);
 variant_boilerplate!(FirstScriptChunk);
+variant_boilerplate!(MetadataLabelState);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -252,6 +256,7 @@ impl dolos_core::Entity for CardanoEntity {
             ScriptState::NS => ScriptState::decode_entity(ns, value).map(Into::into),
             FirstScriptSet::NS => FirstScriptSet::decode_entity(ns, value).map(Into::into),
             FirstScriptChunk::NS => FirstScriptChunk::decode_entity(ns, value).map(Into::into),
+            MetadataLabelState::NS => MetadataLabelState::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -284,6 +289,7 @@ impl dolos_core::Entity for CardanoEntity {
             Self::ScriptState(x) => ScriptState::encode_entity(x),
             Self::FirstScriptSet(x) => FirstScriptSet::encode_entity(x),
             Self::FirstScriptChunk(x) => FirstScriptChunk::encode_entity(x),
+            Self::MetadataLabelState(x) => MetadataLabelState::encode_entity(x),
         }
     }
 }
@@ -321,6 +327,7 @@ pub fn build_schema() -> StateSchema {
     register_state::<AccountStats>(&mut schema);
     register_state::<ScriptState>(&mut schema);
     register_state::<FirstScriptSet>(&mut schema);
+    register_state::<MetadataLabelState>(&mut schema);
     schema
 }
 
@@ -447,6 +454,7 @@ pub enum CardanoDelta {
     StagePaymentAddress(Box<StagePaymentAddress>),
     StagePaymentStats(Box<StagePaymentStats>),
     StageAccountStats(Box<StageAccountStats>),
+    MetadataLabelTxInc(Box<MetadataLabelTxInc>),
     ScriptFirstSeen(Box<ScriptFirstSeen>),
     StageFirstScript(Box<StageFirstScript>),
 }
@@ -562,6 +570,7 @@ delta_from!(StagePaymentStats);
 delta_from!(StageAccountStats);
 delta_from!(ScriptFirstSeen);
 delta_from!(StageFirstScript);
+delta_from!(MetadataLabelTxInc);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -642,6 +651,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => x.key(),
             Self::StagePaymentStats(x) => x.key(),
             Self::StageAccountStats(x) => x.key(),
+            Self::MetadataLabelTxInc(x) => x.key(),
         }
     }
 
@@ -720,6 +730,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StagePaymentStats(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StageAccountStats(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::MetadataLabelTxInc(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -798,6 +809,118 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StagePaymentAddress(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StagePaymentStats(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StageAccountStats(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::MetadataLabelTxInc(x) => Self::downcast_undo(x.as_ref(), entity),
+        }
+    }
+}
+
+#[cfg(test)]
+mod wal_tests {
+    use super::*;
+    use crate::periods::GroupKey;
+    use pallas::ledger::primitives::StakeCredential;
+
+    #[test]
+    fn appended_delta_variant_indices_are_pinned() {
+        let account = AccountKey(StakeCredential::AddrKeyhash([0x11; 28].into()));
+        let deltas: Vec<(u32, CardanoDelta)> = vec![
+            (
+                64,
+                GovDRepSnapshot::new(DRepSnapshot {
+                    closing_epoch: 7,
+                    dreps: Default::default(),
+                })
+                .into(),
+            ),
+            (
+                65,
+                StageFirstMint::new(FirstMintSet {
+                    policy: [0x22; 28].into(),
+                    name: b"A".to_vec(),
+                    epoch: 7,
+                    slot: 100,
+                    tx_index: 0,
+                })
+                .into(),
+            ),
+            (
+                66,
+                StageAccountAddress::new(AccountAddressSet {
+                    account: account.0.clone(),
+                    address: vec![0x33; 29],
+                    epoch: 7,
+                    slot: 100,
+                    tx_index: 0,
+                    output_index: 0,
+                })
+                .into(),
+            ),
+            (
+                67,
+                StageAddressStats::new(
+                    (7, AddressKey::Unstaked(vec![0x33; 29])),
+                    AddressStats::default(),
+                )
+                .into(),
+            ),
+            (
+                68,
+                StagePaymentAddress::new(PaymentAddressSet {
+                    payment: [0x44; 28].into(),
+                    epoch: 7,
+                    tail: vec![0x60],
+                })
+                .into(),
+            ),
+            (
+                69,
+                StagePaymentStats::new(
+                    GroupKey {
+                        group: PaymentKey([0x44; 28].into()),
+                        epoch: 7,
+                        member: (),
+                    },
+                    PaymentStats { tx_count: 1 },
+                )
+                .into(),
+            ),
+            (
+                70,
+                StageAccountStats::new((7, account), AccountStats { tx_count: 1 }).into(),
+            ),
+            (71, MetadataLabelTxInc::new(674, 1).into()),
+            (
+                72,
+                ScriptFirstSeen::new(
+                    [0x55; 28].into(),
+                    ScriptState {
+                        slot: 100,
+                        tx_index: 0,
+                        order: 0,
+                    },
+                )
+                .into(),
+            ),
+            (
+                73,
+                StageFirstScript::new(
+                    7,
+                    [0x55; 28].into(),
+                    ScriptState {
+                        slot: 100,
+                        tx_index: 0,
+                        order: 0,
+                    },
+                )
+                .into(),
+            ),
+        ];
+
+        for (index, delta) in deltas {
+            let encoded = bincode::serialize(&delta).unwrap();
+            assert_eq!(&encoded[..4], &index.to_le_bytes());
+            let decoded: CardanoDelta = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(bincode::serialize(&decoded).unwrap(), encoded);
         }
     }
 }
