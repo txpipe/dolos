@@ -95,7 +95,7 @@ pub fn compute_undo_delta(
         }
     }
 
-    for tx in txs.values() {
+    for (_, tx) in txs.iter() {
         for consumed in tx.consumes() {
             let stxi_ref = TxoRef(*consumed.hash(), consumed.index() as u32);
 
@@ -327,11 +327,11 @@ mod tests {
         let apply = super::compute_apply_delta(&block, &context).unwrap();
         let undo = super::compute_undo_delta(&block, &context).unwrap();
 
-        for produced in apply.produced_utxo.keys() {
+        for (produced, _) in apply.produced_utxo.iter() {
             assert!(undo.undone_utxo.contains_key(produced));
         }
 
-        for consumed in apply.consumed_utxo.keys() {
+        for (consumed, _) in apply.consumed_utxo.iter() {
             assert!(undo.recovered_stxi.contains_key(consumed));
         }
     }

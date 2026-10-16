@@ -85,12 +85,12 @@ impl UtxosTable {
             table.insert(k, v)?;
         }
 
-        for k in delta.undone_utxo.keys() {
+        for (k, _) in delta.undone_utxo.iter() {
             let k: (&[u8; 32], u32) = (&k.0, k.1);
             table.remove(k)?;
         }
 
-        for k in delta.consumed_utxo.keys() {
+        for (k, _) in delta.consumed_utxo.iter() {
             let k: (&[u8; 32], u32) = (&k.0, k.1);
             table.remove(k)?;
         }

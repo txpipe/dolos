@@ -179,7 +179,7 @@ impl BlockVisitor for DRepStateVisitor {
             return Ok(());
         };
 
-        for voter in voting_procedures.keys() {
+        for (voter, _) in voting_procedures.iter() {
             let drep = match voter {
                 Voter::DRepKey(hash) => DRep::Key(*hash),
                 Voter::DRepScript(hash) => DRep::Script(*hash),

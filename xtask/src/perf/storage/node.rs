@@ -412,7 +412,7 @@ fn pid_counters(pid: u32) -> Option<Counters> {
     let hwm = status.as_ref().and_then(|s| {
         s.lines()
             .find_map(|l| l.strip_prefix("VmHWM:"))
-            .and_then(|v| v.split_whitespace().next())
+            .and_then(|v| v.trim().split_whitespace().next())
             .and_then(|kb| kb.parse::<u64>().ok())
             .map(|kb| kb * 1024)
     });

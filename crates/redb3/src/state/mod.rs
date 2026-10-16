@@ -133,7 +133,7 @@ impl StateStore {
 
         let _ = wx.open_table(CURSOR_TABLE)?;
 
-        for table in self.tables.values() {
+        for (_, table) in self.tables.iter() {
             table.initialize(&mut wx)?;
         }
 
