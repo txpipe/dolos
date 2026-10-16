@@ -306,14 +306,14 @@ Note: HTTP/2 flow control is hop-by-hop and the receiver advertises the window t
 
 The `serve.minibf` section controls the options for the HTTP endpoint that hosts a Blockfrost-like endpoint.
 
-| property           | type    | example                          |
-| ------------------ | ------- | -------------------------------- |
-| listen_address     | string  | "[::]:3000"                     |
-| permissive_cors    | boolean | true (default)                   |
-| token_registry_url | string  | "https://token-registry.io"     |
-| url                | string  | "https://minibf.local"          |
-| max_scan_items     | integer | 3000                             |
-| max_offchain_cache_mb | integer | 256 (default)                    |
+| property              | type    | example                     |
+| --------------------- | ------- | --------------------------- |
+| listen_address        | string  | "[::]:3000"                 |
+| permissive_cors       | boolean | true (default)              |
+| token_registry_url    | string  | "https://token-registry.io" |
+| url                   | string  | "https://minibf.local"      |
+| max_scan_items        | integer | 3000                        |
+| max_offchain_cache_mb | integer | 256 (default)               |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin (defaults to `true`).

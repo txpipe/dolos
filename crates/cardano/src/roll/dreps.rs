@@ -257,8 +257,7 @@ impl BlockVisitor for DRepStateVisitor {
         self.cert_index += 1;
 
         // Sightings mirror db-sync's `drep_hash` rows, which db-sync only
-        // writes for certs of valid txs; the crawl above already gates the
-        // certificate fan-out on `tx.is_valid()`.
+        // writes for certs of valid txs, the only certs the crawl visits.
         if let Some(drep) = cert_sighting(cert) {
             let at = (block.slot(), *order, cert_index);
             deltas.add_for_entity(DRepSighting::new(drep, at, cert_anchor(cert)));

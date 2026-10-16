@@ -437,8 +437,6 @@ pub enum CardanoDelta {
     StagePaymentAddress(Box<StagePaymentAddress>),
     StagePaymentStats(Box<StagePaymentStats>),
     StageAccountStats(Box<StageAccountStats>),
-    // The WAL stores this enum positionally: append new variants at the end,
-    // never insert them mid-enum.
     DRepSighting(Box<DRepSighting>),
 }
 
