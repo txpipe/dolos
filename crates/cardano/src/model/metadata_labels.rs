@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 /// The number of transactions that have a transaction-metadata label.
 ///
 /// The entity key is the label. The value does not contain the label again.
-/// Each valid transaction that has
-/// the label in its auxiliary data adds 1 to the count. This count is equal to
-/// the number of `tx_metadata` rows for the label in db-sync.
+/// Each valid transaction that has the label in its auxiliary data adds 1 to
+/// the count. This count is equal to the number of `tx_metadata` rows for the
+/// label in db-sync.
 #[derive(Debug, Clone, Default, Encode, Decode, PartialEq, Eq)]
 pub struct MetadataLabelState {
     #[n(0)]
