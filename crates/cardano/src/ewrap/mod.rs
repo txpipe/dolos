@@ -188,6 +188,13 @@ pub struct BoundaryWork {
     /// [`BoundaryWork::clears_drep_delegation`].
     pub retiring_dreps: Vec<(DRep, (BlockSlot, TxOrder))>,
 
+    /// The network's PV9 delegator-set table (`hacks::pv9_drep_delegs`).
+    pub pv9_drep_delegs: &'static [crate::hacks::pv9_drep_delegs::Entry],
+
+    /// The accounts the table settles at this boundary: those listed under
+    /// the certificate of one of [`Self::retiring_dreps`].
+    pub pv9_settlements: HashMap<StakeCredential, crate::hacks::pv9_drep_delegs::Settlement>,
+
     /// The stake snapshot this boundary's rewards were computed against, and
     /// the protocol its stake totals are read under: RUPD's `snapshot_epoch`
     /// (`C - 3`) and the era of `snapshot_epoch + 1`. `None` where RUPD
@@ -449,13 +456,33 @@ impl BoundaryWork {
     /// correct under repeated dereg/rereg cycles inside one epoch: only
     /// delegations predating the last certificate are cleared. A registration
     /// on its own never clears anything.
+    ///
+    /// Under protocol 9 the set the ledger saw is not the positional one, and
+    /// [`Self::pv9_settlements`] overrides it for the accounts it lists: a
+    /// `Clear` account loses a delegation predating the certificate whatever
+    /// DRep it now points at, and a `Keep` account keeps its delegation to the
+    /// retiring DRep. A delegation made after the certificate is left to the
+    /// positional rule.
     pub fn clears_drep_delegation(&self, drep: &DRep, account: &AccountState) -> bool {
-        let Some((_, unregistered_at)) = self.retiring_dreps.iter().find(|(x, _)| x == drep) else {
-            return false;
+        let predates = |unregistered_at: &(BlockSlot, TxOrder)| {
+            account
+                .vote_delegated_at
+                .is_some_and(|delegated_at| delegated_at < *unregistered_at)
         };
 
-        account
-            .vote_delegated_at
-            .is_some_and(|delegated_at| delegated_at < *unregistered_at)
+        if let Some(settled) = self.pv9_settlements.get(&account.credential) {
+            use crate::hacks::pv9_drep_delegs::Action;
+
+            match settled.action {
+                Action::Clear if predates(&settled.unregistered_at) => return true,
+                Action::Keep if settled.drep == *drep => return false,
+                _ => (),
+            }
+        }
+
+        self.retiring_dreps
+            .iter()
+            .find(|(x, _)| x == drep)
+            .is_some_and(|(_, unregistered_at)| predates(unregistered_at))
     }
 }

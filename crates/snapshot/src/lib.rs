@@ -106,11 +106,11 @@ pub use stelae::progress;
 pub use stelae::{dir, inscription, transport, SteleReader};
 
 use dolos_cardano::model::{
-    AccountEpochLog, AccountState, AccountStats, AddressStats, AssetState, DRepState, DatumState,
-    EpochState, EraState, FirstMintChunk, FixedNamespace, GovState, PaymentStats, PendingMirState,
-    PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState, ScriptSeqState,
-    ScriptState, StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
-    StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
+    AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
+    AddressStats, AssetState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
+    FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
+    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
+    ScriptSeqState, ScriptState,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -140,10 +140,11 @@ pub use layers::digests::DIGESTS;
 /// The namespaces the ledger writes epoch-boundary logs under: the namespace
 /// column of [`LOG_KINDS`], byte-sorted.
 ///
-/// A subset of [`NAMESPACES`] — every log namespace is also a state namespace —
-/// and the closed set the `log-{ns}` kinds are drawn from. Another namespace
-/// acquiring logs would have no layer to travel in, which is why [`export`]
-/// refuses one rather than dropping it.
+/// A subset of [`NAMESPACES`], and the closed set the `log-{ns}` kinds are
+/// drawn from. A log namespace is a state namespace only where its entity also
+/// declares a state key; an archive-only log has no state kind. Another
+/// namespace acquiring logs would have no layer to travel in, which is why
+/// [`export`] refuses one rather than dropping it.
 pub const LOG_NAMESPACES: [Namespace; LOG_KINDS.len()] = {
     let mut namespaces = [""; LOG_KINDS.len()];
     let mut i = 0;
@@ -170,15 +171,15 @@ pub const LOG_NAMESPACES: [Namespace; LOG_KINDS.len()] = {
 /// the log namespaces are spelled, held to the entity types by
 /// `log_kinds_derive_from_their_namespaces` in `tests/coverage.rs`.
 pub const LOG_KINDS: [(&str, Namespace); 9] = [
+    ("log-account-address-chunks", AccountAddressChunk::NS),
     ("log-account-epochs", AccountEpochLog::NS),
     ("log-account-stats", AccountStats::NS),
     ("log-address-stats", AddressStats::NS),
     ("log-epochs", EpochState::NS),
-    ("log-first-mints", FirstMintChunk::NS),
-    ("log-payment-stats", PaymentStats::NS),
-    ("log-policy-first-mints", PolicyMintChunk::NS),
+    ("log-first-mint-chunks", FirstMintChunk::NS),
+    ("log-payment-address-chunks", PaymentAddressChunk::NS),
+    ("log-policy-mint-chunks", PolicyMintChunk::NS),
     ("log-pool-epochs", PoolEpochLog::NS),
-    ("log-stake-addresses", StakeAddressesRow::NS),
 ];
 
 /// The state layer kinds: the namespace each carries and the shard count its
@@ -195,14 +196,14 @@ pub const LOG_KINDS: [(&str, Namespace); 9] = [
 /// rename cannot silently rename a published kind. The derivation is a test,
 /// not a constructor (`state_kinds_derive_from_their_namespaces`).
 ///
-/// The shard count is **specification, never tuning**: the five namespaces
-/// whose populations are chain-scale — the UTxO set, accounts, assets, datums
-/// and scripts — shard sixteen ways by the first key nibble, and every other
-/// namespace is a single blob. Re-sharding a namespace is a media-type-version
-/// event for that namespace's kind, decided by the format's owner; it is not a
-/// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 28] = [
-    ("state-account-epochs", AccountEpochLog::NS, 1),
+/// The shard count is **specification, never tuning**: the namespaces whose
+/// populations are chain-scale — the UTxO set, accounts, assets, datums and
+/// scripts — shard sixteen ways by the first key nibble, and every other
+/// namespace is a single blob. Re-sharding a namespace is a media-type-version event for that
+/// namespace's kind, decided by the format's owner; it is not a constant to
+/// nudge.
+pub const STATE_KINDS: [(&str, Namespace, u8); 20] = [
+    ("state-account-addresses", AccountAddressSet::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
     ("state-address-stats", AddressStats::NS, 1),
@@ -211,28 +212,16 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 28] = [
     ("state-dreps", DRepState::NS, 1),
     ("state-epochs", EpochState::NS, 1),
     ("state-eras", EraState::NS, 1),
-    ("state-first-mints", FirstMintChunk::NS, 1),
+    ("state-first-mints", FirstMintSet::NS, 1),
     ("state-gov", GovState::NS, 1),
+    ("state-payment-addresses", PaymentAddressSet::NS, 1),
     ("state-payment-stats", PaymentStats::NS, 1),
     ("state-pending-mirs", PendingMirState::NS, 1),
     ("state-pending-rewards", PendingRewardState::NS, 1),
-    ("state-policy-first-mints", PolicyMintChunk::NS, 1),
-    ("state-pool-epochs", PoolEpochLog::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
     ("state-script-seqs", ScriptSeqState::NS, 1),
     ("state-scripts", ScriptState::NS, 16),
-    ("state-staged-account-stats", StagedAccountStats::NS, 1),
-    ("state-staged-address-stats", StagedAddressStats::NS, 1),
-    ("state-staged-first-mints", StagedFirstMint::NS, 1),
-    (
-        "state-staged-payment-addresses",
-        StagedPaymentAddress::NS,
-        1,
-    ),
-    ("state-staged-payment-stats", StagedPaymentStats::NS, 1),
-    ("state-staged-stake-addresses", StagedStakeAddress::NS, 1),
-    ("state-stake-addresses", StakeAddressesRow::NS, 1),
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 
@@ -288,8 +277,8 @@ pub fn shards_for(ns: Namespace) -> Option<u8> {
         .map(|(_, _, shards)| shards)
 }
 
-/// How many state layers every publish writes: the shard counts summed — 103
-/// today. Every shard of every namespace kind is written even when empty, so
+/// How many state layers every publish writes: the shard counts summed. Every
+/// shard of every namespace kind is written even when empty, so
 /// tip completeness stays structural rather than data-dependent.
 pub const fn state_layer_count() -> usize {
     let mut total = 0;

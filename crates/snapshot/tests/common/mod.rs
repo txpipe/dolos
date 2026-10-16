@@ -22,16 +22,16 @@
 use dolos_cardano::{
     indexes::archive_dimensions,
     model::{
-        AccountEpochLog, AccountKey, AccountState, AccountStats, AddressKey, AddressStats,
-        AddressStatsKey, AssetKey, AssetState, DRepKey, DRepState, DatumKey, DatumState,
-        EpochState, EraKey, EraState, FirstMintChunk, FixedNamespace as _, GovState, PaymentKey,
-        PaymentStats, PaymentTail, PendingMirState, PendingRewardState, PolicyKey, PolicyMintChunk,
+        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountKey, AccountState,
+        AccountStats, AddressKey, AddressStats, AssetKey, AssetState, DRepKey, DRepState, DatumKey,
+        DatumState, EpochState, EraKey, EraState, FirstMintChunk, FirstMintSet,
+        FixedNamespace as _, GovState, PaymentAddressChunk, PaymentAddressKey, PaymentAddressSet,
+        PaymentKey, PaymentStats, PendingMirState, PendingRewardState, PolicyKey, PolicyMintChunk,
         PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState, ScriptKey, ScriptSeqState,
-        ScriptState, StagedAccountStats, StagedAddressStats, StagedFirstMint, StagedPaymentAddress,
-        StagedPaymentStats, StagedStakeAddress, StakeAddressesRow,
+        ScriptState,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
-    periods::StagedKey,
+    periods::GroupKey,
 };
 use dolos_core::{
     key_hash, keys, BlockHash, EntityKey, EraCbor, ExactKind, ExactRecord, IndexRecord, LogKey,
@@ -92,32 +92,27 @@ pub fn populated_shards(ns: Namespace, shards: u8) -> Vec<u8> {
 pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
     let credential = AccountKey(StakeCredential::AddrKeyhash([byte; 28].into()));
     let payment = PaymentKey([byte; 28].into());
-    let address = AddressStatsKey::Staked {
+    // a base address's header and payment hash
+    let address = AddressKey::Staked {
         account: credential.clone(),
-        rest: vec![byte; 29],
+        rest: [[0x01].as_slice(), &[byte; 28]].concat(),
     };
 
     let key = match ns {
         AccountState::NS
         | AccountEpochLog::NS
-        | AccountStats::NS
         | PendingMirState::NS
         | PendingRewardState::NS
-        | StakeAddressesRow::NS => keys::encode(&credential),
-        AddressStats::NS => keys::encode(&address),
-        PaymentStats::NS => keys::encode(&payment),
-        StagedAccountStats::NS => keys::encode(&StagedKey {
-            group: credential,
-            epoch: u64::from(byte),
-            member: (),
-        }),
-        StagedAddressStats::NS => keys::encode(&(u64::from(byte), address)),
-        StagedPaymentAddress::NS => keys::encode(&StagedKey {
+        | AccountAddressChunk::NS => keys::encode(&credential),
+        AccountStats::NS => keys::encode(&(u64::from(byte), credential)),
+        AddressStats::NS => keys::encode(&(u64::from(byte), address)),
+        PaymentAddressChunk::NS => keys::encode(&payment),
+        PaymentAddressSet::NS => keys::encode(&GroupKey {
             group: payment,
             epoch: u64::from(byte),
-            member: PaymentTail(vec![byte; 29]),
+            member: PaymentAddressKey(vec![byte; 29]),
         }),
-        StagedPaymentStats::NS => keys::encode(&StagedKey {
+        PaymentStats::NS => keys::encode(&GroupKey {
             group: payment,
             epoch: u64::from(byte),
             member: (),
@@ -133,15 +128,15 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         ProposalState::NS => keys::encode(&ProposalKey::new([byte; 32].into(), u32::from(byte))),
         ScriptSeqState::NS => keys::encode(&u64::from(byte)),
         ScriptState::NS => keys::encode(&ScriptKey([byte; 28].into())),
-        StagedFirstMint::NS => keys::encode(&StagedKey {
+        FirstMintSet::NS => keys::encode(&GroupKey {
             group: PolicyKey([byte; 28].into()),
             epoch: u64::from(byte),
             member: AssetKey([byte; 32].into()),
         }),
-        StagedStakeAddress::NS => keys::encode(&StagedKey {
+        AccountAddressSet::NS => keys::encode(&GroupKey {
             group: credential,
             epoch: u64::from(byte),
-            member: AddressKey(vec![byte; 57]),
+            member: address,
         }),
         other => panic!("no fixture key for {other}"),
     };
@@ -270,7 +265,7 @@ pub fn logs(ns: Namespace) -> Vec<LogRecord> {
 /// One layer per namespace, so a kind's shards are the ones its spec'd count
 /// allows and its fixture keys reach: both of [`SHARDS`] for `assets`,
 /// `datums`, `scripts` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`, and
-/// shard 0 for every single blob. Every namespace is among them — which is what
+/// shard 0 for every single blob. Every state namespace is among them — which is what
 /// `the_golden_state_layers_cover_every_namespace` holds this to.
 pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
     STATE_KINDS
@@ -326,7 +321,15 @@ pub fn digests() -> Vec<ImmutableDigests> {
 
 /// A key of `ns`'s log at `slot`, made from `byte`.
 pub fn log_key(ns: Namespace, slot: u64, byte: u8) -> LogKey {
-    LogKey::from_raw(&[slot.to_be_bytes().as_slice(), &state_key(ns, byte)].concat()).unwrap()
+    let key = state_key(ns, byte);
+
+    // a period type's state key is its log key behind the epoch
+    let key = match ns {
+        AccountStats::NS | AddressStats::NS => &key[8..],
+        _ => &key[..],
+    };
+
+    LogKey::from_raw(&[slot.to_be_bytes().as_slice(), key].concat()).unwrap()
 }
 
 pub fn encode_all<T>(

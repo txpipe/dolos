@@ -74,7 +74,7 @@ impl InstanceContents {
 
         let mut logs = BTreeMap::new();
 
-        for ns in dolos_cardano::model::build_schema().keys() {
+        for ns in dolos_cardano::model::build_log_schema().keys() {
             let rows: Vec<_> = stores
                 .archive
                 .iter_logs(ns, dolos_core::KeyRange::all())

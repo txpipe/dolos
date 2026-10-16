@@ -18,18 +18,23 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use dolos_cardano::{indexes::archive_dimensions, model::build_schema};
+use dolos_cardano::{
+    indexes::archive_dimensions,
+    model::{build_log_schema, build_schema},
+};
 use dolos_core::{ExactKind, IndexRecord, Namespace};
 use dolos_snapshot::{
     layers::indexes, log_kind_for, log_ns_for, namespaces, shards_for, state_kind_for,
     state_ns_for, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 
-/// The state namespaces this profile carries are exactly `build_schema`'s, plus
-/// the UTxO set.
+/// The namespaces this profile carries are exactly the two schemas', plus the
+/// UTxO set: the state kinds carry `build_schema`'s and the log kinds carry
+/// `build_log_schema`'s.
 #[test]
-fn namespace_registry_matches_build_schema() {
-    let schema: BTreeSet<Namespace> = build_schema().keys().copied().collect();
+fn namespace_registry_matches_the_schemas() {
+    let states: BTreeSet<Namespace> = build_schema().keys().copied().collect();
+    let logs: BTreeSet<Namespace> = build_log_schema().keys().copied().collect();
     let registry: BTreeSet<Namespace> = NAMESPACES.into_iter().collect();
 
     assert!(
@@ -41,8 +46,26 @@ fn namespace_registry_matches_build_schema() {
         registry.iter().copied().filter(|ns| *ns != UTXOS).collect();
 
     assert_eq!(
-        entities, schema,
-        "the profile's state namespaces have drifted from build_schema()"
+        entities,
+        states.union(&logs).copied().collect(),
+        "the profile's namespaces have drifted from the schemas"
+    );
+
+    let state_kinds: BTreeSet<Namespace> = STATE_KINDS
+        .into_iter()
+        .map(|(_, ns, _)| ns)
+        .filter(|ns| *ns != UTXOS)
+        .collect();
+
+    assert_eq!(
+        state_kinds, states,
+        "the state kinds have drifted from build_schema()"
+    );
+
+    assert_eq!(
+        LOG_NAMESPACES.into_iter().collect::<BTreeSet<_>>(),
+        logs,
+        "the log kinds have drifted from build_log_schema()"
     );
 }
 
@@ -139,7 +162,7 @@ fn the_golden_indexes_layer_covers_every_dimension_and_kind() {
 /// freezing its media type.
 #[test]
 fn the_golden_state_layers_cover_every_namespace() {
-    let expected: BTreeSet<Namespace> = NAMESPACES.into_iter().collect();
+    let expected: BTreeSet<Namespace> = STATE_KINDS.into_iter().map(|(_, ns, _)| ns).collect();
 
     let present: BTreeSet<Namespace> = common::state_layers()
         .into_iter()
@@ -180,9 +203,9 @@ fn the_golden_stele_covers_every_state_kind() {
 }
 
 /// The log namespaces draw from the same registry, so a log kind can never name
-/// a namespace no state layer knows.
+/// a namespace the profile does not know.
 #[test]
-fn the_log_namespaces_are_state_namespaces() {
+fn the_log_namespaces_are_registered() {
     let registry: BTreeSet<Namespace> = NAMESPACES.into_iter().collect();
     let logs: BTreeSet<Namespace> = LOG_NAMESPACES.into_iter().collect();
 
@@ -290,8 +313,6 @@ fn the_golden_stele_covers_every_log_kind() {
 /// namespace.
 #[test]
 fn state_kinds_derive_from_their_namespaces() {
-    assert_eq!(STATE_KINDS.len(), NAMESPACES.len());
-
     let mut kinds = Vec::new();
 
     for (kind, ns, shards) in STATE_KINDS {
@@ -328,13 +349,27 @@ fn state_kinds_derive_from_their_namespaces() {
     sorted.sort_unstable();
     assert_eq!(kinds, sorted, "STATE_KINDS must be in byte order");
 
+    let states: BTreeSet<Namespace> = build_schema().keys().copied().collect();
+    let registered: Vec<Namespace> = NAMESPACES
+        .into_iter()
+        .filter(|ns| *ns == UTXOS || states.contains(ns))
+        .collect();
+
     assert_eq!(
-        STATE_KINDS.map(|(_, ns, _)| ns),
-        NAMESPACES,
-        "STATE_KINDS and NAMESPACES disagree about the namespaces"
+        STATE_KINDS.map(|(_, ns, _)| ns).to_vec(),
+        registered,
+        "STATE_KINDS and the state namespaces disagree"
     );
 
-    // The shard map is the spec's, not the data's: five chain-scale namespaces
+    // An archive-only log has no state kind: a stele carries no state layer
+    // for it.
+    for ns in NAMESPACES {
+        if ns != UTXOS && !states.contains(ns) {
+            assert_eq!(state_kind_for(ns), None, "{ns}");
+        }
+    }
+
+    // The shard map is the spec's, not the data's: the chain-scale namespaces
     // split sixteen ways, and every other namespace is a single blob. Changing
     // one of these is a media-type-version event for that kind, so it is spelled
     // out here rather than derived from the table it is checking.

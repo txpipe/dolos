@@ -301,7 +301,7 @@ mod tests {
     use pallas::crypto::hash::Hash;
 
     fn store_with_tags(tags: Vec<(BlockSlot, Vec<Tag>)>) -> MemoryArchiveStore {
-        let store = MemoryArchiveStore::new(crate::model::build_schema());
+        let store = MemoryArchiveStore::new(crate::model::build_log_schema());
         let deltas: Vec<_> = tags
             .into_iter()
             .map(|(slot, tags)| ArchiveIndexDelta {

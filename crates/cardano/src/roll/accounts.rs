@@ -14,8 +14,8 @@ use pallas::ledger::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    pallas_extras, roll::BlockVisitor, ControlledAmountDec, ControlledAmountInc, EnqueueMir,
-    PParamsSet, StageStakeAddress, StagedStakeAddress, StakeDelegation, StakeDeregistration,
+    pallas_extras, roll::BlockVisitor, AccountAddressSet, ControlledAmountDec, ControlledAmountInc,
+    EnqueueMir, PParamsSet, StageAccountAddress, StakeDelegation, StakeDeregistration,
     StakeRegistration, VoteDelegation, WithdrawalInc,
 };
 
@@ -106,7 +106,7 @@ impl BlockVisitor for AccountVisitor {
             let bytes = address.to_vec();
 
             if self.staged.insert((account.clone(), bytes.clone())) {
-                deltas.add_for_entity(StageStakeAddress::new(StagedStakeAddress {
+                deltas.add_for_entity(StageAccountAddress::new(AccountAddressSet {
                     account,
                     address: bytes,
                     epoch,

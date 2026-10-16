@@ -14,7 +14,7 @@ use super::WorkDeltas;
 use crate::cip25::{cip25_metadata_for_tx, cip25_metadata_has_asset};
 use crate::cip68::{has_cip25_metadata, parse_cip67_label_from_asset_name};
 use crate::roll::BlockVisitor;
-use crate::{MetadataTxUpdate, MintStatsUpdate, PParamsSet, StageFirstMint, StagedFirstMint};
+use crate::{FirstMintSet, MetadataTxUpdate, MintStatsUpdate, PParamsSet, StageFirstMint};
 
 #[derive(Default, Clone)]
 pub struct AssetStateVisitor {
@@ -70,7 +70,7 @@ impl BlockVisitor for AssetStateVisitor {
             ));
 
             if self.staged.insert((*policy, asset.name().to_vec())) {
-                deltas.add_for_entity(StageFirstMint::new(StagedFirstMint {
+                deltas.add_for_entity(StageFirstMint::new(FirstMintSet {
                     policy: *policy,
                     name: asset.name().to_vec(),
                     epoch: self.epoch,

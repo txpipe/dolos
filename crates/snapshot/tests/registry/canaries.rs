@@ -22,17 +22,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use dolos_cardano::{
     model::{
-        AccountEpochLog, AccountState, AssetState, AuthHistory, Committee, CommitteeAuthorization,
-        Constitution, DRepDelegation, DRepExpiry, DRepState, DatumState, EndStats, EpochState,
-        EpochValue, EraBoundary, EraState, FirstMintChunk, GovDistr, GovRoots, GovState, Nonces,
-        PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
-        PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction,
-        ProposalState, RollingStats, ScriptSeqState, ScriptState, ShardProgress, StagedFirstMint,
-        StagedStakeAddress, Stake, StakeAddressesRow, VoteEntry,
+        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AssetState,
+        AuthHistory, Committee, CommitteeAuthorization, Constitution, DRepDelegation, DRepExpiry,
+        DRepState, DatumState, EndStats, EpochState, EpochValue, EraBoundary, EraState,
+        FirstMintChunk, FirstMintSet, GovDistr, GovRoots, GovState, Nonces, PParamValue,
+        PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation,
+        PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
+        RollingStats, ScriptSeqState, ScriptState, ShardProgress, Stake, VoteEntry,
     },
     model::{
-        AccountStats, AddressStats, PaymentStats, StagedAccountStats, StagedAddressStats,
-        StagedPaymentAddress, StagedPaymentStats, Sum, UnitSums,
+        AccountStats, AddressStats, PaymentAddressChunk, PaymentAddressSet, PaymentStats, Sum,
+        UnitSums,
     },
     pallas::{
         codec::utils::Bytes,
@@ -212,8 +212,8 @@ pub fn policy_mint_chunk() -> PolicyMintChunk {
     }
 }
 
-pub fn staged_first_mint() -> StagedFirstMint {
-    StagedFirstMint {
+pub fn first_mint_set() -> FirstMintSet {
+    FirstMintSet {
         policy: hash28(0xb2),
         name: b"staged".to_vec(),
         epoch: 611,
@@ -248,12 +248,8 @@ pub fn address_stats() -> AddressStats {
     }
 }
 
-pub fn staged_address_stats() -> StagedAddressStats {
-    StagedAddressStats(address_stats())
-}
-
-pub fn payment_stats() -> PaymentStats {
-    PaymentStats {
+pub fn payment_address_chunk() -> PaymentAddressChunk {
+    PaymentAddressChunk {
         tails: vec![
             [[0x01].as_slice(), &[0xc2; 28]].concat().into(),
             vec![0x61].into(),
@@ -262,28 +258,24 @@ pub fn payment_stats() -> PaymentStats {
     }
 }
 
-pub fn staged_payment_address() -> StagedPaymentAddress {
-    StagedPaymentAddress {
+pub fn payment_address_set() -> PaymentAddressSet {
+    PaymentAddressSet {
         payment: hash28(0xc1),
         epoch: 612,
         tail: [[0x01].as_slice(), &[0xc2; 28]].concat(),
     }
 }
 
-pub fn staged_payment_stats() -> StagedPaymentStats {
-    StagedPaymentStats { tx_count: 23 }
+pub fn payment_stats() -> PaymentStats {
+    PaymentStats { tx_count: 23 }
 }
 
 pub fn account_stats() -> AccountStats {
-    AccountStats { tx_overlap: 5 }
+    AccountStats { tx_count: 5 }
 }
 
-pub fn staged_account_stats() -> StagedAccountStats {
-    StagedAccountStats { tx_overlap: 7 }
-}
-
-pub fn staged_stake_address() -> StagedStakeAddress {
-    StagedStakeAddress {
+pub fn account_address_set() -> AccountAddressSet {
+    AccountAddressSet {
         account: StakeCredential::ScriptHash(hash28(0xb3)),
         address: [[0x11].as_slice(), &[0xb4; 28], &[0xb3; 28]].concat(),
         epoch: 612,
@@ -293,8 +285,8 @@ pub fn staged_stake_address() -> StagedStakeAddress {
     }
 }
 
-pub fn stake_addresses_row() -> StakeAddressesRow {
-    StakeAddressesRow {
+pub fn account_address_chunk() -> AccountAddressChunk {
+    AccountAddressChunk {
         addresses: vec![
             [[0x01].as_slice(), &[0xb5; 28], &[0xb6; 28]]
                 .concat()
