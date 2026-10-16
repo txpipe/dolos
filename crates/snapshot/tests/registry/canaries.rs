@@ -24,7 +24,7 @@ use dolos_cardano::{
     model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AssetState,
         AuthHistory, Committee, CommitteeAuthorization, Constitution, DRepDelegation, DRepExpiry,
-        DRepState, DatumState, EndStats, EpochState, EpochValue, EraBoundary, EraState,
+        DRepSightingState, DRepState, DatumState, EndStats, EpochState, EpochValue, EraBoundary, EraState,
         FirstMintChunk, FirstMintSet, GovDistr, GovRoots, GovState, Nonces, PParamValue,
         PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation,
         PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
@@ -302,6 +302,13 @@ pub fn datum_state() -> DatumState {
     DatumState {
         refcount: 23,
         bytes: bytes_of::<24>(0x90).to_vec(),
+    }
+}
+
+pub fn drep_sighting_state() -> DRepSightingState {
+    DRepSightingState {
+        first_seen: (44_444, 2, 1),
+        anchor: Some(anchor(0xa2)),
     }
 }
 

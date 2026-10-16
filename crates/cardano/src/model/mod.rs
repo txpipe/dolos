@@ -106,6 +106,7 @@ pub mod account_addresses;
 pub mod accounts;
 pub mod assets;
 pub mod datums;
+pub mod drep_sightings;
 pub mod dreps;
 pub mod epoch_value;
 pub mod epochs;
@@ -126,6 +127,7 @@ pub use account_addresses::*;
 pub use accounts::*;
 pub use assets::*;
 pub use datums::*;
+pub use drep_sightings::*;
 pub use dreps::*;
 pub use epoch_value::*;
 pub use epochs::*;
@@ -149,6 +151,7 @@ pub enum CardanoEntity {
     PoolState(Box<PoolState>),
     EpochState(Box<EpochState>),
     DRepState(Box<DRepState>),
+    DRepSightingState(Box<DRepSightingState>),
     ProposalState(Box<ProposalState>),
     PoolEpochLog(Box<PoolEpochLog>),
     DatumState(Box<DatumState>),
@@ -193,6 +196,7 @@ variant_boilerplate!(AssetState);
 variant_boilerplate!(PoolState);
 variant_boilerplate!(EpochState);
 variant_boilerplate!(DRepState);
+variant_boilerplate!(DRepSightingState);
 variant_boilerplate!(ProposalState);
 variant_boilerplate!(PoolEpochLog);
 variant_boilerplate!(DatumState);
@@ -220,6 +224,7 @@ impl dolos_core::Entity for CardanoEntity {
             PoolState::NS => PoolState::decode_entity(ns, value).map(Into::into),
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
             DRepState::NS => DRepState::decode_entity(ns, value).map(Into::into),
+            DRepSightingState::NS => DRepSightingState::decode_entity(ns, value).map(Into::into),
             ProposalState::NS => ProposalState::decode_entity(ns, value).map(Into::into),
             PoolEpochLog::NS => PoolEpochLog::decode_entity(ns, value).map(Into::into),
             DatumState::NS => DatumState::decode_entity(ns, value).map(Into::into),
@@ -253,6 +258,7 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PoolState(x) => PoolState::encode_entity(x),
             Self::EpochState(x) => EpochState::encode_entity(x),
             Self::DRepState(x) => DRepState::encode_entity(x),
+            Self::DRepSightingState(x) => DRepSightingState::encode_entity(x),
             Self::ProposalState(x) => ProposalState::encode_entity(x),
             Self::PoolEpochLog(x) => PoolEpochLog::encode_entity(x),
             Self::DatumState(x) => DatumState::encode_entity(x),
@@ -294,6 +300,7 @@ pub fn build_schema() -> StateSchema {
     register_state::<PoolState>(&mut schema);
     register_state::<EpochState>(&mut schema);
     register_state::<DRepState>(&mut schema);
+    register_state::<DRepSightingState>(&mut schema);
     register_state::<ProposalState>(&mut schema);
     register_state::<DatumState>(&mut schema);
     register_state::<PendingRewardState>(&mut schema);
@@ -433,6 +440,7 @@ pub enum CardanoDelta {
     // The WAL stores this enum positionally: append new variants at the end,
     // never insert them mid-enum.
     DRepSeen(Box<DRepSeen>),
+    DRepSighting(Box<DRepSighting>),
 }
 
 impl CardanoDelta {
@@ -485,6 +493,7 @@ delta_from!(DRepUnRegistration);
 delta_from!(DRepActivity);
 delta_from!(DRepExpiration);
 delta_from!(DRepSeen);
+delta_from!(DRepSighting);
 delta_from!(WithdrawalInc);
 delta_from!(VoteDelegation);
 delta_from!(PParamsUpdate);
@@ -569,6 +578,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepExpiration(x) => x.key(),
             Self::DRepAnchorUpdate(x) => x.key(),
             Self::DRepSeen(x) => x.key(),
+            Self::DRepSighting(x) => x.key(),
             Self::WithdrawalInc(x) => x.key(),
             Self::VoteDelegation(x) => x.key(),
             Self::PParamsUpdate(x) => x.key(),
@@ -646,6 +656,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepExpiration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepAnchorUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepSeen(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DRepSighting(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::WithdrawalInc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::VoteDelegation(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PParamsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -723,6 +734,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepExpiration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepAnchorUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepSeen(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DRepSighting(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::WithdrawalInc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::VoteDelegation(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PParamsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),

@@ -23,7 +23,7 @@ use dolos_cardano::{
     indexes::archive_dimensions,
     model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountKey, AccountState,
-        AccountStats, AddressKey, AddressStats, AssetKey, AssetState, DRepKey, DRepState, DatumKey,
+        AccountStats, AddressKey, AddressStats, AssetKey, AssetState, DRepKey, DRepSightingState, DRepState, DatumKey,
         DatumState, EpochState, EraKey, EraState, FirstMintChunk, FirstMintSet,
         FixedNamespace as _, GovState, PaymentAddressChunk, PaymentAddressKey, PaymentAddressSet,
         PaymentKey, PaymentStats, PendingMirState, PendingRewardState, PolicyKey, PolicyMintChunk,
@@ -118,7 +118,9 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         }),
         AssetState::NS => keys::encode(&AssetKey([byte; 32].into())),
         DatumState::NS => keys::encode(&DatumKey([byte; 32].into())),
-        DRepState::NS => keys::encode(&DRepKey(DRep::Key([byte; 28].into()))),
+        DRepSightingState::NS | DRepState::NS => {
+            keys::encode(&DRepKey(DRep::Key([byte; 28].into())))
+        }
         EpochState::NS | GovState::NS => keys::encode(&()),
         EraState::NS => keys::encode(&EraKey::from(u16::from(byte))),
         FirstMintChunk::NS => keys::encode(&u32::from(byte)),

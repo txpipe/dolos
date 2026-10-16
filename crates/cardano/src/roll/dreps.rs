@@ -15,7 +15,7 @@ use crate::{
     pallas_extras::{self, stake_cred_to_drep},
     roll::BlockVisitor,
     DRepActivity, DRepAnchorUpdate, DRepDormancyRelease, DRepExpiryUpdate, DRepKey,
-    DRepRegistration, DRepSeen, DRepUnRegistration, GovDormancyReset, PParamsSet,
+    DRepRegistration, DRepSeen, DRepSighting, DRepUnRegistration, GovDormancyReset, PParamsSet,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -36,6 +36,19 @@ fn cert_sighting(cert: &MultiEraCert) -> Option<DRep> {
     pallas_extras::cert_as_vote_delegation(cert)
         .map(|delegation| delegation.drep)
         .or_else(|| cert_drep(cert))
+}
+
+/// The anchor a DRep registration or update carries; db-sync serves the
+/// latest one as the DRep's metadata.
+fn cert_anchor(cert: &MultiEraCert) -> Option<conway::Anchor> {
+    match &cert {
+        MultiEraCert::Conway(conway) => match conway.deref().deref() {
+            conway::Certificate::RegDRepCert(_, _, anchor) => anchor.clone(),
+            conway::Certificate::UpdateDRepCert(_, anchor) => anchor.clone(),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Governance-bookkeeping context the roll visitors need from state:
@@ -247,7 +260,10 @@ impl BlockVisitor for DRepStateVisitor {
         // writes for certs of valid txs; the crawl above already gates the
         // certificate fan-out on `tx.is_valid()`.
         if let Some(drep) = cert_sighting(cert) {
-            deltas.add_for_entity(DRepSeen::new(drep, (block.slot(), *order, cert_index)));
+            let at = (block.slot(), *order, cert_index);
+
+            deltas.add_for_entity(DRepSeen::new(drep.clone(), at));
+            deltas.add_for_entity(DRepSighting::new(drep, at, cert_anchor(cert)));
         }
 
         let Some(drep) = cert_drep(cert) else {
@@ -341,7 +357,7 @@ mod tests {
         use pallas::ledger::primitives::{conway::Certificate, StakeCredential};
 
         use super::*;
-        use crate::DRepState;
+        use crate::DRepSightingState;
 
         const REGISTERED: [u8; 28] = [0xd1; 28];
         // named by one tx, the larger key first: certificate order and key
@@ -402,12 +418,12 @@ mod tests {
             }
 
             let first_seen = |hash: [u8; 28]| {
-                let ns_key = dolos_core::NsKey::of::<DRepState>(&key(hash));
+                let ns_key = dolos_core::NsKey::of::<DRepSightingState>(&key(hash));
 
                 deltas.entities[&ns_key]
                     .iter()
                     .filter_map(|delta| match delta {
-                        crate::CardanoDelta::DRepSeen(seen) => Some(seen.at),
+                        crate::CardanoDelta::DRepSighting(sighting) => Some(sighting.at),
                         _ => None,
                     })
                     .min()

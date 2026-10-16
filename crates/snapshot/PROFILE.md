@@ -79,6 +79,7 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 | `address-stats` | `(Epoch, AddressKey)`: `epoch(8) ‖` the log key, 69 B for a base address | `AddressKey`: `AccountKey ‖ rest` for an address with a stake credential, `rest` being the address without its stake hash (a base address's header and payment hash, a stake address's header), else `0x00 ‖ address`; the first byte, `0x82` or `0x00`, tells the forms apart; 61 B for a base address |
 | `assets` | `AssetKey`: `blake2b256(policy ‖ name)`, 32 B | — |
 | `datums` | `DatumKey`: datum hash, 32 B | — |
+| `drep-sightings` | `DRepKey`, as `dreps` | — |
 | `dreps` | `DRepKey`: `0x22` (key) or `0x23` (script) `‖ hash(28)`, 29 B; `0x00` abstain, `0x01` no-confidence, 1 B | — |
 | `epochs` | `()`: empty | `()`: empty |
 | `eras` | `EraKey`: protocol `u16`, 2 B | — |

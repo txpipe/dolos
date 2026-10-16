@@ -9,12 +9,8 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+use super::CertPosition;
 use crate::pallas_extras::{DREP_KEY_PREFIX, DREP_SCRIPT_PREFIX};
-
-/// Where a certificate sits on chain: the slot of its block, the position of
-/// its transaction in the block, and its own position among that
-/// transaction's certificates. Sorting by it is the chain's certificate order.
-pub type CertPosition = (BlockSlot, TxOrder, usize);
 
 /// Epoch-based DRep expiry, stored exactly as the Haskell ledger stores
 /// `drepExpiry`: **without** dormant-epoch credit. The actual expiry is

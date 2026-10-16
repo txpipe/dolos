@@ -17,7 +17,7 @@
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
+    AddressStats, AssetState, DRepSightingState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
     FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
     PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
 };
@@ -37,7 +37,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against the schemas directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 24] = [
+pub const NAMESPACES: [Namespace; 25] = [
     AccountAddressChunk::NS,
     AccountAddressSet::NS,
     AccountEpochLog::NS,
@@ -46,6 +46,7 @@ pub const NAMESPACES: [Namespace; 24] = [
     AddressStats::NS,
     AssetState::NS,
     DatumState::NS,
+    DRepSightingState::NS,
     DRepState::NS,
     EpochState::NS,
     EraState::NS,
@@ -84,7 +85,7 @@ pub const NAMESPACES: [Namespace; 24] = [
 /// `dreps` then reached 3 when `DRepState::first_seen_at` was appended.
 /// Kept beside [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 24] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 25] = [
     (AccountAddressChunk::NS, 1),
     (AccountAddressSet::NS, 1),
     (AccountEpochLog::NS, 1),
@@ -93,6 +94,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 24] = [
     (AddressStats::NS, 1),
     (AssetState::NS, 1),
     (DatumState::NS, 1),
+    (DRepSightingState::NS, 1),
     (DRepState::NS, 3),
     (EpochState::NS, 3),
     (EraState::NS, 2),
@@ -131,6 +133,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         AddressStats::NS => exact::<<AddressStats as StateEntity>::Key>(key),
         AssetState::NS => exact::<<AssetState as StateEntity>::Key>(key),
         DatumState::NS => exact::<<DatumState as StateEntity>::Key>(key),
+        DRepSightingState::NS => exact::<<DRepSightingState as StateEntity>::Key>(key),
         DRepState::NS => exact::<<DRepState as StateEntity>::Key>(key),
         EpochState::NS => exact::<<EpochState as StateEntity>::Key>(key),
         EraState::NS => exact::<<EraState as StateEntity>::Key>(key),
