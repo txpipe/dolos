@@ -136,10 +136,6 @@ pub mod archive {
         COMMITTEE_CERTS = "committee_certs";
 
         COMMITTEE_VOTES = "committee_votes";
-
-        /// Native asset subject (policy ID + asset name) of every mint or
-        /// burn in a valid transaction
-        ASSET_MINTS = "asset_mints";
     }
 
     pub(in crate::indexes) const COMMITTEE_VOTES_KEY: &[u8] = b"committee";
@@ -187,7 +183,6 @@ mod tests {
                 "script_redeemers",
                 "committee_certs",
                 "committee_votes",
-                "asset_mints",
             ]
         );
     }
