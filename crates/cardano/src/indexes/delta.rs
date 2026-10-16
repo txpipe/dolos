@@ -235,6 +235,48 @@ impl CardanoIndexDeltaBuilder {
             .push(Tag::new(archive::SCRIPT_REDEEMERS, hash));
     }
 
+    /// Tag the current block with every script `tx` carries outside the
+    /// outputs it produces: the witnesses, the auxiliary data, and the
+    /// collateral return of a valid tx.
+    ///
+    /// They count because `/scripts` lists them
+    /// (`roll::scripts::tx_script_hashes`): a listed script is found through
+    /// the archive index once the block that carried it first is pruned. The
+    /// tags do not follow phase-2 validity; `script_by_hash` filters the
+    /// blocks it reads. A produced output's reference script is tagged with
+    /// it, see [`Self::extract_utxo_tags`].
+    pub fn add_tx_scripts(&mut self, tx: &MultiEraTx) {
+        use pallas::ledger::traverse::{ComputeHash as _, OriginalHash as _};
+
+        for script in tx.native_scripts() {
+            self.add_script_hash(script.original_hash().to_vec());
+        }
+        for script in tx.plutus_v1_scripts() {
+            self.add_script_hash(script.compute_hash().to_vec());
+        }
+        for script in tx.plutus_v2_scripts() {
+            self.add_script_hash(script.compute_hash().to_vec());
+        }
+        for script in tx.plutus_v3_scripts() {
+            self.add_script_hash(script.compute_hash().to_vec());
+        }
+
+        for script in pallas_extras::aux_native_scripts(tx) {
+            self.add_script_hash(pallas_extras::native_script_hash(&script).to_vec());
+        }
+        for script in tx.aux_plutus_v1_scripts() {
+            self.add_script_hash(script.compute_hash().to_vec());
+        }
+
+        // a phase-2-invalid tx produces its collateral return, which is tagged
+        // with the other outputs it produces
+        let collateral_return = tx.collateral_return().filter(|_| tx.is_valid());
+
+        if let Some(script_ref) = collateral_return.as_ref().and_then(|x| x.script_ref()) {
+            self.add_script_hash(pallas_extras::script_ref_hash(&script_ref).to_vec());
+        }
+    }
+
     /// Add certificate tags to the current block.
     pub fn add_cert(&mut self, cert: &MultiEraCert) {
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
@@ -445,18 +487,7 @@ impl CardanoIndexDeltaBuilder {
                 }
             }
 
-            for script in tx.native_scripts() {
-                self.add_script_hash(script.original_hash().to_vec());
-            }
-            for script in tx.plutus_v1_scripts() {
-                self.add_script_hash(script.compute_hash().to_vec());
-            }
-            for script in tx.plutus_v2_scripts() {
-                self.add_script_hash(script.compute_hash().to_vec());
-            }
-            for script in tx.plutus_v3_scripts() {
-                self.add_script_hash(script.compute_hash().to_vec());
-            }
+            self.add_tx_scripts(&tx);
 
             for datum in tx.plutus_data() {
                 self.add_datum_hash(datum.original_hash().to_vec());
@@ -707,6 +738,134 @@ mod tests {
 
         let tags = mir(InstantaneousRewardTarget::OtherAccountingPot(5));
         assert!(tags.is_empty());
+    }
+
+    /// A script that only the auxiliary data carries is tagged like a
+    /// witness: the registry lists it, so `script_by_hash` has to find the
+    /// block.
+    #[test]
+    fn auxiliary_scripts_get_script_tags() {
+        use pallas::codec::minicbor;
+        use pallas::codec::utils::{Bytes, KeepRaw, Nullable};
+        use pallas::ledger::primitives::{
+            alonzo::{AuxiliaryData, NativeScript, PostAlonzoAuxiliaryData},
+            conway::{TransactionBody, TransactionInput, Tx, WitnessSet},
+            PlutusScript, Set,
+        };
+        use pallas::ledger::traverse::{ComputeHash as _, MultiEraTx};
+
+        let native = NativeScript::InvalidBefore(9);
+        let plutus = PlutusScript::<1>(Bytes::from(vec![0x46, 0x01, 0x00, 0x00, 0x22, 0x26, 0x01]));
+
+        let body = TransactionBody {
+            inputs: Set::from(vec![TransactionInput {
+                transaction_id: [1u8; 32].into(),
+                index: 0,
+            }]),
+            outputs: vec![],
+            fee: 200_000,
+            ttl: None,
+            certificates: None,
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: None,
+            proposal_procedures: None,
+            treasury_value: None,
+            donation: None,
+        };
+
+        let body = minicbor::to_vec(&body).unwrap();
+        let body = minicbor::decode::<KeepRaw<'_, TransactionBody<'_>>>(&body)
+            .unwrap()
+            .to_owned();
+
+        let witness_set = WitnessSet {
+            vkeywitness: None,
+            native_script: None,
+            bootstrap_witness: None,
+            plutus_v1_script: None,
+            plutus_data: None,
+            redeemer: None,
+            plutus_v2_script: None,
+            plutus_v3_script: None,
+        };
+
+        let tx = Tx {
+            transaction_body: body,
+            transaction_witness_set: KeepRaw::from(witness_set),
+            success: true,
+            auxiliary_data: Nullable::Some(KeepRaw::from(AuxiliaryData::PostAlonzo(
+                PostAlonzoAuxiliaryData {
+                    metadata: None,
+                    native_scripts: Some(vec![native.clone()]),
+                    plutus_scripts: Some(vec![plutus.clone()]),
+                },
+            ))),
+        };
+
+        let cbor = minicbor::to_vec(tx).unwrap();
+        let tx = MultiEraTx::decode(&cbor).unwrap();
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.start_block(1, vec![0xaa; 32], Some(1));
+        builder.add_tx_scripts(&tx);
+
+        let archive = builder.build();
+        let scripts: Vec<&[u8]> = archive
+            .iter()
+            .flat_map(|block| block.tags.iter())
+            .filter(|tag| tag.dimension == archive::SCRIPT)
+            .map(|tag| tag.key.as_slice())
+            .collect();
+
+        assert_eq!(
+            scripts,
+            vec![
+                native.compute_hash().as_slice(),
+                plutus.compute_hash().as_slice()
+            ]
+        );
+    }
+
+    /// Every script `/scripts` counts a valid tx for, past the reference
+    /// scripts of the outputs it produces, gets a tag: the collateral return's,
+    /// the witnesses' and the auxiliary data's, an auxiliary native script
+    /// under the hash of its bytes as written.
+    #[test]
+    fn every_listed_script_outside_the_outputs_gets_a_script_tag() {
+        use pallas::ledger::traverse::MultiEraTx;
+
+        let (tx, listed) = crate::roll::scripts::tests::every_place();
+        let produced = tx.outputs.len();
+        let cbor = tx.cbor();
+        let tx = MultiEraTx::decode(&cbor).unwrap();
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.start_block(1, vec![0xaa; 32], Some(1));
+        builder.add_tx_scripts(&tx);
+
+        let mut tagged: Vec<Vec<u8>> = builder
+            .build()
+            .iter()
+            .flat_map(|block| block.tags.iter())
+            .filter(|tag| tag.dimension == archive::SCRIPT)
+            .map(|tag| tag.key.clone())
+            .collect();
+        tagged.sort();
+
+        let mut expected: Vec<Vec<u8>> = listed[produced..].iter().map(|x| x.to_vec()).collect();
+        expected.sort();
+
+        assert_eq!(tagged, expected);
     }
 
     /// Drive every tag-producing method on the builder once.

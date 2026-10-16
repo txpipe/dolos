@@ -24,13 +24,14 @@ use dolos_cardano::{
     model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountKey, AccountState,
         AccountStats, AddressKey, AddressStats, AssetKey, AssetState, DRepKey, DRepState, DatumKey,
-        DatumState, EpochState, EraKey, EraState, FirstMintChunk, FirstMintSet,
-        FixedNamespace as _, GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressKey,
-        PaymentAddressSet, PaymentKey, PaymentStats, PendingMirState, PendingRewardState,
-        PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState,
+        DatumState, EpochState, EraKey, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+        FirstScriptSet, FixedNamespace as _, GovState, MetadataLabelState, PaymentAddressChunk,
+        PaymentAddressKey, PaymentAddressSet, PaymentKey, PaymentStats, PendingMirState,
+        PendingRewardState, PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, PoolState,
+        ProposalKey, ProposalState, ScriptKey, ScriptState,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
-    periods::GroupKey,
+    periods::{GroupKey, Ungrouped},
 };
 use dolos_core::{
     key_hash, keys, BlockHash, EntityKey, EraCbor, ExactKind, ExactRecord, IndexRecord, LogKey,
@@ -122,10 +123,16 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         EpochState::NS | GovState::NS => keys::encode(&()),
         MetadataLabelState::NS => keys::encode(&u64::from(byte)),
         EraState::NS => keys::encode(&EraKey::from(u16::from(byte))),
-        FirstMintChunk::NS => keys::encode(&u32::from(byte)),
+        FirstMintChunk::NS | FirstScriptChunk::NS => keys::encode(&u32::from(byte)),
         PolicyMintChunk::NS => keys::encode(&(PolicyKey([byte; 28].into()), u32::from(byte))),
         PoolState::NS | PoolEpochLog::NS => keys::encode(&PoolKey([byte; 28].into())),
         ProposalState::NS => keys::encode(&ProposalKey::new([byte; 32].into(), u32::from(byte))),
+        ScriptState::NS => keys::encode(&ScriptKey([byte; 28].into())),
+        FirstScriptSet::NS => keys::encode(&GroupKey {
+            group: Ungrouped,
+            epoch: u64::from(byte),
+            member: ScriptKey([byte; 28].into()),
+        }),
         FirstMintSet::NS => keys::encode(&GroupKey {
             group: PolicyKey([byte; 28].into()),
             epoch: u64::from(byte),
@@ -262,9 +269,10 @@ pub fn logs(ns: Namespace) -> Vec<LogRecord> {
 ///
 /// One layer per namespace, so a kind's shards are the ones its spec'd count
 /// allows and its fixture keys reach: both of [`SHARDS`] for `assets`,
-/// `datums` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`, and shard 0
-/// for every single blob. Every state namespace is among them — which is what
-/// `the_golden_state_layers_cover_every_namespace` holds this to.
+/// `datums`, `scripts` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`,
+/// and shard 0 for every single blob. Every state namespace is among them —
+/// which is what `the_golden_state_layers_cover_every_namespace` holds this
+/// to.
 pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
     STATE_KINDS
         .into_iter()

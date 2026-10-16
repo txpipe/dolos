@@ -126,8 +126,8 @@ impl OrderCheck {
 mod tests {
     use dolos_cardano::model::{
         AccountAddressChunk, AccountStats, AddressStats, EpochState, FirstMintChunk,
-        FixedNamespace as _, PaymentAddressChunk, PolicyKey, PolicyMintChunk, PoolEpochLog,
-        PoolKey,
+        FirstScriptChunk, FixedNamespace as _, PaymentAddressChunk, PolicyKey, PolicyMintChunk,
+        PoolEpochLog, PoolKey,
     };
 
     use super::*;
@@ -157,8 +157,8 @@ mod tests {
     }
 
     /// Each log takes exactly the keys of its kind after the slot: none for
-    /// the epoch log, a chunk index for first mints, a policy and a chunk for
-    /// the per-policy list.
+    /// the epoch log, a chunk index for first mints and first scripts, a policy
+    /// and a chunk for the per-policy list.
     #[test]
     fn keys_are_held_to_their_namespace_kind() {
         let slot = 7u64.to_be_bytes();
@@ -166,6 +166,7 @@ mod tests {
         for (ns, len) in [
             (EpochState::NS, 0),
             (FirstMintChunk::NS, 4),
+            (FirstScriptChunk::NS, 4),
             (PolicyMintChunk::NS, 32),
             (PoolEpochLog::NS, 28),
         ] {
@@ -196,6 +197,7 @@ mod tests {
         for (ns, len) in [
             (EpochState::NS, 32),
             (FirstMintChunk::NS, 32),
+            (FirstScriptChunk::NS, 32),
             (AccountAddressChunk::NS, 32),
             (AccountStats::NS, 32),
             (AddressStats::NS, 1),
