@@ -24,8 +24,8 @@ use dolos_cardano::{
     model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AssetState,
         AuthHistory, Committee, CommitteeAuthorization, Constitution, DRepDelegation, DRepExpiry,
-        DRepSightingState, DRepState, DatumState, EndStats, EpochState, EpochValue, EraBoundary, EraState,
-        FirstMintChunk, FirstMintSet, GovDistr, GovRoots, GovState, Nonces, PParamValue,
+        DRepSightingState, DRepState, DatumState, EndStats, EpochState, EpochValue, EraBoundary,
+        EraState, FirstMintChunk, FirstMintSet, GovDistr, GovRoots, GovState, Nonces, PParamValue,
         PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation,
         PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction, ProposalState,
         RollingStats, ShardProgress, Stake, VoteEntry,
@@ -327,7 +327,6 @@ pub fn drep_state() -> DRepState {
             updated_in: 409,
             prev: Some(400),
         }),
-        first_seen_at: Some((44_444, 2, 1)),
     }
 }
 

@@ -38,7 +38,8 @@ use dolos_cardano::{
     indexes::CardanoArchiveIndexExt as _,
     model::{
         gov::{CommitteeAuthorization, GovState},
-        AccountState, DRepKey, DRepState, ProposalAction, ProposalKey, ProposalState,
+        AccountState, CertPosition, DRepKey, DRepSightingState, DRepState, ProposalAction,
+        ProposalKey, ProposalState,
     },
     pallas_extras, ChainSummary, PParamsSet,
 };
@@ -221,64 +222,116 @@ fn parse_bool_filter(value: Option<&str>) -> Result<Option<bool>, Error> {
     }
 }
 
+/// One listed DRep: its sighting, and its ledger row where the ledger has
+/// one. A DRep only a vote delegation named has none.
+struct DrepRow {
+    key: DRepKey,
+    sighting: DRepSightingState,
+    state: Option<DRepState>,
+}
+
+impl DrepRow {
+    /// The listing's default order, db-sync's `drep_hash` order: first
+    /// sighting, down to the certificate, the key breaking ties no chain
+    /// produces.
+    fn appearance(&self) -> (CertPosition, &DRepKey) {
+        (self.sighting.first_seen, &self.key)
+    }
+
+    fn amount(&self) -> u64 {
+        self.state
+            .as_ref()
+            .map(|state| state.voting_power)
+            .unwrap_or_default()
+    }
+}
+
 /// One page of `/governance/dreps`, with the chain context its rows render
 /// against.
 struct DrepsPage {
-    states: Vec<DRepState>,
+    rows: Vec<DrepRow>,
     chain: ChainSummary,
     tip: BlockSlot,
     pparams: PParamsSet,
 }
 
-/// The stamp a listed DRep sorts by: its first sighting, or the end of the
-/// order for a row with none.
-type AppearedAt = (u64, usize, usize);
-
-/// The DReps the listing keeps, each with the stamp it sorts by, in key
-/// order, `chunk` rows per blocking task.
-///
-/// Blockfrost applies the filters before pagination, so every page holds up
-/// to `count` matching rows.
-async fn load_drep_rows<D>(
+/// Every DRep a certificate has named, in key order.
+async fn load_drep_sightings<D>(
     domain: &Facade<D>,
-    retired: Option<bool>,
-    expired: Option<bool>,
-    chain: ChainSummary,
-    tip: BlockSlot,
-    pparams: PParamsSet,
     chunk: usize,
-) -> Result<Vec<(AppearedAt, DRepKey, DRepState)>, StatusCode>
+) -> Result<Vec<(DRepKey, DRepSightingState)>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    EntityScan::<DRepState>::all(chunk)
-        .filter_map(domain, move |key, state| {
-            if retired.is_some_and(|wanted| drep_is_retired(&state) != wanted) {
-                return None;
+    EntityScan::<DRepSightingState>::all(chunk)
+        .filter_map(domain, |key, sighting| Some((key, sighting)))
+        .await
+}
+
+/// The ledger row of every sighted DRep, read by one scan of `dreps` rather
+/// than a point read per DRep: the filters and `order_by=amount` need every
+/// row before they can cut a page.
+async fn join_drep_states<D>(
+    domain: &Facade<D>,
+    sightings: Vec<(DRepKey, DRepSightingState)>,
+    chunk: usize,
+) -> Result<Vec<DrepRow>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let mut states: HashMap<DRepKey, DRepState> = EntityScan::<DRepState>::all(chunk)
+        .filter_map(domain, |key, state| Some((key, state)))
+        .await?
+        .into_iter()
+        .collect();
+
+    let rows = sightings
+        .into_iter()
+        .map(|(key, sighting)| {
+            let state = states.remove(&key);
+
+            DrepRow {
+                key,
+                sighting,
+                state,
             }
+        })
+        .collect();
 
-            if expired
-                .is_some_and(|wanted| drep_is_expired(&state, &chain, tip, &pparams) != wanted)
-            {
-                return None;
-            }
+    Ok(rows)
+}
 
-            // A row from before `first_seen_at` sorts by its lifecycle stamps
-            // until its next sighting backfills the field; one with no stamp
-            // at all goes last. A resync restores the exact order, and the
-            // DReps such a store never wrote a row for.
-            let appeared_at = state
-                .first_seen()
-                .unwrap_or((u64::MAX, usize::MAX, usize::MAX));
+/// The ledger rows of one page's DReps, by point reads in one blocking task.
+async fn read_drep_states<D>(
+    domain: &Facade<D>,
+    sightings: Vec<(DRepKey, DRepSightingState)>,
+) -> Result<Vec<DrepRow>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    domain
+        .blocking(move |facade| {
+            sightings
+                .into_iter()
+                .map(|(key, sighting)| {
+                    let state = facade.read_cardano_entity::<DRepState>(&key)?;
 
-            Some((appeared_at, key, state))
+                    Ok(DrepRow {
+                        key,
+                        sighting,
+                        state,
+                    })
+                })
+                .collect()
         })
         .await
 }
 
-/// The listing filters and sorts every DRep before it cuts the page: the
-/// scan runs in chunks under the query limiter, the sort on the request's
-/// own task.
+/// The listing sorts every sighted DRep before it cuts the page. Without a
+/// filter or `order_by=amount`, only the page's ledger rows are read.
+///
+/// Blockfrost applies the filters before pagination, so every page holds up
+/// to `count` matching rows.
 async fn drep_page<D>(
     domain: &Facade<D>,
     retired: Option<bool>,
@@ -291,47 +344,74 @@ where
 {
     let (chain, tip, pparams) = chain_context(domain)?;
 
-    let mut dreps = load_drep_rows(
-        domain,
-        retired,
-        expired,
-        chain.clone(),
-        tip,
-        pparams.clone(),
-        ENTITY_CHUNK,
-    )
-    .await?;
+    let mut sightings = load_drep_sightings(domain, ENTITY_CHUNK).await?;
+
+    if retired.is_none() && expired.is_none() && !order_by_amount {
+        sightings
+            .sort_by(|(a_key, a), (b_key, b)| (a.first_seen, a_key).cmp(&(b.first_seen, b_key)));
+
+        if matches!(pagination.order, Order::Desc) {
+            sightings.reverse();
+        }
+
+        let page = sightings
+            .into_iter()
+            .skip(pagination.from())
+            .take(pagination.count)
+            .collect();
+
+        let rows = read_drep_states(domain, page).await?;
+
+        return Ok(DrepsPage {
+            rows,
+            chain,
+            tip,
+            pparams,
+        });
+    }
+
+    let mut rows = join_drep_states(domain, sightings, ENTITY_CHUNK).await?;
+
+    // a DRep with no ledger row is listed, neither retired nor expired
+    rows.retain(|row| {
+        let is_retired = row.state.as_ref().is_some_and(drep_is_retired);
+
+        let is_expired = row
+            .state
+            .as_ref()
+            .is_some_and(|state| drep_is_expired(state, &chain, tip, &pparams));
+
+        retired.is_none_or(|wanted| is_retired == wanted)
+            && expired.is_none_or(|wanted| is_expired == wanted)
+    });
 
     if order_by_amount {
         // `order` flips only the amount; the appearance order stays the
         // ascending tie-breaker, like Blockfrost's `ORDER BY amount, id ASC`.
-        dreps.sort_by(|(a_order, a_key, a_state), (b_order, b_key, b_state)| {
+        rows.sort_by(|a, b| {
             let amounts = match pagination.order {
-                Order::Desc => b_state.voting_power.cmp(&a_state.voting_power),
-                Order::Asc => a_state.voting_power.cmp(&b_state.voting_power),
+                Order::Desc => b.amount().cmp(&a.amount()),
+                Order::Asc => a.amount().cmp(&b.amount()),
             };
 
-            amounts.then_with(|| (a_order, a_key).cmp(&(b_order, b_key)))
+            amounts.then_with(|| a.appearance().cmp(&b.appearance()))
         });
     } else {
-        dreps.sort_by(|(a_order, a_key, _), (b_order, b_key, _)| {
-            (a_order, a_key).cmp(&(b_order, b_key))
-        });
+        rows.sort_by(|a, b| a.appearance().cmp(&b.appearance()));
 
         if matches!(pagination.order, Order::Desc) {
-            dreps.reverse();
+            rows.reverse();
         }
     }
 
-    let states = dreps
+    let rows = rows
         .into_iter()
         .skip(pagination.from())
         .take(pagination.count)
-        .map(|(_, _, state)| state)
         .collect();
 
     Ok(DrepsPage {
-        states,
+        rows,
         chain,
         tip,
         pparams,
@@ -344,7 +424,6 @@ pub async fn all_dreps<D>(
 ) -> Result<Json<Vec<DrepsInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<DRepState>: From<D::Entity>,
 {
     let order_by_amount = params.order_by_amount()?;
     let retired = parse_bool_filter(params.retired.as_deref())?;
@@ -354,7 +433,7 @@ where
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
     let DrepsPage {
-        states,
+        rows,
         chain,
         tip,
         pparams,
@@ -363,9 +442,11 @@ where
     let store = offchain_store(&domain).await;
     let gateways = domain.config.ipfs_gateways();
 
-    let anchors: Vec<_> = states
+    // the latest anchor a registration or update carried, as db-sync serves
+    // it; the ledger's own anchor is cleared by an update that carries none
+    let anchors: Vec<_> = rows
         .iter()
-        .flat_map(|state| state.anchor.clone())
+        .flat_map(|row| row.sighting.anchor.clone())
         .collect();
 
     // a page shows what it has rather than wait on a backlog of loads
@@ -385,11 +466,11 @@ where
 
     let mut metadata = metadata.into_iter();
 
-    let page = states
+    let page = rows
         .into_iter()
-        .map(|state| {
-            let has_anchor = state.anchor.is_some();
-            let mut model = drep_list_item(state, &pparams, &chain, tip)?;
+        .map(|row| {
+            let has_anchor = row.sighting.anchor.is_some();
+            let mut model = drep_list_item(row.key.into(), row.state, &pparams, &chain, tip)?;
 
             // `anchors` keeps the anchored rows in page order
             model.metadata = has_anchor.then(|| metadata.next()).flatten().map(Box::new);
@@ -3116,16 +3197,29 @@ mod tests {
             .try_into()
             .expect("drep bytes carry a 28-byte hash");
 
+        let key = drep_key(&drep_bytes).unwrap();
+
         let mut state = DRepState::new(DRep::Key(Hash::from(keyhash)));
-        state.anchor = Some(anchor);
+        state.anchor = Some(anchor.clone());
+
+        // the list serves the sighting's anchor, so it carries the same one
+        let mut sighting = domain
+            .state()
+            .read_entity_typed::<DRepSightingState>(&key)
+            .expect("failed to read drep sighting")
+            .expect("the synthetic drep has a sighting");
+        sighting.anchor = Some(anchor);
 
         let writer = domain
             .state()
             .start_writer()
             .expect("failed to start writer");
         writer
-            .write_entity_typed(&drep_key(&drep_bytes).unwrap(), &state)
+            .write_entity_typed(&key, &state)
             .expect("failed to write drep state");
+        writer
+            .write_entity_typed(&key, &sighting)
+            .expect("failed to write drep sighting");
         writer.commit().expect("failed to commit drep state");
     }
 
@@ -3471,6 +3565,21 @@ mod tests {
         assert!(models.is_empty());
     }
 
+    /// Writes a DRep's sighting, as the roll would have.
+    fn write_sighting(
+        writer: &impl dolos_core::StateWriter,
+        identifier: &DRep,
+        first_seen: CertPosition,
+        anchor: Option<Anchor>,
+    ) {
+        writer
+            .write_entity_typed(
+                &DRepKey::from(identifier),
+                &DRepSightingState { first_seen, anchor },
+            )
+            .expect("failed to write drep sighting");
+    }
+
     /// Three DReps whose voting powers and first sightings disagree, so
     /// ordering by amount cannot be mistaken for the default ordering and
     /// each direction names a different row first.
@@ -3488,13 +3597,14 @@ mod tests {
 
                 let mut state = DRepState::new(identifier.clone());
                 state.registered_at = Some((seen, 0));
-                state.first_seen_at = Some((seen, 0, 0));
                 state.voting_power = power;
                 state.expiry = Some(DRepExpiry::new(u64::MAX, 0));
 
                 writer
                     .write_entity_typed(&DRepKey::from(&identifier), &state)
                     .expect("failed to write drep");
+
+                write_sighting(&writer, &identifier, (seen, 0, 0), None);
             }
 
             writer.commit().expect("failed to commit dreps");
@@ -3547,90 +3657,211 @@ mod tests {
         assert_eq!(listed_ids(&models, &seeded), vec![a, c, b]);
     }
 
-    /// Rows written before `first_seen_at` existed keep their place by their
-    /// lifecycle stamps instead of piling up at the end in key order.
-    #[tokio::test]
-    async fn governance_dreps_list_orders_legacy_rows_by_lifecycle_stamps() {
-        // the legacy keys sort first, so a key-order fallback would list them
-        // ahead of the rows that carry a sighting
-        let rows = [
-            (0x01u8, None, None),
-            (0x02, None, Some((15, 0))),
-            (0xe5, Some((10, 0, 0)), Some((10, 0))),
-            (0xf6, Some((20, 0, 0)), Some((20, 0))),
-        ];
+    /// DReps the synthetic chain's first tx names after its own DRep, whose
+    /// keys sort in neither their appearance order nor its reverse.
+    mod sighted {
+        use super::*;
 
-        let app =
-            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), move |domain, _| {
-                let writer = domain
-                    .state()
-                    .start_writer()
-                    .expect("failed to start writer");
+        /// Delegated to in certificate 5, registered in certificate 8.
+        pub const DELEGATED_FIRST: [u8; 28] = [0xf1; 28];
+        /// Registered in certificate 6, delegated to in certificate 7.
+        pub const REGISTERED_FIRST: [u8; 28] = [0xe2; 28];
+        /// Delegated to in certificate 9, never registered.
+        pub const NEVER_REGISTERED: [u8; 28] = [0xd3; 28];
 
-                for (byte, seen, registered) in rows {
-                    let identifier = DRep::Key([byte; 28].into());
+        pub fn drep(hash: [u8; 28]) -> DRep {
+            DRep::Key(hash.into())
+        }
 
-                    let mut state = DRepState::new(identifier.clone());
-                    state.first_seen_at = seen;
-                    state.registered_at = registered;
+        pub fn id(drep: &DRep) -> String {
+            bech32_drep(drep).expect("failed to encode")
+        }
 
-                    writer
-                        .write_entity_typed(&DRepKey::from(&identifier), &state)
-                        .expect("failed to write drep");
-                }
+        fn delegation(target: DRep) -> Certificate {
+            Certificate::VoteDeleg(
+                crate::test_support::stake_address_accounts::primary(),
+                target,
+            )
+        }
 
-                writer.commit().expect("failed to commit dreps");
-            });
+        fn registration(hash: [u8; 28], anchor: Option<Anchor>) -> Certificate {
+            Certificate::RegDRepCert(StakeCredential::AddrKeyhash(hash.into()), 1000, anchor)
+        }
 
-        let id = |byte: u8| bech32_drep(&DRep::Key([byte; 28].into())).expect("failed to encode");
-        let seeded = rows.map(|(byte, ..)| id(byte)).to_vec();
+        pub fn anchor(byte: u8) -> Anchor {
+            Anchor {
+                url: format!("https://example.invalid/drep/{byte}"),
+                content_hash: Hash::from([byte; 32]),
+            }
+        }
 
-        let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
+        /// Two blocks. The first tx of block 0 names, after the synthetic
+        /// DRep's certificates 3 and 4, the DReps above and then the two
+        /// special DReps. The first tx of block 1 updates `REGISTERED_FIRST`
+        /// without an anchor.
+        pub fn config() -> SyntheticBlockConfig {
+            SyntheticBlockConfig {
+                block_count: 2,
+                extra_certs_by_block: vec![
+                    vec![vec![
+                        delegation(drep(DELEGATED_FIRST)),
+                        registration(REGISTERED_FIRST, Some(anchor(0x51))),
+                        delegation(drep(REGISTERED_FIRST)),
+                        registration(DELEGATED_FIRST, None),
+                        delegation(drep(NEVER_REGISTERED)),
+                        delegation(DRep::Abstain),
+                        delegation(DRep::NoConfidence),
+                    ]],
+                    vec![vec![Certificate::UpdateDRepCert(
+                        StakeCredential::AddrKeyhash(REGISTERED_FIRST.into()),
+                        None,
+                    )]],
+                ],
+                ..Default::default()
+            }
+        }
 
-        // the row with no stamp at all has nothing to sort by and goes last
-        assert_eq!(
-            listed_ids(&models, &seeded),
-            vec![id(0xe5), id(0x02), id(0xf6), id(0x01)]
-        );
+        /// Every DRep the chain names, in the order its certificates first
+        /// name them.
+        pub fn appearance(app: &TestApp) -> Vec<String> {
+            vec![
+                app.vectors().drep_id.clone(),
+                id(&drep(DELEGATED_FIRST)),
+                id(&drep(REGISTERED_FIRST)),
+                id(&drep(NEVER_REGISTERED)),
+                id(&DRep::Abstain),
+                id(&DRep::NoConfidence),
+            ]
+        }
     }
 
-    /// DReps one transaction names first keep the order of its certificates,
-    /// the order db-sync inserts their `drep_hash` rows in, whatever order
-    /// their keys sort in.
+    /// The list follows the chain's certificate order, in both directions,
+    /// whatever order the keys sort in: a DRep a tx delegates to before it
+    /// registers sorts by the delegation, one it registers first by the
+    /// registration.
     #[tokio::test]
-    async fn governance_dreps_list_keeps_certificate_order_within_a_tx() {
-        // the larger key is named by the earlier certificate
-        let rows = [(0xf7u8, 1usize), (0xe8, 2)];
+    async fn governance_dreps_list_follows_certificate_order() {
+        let app = TestApp::new_with_cfg(sighted::config());
+        let expected = sighted::appearance(&app);
 
-        let app =
-            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), move |domain, _| {
-                let writer = domain
-                    .state()
-                    .start_writer()
-                    .expect("failed to start writer");
-
-                for (byte, cert) in rows {
-                    let identifier = DRep::Key([byte; 28].into());
-
-                    let mut state = DRepState::new(identifier.clone());
-                    state.first_seen_at = Some((40, 0, cert));
-
-                    writer
-                        .write_entity_typed(&DRepKey::from(&identifier), &state)
-                        .expect("failed to write drep");
-                }
-
-                writer.commit().expect("failed to commit dreps");
-            });
-
-        let id = |byte: u8| bech32_drep(&DRep::Key([byte; 28].into())).expect("failed to encode");
-        let seeded = rows.map(|(byte, _)| id(byte)).to_vec();
+        let ids = |models: Vec<DrepsInner>| -> Vec<String> {
+            models.into_iter().map(|x| x.drep_id).collect()
+        };
 
         let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
-        assert_eq!(listed_ids(&models, &seeded), vec![id(0xf7), id(0xe8)]);
+        assert_eq!(ids(models), expected);
 
         let models = get_dreps_list(&app, "/governance/dreps?count=100&order=desc").await;
-        assert_eq!(listed_ids(&models, &seeded), vec![id(0xe8), id(0xf7)]);
+        let mut reversed = expected.clone();
+        reversed.reverse();
+        assert_eq!(ids(models), reversed);
+
+        // pages cut the same order
+        let mut paged = vec![];
+
+        for page in 1..=3 {
+            let path = format!("/governance/dreps?count=2&page={page}");
+            paged.extend(ids(get_dreps_list(&app, &path).await));
+        }
+
+        assert_eq!(paged, expected);
+    }
+
+    /// A DRep only a vote delegation names has no ledger row. It is listed
+    /// all the same, neither retired nor expired, with no amount, no
+    /// activity and no metadata, and the filters agree.
+    #[tokio::test]
+    async fn governance_dreps_list_includes_dreps_only_a_delegation_names() {
+        let app = TestApp::new_with_cfg(sighted::config());
+        let drep = sighted::drep(sighted::NEVER_REGISTERED);
+        let drep_id = sighted::id(&drep);
+
+        let ledger_row = app
+            .facade()
+            .read_cardano_entity::<DRepState>(&DRepKey::from(&drep))
+            .expect("drep read");
+        assert!(ledger_row.is_none(), "the ledger holds no row for it");
+
+        let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
+        let listed = models
+            .into_iter()
+            .find(|x| x.drep_id == drep_id)
+            .expect("the drep is not listed");
+
+        assert_eq!(
+            listed,
+            DrepsInner {
+                drep_id: drep_id.clone(),
+                hex: hex::encode(dolos_core::keys::encode(&DRepKey::from(&drep))),
+                amount: "0".to_string(),
+                has_script: false,
+                retired: false,
+                expired: false,
+                last_active_epoch: None,
+                metadata: None,
+            }
+        );
+
+        for (path, kept) in [
+            ("/governance/dreps?count=100&retired=false", true),
+            ("/governance/dreps?count=100&expired=false", true),
+            ("/governance/dreps?count=100&retired=true", false),
+            ("/governance/dreps?count=100&expired=true", false),
+        ] {
+            let models = get_dreps_list(&app, path).await;
+            assert_eq!(models.iter().any(|x| x.drep_id == drep_id), kept, "{path}");
+        }
+    }
+
+    /// The special DReps are listed where a delegation first names them,
+    /// with an empty `hex`, as Blockfrost lists them.
+    #[tokio::test]
+    async fn governance_dreps_list_includes_the_special_dreps() {
+        let app = TestApp::new_with_cfg(sighted::config());
+        let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
+
+        for drep in [DRep::Abstain, DRep::NoConfidence] {
+            let drep_id = sighted::id(&drep);
+
+            let listed = models
+                .iter()
+                .find(|x| x.drep_id == drep_id)
+                .unwrap_or_else(|| panic!("{drep_id} is not listed"));
+
+            assert_eq!(listed.hex, "");
+            assert!(!listed.has_script);
+            assert!(!listed.retired);
+            assert!(!listed.expired);
+            assert_eq!(listed.last_active_epoch, None);
+            assert_eq!(listed.metadata, None);
+        }
+    }
+
+    /// An update without an anchor clears the ledger's anchor, but the list
+    /// serves the one the registration carried, as Blockfrost does.
+    #[tokio::test]
+    async fn governance_dreps_list_keeps_the_anchor_an_update_omits() {
+        let app = TestApp::new_with_cfg(sighted::config());
+        let drep = sighted::drep(sighted::REGISTERED_FIRST);
+        let registered = sighted::anchor(0x51);
+
+        let ledger_row = app
+            .facade()
+            .read_cardano_entity::<DRepState>(&DRepKey::from(&drep))
+            .expect("drep read")
+            .expect("drep state");
+        assert_eq!(ledger_row.anchor, None, "the update cleared the ledger's");
+
+        let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
+        let metadata = models
+            .into_iter()
+            .find(|x| x.drep_id == sighted::id(&drep))
+            .expect("the drep is not listed")
+            .metadata
+            .expect("the drep has no metadata");
+
+        assert_eq!(metadata.url, registered.url);
+        assert_eq!(metadata.hash, hex::encode(registered.content_hash));
     }
 
     /// A DRep that never registered and never voted — a vote-delegation
@@ -3654,13 +3885,15 @@ mod tests {
                 // seen at the very first slot and silent ever since, with the
                 // ledger expiry the boundary would have long since tripped
                 let mut state = DRepState::new(identifier.clone());
-                state.first_seen_at = Some((0, 0, 0));
                 state.expiry = Some(DRepExpiry::new(0, 0));
                 state.expired = true;
 
                 writer
                     .write_entity_typed(&DRepKey::from(&identifier), &state)
                     .expect("failed to write drep");
+
+                write_sighting(&writer, &identifier, (0, 0, 0), None);
+
                 writer.commit().expect("failed to commit drep");
             })
         };
@@ -8448,16 +8681,24 @@ mod tests {
         );
     }
 
-    /// Writes `copies` copies of the synthetic DRep under new keys, so that a
-    /// scan of the DReps reads several chunks.
+    /// Writes `copies` copies of the synthetic DRep and its sighting under
+    /// new keys, so that a scan of either reads several chunks.
     fn replicate_dreps(domain: &ToyDomain, copies: u8) {
         use dolos_core::StateWriter as _;
 
+        let key = DRepKey::from(&synthetic_drep());
+
         let state = domain
             .state()
-            .read_entity_typed::<DRepState>(&DRepKey::from(&synthetic_drep()))
+            .read_entity_typed::<DRepState>(&key)
             .expect("drep read")
             .expect("drep state");
+
+        let sighting = domain
+            .state()
+            .read_entity_typed::<DRepSightingState>(&key)
+            .expect("sighting read")
+            .expect("drep sighting");
 
         let writer = domain.state().start_writer().expect("state writer");
 
@@ -8465,9 +8706,16 @@ mod tests {
             let drep = DRep::Key(Hash::from([copy; 28]));
             let mut state = state.clone();
             state.identifier = drep.clone();
+
+            let mut sighting = sighting.clone();
+            sighting.first_seen.2 += usize::from(copy);
+
             writer
-                .write_entity_typed(&DRepKey(drep), &state)
+                .write_entity_typed(&DRepKey(drep.clone()), &state)
                 .expect("drep write");
+            writer
+                .write_entity_typed(&DRepKey(drep), &sighting)
+                .expect("sighting write");
         }
 
         writer.commit().expect("state commit");
@@ -8479,38 +8727,31 @@ mod tests {
             replicate_dreps(domain, 4)
         });
         let facade = app.facade();
-        let (chain, tip, pparams) = chain_context(&facade).expect("chain context");
 
-        let rows = |retired, expired, chunk| {
+        let rows = |chunk| {
             let facade = facade.clone();
-            let chain = chain.clone();
-            let pparams = pparams.clone();
             async move {
-                load_drep_rows(&facade, retired, expired, chain, tip, pparams, chunk)
+                let sightings = load_drep_sightings(&facade, chunk)
+                    .await
+                    .expect("drep sightings");
+
+                join_drep_states(&facade, sightings, chunk)
                     .await
                     .expect("drep rows")
                     .into_iter()
-                    .map(|(appeared_at, key, state)| (appeared_at, key, state.voting_power))
+                    .map(|row| {
+                        let power = row.state.map(|state| state.voting_power);
+                        (row.sighting.first_seen, row.key, power)
+                    })
                     .collect::<Vec<_>>()
             }
         };
 
-        assert!(
-            rows(None, None, usize::MAX).await.len() > 2,
-            "too few dreps to split into chunks"
-        );
+        let whole = rows(usize::MAX).await;
+        assert!(whole.len() > 2, "too few dreps to split into chunks");
 
-        for (retired, expired) in [
-            (None, None),
-            (Some(false), None),
-            (None, Some(false)),
-            (Some(true), Some(true)),
-        ] {
-            let whole = rows(retired, expired, usize::MAX).await;
-
-            for chunk in [1, 2] {
-                assert_eq!(rows(retired, expired, chunk).await, whole);
-            }
+        for chunk in [1, 2] {
+            assert_eq!(rows(chunk).await, whole);
         }
     }
 

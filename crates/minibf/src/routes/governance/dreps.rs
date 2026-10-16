@@ -265,22 +265,26 @@ impl<'a> IntoModel<DrepsInner> for DrepModelBuilder<'a> {
     }
 }
 
+/// A listed DRep. `state` is its ledger row, which a DRep only a vote
+/// delegation named does not have: it lists with no amount, neither retired
+/// nor expired.
 pub fn drep_list_item(
-    state: DRepState,
+    identifier: DRep,
+    state: Option<DRepState>,
     pparams: &PParamsSet,
     chain: &ChainSummary,
     tip: BlockSlot,
 ) -> Result<DrepsInner, StatusCode> {
-    let drep_id = bech32_drep(&state.identifier)?;
-    let drep_id_encoded = dolos_core::keys::encode(&DRepKey::from(&state.identifier)).to_vec();
-    let is_special = matches!(state.identifier, DRep::Abstain | DRep::NoConfidence);
+    let drep_id = bech32_drep(&identifier)?;
+    let drep_id_encoded = dolos_core::keys::encode(&DRepKey::from(&identifier)).to_vec();
+    let is_special = matches!(identifier, DRep::Abstain | DRep::NoConfidence);
 
     let builder = DrepModelBuilder {
         drep_id,
         drep_id_encoded,
         is_legacy: false,
         is_special,
-        state: Some(state),
+        state,
         pparams,
         chain,
         tip,

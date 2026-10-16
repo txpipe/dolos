@@ -57,9 +57,10 @@ pub mod ground_rules;
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetState, DRepSightingState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
-    FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
-    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
+    AddressStats, AssetState, DRepSightingState, DRepState, DatumState, EpochState, EraState,
+    FirstMintChunk, FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet,
+    PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState,
+    ProposalState,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -197,12 +198,6 @@ pub fn registry() -> Vec<Entry> {
                 Pinned {
                     rev: 2,
                     hex: include_str!("goldens/dreps.rev2.hex"),
-                },
-                // Revision 3 appends `first_seen_at` (index 9); revision 1 and 2
-                // rows predate the field and must keep decoding.
-                Pinned {
-                    rev: 3,
-                    hex: include_str!("goldens/dreps.rev3.hex"),
                 },
             ]
         ),

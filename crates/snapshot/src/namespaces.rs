@@ -17,9 +17,10 @@
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetState, DRepSightingState, DRepState, DatumState, EpochState, EraState, FirstMintChunk,
-    FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
-    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
+    AddressStats, AssetState, DRepSightingState, DRepState, DatumState, EpochState, EraState,
+    FirstMintChunk, FirstMintSet, FixedNamespace, GovState, PaymentAddressChunk, PaymentAddressSet,
+    PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState,
+    ProposalState,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -82,7 +83,6 @@ pub const NAMESPACES: [Namespace; 25] = [
 /// `epochs`, `eras`, `first-mint-chunks`, `first-mints`, `gov`,
 /// `pool-epochs`, `pools` and `proposals` stopped being padded or truncated to
 /// a fixed width (decision 0051), and each of those moved one revision for it.
-/// `dreps` then reached 3 when `DRepState::first_seen_at` was appended.
 /// Kept beside [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
 pub const SCHEMA_REVS: [(Namespace, u64); 25] = [
@@ -95,7 +95,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 25] = [
     (AssetState::NS, 1),
     (DatumState::NS, 1),
     (DRepSightingState::NS, 1),
-    (DRepState::NS, 3),
+    (DRepState::NS, 2),
     (EpochState::NS, 3),
     (EraState::NS, 2),
     (FirstMintChunk::NS, 2),

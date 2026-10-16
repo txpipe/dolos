@@ -15,7 +15,7 @@ use crate::{
     pallas_extras::{self, stake_cred_to_drep},
     roll::BlockVisitor,
     DRepActivity, DRepAnchorUpdate, DRepDormancyRelease, DRepExpiryUpdate, DRepKey,
-    DRepRegistration, DRepSeen, DRepSighting, DRepUnRegistration, GovDormancyReset, PParamsSet,
+    DRepRegistration, DRepSighting, DRepUnRegistration, GovDormancyReset, PParamsSet,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -261,8 +261,6 @@ impl BlockVisitor for DRepStateVisitor {
         // certificate fan-out on `tx.is_valid()`.
         if let Some(drep) = cert_sighting(cert) {
             let at = (block.slot(), *order, cert_index);
-
-            deltas.add_for_entity(DRepSeen::new(drep.clone(), at));
             deltas.add_for_entity(DRepSighting::new(drep, at, cert_anchor(cert)));
         }
 
