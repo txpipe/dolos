@@ -3,13 +3,12 @@ use std::{collections::BTreeSet, ops::Deref};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::Response,
     Json,
 };
 use blockfrost_openapi::models::{
     account_addresses_assets_inner::AccountAddressesAssetsInner,
     account_addresses_content_inner::AccountAddressesContentInner,
-    account_addresses_total::AccountAddressesTotal,
-    account_addresses_total_received_sum_inner::AccountAddressesTotalReceivedSumInner,
     account_content::AccountContent,
     account_delegation_content_inner::AccountDelegationContentInner,
     account_history_content_inner::AccountHistoryContentInner,
@@ -19,7 +18,6 @@ use blockfrost_openapi::models::{
     account_transactions_content_inner::AccountTransactionsContentInner,
     account_withdrawal_content_inner::AccountWithdrawalContentInner,
     address_utxo_content_inner::AddressUtxoContentInner,
-    tx_content_output_amount_inner::TxContentOutputAmountInner,
 };
 
 use dolos_cardano::{
@@ -47,7 +45,11 @@ use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 use crate::{
     error::Error,
     inputs::{for_each_touched_output, InputDeps, InputResolver},
-    mapping::{self, bech32_drep, bech32_pool, IntoModel},
+    mapping::{
+        self, bech32_drep, bech32_pool,
+        totals::{account_addresses_total, json_response},
+        IntoModel,
+    },
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -357,18 +359,6 @@ where
     Ok(Json(items))
 }
 
-fn account_amounts(
-    amounts: Vec<TxContentOutputAmountInner>,
-) -> Vec<AccountAddressesTotalReceivedSumInner> {
-    amounts
-        .into_iter()
-        .map(|amount| AccountAddressesTotalReceivedSumInner {
-            unit: amount.unit,
-            quantity: amount.quantity,
-        })
-        .collect()
-}
-
 /// `GET /accounts/{stake_address}/addresses/total`: lifetime sums and tx count
 /// across every address of an account, from the Stats period logs.
 ///
@@ -378,7 +368,7 @@ fn account_amounts(
 pub async fn by_stake_addresses_total<D>(
     Path(stake_address): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<AccountAddressesTotal>, Error>
+) -> Result<Response, Error>
 where
     Option<AccountState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
@@ -411,16 +401,10 @@ where
         .to_bech32()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let (received_sum, sent_sum) = mapping::stats_amounts(&totals);
-
-    let model = AccountAddressesTotal {
-        stake_address,
-        received_sum: account_amounts(received_sum),
-        sent_sum: account_amounts(sent_sum),
-        tx_count: totals.tx_count as i32,
-    };
-
-    Ok(Json(model))
+    Ok(json_response(account_addresses_total(
+        &stake_address,
+        &totals,
+    )))
 }
 
 pub async fn by_stake_utxos<D>(
@@ -1384,10 +1368,13 @@ mod tests {
 
     use super::*;
     use crate::test_support::{TestApp, TestFault};
+    use axum::http::header;
     use blockfrost_openapi::models::{
         account_addresses_assets_inner::AccountAddressesAssetsInner,
         account_addresses_content_inner::AccountAddressesContentInner,
-        account_addresses_total::AccountAddressesTotal, account_content::AccountContent,
+        account_addresses_total::AccountAddressesTotal,
+        account_addresses_total_received_sum_inner::AccountAddressesTotalReceivedSumInner,
+        account_content::AccountContent,
         account_delegation_content_inner::AccountDelegationContentInner,
         account_history_content_inner::AccountHistoryContentInner,
         account_registration_content_inner::AccountRegistrationContentInner,
@@ -2129,12 +2116,21 @@ mod tests {
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
+    /// The written body is byte for byte what the serde path encodes.
+    fn assert_serde_bytes(item: &AccountAddressesTotal, bytes: &[u8]) {
+        let expected = serde_json::to_vec(item).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(bytes),
+            String::from_utf8_lossy(&expected)
+        );
+    }
+
     #[tokio::test]
     async fn accounts_by_stake_addresses_total_happy_path() {
         let app = TestApp::new();
         let stake_address = app.vectors().stake_address.as_str();
         let path = format!("/accounts/{stake_address}/addresses/total");
-        let (status, bytes) = app.get_bytes(&path).await;
+        let (status, headers, bytes) = app.get_with_headers(&path).await;
 
         assert_eq!(
             status,
@@ -2146,7 +2142,10 @@ mod tests {
         let item: AccountAddressesTotal =
             serde_json::from_slice(&bytes).expect("failed to parse account addresses total");
 
+        assert_serde_bytes(&item, &bytes);
+
         assert_eq!(item.stake_address, stake_address);
+        assert_eq!(headers[header::CONTENT_TYPE], "application/json");
 
         // every synthetic tx produces a single output to one of the account
         // addresses, so the account totals cover all txs in all blocks
@@ -2200,6 +2199,8 @@ mod tests {
 
         let item: AccountAddressesTotal =
             serde_json::from_slice(&bytes).expect("failed to parse account addresses total");
+
+        assert_serde_bytes(&item, &bytes);
 
         let quantity = |sums: &[AccountAddressesTotalReceivedSumInner], unit: &str| {
             sums.iter()
