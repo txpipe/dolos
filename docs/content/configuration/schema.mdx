@@ -200,6 +200,24 @@ another format as `v4` is unsupported and is not detected.
 - `path`: optional override for the mempool path (defaults to `<storage.path>/mempool`).
 - `cache`: size (MB) of the mempool cache (Redb only).
 
+### `storage.cache` section
+
+| property            | type    | example    |
+| ------------------- | ------- | ---------- |
+| enabled             | boolean | true       |
+| path                | string  | "cache"    |
+| memory_budget_bytes | integer | 536870912  |
+| disk_budget_bytes   | integer | 4294967296 |
+| admission           | table   |            |
+
+- `enabled`: whether the cache is on (defaults to `true`). Off, every lookup misses and nothing is stored.
+- `path`: optional override for the directory of the cache's disk tier (defaults to `<storage.path>/cache`).
+- `memory_budget_bytes`: bytes the memory tier may hold (defaults to 512 MiB), apart from the state and archive caches.
+- `disk_budget_bytes`: bytes the disk tier may hold (defaults to 4 GiB).
+- `admission`: a table from namespace name to the least build cost an entry needs to be kept, in place of that namespace's default.
+
+The cache keeps answers derived from the other stores. It is not part of the WAL, the state or the archive, and no setting here changes an answer, only what is kept and for how long. Entries are held in memory only for now; `path` and `disk_budget_bytes` take effect once the disk tier is in place. Unknown cache settings fail configuration loading.
+
 ## `genesis` section
 
 Dolos requires Cardano genesis data to operate. For simplicity sake, we've decided to follow the schema for the existing .json files used by the Haskell node. The `genesis` section indicates how to locate the different json files with genesis data for each required era. The content of the json files should match the ones used in the Haskell node.

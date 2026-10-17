@@ -31,6 +31,7 @@ pub mod archive;
 pub mod async_query;
 pub mod bootstrap;
 pub mod builtin;
+pub mod cache;
 pub mod cbor;
 pub mod config;
 pub mod crawl;
@@ -113,6 +114,9 @@ pub type LogSeq = u64;
 
 pub use archive::*;
 pub use async_query::*;
+pub use cache::{
+    CacheDiskTier, CacheEntry, CacheError, CacheNamespace, CacheStore, FillError, TieredCache,
+};
 pub use indexes::*;
 pub use keys::{
     EntityKey, FixedKey, KeyBytes, KeyCodec, KeyError, KeyPrefix, KeyRange, LogKey, LogRangeOf,
@@ -665,6 +669,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type State: StateStore;
     type Archive: ArchiveStore;
     type Mempool: MempoolStore;
+    type Cache: CacheStore;
     type TipSubscription: TipSubscription;
 
     fn storage_config(&self) -> &config::StorageConfig;
@@ -682,6 +687,9 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
     fn mempool(&self) -> &Self::Mempool;
+
+    /// The disposable cache for derived reads.
+    fn cache(&self) -> &Self::Cache;
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError>;
     fn notify_tip(&self, tip: TipEvent);

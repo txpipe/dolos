@@ -15,7 +15,7 @@ use dolos_core::{
     archive::{ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter},
     builtin::{
         EmptyBlockIter, EmptyLogIter, EmptySlotIter, MemoryArchiveStore, MemoryStateStore,
-        MemoryStateWriter, NoOpArchiveStore, NoOpArchiveWriter,
+        MemoryStateWriter, NoDiskTier, NoOpArchiveStore, NoOpArchiveWriter,
     },
     config::{
         ArchiveStoreConfig, FjallStateConfig, MempoolStoreConfig, RedbStateConfig, RedbWalConfig,
@@ -23,10 +23,10 @@ use dolos_core::{
     },
     ArchiveIndexDelta, BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
     ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey, LogValue, MempoolError, MempoolEvent,
-    MempoolStore, MempoolTx, Namespace, RawBlock, StateError, StateSchema,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TagRecord, TxHash,
-    TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError,
-    WalStore,
+    MempoolStore, MempoolTx, Namespace, QueryLimiter, RawBlock, StateError, StateSchema,
+    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TagRecord,
+    TieredCache, TxHash, TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet,
+    UtxoSetDelta, WalError, WalStore,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -220,6 +220,12 @@ pub fn open_mempool_store(config: &RootConfig) -> Result<MempoolBackend, Error> 
     }
 }
 
+/// The cache store, filling under `limiter`, the domain's query limiter. It
+/// keeps entries in memory only until a disk tier is plugged in.
+pub fn open_cache_store(config: &RootConfig, limiter: QueryLimiter) -> Result<CacheBackend, Error> {
+    Ok(TieredCache::new(&config.storage.cache, NoDiskTier, limiter))
+}
+
 pub fn open_data_stores<D>(config: &RootConfig) -> Result<Stores<D>, Error>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
@@ -233,6 +239,8 @@ where
         mempool: open_mempool_store(config)?,
     })
 }
+
+pub type CacheBackend = TieredCache<NoDiskTier>;
 
 // ============================================================================
 // WAL Store Backend

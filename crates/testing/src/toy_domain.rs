@@ -1,7 +1,7 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
-    builtin::{MemoryArchiveStore, MemoryStateStore},
+    builtin::{MemoryArchiveStore, MemoryStateStore, NoDiskTier},
     config::{CardanoConfig, StorageConfig, SyncConfig},
     sync::execute_work_unit,
     BootstrapExt, *,
@@ -284,6 +284,7 @@ pub struct ToyDomain<B: ToyStores = MemoryStores> {
     genesis: Arc<dolos_core::Genesis>,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
     query_limiter: QueryLimiter,
+    cache: TieredCache<NoDiskTier>,
 }
 
 impl ToyDomain<MemoryStores> {
@@ -353,6 +354,9 @@ impl<B: ToyStores> ToyDomain<B> {
         stores: B,
     ) -> Self {
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
+        let storage_config = storage_config.unwrap_or_default();
+        let query_limiter = QueryLimiter::default();
+        let cache = TieredCache::memory(&storage_config.cache, query_limiter.clone());
 
         let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
             config.clone(),
@@ -369,11 +373,12 @@ impl<B: ToyStores> ToyDomain<B> {
             mempool: Mempool {
                 pending: Arc::new(RwLock::new(Vec::new())),
             },
-            storage_config: storage_config.unwrap_or_default(),
+            storage_config,
             sync_config: SyncConfig::default(),
             genesis: genesis.clone(),
             tip_broadcast,
-            query_limiter: QueryLimiter::default(),
+            query_limiter,
+            cache,
         };
 
         // Apply genesis state using the work unit pattern.
@@ -422,8 +427,9 @@ impl<B: ToyStores> ToyDomain<B> {
     }
 
     /// Override the query limiter so tests can bound blocking query work;
-    /// clones of the domain share it.
+    /// clones of the domain share it. The cache is rebuilt to fill under it.
     pub fn with_query_limiter(mut self, query_limiter: QueryLimiter) -> Self {
+        self.cache = TieredCache::memory(&self.storage_config.cache, query_limiter.clone());
         self.query_limiter = query_limiter;
         self
     }
@@ -465,6 +471,7 @@ impl<B: ToyStores> dolos_core::Domain for ToyDomain<B> {
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
     type Mempool = Mempool;
+    type Cache = TieredCache<NoDiskTier>;
 
     fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
@@ -504,6 +511,10 @@ impl<B: ToyStores> dolos_core::Domain for ToyDomain<B> {
 
     fn mempool(&self) -> &Self::Mempool {
         &self.mempool
+    }
+
+    fn cache(&self) -> &Self::Cache {
+        &self.cache
     }
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {

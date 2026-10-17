@@ -1503,6 +1503,7 @@ dependencies = [
 name = "dolos-core"
 version = "2.0.0-alpha.0"
 dependencies = [
+ "bytes",
  "dolos-testing",
  "futures-core",
  "futures-util",

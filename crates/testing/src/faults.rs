@@ -620,6 +620,7 @@ impl Domain for FaultyToyDomain {
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
     type Mempool = Mempool;
+    type Cache = <ToyDomain as Domain>::Cache;
 
     fn storage_config(&self) -> &dolos_core::config::StorageConfig {
         self.inner.storage_config()
@@ -662,6 +663,10 @@ impl Domain for FaultyToyDomain {
 
     fn mempool(&self) -> &Self::Mempool {
         self.inner.mempool()
+    }
+
+    fn cache(&self) -> &Self::Cache {
+        self.inner.cache()
     }
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {
