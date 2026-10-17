@@ -86,7 +86,7 @@ The Cardano entity types in `crates/cardano/src/model/` follow one naming conven
 | `Set` | a member's first appearance in an epoch | an insert-if-absent staged per block | state only; its seal builds a `Chunk` |
 | `Chunk` | a page of an ordered list, built at seal | one write at seal | archive |
 
-A `Stats` type is one type under one namespace in both stores: its seal moves an epoch's rows to the archive at the epoch's start slot, and never reshapes them.
+A `Stats` type is one type under one namespace in both stores: its seal moves an epoch's rows to the archive at the epoch's start slot, and never reshapes them. On mainnet, `account-stats` takes 1.16 GB on disk for 33.4 M rows, measured as the chunk sizes below are. `address-stats` holds 35.04 GB of raw rows for 103.2 M (epoch, address) pairs, counted over a full mainnet replay; its compacted size on disk has not been measured.
 
 A `Set` lives in state only, one row per member keyed `group ‖ epoch ‖ member` (`GroupKey`), so one prefix scan returns a group's unsealed epochs. Its seal builds a `Chunk`: one list per group and epoch, written to the archive at the epoch's start slot before the epoch's `Set` rows are deleted. A seal may drop rows, as first mints drop re-mints. A `Set` and the `Stats` that counts its group may seal into one `Chunk`, and that `Stats` then lives in state only: `PaymentStats` does, its tx count riding in `PaymentAddressChunk` beside the addresses.
 
@@ -94,12 +94,12 @@ A `Set` lives in state only, one row per member keyed `group ‖ epoch ‖ membe
 | ------------- | --------------------- | ------ | ---------------------- |
 | `account-addresses` (`AccountAddressSet`) | `account-address-chunks` (`AccountAddressChunk`) | `/accounts/{stake_address}/addresses` | 3.27 GB |
 | `payment-addresses` (`PaymentAddressSet`), with `payment-stats` (`PaymentStats`) | `payment-address-chunks` (`PaymentAddressChunk`) | `/addresses/{address}/total` by payment credential | 5.27 GB |
-| `first-mints` (`FirstMintSet`) | `first-mint-chunks` (`FirstMintChunk`) | `/assets` | not measured |
+| `first-mints` (`FirstMintSet`) | `first-mint-chunks` (`FirstMintChunk`) | `/assets` | 0.13 GB |
 | `first-scripts` (`FirstScriptSet`) | `first-script-chunks` (`FirstScriptChunk`) | `/scripts` | 9.8 MB |
 | | `policy-mint-chunks` (`PolicyMintChunk`) | `/assets/policy/{policy}` | 0.09 GB |
 | `asset-mints` (`AssetMintSet`) | `asset-mint-chunks` (`AssetMintChunk`) | `/assets/{asset}/history` | 1.21 GB |
 
-The sizes are the table files of each chunk namespace written at mainnet scale into a fully compacted fjall 3.1 store, measured under the namespace's earlier name (`stake-addresses`, `payment-stats` and `policy-first-mints`); renaming it left its keys and values unchanged. `first-script-chunks` was measured in the endpoint-structures research, over mainnet's 319,671 scripts. `asset-mint-chunks` was measured under its own name, beside 0.26 MB of `asset-mints` staged in state at the tip.
+The sizes are the table files of each chunk namespace written at mainnet scale into a fully compacted fjall 3.1 store, measured under the namespace's earlier name (`stake-addresses`, `payment-stats` and `policy-first-mints`); renaming it left its keys and values unchanged. `first-mint-chunks` was built from mainnet's 11,159,935 first mints through epoch 646. `first-script-chunks` was measured in the endpoint-structures research, over mainnet's 319,671 scripts. `asset-mint-chunks` was measured under its own name, beside 0.26 MB of `asset-mints` staged in state at the tip.
 
 A `Set` lists a member once per epoch, so a list that names each member once over all of history needs a witness to tell a first appearance from a repeat. First mints use `AssetState.initial_slot`. Scripts have no ledger state, so `scripts` (`ScriptState`) is their witness: one row per script hash, holding where the script was first seen (slot, tx index and order within the tx, in cardano-db-sync's order), written once and never pruned. It is 12.9 MB on mainnet and travels in every stele. `/scripts/{script_hash}` starts its lookup from it. `first-scripts` has no group, so its rows key `epoch ‖ script hash`.
 
