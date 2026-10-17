@@ -57,11 +57,11 @@ pub mod ground_rules;
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepState, DatumState, EpochState,
-    EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet, FixedNamespace,
-    GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
-    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
-    ScriptState,
+    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepSightingState, DRepState,
+    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PoolEpochLog, PoolState, ProposalState, ScriptState,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -174,6 +174,15 @@ pub fn registry() -> Vec<Entry> {
             &[Pinned {
                 rev: 1,
                 hex: include_str!("goldens/datums.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_drep_sightings,
+            DRepSightingState,
+            canaries::drep_sighting_state,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/drep-sightings.rev1.hex"),
             }]
         ),
         entity_entry!(

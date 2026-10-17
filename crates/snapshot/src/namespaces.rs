@@ -17,11 +17,11 @@
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepState, DatumState, EpochState,
-    EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet, FixedNamespace,
-    GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
-    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
-    ScriptState,
+    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepSightingState, DRepState,
+    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PoolEpochLog, PoolState, ProposalState, ScriptState,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -39,7 +39,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against the schemas directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 30] = [
+pub const NAMESPACES: [Namespace; 31] = [
     AccountAddressChunk::NS,
     AccountAddressSet::NS,
     AccountEpochLog::NS,
@@ -50,6 +50,7 @@ pub const NAMESPACES: [Namespace; 30] = [
     AssetMintSet::NS,
     AssetState::NS,
     DatumState::NS,
+    DRepSightingState::NS,
     DRepState::NS,
     EpochState::NS,
     EraState::NS,
@@ -91,7 +92,7 @@ pub const NAMESPACES: [Namespace; 30] = [
 /// padded or truncated to a fixed width (decision 0051), and each of those
 /// moved one revision for it. Kept beside [`NAMESPACES`], in the same order,
 /// and held to it by `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 30] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (AccountAddressChunk::NS, 1),
     (AccountAddressSet::NS, 1),
     (AccountEpochLog::NS, 1),
@@ -102,6 +103,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 30] = [
     (AssetMintSet::NS, 1),
     (AssetState::NS, 1),
     (DatumState::NS, 1),
+    (DRepSightingState::NS, 1),
     (DRepState::NS, 2),
     (EpochState::NS, 3),
     (EraState::NS, 2),
@@ -145,6 +147,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         AssetMintSet::NS => exact::<<AssetMintSet as StateEntity>::Key>(key),
         AssetState::NS => exact::<<AssetState as StateEntity>::Key>(key),
         DatumState::NS => exact::<<DatumState as StateEntity>::Key>(key),
+        DRepSightingState::NS => exact::<<DRepSightingState as StateEntity>::Key>(key),
         DRepState::NS => exact::<<DRepState as StateEntity>::Key>(key),
         EpochState::NS => exact::<<EpochState as StateEntity>::Key>(key),
         EraState::NS => exact::<<EraState as StateEntity>::Key>(key),

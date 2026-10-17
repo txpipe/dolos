@@ -107,11 +107,11 @@ pub use stelae::{dir, inscription, transport, SteleReader};
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepState, DatumState, EpochState,
-    EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet, FixedNamespace,
-    GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressSet, PaymentStats,
-    PendingMirState, PendingRewardState, PolicyMintChunk, PoolEpochLog, PoolState, ProposalState,
-    ScriptState,
+    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepSightingState, DRepState,
+    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PoolEpochLog, PoolState, ProposalState, ScriptState,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -205,7 +205,7 @@ pub const LOG_KINDS: [(&str, Namespace); 11] = [
 /// namespace is a single blob. Re-sharding a namespace is a media-type-version
 /// event for that namespace's kind, decided by the format's owner; it is not a
 /// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 22] = [
+pub const STATE_KINDS: [(&str, Namespace, u8); 23] = [
     ("state-account-addresses", AccountAddressSet::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
@@ -213,6 +213,7 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 22] = [
     ("state-asset-mints", AssetMintSet::NS, 1),
     ("state-assets", AssetState::NS, 16),
     ("state-datums", DatumState::NS, 16),
+    ("state-drep-sightings", DRepSightingState::NS, 1),
     ("state-dreps", DRepState::NS, 1),
     ("state-epochs", EpochState::NS, 1),
     ("state-eras", EraState::NS, 1),

@@ -65,19 +65,21 @@ The endpoints required for most tx builders to work are supported. Libraries lik
 
 The `serve.minibf` section controls the options for the MiniBF endpoint that can be used by clients.
 
-| property           | type    | example                     |
-| ------------------ | ------- | --------------------------- |
-| listen_address     | string  | "[::]:3000"                 |
-| permissive_cors    | boolean | true                        |
-| token_registry_url | string  | "https://token-registry.io" |
-| url                | string  | "https://minibf.local"      |
-| max_scan_items     | integer | 3000                        |
+| property              | type    | example                     |
+| --------------------- | ------- | --------------------------- |
+| listen_address        | string  | "[::]:3000"                 |
+| permissive_cors       | boolean | true                        |
+| token_registry_url    | string  | "https://token-registry.io" |
+| url                   | string  | "https://minibf.local"      |
+| max_scan_items        | integer | 3000                        |
+| max_offchain_cache_mb | integer | 256 (default)               |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin.
 - `token_registry_url`: optional token registry base URL used for off-chain asset metadata.
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
+- `max_offchain_cache_mb`: disk the verified DRep metadata cache may use under `<storage.path>/offchain`, in MB (defaults to 256). `0` keeps the cache in memory only: nothing is written, and bodies an earlier run left there are removed.
 
 This is an example of the `serve.minibf` fragment with a `dolos.toml` configuration file.
 
@@ -88,6 +90,7 @@ permissive_cors = true
 token_registry_url = "https://token-registry.io"
 url = "https://minibf.local"
 max_scan_items = 3000
+max_offchain_cache_mb = 256
 ```
 
 Check the [Configuration Schema](../configuration/schema) for detailed info on how to set this up.
@@ -153,6 +156,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/governance/committee`                                    | Get the current constitutional committee                 |
 | `/governance/committee/votes`                              | Get votes cast by every constitutional committee member  |
 | `/governance/committee/{cc_id}/votes`                      | Get votes cast by a constitutional committee member      |
+| `/governance/dreps`                                        | Get list of DReps                                        |
 | `/governance/dreps/{drep_id}`                              | Get DRep information                                     |
 | `/governance/dreps/{drep_id}/delegators`                   | Get delegators for a specific DRep                       |
 | `/governance/dreps/{drep_id}/metadata`                     | Get DRep metadata                                        |
@@ -221,3 +225,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 `/scripts/{script_hash}` and its `/json`, `/cbor` and `/utxos` variants answer for the scripts the list holds, the way Blockfrost does: a transaction that failed phase-2 validation contributes only the reference script of its collateral return, so a script only its witnesses or auxiliary data carried is in neither. The witness points each script at the block that carried it first, so after `dolos doctor rebuild-state` those lookups need nothing rebuilt in the archive while that block is kept. Once `sync.max_history` prunes it, a lookup finds a later carrier through the archive index, and an archive written by a version that did not tag scripts carried in auxiliary data or in a valid transaction's collateral return has no index entries for them: if the node is going to prune, run the rebuild as `dolos doctor rebuild-state --rewrite-logs` before turning `sync.max_history` on, which fills them in. Like any rebuild it needs the full history, so a node whose archive is already pruned has to bootstrap again instead. A script whose every carrying block was pruned is not found by hash.
 
 pallas 1.3 decodes no Plutus V2 or V3 scripts in auxiliary data, so a script only auxiliary data ever carried in those languages is missing from the list.
+
+## DRep listing on stores synced by an older release
+
+`/governance/dreps` lists every DRep a certificate of a valid tx ever named, vote-delegation targets and the special DReps included, in the order a certificate first named it, with the latest anchor a registration or update carried. It reads them from the `drep-sightings` state namespace, which the roll writes. A state store synced by a release without that namespace has no sightings for the blocks it applied before: it lists only the DReps certificates named since, at the position of that later certificate. Syncing forward does not recover what is behind the cursor; resync the instance, or bootstrap it from a snapshot that carries `state-drep-sightings`, to get the full list in its exact order.

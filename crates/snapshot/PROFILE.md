@@ -81,6 +81,7 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 | `asset-mints` | `GroupKey<AssetKey, (u64, u32)>`: `asset key(32) ‖ epoch(8) ‖ slot(8) ‖ tx index(4)`, 52 B | — |
 | `assets` | `AssetKey`: `blake2b256(policy ‖ name)`, 32 B | — |
 | `datums` | `DatumKey`: datum hash, 32 B | — |
+| `drep-sightings` | `DRepKey`, as `dreps` | — |
 | `dreps` | `DRepKey`: `0x22` (key) or `0x23` (script) `‖ hash(28)`, 29 B; `0x00` abstain, `0x01` no-confidence, 1 B | — |
 | `epochs` | `()`: empty | `()`: empty |
 | `eras` | `EraKey`: protocol `u16`, 2 B | — |
