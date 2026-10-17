@@ -3,7 +3,6 @@ use std::{collections::BTreeSet, ops::Deref};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::Response,
     Json,
 };
 use blockfrost_openapi::models::{
@@ -46,9 +45,8 @@ use crate::{
     error::Error,
     inputs::{for_each_touched_output, InputDeps, InputResolver},
     mapping::{
-        self, bech32_drep, bech32_pool,
-        totals::{account_addresses_total, json_response},
-        IntoModel,
+        self, address_stats::AccountAddressesTotalBody, bech32_drep, bech32_pool,
+        direct_json::DirectJson, IntoModel,
     },
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
@@ -368,7 +366,7 @@ where
 pub async fn by_stake_addresses_total<D>(
     Path(stake_address): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Response, Error>
+) -> Result<DirectJson<AccountAddressesTotalBody>, Error>
 where
     Option<AccountState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
@@ -401,10 +399,10 @@ where
         .to_bech32()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(json_response(account_addresses_total(
-        &stake_address,
-        &totals,
-    )))
+    Ok(DirectJson(AccountAddressesTotalBody {
+        stake_address,
+        totals,
+    }))
 }
 
 pub async fn by_stake_utxos<D>(

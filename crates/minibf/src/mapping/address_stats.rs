@@ -1,76 +1,72 @@
-//! The `/total` bodies, written straight from an `AddressStats` total.
-//!
-//! The heaviest totals carry millions of units, which the blockfrost-openapi
-//! models and `serde_json` take most of a second to encode. These writers
-//! produce the same bytes directly, and the tests hold them to the serde path.
+//! The `/total` bodies, written from an `AddressStats` total.
 
-use axum::{
-    http::{header, HeaderValue},
-    response::{IntoResponse, Response},
-};
 use dolos_cardano::{AddressStats, UnitSums};
 
-const HEX: &[u8; 16] = b"0123456789abcdef";
+use super::direct_json::{write_hex, write_int, write_int_str, write_str, WriteJson};
 
 /// The `AddressContentTotal` body of `/addresses/{address}/total`.
-pub fn address_total(address: &str, totals: &AddressStats) -> Vec<u8> {
-    write_total("address", address, totals)
+pub struct AddressTotalBody {
+    pub address: String,
+    pub totals: AddressStats,
 }
 
 /// The `AccountAddressesTotal` body of
 /// `/accounts/{stake_address}/addresses/total`.
-pub fn account_addresses_total(stake_address: &str, totals: &AddressStats) -> Vec<u8> {
-    write_total("stake_address", stake_address, totals)
+pub struct AccountAddressesTotalBody {
+    pub stake_address: String,
+    pub totals: AddressStats,
 }
 
-/// A written body served as `application/json`, as `Json` serves a model.
-pub fn json_response(body: Vec<u8>) -> Response {
-    (
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        )],
-        body,
-    )
-        .into_response()
+impl WriteJson for AddressTotalBody {
+    fn size_hint(&self) -> usize {
+        size_hint(&self.totals)
+    }
+
+    fn write_json(&self, out: &mut Vec<u8>) {
+        write_total(out, "address", &self.address, &self.totals);
+    }
 }
 
-fn write_total(field: &str, id: &str, totals: &AddressStats) -> Vec<u8> {
-    let mut out = Vec::with_capacity(128 + totals.units.len() * 2 * 112);
+impl WriteJson for AccountAddressesTotalBody {
+    fn size_hint(&self) -> usize {
+        size_hint(&self.totals)
+    }
 
+    fn write_json(&self, out: &mut Vec<u8>) {
+        write_total(out, "stake_address", &self.stake_address, &self.totals);
+    }
+}
+
+fn size_hint(totals: &AddressStats) -> usize {
+    128 + totals.units.len() * 2 * 112
+}
+
+fn write_total(out: &mut Vec<u8>, field: &str, id: &str, totals: &AddressStats) {
     out.extend_from_slice(b"{\"");
     out.extend_from_slice(field.as_bytes());
     out.extend_from_slice(b"\":");
-    serde_json::to_writer(&mut out, id).expect("writing to a Vec cannot fail");
+    write_str(out, id);
     out.extend_from_slice(b",\"received_sum\":[");
-    write_side(&mut out, totals, |sums| sums.received.0);
+    write_side(out, totals, |sums| sums.received.0);
     out.extend_from_slice(b"],\"sent_sum\":[");
-    write_side(&mut out, totals, |sums| sums.sent.0);
+    write_side(out, totals, |sums| sums.sent.0);
     out.extend_from_slice(b"],\"tx_count\":");
-    out.extend_from_slice(
-        itoa::Buffer::new()
-            .format(totals.tx_count as i32)
-            .as_bytes(),
-    );
+    write_int(out, totals.tx_count as i32);
     out.push(b'}');
-
-    out
 }
 
 /// One side's amounts: lovelace first, then every asset with a nonzero sum on
 /// that side, by unit.
 fn write_side(out: &mut Vec<u8>, totals: &AddressStats, pick: fn(&UnitSums) -> u128) {
-    let mut num = itoa::Buffer::new();
-
     let lovelace = totals
         .units
         .get(&Vec::new().into())
         .map(pick)
         .unwrap_or_default();
 
-    out.extend_from_slice(b"{\"unit\":\"lovelace\",\"quantity\":\"");
-    out.extend_from_slice(num.format(lovelace).as_bytes());
-    out.extend_from_slice(b"\"}");
+    out.extend_from_slice(b"{\"unit\":\"lovelace\",\"quantity\":");
+    write_int_str(out, lovelace);
+    out.push(b'}');
 
     for (unit, sums) in &totals.units {
         let quantity = pick(sums);
@@ -79,21 +75,18 @@ fn write_side(out: &mut Vec<u8>, totals: &AddressStats, pick: fn(&UnitSums) -> u
             continue;
         }
 
-        out.extend_from_slice(b",{\"unit\":\"");
-        for byte in unit.iter() {
-            out.push(HEX[(byte >> 4) as usize]);
-            out.push(HEX[(byte & 0xf) as usize]);
-        }
-        out.extend_from_slice(b"\",\"quantity\":\"");
-        out.extend_from_slice(num.format(quantity).as_bytes());
-        out.extend_from_slice(b"\"}");
+        out.extend_from_slice(b",{\"unit\":");
+        write_hex(out, unit);
+        out.extend_from_slice(b",\"quantity\":");
+        write_int_str(out, quantity);
+        out.push(b'}');
     }
 }
 
 #[cfg(test)]
 pub(crate) mod oracle {
-    //! The serde path the writers replaced, kept as the oracle they are
-    //! checked against.
+    //! The serde path the bodies replaced, kept as the oracle they are checked
+    //! against.
 
     use blockfrost_openapi::models::{
         account_addresses_total::AccountAddressesTotal,
@@ -208,12 +201,21 @@ mod tests {
     }
 
     fn assert_matches_oracle(totals: &AddressStats) {
+        let address = AddressTotalBody {
+            address: ADDRESS.to_string(),
+            totals: totals.clone(),
+        };
+        let account = AccountAddressesTotalBody {
+            stake_address: STAKE_ADDRESS.to_string(),
+            totals: totals.clone(),
+        };
+
         assert_eq!(
-            address_total(ADDRESS, totals),
+            address.to_json_vec(),
             oracle::address_total(ADDRESS, totals),
         );
         assert_eq!(
-            account_addresses_total(STAKE_ADDRESS, totals),
+            account.to_json_vec(),
             oracle::account_addresses_total(STAKE_ADDRESS, totals),
         );
     }
@@ -288,15 +290,18 @@ mod tests {
             )
         });
 
-        let totals = stats(units, 2_500_000);
+        let account = AccountAddressesTotalBody {
+            stake_address: STAKE_ADDRESS.to_string(),
+            totals: stats(units, 2_500_000),
+        };
 
         let start = Instant::now();
-        let body = account_addresses_total(STAKE_ADDRESS, &totals);
+        let body = account.to_json_vec();
         let elapsed = start.elapsed();
 
         eprintln!(
             "wrote {} units, {} bytes in {elapsed:?}",
-            totals.units.len(),
+            account.totals.units.len(),
             body.len()
         );
 

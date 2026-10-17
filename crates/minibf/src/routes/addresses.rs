@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::Response,
     Json,
 };
 use blockfrost_openapi::models::{
@@ -33,8 +32,7 @@ use crate::{
     error::Error,
     inputs::{match_block_txs, tx_touches_output, InputDeps, InputResolver},
     mapping::{
-        aggregate_assets,
-        totals::{address_total, json_response},
+        address_stats::AddressTotalBody, aggregate_assets, direct_json::DirectJson,
         AddressExtendedModelBuilder, AddressKind, AddressModelBuilder, IntoModel,
     },
     pagination::{Order, Pagination, PaginationParameters},
@@ -634,7 +632,7 @@ where
 pub async fn total<D>(
     Path(address): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Response, Error>
+) -> Result<DirectJson<AddressTotalBody>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -685,7 +683,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    Ok(json_response(address_total(&address, &totals)))
+    Ok(DirectJson(AddressTotalBody { address, totals }))
 }
 
 #[cfg(test)]

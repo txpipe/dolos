@@ -41,12 +41,13 @@ use blockfrost_openapi::models::{
 use dolos_cardano::pallas_extras;
 use dolos_core::{async_query::BlockRefMeta, EraCbor, TxHash, TxoIdx, TxoRef};
 
+pub mod address_stats;
 pub mod blocks;
 pub mod cost_models;
+pub mod direct_json;
 pub mod epochs;
 pub mod network;
 pub mod protocol_params;
-pub mod totals;
 pub mod txs;
 
 macro_rules! try_into_or_500 {
