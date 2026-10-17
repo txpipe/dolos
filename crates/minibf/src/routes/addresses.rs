@@ -632,7 +632,7 @@ where
 pub async fn total<D>(
     Path(address): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<DirectJson<AddressTotalBody>, Error>
+) -> Result<DirectJson, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -654,24 +654,27 @@ where
         }
     };
 
-    let totals = domain
+    let body = domain
         .query()
         .run_blocking(move |domain| {
-            match &query {
+            let totals = match &query {
                 Either::Left(payment) => {
                     stats::payment_totals(&domain, &chain, shelley..=tip_epoch, payment)
                 }
-                Either::Right(address) => {
-                    let from = match address {
+                Either::Right(parsed) => {
+                    let from = match parsed {
                         Address::Byron(_) => 0,
                         _ => shelley,
                     };
 
-                    let key = AddressKey::of(address);
+                    let key = AddressKey::of(parsed);
                     stats::address_totals(&domain, &chain, from..=tip_epoch, &key)
                 }
             }
-            .map_err(DomainError::from)
+            .map_err(DomainError::from)?;
+
+            Ok((totals.tx_count > 0)
+                .then(|| DirectJson::encode(&AddressTotalBody { address, totals })))
         })
         .await
         .map_err(|err| {
@@ -679,11 +682,7 @@ where
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    if totals.tx_count == 0 {
-        return Err(StatusCode::NOT_FOUND.into());
-    }
-
-    Ok(DirectJson(AddressTotalBody { address, totals }))
+    body.ok_or_else(|| StatusCode::NOT_FOUND.into())
 }
 
 #[cfg(test)]

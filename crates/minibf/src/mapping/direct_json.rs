@@ -29,18 +29,27 @@ pub trait WriteJson {
     }
 }
 
-/// Serves a [`WriteJson`] body as `application/json`, as `Json` serves a
-/// model.
-pub struct DirectJson<T>(pub T);
+/// A [`WriteJson`] body, encoded and served as `application/json` like
+/// `Json` serves a model.
+///
+/// Unlike `Json`, it encodes when built, so a heavy body can be encoded on the
+/// blocking pool rather than on an async worker.
+pub struct DirectJson(Vec<u8>);
 
-impl<T: WriteJson> IntoResponse for DirectJson<T> {
+impl DirectJson {
+    pub fn encode(body: &impl WriteJson) -> Self {
+        Self(body.to_json_vec())
+    }
+}
+
+impl IntoResponse for DirectJson {
     fn into_response(self) -> Response {
         (
             [(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),
             )],
-            self.0.to_json_vec(),
+            self.0,
         )
             .into_response()
     }

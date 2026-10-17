@@ -366,7 +366,7 @@ where
 pub async fn by_stake_addresses_total<D>(
     Path(stake_address): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<DirectJson<AccountAddressesTotalBody>, Error>
+) -> Result<DirectJson, Error>
 where
     Option<AccountState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
@@ -383,10 +383,21 @@ where
     let epochs = chain.first_shelley_epoch()..=tip_epoch;
     let account = account_key.account.clone();
 
-    let totals = domain
+    let stake_address = account_key
+        .address
+        .to_bech32()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let body = domain
         .query()
         .run_blocking(move |domain| {
-            stats::account_totals(&domain, &chain, epochs, &account).map_err(DomainError::from)
+            let totals = stats::account_totals(&domain, &chain, epochs, &account)
+                .map_err(DomainError::from)?;
+
+            Ok(DirectJson::encode(&AccountAddressesTotalBody {
+                stake_address,
+                totals,
+            }))
         })
         .await
         .map_err(|err| {
@@ -394,15 +405,7 @@ where
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let stake_address = account_key
-        .address
-        .to_bech32()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(DirectJson(AccountAddressesTotalBody {
-        stake_address,
-        totals,
-    }))
+    Ok(body)
 }
 
 pub async fn by_stake_utxos<D>(

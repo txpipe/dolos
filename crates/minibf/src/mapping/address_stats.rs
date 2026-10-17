@@ -1,8 +1,13 @@
 //! The `/total` bodies, written from an `AddressStats` total.
 
 use dolos_cardano::{AddressStats, UnitSums};
+use pallas::codec::utils::Bytes;
 
 use super::direct_json::{write_hex, write_int, write_int_str, write_str, WriteJson};
+
+/// Room for everything but the asset entries: the keys, both lovelace entries
+/// and the tx count.
+const SIZE_HINT_SLACK: usize = 256;
 
 /// The `AddressContentTotal` body of `/addresses/{address}/total`.
 pub struct AddressTotalBody {
@@ -19,7 +24,7 @@ pub struct AccountAddressesTotalBody {
 
 impl WriteJson for AddressTotalBody {
     fn size_hint(&self) -> usize {
-        size_hint(&self.totals)
+        size_hint(&self.address, &self.totals)
     }
 
     fn write_json(&self, out: &mut Vec<u8>) {
@@ -29,7 +34,7 @@ impl WriteJson for AddressTotalBody {
 
 impl WriteJson for AccountAddressesTotalBody {
     fn size_hint(&self) -> usize {
-        size_hint(&self.totals)
+        size_hint(&self.stake_address, &self.totals)
     }
 
     fn write_json(&self, out: &mut Vec<u8>) {
@@ -37,8 +42,21 @@ impl WriteJson for AccountAddressesTotalBody {
     }
 }
 
-fn size_hint(totals: &AddressStats) -> usize {
-    128 + totals.units.len() * 2 * 112
+/// The asset entries' exact length, plus room for the rest of the body.
+fn size_hint(id: &str, totals: &AddressStats) -> usize {
+    let entry = |unit: &Bytes, quantity: u128| match quantity {
+        0 => 0,
+        _ => 27 + 2 * unit.len() + quantity.ilog10() as usize,
+    };
+
+    let assets: usize = totals
+        .units
+        .iter()
+        .filter(|(unit, _)| !unit.is_empty())
+        .map(|(unit, sums)| entry(unit, sums.received.0) + entry(unit, sums.sent.0))
+        .sum();
+
+    SIZE_HINT_SLACK + id.len() + assets
 }
 
 fn write_total(out: &mut Vec<u8>, field: &str, id: &str, totals: &AddressStats) {
@@ -218,6 +236,18 @@ mod tests {
             account.to_json_vec(),
             oracle::account_addresses_total(STAKE_ADDRESS, totals),
         );
+
+        assert_size_hint(&address);
+        assert_size_hint(&account);
+    }
+
+    /// The hint covers the body, and overshoots it by less than the slack.
+    fn assert_size_hint(body: &impl WriteJson) {
+        let hint = body.size_hint();
+        let len = body.to_json_vec().len();
+
+        assert!(len <= hint, "hint {hint} under body {len}");
+        assert!(hint < len + SIZE_HINT_SLACK, "hint {hint} over body {len}");
     }
 
     #[test]
