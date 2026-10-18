@@ -22,7 +22,7 @@ A namespace has one of two validity models:
 - **Immutable** entries are never stale. An `offchain` body is pinned by its anchor's content hash, which every read checks again. The other immutable entries are built from sealed data only, so they are at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
 - **Tip-scoped** entries are valid for a while. After that, a `network` entry is served stale while one rebuild replaces it, and an `offchain-failures` entry is ignored, so the next request fetches again. They are kept in memory only.
 
-The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file that fails to open is recreated empty.
+The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file found corrupt, or of an older format, is recreated empty; one that fails to open for another reason, such as its permissions, is an error and the node does not start.
 
 ## Budgets and admission
 
@@ -38,9 +38,9 @@ An entry is kept only if building it cost at least its namespace's admission thr
 
 ## Commands
 
-The `dolos cache` commands work on the cache file directly, so they run with the node stopped. Against a running node they exit with an error asking you to stop it first.
+The `dolos cache` commands work on the cache file directly, so they run with the node stopped. While a running node, or another `dolos` command, holds the cache file, they exit with an error asking you to stop it first. They print the cache's warnings, such as a cache file found corrupt and recreated empty, on stderr.
 
-- `dolos cache warm --namespace <ns>` builds entries ahead of the requests that would miss them, keeping those at or above the admission threshold, and prints how many it kept, their bytes on disk and the time taken. It also counts the entries the disk budget refused or evicted. It takes one source of keys, and builds a key listed twice once:
+- `dolos cache warm --namespace <ns>` builds entries ahead of the requests that would miss them, keeping those at or above the admission threshold, and prints how many it kept, their bytes on disk and the time taken. It also counts the entries the disk budget refused or evicted, including entries already current that a later one evicted. It takes one source of keys, and builds a key listed twice once:
   - `--keys <file>`: one key per line. For `totals`, a key is an address, a payment credential (`addr_vkh…` or `script…`) or a stake address.
   - `--previous`: the keys the namespace held when it was last cleared, to restore a cache after `clear`.
   - `--scan`: the keys the namespace finds worth warming. For `totals`, every credential whose rows in a single sealed epoch reach 4,096 unit sums.

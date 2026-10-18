@@ -100,6 +100,7 @@ pub struct VerifyArgs {
 
 #[tokio::main]
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    crate::common::setup_tracing_warnings()?;
     ensure_offline(&config.storage)?;
 
     let domain = crate::common::setup_domain(config)?;
@@ -139,8 +140,8 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     }
 }
 
-/// Fails while a running node holds the cache file, and while the cache is
-/// off.
+/// Fails while another process, such as a running node, holds the cache file,
+/// and while the cache is off.
 pub fn ensure_offline(storage: &StorageConfig) -> miette::Result<()> {
     let Some(dir) = storage.cache_path() else {
         bail!(
@@ -152,8 +153,8 @@ pub fn ensure_offline(storage: &StorageConfig) -> miette::Result<()> {
     match RedbCacheTier::open(&dir, storage.cache.disk_budget_bytes) {
         Ok(_) => Ok(()),
         Err(CacheError::InUse(path)) => Err(miette!(
-            help = "stop the node first: the cache commands run with it stopped",
-            "the cache file {path} is locked by a running node"
+            help = "stop the node first, or wait for the other dolos command to finish: the cache commands run with the node stopped",
+            "the cache file {path} is locked by another process: a running node, or another dolos command"
         )),
         Err(error) => Err(miette!("opening the cache: {error}")),
     }
@@ -183,10 +184,27 @@ impl<D: Domain> Namespaces<D> {
 
         let supported: Vec<_> = self.uses.iter().map(|x| x.namespace()).collect();
 
-        bail!(
-            "namespace {name} cannot be warmed or verified; these can: {}",
-            supported.join(", ")
-        )
+        let off: Vec<_> = self
+            .off
+            .iter()
+            .map(|off| format!("{} is off: {}", off.name, off.why))
+            .collect();
+
+        match (supported.is_empty(), off.is_empty()) {
+            (false, true) => bail!(
+                "namespace {name} cannot be warmed or verified; these can: {}",
+                supported.join(", ")
+            ),
+            (false, false) => bail!(
+                "namespace {name} cannot be warmed or verified; these can: {} ({})",
+                supported.join(", "),
+                off.join("; ")
+            ),
+            (true, _) => bail!(
+                "namespace {name} cannot be warmed or verified, and none can here ({})",
+                off.join("; ")
+            ),
+        }
     }
 
     fn check_on(&self, name: &str) -> miette::Result<()> {
@@ -239,7 +257,8 @@ pub struct Warmed {
     pub watermark: Watermark,
     /// Distinct keys of the source.
     pub keys: u64,
-    /// Already stored at the watermark, so not rebuilt.
+    /// Already stored at the watermark, so not rebuilt, and on disk after the
+    /// run.
     pub current: u64,
     /// Built and on disk after the run.
     pub kept: u64,
@@ -247,8 +266,9 @@ pub struct Warmed {
     pub bytes: u64,
     /// Built and not kept, below the admission threshold.
     pub below: u64,
-    /// Built at or above the threshold and not on disk after the run: the
-    /// disk budget refused it, or evicted it for a later entry.
+    /// Built at or above the threshold, or already current, and not on disk
+    /// after the run: the disk budget refused it, or evicted it for a later
+    /// entry.
     pub refused: u64,
     pub failed: Vec<(String, String)>,
     pub took: Duration,
@@ -263,6 +283,23 @@ enum Warm {
 /// keeps what it built and a rerun resumes from there.
 const FLUSH_EVERY: Duration = Duration::from_secs(30);
 
+/// How `warm` paces a run: the keys it builds at once, and how often it
+/// flushes.
+#[derive(Debug, Clone, Copy)]
+pub struct Pace {
+    pub parallel: usize,
+    pub flush_every: Duration,
+}
+
+impl Default for Pace {
+    fn default() -> Self {
+        Self {
+            parallel: std::thread::available_parallelism().map_or(1, usize::from),
+            flush_every: FLUSH_EVERY,
+        }
+    }
+}
+
 /// Builds each key of `source` up to the namespace's current watermark,
 /// admitting by cost as a miss does, flushing every [`FLUSH_EVERY`] and at the
 /// end.
@@ -271,6 +308,21 @@ pub async fn warm<D, T>(
     namespaces: &Namespaces<D>,
     namespace: &str,
     source: &Source,
+) -> miette::Result<Warmed>
+where
+    D: Domain<Cache = TieredCache<T>>,
+    T: CacheDiskTier,
+{
+    warm_paced(domain, namespaces, namespace, source, Pace::default()).await
+}
+
+/// [`warm`] at `pace`.
+pub async fn warm_paced<D, T>(
+    domain: &D,
+    namespaces: &Namespaces<D>,
+    namespace: &str,
+    source: &Source,
+    pace: Pace,
 ) -> miette::Result<Warmed>
 where
     D: Domain<Cache = TieredCache<T>>,
@@ -301,8 +353,6 @@ where
 
     let started = Instant::now();
 
-    let parallel = std::thread::available_parallelism().map_or(1, usize::from);
-
     let mut outcomes = Vec::with_capacity(keys.len());
     let mut flushed = Instant::now();
 
@@ -315,12 +365,12 @@ where
                 (key, outcome)
             }
         })
-        .buffer_unordered(parallel);
+        .buffer_unordered(pace.parallel);
 
     while let Some(outcome) = built.next().await {
         outcomes.push(outcome);
 
-        if flushed.elapsed() >= FLUSH_EVERY {
+        if flushed.elapsed() >= pace.flush_every {
             domain.cache().flush().into_diagnostic()?;
             flushed = Instant::now();
         }
@@ -341,7 +391,10 @@ where
 
     for (key, outcome) in outcomes {
         match outcome {
-            Ok(Warm::Current) => warmed.current += 1,
+            Ok(Warm::Current) => match disk.get(name, &key).into_diagnostic()? {
+                Some(_) => warmed.current += 1,
+                None => warmed.refused += 1,
+            },
             Ok(Warm::Built(cost)) => match disk.get(name, &key).into_diagnostic()? {
                 Some(entry) => {
                     warmed.kept += 1;
@@ -594,8 +647,16 @@ fn watermarks<D: Domain>(
 }
 
 fn print_stats(stats: &Stats) {
+    let names = stats.namespaces.iter().map(|ns| ns.name);
+    let names = names.chain(stats.off.iter().map(|ns| ns.name));
+    let width = names
+        .chain(["namespace"])
+        .map(str::len)
+        .max()
+        .unwrap_or_default();
+
     println!(
-        "{:<12} {:>8} {:>10} {:>14} {:>12}",
+        "{:<width$} {:>8} {:>10} {:>14} {:>12}",
         "namespace", "version", "entries", "bytes on disk", "watermarks"
     );
 
@@ -606,14 +667,14 @@ fn print_stats(stats: &Stats) {
         };
 
         println!(
-            "{:<12} {:>8} {:>10} {:>14} {:>12}",
+            "{:<width$} {:>8} {:>10} {:>14} {:>12}",
             ns.name, ns.version, ns.entries, ns.bytes, watermarks
         );
     }
 
     for ns in &stats.off {
         println!(
-            "{:<12} {:>8} {:>10} {:>14} {:>12}",
+            "{:<width$} {:>8} {:>10} {:>14} {:>12}",
             ns.name, "off", ns.entries, ns.bytes, "-"
         );
     }
@@ -756,6 +817,7 @@ mod tests {
     use dolos_core::{
         config::{CacheConfig, SyncConfig},
         import::ImportExt as _,
+        CacheEntry,
     };
     use dolos_testing::{
         synthetic::{build_synthetic_blocks, SyntheticBlockConfig, SyntheticVectors},
@@ -866,16 +928,31 @@ mod tests {
         ]
     }
 
-    fn cost(domain: &ToyDomain, text: &str) -> u64 {
+    fn key(domain: &ToyDomain, text: &str) -> Vec<u8> {
         let totals = Totals::new(domain).unwrap();
-        let key = CacheUse::<ToyDomain>::parse_key(&totals, text).unwrap();
+        CacheUse::<ToyDomain>::parse_key(&totals, text).unwrap()
+    }
+
+    /// The key of `text` and its entry up to `watermark`.
+    fn built_at(domain: &ToyDomain, text: &str, watermark: Watermark) -> (Vec<u8>, CacheEntry) {
+        let totals = Totals::new(domain).unwrap();
+        let key = key(domain, text);
+        let entry = CacheUse::<ToyDomain>::build(&totals, domain, &key, watermark).unwrap();
+        (key, entry)
+    }
+
+    /// The key of `text` and its entry up to the current watermark.
+    fn built(domain: &ToyDomain, text: &str) -> (Vec<u8>, CacheEntry) {
+        let totals = Totals::new(domain).unwrap();
         let watermark = CacheUse::<ToyDomain>::current_watermark(&totals, domain)
             .unwrap()
             .unwrap();
 
-        CacheUse::<ToyDomain>::build(&totals, domain, &key, watermark)
-            .unwrap()
-            .cost
+        built_at(domain, text, watermark)
+    }
+
+    fn cost(domain: &ToyDomain, text: &str) -> u64 {
+        built(domain, text).1.cost
     }
 
     fn keys_file(dir: &Path, keys: &[String]) -> PathBuf {
@@ -977,6 +1054,206 @@ mod tests {
             (warmed.kept, warmed.bytes, warmed.below, warmed.refused),
             (0, 0, 0, 3)
         );
+    }
+
+    #[tokio::test]
+    async fn warm_counts_a_current_entry_a_later_one_evicts_as_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (probe, vectors) = domain(&dir.path().join("probe"), 0);
+        let [sibling, _, account] = keys(&vectors);
+
+        let size = |(key, entry): &(Vec<u8>, CacheEntry)| (key.len() + entry.value.len()) as u64;
+        let (a, b) = (built(&probe, &sibling), built(&probe, &account));
+
+        // the one of lower cost per byte, which the other evicts
+        let (low, high) = if u128::from(a.1.cost) * u128::from(size(&b))
+            <= u128::from(b.1.cost) * u128::from(size(&a))
+        {
+            (sibling, account)
+        } else {
+            (account, sibling)
+        };
+
+        let cache = CacheConfig {
+            disk_budget_bytes: size(&a).max(size(&b)),
+            ..cache_config(0)
+        };
+        let (domain, _) = domain_with(&dir.path().join("cache"), cache);
+        let namespaces = register(&domain).unwrap();
+        let pace = Pace {
+            parallel: 1,
+            ..Pace::default()
+        };
+
+        let file = keys_file(dir.path(), std::slice::from_ref(&low));
+        let first = warm_paced(&domain, &namespaces, TOTALS.name, &Source::Keys(file), pace)
+            .await
+            .unwrap();
+        assert_eq!(first.kept, 1);
+
+        let file = keys_file(dir.path(), &[low, high]);
+        let second = warm_paced(&domain, &namespaces, TOTALS.name, &Source::Keys(file), pace)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (second.current, second.kept, second.refused),
+            (0, 1, 1),
+            "{second:?}"
+        );
+        assert_eq!(domain.cache().disk().entries(TOTALS.name).unwrap(), 1);
+    }
+
+    /// Totals, copying the cache file aside as it starts building `at`: what a
+    /// kill there would leave on disk.
+    struct KilledAt {
+        totals: Totals,
+        at: Vec<u8>,
+        file: PathBuf,
+        left: PathBuf,
+    }
+
+    impl CacheUse<ToyDomain> for KilledAt {
+        fn namespace(&self) -> &'static str {
+            CacheUse::<ToyDomain>::namespace(&self.totals)
+        }
+
+        fn admission(&self) -> Cost {
+            CacheUse::<ToyDomain>::admission(&self.totals)
+        }
+
+        fn parse_key(&self, text: &str) -> Result<Vec<u8>, FillError> {
+            CacheUse::<ToyDomain>::parse_key(&self.totals, text)
+        }
+
+        fn current_watermark(&self, domain: &ToyDomain) -> Result<Option<Watermark>, FillError> {
+            self.totals.current_watermark(domain)
+        }
+
+        fn build(
+            &self,
+            domain: &ToyDomain,
+            key: &[u8],
+            watermark: Watermark,
+        ) -> Result<CacheEntry, FillError> {
+            if key == self.at {
+                std::fs::create_dir_all(&self.left).unwrap();
+                std::fs::copy(&self.file, self.left.join(dolos_redb3::cache::FILE_NAME)).unwrap();
+            }
+
+            self.totals.build(domain, key, watermark)
+        }
+
+        fn watermark(&self, value: &[u8]) -> Option<Watermark> {
+            CacheUse::<ToyDomain>::watermark(&self.totals, value)
+        }
+
+        fn candidates(&self, domain: &ToyDomain) -> Result<Vec<Vec<u8>>, FillError> {
+            self.totals.candidates(domain)
+        }
+    }
+
+    /// Warms the address then the account at `flush_every`, and answers the
+    /// totals entries a kill as the account starts building would leave, and
+    /// those a kill after the run would.
+    async fn left_by_a_kill(dir: &Path, flush_every: Duration) -> (u64, u64) {
+        let (domain, vectors) = domain(&dir.join("cache"), 0);
+        register(&domain).unwrap();
+
+        let [_, address, account] = keys(&vectors);
+
+        let namespaces = Namespaces {
+            uses: vec![Arc::new(KilledAt {
+                totals: Totals::new(&domain).unwrap(),
+                at: key(&domain, &account),
+                file: dir.join("cache").join(dolos_redb3::cache::FILE_NAME),
+                left: dir.join("midway"),
+            }) as Arc<dyn CacheUse<ToyDomain>>],
+            off: vec![],
+        };
+
+        let pace = Pace {
+            parallel: 1,
+            flush_every,
+        };
+        let file = keys_file(dir, &[address, account]);
+        let warmed = warm_paced(&domain, &namespaces, TOTALS.name, &Source::Keys(file), pace)
+            .await
+            .unwrap();
+        assert_eq!(warmed.kept, 2);
+
+        std::fs::create_dir_all(dir.join("after")).unwrap();
+        std::fs::copy(
+            dir.join("cache").join(dolos_redb3::cache::FILE_NAME),
+            dir.join("after").join(dolos_redb3::cache::FILE_NAME),
+        )
+        .unwrap();
+
+        let entries = |name: &str| {
+            let tier = RedbCacheTier::open(dir.join(name), 1 << 30).unwrap();
+            tier.entries(TOTALS.name).unwrap()
+        };
+
+        (entries("midway"), entries("after"))
+    }
+
+    #[tokio::test]
+    async fn warm_makes_its_entries_durable_as_it_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(left_by_a_kill(dir.path(), Duration::ZERO).await, (1, 2));
+
+        // the kill is seen: without a flush partway, nothing is left midway
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(left_by_a_kill(dir.path(), Duration::MAX).await, (0, 2));
+    }
+
+    #[tokio::test]
+    async fn an_older_entry_is_verified_at_its_watermark_and_rewarmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+
+        let (domain, vectors) = domain(&cache, 0);
+        let namespaces = register(&domain).unwrap();
+        let [_, address, account] = keys(&vectors);
+        let file = keys_file(dir.path(), &[address.clone(), account]);
+
+        warm(
+            &domain,
+            &namespaces,
+            TOTALS.name,
+            &Source::Keys(file.clone()),
+        )
+        .await
+        .unwrap();
+
+        // the address's entry as an earlier run, two epochs back, stored it
+        let (key, older) = built_at(&domain, &address, 2);
+        let disk = domain.cache().disk();
+        disk.put(TOTALS.name, &key, &older.value, older.cost)
+            .unwrap();
+        disk.flush().unwrap();
+        drop(domain);
+
+        let (domain, _) = self::domain(&cache, 0);
+        let namespaces = register(&domain).unwrap();
+
+        let watermarks = |domain: &ToyDomain, namespaces: &Namespaces<ToyDomain>| {
+            let stats = stats(domain, namespaces).unwrap();
+            let totals = stats.namespaces.iter().find(|ns| ns.name == TOTALS.name);
+            totals.unwrap().watermarks
+        };
+        assert_eq!(watermarks(&domain, &namespaces), Some((2, 3)));
+
+        let verified = verify(&domain, &namespaces, Some(TOTALS.name), 100).unwrap();
+        assert_eq!(verified.checked, 2);
+        assert!(verified.mismatches.is_empty(), "{:?}", verified.mismatches);
+
+        let warmed = warm(&domain, &namespaces, TOTALS.name, &Source::Keys(file))
+            .await
+            .unwrap();
+        assert_eq!((warmed.current, warmed.kept), (1, 1));
+
+        assert_eq!(watermarks(&domain, &namespaces), Some((3, 3)));
     }
 
     #[tokio::test]
@@ -1092,6 +1369,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn warm_and_verify_on_a_pruned_node_say_none_can() {
+        let dir = tempfile::tempdir().unwrap();
+        let domain = pruned(dir.path());
+        let namespaces = register(&domain).unwrap();
+
+        let error = warm(&domain, &namespaces, "nowhere", &Source::Scan)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("none can here"), "{error}");
+        assert!(error.to_string().contains("totals is off"), "{error}");
+
+        let error = verify(&domain, &namespaces, Some("nowhere"), 1).unwrap_err();
+        assert!(error.to_string().contains("none can here"), "{error}");
+    }
+
+    #[tokio::test]
     async fn stats_counts_an_off_namespace_left_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let domain = warmed_then_pruned(dir.path()).await;
@@ -1136,6 +1429,29 @@ mod tests {
         assert_eq!(domain.cache().disk().entries(TOTALS.name).unwrap(), 0);
     }
 
+    #[tokio::test]
+    async fn clear_all_wipes_totals_and_records_its_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let (domain, file) = warmable(dir.path());
+        let namespaces = register(&domain).unwrap();
+
+        warm(&domain, &namespaces, TOTALS.name, &Source::Keys(file))
+            .await
+            .unwrap();
+
+        let disk = domain.cache().disk();
+        let mut held = disk.keys(TOTALS.name).unwrap();
+
+        let wiped = clear(&domain, &namespaces, &Target::All).unwrap();
+        assert!(wiped.contains(&(TOTALS.name, 2)), "{wiped:?}");
+        assert_eq!(disk.entries(TOTALS.name).unwrap(), 0);
+
+        let mut recorded = disk.previous_keys(TOTALS.name).unwrap();
+        held.sort();
+        recorded.sort();
+        assert_eq!(recorded, held);
+    }
+
     #[test]
     fn a_locked_cache_file_asks_to_stop_the_node() {
         let dir = tempfile::tempdir().unwrap();
@@ -1153,7 +1469,7 @@ mod tests {
             .map(|help| help.to_string())
             .unwrap_or_default();
         assert!(
-            error.to_string().contains("locked by a running node"),
+            error.to_string().contains("locked by another process"),
             "{error}"
         );
         assert!(help.contains("stop the node first"), "{help}");

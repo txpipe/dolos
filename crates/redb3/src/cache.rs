@@ -100,8 +100,9 @@ struct Inner {
 
 impl RedbCacheTier {
     /// Opens `<dir>/cache.redb`, holding at most `budget` bytes of keys and
-    /// values. A file that fails to open is deleted and recreated empty; one
-    /// another process holds is an error that names it.
+    /// values. A file redb finds corrupt or of an old format is deleted and
+    /// recreated empty; one another process holds, or that fails to open for
+    /// any other reason, such as its permissions, is an error that names it.
     pub fn open(dir: impl AsRef<Path>, budget: u64) -> Result<Self, CacheError> {
         let dir = dir.as_ref();
         let path = dir.join(FILE_NAME);
@@ -114,6 +115,10 @@ impl RedbCacheTier {
             Err(redb::Error::DatabaseAlreadyOpen) => {
                 Err(CacheError::InUse(path.display().to_string()))
             }
+            Err(error) if !is_corrupt(&error) => Err(CacheError::Disk(format!(
+                "opening {}: {error}",
+                path.display()
+            ))),
             Err(error) => {
                 warn!(path = %path.display(), %error, "cache file unreadable, recreating it empty");
 
@@ -393,6 +398,17 @@ impl CacheDiskTier for RedbCacheTier {
 
     fn flush(&self) -> Result<(), CacheError> {
         self.write(Durability::Immediate, |_| Ok(()))
+    }
+}
+
+/// Whether an open failed on the file's contents rather than on access to it.
+/// redb only reads the contents once it holds the file's lock, so no other
+/// process is using a file found corrupt.
+fn is_corrupt(error: &redb::Error) -> bool {
+    match error {
+        redb::Error::Corrupted(_) | redb::Error::UpgradeRequired(_) => true,
+        redb::Error::Io(error) => error.kind() == std::io::ErrorKind::InvalidData,
+        _ => false,
     }
 }
 
@@ -739,6 +755,32 @@ mod tests {
         assert!(tier.keys("ns").unwrap().is_empty());
 
         tier.put("ns", b"key", b"value", 1).unwrap();
+        assert!(holds(&tier, "key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_it_may_not_write_is_an_error_and_kept() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let dir = tempfile::tempdir().unwrap();
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        put(&tier, "key", 10, 1);
+        tier.flush().unwrap();
+
+        let path = dir.path().join(FILE_NAME);
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let Err(error) = RedbCacheTier::open(dir.path(), MIB) else {
+            panic!("a cache file it may not write opened");
+        };
+        assert!(
+            error.to_string().contains(&path.display().to_string()),
+            "{error}"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
         assert!(holds(&tier, "key"));
     }
 
