@@ -14,7 +14,7 @@ use std::{
     future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, MutexGuard, PoisonError, Weak,
+        Arc, Mutex, MutexGuard, PoisonError, RwLock, Weak,
     },
     time::{Duration, Instant},
 };
@@ -193,7 +193,8 @@ pub struct CacheStats {
 #[trait_variant::make(Send)]
 pub trait CacheStore: Clone + Send + Sync + 'static {
     /// Registers `namespace`, replacing an earlier registration of its name.
-    /// Entries kept under another format version are wiped.
+    /// Entries kept under another format version are wiped, and its fills
+    /// still under way keep nothing.
     fn register(&self, namespace: CacheNamespace) -> Result<(), CacheError>;
 
     /// The fresh entry under `key`, if a tier holds one. May read the disk
@@ -279,7 +280,13 @@ pub trait CacheDiskTier: Send + Sync + 'static {
     fn flush(&self) -> Result<(), CacheError>;
 }
 
-type FlightKey = (&'static str, Bytes);
+/// A key under one format version of its namespace, so a miss never joins a
+/// fill of another version.
+type FlightKey = (&'static str, u32, Bytes);
+
+fn flight_key(ns: &CacheNamespace, key: &[u8]) -> FlightKey {
+    (ns.name, ns.version, Bytes::copy_from_slice(key))
+}
 
 /// The one fill under way for a key, awaited by every caller that needs it.
 type Flight = Shared<BoxFuture<'static, Result<Bytes, CacheError>>>;
@@ -288,6 +295,25 @@ struct Registered {
     spec: CacheNamespace,
     permits: Option<Arc<Semaphore>>,
     pending: AtomicUsize,
+    /// False once a registration under another format version replaces this
+    /// one.
+    live: RwLock<bool>,
+}
+
+impl Registered {
+    /// Runs `keep` unless this registration was replaced. `register` waits
+    /// for a running `keep` before it wipes, so nothing lands after the wipe.
+    fn keep_while_live(&self, keep: impl FnOnce()) {
+        let live = self.live.read().unwrap_or_else(PoisonError::into_inner);
+
+        if *live {
+            keep();
+        }
+    }
+
+    fn retire(&self) {
+        *self.live.write().unwrap_or_else(PoisonError::into_inner) = false;
+    }
 }
 
 enum Lookup {
@@ -384,27 +410,29 @@ impl<D: CacheDiskTier> TieredCache<D> {
 
     /// Reads the disk tier and promotes a hit to memory. A disk error is a
     /// miss: the cache is disposable.
-    fn lookup_disk(&self, ns: &CacheNamespace, key: &Bytes) -> Option<Bytes> {
-        if !self.uses_disk(ns) {
+    fn lookup_disk(&self, ns: &Registered, key: &Bytes) -> Option<Bytes> {
+        let spec = &ns.spec;
+
+        if !self.uses_disk(spec) {
             return None;
         }
 
         let metrics = &self.inner.metrics;
 
-        match self.inner.disk.get(ns.name, key) {
+        match self.inner.disk.get(spec.name, key) {
             Ok(Some(entry)) => {
-                metrics.hit(ns.name, Tier::Disk);
+                metrics.hit(spec.name, Tier::Disk);
                 let value = entry.value.clone();
-                self.keep_in_memory(ns, key.clone(), entry);
+                ns.keep_while_live(|| self.keep_in_memory(spec, key.clone(), entry));
                 Some(value)
             }
             Ok(None) => {
-                metrics.miss(ns.name, Tier::Disk);
+                metrics.miss(spec.name, Tier::Disk);
                 None
             }
             Err(error) => {
-                tracing::warn!(namespace = ns.name, %error, "cache disk read failed");
-                metrics.miss(ns.name, Tier::Disk);
+                tracing::warn!(namespace = spec.name, %error, "cache disk read failed");
+                metrics.miss(spec.name, Tier::Disk);
                 None
             }
         }
@@ -431,18 +459,22 @@ impl<D: CacheDiskTier> TieredCache<D> {
     }
 
     /// Keeps a filled entry in memory and, for an immutable namespace, on
-    /// disk. Blocks on the disk write.
-    fn store(&self, ns: &CacheNamespace, key: Bytes, entry: CacheEntry) {
-        let on_disk = self.admits(ns, &entry) && self.uses_disk(ns);
+    /// disk, unless a new format version replaced `ns` meanwhile. Blocks on
+    /// the disk write.
+    fn store(&self, ns: &Registered, key: Bytes, entry: CacheEntry) {
+        let spec = &ns.spec;
+        let on_disk = self.admits(spec, &entry) && self.uses_disk(spec);
         let (value, cost) = (entry.value.clone(), entry.cost);
 
-        self.keep_in_memory(ns, key.clone(), entry);
+        ns.keep_while_live(|| {
+            self.keep_in_memory(spec, key.clone(), entry);
 
-        if on_disk {
-            if let Err(error) = self.inner.disk.put(ns.name, &key, &value, cost) {
-                tracing::warn!(namespace = ns.name, %error, "cache disk write failed");
+            if on_disk {
+                if let Err(error) = self.inner.disk.put(spec.name, &key, &value, cost) {
+                    tracing::warn!(namespace = spec.name, %error, "cache disk write failed");
+                }
             }
-        }
+        });
     }
 
     /// Records `key`'s flight under the caller's flights lock and releases
@@ -490,33 +522,32 @@ impl<D: CacheDiskTier> TieredCache<D> {
         let runtime = Handle::try_current().map_err(|_| CacheError::NoRuntime)?;
 
         let cache = self.clone();
-        let entry_key = key.1.clone();
+        let entry_key = key.2.clone();
         let (flight, retire) = self.record_flight(flights, key, None);
 
         runtime.spawn(async move {
             let limiter = cache.inner.limiter.clone();
 
             let run = move || {
-                let ns = &ns.spec;
-
                 if read_disk {
-                    if let Some(value) = cache.lookup_disk(ns, &entry_key) {
+                    if let Some(value) = cache.lookup_disk(&ns, &entry_key) {
                         return Ok(value);
                     }
                 }
 
+                let name = ns.spec.name;
                 let started = Instant::now();
                 let filled = fill();
-                cache.inner.metrics.filled(ns.name, started.elapsed());
+                cache.inner.metrics.filled(name, started.elapsed());
 
                 let entry = filled.map_err(|error| {
                     let error = CacheError::fill(error);
-                    tracing::warn!(namespace = ns.name, %error, "cache fill failed");
+                    tracing::warn!(namespace = name, %error, "cache fill failed");
                     error
                 })?;
 
                 let value = entry.value.clone();
-                cache.store(ns, entry_key, entry);
+                cache.store(&ns, entry_key, entry);
                 Ok(value)
             };
 
@@ -555,13 +586,13 @@ impl<D: CacheDiskTier> TieredCache<D> {
         ns.pending.fetch_add(1, Ordering::SeqCst);
 
         let cache = self.clone();
-        let entry_key = key.1.clone();
+        let entry_key = key.2.clone();
         let (flight, retire) = self.record_flight(flights, key, Some(ns.clone()));
 
         let run = async move {
             if cache.uses_disk(&ns.spec) {
                 let (cache, ns, key) = (cache.clone(), ns.clone(), entry_key.clone());
-                let found = tokio::task::spawn_blocking(move || cache.lookup_disk(&ns.spec, &key))
+                let found = tokio::task::spawn_blocking(move || cache.lookup_disk(&ns, &key))
                     .await
                     .ok()
                     .flatten();
@@ -591,10 +622,10 @@ impl<D: CacheDiskTier> TieredCache<D> {
 
             if cache.uses_disk(&ns.spec) {
                 let stored =
-                    tokio::task::spawn_blocking(move || cache.store(&ns.spec, entry_key, entry));
+                    tokio::task::spawn_blocking(move || cache.store(&ns, entry_key, entry));
                 let _ = stored.await;
             } else {
-                cache.store(&ns.spec, entry_key, entry);
+                cache.store(&ns, entry_key, entry);
             }
 
             Ok(value)
@@ -649,11 +680,12 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
 
         let mut namespaces = lock(&self.inner.namespaces);
 
-        let changed = namespaces
+        let replaced = namespaces
             .get(namespace.name)
-            .is_some_and(|known| known.spec.version != namespace.version);
+            .filter(|known| known.spec.version != namespace.version);
 
-        if changed {
+        if let Some(known) = replaced {
+            known.retire();
             lock(&self.inner.memory).wipe(namespace.name);
         }
 
@@ -673,6 +705,7 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
                 spec: namespace,
                 permits,
                 pending: AtomicUsize::new(0),
+                live: RwLock::new(true),
             }),
         );
 
@@ -685,7 +718,7 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
         match self.lookup_memory(&ns.spec, key) {
             Lookup::Fresh(value) => Some(value),
             Lookup::Stale(_) => None,
-            Lookup::Miss => self.lookup_disk(&ns.spec, &Bytes::copy_from_slice(key)),
+            Lookup::Miss => self.lookup_disk(&ns, &Bytes::copy_from_slice(key)),
         }
     }
 
@@ -761,12 +794,12 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
         E: Into<FillError> + 'static,
     {
         let ns = self.namespace(namespace)?;
-        let key: FlightKey = (ns.spec.name, Bytes::copy_from_slice(key));
+        let key = flight_key(&ns.spec, key);
 
         let flight = {
             let flights = lock(&self.inner.flights);
 
-            match self.lookup_memory(&ns.spec, &key.1) {
+            match self.lookup_memory(&ns.spec, &key.2) {
                 Lookup::Fresh(value) => return Ok(value),
                 Lookup::Stale(value) => {
                     if !flights.contains_key(&key) {
@@ -791,7 +824,7 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
         E: Into<FillError> + 'static,
     {
         let ns = self.namespace(namespace)?;
-        let key: FlightKey = (ns.spec.name, Bytes::copy_from_slice(key));
+        let key = flight_key(&ns.spec, key);
 
         let flights = lock(&self.inner.flights);
 
@@ -813,12 +846,12 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
         E: Into<FillError> + 'static,
     {
         let ns = self.namespace(namespace)?;
-        let key: FlightKey = (ns.spec.name, Bytes::copy_from_slice(key));
+        let key = flight_key(&ns.spec, key);
 
         let flight = {
             let flights = lock(&self.inner.flights);
 
-            match self.lookup_memory(&ns.spec, &key.1) {
+            match self.lookup_memory(&ns.spec, &key.2) {
                 Lookup::Fresh(value) => return Ok(value),
                 Lookup::Stale(value) => {
                     // past the fill limits the stale value is still an answer
@@ -997,7 +1030,7 @@ mod tests {
     async fn wait_for_fill<D: CacheDiskTier>(cache: &TieredCache<D>, namespace: &str, key: &[u8]) {
         let flight = lock(&cache.inner.flights)
             .iter()
-            .find(|((ns, k), _)| *ns == namespace && k.as_ref() == key)
+            .find(|((ns, _, k), _)| *ns == namespace && k.as_ref() == key)
             .map(|(_, flight)| flight.clone());
 
         if let Some(flight) = flight {
@@ -1407,6 +1440,44 @@ mod tests {
                 ("slow".to_string(), 2)
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_fill_under_a_replaced_format_version_is_not_kept() {
+        let cache = registered(recording(&CacheConfig::default()), SLOW);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Gate::default());
+
+        let old = tokio::spawn({
+            let cache = cache.clone();
+            let (calls, gate) = (calls.clone(), gate.clone());
+            async move {
+                cache
+                    .get_or_fill("slow", b"key", move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        gate.wait();
+                        entry("v1", 1)
+                    })
+                    .await
+            }
+        });
+
+        wait_for_calls(&calls, 1).await;
+        cache
+            .register(CacheNamespace { version: 2, ..SLOW })
+            .unwrap();
+
+        let value = cache.get_or_fill("slow", b"key", || entry("v2", 1));
+        let value = tokio::time::timeout(Duration::from_secs(5), value).await;
+
+        gate.open();
+        let value = value.expect("the v2 miss joined the v1 fill");
+        assert_eq!(value.unwrap(), "v2");
+        assert_eq!(old.await.unwrap().unwrap(), "v1");
+
+        assert_eq!(cache.get("slow", b"key").unwrap(), "v2");
+        let on_disk = cache.disk().get("slow", b"key").unwrap().unwrap();
+        assert_eq!(on_disk.value, "v2");
     }
 
     #[tokio::test]
