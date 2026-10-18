@@ -39,7 +39,8 @@ fn start(dir: &Path) -> ToyDomain {
     domain
 }
 
-/// Fills `key` with the fold, counting the fills that ran.
+/// Fills the `utxos` key of `namespace` with the fold, counting the fills that
+/// ran.
 async fn fill(domain: &ToyDomain, namespace: &str, calls: &Arc<AtomicUsize>) -> Vec<u8> {
     let (folded, calls) = (domain.clone(), calls.clone());
 
