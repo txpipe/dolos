@@ -8,10 +8,11 @@ use axum::{
     http::{HeaderMap, Method, Request, StatusCode},
     Router,
 };
+use dolos_cardano::periods::stats::TOTALS;
 use dolos_core::{
-    config::{CardanoConfig, MinibfConfig},
+    config::{CacheConfig, CardanoConfig, MinibfConfig, SyncConfig},
     import::ImportExt as _,
-    Domain, StateStore,
+    CacheStore as _, Domain, StateStore,
 };
 use dolos_testing::{
     synthetic::{
@@ -530,6 +531,16 @@ impl TestApp {
         Self::from_domain(domain, vectors, None, None)
     }
 
+    /// App over `cfg`'s chain on the domain `adjust` returns, for a domain
+    /// configured otherwise than the default.
+    pub fn new_with_cfg_and_domain(
+        cfg: SyntheticBlockConfig,
+        adjust: impl FnOnce(ToyDomain) -> ToyDomain,
+    ) -> Self {
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        Self::from_domain(adjust(domain), vectors, None, None)
+    }
+
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
     /// can be exercised without building a chain of thousands of blocks.
     pub fn new_with_scan_limit(cfg: SyntheticBlockConfig, max_scan_items: u64) -> Self {
@@ -635,6 +646,17 @@ impl TestApp {
 
     pub fn vectors(&self) -> &SyntheticVectors {
         &self.vectors
+    }
+
+    /// The entries the totals cache holds in memory, if it is registered.
+    pub fn cache_entries(&self) -> Option<u64> {
+        let stats = self.facade.inner.cache().stats().expect("cache stats");
+
+        stats
+            .namespaces
+            .iter()
+            .find(|ns| ns.name == TOTALS.name)
+            .map(|ns| ns.memory.entries)
     }
 
     /// Epoch at the domain's tip. Only usable on fault-free apps — fault
@@ -760,6 +782,57 @@ pub fn replicated_app_with_fault(fault: Option<TestFault>) -> TestApp {
     replicate_accounts_and_pools(&domain, 4);
 
     TestApp::from_domain(domain, vectors, fault, None)
+}
+
+/// The body of a totals route with the totals cache off, then on and keeping
+/// every entry, missed and hit, over [`stake_address_chain`], whose first
+/// epochs are sealed and last staged. The miss must keep its entry.
+pub async fn totals_bodies(path: impl Fn(&SyntheticVectors) -> String) -> [Vec<u8>; 3] {
+    let mut sync = SyncConfig::default();
+    sync.max_history = Some(1_000);
+
+    let off = TestApp::new_with_cfg_and_domain(stake_address_chain(), |domain| {
+        domain.with_sync_config(sync)
+    });
+
+    let cache = CacheConfig {
+        admission: [(TOTALS.name.to_string(), 0)].into(),
+        ..CacheConfig::default()
+    };
+
+    let on = TestApp::new_with_cfg_and_domain(stake_address_chain(), |domain| {
+        domain.with_cache_config(cache)
+    });
+
+    let off_body = ok_body(&off, &path(off.vectors())).await;
+    assert!(off.cache_entries().is_none(), "the totals cache is on");
+
+    let path = path(on.vectors());
+
+    let miss = ok_body(&on, &path).await;
+    assert_eq!(
+        on.cache_entries(),
+        Some(1),
+        "{path}: the miss kept no entry"
+    );
+
+    let hit = ok_body(&on, &path).await;
+    assert_eq!(on.cache_entries(), Some(1), "{path}");
+
+    [off_body, miss, hit]
+}
+
+async fn ok_body(app: &TestApp, path: &str) -> Vec<u8> {
+    let (status, bytes) = app.get_bytes(path).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{path}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    bytes
 }
 
 pub struct TestAppBuilder {
