@@ -773,6 +773,11 @@ mod tests {
         let inode = std::fs::metadata(&path).unwrap().ino();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
 
+        // root writes it regardless
+        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            return;
+        }
+
         let Err(error) = RedbCacheTier::open(dir.path(), MIB) else {
             panic!("a cache file it may not write opened");
         };
