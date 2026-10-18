@@ -2,7 +2,7 @@ use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
-    config::{CardanoConfig, StorageConfig, SyncConfig},
+    config::{CacheConfig, CardanoConfig, StorageConfig, SyncConfig},
     sync::execute_work_unit,
     BootstrapExt, *,
 };
@@ -434,6 +434,15 @@ impl<B: ToyStores> ToyDomain<B> {
         let disk = self.cache.disk().clone();
         self.cache = TieredCache::new(&self.storage_config.cache, disk, query_limiter.clone());
         self.query_limiter = query_limiter;
+        self
+    }
+
+    /// Override the cache config, admission thresholds included. The cache is
+    /// rebuilt under it, empty and with no namespace registered.
+    pub fn with_cache_config(mut self, cache: CacheConfig) -> Self {
+        self.storage_config.cache = cache;
+        let disk = RedbCacheTier::memory(self.storage_config.cache.disk_budget_bytes).unwrap();
+        self.cache = TieredCache::new(&self.storage_config.cache, disk, self.query_limiter.clone());
         self
     }
 

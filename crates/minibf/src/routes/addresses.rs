@@ -26,7 +26,7 @@ use dolos_cardano::{
     periods::stats,
     AddressKey, ChainSummary, PaymentKey,
 };
-use dolos_core::{BlockBody, BlockSlot, Domain, DomainError, StateStore as _, TxoRef};
+use dolos_core::{BlockBody, BlockSlot, Domain, StateStore as _, TxoRef};
 
 use crate::{
     error::Error,
@@ -628,7 +628,8 @@ where
 }
 
 /// `GET /addresses/{address}/total`: lifetime sums and tx count of an address
-/// or of a payment credential's addresses, from the Stats period logs.
+/// or of a payment credential's addresses, from the Stats period logs through
+/// the totals cache.
 pub async fn total<D>(
     Path(address): Path<String>,
     State(domain): State<Facade<D>>,
@@ -654,33 +655,36 @@ where
         }
     };
 
-    let body = domain
-        .query()
-        .run_blocking(move |domain| {
-            let totals = match &query {
-                Either::Left(payment) => {
-                    stats::payment_totals(&domain, &chain, shelley..=tip_epoch, payment)
-                }
-                Either::Right(parsed) => {
-                    let from = match parsed {
-                        Address::Byron(_) => 0,
-                        _ => shelley,
-                    };
-
-                    let key = AddressKey::of(parsed);
-                    stats::address_totals(&domain, &chain, from..=tip_epoch, &key)
-                }
+    let body = async {
+        let totals = match &query {
+            Either::Left(payment) => {
+                stats::cached_payment_totals(&domain.inner, &chain, shelley..=tip_epoch, payment)
+                    .await?
             }
-            .map_err(DomainError::from)?;
+            Either::Right(parsed) => {
+                let from = match parsed {
+                    Address::Byron(_) => 0,
+                    _ => shelley,
+                };
 
-            Ok((totals.tx_count > 0)
-                .then(|| DirectJson::encode(&AddressTotalBody { address, totals })))
-        })
-        .await
-        .map_err(|err| {
-            tracing::error!(?err);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+                let key = AddressKey::of(parsed);
+                stats::cached_address_totals(&domain.inner, &chain, from..=tip_epoch, &key).await?
+            }
+        };
+
+        domain
+            .query()
+            .run_blocking(move |_| {
+                Ok((totals.tx_count > 0)
+                    .then(|| DirectJson::encode(&AddressTotalBody { address, totals })))
+            })
+            .await
+    }
+    .await
+    .map_err(|err| {
+        tracing::error!(?err);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     body.ok_or_else(|| StatusCode::NOT_FOUND.into())
 }
@@ -688,7 +692,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{health_beside, TestApp, TestFault, SLOW_READ};
+    use crate::test_support::{health_beside, totals_bodies, TestApp, TestFault, SLOW_READ};
     use axum::http::header;
     use blockfrost_openapi::models::{
         address_content::{AddressContent, Type as AddressType},
@@ -697,7 +701,7 @@ mod tests {
         address_transactions_content_inner::AddressTransactionsContentInner,
         address_utxo_content_inner::AddressUtxoContentInner,
     };
-    use dolos_testing::synthetic::SyntheticBlockConfig;
+    use dolos_testing::synthetic::{SyntheticBlockConfig, SyntheticVectors};
 
     fn invalid_address() -> &'static str {
         "not-an-address"
@@ -1043,6 +1047,37 @@ mod tests {
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/total");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// An address's body and a payment credential's are the same bytes with
+    /// the totals cache off, missed and hit.
+    #[tokio::test]
+    async fn addresses_total_bodies_match_with_the_cache_off_missed_and_hit() {
+        let address = |vectors: &SyntheticVectors| vectors.address.clone();
+
+        let payment = |vectors: &SyntheticVectors| {
+            let Ok(Address::Shelley(shelley)) = Address::from_bech32(&vectors.address) else {
+                panic!("expected a shelley test address")
+            };
+
+            let hrp = bech32::Hrp::parse("addr_vkh").expect("invalid hrp");
+            bech32::encode::<bech32::Bech32>(hrp, &shelley.payment().to_vec())
+                .expect("failed to encode payment credential")
+        };
+
+        for credential in [&address as &dyn Fn(&SyntheticVectors) -> String, &payment] {
+            let [off, miss, hit] =
+                totals_bodies(|vectors| format!("/addresses/{}/total", credential(vectors))).await;
+
+            let item: AddressContentTotal = serde_json::from_slice(&off).unwrap();
+            assert!(item.tx_count > 0);
+
+            assert_eq!(
+                String::from_utf8_lossy(&miss),
+                String::from_utf8_lossy(&off)
+            );
+            assert_eq!(String::from_utf8_lossy(&hit), String::from_utf8_lossy(&off));
+        }
     }
 
     #[tokio::test]
