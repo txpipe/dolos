@@ -1573,6 +1573,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "itertools 0.14.0",
+ "itoa",
  "num-bigint",
  "num-rational",
  "num-traits",
