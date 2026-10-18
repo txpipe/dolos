@@ -30,7 +30,7 @@ Dolos keeps its data in distinct stores, each serving a specific purpose:
 - **Purpose**: Disposable answers derived from the other stores (decision 0059); it is outside the WAL, steles and restore, and deleting it changes no answer
 - **Contents**: Byte entries by namespace and key; a namespace carries a format version, a validity model (immutable or tip-scoped) and an admission cost
 - **Traits**: `CacheStore`, implemented by `TieredCache` over the builtin memory tier and a `CacheDiskTier`
-- **Database**: memory only until a disk tier is plugged in (`<storage.path>/cache`)
+- **Database**: `<storage.path>/cache/cache.redb`, a Redb file of immutable entries within `disk_budget_bytes`; writes skip the fsync and the flush at shutdown makes them durable, and a file that fails to open is recreated empty
 
 ### Where the indexes live
 There is no standalone index store. Every index is a projection and lives in
@@ -45,10 +45,11 @@ the store that holds what it projects:
 ├── wal      # Write-Ahead Log database
 ├── state    # Ledger state database
 ├── archive  # Archive index plus flat block segment files
+├── cache    # Disposable cache entries (cache.redb)
 └── scratch  # not a store: stele layers staged in flight by a registry transfer
 ```
 
-The persistent WAL uses Redb, while state and archive use separate Fjall databases with independent cache and durability configuration. Builtin memory stores serve ephemeral nodes, tooling, and tests.
+The persistent WAL and the cache's disk tier use Redb, while state and archive use separate Fjall databases with independent cache and durability configuration. Builtin memory stores serve ephemeral nodes, tooling, and tests.
 
 ## Crate Architecture
 
@@ -97,12 +98,13 @@ The project follows a modular workspace architecture with clear separation of co
 - **Dependencies**: `dolos-core`, Pallas library for Cardano protocol support
 
 #### `dolos-redb3` (Storage Backend)
-- **Purpose**: Redb v3 implementations retained for the WAL, mempool, and legacy state tests
+- **Purpose**: Redb v3 implementations retained for the WAL, mempool, cache disk tier, and legacy state tests
 - **Components**:
   - `wal`: `WalStore` implementation for crash recovery
   - `mempool`: persistent mempool storage
+  - `cache`: `CacheDiskTier` implementation, the cache's disk tier in its own file and page cache
   - `state`: legacy `StateStore` implementation used by tests, not a supported node configuration backend
-- **Role**: Persistence layer for the WAL and mempool
+- **Role**: Persistence layer for the WAL, mempool, and cache disk tier
 
 #### `dolos-fjall` (State and Archive Storage)
 - **Purpose**: Persistent state and archive implementation using the Fjall LSM-tree embedded database
