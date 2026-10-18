@@ -46,8 +46,9 @@ pub const OFFCHAIN_FAILURES: CacheNamespace =
 /// Where earlier versions kept verified bodies, under the storage path.
 const LEGACY_DIR: &str = "offchain";
 
-/// Registers the namespaces this module keeps. A namespace that fails to
-/// register leaves its anchors fetched on every request.
+/// Registers the namespaces this module keeps. Without [`OFFCHAIN`] anchors
+/// go out unfetched until restart; without [`OFFCHAIN_FAILURES`] a failing
+/// anchor is fetched again on every request.
 pub fn register<C: CacheStore>(cache: &C) {
     for namespace in [OFFCHAIN, OFFCHAIN_FAILURES] {
         if let Err(error) = cache.register(namespace.clone()) {

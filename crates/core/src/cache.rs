@@ -613,6 +613,7 @@ impl<D: CacheDiskTier> TieredCache<D> {
 
         Ok(flight)
     }
+
     /// An async fill of `key` under the namespace's concurrent limit: the
     /// disk tier first, then `fill`, whose entry is kept.
     async fn run_async_fill<Fut, E>(
