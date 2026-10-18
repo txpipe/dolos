@@ -2,12 +2,17 @@
 //! (decision 0059) with the node stopped.
 //!
 //! Every subcommand opens the domain offline, registering the namespaces a
-//! node registers. `clear` and `stats` work on each of them; `warm` and
-//! `verify` only on those with a [`CacheUse`].
+//! node registers. `clear` and `stats` work on each of them, and on those the
+//! node leaves off, directly on the disk tier; `warm` and `verify` only on
+//! those with a [`CacheUse`].
 
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,7 +20,7 @@ use bytes::Bytes;
 use clap::{ArgGroup, Parser, Subcommand};
 use dolos_cardano::periods::stats::{register_totals_cache, TOTALS};
 use dolos_core::{
-    cache::FillError,
+    cache::{Cost, FillError},
     config::{RootConfig, StorageConfig},
     CacheDiskTier, CacheError, CacheStore as _, Domain, TieredCache,
 };
@@ -117,7 +122,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
                 None => Target::All,
             };
 
-            for (name, entries) in clear(&domain, &namespaces, target)? {
+            for (name, entries) in clear(&domain, &namespaces, &target)? {
                 println!("{name}: wiped {entries} entries from disk");
             }
 
@@ -195,7 +200,10 @@ impl<D: Domain> Namespaces<D> {
 /// Registers the namespaces a node registers.
 pub fn register<D: Domain>(domain: &D) -> miette::Result<Namespaces<D>> {
     #[cfg(feature = "minibf")]
-    dolos_minibf::register_network_cache(domain.cache()).into_diagnostic()?;
+    {
+        dolos_minibf::register_network_cache(domain.cache()).into_diagnostic()?;
+        dolos_minibf::register_governance_caches(domain.cache());
+    }
 
     let mut namespaces = Namespaces {
         uses: Vec::new(),
@@ -229,27 +237,35 @@ pub enum Source {
 pub struct Warmed {
     pub namespace: &'static str,
     pub watermark: Watermark,
+    /// Distinct keys of the source.
     pub keys: u64,
     /// Already stored at the watermark, so not rebuilt.
     pub current: u64,
-    /// Built and kept, at or above the admission threshold.
+    /// Built and on disk after the run.
     pub kept: u64,
-    /// Bytes of the kept entries' keys and values.
+    /// Bytes on disk of the kept entries' keys and values.
     pub bytes: u64,
     /// Built and not kept, below the admission threshold.
-    pub dropped: u64,
+    pub below: u64,
+    /// Built at or above the threshold and not on disk after the run: the
+    /// disk budget refused it, or evicted it for a later entry.
+    pub refused: u64,
     pub failed: Vec<(String, String)>,
     pub took: Duration,
 }
 
 enum Warm {
     Current,
-    Kept(u64),
-    Dropped,
+    Built(Cost),
 }
 
+/// How often a running `warm` makes its entries durable, so an interrupted run
+/// keeps what it built and a rerun resumes from there.
+const FLUSH_EVERY: Duration = Duration::from_secs(30);
+
 /// Builds each key of `source` up to the namespace's current watermark,
-/// admitting by cost as a miss does, then flushes.
+/// admitting by cost as a miss does, flushing every [`FLUSH_EVERY`] and at the
+/// end.
 pub async fn warm<D, T>(
     domain: &D,
     namespaces: &Namespaces<D>,
@@ -263,7 +279,7 @@ where
     let cache_use = namespaces.use_of(namespace)?;
     let name = cache_use.namespace();
 
-    let keys = match source {
+    let mut keys = match source {
         Source::Keys(path) => read_keys(cache_use.as_ref(), path)?,
         Source::Previous => domain
             .cache()
@@ -276,6 +292,9 @@ where
         Source::Scan => cache_use.candidates(domain).map_err(report)?,
     };
 
+    let mut seen = HashSet::new();
+    keys.retain(|key| seen.insert(key.clone()));
+
     let Some(watermark) = cache_use.current_watermark(domain).map_err(report)? else {
         bail!("nothing in namespace {name} can be cached yet");
     };
@@ -284,7 +303,10 @@ where
 
     let parallel = std::thread::available_parallelism().map_or(1, usize::from);
 
-    let outcomes: Vec<_> = stream::iter(keys)
+    let mut outcomes = Vec::with_capacity(keys.len());
+    let mut flushed = Instant::now();
+
+    let mut built = stream::iter(keys)
         .map(|key| {
             let cache_use = cache_use.clone();
 
@@ -293,11 +315,21 @@ where
                 (key, outcome)
             }
         })
-        .buffer_unordered(parallel)
-        .collect()
-        .await;
+        .buffer_unordered(parallel);
+
+    while let Some(outcome) = built.next().await {
+        outcomes.push(outcome);
+
+        if flushed.elapsed() >= FLUSH_EVERY {
+            domain.cache().flush().into_diagnostic()?;
+            flushed = Instant::now();
+        }
+    }
 
     domain.cache().flush().into_diagnostic()?;
+
+    let admission = admission(domain, name, cache_use.admission());
+    let disk = domain.cache().disk();
 
     let mut warmed = Warmed {
         namespace: name,
@@ -310,16 +342,25 @@ where
     for (key, outcome) in outcomes {
         match outcome {
             Ok(Warm::Current) => warmed.current += 1,
-            Ok(Warm::Kept(bytes)) => {
-                warmed.kept += 1;
-                warmed.bytes += bytes;
-            }
-            Ok(Warm::Dropped) => warmed.dropped += 1,
+            Ok(Warm::Built(cost)) => match disk.get(name, &key).into_diagnostic()? {
+                Some(entry) => {
+                    warmed.kept += 1;
+                    warmed.bytes += (key.len() + entry.value.len()) as u64;
+                }
+                None if cost < admission => warmed.below += 1,
+                None => warmed.refused += 1,
+            },
             Err(error) => warmed.failed.push((hex::encode(key), error.to_string())),
         }
     }
 
     Ok(warmed)
+}
+
+/// The least cost `namespace` keeps: the configured one, else its own.
+fn admission<D: Domain>(domain: &D, namespace: &str, default: Cost) -> Cost {
+    let configured = domain.storage_config().cache.admission.get(namespace);
+    configured.copied().unwrap_or(default)
 }
 
 /// Rebuilds `key` unless it is stored at `watermark`.
@@ -344,17 +385,21 @@ where
         cache.remove(name, key)?;
     }
 
+    let cost = Arc::new(AtomicU64::new(0));
+
     let fill = {
-        let (domain, owned) = (domain.clone(), key.to_vec());
-        move || cache_use.build(&domain, &owned, watermark)
+        let (domain, owned, cost) = (domain.clone(), key.to_vec(), cost.clone());
+
+        move || {
+            let entry = cache_use.build(&domain, &owned, watermark)?;
+            cost.store(entry.cost, Ordering::Relaxed);
+            Ok::<_, FillError>(entry)
+        }
     };
 
     cache.get_or_fill(name, key, fill).await?;
 
-    Ok(match cache.disk().get(name, key)? {
-        Some(entry) => Warm::Kept((key.len() + entry.value.len()) as u64),
-        None => Warm::Dropped,
-    })
+    Ok(Warm::Built(cost.load(Ordering::Relaxed)))
 }
 
 fn read_keys<D: Domain>(cache_use: &dyn CacheUse<D>, path: &Path) -> miette::Result<Vec<Vec<u8>>> {
@@ -379,14 +424,15 @@ fn print_warmed(warmed: &Warmed) -> miette::Result<()> {
     }
 
     println!(
-        "{}: {} keys up to watermark {} in {:.1?}: {} kept ({} bytes), {} below the admission threshold, {} already current, {} failed",
+        "{}: {} keys up to watermark {} in {:.1?}: {} kept ({} bytes on disk), {} below the admission threshold, {} refused or evicted by the disk budget, {} already current, {} failed",
         warmed.namespace,
         warmed.keys,
         warmed.watermark,
         warmed.took,
         warmed.kept,
         warmed.bytes,
-        warmed.dropped,
+        warmed.below,
+        warmed.refused,
         warmed.current,
         warmed.failed.len(),
     );
@@ -403,41 +449,57 @@ pub enum Target<'a> {
     All,
 }
 
-/// Wipes the target namespaces, recording their keys, then flushes. Answers
-/// the entries each held on disk.
+/// Wipes the target namespaces, recording their keys, then flushes. One the
+/// node leaves off is wiped on the disk tier, where its entries from an
+/// earlier run remain. Answers the entries each held on disk.
 pub fn clear<D, T>(
     domain: &D,
     namespaces: &Namespaces<D>,
-    target: Target<'_>,
+    target: &Target<'_>,
 ) -> miette::Result<Vec<(&'static str, u64)>>
 where
     D: Domain<Cache = TieredCache<T>>,
     T: CacheDiskTier,
 {
     let cache = domain.cache();
+    let disk = cache.disk();
     let registered = cache.stats().into_diagnostic()?.namespaces;
 
-    let wiped: Vec<_> = match target {
-        Target::All => registered,
+    let (on, off): (Vec<_>, Vec<_>) = match target {
+        Target::All => (registered, namespaces.off.clone()),
         Target::One(name) => {
-            namespaces.check_on(name)?;
+            if let Some(off) = namespaces.off.iter().find(|off| off.name == *name) {
+                (vec![], vec![*off])
+            } else if let Some(found) = registered.iter().find(|ns| ns.name == *name) {
+                (vec![found.clone()], vec![])
+            } else {
+                let known: Vec<_> = registered
+                    .iter()
+                    .map(|ns| ns.name)
+                    .chain(namespaces.off.iter().map(|off| off.name))
+                    .collect();
 
-            let Some(found) = registered.iter().find(|ns| ns.name == name) else {
-                let known: Vec<_> = registered.iter().map(|ns| ns.name).collect();
                 bail!("unknown namespace {name}; known: {}", known.join(", "));
-            };
-
-            vec![found.clone()]
+            }
         }
     };
 
-    for ns in &wiped {
+    let mut wiped = Vec::new();
+
+    for ns in on {
         cache.wipe(ns.name).into_diagnostic()?;
+        wiped.push((ns.name, ns.disk.entries));
+    }
+
+    for off in off {
+        let entries = disk.entries(off.name).into_diagnostic()?;
+        disk.wipe(off.name).into_diagnostic()?;
+        wiped.push((off.name, entries));
     }
 
     cache.flush().into_diagnostic()?;
 
-    Ok(wiped.iter().map(|ns| (ns.name, ns.disk.entries)).collect())
+    Ok(wiped)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -450,10 +512,20 @@ pub struct NamespaceStats {
     pub watermarks: Option<(Watermark, Watermark)>,
 }
 
+/// A namespace the node leaves off, and what an earlier run left of it on
+/// disk.
+#[derive(Debug)]
+pub struct OffStats {
+    pub name: &'static str,
+    pub why: &'static str,
+    pub entries: u64,
+    pub bytes: u64,
+}
+
 #[derive(Debug)]
 pub struct Stats {
     pub namespaces: Vec<NamespaceStats>,
-    off: Vec<Off>,
+    pub off: Vec<OffStats>,
 }
 
 pub fn stats<D, T>(domain: &D, namespaces: &Namespaces<D>) -> miette::Result<Stats>
@@ -481,9 +553,20 @@ where
         });
     }
 
+    let mut off = Vec::new();
+
+    for ns in &namespaces.off {
+        off.push(OffStats {
+            name: ns.name,
+            why: ns.why,
+            entries: cache.disk().entries(ns.name).into_diagnostic()?,
+            bytes: cache.disk().bytes(ns.name).into_diagnostic()?,
+        });
+    }
+
     Ok(Stats {
         namespaces: out,
-        off: namespaces.off.clone(),
+        off,
     })
 }
 
@@ -528,8 +611,15 @@ fn print_stats(stats: &Stats) {
         );
     }
 
-    for off in &stats.off {
-        println!("{:<12} off: {}", off.name, off.why);
+    for ns in &stats.off {
+        println!(
+            "{:<12} {:>8} {:>10} {:>14} {:>12}",
+            ns.name, "off", ns.entries, ns.bytes, "-"
+        );
+    }
+
+    for ns in &stats.off {
+        println!("{} is off: {}", ns.name, ns.why);
     }
 
     println!();
@@ -663,7 +753,10 @@ fn print_verified(verified: &Verified) -> miette::Result<()> {
 mod tests {
     use std::sync::Arc;
 
-    use dolos_core::{config::CacheConfig, import::ImportExt as _};
+    use dolos_core::{
+        config::{CacheConfig, SyncConfig},
+        import::ImportExt as _,
+    };
     use dolos_testing::{
         synthetic::{build_synthetic_blocks, SyntheticBlockConfig, SyntheticVectors},
         toy_domain::ToyDomain,
@@ -705,16 +798,18 @@ mod tests {
         }
     }
 
-    /// The chain on a domain whose cache keeps its disk tier in `dir` and
-    /// totals entries of at least `admission`.
-    fn domain(dir: &Path, admission: u64) -> (ToyDomain, SyntheticVectors) {
-        let genesis = Arc::new(dolos_cardano::include::preview::load());
-        let (blocks, vectors, chain_config) = build_synthetic_blocks(chain());
-
-        let cache = CacheConfig {
+    fn cache_config(admission: u64) -> CacheConfig {
+        CacheConfig {
             admission: [(TOTALS.name.to_string(), admission)].into(),
             ..CacheConfig::default()
-        };
+        }
+    }
+
+    /// The chain on a domain whose cache, under `cache`, keeps its disk tier
+    /// in `dir`.
+    fn domain_with(dir: &Path, cache: CacheConfig) -> (ToyDomain, SyntheticVectors) {
+        let genesis = Arc::new(dolos_cardano::include::preview::load());
+        let (blocks, vectors, chain_config) = build_synthetic_blocks(chain());
 
         let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None)
             .with_cache_config(cache)
@@ -724,6 +819,42 @@ mod tests {
         domain.import_blocks(blocks).unwrap();
 
         (domain, vectors)
+    }
+
+    /// The chain on a domain whose cache keeps its disk tier in `dir` and
+    /// totals entries of at least `admission`.
+    fn domain(dir: &Path, admission: u64) -> (ToyDomain, SyntheticVectors) {
+        domain_with(dir, cache_config(admission))
+    }
+
+    /// A pruned node over the cache in `dir`, so with totals off.
+    fn pruned(dir: &Path) -> ToyDomain {
+        let genesis = Arc::new(dolos_cardano::include::preview::load());
+        let (_, _, chain_config) = build_synthetic_blocks(chain());
+
+        let mut sync = SyncConfig::default();
+        sync.max_history = Some(1_000);
+
+        ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None)
+            .with_sync_config(sync)
+            .with_cache_config(cache_config(0))
+            .with_persistent_cache(dir)
+            .unwrap()
+    }
+
+    /// Two totals entries on disk in `dir`, from an unpruned run.
+    async fn warmed_then_pruned(dir: &Path) -> ToyDomain {
+        let (domain, file) = warmable(dir);
+        let namespaces = register(&domain).unwrap();
+
+        warm(&domain, &namespaces, TOTALS.name, &Source::Keys(file))
+            .await
+            .unwrap();
+        drop(domain);
+
+        let domain = pruned(&dir.join("cache"));
+        assert_eq!(domain.cache().disk().entries(TOTALS.name).unwrap(), 2);
+        domain
     }
 
     /// The test's keys in text form, cheapest first.
@@ -781,8 +912,14 @@ mod tests {
 
         assert_eq!(warmed.watermark, 3);
         assert_eq!(
-            (warmed.keys, warmed.kept, warmed.dropped, warmed.current),
-            (3, 2, 1, 0)
+            (
+                warmed.keys,
+                warmed.kept,
+                warmed.below,
+                warmed.refused,
+                warmed.current
+            ),
+            (3, 2, 1, 0, 0)
         );
         assert!(warmed.failed.is_empty(), "{:?}", warmed.failed);
         assert_eq!(domain.cache().disk().entries(TOTALS.name).unwrap(), 2);
@@ -796,7 +933,50 @@ mod tests {
         let again = warm(&domain, &namespaces, TOTALS.name, &Source::Keys(path))
             .await
             .unwrap();
-        assert_eq!((again.current, again.dropped), (2, 1));
+        assert_eq!((again.current, again.below), (2, 1));
+    }
+
+    #[tokio::test]
+    async fn warm_builds_a_repeated_key_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (domain, vectors) = domain(dir.path(), 0);
+        let namespaces = register(&domain).unwrap();
+
+        let [_, address, _] = keys(&vectors);
+        let file = keys_file(dir.path(), &[address.clone(), address]);
+
+        let warmed = warm(&domain, &namespaces, TOTALS.name, &Source::Keys(file))
+            .await
+            .unwrap();
+
+        assert_eq!((warmed.keys, warmed.kept), (1, 1));
+        assert_eq!(
+            warmed.bytes,
+            domain.cache().disk().bytes(TOTALS.name).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn warm_tells_a_budget_refusal_from_the_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let cache = CacheConfig {
+            disk_budget_bytes: 1,
+            ..cache_config(0)
+        };
+
+        let (domain, vectors) = domain_with(dir.path(), cache);
+        let namespaces = register(&domain).unwrap();
+        let file = keys_file(dir.path(), &keys(&vectors));
+
+        let warmed = warm(&domain, &namespaces, TOTALS.name, &Source::Keys(file))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (warmed.kept, warmed.bytes, warmed.below, warmed.refused),
+            (0, 0, 0, 3)
+        );
     }
 
     #[tokio::test]
@@ -817,7 +997,7 @@ mod tests {
             .map(|key| (key.clone(), disk.get(TOTALS.name, &key).unwrap()))
             .collect();
 
-        let wiped = clear(&domain, &namespaces, Target::One(TOTALS.name)).unwrap();
+        let wiped = clear(&domain, &namespaces, &Target::One(TOTALS.name)).unwrap();
         assert!(wiped.contains(&(TOTALS.name, 2)), "{wiped:?}");
         assert_eq!(disk.entries(TOTALS.name).unwrap(), 0);
 
@@ -909,6 +1089,51 @@ mod tests {
 
         let error = verify(&domain, &namespaces, Some("nowhere"), 1).unwrap_err();
         assert!(error.to_string().contains("these can: totals"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn stats_counts_an_off_namespace_left_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let domain = warmed_then_pruned(dir.path()).await;
+        let namespaces = register(&domain).unwrap();
+
+        let stats = stats(&domain, &namespaces).unwrap();
+        assert!(stats.namespaces.iter().all(|ns| ns.name != TOTALS.name));
+
+        let [totals] = &stats.off[..] else {
+            panic!("{:?}", stats.off);
+        };
+        assert_eq!(totals.name, TOTALS.name);
+        assert_eq!(totals.entries, 2);
+        assert_eq!(
+            totals.bytes,
+            domain.cache().disk().bytes(TOTALS.name).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_wipes_an_off_namespace_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let domain = warmed_then_pruned(dir.path()).await;
+        let namespaces = register(&domain).unwrap();
+
+        let wiped = clear(&domain, &namespaces, &Target::One(TOTALS.name)).unwrap();
+        assert_eq!(wiped, vec![(TOTALS.name, 2)]);
+
+        let disk = domain.cache().disk();
+        assert_eq!(disk.entries(TOTALS.name).unwrap(), 0);
+        assert_eq!(disk.previous_keys(TOTALS.name).unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn clear_all_wipes_an_off_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let domain = warmed_then_pruned(dir.path()).await;
+        let namespaces = register(&domain).unwrap();
+
+        let wiped = clear(&domain, &namespaces, &Target::All).unwrap();
+        assert!(wiped.contains(&(TOTALS.name, 2)), "{wiped:?}");
+        assert_eq!(domain.cache().disk().entries(TOTALS.name).unwrap(), 0);
     }
 
     #[test]

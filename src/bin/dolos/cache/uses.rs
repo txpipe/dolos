@@ -11,7 +11,10 @@ use dolos_cardano::{
     },
     ChainSummary,
 };
-use dolos_core::{cache::FillError, CacheEntry, Domain, StateStore as _};
+use dolos_core::{
+    cache::{Cost, FillError},
+    CacheEntry, Domain, StateStore as _,
+};
 
 /// How far an entry reaches, in its use's unit (an epoch for `totals`).
 pub type Watermark = u64;
@@ -19,6 +22,9 @@ pub type Watermark = u64;
 /// One namespace's entries, as the commands build and check them.
 pub trait CacheUse<D: Domain>: Send + Sync + 'static {
     fn namespace(&self) -> &'static str;
+
+    /// The namespace's own admission threshold, which the config may override.
+    fn admission(&self) -> Cost;
 
     /// A key from its text form, one line of a `warm --keys` file.
     fn parse_key(&self, text: &str) -> Result<Vec<u8>, FillError>;
@@ -52,6 +58,10 @@ impl Totals {
 impl<D: Domain> CacheUse<D> for Totals {
     fn namespace(&self) -> &'static str {
         TOTALS.name
+    }
+
+    fn admission(&self) -> Cost {
+        TOTALS.admission
     }
 
     fn parse_key(&self, text: &str) -> Result<Vec<u8>, FillError> {

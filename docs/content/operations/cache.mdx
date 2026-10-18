@@ -38,10 +38,12 @@ An entry is kept only if building it cost at least its namespace's admission thr
 
 The `dolos cache` commands work on the cache file directly, so they run with the node stopped. Against a running node they exit with an error asking you to stop it first.
 
-- `dolos cache warm --namespace <ns>` builds entries ahead of the requests that would miss them, keeping those at or above the admission threshold, and prints how many it kept, their bytes and the time taken. It takes one source of keys:
+- `dolos cache warm --namespace <ns>` builds entries ahead of the requests that would miss them, keeping those at or above the admission threshold, and prints how many it kept, their bytes on disk and the time taken. It also counts the entries the disk budget refused or evicted. It takes one source of keys, and builds a key listed twice once:
   - `--keys <file>`: one key per line. For `totals`, a key is an address, a payment credential (`addr_vkh…` or `script…`) or a stake address.
   - `--previous`: the keys the namespace held when it was last cleared, to restore a cache after `clear`.
   - `--scan`: the keys the namespace finds worth warming. For `totals`, every credential whose rows in a single sealed epoch reach 4,096 unit sums.
+
+  `warm` makes its entries durable every 30 seconds. If it is interrupted, run it again: it skips the entries already current.
 - `dolos cache clear --namespace <ns>` wipes one namespace, and `--all` every one. The keys they held are recorded for `warm --previous`.
 - `dolos cache stats` prints each namespace's entries, bytes on disk, format version, and oldest and newest watermark. Hit rates are not kept on disk; read them from the metrics below.
 - `dolos cache verify` rebuilds a random sample of entries without the cache, each up to its own watermark, and compares them by digest. It prints each mismatch and exits non-zero on any. `--namespace` checks one namespace, and `--sample` sets how many entries it rebuilds per namespace (100 by default).
@@ -66,4 +68,4 @@ The cache records OpenTelemetry metrics under the `dolos-cache` meter:
 
 ## Pruned nodes
 
-The `totals` namespace sums sealed per-epoch stats from the archive, which a node with `sync.max_history` set prunes. On such a node the namespace is off: the totals routes compute every answer without the cache, `stats` reports it as off, and `warm` and `verify` refuse it.
+The `totals` namespace sums sealed per-epoch stats from the archive, which a node with `sync.max_history` set prunes. On such a node the namespace is off: the totals routes compute every answer without the cache, and `warm` and `verify` refuse it. Entries an earlier, unpruned run left on disk stay there until cleared: `stats` reports the namespace as off with their count, and `clear --namespace totals` or `clear --all` wipes them.

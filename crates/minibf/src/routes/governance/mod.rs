@@ -52,7 +52,8 @@ use futures::{stream, FutureExt as _, StreamExt as _};
 use itertools::Itertools;
 use metadata::{cached_drep_metadata, fetch_drep_metadata, unfetched, OnOverload};
 
-pub(crate) use metadata::{register as register_caches, remove_legacy_dir};
+pub use metadata::register as register_caches;
+pub(crate) use metadata::remove_legacy_dir;
 use pallas::{
     crypto::hash::Hash,
     ledger::{
