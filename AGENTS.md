@@ -6,7 +6,7 @@ Dolos is a lightweight Cardano node designed specifically for keeping an updated
 
 ## Storage Concepts
 
-Dolos uses three distinct storage backends, each serving a specific purpose:
+Dolos keeps its data in distinct stores, each serving a specific purpose:
 
 ### StateStore
 - **Purpose**: Current ledger state (the "world view")
@@ -25,6 +25,12 @@ Dolos uses three distinct storage backends, each serving a specific purpose:
 - **Contents**: Log entries with block data, entity deltas, and input UTxOs
 - **Traits**: `WalStore`
 - **Database**: `<storage.path>/wal`
+
+### CacheStore
+- **Purpose**: Disposable answers derived from the other stores (decision 0059); it is outside the WAL, steles and restore, and deleting it changes no answer
+- **Contents**: Byte entries by namespace and key; a namespace carries a format version, a validity model (immutable or tip-scoped) and an admission cost
+- **Traits**: `CacheStore`, implemented by `TieredCache` over the builtin memory tier and a `CacheDiskTier`
+- **Database**: memory only until a disk tier is plugged in (`<storage.path>/cache`)
 
 ### Where the indexes live
 There is no standalone index store. Every index is a projection and lives in
@@ -70,6 +76,7 @@ The project follows a modular workspace architecture with clear separation of co
   - `archive`: `ArchiveStore` and `ArchiveWriter` traits, `SlotTags` for indexing metadata
   - `indexes`: the chain-agnostic index record types (`Tag`, `UtxoIndexDelta`, `ArchiveIndexDelta`, `TagRecord`, `ExactRecord`, `IndexRecord`) the state and archive stores consume
   - `wal`: `WalStore` trait for write-ahead logging
+  - `cache`: `CacheStore` and `CacheDiskTier` traits, and `TieredCache`, the store over them
   - `batch`: `WorkBatch`, `WorkBlock`, `WorkDeltas` for batch processing pipeline
   - `facade`: High-level operations (`execute_batch`, `roll_forward`, `import_blocks`)
   - `query`: `QueryHelpers` trait and `SparseBlockIter` for joining indexes with archive
@@ -211,12 +218,14 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type State: StateStore;
     type Archive: ArchiveStore;
     type Mempool: MempoolStore;
+    type Cache: CacheStore;
     type TipSubscription: TipSubscription;
 
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
     fn mempool(&self) -> &Self::Mempool;
+    fn cache(&self) -> &Self::Cache;
     // ... configuration and chain access methods
 }
 ```

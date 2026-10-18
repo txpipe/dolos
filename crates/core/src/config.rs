@@ -1,4 +1,4 @@
-use std::{fmt::Display, net::SocketAddr, path::PathBuf};
+use std::{collections::BTreeMap, fmt::Display, net::SocketAddr, path::PathBuf};
 
 use pallas::ledger::primitives::Epoch;
 use serde::{Deserialize, Serialize};
@@ -465,6 +465,48 @@ impl MempoolStoreConfig {
     }
 }
 
+/// The disposable cache for derived reads. No setting changes an answer, only
+/// what is kept and for how long.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CacheConfig {
+    /// Off: every lookup misses and nothing is stored.
+    pub enabled: bool,
+    /// Optional path override for the disk tier's directory. If relative,
+    /// resolved from storage root. If not specified, defaults to
+    /// `<storage.path>/cache`.
+    pub path: Option<PathBuf>,
+    /// Bytes the memory tier may hold, apart from the state and archive
+    /// caches.
+    pub memory_budget_bytes: u64,
+    /// Bytes the disk tier may hold.
+    pub disk_budget_bytes: u64,
+    /// The least cost an entry must have to be kept, by namespace, in place
+    /// of the namespace's own default.
+    pub admission: BTreeMap<String, u64>,
+}
+
+impl CacheConfig {
+    pub const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
+    pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: None,
+            memory_budget_bytes: Self::DEFAULT_MEMORY_BUDGET_BYTES,
+            disk_budget_bytes: Self::DEFAULT_DISK_BUDGET_BYTES,
+            admission: BTreeMap::new(),
+        }
+    }
+}
+
 // ============================================================================
 // Storage Configuration
 // ============================================================================
@@ -493,6 +535,10 @@ pub struct StorageConfig {
     /// Mempool store configuration.
     #[serde(default, skip_serializing_if = "MempoolStoreConfig::is_default")]
     pub mempool: MempoolStoreConfig,
+
+    /// Cache store configuration.
+    #[serde(default, skip_serializing_if = "CacheConfig::is_default")]
+    pub cache: CacheConfig,
 }
 
 impl StorageConfig {
@@ -553,6 +599,14 @@ impl StorageConfig {
             }
         }
     }
+
+    /// Get the resolved path for the cache's disk tier.
+    /// Returns `None` when the cache is off.
+    pub fn cache_path(&self) -> Option<PathBuf> {
+        self.cache
+            .enabled
+            .then(|| self.resolve_store_path_with_default(self.cache.path.as_ref(), "cache"))
+    }
 }
 
 impl Default for StorageConfig {
@@ -564,6 +618,7 @@ impl Default for StorageConfig {
             state: StateStoreConfig::default(),
             archive: ArchiveStoreConfig::default(),
             mempool: MempoolStoreConfig::default(),
+            cache: CacheConfig::default(),
         }
     }
 }
@@ -1297,6 +1352,47 @@ mod tests {
 
         let json = serde_json::to_value(ArchiveStoreConfig::NoOp).unwrap();
         assert_eq!(json["backend"], "no_op");
+    }
+
+    #[test]
+    fn the_cache_table_takes_its_defaults_and_refuses_unknown_keys() {
+        use serde_json::json;
+
+        let cache: CacheConfig =
+            serde_json::from_value(json!({ "admission": { "totals": 5 } })).unwrap();
+        assert!(cache.enabled);
+        assert_eq!(cache.memory_budget_bytes, 512 * 1024 * 1024);
+        assert_eq!(cache.disk_budget_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(cache.admission["totals"], 5);
+
+        let err = serde_json::from_value::<CacheConfig>(json!({ "budget": 1 }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("budget"), "{err}");
+
+        let json = serde_json::to_value(StorageConfig::default()).unwrap();
+        assert!(json.get("cache").is_none());
+    }
+
+    #[test]
+    fn the_cache_path_resolves_like_the_other_stores() {
+        let mut storage = StorageConfig {
+            path: PathBuf::from("/data"),
+            ..Default::default()
+        };
+        assert_eq!(storage.cache_path(), Some(PathBuf::from("/data/cache")));
+
+        storage.cache.path = Some(PathBuf::from("fast/cache"));
+        assert_eq!(
+            storage.cache_path(),
+            Some(PathBuf::from("/data/fast/cache"))
+        );
+
+        storage.cache.path = Some(PathBuf::from("/ssd/cache"));
+        assert_eq!(storage.cache_path(), Some(PathBuf::from("/ssd/cache")));
+
+        storage.cache.enabled = false;
+        assert_eq!(storage.cache_path(), None);
     }
 
     #[test]
