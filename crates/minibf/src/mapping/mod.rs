@@ -606,7 +606,7 @@ fn anchor_http_client() -> Result<&'static reqwest::Client, &'static reqwest::Er
     CLIENT.as_ref()
 }
 
-fn offchain_hash_mismatch_error(
+pub(crate) fn offchain_hash_mismatch_error(
     url: &str,
     expected_hash: &[u8],
     actual_hash: &[u8],

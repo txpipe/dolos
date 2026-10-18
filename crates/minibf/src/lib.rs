@@ -361,6 +361,8 @@ where
     Option<GovState>: From<D::Entity>,
     Option<MetadataLabelState>: From<D::Entity>,
 {
+    routes::governance::register_caches(facade.inner.cache());
+
     let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
         .route("/", get(routes::root::<D>))
@@ -775,6 +777,12 @@ where
     type Config = MinibfConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
+        let storage_path = domain.storage_config().path.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            routes::governance::remove_legacy_dir(&storage_path)
+        })
+        .await;
+
         let app = build_router(cfg.clone(), domain);
 
         let listener = tokio::net::TcpListener::bind(cfg.listen_address)
