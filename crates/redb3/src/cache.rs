@@ -776,6 +776,7 @@ mod tests {
         let Err(error) = RedbCacheTier::open(dir.path(), MIB) else {
             panic!("a cache file it may not write opened");
         };
+        assert!(matches!(error, CacheError::Disk(_)), "{error}");
         assert!(
             error.to_string().contains(&path.display().to_string()),
             "{error}"
