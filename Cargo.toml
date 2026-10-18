@@ -192,6 +192,14 @@ jemalloc = ["dep:tikv-jemallocator"]
 # Default features - includes all services
 default = ["mithril", "utils", "grpc", "minibf", "minikupo", "trp", "jemalloc"]
 
+# Line tables keep file:line in backtraces and panics while cutting the dev and
+# test targets by ~40%; set CARGO_PROFILE_DEV_DEBUG=full for a debugger session
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 # The profile that 'cargo dist' will build with
 [profile.dist]
 inherits = "release"
