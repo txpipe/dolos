@@ -62,7 +62,7 @@ The cache records OpenTelemetry metrics under the `dolos-cache` meter:
 | `cache_entries`   | gauge     | `namespace`, `tier` |
 | `cache_bytes`     | gauge     | `namespace`, `tier` |
 
-`tier` is `memory` or `disk`. The hit rate of a namespace is its hits over its hits and misses. They reach a collector through the process's OpenTelemetry meter provider; the [`[telemetry]`](./tracing) section exports traces only, so `dolos daemon` does not export these metrics yet.
+`tier` is `memory` or `disk`; the disk tier's own evictions are not counted. A lookup reads the disk only after a memory miss, so a namespace's hit rate is its memory and disk hits over its hits and misses on the memory tier. The metrics reach a collector through the process's OpenTelemetry meter provider; the [`[telemetry]`](./tracing) section exports traces only, so `dolos daemon` does not export these metrics yet.
 
 ## Pruned nodes
 
