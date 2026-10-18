@@ -4,20 +4,22 @@ sidebar:
   order: 5
 ---
 
-Dolos keeps a cache of answers it derives from its other stores, so that an expensive read is computed once rather than on every request. The cache is disposable: it is not part of the WAL, the state or the archive, it is left out of snapshots and restores, and deleting it changes no answer, only how fast the first requests are served.
+Dolos keeps a cache of answers it derives from its other stores, so that an expensive read is computed once rather than on every request. The cache is disposable: it is not part of the WAL, the state or the archive, it is left out of snapshots and restores, and deleting it changes no answer the node derives, only how fast the first requests are served. The one thing it holds that the node cannot rebuild on its own is off-chain metadata, which is fetched again from its hosts.
 
 ## What it holds
 
 The cache is split into namespaces, one per use. Each namespace has a format version; an upgrade that changes a namespace's encoding bumps it, and the entries kept under the old version are wiped when the node starts.
 
-| namespace | validity    | serves                                                                                             |
-| --------- | ----------- | -------------------------------------------------------------------------------------------------- |
-| `totals`  | immutable   | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` |
-| `network` | tip-scoped  | the `/network` body, for 30 seconds                                                                |
+| namespace           | validity   | serves                                                                                                        |
+| ------------------- | ---------- | ------------------------------------------------------------------------------------------------------------- |
+| `totals`            | immutable  | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total`           |
+| `network`           | tip-scoped | the `/network` body, for 30 seconds                                                                           |
+| `offchain`          | immutable  | the verified DRep metadata of `/governance/dreps` and `/governance/dreps/{drep_id}/metadata`, by content hash |
+| `offchain-failures` | tip-scoped | failed metadata fetches, for 10 minutes, so a dead host is not asked again on every request                   |
 
 A namespace has one of two validity models:
 
-- **Immutable** entries are built from sealed data only. They are never stale, at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
+- **Immutable** entries are never stale. An `offchain` body is pinned by its anchor's content hash, which every read checks again. The other immutable entries are built from sealed data only, so they are at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
 - **Tip-scoped** entries are valid for a while, then served stale while one rebuild replaces them. They are kept in memory only.
 
 The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file that fails to open is recreated empty.
