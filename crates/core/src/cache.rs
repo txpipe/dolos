@@ -248,6 +248,21 @@ pub trait CacheStore: Clone + Send + Sync + 'static {
     where
         Fut: Future<Output = Result<CacheEntry, E>> + Send + 'static,
         E: Into<FillError> + 'static;
+
+    /// The entry under `key`, or the value `fill` builds for it in the
+    /// caller's task: the answer to a miss that
+    /// [`get_or_fill_async`](Self::get_or_fill_async) refused with
+    /// [`CacheError::Overloaded`]. `fill` runs outside the pending limit but
+    /// within the concurrent one, joins no flight and stops with its caller.
+    async fn fill_inline<Fut, E>(
+        &self,
+        namespace: &str,
+        key: &[u8],
+        fill: Fut,
+    ) -> Result<Bytes, CacheError>
+    where
+        Fut: Future<Output = Result<CacheEntry, E>> + Send,
+        E: Into<FillError>;
 }
 
 /// The persistent tier a backend implements. Calls block on I/O.
@@ -589,47 +604,7 @@ impl<D: CacheDiskTier> TieredCache<D> {
         let entry_key = key.2.clone();
         let (flight, retire) = self.record_flight(flights, key, Some(ns.clone()));
 
-        let run = async move {
-            if cache.uses_disk(&ns.spec) {
-                let (cache, ns, key) = (cache.clone(), ns.clone(), entry_key.clone());
-                let found = tokio::task::spawn_blocking(move || cache.lookup_disk(&ns, &key))
-                    .await
-                    .ok()
-                    .flatten();
-
-                if let Some(value) = found {
-                    return Ok(value);
-                }
-            }
-
-            let _permit =
-                match &ns.permits {
-                    Some(permits) => Some(permits.clone().acquire_owned().await.map_err(|_| {
-                        CacheError::Limiter("cache fill permits closed".to_string())
-                    })?),
-                    None => None,
-                };
-
-            let started = Instant::now();
-            let filled = fill.await.map_err(CacheError::fill);
-            cache.inner.metrics.filled(ns.spec.name, started.elapsed());
-
-            let entry = filled.inspect_err(|error| {
-                tracing::warn!(namespace = ns.spec.name, %error, "cache fill failed");
-            })?;
-
-            let value = entry.value.clone();
-
-            if cache.uses_disk(&ns.spec) {
-                let stored =
-                    tokio::task::spawn_blocking(move || cache.store(&ns, entry_key, entry));
-                let _ = stored.await;
-            } else {
-                cache.store(&ns, entry_key, entry);
-            }
-
-            Ok(value)
-        };
+        let run = cache.run_async_fill(ns, entry_key, fill);
 
         runtime.spawn(async move {
             let filled = run.await;
@@ -637,6 +612,60 @@ impl<D: CacheDiskTier> TieredCache<D> {
         });
 
         Ok(flight)
+    }
+
+    /// An async fill of `key` under the namespace's concurrent limit: the
+    /// disk tier first, then `fill`, whose entry is kept.
+    async fn run_async_fill<Fut, E>(
+        self,
+        ns: Arc<Registered>,
+        key: Bytes,
+        fill: Fut,
+    ) -> Result<Bytes, CacheError>
+    where
+        Fut: Future<Output = Result<CacheEntry, E>>,
+        E: Into<FillError>,
+    {
+        if self.uses_disk(&ns.spec) {
+            let (cache, ns, key) = (self.clone(), ns.clone(), key.clone());
+            let found = tokio::task::spawn_blocking(move || cache.lookup_disk(&ns, &key))
+                .await
+                .ok()
+                .flatten();
+
+            if let Some(value) = found {
+                return Ok(value);
+            }
+        }
+
+        let _permit =
+            match &ns.permits {
+                Some(permits) => {
+                    Some(permits.clone().acquire_owned().await.map_err(|_| {
+                        CacheError::Limiter("cache fill permits closed".to_string())
+                    })?)
+                }
+                None => None,
+            };
+
+        let started = Instant::now();
+        let filled = fill.await.map_err(CacheError::fill);
+        self.inner.metrics.filled(ns.spec.name, started.elapsed());
+
+        let entry = filled.inspect_err(|error| {
+            tracing::warn!(namespace = ns.spec.name, %error, "cache fill failed");
+        })?;
+
+        let value = entry.value.clone();
+
+        if self.uses_disk(&ns.spec) {
+            let stored = tokio::task::spawn_blocking(move || self.store(&ns, key, entry));
+            let _ = stored.await;
+        } else {
+            self.store(&ns, key, entry);
+        }
+
+        Ok(value)
     }
 }
 
@@ -872,6 +901,27 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
         };
 
         flight.await
+    }
+
+    async fn fill_inline<Fut, E>(
+        &self,
+        namespace: &str,
+        key: &[u8],
+        fill: Fut,
+    ) -> Result<Bytes, CacheError>
+    where
+        Fut: Future<Output = Result<CacheEntry, E>> + Send,
+        E: Into<FillError>,
+    {
+        let ns = self.namespace(namespace)?;
+
+        if let Lookup::Fresh(value) = self.lookup_memory(&ns.spec, key) {
+            return Ok(value);
+        }
+
+        self.clone()
+            .run_async_fill(ns, Bytes::copy_from_slice(key), fill)
+            .await
     }
 }
 
@@ -1639,5 +1689,55 @@ mod tests {
         assert_eq!(joined.await.unwrap().unwrap(), "fetched");
         assert!(!started.load(Ordering::SeqCst));
         assert_eq!(most.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn an_inline_fill_waits_for_a_permit_and_keeps_its_entry() {
+        let ns = CacheNamespace::immutable("net", 1).with_fill_limits(1, 1);
+        let cache = registered(cache(), ns);
+        let running = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Semaphore::new(0));
+
+        let held = tokio::spawn({
+            let (cache, running, gate) = (cache.clone(), running.clone(), gate.clone());
+            async move {
+                cache
+                    .get_or_fill_async("net", &[0], async move {
+                        running.fetch_add(1, Ordering::SeqCst);
+                        let _ = gate.acquire().await;
+                        entry("held", 1)
+                    })
+                    .await
+            }
+        });
+
+        wait_for_calls(&running, 1).await;
+
+        let past = cache
+            .get_or_fill_async("net", &[1], async { entry("never", 1) })
+            .await;
+        assert!(matches!(past, Err(CacheError::Overloaded)));
+
+        let started = Arc::new(AtomicBool::new(false));
+
+        let inline = tokio::spawn({
+            let (cache, started) = (cache.clone(), started.clone());
+            async move {
+                cache
+                    .fill_inline("net", &[1], async move {
+                        started.store(true, Ordering::SeqCst);
+                        entry("inline", 1)
+                    })
+                    .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!started.load(Ordering::SeqCst));
+        gate.add_permits(64);
+
+        assert_eq!(held.await.unwrap().unwrap(), "held");
+        assert_eq!(inline.await.unwrap().unwrap(), "inline");
+        assert_eq!(cache.get("net", &[1]).unwrap(), "inline");
     }
 }

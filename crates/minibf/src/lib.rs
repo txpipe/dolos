@@ -363,6 +363,8 @@ where
         tracing::error!(%error, "failed to register the /network cache namespace");
     }
 
+    routes::governance::register_caches(facade.cache());
+
     // disposable: without the namespace the totals routes fold uncached
     if let Err(error) = dolos_cardano::periods::stats::register_totals_cache(&facade.inner) {
         tracing::warn!(%error, "totals cache not registered");
@@ -782,6 +784,12 @@ where
     type Config = MinibfConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
+        let storage_path = domain.storage_config().path.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            routes::governance::remove_legacy_dir(&storage_path)
+        })
+        .await;
+
         let app = build_router(cfg.clone(), domain);
 
         let listener = tokio::net::TcpListener::bind(cfg.listen_address)
