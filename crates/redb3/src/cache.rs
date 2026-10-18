@@ -111,10 +111,9 @@ impl RedbCacheTier {
 
         match Self::create(&path, budget) {
             Ok(tier) => Ok(tier),
-            Err(redb::Error::DatabaseAlreadyOpen) => Err(CacheError::Disk(format!(
-                "{} is in use by another process",
-                path.display()
-            ))),
+            Err(redb::Error::DatabaseAlreadyOpen) => {
+                Err(CacheError::InUse(path.display().to_string()))
+            }
             Err(error) => {
                 warn!(path = %path.display(), %error, "cache file unreadable, recreating it empty");
 
@@ -190,7 +189,24 @@ impl RedbCacheTier {
         durability: Durability,
         apply: impl FnOnce(&WriteTransaction) -> Result<(), redb::Error>,
     ) -> Result<(), CacheError> {
-        let touched = std::mem::take(&mut *lock(&self.inner.touched));
+        self.write_wiping(durability, None, apply)
+    }
+
+    /// [`write`](Self::write) for an `apply` that wipes `wiped`, whose hits
+    /// are dropped rather than written: redb 3.1 frees the pages of a table
+    /// written and deleted in one transaction as if they were committed, and
+    /// panics on it in debug builds.
+    fn write_wiping(
+        &self,
+        durability: Durability,
+        wiped: Option<&str>,
+        apply: impl FnOnce(&WriteTransaction) -> Result<(), redb::Error>,
+    ) -> Result<(), CacheError> {
+        let mut touched = std::mem::take(&mut *lock(&self.inner.touched));
+
+        if let Some(wiped) = wiped {
+            touched.retain(|(namespace, _)| namespace != wiped);
+        }
 
         let run = || -> Result<(), redb::Error> {
             let mut wx = self.inner.db.begin_write()?;
@@ -254,7 +270,7 @@ impl CacheDiskTier for RedbCacheTier {
             return Ok(());
         }
 
-        self.write(Durability::None, |wx| {
+        self.write_wiping(Durability::None, Some(namespace), |wx| {
             if known.is_some() {
                 wipe(wx, namespace)?;
             }
@@ -356,7 +372,7 @@ impl CacheDiskTier for RedbCacheTier {
     }
 
     fn wipe(&self, namespace: &str) -> Result<(), CacheError> {
-        self.write(Durability::None, |wx| wipe(wx, namespace))
+        self.write_wiping(Durability::None, Some(namespace), |wx| wipe(wx, namespace))
     }
 
     fn previous_keys(&self, namespace: &str) -> Result<Vec<Bytes>, CacheError> {
@@ -686,6 +702,31 @@ mod tests {
         put(&tier, "c", 10, 1);
         tier.wipe("ns").unwrap();
         assert_eq!(tier.previous_keys("ns").unwrap(), [Bytes::from("c")]);
+    }
+
+    /// A hit's access time, still to be written, does not stop a wipe or a
+    /// new format version from dropping its namespace.
+    #[test]
+    fn a_wipe_after_a_hit_drops_the_namespace() {
+        let tier = RedbCacheTier::memory(MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        tier.open_namespace("other", 1).unwrap();
+
+        put(&tier, "a", 10, 1);
+        tier.put("other", b"x", b"0123456789", 1).unwrap();
+        assert!(holds(&tier, "a"));
+        assert!(tier.get("other", b"x").unwrap().is_some());
+
+        tier.wipe("ns").unwrap();
+        assert_eq!(tier.previous_keys("ns").unwrap(), [Bytes::from("a")]);
+        assert!(tier.get("other", b"x").unwrap().is_some());
+
+        put(&tier, "b", 10, 1);
+        assert!(holds(&tier, "b"));
+
+        tier.open_namespace("ns", 2).unwrap();
+        assert!(tier.keys("ns").unwrap().is_empty());
+        assert_eq!(tier.entries("other").unwrap(), 1);
     }
 
     #[test]

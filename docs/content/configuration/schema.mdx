@@ -216,7 +216,7 @@ another format as `v4` is unsupported and is not detected.
 - `disk_budget_bytes`: bytes the disk tier may hold (defaults to 4 GiB).
 - `admission`: a table from namespace name to the least build cost an entry needs to be kept, in place of that namespace's default.
 
-The cache keeps answers derived from the other stores. It is not part of the WAL, the state or the archive, and no setting here changes an answer, only what is kept and for how long. Entries are held in memory only for now; `path` and `disk_budget_bytes` take effect once the disk tier is in place. Unknown cache settings fail configuration loading.
+The cache keeps answers derived from the other stores. It is not part of the WAL, the state or the archive, and no setting here changes an answer, only what is kept and for how long. Unknown cache settings fail configuration loading. See [Cache](../operations/cache) for what it holds, its budgets and admission, and the `dolos cache` commands.
 
 ## `genesis` section
 

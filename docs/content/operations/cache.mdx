@@ -1,0 +1,69 @@
+---
+title: Cache
+sidebar:
+  order: 5
+---
+
+Dolos keeps a cache of answers it derives from its other stores, so that an expensive read is computed once rather than on every request. The cache is disposable: it is not part of the WAL, the state or the archive, it is left out of snapshots and restores, and deleting it changes no answer, only how fast the first requests are served.
+
+## What it holds
+
+The cache is split into namespaces, one per use. Each namespace has a format version; an upgrade that changes a namespace's encoding bumps it, and the entries kept under the old version are wiped when the node starts.
+
+| namespace | validity    | serves                                                                                             |
+| --------- | ----------- | -------------------------------------------------------------------------------------------------- |
+| `totals`  | immutable   | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` |
+| `network` | tip-scoped  | the `/network` body, for 30 seconds                                                                |
+
+A namespace has one of two validity models:
+
+- **Immutable** entries are built from sealed data only. They are never stale, at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
+- **Tip-scoped** entries are valid for a while, then served stale while one rebuild replaces them. They are kept in memory only.
+
+The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file that fails to open is recreated empty.
+
+## Budgets and admission
+
+| setting                               | default           |
+| ------------------------------------- | ----------------- |
+| `storage.cache.memory_budget_bytes`   | 512 MiB           |
+| `storage.cache.disk_budget_bytes`     | 4 GiB             |
+| `storage.cache.admission.<namespace>` | the namespace's own |
+
+When a tier is full, it evicts the entries with the lowest build cost per byte first, and the least recently used among equals.
+
+An entry is kept only if building it cost at least its namespace's admission threshold, so cheap answers do not crowd out expensive ones. A `totals` entry's cost is the number of per-epoch unit sums its build read, and it is kept from 100,000. Set `[storage.cache.admission]` to change a threshold, for example `totals = 20000` to keep more credentials. See the [`storage.cache`](../configuration/schema#storagecache-section) section for every setting.
+
+## Commands
+
+The `dolos cache` commands work on the cache file directly, so they run with the node stopped. Against a running node they exit with an error asking you to stop it first.
+
+- `dolos cache warm --namespace <ns>` builds entries ahead of the requests that would miss them, keeping those at or above the admission threshold, and prints how many it kept, their bytes and the time taken. It takes one source of keys:
+  - `--keys <file>`: one key per line. For `totals`, a key is an address, a payment credential (`addr_vkh…` or `script…`) or a stake address.
+  - `--previous`: the keys the namespace held when it was last cleared, to restore a cache after `clear`.
+  - `--scan`: the keys the namespace finds worth warming. For `totals`, every credential whose rows in a single sealed epoch reach 4,096 unit sums.
+- `dolos cache clear --namespace <ns>` wipes one namespace, and `--all` every one. The keys they held are recorded for `warm --previous`.
+- `dolos cache stats` prints each namespace's entries, bytes on disk, format version, and oldest and newest watermark. Hit rates are not kept on disk; read them from the metrics below.
+- `dolos cache verify` rebuilds a random sample of entries without the cache, each up to its own watermark, and compares them by digest. It prints each mismatch and exits non-zero on any. `--namespace` checks one namespace, and `--sample` sets how many entries it rebuilds per namespace (100 by default).
+
+`warm` and `verify` work on the namespaces that know how to build their entries offline, for now `totals`; given another, they name the ones they support.
+
+## Metrics
+
+The cache records OpenTelemetry metrics under the `dolos-cache` meter:
+
+| metric            | kind      | attributes          |
+| ----------------- | --------- | ------------------- |
+| `cache_hits`      | counter   | `namespace`, `tier` |
+| `cache_misses`    | counter   | `namespace`, `tier` |
+| `cache_evictions` | counter   | `namespace`, `tier` |
+| `cache_fills`     | counter   | `namespace`         |
+| `cache_fill_time` | histogram | `namespace`, in seconds |
+| `cache_entries`   | gauge     | `namespace`, `tier` |
+| `cache_bytes`     | gauge     | `namespace`, `tier` |
+
+`tier` is `memory` or `disk`. The hit rate of a namespace is its hits over its hits and misses. They reach a collector through the process's OpenTelemetry meter provider; the [`[telemetry]`](./tracing) section exports traces only, so `dolos daemon` does not export these metrics yet.
+
+## Pruned nodes
+
+The `totals` namespace sums sealed per-epoch stats from the archive, which a node with `sync.max_history` set prunes. On such a node the namespace is off: the totals routes compute every answer without the cache, `stats` reports it as off, and `warm` and `verify` refuse it.
