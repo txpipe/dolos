@@ -18,6 +18,7 @@ bincode.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 tempfile = "3"
+bytes = "1.11"
 
 dolos-core = { path = "../core" }
 

@@ -1,11 +1,12 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
-    builtin::{MemoryArchiveStore, MemoryStateStore, NoDiskTier},
+    builtin::{MemoryArchiveStore, MemoryStateStore},
     config::{CacheConfig, CardanoConfig, StorageConfig, SyncConfig},
     sync::execute_work_unit,
     BootstrapExt, *,
 };
+use dolos_redb3::cache::RedbCacheTier;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -284,7 +285,7 @@ pub struct ToyDomain<B: ToyStores = MemoryStores> {
     genesis: Arc<dolos_core::Genesis>,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
     query_limiter: QueryLimiter,
-    cache: TieredCache<NoDiskTier>,
+    cache: TieredCache<RedbCacheTier>,
 }
 
 impl ToyDomain<MemoryStores> {
@@ -356,7 +357,8 @@ impl<B: ToyStores> ToyDomain<B> {
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
         let storage_config = storage_config.unwrap_or_default();
         let query_limiter = QueryLimiter::default();
-        let cache = TieredCache::memory(&storage_config.cache, query_limiter.clone());
+        let disk = RedbCacheTier::memory(storage_config.cache.disk_budget_bytes).unwrap();
+        let cache = TieredCache::new(&storage_config.cache, disk, query_limiter.clone());
 
         let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
             config.clone(),
@@ -429,7 +431,8 @@ impl<B: ToyStores> ToyDomain<B> {
     /// Override the query limiter so tests can bound blocking query work;
     /// clones of the domain share it. The cache is rebuilt to fill under it.
     pub fn with_query_limiter(mut self, query_limiter: QueryLimiter) -> Self {
-        self.cache = TieredCache::memory(&self.storage_config.cache, query_limiter.clone());
+        let disk = self.cache.disk().clone();
+        self.cache = TieredCache::new(&self.storage_config.cache, disk, query_limiter.clone());
         self.query_limiter = query_limiter;
         self
     }
@@ -438,8 +441,20 @@ impl<B: ToyStores> ToyDomain<B> {
     /// rebuilt under it, empty and with no namespace registered.
     pub fn with_cache_config(mut self, cache: CacheConfig) -> Self {
         self.storage_config.cache = cache;
-        self.cache = TieredCache::memory(&self.storage_config.cache, self.query_limiter.clone());
+        let disk = RedbCacheTier::memory(self.storage_config.cache.disk_budget_bytes).unwrap();
+        self.cache = TieredCache::new(&self.storage_config.cache, disk, self.query_limiter.clone());
         self
+    }
+
+    /// Keeps the cache's disk tier in `dir`, as a node does, in place of
+    /// memory. Reopening the directory is a restart of the cache.
+    pub fn with_persistent_cache(
+        mut self,
+        dir: impl AsRef<std::path::Path>,
+    ) -> Result<Self, CacheError> {
+        let disk = RedbCacheTier::open(dir, self.storage_config.cache.disk_budget_bytes)?;
+        self.cache = TieredCache::new(&self.storage_config.cache, disk, self.query_limiter.clone());
+        Ok(self)
     }
 }
 
@@ -479,7 +494,7 @@ impl<B: ToyStores> dolos_core::Domain for ToyDomain<B> {
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
     type Mempool = Mempool;
-    type Cache = TieredCache<NoDiskTier>;
+    type Cache = TieredCache<RedbCacheTier>;
 
     fn storage_config(&self) -> &StorageConfig {
         &self.storage_config

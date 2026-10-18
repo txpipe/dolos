@@ -568,7 +568,6 @@ impl TestApp {
         let facade = Facade {
             inner: domain,
             config: cfg,
-            cache: crate::cache::CacheService::default(),
         };
 
         let router = build_router_with_facade(facade.clone());
@@ -722,7 +721,7 @@ pub async fn health_beside(app: &TestApp, path: &str) -> StatusCode {
 /// Writes `copies` copies of every account and every pool under new keys, so
 /// that a scan of either reads several chunks. The account copies keep the
 /// delegations of the originals.
-pub fn replicate_accounts_and_pools(domain: &ToyDomain, copies: u8) {
+pub fn replicate_accounts_and_pools<D: Domain>(domain: &D, copies: u8) {
     use dolos_cardano::{
         model::{AccountState, PoolState},
         AccountKey, PoolKey,

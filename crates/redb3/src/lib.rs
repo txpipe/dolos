@@ -3,6 +3,7 @@ use redb::{MultimapTableDefinition, ReadTransaction, TableDefinition, WriteTrans
 use std::{collections::HashMap, ops::Bound};
 use tracing::trace;
 
+pub mod cache;
 pub mod mempool;
 pub mod state;
 pub mod wal;

@@ -29,7 +29,6 @@ use dolos_core::{
     SubmitExt, TxOrder,
 };
 
-mod cache;
 mod error;
 pub(crate) mod hacks;
 pub(crate) mod inputs;
@@ -51,7 +50,6 @@ pub(crate) fn log_and_500<E: std::fmt::Debug>(context: &str) -> impl Fn(E) -> St
 pub struct Facade<D: Domain> {
     pub inner: D,
     pub config: MinibfConfig,
-    pub cache: cache::CacheService,
 }
 
 impl<D: Domain> Deref for Facade<D> {
@@ -345,7 +343,6 @@ where
     build_router_with_facade(Facade::<D> {
         inner: domain,
         config: cfg,
-        cache: cache::CacheService::default(),
     })
 }
 
@@ -361,6 +358,11 @@ where
     Option<GovState>: From<D::Entity>,
     Option<MetadataLabelState>: From<D::Entity>,
 {
+    // tip-scoped, so it opens no disk tier and cannot fail in practice
+    if let Err(error) = routes::network::register_cache(facade.cache()) {
+        tracing::error!(%error, "failed to register the /network cache namespace");
+    }
+
     // disposable: without the namespace the totals routes fold uncached
     if let Err(error) = dolos_cardano::periods::stats::register_totals_cache(&facade.inner) {
         tracing::warn!(%error, "totals cache not registered");

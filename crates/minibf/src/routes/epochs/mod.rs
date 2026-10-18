@@ -387,7 +387,6 @@ mod tests {
             Facade {
                 inner: domain,
                 config: MinibfConfig::new("[::]:0".parse().expect("valid listen address")),
-                cache: crate::cache::CacheService::default(),
             }
         }
 
@@ -434,7 +433,6 @@ mod tests {
                 TestFault::ArchiveStoreError,
             ),
             config: preprod.config.clone(),
-            cache: preprod.cache.clone(),
         };
         let chain = faulty_preprod.get_chain_summary().expect("era summary");
         let state = dolos_cardano::load_epoch::<dolos_testing::faults::FaultyToyDomain>(
