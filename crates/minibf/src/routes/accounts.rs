@@ -358,7 +358,8 @@ where
 }
 
 /// `GET /accounts/{stake_address}/addresses/total`: lifetime sums and tx count
-/// across every address of an account, from the Stats period logs.
+/// across every address of an account, from the Stats period logs through the
+/// totals cache.
 ///
 /// Pointer addresses are out of scope: an output's account is resolved
 /// through `pallas_extras::address_account`, which has no answer for a
@@ -388,22 +389,24 @@ where
         .to_bech32()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let body = domain
-        .query()
-        .run_blocking(move |domain| {
-            let totals = stats::account_totals(&domain, &chain, epochs, &account)
-                .map_err(DomainError::from)?;
+    let body = async {
+        let totals = stats::cached_account_totals(&domain.inner, &chain, epochs, &account).await?;
 
-            Ok(DirectJson::encode(&AccountAddressesTotalBody {
-                stake_address,
-                totals,
-            }))
-        })
-        .await
-        .map_err(|err| {
-            tracing::error!(?err);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        domain
+            .query()
+            .run_blocking(move |_| {
+                Ok(DirectJson::encode(&AccountAddressesTotalBody {
+                    stake_address,
+                    totals,
+                }))
+            })
+            .await
+    }
+    .await
+    .map_err(|err| {
+        tracing::error!(?err);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(body)
 }
@@ -1368,7 +1371,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{totals_bodies, TestApp, TestFault};
     use axum::http::header;
     use blockfrost_openapi::models::{
         account_addresses_assets_inner::AccountAddressesAssetsInner,
@@ -2241,6 +2244,24 @@ mod tests {
         let app = TestApp::new();
         let path = format!("/accounts/{}/addresses/total", missing_stake_address());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    /// An account's body is the same bytes with the totals cache off, missed
+    /// and hit.
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_total_bodies_match_with_the_cache_off_missed_and_hit() {
+        let [off, miss, hit] =
+            totals_bodies(|vectors| format!("/accounts/{}/addresses/total", vectors.stake_address))
+                .await;
+
+        let item: AccountAddressesTotal = serde_json::from_slice(&off).unwrap();
+        assert!(item.tx_count > 0);
+
+        assert_eq!(
+            String::from_utf8_lossy(&miss),
+            String::from_utf8_lossy(&off)
+        );
+        assert_eq!(String::from_utf8_lossy(&hit), String::from_utf8_lossy(&off));
     }
 
     #[tokio::test]

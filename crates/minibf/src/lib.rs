@@ -365,6 +365,11 @@ where
 
     routes::governance::register_caches(facade.cache());
 
+    // disposable: without the namespace the totals routes fold uncached
+    if let Err(error) = dolos_cardano::periods::stats::register_totals_cache(&facade.inner) {
+        tracing::warn!(%error, "totals cache not registered");
+    }
+
     let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
         .route("/", get(routes::root::<D>))
