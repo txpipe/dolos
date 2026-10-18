@@ -1506,6 +1506,7 @@ dependencies = [
  "bytes",
  "dolos-testing",
  "futures-core",
+ "futures-executor",
  "futures-util",
  "hex",
  "itertools 0.14.0",

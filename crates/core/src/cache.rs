@@ -945,6 +945,7 @@ fn attributes(namespace: &'static str, tier: Tier) -> [KeyValue; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_executor::block_on;
     use std::{
         panic::AssertUnwindSafe,
         sync::{atomic::AtomicBool, mpsc, Condvar},
@@ -1225,6 +1226,8 @@ mod tests {
 
     /// Starts each kind of fill where the runtime drops its tasks unstarted,
     /// as one that is shutting down does, and reports how the checks went.
+    /// It waits for each result, since such a runtime may drop a task later,
+    /// on one of its workers.
     fn fill_where_tasks_are_dropped(
         cache: TieredCache<crate::builtin::NoDiskTier>,
         done: mpsc::Sender<std::thread::Result<()>>,
@@ -1233,16 +1236,10 @@ mod tests {
             cache.refill("slow", b"key", || entry("value", 1)).unwrap();
 
             let filled = cache.get_or_fill("slow", b"key", || entry("value", 1));
-            assert!(matches!(
-                filled.now_or_never(),
-                Some(Err(CacheError::Aborted))
-            ));
+            assert!(matches!(block_on(filled), Err(CacheError::Aborted)));
 
             let fetched = cache.get_or_fill_async("net", b"key", async { entry("value", 1) });
-            assert!(matches!(
-                fetched.now_or_never(),
-                Some(Err(CacheError::Aborted))
-            ));
+            assert!(matches!(block_on(fetched), Err(CacheError::Aborted)));
 
             assert_usable(&cache);
         }));
