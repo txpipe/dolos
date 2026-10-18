@@ -27,7 +27,7 @@ use opentelemetry::{
     KeyValue,
 };
 use thiserror::Error;
-use tokio::sync::Semaphore;
+use tokio::{runtime::Handle, sync::Semaphore};
 
 use crate::{builtin::MemoryCacheTier, config::CacheConfig, QueryLimiter};
 
@@ -142,6 +142,9 @@ pub enum CacheError {
     #[error("too many cache fills under way")]
     Overloaded,
 
+    #[error("cache fills need a Tokio runtime")]
+    NoRuntime,
+
     #[error("cache disk tier: {0}")]
     Disk(String),
 }
@@ -220,6 +223,9 @@ pub trait CacheStore: Clone + Send + Sync + 'static {
 
     /// Replaces the entry under `key` with what `fill` builds, in the
     /// background. Does nothing while a fill of the key is under way.
+    ///
+    /// The fill is spawned on the caller's Tokio runtime; called outside one,
+    /// it fails with [`CacheError::NoRuntime`].
     fn refill<F, E>(&self, namespace: &str, key: &[u8], fill: F) -> Result<(), CacheError>
     where
         F: FnOnce() -> Result<CacheEntry, E> + Send + 'static,
@@ -445,11 +451,15 @@ impl<D: CacheDiskTier> TieredCache<D> {
         key: FlightKey,
         fill: F,
         read_disk: bool,
-    ) -> Flight
+    ) -> Result<Flight, CacheError>
     where
         F: FnOnce() -> Result<CacheEntry, E> + Send + 'static,
         E: Into<FillError> + 'static,
     {
+        // checked before the guard exists: a spawn without a runtime drops
+        // the guard while the caller still holds the flights lock
+        let runtime = Handle::try_current().map_err(|_| CacheError::NoRuntime)?;
+
         let retire = Retire {
             cache: self.clone(),
             key: key.clone(),
@@ -459,7 +469,7 @@ impl<D: CacheDiskTier> TieredCache<D> {
         let cache = self.clone();
         let entry_key = key.1.clone();
 
-        let task = tokio::spawn(async move {
+        let task = runtime.spawn(async move {
             let _retire = retire;
             let limiter = cache.inner.limiter.clone();
 
@@ -498,7 +508,7 @@ impl<D: CacheDiskTier> TieredCache<D> {
             .shared();
 
         flights.insert(key, flight.clone());
-        flight
+        Ok(flight)
     }
 
     /// Starts an async fill of `key` within the namespace's fill limits, and
@@ -514,6 +524,8 @@ impl<D: CacheDiskTier> TieredCache<D> {
         Fut: Future<Output = Result<CacheEntry, E>> + Send + 'static,
         E: Into<FillError> + 'static,
     {
+        let runtime = Handle::try_current().map_err(|_| CacheError::NoRuntime)?;
+
         if let Some(limits) = ns.spec.fill_limits {
             if ns.pending.load(Ordering::SeqCst) >= limits.pending {
                 return Err(CacheError::Overloaded);
@@ -531,7 +543,7 @@ impl<D: CacheDiskTier> TieredCache<D> {
         let cache = self.clone();
         let entry_key = key.1.clone();
 
-        let task = tokio::spawn(async move {
+        let task = runtime.spawn(async move {
             let _retire = retire;
 
             if cache.uses_disk(&ns.spec) {
@@ -732,14 +744,14 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
                 Lookup::Fresh(value) => return Ok(value),
                 Lookup::Stale(value) => {
                     if !flights.contains_key(&key) {
-                        drop(self.start_fill(&mut flights, ns, key, fill, false));
+                        drop(self.start_fill(&mut flights, ns, key, fill, false)?);
                     }
 
                     return Ok(value);
                 }
                 Lookup::Miss => match flights.get(&key) {
                     Some(flight) => flight.clone(),
-                    None => self.start_fill(&mut flights, ns, key, fill, true),
+                    None => self.start_fill(&mut flights, ns, key, fill, true)?,
                 },
             }
         };
@@ -758,7 +770,7 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
         let mut flights = lock(&self.inner.flights);
 
         if !flights.contains_key(&key) {
-            drop(self.start_fill(&mut flights, ns, key, fill, false));
+            drop(self.start_fill(&mut flights, ns, key, fill, false)?);
         }
 
         Ok(())
@@ -785,7 +797,10 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
                 Lookup::Stale(value) => {
                     // past the fill limits the stale value is still an answer
                     if !flights.contains_key(&key) {
-                        let _ = self.start_async_fill(&mut flights, ns, key, fill);
+                        match self.start_async_fill(&mut flights, ns, key, fill) {
+                            Ok(_) | Err(CacheError::Overloaded) => {}
+                            Err(error) => return Err(error),
+                        }
                     }
 
                     return Ok(value);
@@ -1159,6 +1174,36 @@ mod tests {
 
         let value = cache.get_or_fill("slow", b"key", || entry("ok", 1));
         assert_eq!(value.await.unwrap(), "ok");
+    }
+
+    #[test]
+    fn a_fill_outside_a_runtime_fails_and_leaves_the_cache_usable() {
+        let net = CacheNamespace::immutable("net", 1).with_fill_limits(1, 1);
+        let cache = registered(registered(cache(), SLOW), net);
+
+        let refilled = cache.refill("slow", b"key", || entry("value", 1));
+        assert!(matches!(refilled, Err(CacheError::NoRuntime)));
+
+        let filled = cache.get_or_fill("slow", b"key", || entry("value", 1));
+        assert!(matches!(
+            filled.now_or_never(),
+            Some(Err(CacheError::NoRuntime))
+        ));
+
+        let fetched = cache.get_or_fill_async("net", b"key", async { entry("value", 1) });
+        assert!(matches!(
+            fetched.now_or_never(),
+            Some(Err(CacheError::NoRuntime))
+        ));
+
+        assert!(lock(&cache.inner.flights).is_empty());
+        let pending = cache
+            .namespace("net")
+            .unwrap()
+            .pending
+            .load(Ordering::SeqCst);
+        assert_eq!(pending, 0);
+        assert_eq!(cache.get("slow", b"key"), None);
     }
 
     #[tokio::test]

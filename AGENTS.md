@@ -6,7 +6,7 @@ Dolos is a lightweight Cardano node designed specifically for keeping an updated
 
 ## Storage Concepts
 
-Dolos uses three distinct storage backends, each serving a specific purpose:
+Dolos keeps its data in distinct stores, each serving a specific purpose:
 
 ### StateStore
 - **Purpose**: Current ledger state (the "world view")
