@@ -27,7 +27,10 @@ use opentelemetry::{
     KeyValue,
 };
 use thiserror::Error;
-use tokio::{runtime::Handle, sync::Semaphore};
+use tokio::{
+    runtime::Handle,
+    sync::{oneshot, Semaphore},
+};
 
 use crate::{builtin::MemoryCacheTier, config::CacheConfig, QueryLimiter};
 
@@ -224,8 +227,9 @@ pub trait CacheStore: Clone + Send + Sync + 'static {
     /// Replaces the entry under `key` with what `fill` builds, in the
     /// background. Does nothing while a fill of the key is under way.
     ///
-    /// The fill is spawned on the caller's Tokio runtime; called outside one,
-    /// it fails with [`CacheError::NoRuntime`].
+    /// The fill is spawned on the caller's Tokio runtime, and a runtime that
+    /// is shutting down drops it; called outside one, it fails with
+    /// [`CacheError::NoRuntime`].
     fn refill<F, E>(&self, namespace: &str, key: &[u8], fill: F) -> Result<(), CacheError>
     where
         F: FnOnce() -> Result<CacheEntry, E> + Send + 'static,
@@ -441,12 +445,39 @@ impl<D: CacheDiskTier> TieredCache<D> {
         }
     }
 
-    /// Starts a blocking fill of `key` and records it as the key's flight.
-    /// The caller holds the flights lock, so the task's retirement comes
-    /// after the record.
+    /// Records `key`'s flight under the caller's flights lock and releases
+    /// the lock before the fill is spawned: a runtime that is shutting down
+    /// drops a spawned task unstarted, on the spawning thread, and its
+    /// retirement takes the lock.
+    fn record_flight(
+        &self,
+        mut flights: MutexGuard<'_, HashMap<FlightKey, Flight>>,
+        key: FlightKey,
+        pending: Option<Arc<Registered>>,
+    ) -> (Flight, Retire<D>) {
+        let (done, result) = oneshot::channel();
+
+        let flight = async move { result.await.unwrap_or(Err(CacheError::Aborted)) }
+            .boxed()
+            .shared();
+
+        flights.insert(key.clone(), flight.clone());
+        drop(flights);
+
+        let retire = Retire {
+            cache: self.clone(),
+            key,
+            pending,
+            done: Some(done),
+        };
+
+        (flight, retire)
+    }
+
+    /// Starts a blocking fill of `key` as the key's flight.
     fn start_fill<F, E>(
         &self,
-        flights: &mut HashMap<FlightKey, Flight>,
+        flights: MutexGuard<'_, HashMap<FlightKey, Flight>>,
         ns: Arc<Registered>,
         key: FlightKey,
         fill: F,
@@ -456,21 +487,13 @@ impl<D: CacheDiskTier> TieredCache<D> {
         F: FnOnce() -> Result<CacheEntry, E> + Send + 'static,
         E: Into<FillError> + 'static,
     {
-        // checked before the guard exists: a spawn without a runtime drops
-        // the guard while the caller still holds the flights lock
         let runtime = Handle::try_current().map_err(|_| CacheError::NoRuntime)?;
-
-        let retire = Retire {
-            cache: self.clone(),
-            key: key.clone(),
-            pending: None,
-        };
 
         let cache = self.clone();
         let entry_key = key.1.clone();
+        let (flight, retire) = self.record_flight(flights, key, None);
 
-        let task = runtime.spawn(async move {
-            let _retire = retire;
+        runtime.spawn(async move {
             let limiter = cache.inner.limiter.clone();
 
             let run = move || {
@@ -497,25 +520,22 @@ impl<D: CacheDiskTier> TieredCache<D> {
                 Ok(value)
             };
 
-            limiter
+            let filled = limiter
                 .run_blocking(run)
                 .await
-                .unwrap_or_else(|error| Err(CacheError::Limiter(error.to_string())))
+                .unwrap_or_else(|error| Err(CacheError::Limiter(error.to_string())));
+
+            retire.finish(filled);
         });
 
-        let flight = async move { task.await.unwrap_or(Err(CacheError::Aborted)) }
-            .boxed()
-            .shared();
-
-        flights.insert(key, flight.clone());
         Ok(flight)
     }
 
-    /// Starts an async fill of `key` within the namespace's fill limits, and
-    /// records it as the key's flight.
+    /// Starts an async fill of `key`, within the namespace's fill limits, as
+    /// the key's flight.
     fn start_async_fill<Fut, E>(
         &self,
-        flights: &mut HashMap<FlightKey, Flight>,
+        flights: MutexGuard<'_, HashMap<FlightKey, Flight>>,
         ns: Arc<Registered>,
         key: FlightKey,
         fill: Fut,
@@ -534,18 +554,11 @@ impl<D: CacheDiskTier> TieredCache<D> {
 
         ns.pending.fetch_add(1, Ordering::SeqCst);
 
-        let retire = Retire {
-            cache: self.clone(),
-            key: key.clone(),
-            pending: Some(ns.clone()),
-        };
-
         let cache = self.clone();
         let entry_key = key.1.clone();
+        let (flight, retire) = self.record_flight(flights, key, Some(ns.clone()));
 
-        let task = runtime.spawn(async move {
-            let _retire = retire;
-
+        let run = async move {
             if cache.uses_disk(&ns.spec) {
                 let (cache, ns, key) = (cache.clone(), ns.clone(), entry_key.clone());
                 let found = tokio::task::spawn_blocking(move || cache.lookup_disk(&ns.spec, &key))
@@ -585,23 +598,36 @@ impl<D: CacheDiskTier> TieredCache<D> {
             }
 
             Ok(value)
+        };
+
+        runtime.spawn(async move {
+            let filled = run.await;
+            retire.finish(filled);
         });
 
-        let flight = async move { task.await.unwrap_or(Err(CacheError::Aborted)) }
-            .boxed()
-            .shared();
-
-        flights.insert(key, flight.clone());
         Ok(flight)
     }
 }
 
-/// Clears a fill's flight when its task ends, panics and aborts included, so
-/// the next miss starts afresh.
+/// Clears a fill's flight when its task ends, panics, aborts and a task
+/// dropped unstarted included, so the next miss starts afresh. The flight's
+/// waiters wake after it is cleared.
 struct Retire<D: CacheDiskTier> {
     cache: TieredCache<D>,
     key: FlightKey,
     pending: Option<Arc<Registered>>,
+    done: Option<oneshot::Sender<Result<Bytes, CacheError>>>,
+}
+
+impl<D: CacheDiskTier> Retire<D> {
+    fn finish(mut self, filled: Result<Bytes, CacheError>) {
+        let done = self.done.take();
+        drop(self);
+
+        if let Some(done) = done {
+            let _ = done.send(filled);
+        }
+    }
 }
 
 impl<D: CacheDiskTier> Drop for Retire<D> {
@@ -738,20 +764,20 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
         let key: FlightKey = (ns.spec.name, Bytes::copy_from_slice(key));
 
         let flight = {
-            let mut flights = lock(&self.inner.flights);
+            let flights = lock(&self.inner.flights);
 
             match self.lookup_memory(&ns.spec, &key.1) {
                 Lookup::Fresh(value) => return Ok(value),
                 Lookup::Stale(value) => {
                     if !flights.contains_key(&key) {
-                        drop(self.start_fill(&mut flights, ns, key, fill, false)?);
+                        drop(self.start_fill(flights, ns, key, fill, false)?);
                     }
 
                     return Ok(value);
                 }
                 Lookup::Miss => match flights.get(&key) {
                     Some(flight) => flight.clone(),
-                    None => self.start_fill(&mut flights, ns, key, fill, true)?,
+                    None => self.start_fill(flights, ns, key, fill, true)?,
                 },
             }
         };
@@ -767,10 +793,10 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
         let ns = self.namespace(namespace)?;
         let key: FlightKey = (ns.spec.name, Bytes::copy_from_slice(key));
 
-        let mut flights = lock(&self.inner.flights);
+        let flights = lock(&self.inner.flights);
 
         if !flights.contains_key(&key) {
-            drop(self.start_fill(&mut flights, ns, key, fill, false)?);
+            drop(self.start_fill(flights, ns, key, fill, false)?);
         }
 
         Ok(())
@@ -790,14 +816,14 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
         let key: FlightKey = (ns.spec.name, Bytes::copy_from_slice(key));
 
         let flight = {
-            let mut flights = lock(&self.inner.flights);
+            let flights = lock(&self.inner.flights);
 
             match self.lookup_memory(&ns.spec, &key.1) {
                 Lookup::Fresh(value) => return Ok(value),
                 Lookup::Stale(value) => {
                     // past the fill limits the stale value is still an answer
                     if !flights.contains_key(&key) {
-                        match self.start_async_fill(&mut flights, ns, key, fill) {
+                        match self.start_async_fill(flights, ns, key, fill) {
                             Ok(_) | Err(CacheError::Overloaded) => {}
                             Err(error) => return Err(error),
                         }
@@ -807,7 +833,7 @@ impl<D: CacheDiskTier> CacheStore for TieredCache<D> {
                 }
                 Lookup::Miss => match flights.get(&key) {
                     Some(flight) => flight.clone(),
-                    None => self.start_async_fill(&mut flights, ns, key, fill)?,
+                    None => self.start_async_fill(flights, ns, key, fill)?,
                 },
             }
         };
@@ -919,7 +945,10 @@ fn attributes(namespace: &'static str, tier: Tier) -> [KeyValue; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{atomic::AtomicBool, Condvar};
+    use std::{
+        panic::AssertUnwindSafe,
+        sync::{atomic::AtomicBool, mpsc, Condvar},
+    };
 
     const SLOW: CacheNamespace = CacheNamespace::immutable("slow", 1);
 
@@ -1176,10 +1205,62 @@ mod tests {
         assert_eq!(value.await.unwrap(), "ok");
     }
 
+    fn slow_and_net() -> TieredCache<crate::builtin::NoDiskTier> {
+        let net = CacheNamespace::immutable("net", 1).with_fill_limits(1, 1);
+        registered(registered(cache(), SLOW), net)
+    }
+
+    /// No flight is left behind or locked, and no async fill counts as
+    /// pending.
+    fn assert_usable(cache: &TieredCache<crate::builtin::NoDiskTier>) {
+        assert!(lock(&cache.inner.flights).is_empty());
+        let pending = cache
+            .namespace("net")
+            .unwrap()
+            .pending
+            .load(Ordering::SeqCst);
+        assert_eq!(pending, 0);
+        assert_eq!(cache.get("slow", b"key"), None);
+    }
+
+    /// Starts each kind of fill where the runtime drops its tasks unstarted,
+    /// as one that is shutting down does, and reports how the checks went.
+    fn fill_where_tasks_are_dropped(
+        cache: TieredCache<crate::builtin::NoDiskTier>,
+        done: mpsc::Sender<std::thread::Result<()>>,
+    ) {
+        let checked = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            cache.refill("slow", b"key", || entry("value", 1)).unwrap();
+
+            let filled = cache.get_or_fill("slow", b"key", || entry("value", 1));
+            assert!(matches!(
+                filled.now_or_never(),
+                Some(Err(CacheError::Aborted))
+            ));
+
+            let fetched = cache.get_or_fill_async("net", b"key", async { entry("value", 1) });
+            assert!(matches!(
+                fetched.now_or_never(),
+                Some(Err(CacheError::Aborted))
+            ));
+
+            assert_usable(&cache);
+        }));
+
+        let _ = done.send(checked);
+    }
+
+    /// Fails, rather than hangs, when a cache call on another thread blocks.
+    fn finished_in_time(finished: mpsc::Receiver<std::thread::Result<()>>) {
+        match finished.recv_timeout(Duration::from_secs(5)) {
+            Ok(checked) => checked.unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            Err(_) => panic!("a cache call hung"),
+        }
+    }
+
     #[test]
     fn a_fill_outside_a_runtime_fails_and_leaves_the_cache_usable() {
-        let net = CacheNamespace::immutable("net", 1).with_fill_limits(1, 1);
-        let cache = registered(registered(cache(), SLOW), net);
+        let cache = slow_and_net();
 
         let refilled = cache.refill("slow", b"key", || entry("value", 1));
         assert!(matches!(refilled, Err(CacheError::NoRuntime)));
@@ -1196,14 +1277,47 @@ mod tests {
             Some(Err(CacheError::NoRuntime))
         ));
 
-        assert!(lock(&cache.inner.flights).is_empty());
-        let pending = cache
-            .namespace("net")
-            .unwrap()
-            .pending
-            .load(Ordering::SeqCst);
-        assert_eq!(pending, 0);
-        assert_eq!(cache.get("slow", b"key"), None);
+        assert_usable(&cache);
+    }
+
+    #[test]
+    fn a_fill_on_a_runtime_shutting_down_leaves_the_cache_usable() {
+        let cache = slow_and_net();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (started, running) = mpsc::channel();
+        let (shut, closed) = mpsc::channel();
+        let (done, finished) = mpsc::channel();
+
+        runtime.spawn_blocking(move || {
+            started.send(()).unwrap();
+            closed.recv().unwrap();
+            fill_where_tasks_are_dropped(cache, done);
+        });
+
+        running.recv().unwrap();
+        runtime.shutdown_background();
+        shut.send(()).unwrap();
+
+        finished_in_time(finished);
+    }
+
+    #[test]
+    fn a_fill_on_a_dropped_runtime_leaves_the_cache_usable() {
+        let cache = slow_and_net();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        drop(runtime);
+
+        let (done, finished) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let _entered = handle.enter();
+            fill_where_tasks_are_dropped(cache, done);
+        });
+
+        finished_in_time(finished);
     }
 
     #[tokio::test]
