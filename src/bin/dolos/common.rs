@@ -54,8 +54,8 @@ const MOVED_TO_ARGUMENTS: [(&str, &str); 3] = [
     ),
     (
         "stelae",
-        "the `--registry-user` / `DOLOS_STELAE_*` inputs of `dolos bootstrap stelae` and \
-         `dolos snapshot`",
+        "`--registry-user` / `DOLOS_STELAE_USER`, `DOLOS_STELAE_PASSWORD`, `DOLOS_STELAE_TOKEN` \
+         and `--registry-credentials-file` on `dolos bootstrap stelae` and `dolos snapshot`",
     ),
 ];
 
@@ -475,11 +475,6 @@ mod tests {
                 "[snapshot]",
                 "--state-epochs",
             ),
-            (
-                "[stelae.registry]\nuser = \"stelae\"\n",
-                "[stelae]",
-                "DOLOS_STELAE_",
-            ),
         ] {
             let message = reject_moved_sections(&files(document))
                 .unwrap_err()
@@ -488,6 +483,24 @@ mod tests {
             assert!(message.contains(section), "{message}");
             assert!(message.contains(flag), "{message}");
         }
+
+        // Named exactly: a wildcard would also match the legacy
+        // `DOLOS_STELAE_REGISTRY_*` names, which nothing reads any more.
+        let message = reject_moved_sections(&files("[stelae.registry]\nuser = \"stelae\"\n"))
+            .unwrap_err()
+            .to_string();
+
+        for input in [
+            "[stelae]",
+            "--registry-user",
+            "`DOLOS_STELAE_USER`",
+            "`DOLOS_STELAE_PASSWORD`",
+            "`DOLOS_STELAE_TOKEN`",
+            "--registry-credentials-file",
+        ] {
+            assert!(message.contains(input), "{message}");
+        }
+        assert!(!message.contains("DOLOS_STELAE_*"), "{message}");
 
         reject_moved_sections(&files("[upstream]\npeer_address = \"x:1\"\n")).unwrap();
     }

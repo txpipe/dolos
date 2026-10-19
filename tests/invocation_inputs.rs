@@ -30,6 +30,19 @@ fn cursor(node: &Node) -> Option<dolos_core::ChainPoint> {
     cursor
 }
 
+/// Gives `node` a magic no known network has, so nothing is defaulted from
+/// the catalog.
+fn set_custom_magic(node: &Node) {
+    let config_path = node.config_path();
+    let mut document: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    document["chain"]
+        .as_table_mut()
+        .unwrap()
+        .insert("magic".to_owned(), toml::Value::Integer(4242));
+    std::fs::write(&config_path, toml::to_string(&document).unwrap()).unwrap();
+}
+
 /// `dolos init` over a config an older `init` wrote, which always carries
 /// `[mithril]`: the error says where the section moved, and the setup is not
 /// called unreadable, which would tell the operator to remove their data.
@@ -75,19 +88,11 @@ fn force_does_not_clear_before_the_mithril_inputs_resolve() {
     let before = cursor(&node);
     assert!(before.is_some(), "no cursor");
 
-    // A magic no known network has, so nothing is defaulted.
-    let config_path = node.config_path();
-    let mut document: toml::Value =
-        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    document["chain"]
-        .as_table_mut()
-        .unwrap()
-        .insert("magic".to_owned(), toml::Value::Integer(4242));
-    std::fs::write(&config_path, toml::to_string(&document).unwrap()).unwrap();
+    set_custom_magic(&node);
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_dolos"))
         .arg("--config")
-        .arg(&config_path)
+        .arg(node.config_path())
         .args(["bootstrap", "--force", "mithril"])
         .env_remove("DOLOS_MITHRIL_AGGREGATOR")
         .env_remove("DOLOS_MITHRIL_GENESIS_VKEY")
@@ -380,4 +385,108 @@ fn verify_refuses_a_bad_state_epoch_list_before_streaming() {
         stderr(&output)
     );
     assert_eq!(proxy.requests(), 0, "the registry was read before the list");
+}
+
+/// `snapshot digest` plans with the retained epochs it is given, from the list
+/// or from a file, rather than retaining the tip alone.
+#[test]
+fn digest_plans_with_the_given_state_epochs() {
+    let node = Node::new();
+    node.sync();
+
+    let epochs = node.root.path().join("epochs.txt");
+    std::fs::write(&epochs, "208\n236\n").unwrap();
+    let inscription = node.root.path().join("inscription.json");
+
+    for source in [
+        ["--state-epochs", "208,236"],
+        ["--state-epochs-file", epochs.to_str().unwrap()],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_dolos"))
+            .arg("--config")
+            .arg(node.config_path())
+            .args(["snapshot", "digest", "--output"])
+            .arg(&inscription)
+            .args(source)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(
+            stderr(&output).contains("dumps:    [208, 236] retained"),
+            "{source:?} did not reach the plan:\n{}",
+            stderr(&output)
+        );
+    }
+}
+
+/// `snapshot verify --reproduce` plans with the retained epochs it is given,
+/// and reports that plan before it reads the registry.
+#[test]
+fn verify_reproduces_with_the_given_state_epochs() {
+    let node = Node::new();
+    node.sync();
+
+    let proxy = Proxy::start();
+
+    let output = proxy.run(
+        &node,
+        &[
+            "snapshot",
+            "verify",
+            "--repo",
+            networks::PREVIEW.stelae.registry,
+            "--insecure",
+            "--reproduce",
+            "--state-epochs",
+            "208,236",
+        ],
+        None,
+    );
+
+    assert!(!output.status.success(), "the proxy has no stele");
+    assert!(
+        stderr(&output).contains("dumps:    [208, 236] retained"),
+        "the list did not reach the reproduction's plan:\n{}",
+        stderr(&output)
+    );
+    assert!(proxy.requests() > 0, "the registry was never read");
+}
+
+/// A node on a network with no catalog entry reads even the official registry
+/// anonymously: the published read-only password belongs to the catalog
+/// networks' repositories alone.
+#[test]
+fn a_custom_network_reads_the_official_registry_anonymously() {
+    let node = Node::new();
+    set_custom_magic(&node);
+
+    let repository = networks::PREVIEW.stelae.registry;
+
+    for args in [
+        &["snapshot", "inspect", "--repo", repository, "--insecure"][..],
+        &["snapshot", "verify", "--repo", repository, "--insecure"][..],
+        &["bootstrap", "stelae", "--source", repository, "--insecure"][..],
+    ] {
+        let proxy = Proxy::start();
+        let output = proxy.run(&node, args, None);
+
+        assert!(!output.status.success(), "{args:?}: the proxy has no stele");
+        assert!(
+            proxy.requests() > 0,
+            "{args:?}: the registry was never read"
+        );
+        assert!(
+            proxy
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|seen| seen.authorization.is_none()),
+            "{args:?} sent credentials for a custom network: {:?}\n{}",
+            proxy.seen.lock().unwrap(),
+            stderr(&output)
+        );
+    }
 }

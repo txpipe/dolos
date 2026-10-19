@@ -96,8 +96,6 @@ impl CredentialArgs {
         network: Option<&KnownNetwork>,
         env: impl Fn(&str) -> Option<String>,
     ) -> miette::Result<RegistryAuth> {
-        let env = |name| env(name).filter(|value| !value.is_empty());
-
         let secrets = match &self.registry_credentials_file {
             Some(path) => read_secrets(path)?,
             None => Secrets {
@@ -106,17 +104,17 @@ impl CredentialArgs {
             },
         };
 
-        let user = match (&self.registry_user, &secrets.token) {
+        // An empty value is no secret, whichever source it came from.
+        let password = secrets.password.filter(|value| !value.is_empty());
+        let token = secrets.token.filter(|value| !value.is_empty());
+
+        let user = match (&self.registry_user, &token) {
             (Some(user), _) => Some(user.clone()),
             (None, None) => official_user(repository, network).map(str::to_owned),
             (None, Some(_)) => None,
         };
 
-        Ok(RegistryAuth::from_inputs(
-            user,
-            secrets.password,
-            secrets.token,
-        ))
+        Ok(RegistryAuth::from_inputs(user, password, token))
     }
 }
 
@@ -285,6 +283,41 @@ mod tests {
         );
     }
 
+    /// An empty value in a credentials file counts as unset, as an empty
+    /// variable does: no empty bearer, no empty password.
+    #[test]
+    fn an_empty_file_value_is_no_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.toml");
+
+        let args = CredentialArgs {
+            registry_credentials_file: Some(path.clone()),
+            ..Default::default()
+        };
+
+        std::fs::write(&path, "token = \"\"\n").unwrap();
+
+        assert_eq!(
+            auth(&args, &official(), Some(&networks::MAINNET), no_env),
+            Auth::Basic {
+                user: networks::MAINNET.stelae.user.to_owned(),
+                password: OFFICIAL_REGISTRY_PASSWORD.to_owned(),
+            }
+        );
+
+        let args = CredentialArgs {
+            registry_user: Some("publisher".to_owned()),
+            ..args
+        };
+        std::fs::write(&path, "password = \"\"\n").unwrap();
+
+        let inputs = args
+            .inputs(&official(), Some(&networks::MAINNET), no_env)
+            .unwrap();
+        assert_eq!(inputs.password, None);
+        assert_eq!(inputs.token, None);
+    }
+
     #[test]
     fn a_credentials_file_takes_the_place_of_the_environment() {
         let dir = tempfile::tempdir().unwrap();
@@ -373,6 +406,54 @@ mod tests {
         assert!(message.contains("credentials.toml"), "{message}");
         assert!(!message.contains(TOKEN_ENV), "{message}");
         assert!(!message.contains("from-file"), "{message}");
+    }
+
+    /// A token from the environment is the variable to drop.
+    #[test]
+    fn an_ambiguous_identity_from_the_environment_names_the_variable() {
+        let _guard = crate::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        std::env::remove_var(PASSWORD_ENV);
+        std::env::set_var(TOKEN_ENV, "from-env");
+
+        let args = CredentialArgs {
+            registry_user: Some("publisher".to_owned()),
+            ..Default::default()
+        };
+        let result = args.auth(&official(), Some(&networks::MAINNET));
+
+        std::env::remove_var(TOKEN_ENV);
+
+        let message = format!("{:?}", result.err().unwrap());
+
+        assert!(message.contains(&format!("drop {TOKEN_ENV}")), "{message}");
+        assert!(!message.contains("from-env"), "{message}");
+    }
+
+    /// A password with no user to pair it with says how to name one.
+    #[test]
+    fn an_orphan_password_says_how_to_name_the_user() {
+        let _guard = crate::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        std::env::remove_var(TOKEN_ENV);
+        std::env::set_var(PASSWORD_ENV, "orphan");
+
+        let mirror = repo("oci://registry.example/stelae/mainnet");
+        let result = CredentialArgs::default().auth(&mirror, Some(&networks::MAINNET));
+
+        std::env::remove_var(PASSWORD_ENV);
+
+        let message = format!("{:?}", result.err().unwrap());
+
+        assert!(
+            message.contains("pass --registry-user or set DOLOS_STELAE_USER"),
+            "{message}"
+        );
+        assert!(!message.contains("orphan"), "{message}");
     }
 
     /// The documented variable names, through the real environment: a typo in

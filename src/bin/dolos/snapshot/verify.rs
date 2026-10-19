@@ -36,6 +36,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
+    export::Plan,
     facade::{SnapshotRepository, SnapshotSource as _, StoreSnapshot},
     node,
     registry::{self, Point, Repository},
@@ -117,9 +118,12 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    // Read and validated before the transport check, so that a bad list is
-    // refused before every blob has been streamed.
-    let retained = super::retained_epochs(&args.state_epochs, args.state_epochs_file.as_deref())?;
+    // Planned before the transport check, so that a list or a selection this
+    // node cannot plan is refused before every blob has been streamed.
+    let reproduction = args
+        .reproduce
+        .then(|| reproduction(config, args))
+        .transpose()?;
 
     let auth = args.credentials.auth_for_chain(&args.repo, &config.chain)?;
 
@@ -167,9 +171,28 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // could vouch for.
     println!("checked:  digests only; signatures and chain provenance are phase 5");
 
-    if !args.reproduce {
+    let Some((stores, plan)) = reproduction else {
         return Ok(());
-    }
+    };
+
+    let reproduced = StoreSnapshot::new(&stores.archive, &stores.state)
+        .verify_reproduction(&verified.inscription, &plan)
+        .into_diagnostic()
+        .context("reproducing the published stele from the local stores")?;
+
+    println!(
+        "reproduced: {} layers rebuilt from the local stores; the documents are byte-identical \
+         ({})",
+        reproduced.layers.len(),
+        verified.identity,
+    );
+
+    Ok(())
+}
+
+/// The stores and the reported plan `--reproduce` rebuilds the stele from.
+fn reproduction(config: &RootConfig, args: &Args) -> miette::Result<(crate::common::Stores, Plan)> {
+    let retained = super::retained_epochs(&args.state_epochs, args.state_epochs_file.as_deref())?;
 
     let stores = crate::common::open_data_stores(config)
         .into_diagnostic()
@@ -191,19 +214,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     super::report_plan(&plan)?;
 
-    let reproduced = StoreSnapshot::new(&stores.archive, &stores.state)
-        .verify_reproduction(&verified.inscription, &plan)
-        .into_diagnostic()
-        .context("reproducing the published stele from the local stores")?;
-
-    println!(
-        "reproduced: {} layers rebuilt from the local stores; the documents are byte-identical \
-         ({})",
-        reproduced.layers.len(),
-        verified.identity,
-    );
-
-    Ok(())
+    Ok((stores, plan))
 }
 
 #[cfg(test)]
