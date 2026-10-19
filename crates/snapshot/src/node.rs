@@ -41,10 +41,10 @@ mod auth {
     /// generated `dolos.toml` so that a node whose config names the user and no
     /// password authenticates as that user rather than as nobody.
     ///
-    /// Rotating the pair is a change here and in `dolos init`'s
-    /// `OFFICIAL_REGISTRY_USER` — paired with a release and comms, because
-    /// generated configs and released binaries carry the old one until their
-    /// nodes update.
+    /// Rotating the pair is a change here and in the catalog's
+    /// `dolos_cardano::networks` stelae user — paired with a release and
+    /// comms, because generated configs and released binaries carry the old
+    /// one until their nodes update.
     pub const OFFICIAL_REGISTRY_PASSWORD: &str = "7214892e36157f4051677b51526382cc96693d45eda4e4cd";
 
     /// Which identity this node reads a registry as.

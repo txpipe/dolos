@@ -702,9 +702,10 @@ pub struct SnapshotConfig {
 ///
 /// **Which registry is the official one, and what it is read as, is not decided
 /// here.** That is a hardcoded default of the same kind as a network's relay
-/// address or its Mithril aggregator, and it lives where those live: beside
-/// `KnownNetwork` in the binary, which is both what seeds a generated
-/// `dolos.toml` and what answers for a section naming a user and no password.
+/// address or its Mithril aggregator, and it lives where those live: in
+/// `dolos_cardano::networks::KnownNetwork`, which seeds a generated
+/// `dolos.toml`. The password that answers for a section naming a user and no
+/// password is `dolos_snapshot::node::OFFICIAL_REGISTRY_PASSWORD`.
 /// This crate carries the shape and none of the values.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 pub struct StelaeConfig {

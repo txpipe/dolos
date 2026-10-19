@@ -232,7 +232,7 @@ Dolos requires Cardano genesis data to operate. For simplicity sake, we've decid
 - `shelley_path`: file path to the Shelley json genesis file
 - `alonzo_path`: file path to the Alonzo json genesis file
 - `conway_path`: file path to the Conway json genesis file
-- `force_protocol`: (optional) the protocol version to force the node to start from. This is useful for networks such as `preview` which skips the Byron era.
+- `force_protocol`: (optional) the protocol version to force the node to start from. When unset, a Shelley genesis whose `protocolVersion.major` is above 2 starts the chain at that version (this is how `preview`, which skips the Byron era, starts at 6); otherwise the chain starts on Byron. An explicit value always wins.
 
 ## `chain` section
 
