@@ -489,8 +489,8 @@ pub fn log_ns_for(kind: &str) -> Option<Namespace> {
 ///
 /// If the field is absent, the reader can skip the layer.
 /// The committee context sets this field to true.
-/// The field is part of the `scope` that the profile defines, not an OCI annotation.
-/// The plan uses the field. The scope is canonical in the
+/// The field is part of the `scope` that the profile defines, not an OCI
+/// annotation. The plan uses the field. The scope is canonical in the
 /// inscription and covered by the digest a publisher signs, while annotations
 /// ride on the manifest, unsigned and transport-side.
 ///
