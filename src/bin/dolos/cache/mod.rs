@@ -1104,6 +1104,20 @@ mod tests {
         assert_eq!(domain.cache().disk().entries(TOTALS.name).unwrap(), 1);
     }
 
+    /// Copies the open cache file `file` into `dir`, as a kill now would leave
+    /// it. The copy reads through a memory map, since Windows refuses a plain
+    /// read of a file redb holds locked and its byte-range locks do not apply
+    /// to mapped pages; either way it sees what the OS would write back.
+    fn copy_left(file: &Path, dir: &Path) {
+        let file = std::fs::File::open(file).unwrap();
+
+        // SAFETY: the domain writes nothing to the file while the map lives
+        let map = unsafe { memmap2::Mmap::map(&file) }.unwrap();
+
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(dolos_redb3::cache::FILE_NAME), &map[..]).unwrap();
+    }
+
     /// Totals, copying the cache file aside as it starts building `at`: what a
     /// kill there would leave on disk.
     struct KilledAt {
@@ -1137,8 +1151,7 @@ mod tests {
             watermark: Watermark,
         ) -> Result<CacheEntry, FillError> {
             if key == self.at {
-                std::fs::create_dir_all(&self.left).unwrap();
-                std::fs::copy(&self.file, self.left.join(dolos_redb3::cache::FILE_NAME)).unwrap();
+                copy_left(&self.file, &self.left);
             }
 
             self.totals.build(domain, key, watermark)
@@ -1182,12 +1195,10 @@ mod tests {
             .unwrap();
         assert_eq!(warmed.kept, 2);
 
-        std::fs::create_dir_all(dir.join("after")).unwrap();
-        std::fs::copy(
-            dir.join("cache").join(dolos_redb3::cache::FILE_NAME),
-            dir.join("after").join(dolos_redb3::cache::FILE_NAME),
-        )
-        .unwrap();
+        copy_left(
+            &dir.join("cache").join(dolos_redb3::cache::FILE_NAME),
+            &dir.join("after"),
+        );
 
         let entries = |name: &str| {
             let tier = RedbCacheTier::open(dir.join(name), 1 << 30).unwrap();
