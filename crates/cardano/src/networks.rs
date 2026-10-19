@@ -257,10 +257,13 @@ mod tests {
 
     #[test]
     fn preview_genesis_starts_at_protocol_six() {
-        assert_eq!(PREVIEW.genesis().starting_protocol(), Some(6));
-        assert_eq!(MAINNET.genesis().starting_protocol(), None);
-        assert_eq!(PREPROD.genesis().starting_protocol(), None);
-        assert_eq!(include::devnet::load().starting_protocol(), Some(9));
+        assert_eq!(PREVIEW.genesis().starting_protocol().unwrap(), Some(6));
+        assert_eq!(MAINNET.genesis().starting_protocol().unwrap(), None);
+        assert_eq!(PREPROD.genesis().starting_protocol().unwrap(), None);
+        assert_eq!(
+            include::devnet::load().starting_protocol().unwrap(),
+            Some(9)
+        );
     }
 
     #[test]
@@ -268,6 +271,28 @@ mod tests {
         let mut genesis = PREVIEW.genesis();
         genesis.force_protocol = Some(4);
 
-        assert_eq!(genesis.starting_protocol(), Some(4));
+        assert_eq!(genesis.starting_protocol().unwrap(), Some(4));
+    }
+
+    #[test]
+    fn shelley_major_above_two_is_a_fast_forwarded_start() {
+        let mut genesis = PREVIEW.genesis();
+
+        genesis.shelley.protocol_params.protocol_version.major = 2;
+        assert_eq!(genesis.starting_protocol().unwrap(), None);
+
+        genesis.shelley.protocol_params.protocol_version.major = 3;
+        assert_eq!(genesis.starting_protocol().unwrap(), Some(3));
+    }
+
+    #[test]
+    fn starting_protocol_out_of_range_is_a_typed_error() {
+        let mut genesis = PREVIEW.genesis();
+        genesis.shelley.protocol_params.protocol_version.major = 65536;
+
+        assert!(matches!(
+            genesis.starting_protocol(),
+            Err(ChainError::UnsupportedStartingProtocol(65536))
+        ));
     }
 }

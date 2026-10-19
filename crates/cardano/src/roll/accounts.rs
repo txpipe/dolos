@@ -237,8 +237,7 @@ mod tests {
         });
         let block = MultiEraBlock::decode(&blocks[0]).unwrap();
 
-        let mut genesis = crate::include::devnet::load();
-        genesis.force_protocol = None;
+        let genesis = crate::include::devnet::load();
         let pparams = crate::forks::from_byron_genesis(&genesis.byron);
 
         let mut visitor = AccountVisitor::default();

@@ -386,14 +386,23 @@ impl Genesis {
     /// An explicit `force_protocol` wins. Otherwise a Shelley genesis major
     /// above 2 means a fast-forwarded start, since Shelley's own band is
     /// `[2, 2]`. `None` is a Byron start that climbs the hard-fork ladder.
-    pub fn starting_protocol(&self) -> Option<u16> {
-        if let Some(forced) = self.force_protocol {
-            return Some(forced as u16);
-        }
+    pub fn starting_protocol(&self) -> Result<Option<u16>, ChainError> {
+        let major = match self.force_protocol {
+            Some(forced) => forced as u64,
+            None => {
+                let major = self.shelley.protocol_params.protocol_version.major;
 
-        let major = self.shelley.protocol_params.protocol_version.major;
+                if major <= 2 {
+                    return Ok(None);
+                }
 
-        (major > 2).then_some(major as u16)
+                major
+            }
+        };
+
+        u16::try_from(major)
+            .map(Some)
+            .map_err(|_| ChainError::UnsupportedStartingProtocol(major))
     }
 
     pub fn from_file_paths(
@@ -477,8 +486,11 @@ pub enum ChainError {
     #[error("protocol params not found: {0}")]
     PParamsNotFound(String),
 
-    #[error("protocol parameter `{0}` is not set at this point of the chain; the genesis probably starts past Byron, set `genesis.force_protocol` to its starting protocol version")]
+    #[error("protocol parameter `{0}` is not set at this point of the chain; the genesis probably starts past Byron: set `genesis.force_protocol` to its starting protocol version, then wipe the store and bootstrap it again, since the setting is read only when the genesis is first applied")]
     StartingPParamMissing(&'static str),
+
+    #[error("the genesis starts at protocol version {0}, which this dolos can't fast-forward to")]
+    UnsupportedStartingProtocol(u64),
 
     #[error("no active epoch")]
     NoActiveEpoch,

@@ -89,3 +89,49 @@ impl BlockVisitor for PoolStateVisitor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+
+    use super::*;
+
+    /// A chain that opens on Byron's pparams carries no pool deposit, so a
+    /// pool registration reached before the Shelley fork is a typed error
+    /// rather than a panic.
+    #[test]
+    fn pool_registration_without_pool_deposit_is_a_typed_error() {
+        let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 1,
+            ..Default::default()
+        });
+        let block = MultiEraBlock::decode(&blocks[0]).unwrap();
+
+        let genesis = crate::include::devnet::load();
+        let pparams = crate::forks::from_byron_genesis(&genesis.byron);
+
+        let mut visitor = PoolStateVisitor::default();
+        let mut deltas = WorkDeltas::default();
+
+        visitor
+            .visit_root(&mut deltas, &block, &genesis, &pparams, 0, 0, 0)
+            .unwrap();
+
+        let txs = block.txs();
+        let cert = txs[0]
+            .certs()
+            .into_iter()
+            .find(|cert| pallas_extras::cert_as_pool_registration(cert).is_some())
+            .unwrap();
+
+        let err = visitor
+            .visit_cert(&mut deltas, &block, &txs[0], &0, &cert)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ChainError::StartingPParamMissing("pool_deposit")
+        ));
+    }
+}
