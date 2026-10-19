@@ -165,15 +165,18 @@ impl Proxy {
                     }
                     Some(_) => "HTTP/1.1 404 Not Found\r\n",
                 };
-                let _ = write!(
-                    stream,
-                    "{response}Content-Length: 0\r\nConnection: close\r\n\r\n"
-                );
 
+                // Recorded before the answer: the answer can end the command,
+                // and a test reads the record as soon as the command exits.
                 record.lock().unwrap().push(Seen {
                     target,
                     authorization,
                 });
+
+                let _ = write!(
+                    stream,
+                    "{response}Content-Length: 0\r\nConnection: close\r\n\r\n"
+                );
             }
         });
 
