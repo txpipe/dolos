@@ -13,8 +13,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{
-    sync::execute_work_unit, ArchiveStore as _, Domain, DomainError, Genesis, StateStore as _,
-    StateWriter as _,
+    sync::execute_work_unit, ArchiveStore as _, BrokenInvariant, ChainError, Domain, DomainError,
+    Genesis, StateStore as _, StateWriter as _,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
@@ -500,6 +500,112 @@ fn the_tally_counts_stake_under_the_opening_epochs_protocol() {
     let conway = frozen_owned_stake(true);
 
     assert_eq!(babbage - conway, 7, "only the pointer stake differs");
+}
+
+fn frozen_tally(domain: &ToyDomain, stake_epoch: Epoch, operator: u8) -> PoolTally {
+    frozen(domain, stake_epoch)
+        .get(&pool_hash(operator))
+        .copied()
+        .flatten()
+        .expect("frozen tally")
+}
+
+/// A retirement or a re-registration certified in the closing epoch only
+/// schedules the pool's next snapshot. The distribution freezes with the
+/// closing epoch's own: the retiring pool keeps its delegators' stake, and
+/// the re-registered pool's live pledge counts its old owners. The next
+/// distribution takes both changes.
+#[test]
+fn scheduled_pool_changes_wait_for_the_next_distribution() {
+    let domain = seeded(devnet());
+    open_next_epoch(&domain).unwrap();
+
+    let epoch = epoch_state(&domain).number;
+    let mut pools = pools(&domain);
+
+    // what EWRAP's `PoolWrapUp` does to a pool retiring as the next epoch opens
+    let retiring = pools.get_mut(&pool_hash(EMPTY)).unwrap();
+    retiring.snapshot.scheduled_or_default().is_retired = true;
+
+    // what `PoolRegistration` does to a live pool, here handing it to `DESERTER`
+    let reregistered = pools.get_mut(&pool_hash(OWNED)).unwrap();
+    let mut next = reregistered.snapshot.unwrap_live().clone();
+    next.params.pool_owners = vec![[DESERTER; 28].into()];
+    reregistered.snapshot.schedule(epoch, Some(next));
+
+    let mut delegator = all_accounts(&domain)
+        .into_iter()
+        .find(|x| x.credential == key(0x41))
+        .unwrap();
+    delegator
+        .pool
+        .replace(PoolDelegation::Pool(pool_hash(EMPTY)), epoch);
+
+    write(&domain, |writer| {
+        for pool in pools.values() {
+            writer
+                .write_entity_typed(&PoolKey(pool.operator), pool)
+                .unwrap();
+        }
+
+        writer
+            .write_entity_typed(&AccountKey::from(&delegator.credential), &delegator)
+            .unwrap();
+    });
+
+    open_next_epoch(&domain).unwrap();
+    assert_frozen_matches_the_scan(&domain, epoch);
+
+    assert_eq!(frozen_tally(&domain, epoch, EMPTY).stake, 1005);
+    assert_eq!(frozen_tally(&domain, epoch, OWNED).live_pledge, 105);
+
+    open_next_epoch(&domain).unwrap();
+    assert_frozen_matches_the_scan(&domain, epoch + 1);
+
+    assert_eq!(
+        frozen_tally(&domain, epoch + 1, EMPTY),
+        PoolTally::default()
+    );
+    assert_eq!(frozen_tally(&domain, epoch + 1, OWNED).live_pledge, 35);
+}
+
+/// RUPD refuses a stake epoch whose pool snapshot ESTART never froze, rather
+/// than reading its stake as zero.
+#[test]
+fn rupd_refuses_an_unfrozen_stake_snapshot() {
+    let domain = seeded(devnet());
+
+    for _ in 0..3 {
+        open_next_epoch(&domain).unwrap();
+    }
+
+    let mut pool = pools(&domain).remove(&pool_hash(OWNED)).unwrap();
+    let mut unfrozen = EpochValue::with_live(0, pool.snapshot.unwrap_live().clone());
+
+    for epoch in 1..=3 {
+        unfrozen.default_transition(epoch);
+    }
+
+    pool.snapshot = unfrozen;
+
+    write(&domain, |writer| {
+        writer
+            .write_entity_typed(&PoolKey(pool.operator), &pool)
+            .unwrap();
+    });
+
+    let result = StakeSnapshot::load_globals::<ToyDomain>(domain.state(), 3, 0);
+
+    assert!(
+        matches!(
+            result,
+            Err(ChainError::BrokenInvariant(
+                BrokenInvariant::UnfrozenPoolStake { epoch: 0, .. }
+            ))
+        ),
+        "{:?}",
+        result.err()
+    );
 }
 
 fn snapshot_of(
