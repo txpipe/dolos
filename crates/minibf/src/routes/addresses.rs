@@ -20,12 +20,13 @@ use pallas::ledger::{
 };
 
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
+    indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt},
     model::AssetState,
     pallas_extras,
     periods::stats,
     AddressKey, ChainSummary, PaymentKey,
 };
+use dolos_core::SlotOrder;
 use dolos_core::{BlockBody, BlockSlot, Domain, StateStore as _, TxoRef};
 
 use crate::{

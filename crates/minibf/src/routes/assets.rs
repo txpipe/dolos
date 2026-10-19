@@ -23,11 +23,12 @@ use dolos_cardano::{
         cip68_metadata_is_valid, cip_68_reference_asset, encode_to_hex, parse_cip68_metadata_map,
         Cip68TokenStandard,
     },
-    indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
+    indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt},
     model::AssetState,
     periods::first_mints,
     ChainSummary,
 };
+use dolos_core::SlotOrder;
 use dolos_core::{
     ArchiveStore as _, BlockBody, BlockSlot, Domain, DomainError, EraCbor, StateStore as _, TxoRef,
 };

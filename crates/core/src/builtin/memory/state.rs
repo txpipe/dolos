@@ -14,7 +14,11 @@
 //!   holding the refs tagged under it — the query takes the logical key, the
 //!   set is mutable, and nothing ever leaves the store, so there is nothing to
 //!   gain from hashing it;
-//! - the cursor is one slot.
+//! - the slot-ordered tags live in a second map under the same key, each
+//!   holding `(slot, ref)` pairs in that order — the shape fjall's
+//!   `[dim_hash][key][slot][txo_ref]` key sorts into — and the producing slots
+//!   sit in a map keyed on [`TxoRef`] beside the UTxOs;
+//! - the cursor is one slot, and the positioned mark one flag.
 //!
 //! ## Ephemeral by design
 //!
@@ -25,15 +29,18 @@
 //! tooling and tests, where it is the fastest store available and the only
 //! memory-resident one that serves the snapshot export seam.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Bound;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::state::{EntityValue, Namespace, StateError, StateStore, StateWriter, UtxoEntry};
 use crate::{
-    ChainPoint, EntityKey, EraCbor, KeyRange, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap,
-    UtxoSet, UtxoSetDelta,
+    BlockSlot, ChainPoint, EntityKey, EraCbor, KeyRange, SlotOrder, SlotScan, Tag, TagDimension,
+    TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
 };
+
+/// One row of a tag in chain order: the producing slot, then the ref.
+type SlotRow = (BlockSlot, TxoRef);
 
 /// The store's whole contents, guarded as one unit so a commit is atomic.
 #[derive(Default)]
@@ -45,6 +52,14 @@ struct Tables {
     /// per lookup.
     utxos: BTreeMap<TxoRef, Arc<EraCbor>>,
     utxo_tags: BTreeMap<(TagDimension, Vec<u8>), HashSet<TxoRef>>,
+    /// The producing slot of every positioned live UTxO.
+    utxo_slots: BTreeMap<TxoRef, BlockSlot>,
+    /// The tags of the positioned UTxOs, in chain order under each key.
+    utxo_tags_by_slot: BTreeMap<(TagDimension, Vec<u8>), BTreeSet<SlotRow>>,
+    /// Whether the ordered tags cover the set, see
+    /// [`StateStore::utxos_positioned`]. Nothing but this binary ever writes
+    /// this store, so the flag needs no tie to the cursor.
+    positioned: bool,
 }
 
 /// A single mutation, recorded by a writer and replayed at commit.
@@ -61,6 +76,11 @@ enum Op {
     DeleteUtxo(TxoRef),
     InsertUtxoTag(TagDimension, Vec<u8>, TxoRef),
     RemoveUtxoTag(TagDimension, Vec<u8>, TxoRef),
+    PutUtxoSlot(TxoRef, BlockSlot),
+    DeleteUtxoSlot(TxoRef),
+    InsertUtxoTagAt(TagDimension, Vec<u8>, BlockSlot, TxoRef),
+    RemoveUtxoTagAt(TagDimension, Vec<u8>, BlockSlot, TxoRef),
+    MarkPositioned,
 }
 
 fn poisoned() -> StateError {
@@ -107,16 +127,41 @@ impl MemoryStateWriter {
         Ok(())
     }
 
+    /// The tag writes of one side of a delta: the plain tag of every ref,
+    /// and for a ref with a slot its ordered tags and its slot row too, put
+    /// in (`insert`) or taken out.
     fn push_tags(
         &self,
-        tagged: &[(TxoRef, Vec<crate::Tag>)],
-        op: fn(TagDimension, Vec<u8>, TxoRef) -> Op,
+        tagged: &[(TxoRef, Vec<Tag>)],
+        slots: &HashMap<TxoRef, BlockSlot>,
+        insert: bool,
     ) -> Result<(), StateError> {
         let mut ops = self.ops.lock().map_err(|_| poisoned())?;
 
         for (txo, tags) in tagged {
+            let slot = slots.get(txo).copied();
+
             for tag in tags {
-                ops.push(op(tag.dimension, tag.key.clone(), txo.clone()));
+                let (dimension, key) = (tag.dimension, tag.key.clone());
+
+                ops.push(match insert {
+                    true => Op::InsertUtxoTag(dimension, key.clone(), txo.clone()),
+                    false => Op::RemoveUtxoTag(dimension, key.clone(), txo.clone()),
+                });
+
+                if let Some(slot) = slot {
+                    ops.push(match insert {
+                        true => Op::InsertUtxoTagAt(dimension, key, slot, txo.clone()),
+                        false => Op::RemoveUtxoTagAt(dimension, key, slot, txo.clone()),
+                    });
+                }
+            }
+
+            if let Some(slot) = slot {
+                ops.push(match insert {
+                    true => Op::PutUtxoSlot(txo.clone(), slot),
+                    false => Op::DeleteUtxoSlot(txo.clone()),
+                });
             }
         }
 
@@ -168,19 +213,36 @@ impl StateWriter for MemoryStateWriter {
     }
 
     fn apply_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
-        self.push_tags(&delta.produced, Op::InsertUtxoTag)?;
-        self.push_tags(&delta.consumed, Op::RemoveUtxoTag)
+        self.push_tags(&delta.produced, &delta.slots, true)?;
+        self.push_tags(&delta.consumed, &delta.slots, false)
     }
 
+    /// The regained refs first, the lost ones last, as `apply_utxoset` orders
+    /// its puts and deletes: a ref on both sides ends up absent.
     fn undo_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
-        self.push_tags(&delta.produced, Op::RemoveUtxoTag)?;
-        self.push_tags(&delta.consumed, Op::InsertUtxoTag)
+        self.push_tags(&delta.consumed, &delta.slots, true)?;
+        self.push_tags(&delta.produced, &delta.slots, false)
+    }
+
+    fn mark_utxos_positioned(&self) -> Result<(), StateError> {
+        self.push(Op::MarkPositioned)
     }
 
     fn commit(self) -> Result<(), StateError> {
         let ops = self.ops.into_inner().map_err(|_| poisoned())?;
 
         let mut tables = self.store.tables.write().map_err(|_| poisoned())?;
+
+        // the mark follows the cursor, as on the disk backends: a batch that
+        // marks a store with no cursor, and sets none, has nothing to follow
+        let marks = ops.iter().any(|op| matches!(op, Op::MarkPositioned));
+        let sets_cursor = ops.iter().any(|op| matches!(op, Op::SetCursor(_)));
+
+        if marks && !sets_cursor && tables.cursor.is_none() {
+            return Err(StateError::InternalStoreError(
+                "the positioned mark needs a cursor to follow, and the store has none".into(),
+            ));
+        }
 
         for op in ops {
             match op {
@@ -214,6 +276,30 @@ impl StateWriter for MemoryStateWriter {
                         }
                     }
                 }
+                Op::PutUtxoSlot(txo, slot) => {
+                    tables.utxo_slots.insert(txo, slot);
+                }
+                Op::DeleteUtxoSlot(txo) => {
+                    tables.utxo_slots.remove(&txo);
+                }
+                Op::InsertUtxoTagAt(dimension, key, slot, txo) => {
+                    tables
+                        .utxo_tags_by_slot
+                        .entry((dimension, key))
+                        .or_default()
+                        .insert((slot, txo));
+                }
+                Op::RemoveUtxoTagAt(dimension, key, slot, txo) => {
+                    if let std::collections::btree_map::Entry::Occupied(mut entry) =
+                        tables.utxo_tags_by_slot.entry((dimension, key))
+                    {
+                        entry.get_mut().remove(&(slot, txo));
+                        if entry.get().is_empty() {
+                            entry.remove();
+                        }
+                    }
+                }
+                Op::MarkPositioned => tables.positioned = true,
             }
         }
 
@@ -245,6 +331,40 @@ impl Iterator for MemoryUtxoIter {
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next().map(Ok)
     }
+}
+
+/// The `(slot, ref)` bounds a [`SlotScan`] selects, `None` when it selects
+/// nothing: an inverted slot range, no rows wanted, or a resume point already
+/// past the end the walk is heading for. An `after` outside the slot range
+/// on the side the walk starts from is simply not yet reached.
+fn slot_scan_bounds(scan: &SlotScan) -> Option<(Bound<SlotRow>, Bound<SlotRow>)> {
+    let (start, end) = (*scan.slots.start(), *scan.slots.end());
+
+    if start > end || scan.limit == 0 {
+        return None;
+    }
+
+    let lowest = (start, TxoRef(pallas::crypto::hash::Hash::new([0; 32]), 0));
+    let highest = (
+        end,
+        TxoRef(pallas::crypto::hash::Hash::new([0xff; 32]), u32::MAX),
+    );
+
+    let bounds = match (scan.order, &scan.after) {
+        (_, None) => (Bound::Included(lowest), Bound::Included(highest)),
+        (SlotOrder::Asc, Some(after)) if *after < lowest => {
+            (Bound::Included(lowest), Bound::Included(highest))
+        }
+        (SlotOrder::Asc, Some(after)) if *after >= highest => return None,
+        (SlotOrder::Asc, Some(after)) => (Bound::Excluded(after.clone()), Bound::Included(highest)),
+        (SlotOrder::Desc, Some(after)) if *after > highest => {
+            (Bound::Included(lowest), Bound::Included(highest))
+        }
+        (SlotOrder::Desc, Some(after)) if *after <= lowest => return None,
+        (SlotOrder::Desc, Some(after)) => (Bound::Included(lowest), Bound::Excluded(after.clone())),
+    };
+
+    Some(bounds)
 }
 
 impl StateStore for MemoryStateStore {
@@ -346,26 +466,57 @@ impl StateStore for MemoryStateStore {
         Ok(found)
     }
 
-    fn utxos_by_tag_limited(
+    fn get_utxo_slots(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, BlockSlot>, StateError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let found = refs
+            .into_iter()
+            .filter_map(|txo| tables.utxo_slots.get(&txo).map(|slot| (txo, *slot)))
+            .collect();
+
+        Ok(found)
+    }
+
+    fn utxos_by_tag_in_slots(
         &self,
         dimension: TagDimension,
         key: &[u8],
-        limit: usize,
-    ) -> Result<Vec<TxoRef>, StateError> {
+        scan: &SlotScan,
+    ) -> Result<Vec<(BlockSlot, TxoRef)>, StateError> {
         let tables = self.tables.read().map_err(|_| poisoned())?;
 
-        // the whole set, sorted, is this backend's trade: it serves tests and
-        // ephemeral nodes, and the caller still sees at most `limit`
-        let mut refs: Vec<TxoRef> = tables
-            .utxo_tags
-            .get(&(dimension, key.to_vec()))
-            .map(|set| set.iter().cloned().collect())
-            .unwrap_or_default();
+        let Some(rows) = tables.utxo_tags_by_slot.get(&(dimension, key.to_vec())) else {
+            return Ok(vec![]);
+        };
 
-        refs.sort();
-        refs.truncate(limit);
+        let Some((lower, upper)) = slot_scan_bounds(scan) else {
+            return Ok(vec![]);
+        };
 
-        Ok(refs)
+        let range = rows.range((lower, upper));
+
+        let found = match scan.order {
+            SlotOrder::Asc => range.take(scan.limit).cloned().collect(),
+            SlotOrder::Desc => range.rev().take(scan.limit).cloned().collect(),
+        };
+
+        Ok(found)
+    }
+
+    fn utxos_positioned(&self) -> Result<bool, StateError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        Ok(tables.positioned)
+    }
+
+    fn clear_utxo_positions(&self) -> Result<(), StateError> {
+        let mut tables = self.tables.write().map_err(|_| poisoned())?;
+
+        tables.utxo_slots.clear();
+        tables.utxo_tags_by_slot.clear();
+        tables.positioned = false;
+
+        Ok(())
     }
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {

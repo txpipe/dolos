@@ -9,9 +9,10 @@ use blockfrost_openapi::models::{
     tx_metadata_labels_inner::TxMetadataLabelsInner,
 };
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, SlotOrder},
+    indexes::AsyncCardanoQueryExt,
     model::{FixedNamespace as _, MetadataLabelState},
 };
+use dolos_core::SlotOrder;
 use dolos_core::{Domain, KeyRange, StateError, StateStore as _};
 use futures_util::StreamExt;
 use pallas::{

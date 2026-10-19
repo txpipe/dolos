@@ -6,7 +6,8 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::asset_history_inner::{Action, AssetHistoryInner};
-use dolos_cardano::{indexes::SlotOrder, model::AssetState, periods::asset_mints};
+use dolos_cardano::{model::AssetState, periods::asset_mints};
+use dolos_core::SlotOrder;
 use dolos_core::{Domain, DomainError};
 use pallas::crypto::hash::Hash;
 

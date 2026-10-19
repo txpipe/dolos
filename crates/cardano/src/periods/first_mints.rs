@@ -15,9 +15,10 @@ use pallas::{crypto::hash::Hash, ledger::primitives::Epoch};
 
 use super::{Period, Segment};
 use crate::{
-    indexes::SlotOrder, AssetKey, AssetState, ChainSummary, FirstMintChunk, FirstMintSet,
-    FixedNamespace as _, PolicyKey, PolicyMintChunk,
+    AssetKey, AssetState, ChainSummary, FirstMintChunk, FirstMintSet, FixedNamespace as _,
+    PolicyKey, PolicyMintChunk,
 };
+use dolos_core::SlotOrder;
 
 /// Asset states read per state call when telling first mints from re-mints.
 const LOOKUP_BATCH: usize = 1_000;

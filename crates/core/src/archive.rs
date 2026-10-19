@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, ops::Range};
+use std::{collections::HashMap, marker::PhantomData, ops::Range};
 
 use thiserror::Error;
 
@@ -6,7 +6,7 @@ use crate::{
     indexes::{ArchiveIndexDelta, ExactRecord, IndexRecord, TagDimension, TagRecord},
     keys::{KeyCodec, KeyError, KeyRange, LogKey, LogRangeOf},
     BlockBody, BlockSlot, BrokenInvariant, ChainPoint, Entity, EntityValue, FixedNamespace,
-    Namespace, RawBlock,
+    Namespace, RawBlock, TxHash, TxoRef,
 };
 
 /// An entity logged in one archive namespace. Its rows are keyed
@@ -392,4 +392,40 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     /// Backends that do not implement this return
     /// [`ArchiveError::Unsupported`].
     fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, ArchiveError>;
+}
+
+/// The producing slot of every ref in `refs` whose tx the archive still
+/// indexes: the position the live-UTxO tags keep (`UtxoIndexDelta::slots`),
+/// recovered from the exact index for UTxOs that arrive without their block
+/// — the stele restore and `dolos doctor position-utxos`.
+///
+/// One exact lookup per distinct tx hash, no block body read. A ref whose tx
+/// the archive does not know — a genesis or custom UTxO, or one from a block
+/// `sync.max_history` pruned — is absent and stays unpositioned. A node that
+/// synced the pruned one keeps its position, the roll takes it from the
+/// batch, but the routes that page by chain position start at the oldest
+/// block held, so neither node serves it.
+pub fn position_utxos<'a, A: ArchiveStore>(
+    archive: &A,
+    refs: impl IntoIterator<Item = &'a TxoRef>,
+) -> Result<HashMap<TxoRef, BlockSlot>, ArchiveError> {
+    let mut by_tx: HashMap<TxHash, Option<BlockSlot>> = HashMap::new();
+    let mut out = HashMap::new();
+
+    for txo in refs {
+        let slot = match by_tx.get(&txo.0) {
+            Some(slot) => *slot,
+            None => {
+                let slot = archive.slot_by_tx_hash(txo.0.as_slice())?;
+                by_tx.insert(txo.0, slot);
+                slot
+            }
+        };
+
+        if let Some(slot) = slot {
+            out.insert(txo.clone(), slot);
+        }
+    }
+
+    Ok(out)
 }

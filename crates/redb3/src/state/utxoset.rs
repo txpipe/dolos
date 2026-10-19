@@ -213,7 +213,11 @@ mod tests {
             }
         }
 
-        UtxoIndexDelta { produced, consumed }
+        UtxoIndexDelta {
+            produced,
+            consumed,
+            ..Default::default()
+        }
     }
 
     fn extract_utxo_tags(output: &MultiEraOutput) -> Vec<Tag> {

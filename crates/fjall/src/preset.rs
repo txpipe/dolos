@@ -148,6 +148,11 @@ pub struct StatePreset {
     pub utxos: KeyspaceTuning,
     pub entities: KeyspaceTuning,
     pub tags: KeyspaceTuning,
+    /// The same tags in chain order: the churn of `tags`, so its tuning.
+    pub tags_by_slot: KeyspaceTuning,
+    /// The producing slot beside each positioned UTxO: a delete per spent
+    /// output, like `tags`.
+    pub utxo_slots: KeyspaceTuning,
 }
 
 impl StatePreset {
@@ -157,6 +162,8 @@ impl StatePreset {
         utxos: KeyspaceTuning::FJALL_DEFAULT,
         entities: KeyspaceTuning::FJALL_DEFAULT,
         tags: KeyspaceTuning::INDEX,
+        tags_by_slot: KeyspaceTuning::INDEX,
+        utxo_slots: KeyspaceTuning::INDEX,
     };
 }
 
@@ -369,6 +376,8 @@ mod tests {
             utxos,
             entities,
             tags,
+            tags_by_slot,
+            utxo_slots,
         } = StatePreset::STANDARD;
 
         assert_eq!(database, DATABASE);
@@ -376,6 +385,8 @@ mod tests {
         assert_eq!(utxos, PRIMARY);
         assert_eq!(entities, PRIMARY);
         assert_eq!(tags, INDEX);
+        assert_eq!(tags_by_slot, INDEX);
+        assert_eq!(utxo_slots, INDEX);
     }
 
     #[test]

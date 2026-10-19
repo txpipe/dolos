@@ -23,11 +23,7 @@ use futures_core::Stream;
 /// Number of slots to fetch per chunk when iterating over tagged blocks.
 const SLOT_CHUNK_SIZE: usize = 512;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SlotOrder {
-    Asc,
-    Desc,
-}
+use dolos_core::SlotOrder;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptLanguage {

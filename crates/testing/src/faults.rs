@@ -37,10 +37,13 @@ pub enum TestFault {
     /// stop a work unit between the two commits of a phase, whichever store
     /// that phase commits first.
     CrashAfterCommits(u32),
-    /// [`StateStore::utxos_by_tag`], [`StateStore::utxos_by_tag_limited`] and
-    /// [`StateStore::get_utxos`] sleep this long before answering, as a heavy
-    /// lookup on a large store would.
+    /// [`StateStore::utxos_by_tag`], [`StateStore::utxos_by_tag_in_slots`],
+    /// [`StateStore::get_utxos`] and [`StateStore::get_utxo_slots`] sleep
+    /// this long before answering, as a heavy lookup on a large store would.
     SlowUtxoReads(Duration),
+    /// [`StateStore::utxos_positioned`] answers `false`, as on a store built
+    /// before the slot-ordered tags existed; every other state call succeeds.
+    UtxosNotPositioned,
     /// [`StateStore::iter_entities`] sleeps this long before answering, as a
     /// scan of a large store would.
     SlowStateScans(Duration),
@@ -219,17 +222,45 @@ impl StateStore for FaultyStateStore {
         self.inner.utxos_by_tag(dimension, key)
     }
 
-    fn utxos_by_tag_limited(
+    fn get_utxo_slots(
         &self,
-        dimension: TagDimension,
-        key: &[u8],
-        limit: usize,
-    ) -> Result<Vec<dolos_core::TxoRef>, StateError> {
+        refs: Vec<dolos_core::TxoRef>,
+    ) -> Result<std::collections::HashMap<dolos_core::TxoRef, BlockSlot>, StateError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
         self.slow_utxo_read();
-        self.inner.utxos_by_tag_limited(dimension, key, limit)
+        self.inner.get_utxo_slots(refs)
+    }
+
+    fn utxos_by_tag_in_slots(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        scan: &dolos_core::SlotScan,
+    ) -> Result<Vec<(BlockSlot, dolos_core::TxoRef)>, StateError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.slow_utxo_read();
+        self.inner.utxos_by_tag_in_slots(dimension, key, scan)
+    }
+
+    fn utxos_positioned(&self) -> Result<bool, StateError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        if matches!(self.fault, TestFault::UtxosNotPositioned) {
+            return Ok(false);
+        }
+        self.inner.utxos_positioned()
+    }
+
+    fn clear_utxo_positions(&self) -> Result<(), StateError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.clear_utxo_positions()
     }
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
@@ -279,6 +310,10 @@ impl StateWriter for FaultyStateWriter {
 
     fn undo_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
         self.inner.undo_utxo_tags(delta)
+    }
+
+    fn mark_utxos_positioned(&self) -> Result<(), StateError> {
+        self.inner.mark_utxos_positioned()
     }
 
     fn commit(self) -> Result<(), StateError> {

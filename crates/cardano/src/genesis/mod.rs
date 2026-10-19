@@ -198,7 +198,12 @@ pub fn execute<D: Domain>(
     // at Origin) from "genesis never ran" (no cursor), so a restart doesn't
     // re-run genesis and reset a WAL that already holds blocks. Set last so
     // a crash mid-genesis leaves no cursor and genesis re-runs cleanly.
+    //
+    // A store that starts here is positioned: the genesis UTxOs have no
+    // producing block, and every block from now on rolls through the index
+    // delta with its slots.
     let writer = state.start_writer()?;
+    writer.mark_utxos_positioned()?;
     writer.set_cursor(ChainPoint::Origin)?;
     writer.commit()?;
 

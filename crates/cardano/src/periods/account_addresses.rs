@@ -17,9 +17,9 @@ use pallas::{codec::minicbor::bytes::ByteVec, ledger::primitives::Epoch};
 
 use super::Period;
 use crate::{
-    indexes::SlotOrder, AccountAddressChunk, AccountAddressSet, AccountKey, ChainSummary,
-    FixedNamespace as _,
+    AccountAddressChunk, AccountAddressSet, AccountKey, ChainSummary, FixedNamespace as _,
 };
+use dolos_core::SlotOrder;
 
 /// Epochs read from the archive per call while walking an account's history.
 const EPOCH_BATCH: usize = 64;

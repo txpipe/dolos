@@ -8,7 +8,8 @@ use std::{
 
 use dolos_core::{
     archive::Skippable, ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, EntityKey,
-    EntityValue, LogKey, Namespace, StateError, StateStore, TagDimension, TxoRef, UtxoMap, UtxoSet,
+    EntityValue, LogKey, Namespace, SlotScan, StateError, StateStore, TagDimension, TxoRef,
+    UtxoMap, UtxoSet,
 };
 use serde::Serialize;
 
@@ -348,17 +349,35 @@ impl<Inner: StateStore> StateStore for MeasuredState<Inner> {
         Ok(refs)
     }
 
-    fn utxos_by_tag_limited(
+    fn get_utxo_slots(
+        &self,
+        refs: Vec<TxoRef>,
+    ) -> Result<std::collections::HashMap<TxoRef, BlockSlot>, StateError> {
+        self.counters
+            .utxo_reads
+            .fetch_add(refs.len() as u64, Ordering::Relaxed);
+        self.inner.get_utxo_slots(refs)
+    }
+
+    fn utxos_by_tag_in_slots(
         &self,
         dimension: TagDimension,
         key: &[u8],
-        limit: usize,
-    ) -> Result<Vec<TxoRef>, StateError> {
-        let refs = self.inner.utxos_by_tag_limited(dimension, key, limit)?;
+        scan: &SlotScan,
+    ) -> Result<Vec<(BlockSlot, TxoRef)>, StateError> {
+        let rows = self.inner.utxos_by_tag_in_slots(dimension, key, scan)?;
         self.counters
             .utxo_refs
-            .fetch_add(refs.len() as u64, Ordering::Relaxed);
-        Ok(refs)
+            .fetch_add(rows.len() as u64, Ordering::Relaxed);
+        Ok(rows)
+    }
+
+    fn utxos_positioned(&self) -> Result<bool, StateError> {
+        self.inner.utxos_positioned()
+    }
+
+    fn clear_utxo_positions(&self) -> Result<(), StateError> {
+        self.inner.clear_utxo_positions()
     }
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {

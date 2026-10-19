@@ -45,12 +45,28 @@ impl<D: Domain> BootstrapExt for D {
 
         catch_up_stores(self)?;
 
+        warn_if_unpositioned(self);
+
         // Drain any work that might have been defined by the initialization
         // using the sync lifecycle (full WAL + tip notifications)
         let mut chain = self.write_chain();
         drain_pending_work(&mut *chain, self)?;
 
         Ok(())
+    }
+}
+
+/// Say so when the live UTxOs carry no chain position: the routes that page
+/// by it answer 501 until `dolos doctor position-utxos` builds the ordered
+/// tags. After the catch-up, because that is where the doctor command picks
+/// up. A backend without live-UTxO tags has nothing to position.
+fn warn_if_unpositioned<D: Domain>(domain: &D) {
+    if let Ok(false) = domain.state().utxos_positioned() {
+        warn!(
+            "the live utxos are not positioned: this store predates the slot-ordered tags, or a \
+             binary without them wrote it; run `dolos doctor position-utxos` to serve the routes \
+             that page by chain position"
+        );
     }
 }
 
@@ -267,7 +283,8 @@ fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Doma
         crate::state::apply_delta_chunk::<D>(&mut entities, domain.state(), &mut log.delta)?;
         crate::state::save_entities::<D>(&writer, &entities)?;
 
-        let catchup = D::Chain::compute_catchup(&log.block, &log.inputs, point.clone())?;
+        let catchup =
+            D::Chain::compute_catchup(&log.block, &log.inputs, &log.input_slots, point.clone())?;
 
         writer.apply_utxoset(&catchup.utxo_delta)?;
         writer.apply_utxo_tags(&catchup.utxo_index_delta)?;
@@ -334,7 +351,8 @@ fn catch_up_archive<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
             continue;
         }
 
-        let catchup = D::Chain::compute_catchup(&log.block, &log.inputs, point.clone())?;
+        let catchup =
+            D::Chain::compute_catchup(&log.block, &log.inputs, &log.input_slots, point.clone())?;
 
         writer.apply(&point, &Arc::new(log.block))?;
         writer.apply_index(&catchup.archive_index_deltas)?;

@@ -4,8 +4,8 @@ use itertools::Itertools;
 
 use crate::{
     keys::{EntityKey, KeyCodec, KeyError, KeyRange, RangeOf},
-    ChainError, ChainPoint, Domain, EraCbor, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap,
-    UtxoSet, UtxoSetDelta,
+    BlockSlot, ChainError, ChainPoint, Domain, EraCbor, SlotScan, TagDimension, TxoRef,
+    UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
 };
 
 pub type Namespace = &'static str;
@@ -239,7 +239,26 @@ pub trait StateWriter: Sized + Send + Sync {
 
     /// Reverse `apply_utxo_tags`: `produced` refs lose their tags, `consumed`
     /// refs regain them.
+    ///
+    /// The regained refs go in before the lost ones go out, mirroring
+    /// `apply_utxoset`: a ref a block both produced and consumed is on both
+    /// sides of the delta, and the last write to a key wins within one batch,
+    /// so that order leaves such a ref out, as the set does.
     fn undo_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError>;
+
+    /// Record that the slot-ordered tags cover the set this writer leaves
+    /// behind: every live UTxO whose producing block was known when it was
+    /// written carries its position, see [`StateStore::utxos_positioned`].
+    ///
+    /// Written by the paths that fill the set, or its positions, without
+    /// rolling blocks: genesis and the stele restore in the same commit as
+    /// the cursor they set, `dolos doctor position-utxos` in a commit of its
+    /// own beside the cursor the store already holds. The mark follows the
+    /// cursor, so it needs one — the one this batch sets, or the stored one
+    /// — and a batch that marks a store with neither fails to commit. Every
+    /// commit of a binary that maintains the ordered tags keeps it from then
+    /// on.
+    fn mark_utxos_positioned(&self) -> Result<(), StateError>;
 
     #[allow(clippy::double_must_use)]
     #[must_use]
@@ -372,21 +391,57 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     /// in typed lookups (address, payment credential, asset, …).
     fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, StateError>;
 
-    /// The first `limit` live refs of one tag, in `TxoRef` order. A result
-    /// shorter than `limit` is the whole tag.
+    /// The producing slot of each of `refs` that is live and positioned. A
+    /// ref that is spent, or that entered the set without a position, is
+    /// absent.
     ///
-    /// The bounded form of [`Self::utxos_by_tag`]: a caller that will not
-    /// serve more than `n` refs asks for `n + 1` and knows from the length
-    /// whether the tag fits, without the whole tag ever being in memory. A
-    /// backend reads no further than the `limit`th live entry of the tag.
+    /// The slots the tags of a ref were filed under, read back beside
+    /// [`Self::get_utxos`] when the ref is consumed, so the consuming delta
+    /// can name the ordered entries to take out
+    /// (`UtxoIndexDelta::slots`).
     ///
     /// Backends without live-UTxO tags return [`StateError::Unsupported`].
-    fn utxos_by_tag_limited(
+    fn get_utxo_slots(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, BlockSlot>, StateError>;
+
+    /// One bounded read of a tag's positioned live refs in chain order, the
+    /// walk [`SlotScan`] describes.
+    ///
+    /// The rows are `(slot, ref)` pairs ordered by slot, then by ref inside a
+    /// slot: the store knows no order inside a block, the caller settles that
+    /// from the block. A result shorter than `scan.limit` ends the walk. A
+    /// ref that entered the set without a position is never listed here.
+    ///
+    /// Backends without live-UTxO tags return [`StateError::Unsupported`].
+    fn utxos_by_tag_in_slots(
         &self,
         dimension: TagDimension,
         key: &[u8],
-        limit: usize,
-    ) -> Result<Vec<TxoRef>, StateError>;
+        scan: &SlotScan,
+    ) -> Result<Vec<(BlockSlot, TxoRef)>, StateError>;
+
+    /// Whether the slot-ordered tags cover the UTxO set: every live UTxO
+    /// whose producing block was known when it entered the set carries its
+    /// position, so a chain-ordered walk of a tag lists the same refs the
+    /// plain tag holds, bar the genesis and custom ones.
+    ///
+    /// `true` on a store this binary built from genesis, restored from a
+    /// stele or repaired with `dolos doctor position-utxos`; `false` on one
+    /// built before the ordered tags existed, or written since by a binary
+    /// without them — a persistent backend ties the mark to its cursor, so
+    /// a commit that moved the cursor without the mark unsets it.
+    ///
+    /// Backends without live-UTxO tags return [`StateError::Unsupported`].
+    fn utxos_positioned(&self) -> Result<bool, StateError>;
+
+    /// Drop every position — the ordered tags, the slots kept beside the
+    /// UTxOs and the mark — leaving the plain tags and the set untouched.
+    ///
+    /// Not a batched write, and not part of normal operation: the repair
+    /// path clears before it rebuilds, so a rebuild cut short leaves a store
+    /// that reports itself unpositioned rather than half so.
+    ///
+    /// Backends without live-UTxO tags return [`StateError::Unsupported`].
+    fn clear_utxo_positions(&self) -> Result<(), StateError>;
 
     /// Iterate the whole UTxO set.
     ///

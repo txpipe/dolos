@@ -198,7 +198,16 @@ const WAL_METADATA_VERSION_KEY: &str = "version";
 /// triggers an automatic wipe; a newer version triggers a refusal to start.
 ///
 /// 2: deltas carry typed, variable-length entity keys (decision 0051).
-pub const CURRENT_WAL_VERSION: u32 = 2;
+/// 3: entries carry the producing slots of their resolved inputs
+///    (`LogValue::input_slots`), so a rollback puts the inputs it recovers
+///    back in chain order without reading a store. The wipe leaves a node
+///    whose state cursor is a bare slot — one stopped at an epoch boundary,
+///    after ESTART and before its next block — unable to reseed on its own:
+///    `check_wal_in_sync_with_state` refuses that cursor and so does `dolos
+///    doctor reset-wal` (a slot-only seed would intersect upstream at
+///    origin); such a node is rebuilt with `dolos doctor rebuild-state` or
+///    bootstrapped again.
+pub const CURRENT_WAL_VERSION: u32 = 3;
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 

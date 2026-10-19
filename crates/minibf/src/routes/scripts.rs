@@ -14,11 +14,10 @@ use blockfrost_openapi::models::{
     script_redeemers_inner::ScriptRedeemersInner,
     script_utxos_inner::ScriptUtxosInner,
 };
-use dolos_cardano::indexes::{
-    AsyncCardanoQueryExt, CardanoStateIndexExt, ScriptLanguage, SlotOrder,
-};
+use dolos_cardano::indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, ScriptLanguage};
 use dolos_cardano::ChainSummary;
 use dolos_core::Domain;
+use dolos_core::SlotOrder;
 use futures_util::StreamExt;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::alonzo::NativeScript;
