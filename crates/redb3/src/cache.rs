@@ -100,9 +100,10 @@ struct Inner {
 
 impl RedbCacheTier {
     /// Opens `<dir>/cache.redb`, holding at most `budget` bytes of keys and
-    /// values. A file redb finds corrupt or of an old format is deleted and
-    /// recreated empty; one another process holds, or that fails to open for
-    /// any other reason, such as its permissions, is an error that names it.
+    /// values. A file redb finds corrupt, cut short, or laid out by another
+    /// release is deleted and recreated empty; one another process holds, or
+    /// that fails to open for any other reason, such as its permissions, is
+    /// an error that names it.
     pub fn open(dir: impl AsRef<Path>, budget: u64) -> Result<Self, CacheError> {
         let dir = dir.as_ref();
         let path = dir.join(FILE_NAME);
@@ -401,13 +402,22 @@ impl CacheDiskTier for RedbCacheTier {
     }
 }
 
-/// Whether an open failed on the file's contents rather than on access to it.
+/// Whether an open failed on the file's contents rather than on access to it:
+/// damage, a cut-short header, or a format or table layout of another release.
 /// redb only reads the contents once it holds the file's lock, so no other
 /// process is using a file found corrupt.
 fn is_corrupt(error: &redb::Error) -> bool {
     match error {
-        redb::Error::Corrupted(_) | redb::Error::UpgradeRequired(_) => true,
-        redb::Error::Io(error) => error.kind() == std::io::ErrorKind::InvalidData,
+        redb::Error::Corrupted(_)
+        | redb::Error::UpgradeRequired(_)
+        | redb::Error::TableTypeMismatch { .. }
+        | redb::Error::TypeDefinitionChanged { .. }
+        | redb::Error::TableIsMultimap(_)
+        | redb::Error::TableIsNotMultimap(_) => true,
+        redb::Error::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+        ),
         _ => false,
     }
 }
@@ -755,6 +765,43 @@ mod tests {
         assert!(tier.keys("ns").unwrap().is_empty());
 
         tier.put("ns", b"key", b"value", 1).unwrap();
+        assert!(holds(&tier, "key"));
+    }
+
+    #[test]
+    fn a_file_cut_short_is_recreated_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(RedbCacheTier::open(dir.path(), MIB).unwrap());
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join(FILE_NAME))
+            .unwrap();
+        file.set_len(100).unwrap();
+        drop(file);
+
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        put(&tier, "key", 10, 1);
+        assert!(holds(&tier, "key"));
+    }
+
+    #[test]
+    fn a_file_whose_tables_changed_type_is_recreated_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::create(dir.path().join(FILE_NAME)).unwrap();
+        let wx = db.begin_write().unwrap();
+        wx.open_table(TableDefinition::<&str, u64>::new("cache-usage"))
+            .unwrap()
+            .insert("ns", 1)
+            .unwrap();
+        wx.commit().unwrap();
+        drop(db);
+
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        assert_eq!(tier.entries("ns").unwrap(), 0);
+        put(&tier, "key", 10, 1);
         assert!(holds(&tier, "key"));
     }
 
