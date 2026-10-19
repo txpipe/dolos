@@ -132,6 +132,8 @@ impl Node {
         .unwrap();
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
+        let query_limiter = QueryLimiter::default();
+        let cache = dolos::storage::open_cache_store(&self.config, query_limiter.clone()).unwrap();
 
         let domain = DomainAdapter {
             storage_config: Arc::new(self.config.storage.clone()),
@@ -142,8 +144,9 @@ impl Node {
             state: stores.state,
             archive: stores.archive,
             mempool: stores.mempool,
+            cache,
             tip_broadcast,
-            query_limiter: QueryLimiter::default(),
+            query_limiter,
         };
 
         domain.bootstrap().unwrap();

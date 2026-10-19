@@ -22,7 +22,7 @@
 //! a snapshot exists to avoid — so they travel, and the value is the stored
 //! minicbor of the entity, byte for byte. This codec never decodes an entity: a
 //! log value is an opaque byte string here, which is also why an entity holding
-//! a float (`StakeLog::relative_size`) does not collide with the layer's
+//! a float (`PoolEpochLog::relative_size`) does not collide with the layer's
 //! no-floats encoding rule. The rule governs the record's own CBOR, and the
 //! value is a byte string within it.
 //!
@@ -125,8 +125,9 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountStats, AddressStats, EpochState, FirstMintChunk, FixedNamespace as _, PaymentStats,
-        PolicyKey, PolicyMintChunk, PoolKey, StakeAddressesRow, StakeLog,
+        AccountAddressChunk, AccountStats, AddressStats, AssetMintChunk, EpochState,
+        FirstMintChunk, FirstScriptChunk, FixedNamespace as _, PaymentAddressChunk, PolicyKey,
+        PolicyMintChunk, PoolEpochLog, PoolKey,
     };
 
     use super::*;
@@ -147,14 +148,18 @@ mod tests {
     #[test]
     fn round_trips() {
         let original = LogRecord::new(key(432_000, 0xab), vec![0x82, 0x01]);
-        let encoded = encode(StakeLog::NS, &original).unwrap();
+        let encoded = encode(PoolEpochLog::NS, &original).unwrap();
 
-        assert_eq!(decode(StakeLog::NS, encoded.as_bytes()).unwrap(), original);
+        assert_eq!(
+            decode(PoolEpochLog::NS, encoded.as_bytes()).unwrap(),
+            original
+        );
     }
 
     /// Each log takes exactly the keys of its kind after the slot: none for
-    /// the epoch log, a chunk index for first mints, a policy and a chunk for
-    /// the per-policy list.
+    /// the epoch log, a chunk index for first mints and first scripts, a policy
+    /// and a chunk for the per-policy list, an asset key and a chunk for an
+    /// asset's mints.
     #[test]
     fn keys_are_held_to_their_namespace_kind() {
         let slot = 7u64.to_be_bytes();
@@ -162,8 +167,10 @@ mod tests {
         for (ns, len) in [
             (EpochState::NS, 0),
             (FirstMintChunk::NS, 4),
+            (FirstScriptChunk::NS, 4),
             (PolicyMintChunk::NS, 32),
-            (StakeLog::NS, 28),
+            (AssetMintChunk::NS, 36),
+            (PoolEpochLog::NS, 28),
         ] {
             let key = [slot.as_slice(), &vec![1; len]].concat();
             decode(ns, wire(&key).as_bytes()).unwrap_or_else(|err| panic!("{ns}: {err:?}"));
@@ -172,20 +179,19 @@ mod tests {
         let policy = LogKey::of(7, &(PolicyKey([1; 28].into()), 3u32));
         assert_eq!(policy.entity().len(), 32);
 
-        // stake addresses take an account: a credential header and its hash
+        // account address chunks take an account: a credential header and its hash
         let account = [slot.as_slice(), &[0x82, 0x01, 0x58, 0x1c], &[1; 28]].concat();
-        decode(StakeAddressesRow::NS, wire(&account).as_bytes()).unwrap();
+        decode(AccountAddressChunk::NS, wire(&account).as_bytes()).unwrap();
         decode(AccountStats::NS, wire(&account).as_bytes()).unwrap();
 
-        // address stats take a tag, then an account and the rest of the
-        // address, or the address whole
-        let staked = [account.as_slice(), &[1; 29]].concat();
-        let staked = [&staked[..8], &[0x01], &staked[8..]].concat();
+        // address stats take an account and a base address's header and
+        // payment hash, or a tag and the address whole
+        let staked = [account.as_slice(), &[0x01], &[1; 28]].concat();
         decode(AddressStats::NS, wire(&staked).as_bytes()).unwrap();
         let unstaked = [slot.as_slice(), &[0x00], &[1; 29]].concat();
         decode(AddressStats::NS, wire(&unstaked).as_bytes()).unwrap();
         decode(
-            PaymentStats::NS,
+            PaymentAddressChunk::NS,
             wire(&[slot.as_slice(), &[1; 28]].concat()).as_bytes(),
         )
         .unwrap();
@@ -193,13 +199,16 @@ mod tests {
         for (ns, len) in [
             (EpochState::NS, 32),
             (FirstMintChunk::NS, 32),
-            (StakeAddressesRow::NS, 32),
+            (FirstScriptChunk::NS, 32),
+            (AssetMintChunk::NS, 32),
+            (AccountAddressChunk::NS, 32),
             (AccountStats::NS, 32),
             (AddressStats::NS, 1),
             (AddressStats::NS, 32),
-            (PaymentStats::NS, 32),
-            (StakeLog::NS, 32),
-            (StakeLog::NS, 0),
+            (AddressStats::NS, 33),
+            (PaymentAddressChunk::NS, 32),
+            (PoolEpochLog::NS, 32),
+            (PoolEpochLog::NS, 0),
         ] {
             let key = [slot.as_slice(), &vec![1; len]].concat();
             let err = decode(ns, wire(&key).as_bytes()).unwrap_err();
@@ -222,14 +231,14 @@ mod tests {
     fn the_pre_split_three_element_record_is_refused() {
         let wire = frame::encode(|e| {
             e.array(3)?
-                .str("stakes")?
+                .str("pool-epochs")?
                 .bytes(key(1, 0).as_ref())?
                 .bytes(&[])?;
             Ok(())
         })
         .unwrap();
 
-        let err = decode(StakeLog::NS, wire.as_bytes()).unwrap_err();
+        let err = decode(PoolEpochLog::NS, wire.as_bytes()).unwrap_err();
         assert!(matches!(err, Error::MalformedRecord { .. }), "{err:?}");
     }
 

@@ -98,21 +98,21 @@ mod tests {
     fn namespace_isolation() {
         let key = log_key(42, &[0xab; 32]);
         let a = build_log_key("account-epochs", &key);
-        let b = build_log_key("stakes", &key);
+        let b = build_log_key("pool-epochs", &key);
         assert_ne!(a[..NS_HASH_SIZE], b[..NS_HASH_SIZE]);
         assert_eq!(a[NS_HASH_SIZE..], b[NS_HASH_SIZE..]);
     }
 
     #[test]
     fn key_order_matches_log_key_order() {
-        let earlier = build_log_key("stakes", &log_key(1, &[0xff; 40]));
-        let later = build_log_key("stakes", &log_key(2, &[]));
+        let earlier = build_log_key("pool-epochs", &log_key(1, &[0xff; 40]));
+        let later = build_log_key("pool-epochs", &log_key(2, &[]));
         assert!(earlier < later);
     }
 
     #[test]
     fn temporal_bound_splits_at_slot() {
-        let ns = "stakes";
+        let ns = "pool-epochs";
         let bound = build_temporal_bound(ns, 5);
         let below = build_log_key(ns, &log_key(4, &[0xff; 50]));
         let at = build_log_key(ns, &log_key(5, &[]));

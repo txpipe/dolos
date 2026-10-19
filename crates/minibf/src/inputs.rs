@@ -392,7 +392,6 @@ mod tests {
         let facade = Facade {
             inner: domain,
             config: MinibfConfig::new("[::]:0".parse().expect("invalid listen address")),
-            cache: crate::cache::CacheService::default(),
         };
 
         (facade, vectors)

@@ -1,16 +1,14 @@
-use std::collections::HashMap;
-
-use dolos_core::{ChainError, Domain, Genesis, RangeOf, StateStore};
+use dolos_core::{BrokenInvariant, ChainError, Domain, Genesis, RangeOf, StateStore};
 use pallas::ledger::primitives::StakeCredential;
 use tracing::{debug, trace};
 
 use crate::{
-    pallas_extras, pallas_ratio,
+    pallas_ratio,
     pots::{self, EpochIncentives, Eta, Pots},
     ratio,
     rupd::{RupdWork, StakeSnapshot},
-    AccountKey, AccountState, EpochState, EpochValue, EraProtocol, PParamsSet, PoolHash,
-    PoolParams, PoolSnapshot, PoolState,
+    AccountKey, AccountState, EpochState, EpochValue, EraKey, PParamsSet, PoolHash, PoolParams,
+    PoolSnapshot, PoolState,
 };
 
 /// Calculate eta using pool blocks (not total blocks including federated).
@@ -114,176 +112,47 @@ fn ensure_pool_aligned(
     })
 }
 
-/// The pool half of [`StakeSnapshot::load_globals`], fed one pool at a time.
-///
-/// A caller that reads the store in chunks feeds every pool here, then every
-/// account to the [`GlobalsAccountPass`] that [`Self::accounts`] returns.
-pub struct GlobalsPoolPass {
-    snapshot: StakeSnapshot,
-    current_epoch: u64,
-    stake_epoch: u64,
-    protocol: EraProtocol,
-}
-
-impl GlobalsPoolPass {
-    pub fn new(current_epoch: u64, stake_epoch: u64, protocol: EraProtocol) -> Self {
-        Self {
-            snapshot: StakeSnapshot::default(),
-            current_epoch,
-            stake_epoch,
-            protocol,
-        }
-    }
-
-    pub fn track(&mut self, pool: PoolState) -> Result<(), ChainError> {
+impl StakeSnapshot {
+    /// Add one pool: its blocks in the performance epoch and, when it exists
+    /// in the stake epoch, the tally ESTART froze onto that snapshot.
+    fn track_pool(
+        &mut self,
+        pool: PoolState,
+        current_epoch: u64,
+        stake_epoch: u64,
+    ) -> Result<(), ChainError> {
         // Check ALL pools, not just admitted ones, so a pool lagging out of
         // the admission window is caught rather than silently dropped.
-        ensure_pool_aligned(&pool.operator, &pool.snapshot, self.current_epoch)?;
+        ensure_pool_aligned(&pool.operator, &pool.snapshot, current_epoch)?;
 
         // Sum blocks from ALL pools that have mark() data for the performance epoch.
         // This is needed for epoch_blocks() denominator in apparent performance.
         if let Some(mark_snapshot) = pool.snapshot.mark() {
-            self.snapshot.performance_epoch_pool_blocks += mark_snapshot.blocks_minted as u64;
+            self.performance_epoch_pool_blocks += mark_snapshot.blocks_minted as u64;
         }
 
         // Only include pools that existed at the stake snapshot epoch for
         // stake-based calculations (rewards, delegation, etc.)
-        if pool.snapshot.snapshot_at(self.stake_epoch).is_some() {
-            self.snapshot.pools.insert(pool.operator, pool.snapshot);
-        }
-
-        Ok(())
-    }
-
-    /// End the pool half, once every pool was tracked.
-    pub fn accounts(self) -> GlobalsAccountPass {
-        // Build owner-credential → pools-they-own index from the same
-        // go-snapshot params that `define_rewards` passes to
-        // `live_pledge`. This is shard-agnostic: owners can be in any
-        // first-byte prefix, so the index is built once over every pool
-        // and then consulted while iterating accounts globally.
-        let mut owner_to_pools: HashMap<StakeCredential, Vec<PoolHash>> = HashMap::new();
-        for (pool_hash, pool_snapshot) in &self.snapshot.pools {
-            let Some(go_snapshot) = pool_snapshot.go() else {
-                continue;
-            };
-            for owner_hash in &go_snapshot.params.pool_owners {
-                let cred = pallas_extras::keyhash_to_stake_cred(*owner_hash);
-                owner_to_pools.entry(cred).or_default().push(*pool_hash);
-            }
-        }
-
-        GlobalsAccountPass {
-            snapshot: self.snapshot,
-            owner_to_pools,
-            stake_epoch: self.stake_epoch,
-            protocol: self.protocol,
-        }
-    }
-}
-
-/// The account half of [`StakeSnapshot::load_globals`], fed one account at a
-/// time.
-pub struct GlobalsAccountPass {
-    snapshot: StakeSnapshot,
-    owner_to_pools: HashMap<StakeCredential, Vec<PoolHash>>,
-    stake_epoch: u64,
-    protocol: EraProtocol,
-}
-
-impl GlobalsAccountPass {
-    pub fn track(&mut self, account: &AccountState) -> Result<(), ChainError> {
-        let Some(pool) = account.delegated_pool_at(self.stake_epoch) else {
+        let Some(snapshot) = pool.snapshot.snapshot_at(stake_epoch) else {
             return Ok(());
         };
 
-        let Some(pool_state) = self.snapshot.pools.get(pool) else {
-            return Ok(());
-        };
+        // Retired and delegator-less pools froze zeros.
+        let tally = snapshot
+            .tally()
+            .ok_or_else(|| BrokenInvariant::UnfrozenPoolStake {
+                pool: hex::encode(pool.operator),
+                epoch: stake_epoch,
+            })?;
 
-        let Some(stake_snapshot) = pool_state.snapshot_at(self.stake_epoch) else {
-            return Ok(());
-        };
-
-        if stake_snapshot.is_retired {
-            return Ok(());
-        }
-
-        let stake_value = account.stake.snapshot_at(self.stake_epoch);
-        let stake = stake_value
-            .map(|x| x.total_for_era(self.protocol))
-            .unwrap_or_default();
-
-        // in_shard = false: globals pass keeps only pool-level totals,
-        // not the per-account map.
-        self.snapshot
-            .track_stake(&account.credential, *pool, stake, false)?;
-
-        // If this account is a declared owner of the pool it
-        // delegates to, contribute its stake to the pool's live
-        // pledge. Must be done in `load_globals` (not
-        // `merge_shard`) because owners can live in any shard while
-        // every shard needs the *full* live pledge to reproduce
-        // `pool_rewards` faithfully.
-        if let Some(owned_pools) = self.owner_to_pools.get(&account.credential) {
-            if owned_pools.contains(pool) {
-                *self.snapshot.pool_live_pledges.entry(*pool).or_insert(0) += stake;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// End the pass, once every account was tracked.
-    pub fn finish(self) -> StakeSnapshot {
-        let snapshot = self.snapshot;
-
-        for (pool_id, stake) in snapshot.pool_stake.iter() {
-            trace!(%pool_id, %stake, "pool stake");
-        }
-
-        trace!(
-            active_stake = %snapshot.active_stake_sum,
-            "stake aggregation"
-        );
-
-        snapshot
-    }
-}
-
-impl StakeSnapshot {
-    fn track_stake(
-        &mut self,
-        account: &StakeCredential,
-        pool_id: PoolHash,
-        stake: u64,
-        in_shard: bool,
-    ) -> Result<(), ChainError> {
-        // Pool-level totals always accumulate, regardless of which shard
-        // the credential belongs to — every shard needs the *full* pool
-        // stake / active stake to compute pool rewards correctly.
-        self.pool_stake
-            .entry(pool_id)
-            .and_modify(|x| *x += stake)
-            .or_insert(stake);
-
-        // Same reasoning for the delegator count, which `finalize` reports in
-        // the per-pool `StakeLog`: counting it here (the globals pass sees
-        // every account) keeps it correct after a mid-RUPD restart, which a
-        // per-shard tally would not be.
+        self.pool_stake.insert(pool.operator, tally.stake);
         self.pool_delegator_counts
-            .entry(pool_id)
-            .and_modify(|x| *x += 1)
-            .or_insert(1);
+            .insert(pool.operator, tally.delegators);
+        self.pool_live_pledges
+            .insert(pool.operator, tally.live_pledge);
+        self.active_stake_sum += tally.stake;
 
-        self.active_stake_sum += stake;
-
-        // The per-account map is shard-scoped: only credentials in this
-        // shard's range get retained, so peak memory is O(N / shards).
-        if in_shard {
-            self.accounts_by_pool
-                .insert(pool_id, account.clone(), stake);
-        }
+        self.pools.insert(pool.operator, pool.snapshot);
 
         Ok(())
     }
@@ -295,40 +164,36 @@ impl StakeSnapshot {
     /// Load the pool-level half of the stake snapshot.
     ///
     /// Iterates every `PoolState` once (O(P) ≈ a few thousand entries on
-    /// mainnet) and every `AccountState` once (O(N) — millions on
-    /// mainnet, but only sums + a tiny `pools` map are retained).
-    /// Populates `pools`, `pool_stake`, `active_stake_sum`, and
-    /// `performance_epoch_pool_blocks`.  Leaves `accounts_by_pool` and
-    /// `registered_accounts` empty — those are filled per shard by
-    /// `merge_shard`.
+    /// mainnet) and reads the stake, delegators and live pledge that ESTART
+    /// froze onto each pool's snapshot of `stake_epoch`. Populates `pools`,
+    /// `pool_stake`, `pool_delegator_counts`, `pool_live_pledges`,
+    /// `active_stake_sum`, and `performance_epoch_pool_blocks`. Leaves
+    /// `accounts_by_pool` and `registered_accounts` empty — those are filled
+    /// per shard by `merge_shard`.
     ///
     /// # Arguments
     /// * `state` - Current state store
     /// * `current_epoch` - Epoch the RUPD is computing for; every pool's
     ///   snapshot must be aligned to it (see `ensure_pool_aligned`).
     /// * `stake_epoch` - Epoch for stake/delegation snapshot (E-3)
-    /// * `protocol` - Era protocol for stake calculation
     pub fn load_globals<D: Domain>(
         state: &D::State,
         current_epoch: u64,
         stake_epoch: u64,
-        protocol: EraProtocol,
     ) -> Result<Self, ChainError> {
-        let mut pools = GlobalsPoolPass::new(current_epoch, stake_epoch, protocol);
+        let mut snapshot = Self::default();
 
         for record in state.iter_entities_typed::<PoolState>(None)? {
             let (_, pool) = record?;
-            pools.track(pool)?;
+            snapshot.track_pool(pool, current_epoch, stake_epoch)?;
         }
 
-        let mut accounts = pools.accounts();
+        trace!(
+            active_stake = %snapshot.active_stake_sum,
+            "stake aggregation"
+        );
 
-        for record in state.iter_entities_typed::<AccountState>(None)? {
-            let (_, account) = record?;
-            accounts.track(&account)?;
-        }
-
-        Ok(accounts.finish())
+        Ok(snapshot)
     }
 
     /// Add the per-account leg of the stake snapshot for one shard.
@@ -337,13 +202,13 @@ impl StakeSnapshot {
     /// (one range per `StakeCredential` variant), populating
     /// `accounts_by_pool` (delegators in range) and `registered_accounts`
     /// (registered credentials in range). `pool_stake` /
-    /// `active_stake_sum` are NOT touched here — those came from
-    /// `load_globals`, which already saw every account.
+    /// `active_stake_sum` are NOT touched here — `load_globals` read them
+    /// from the tallies ESTART froze over every account.
     pub fn merge_shard<D: Domain>(
         &mut self,
         state: &D::State,
         stake_epoch: u64,
-        protocol: EraProtocol,
+        protocol: EraKey,
         ranges: &[RangeOf<AccountKey>],
     ) -> Result<(), ChainError> {
         for range in ranges {
@@ -496,16 +361,7 @@ impl RupdWork {
         };
 
         if let Some((snapshot_epoch, performance_epoch)) = work.relevant_epochs() {
-            // The snapshot data was "live" at snapshot_epoch and becomes the "mark"
-            // snapshot at snapshot_epoch + 1. The Haskell ledger computes the mark
-            // snapshot under the entering epoch's protocol rules, so we use
-            // snapshot_epoch + 1 to determine the era (e.g., Conway excludes pointer
-            // address UTxOs from stake).
-            let era = work.chain.era_for_epoch(snapshot_epoch + 1);
-            let protocol = EraProtocol::from(era.protocol);
-
-            work.snapshot =
-                StakeSnapshot::load_globals::<D>(state, current_epoch, snapshot_epoch, protocol)?;
+            work.snapshot = StakeSnapshot::load_globals::<D>(state, current_epoch, snapshot_epoch)?;
 
             debug!(
                 %current_epoch,
@@ -530,8 +386,14 @@ impl RupdWork {
         ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<(), ChainError> {
         if let Some((snapshot_epoch, _)) = self.relevant_epochs() {
+            // The snapshot data was "live" at snapshot_epoch and becomes the
+            // "mark" snapshot at snapshot_epoch + 1. The Haskell ledger
+            // computes the mark snapshot under the entering epoch's protocol
+            // rules, so we use snapshot_epoch + 1 to determine the era (e.g.,
+            // Conway excludes pointer address UTxOs from stake), as ESTART
+            // did when it froze the pool totals.
             let era = self.chain.era_for_epoch(snapshot_epoch + 1);
-            let protocol = EraProtocol::from(era.protocol);
+            let protocol = EraKey::from(era.protocol);
             self.snapshot
                 .merge_shard::<D>(state, snapshot_epoch, protocol, &ranges)?;
         }
@@ -636,16 +498,15 @@ impl crate::rewards::RewardsContext for RupdWork {
     }
 
     fn live_pledge(&self, pool: PoolHash, _owners: &[StakeCredential]) -> u64 {
-        // Use the precomputed per-pool live pledge populated in
-        // `load_globals` (which sees every account, regardless of
-        // shard). The trait default sums `account_stake` across the
-        // owner list, which under sharded RUPD only sees the slice of
-        // `accounts_by_pool` belonging to the current shard's key
-        // range — owners in other shards would silently contribute 0,
-        // tripping the `live_pledge < declared_pledge` short-circuit
-        // in `pool_rewards` and zeroing every emission for the pool
-        // from this shard.
-        *self.snapshot.pool_live_pledges.get(&pool).unwrap_or(&0)
+        // Use the per-pool live pledge ESTART froze over every account,
+        // which `load_globals` reads. The trait default sums
+        // `account_stake` across the owner list, which under sharded RUPD
+        // only sees the slice of `accounts_by_pool` belonging to the
+        // current shard's key range — owners in other shards would
+        // silently contribute 0, tripping the `live_pledge <
+        // declared_pledge` short-circuit in `pool_rewards` and zeroing
+        // every emission for the pool from this shard.
+        self.snapshot.get_pool_live_pledge(&pool)
     }
 
     fn should_include(&self, account: &StakeCredential) -> bool {

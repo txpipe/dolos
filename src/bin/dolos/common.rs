@@ -137,6 +137,20 @@ pub fn setup_tracing_error_only() -> miette::Result<()> {
     Ok(())
 }
 
+/// Warnings and errors only, on stderr, apart from a command's own output.
+pub fn setup_tracing_warnings() -> miette::Result<()> {
+    let filter = Targets::new().with_default(tracing::Level::WARN);
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(filter)
+        .init();
+
+    tracing_log::LogTracer::init().ok();
+
+    Ok(())
+}
+
 pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> miette::Result<()> {
     let level = config.max_level;
 

@@ -18,18 +18,23 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use dolos_cardano::{indexes::archive_dimensions, model::build_schema};
+use dolos_cardano::{
+    indexes::archive_dimensions,
+    model::{build_log_schema, build_schema},
+};
 use dolos_core::{ExactKind, IndexRecord, Namespace};
 use dolos_snapshot::{
     layers::indexes, log_kind_for, log_ns_for, namespaces, shards_for, state_kind_for,
     state_ns_for, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 
-/// The state namespaces this profile carries are exactly `build_schema`'s, plus
-/// the UTxO set.
+/// The namespaces this profile carries are exactly the two schemas', plus the
+/// UTxO set: the state kinds carry `build_schema`'s and the log kinds carry
+/// `build_log_schema`'s.
 #[test]
-fn namespace_registry_matches_build_schema() {
-    let schema: BTreeSet<Namespace> = build_schema().keys().copied().collect();
+fn namespace_registry_matches_the_schemas() {
+    let states: BTreeSet<Namespace> = build_schema().keys().copied().collect();
+    let logs: BTreeSet<Namespace> = build_log_schema().keys().copied().collect();
     let registry: BTreeSet<Namespace> = NAMESPACES.into_iter().collect();
 
     assert!(
@@ -41,14 +46,27 @@ fn namespace_registry_matches_build_schema() {
         registry.iter().copied().filter(|ns| *ns != UTXOS).collect();
 
     assert_eq!(
-        entities, schema,
-        "the profile's state namespaces have drifted from build_schema()"
+        entities,
+        states.union(&logs).copied().collect(),
+        "the profile's namespaces have drifted from the schemas"
     );
 
-    // ADR-004 says twenty-five entity namespaces plus `utxos`. If that count
-    // moves, the sentence in the ADR moves with it.
-    assert_eq!(entities.len(), 25);
-    assert_eq!(NAMESPACES.len(), 26);
+    let state_kinds: BTreeSet<Namespace> = STATE_KINDS
+        .into_iter()
+        .map(|(_, ns, _)| ns)
+        .filter(|ns| *ns != UTXOS)
+        .collect();
+
+    assert_eq!(
+        state_kinds, states,
+        "the state kinds have drifted from build_schema()"
+    );
+
+    assert_eq!(
+        LOG_NAMESPACES.into_iter().collect::<BTreeSet<_>>(),
+        logs,
+        "the log kinds have drifted from build_log_schema()"
+    );
 }
 
 #[test]
@@ -120,11 +138,6 @@ fn the_golden_indexes_layer_covers_every_dimension_and_kind() {
         "the golden indexes layer no longer freezes every dimension name"
     );
 
-    // Seventeen, as the module documentation of `tests/goldens.rs` states.
-    // Pinned here so that prose cannot go stale while every other test still
-    // passes.
-    assert_eq!(expected.len(), 17);
-
     let kinds: BTreeSet<ExactKind> = records
         .iter()
         .filter_map(|record| match record {
@@ -149,7 +162,7 @@ fn the_golden_indexes_layer_covers_every_dimension_and_kind() {
 /// freezing its media type.
 #[test]
 fn the_golden_state_layers_cover_every_namespace() {
-    let expected: BTreeSet<Namespace> = NAMESPACES.into_iter().collect();
+    let expected: BTreeSet<Namespace> = STATE_KINDS.into_iter().map(|(_, ns, _)| ns).collect();
 
     let present: BTreeSet<Namespace> = common::state_layers()
         .into_iter()
@@ -171,8 +184,8 @@ fn the_golden_state_layers_cover_every_namespace() {
     }
 }
 
-/// Every state kind appears in the golden stele, so all twenty-six kind strings
-/// are frozen by a published digest — the state half of
+/// Every state kind appears in the golden stele, so every state kind string is
+/// frozen by a published digest — the state half of
 /// `the_golden_stele_covers_every_log_kind`.
 #[test]
 fn the_golden_stele_covers_every_state_kind() {
@@ -190,9 +203,9 @@ fn the_golden_stele_covers_every_state_kind() {
 }
 
 /// The log namespaces draw from the same registry, so a log kind can never name
-/// a namespace no state layer knows.
+/// a namespace the profile does not know.
 #[test]
-fn the_log_namespaces_are_state_namespaces() {
+fn the_log_namespaces_are_registered() {
     let registry: BTreeSet<Namespace> = NAMESPACES.into_iter().collect();
     let logs: BTreeSet<Namespace> = LOG_NAMESPACES.into_iter().collect();
 
@@ -201,22 +214,36 @@ fn the_log_namespaces_are_state_namespaces() {
     assert!(!logs.contains(UTXOS), "the utxo set is not a log");
 }
 
+/// Namespaces are kebab-case (decision 0056): lowercase ASCII words joined by
+/// hyphens, so a kind is the namespace verbatim and needs no rewrite.
+#[test]
+fn namespaces_are_kebab_case() {
+    for ns in NAMESPACES {
+        assert!(
+            !ns.is_empty()
+                && !ns.starts_with('-')
+                && !ns.ends_with('-')
+                && !ns.contains("--")
+                && ns.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'),
+            "{ns:?} is not kebab-case"
+        );
+    }
+}
+
 /// Done criterion 2: the KIND↔NS table, held to its own rule.
 ///
 /// The table is spelled out rather than composed — house style, and what makes
 /// the wire vocabulary greppable — so the rule that produced the spelling has
-/// to be a test or it is nothing. `_` becomes `-` because a media type's kind
-/// token admits hyphens and not underscores; no log namespace carries an
-/// underscore today, and the mapping is pinned anyway, because the namespace
-/// that does will arrive without anyone reading this comment first.
+/// to be a test or it is nothing. The kind is the namespace verbatim, because
+/// namespaces are kebab-case (decision 0056) and a media type's kind token
+/// admits hyphens and not underscores; `namespaces_are_kebab_case` pins the
+/// half of that rule this test leans on.
 #[test]
 fn log_kinds_derive_from_their_namespaces() {
-    assert_eq!(LOG_KINDS.len(), LOG_NAMESPACES.len());
-
     let mut kinds = Vec::new();
 
     for (kind, ns) in LOG_KINDS {
-        assert_eq!(kind, format!("log-{}", ns.replace('_', "-")), "{ns}");
+        assert_eq!(kind, format!("log-{ns}"), "{ns}");
 
         // Both directions of the lookup, against the spelling and not against
         // the derivation: a table entry nothing can find is a layer nothing can
@@ -250,21 +277,14 @@ fn log_kinds_derive_from_their_namespaces() {
         "LOG_NAMESPACES must be in byte order"
     );
 
-    // The two tables are one table read two ways.
-    assert_eq!(
-        LOG_KINDS.map(|(_, ns)| ns),
-        LOG_NAMESPACES,
-        "LOG_KINDS and LOG_NAMESPACES disagree about the namespaces"
-    );
-
-    // Nothing else is a log kind — `logs`, above all, which is what these six
+    // Nothing else is a log kind — `logs`, above all, which is what these
     // replaced.
-    for absent in ["logs", "log-", "log-utxos", "blocks", "", "log_stakes"] {
+    for absent in ["logs", "log-", "log-utxos", "blocks", "", "log-stakes"] {
         assert!(log_ns_for(absent).is_none(), "{absent:?}");
     }
 }
 
-/// Every log kind appears in the golden stele, so all six kind strings are
+/// Every log kind appears in the golden stele, so every log kind string is
 /// frozen by a published digest.
 #[test]
 fn the_golden_stele_covers_every_log_kind() {
@@ -293,12 +313,10 @@ fn the_golden_stele_covers_every_log_kind() {
 /// namespace.
 #[test]
 fn state_kinds_derive_from_their_namespaces() {
-    assert_eq!(STATE_KINDS.len(), NAMESPACES.len());
-
     let mut kinds = Vec::new();
 
     for (kind, ns, shards) in STATE_KINDS {
-        assert_eq!(kind, format!("state-{}", ns.replace('_', "-")), "{ns}");
+        assert_eq!(kind, format!("state-{ns}"), "{ns}");
 
         // Both directions of the lookup, against the spelling and not against
         // the derivation: a table entry nothing can find is a layer nothing can
@@ -310,13 +328,10 @@ fn state_kinds_derive_from_their_namespaces() {
         kinds.push(kind);
     }
 
-    // The underscore rewrite is not hypothetical here, as it is for the logs:
-    // two state namespaces carry one.
-    assert_eq!(
-        state_kind_for("pending_rewards"),
-        Some("state-pending-rewards")
-    );
-    assert_eq!(state_kind_for("pending_mirs"), Some("state-pending-mirs"));
+    // The pre-0056 spellings are not aliases: v2 steles are a fresh lineage.
+    for retired in ["pending_rewards", "pending_mirs", "stakes"] {
+        assert!(state_kind_for(retired).is_none(), "{retired}");
+    }
 
     // Injective in both columns. Two namespaces sharing a kind would publish one
     // namespace's tip under another's name; two kinds sharing a namespace would
@@ -334,19 +349,33 @@ fn state_kinds_derive_from_their_namespaces() {
     sorted.sort_unstable();
     assert_eq!(kinds, sorted, "STATE_KINDS must be in byte order");
 
+    let states: BTreeSet<Namespace> = build_schema().keys().copied().collect();
+    let registered: Vec<Namespace> = NAMESPACES
+        .into_iter()
+        .filter(|ns| *ns == UTXOS || states.contains(ns))
+        .collect();
+
     assert_eq!(
-        STATE_KINDS.map(|(_, ns, _)| ns),
-        NAMESPACES,
-        "STATE_KINDS and NAMESPACES disagree about the namespaces"
+        STATE_KINDS.map(|(_, ns, _)| ns).to_vec(),
+        registered,
+        "STATE_KINDS and the state namespaces disagree"
     );
 
-    // The shard map is the spec's, not the data's: four chain-scale namespaces
+    // An archive-only log has no state kind: a stele carries no state layer
+    // for it.
+    for ns in NAMESPACES {
+        if ns != UTXOS && !states.contains(ns) {
+            assert_eq!(state_kind_for(ns), None, "{ns}");
+        }
+    }
+
+    // The shard map is the spec's, not the data's: the chain-scale namespaces
     // split sixteen ways, and every other namespace is a single blob. Changing
     // one of these is a media-type-version event for that kind, so it is spelled
     // out here rather than derived from the table it is checking.
     for (_, ns, shards) in STATE_KINDS {
         let expected = match ns {
-            "utxos" | "accounts" | "assets" | "datums" => 16,
+            "utxos" | "accounts" | "assets" | "datums" | "scripts" => 16,
             _ => 1,
         };
 
@@ -354,7 +383,7 @@ fn state_kinds_derive_from_their_namespaces() {
     }
 
     // Nothing else is a state kind — `state`, above all, which is what these
-    // seventeen replaced.
+    // replaced.
     for absent in ["state", "state-", "state-logs", "blocks", "", "state_utxos"] {
         assert!(state_ns_for(absent).is_none(), "{absent:?}");
     }
