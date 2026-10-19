@@ -59,6 +59,39 @@ const MOVED_TO_ARGUMENTS: [(&str, &str); 3] = [
     ),
 ];
 
+/// A file that still carries a moved section, and where each one went.
+///
+/// Its own type so that `init` can tell a file one edit away from loading
+/// apart from one it cannot read at all.
+#[derive(Debug)]
+pub struct MovedSections(Vec<String>);
+
+impl std::fmt::Display for MovedSections {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the configuration carries sections that are now command arguments; remove them: {}",
+            self.0.join("; ")
+        )
+    }
+}
+
+impl std::error::Error for MovedSections {}
+
+impl miette::Diagnostic for MovedSections {}
+
+/// A failed [`load_config`] as a report, with a moved section kept as its own
+/// type so that a caller can still tell it apart.
+pub fn config_report(error: ::config::ConfigError) -> miette::Report {
+    match error {
+        ::config::ConfigError::Foreign(cause) => match cause.downcast::<MovedSections>() {
+            Ok(moved) => miette::Report::new(*moved),
+            Err(cause) => miette::Report::from_err(::config::ConfigError::Foreign(cause)),
+        },
+        other => miette::Report::from_err(other),
+    }
+}
+
 /// Refuses a file that still carries a moved section.
 ///
 /// The loader ignores unknown keys, so without this a moved section would be
@@ -76,10 +109,9 @@ fn reject_moved_sections(files: &::config::Config) -> Result<(), ::config::Confi
         return Ok(());
     }
 
-    Err(::config::ConfigError::Message(format!(
-        "the configuration carries sections that are now command arguments; remove them: {}",
-        moved.join("; ")
-    )))
+    Err(::config::ConfigError::Foreign(Box::new(MovedSections(
+        moved,
+    ))))
 }
 
 pub fn load_config(
@@ -98,12 +130,27 @@ pub fn load_config(
         s = s.add_source(::config::File::with_name(explicit).required(true));
     }
 
-    reject_moved_sections(&s.clone().build()?)?;
+    load_layers(s)
+}
+
+/// The file layers given, then the environment over them.
+fn load_layers(
+    files: ::config::ConfigBuilder<::config::builder::DefaultState>,
+) -> Result<RootConfig, ::config::ConfigError> {
+    reject_moved_sections(&files.clone().build()?)?;
 
     // finally, we use env vars to make some last-step overrides
-    s = s.add_source(::config::Environment::with_prefix("DOLOS").separator("_"));
+    files
+        .add_source(::config::Environment::with_prefix("DOLOS").separator("_"))
+        .build()?
+        .try_deserialize()
+}
 
-    s.build()?.try_deserialize()
+/// [`load_config`] over one file and the environment, without the
+/// `/etc/dolos` and working-directory layers a test cannot control.
+#[cfg(test)]
+pub fn load_file(path: &std::path::Path) -> Result<RootConfig, ::config::ConfigError> {
+    load_layers(::config::Config::builder().add_source(::config::File::from(path)))
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
@@ -470,7 +517,7 @@ is_testnet = true
         let path = dir.path().join("dolos.toml");
         std::fs::write(&path, document).unwrap();
 
-        load_config(&Some(path))
+        load_file(&path)
     }
 
     #[test]

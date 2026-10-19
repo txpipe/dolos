@@ -171,6 +171,19 @@ mod tests {
     }
 
     #[test]
+    fn a_state_epochs_file_is_read_in_place_of_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("epochs.txt");
+        std::fs::write(&path, "208,236\n290\n").unwrap();
+
+        assert_eq!(state_epochs(&[], Some(&path)).unwrap(), vec![208, 236, 290]);
+
+        let missing = dir.path().join("missing.txt");
+        let message = format!("{:?}", state_epochs(&[], Some(&missing)).unwrap_err());
+        assert!(message.contains("missing.txt"), "{message}");
+    }
+
+    #[test]
     fn the_listed_epochs_stand_without_a_file() {
         assert_eq!(state_epochs(&[208, 236], None).unwrap(), vec![208, 236]);
         assert_eq!(state_epochs(&[], None).unwrap(), Vec::<u64>::new());

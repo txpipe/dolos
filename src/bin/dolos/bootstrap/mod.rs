@@ -117,14 +117,15 @@ fn inspect_existing_data(config: &RootConfig, args: &Args) -> miette::Result<Exi
     dolos::storage::inspect_existing_data(config, policy).into_diagnostic()
 }
 
-/// Resolves what a command defaults from the network, so that a custom
-/// network missing an input is refused before any data is cleared.
+/// Resolves a command's inputs — what it defaults from the network, and the
+/// credentials it reads with — so that a missing or bad one is refused before
+/// any data is cleared.
 fn check_inputs(config: &RootConfig, command: &Command) -> miette::Result<()> {
     let network = dolos_cardano::networks::KnownNetwork::by_magic(config.chain.magic());
 
     match command {
         Command::Mithril(args) => mithril::mithril_source(args, network).map(drop),
-        Command::Stelae(args) => stelae::source(args, network).map(drop),
+        Command::Stelae(args) => stelae::check_inputs(args, network),
         Command::Relay(_) | Command::Snapshot(_) => Ok(()),
     }
 }

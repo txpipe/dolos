@@ -743,7 +743,7 @@ pub enum Error {
     #[error(
         "the registry credentials name both a token and a user; a registry client authenticates \
          as one identity and which one was meant is not something to guess at — drop the one you \
-         did not mean (DOLOS_STELAE_TOKEN, or --registry-user / DOLOS_STELAE_USER)"
+         did not mean"
     )]
     AmbiguousRegistryIdentity,
 
@@ -752,7 +752,7 @@ pub enum Error {
     /// unused.
     #[error(
         "the registry credentials name a password with no user; basic registry credentials are \
-         a pair, so pass --registry-user too"
+         a pair, so name the user too"
     )]
     OrphanRegistryPassword,
 }

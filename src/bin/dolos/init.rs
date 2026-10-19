@@ -16,7 +16,7 @@ use std::{
 
 use dolos::storage::{BOOTSTRAP_GUIDE_URL, CURRENT_STORAGE_VERSION};
 
-use crate::{data::cleanup, feedback::Feedback};
+use crate::{common::MovedSections, data::cleanup, feedback::Feedback};
 
 /// The config file `dolos init` writes, and the one whose failure to parse
 /// tells us an older setup is present.
@@ -627,12 +627,29 @@ fn existing_config_is_unreadable(config: &miette::Result<RootConfig>, config_fil
     config.is_err() && config_file.exists()
 }
 
+/// Refuses a config that failed to load only because it still carries a moved
+/// section.
+///
+/// Every `dolos.toml` an older `init` wrote has `[mithril]`. Such a file is one
+/// edit away from loading and names its storage, so it is reported as that
+/// edit rather than as an unreadable setup whose data has to go.
+fn refuse_moved_sections(
+    config: miette::Result<RootConfig>,
+) -> miette::Result<miette::Result<RootConfig>> {
+    match config {
+        Err(report) if report.is::<MovedSections>() => Err(report),
+        other => Ok(other),
+    }
+}
+
 pub fn run(
     config: miette::Result<RootConfig>,
     args: &Args,
     feedback: &Feedback,
 ) -> miette::Result<()> {
     crate::banner::print_init_banner();
+
+    let config = refuse_moved_sections(config)?;
 
     let unparseable_existing = existing_config_is_unreadable(&config, Path::new(CONFIG_FILE));
 
@@ -1058,6 +1075,46 @@ is_testnet = true
             assert!(!written.contains(section), "{written}");
         }
 
-        crate::common::load_config(&Some(path)).expect("the generated config loads");
+        crate::common::load_file(&path).expect("the generated config loads");
+    }
+
+    /// A config an older `init` wrote carries `[mithril]`; init reports where
+    /// it moved instead of calling the setup unreadable.
+    #[test]
+    fn an_older_init_config_is_reported_as_its_moved_section() {
+        let _guard = crate::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dolos.toml");
+
+        ConfigEditor::default()
+            .apply_known_network(Some(&networks::PREPROD))
+            .save(&path)
+            .unwrap();
+
+        let mut written = std::fs::read_to_string(&path).unwrap();
+        written.push_str(
+            "\n[mithril]\naggregator = \"https://aggregator.example\"\ngenesis_key = \"5b31\"\n",
+        );
+        std::fs::write(&path, written).unwrap();
+
+        let config = crate::common::load_file(&path)
+            .map_err(crate::common::config_report)
+            .context("parsing configuration");
+
+        let report = refuse_moved_sections(config).err().unwrap();
+        let message = format!("{report:?}");
+
+        assert!(message.contains("[mithril] moved to"), "{message}");
+        assert!(!message.contains("Remove the data directory"), "{message}");
+    }
+
+    #[test]
+    fn any_other_load_failure_is_left_to_the_upgrade_check() {
+        let failed: miette::Result<RootConfig> = Err(miette!("not toml"));
+
+        assert!(refuse_moved_sections(failed).unwrap().is_err());
     }
 }

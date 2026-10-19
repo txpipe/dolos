@@ -209,3 +209,28 @@ fn chain_from(path: &std::path::Path, plan: &Plan) -> miette::Result<Following> 
         .into_diagnostic()
         .with_context(|| format!("chaining onto {}", path.display()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args, clap::Error> {
+        Args::try_parse_from(std::iter::once("digest").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn the_state_epochs_are_a_comma_separated_list() {
+        let args = parse(&["--state-epochs", "208,236,290"]).unwrap();
+        assert_eq!(args.state_epochs, vec![208, 236, 290]);
+
+        assert!(parse(&[]).unwrap().state_epochs.is_empty());
+    }
+
+    #[test]
+    fn a_state_epochs_file_takes_the_place_of_the_list() {
+        assert!(parse(&["--state-epochs", "208", "--state-epochs-file", "epochs.txt"]).is_err());
+
+        let args = parse(&["--state-epochs-file", "epochs.txt"]).unwrap();
+        assert_eq!(args.state_epochs_file, Some(PathBuf::from("epochs.txt")));
+    }
+}

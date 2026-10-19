@@ -56,7 +56,27 @@ impl CredentialArgs {
     ) -> miette::Result<Auth> {
         let inputs = self.inputs(repository, network, |name| std::env::var(name).ok())?;
 
-        node::registry_auth(&inputs).into_diagnostic()
+        node::registry_auth(&inputs).map_err(|error| self.explain(error))
+    }
+
+    /// The profile crate's refusal, with which of this invocation's inputs to
+    /// change: the token may have come from the environment or from a file.
+    fn explain(&self, error: dolos_snapshot::Error) -> miette::Report {
+        let help = match (&error, &self.registry_credentials_file) {
+            (dolos_snapshot::Error::AmbiguousRegistryIdentity, Some(path)) => format!(
+                "drop the token in {}, or --registry-user / DOLOS_STELAE_USER",
+                path.display()
+            ),
+            (dolos_snapshot::Error::AmbiguousRegistryIdentity, None) => {
+                format!("drop {TOKEN_ENV}, or --registry-user / DOLOS_STELAE_USER")
+            }
+            (dolos_snapshot::Error::OrphanRegistryPassword, _) => {
+                "pass --registry-user or set DOLOS_STELAE_USER".to_owned()
+            }
+            _ => return miette::Report::from_err(error),
+        };
+
+        miette::miette!(help = help, "{error}")
     }
 
     fn inputs(
@@ -89,13 +109,27 @@ impl CredentialArgs {
     }
 }
 
+/// Reads a credentials file, saying where it failed and never what it holds.
+///
+/// A parse error would quote the offending line, and that line is a secret.
 fn read_secrets(path: &Path) -> miette::Result<Secrets> {
+    let context = || format!("reading the registry credentials in {}", path.display());
+
+    let text = std::fs::read_to_string(path)
+        .into_diagnostic()
+        .with_context(context)?;
+
     ::config::Config::builder()
-        .add_source(::config::File::from(path).format(::config::FileFormat::Toml))
+        .add_source(::config::File::from_str(&text, ::config::FileFormat::Toml))
         .build()
         .and_then(|file| file.try_deserialize())
-        .into_diagnostic()
-        .with_context(|| format!("reading the registry credentials in {}", path.display()))
+        .map_err(|_| {
+            miette::miette!(
+                "{} is not a TOML file naming only `password` or `token`",
+                path.display()
+            )
+        })
+        .with_context(context)
 }
 
 /// The catalog's read-only user, for the configured network's official
@@ -266,6 +300,101 @@ mod tests {
         );
         assert!(message.contains("credentials"), "{message}");
         assert!(!message.contains("misspelled"), "{message}");
+    }
+
+    /// A file that does not parse fails naming its path; the line the parser
+    /// would quote is the secret.
+    #[test]
+    fn a_malformed_credentials_file_is_never_echoed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.toml");
+
+        let args = CredentialArgs {
+            registry_credentials_file: Some(path.clone()),
+            ..Default::default()
+        };
+
+        for document in [
+            "token = ghp_FAKESECRET123\n",
+            "password = \"ghp_FAKESECRET123\n",
+            "token = [\"ghp_FAKESECRET123\"]\n",
+        ] {
+            std::fs::write(&path, document).unwrap();
+
+            let message = format!(
+                "{:?}",
+                args.inputs(&official(), Some(&networks::MAINNET), no_env)
+                    .err()
+                    .unwrap()
+            );
+
+            assert!(message.contains("credentials.toml"), "{message}");
+            assert!(!message.contains("FAKESECRET"), "{message}");
+        }
+    }
+
+    /// Which token to drop depends on where it came from.
+    #[test]
+    fn an_ambiguous_identity_names_where_the_token_came_from() {
+        let _guard = crate::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        std::env::remove_var(TOKEN_ENV);
+        std::env::remove_var(PASSWORD_ENV);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.toml");
+        std::fs::write(&path, "token = \"from-file\"\n").unwrap();
+
+        let args = CredentialArgs {
+            registry_user: Some("publisher".to_owned()),
+            registry_credentials_file: Some(path),
+        };
+
+        let message = format!(
+            "{:?}",
+            args.auth(&official(), Some(&networks::MAINNET))
+                .err()
+                .unwrap()
+        );
+
+        assert!(message.contains("credentials.toml"), "{message}");
+        assert!(!message.contains(TOKEN_ENV), "{message}");
+        assert!(!message.contains("from-file"), "{message}");
+    }
+
+    /// The documented variable names, through the real environment: a typo in
+    /// either constant would pass every test that injects one.
+    #[test]
+    fn the_secret_variables_are_read_from_the_environment() {
+        let _guard = crate::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let args = CredentialArgs {
+            registry_user: Some("publisher".to_owned()),
+            ..Default::default()
+        };
+
+        std::env::remove_var("DOLOS_STELAE_TOKEN");
+        std::env::set_var("DOLOS_STELAE_PASSWORD", "full-access");
+        let basic = args.auth(&official(), Some(&networks::MAINNET));
+        std::env::remove_var("DOLOS_STELAE_PASSWORD");
+
+        assert_eq!(
+            basic.unwrap(),
+            Auth::Basic {
+                user: "publisher".to_owned(),
+                password: "full-access".to_owned(),
+            }
+        );
+
+        std::env::set_var("DOLOS_STELAE_TOKEN", "ghp_x");
+        let bearer = CredentialArgs::default().auth(&official(), Some(&networks::MAINNET));
+        std::env::remove_var("DOLOS_STELAE_TOKEN");
+
+        assert_eq!(bearer.unwrap(), Auth::Bearer("ghp_x".to_owned()));
     }
 
     #[test]

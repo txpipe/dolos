@@ -207,3 +207,42 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args, clap::Error> {
+        let fixed = [
+            "verify",
+            "--repo",
+            "oci://ghcr.io/txpipe/dolos-snapshots/preview",
+        ];
+
+        Args::try_parse_from(fixed.into_iter().chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn the_state_epochs_are_a_comma_separated_list_for_a_reproduction() {
+        let args = parse(&["--reproduce", "--state-epochs", "208,236,290"]).unwrap();
+        assert_eq!(args.state_epochs, vec![208, 236, 290]);
+
+        assert!(parse(&["--state-epochs", "208"]).is_err());
+        assert!(parse(&["--state-epochs-file", "epochs.txt"]).is_err());
+    }
+
+    #[test]
+    fn a_state_epochs_file_takes_the_place_of_the_list() {
+        assert!(parse(&[
+            "--reproduce",
+            "--state-epochs",
+            "208",
+            "--state-epochs-file",
+            "epochs.txt",
+        ])
+        .is_err());
+
+        let args = parse(&["--reproduce", "--state-epochs-file", "epochs.txt"]).unwrap();
+        assert_eq!(args.state_epochs_file, Some(PathBuf::from("epochs.txt")));
+    }
+}

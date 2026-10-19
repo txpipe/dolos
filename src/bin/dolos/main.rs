@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use miette::{Context, IntoDiagnostic, Result};
+use miette::{Context, Result};
 
 #[cfg(all(feature = "jemalloc", target_os = "linux"))]
 #[global_allocator]
@@ -96,7 +96,7 @@ fn main() -> Result<()> {
     let args = Cli::parse();
 
     let config = crate::common::load_config(&args.config)
-        .into_diagnostic()
+        .map_err(crate::common::config_report)
         .context("parsing configuration");
 
     let feedback = crate::feedback::Feedback::default();

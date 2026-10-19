@@ -126,6 +126,15 @@ pub(super) fn source(args: &Args, network: Option<&KnownNetwork>) -> miette::Res
         .map_err(|e: String| miette::miette!("{e}"))
 }
 
+/// Resolves the source and, for a repository, the credentials, so that
+/// `--force` clears nothing for a restore that would refuse them.
+pub(super) fn check_inputs(args: &Args, network: Option<&KnownNetwork>) -> miette::Result<()> {
+    match source(args, network)? {
+        Source::Dir(_) => Ok(()),
+        Source::Repo(repo) => args.credentials.auth(&repo, network).map(drop),
+    }
+}
+
 /// What every restore needs before it can read a layer, whatever the source is.
 struct Node {
     root: PathBuf,
