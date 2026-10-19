@@ -52,7 +52,9 @@ impl BlockVisitor for PoolStateVisitor {
     ) -> Result<(), ChainError> {
         if let Some(cert) = pallas_extras::cert_as_pool_registration(cert) {
             let epoch = self.epoch.expect("value set in root");
-            let deposit = self.deposit.expect("value set in root");
+            let deposit = self
+                .deposit
+                .ok_or(ChainError::StartingPParamMissing("pool_deposit"))?;
 
             deltas.add_for_entity(PoolRegistration::new(
                 cert.clone(),
