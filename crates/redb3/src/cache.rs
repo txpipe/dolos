@@ -430,9 +430,10 @@ impl CacheDiskTier for RedbCacheTier {
 const REDB_PAGE_SIZE: u32 = 4096;
 
 /// Fails as corrupt if the file is shorter than the layout its header records,
-/// or records one redb cannot lay out: redb panics on both before it reports
-/// any error. The header is read under the file's lock, as redb takes it, so a
-/// file another process holds fails as open instead.
+/// is not a whole number of pages, or records a layout redb cannot read: redb
+/// panics on all three before it reports any error. The header is read under a
+/// shared lock, which conflicts with redb's exclusive one, so a file another
+/// process holds fails as open instead.
 fn check_layout(path: &Path) -> Result<(), redb::Error> {
     use std::{fs::TryLockError, io::Read as _};
 
@@ -442,7 +443,8 @@ fn check_layout(path: &Path) -> Result<(), redb::Error> {
         Err(error) => return Err(error.into()),
     };
 
-    match file.try_lock() {
+    // a shared lock, since NFS refuses an exclusive one on a read-only handle
+    match file.try_lock_shared() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => return Err(redb::Error::DatabaseAlreadyOpen),
         Err(TryLockError::Error(error)) if error.kind() == std::io::ErrorKind::Unsupported => {}
@@ -483,9 +485,9 @@ fn check_layout(path: &Path) -> Result<(), redb::Error> {
 
     let expected = page_size + full_regions * (header_pages + max_pages) * page_size + trailing;
 
-    if u128::from(len) < expected {
+    if u128::from(len) < expected || u128::from(len) % page_size != 0 {
         return Err(redb::Error::Corrupted(format!(
-            "the file is {len} bytes and its header lays out {expected}"
+            "the file is {len} bytes and its header lays out {expected} in pages of {page_size}"
         )));
     }
 
@@ -896,6 +898,23 @@ mod tests {
             put(&tier, "key", 10, 1);
             assert!(holds(&tier, "key"), "cut to {len} bytes");
         }
+    }
+
+    #[test]
+    fn a_file_not_a_whole_number_of_pages_is_recreated_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(RedbCacheTier::open(dir.path(), MIB).unwrap());
+
+        let path = dir.path().join(FILE_NAME);
+        let len = std::fs::metadata(&path).unwrap().len();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(len + 100).unwrap();
+        drop(file);
+
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        put(&tier, "key", 10, 1);
+        assert!(holds(&tier, "key"));
     }
 
     #[test]
