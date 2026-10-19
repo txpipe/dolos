@@ -34,7 +34,6 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use dolos_cardano::networks::KnownNetwork;
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
     facade::{SnapshotRepository, SnapshotSource as _, StoreSnapshot},
@@ -122,8 +121,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // every blob has been streamed.
     let state_epochs = super::state_epochs(&args.state_epochs, args.state_epochs_file.as_deref())?;
 
-    let network = KnownNetwork::by_magic(config.chain.magic());
-    let auth = args.credentials.auth(&args.repo, network)?;
+    let auth = args.credentials.auth_for_chain(&args.repo, &config.chain)?;
 
     // A verification streams every blob through a staged file. No
     // `--scratch-dir` of its own: it reads what is already published rather

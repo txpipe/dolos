@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use dolos_cardano::networks::KnownNetwork;
+use dolos_core::config::ChainConfig;
 use dolos_snapshot::{
     node::{self, RegistryAuth},
     registry::{Auth, Repository},
@@ -57,6 +58,16 @@ impl CredentialArgs {
         let inputs = self.inputs(repository, network, |name| std::env::var(name).ok())?;
 
         node::registry_auth(&inputs).map_err(|error| self.explain(error))
+    }
+
+    /// How this invocation reads `repository` from a node of `chain`, whose
+    /// magic names the network that supplies the published read-only user.
+    pub fn auth_for_chain(
+        &self,
+        repository: &Repository,
+        chain: &ChainConfig,
+    ) -> miette::Result<Auth> {
+        self.auth(repository, KnownNetwork::by_magic(chain.magic()))
     }
 
     /// The profile crate's refusal, with which of this invocation's inputs to
@@ -395,6 +406,35 @@ mod tests {
         std::env::remove_var("DOLOS_STELAE_TOKEN");
 
         assert_eq!(bearer.unwrap(), Auth::Bearer("ghp_x".to_owned()));
+    }
+
+    /// The snapshot commands read the official repository of the network the
+    /// node is configured for as its published user, not anonymously.
+    #[test]
+    fn a_node_reads_its_network_official_repository_as_the_published_user() {
+        let _guard = crate::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        std::env::remove_var(PASSWORD_ENV);
+        std::env::remove_var(TOKEN_ENV);
+
+        let chain = ChainConfig::Cardano(dolos_core::config::CardanoConfig {
+            magic: u64::from(networks::PREVIEW.magic),
+            ..Default::default()
+        });
+
+        let auth = CredentialArgs::default()
+            .auth_for_chain(&repo(networks::PREVIEW.stelae.registry), &chain)
+            .unwrap();
+
+        assert_eq!(
+            auth,
+            Auth::Basic {
+                user: networks::PREVIEW.stelae.user.to_owned(),
+                password: OFFICIAL_REGISTRY_PASSWORD.to_owned(),
+            }
+        );
     }
 
     #[test]

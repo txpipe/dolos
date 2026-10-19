@@ -20,7 +20,6 @@
 //! column that reads as "none".
 
 use clap::Parser;
-use dolos_cardano::networks::KnownNetwork;
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
     facade::SnapshotRepository,
@@ -61,8 +60,7 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    let network = KnownNetwork::by_magic(config.chain.magic());
-    let auth = args.credentials.auth(&args.repo, network)?;
+    let auth = args.credentials.auth_for_chain(&args.repo, &config.chain)?;
 
     // An inspection reads two small blobs into memory, so nothing is staged
     // and this directory is never created here.
