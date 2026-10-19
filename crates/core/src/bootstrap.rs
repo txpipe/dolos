@@ -41,13 +41,15 @@ impl<D: Domain> BootstrapExt for D {
     }
 
     fn bootstrap(&self) -> Result<(), DomainError> {
+        let mut chain = self.write_chain();
+        D::Chain::reconcile_archive_rollback(self)?;
         self.check_integrity()?;
 
         catch_up_stores(self)?;
 
         // Drain any work that might have been defined by the initialization
         // using the sync lifecycle (full WAL + tip notifications)
-        let mut chain = self.write_chain();
+        D::Chain::prepare_archive(self)?;
         drain_pending_work(&mut *chain, self)?;
 
         Ok(())

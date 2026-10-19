@@ -46,8 +46,8 @@ use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::archive::{ArchiveError, ArchiveStore, ArchiveWriter, Skippable};
 use crate::indexes::{
-    key_hash, ArchiveIndexDelta, ExactKind, ExactRecord, IndexRecord, KeyHash, TagDimension,
-    TagRecord, MAX_EXACT_KEY_LEN,
+    key_hash, ArchiveIndexDelta, ExactKind, ExactRecord, IndexRecord, KeyHash, RelationContext,
+    RelationRecord, RelationSource, TagDimension, TagRecord, MAX_EXACT_KEY_LEN,
 };
 use crate::{
     BlockBody, BlockSlot, ChainPoint, EntityValue, KeyBytes, KeyRange, LogKey, Namespace, RawBlock,
@@ -94,6 +94,8 @@ struct Tables {
     /// Keyed on the record's own inline key rather than a `Vec`, so
     /// `iter_exact_records` copies rather than allocates per record.
     exact: BTreeMap<(ExactKind, ExactKey), BlockSlot>,
+    relations: Arc<BTreeMap<RelationSource, RelationRecord>>,
+    relation_context: BTreeMap<String, RelationContext>,
 }
 
 /// A single mutation, recorded by a writer and replayed at commit.
@@ -109,6 +111,10 @@ enum Op {
     RemoveArchiveTag(ArchiveTag),
     InsertExact(ExactKind, ExactKey, BlockSlot),
     RemoveExact(ExactKind, ExactKey),
+    InsertRelation(RelationSource),
+    PutRelation(RelationRecord),
+    DeleteRelation(RelationSource),
+    SetRelationContext(String, RelationContext),
 }
 
 fn poisoned() -> ArchiveError {
@@ -230,6 +236,25 @@ impl MemoryArchiveWriter {
 }
 
 impl ArchiveWriter for MemoryArchiveWriter {
+    fn put_relation(&self, record: &RelationRecord) -> Result<(), ArchiveError> {
+        self.push(Op::PutRelation(record.clone()))
+    }
+
+    fn delete_relation(&self, source: &RelationSource) -> Result<(), ArchiveError> {
+        self.push(Op::DeleteRelation(source.clone()))
+    }
+
+    fn set_relation_context(
+        &self,
+        dimension: &str,
+        context: &RelationContext,
+    ) -> Result<(), ArchiveError> {
+        if context.version != RelationContext::VERSION {
+            return Err(ArchiveError::InvalidStoreVersion);
+        }
+        self.push(Op::SetRelationContext(dimension.into(), context.clone()))
+    }
+
     fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError> {
         self.push(Op::Apply(point.clone(), block.clone()))
     }
@@ -245,6 +270,9 @@ impl ArchiveWriter for MemoryArchiveWriter {
 
             for tag in Self::archive_tags_of(block) {
                 ops.push(Op::InsertArchiveTag(tag));
+            }
+            for source in &block.relations {
+                ops.push(Op::InsertRelation(source.clone()));
             }
         }
 
@@ -264,6 +292,9 @@ impl ArchiveWriter for MemoryArchiveWriter {
 
             for tag in Self::archive_tags_of(block) {
                 ops.push(Op::RemoveArchiveTag(tag));
+            }
+            for source in &block.relations {
+                ops.push(Op::DeleteRelation(source.clone()));
             }
         }
 
@@ -362,6 +393,20 @@ impl ArchiveWriter for MemoryArchiveWriter {
                 }
                 Op::RemoveExact(kind, key) => {
                     tables.exact.remove(&(kind, key));
+                }
+                Op::InsertRelation(source) => {
+                    Arc::make_mut(&mut tables.relations)
+                        .entry(source.clone())
+                        .or_insert_with(|| RelationRecord::new(source));
+                }
+                Op::PutRelation(record) => {
+                    Arc::make_mut(&mut tables.relations).insert(record.source.clone(), record);
+                }
+                Op::DeleteRelation(source) => {
+                    Arc::make_mut(&mut tables.relations).remove(&source);
+                }
+                Op::SetRelationContext(dimension, context) => {
+                    tables.relation_context.insert(dimension, context);
                 }
             }
         }
@@ -468,7 +513,99 @@ impl Iterator for MemoryLogIter {
     }
 }
 
+struct MemoryRelationIter {
+    snapshot: Arc<BTreeMap<RelationSource, RelationRecord>>,
+    lower: Bound<RelationSource>,
+    dimension: String,
+    subject: Option<Vec<u8>>,
+    done: bool,
+}
+
+impl Iterator for MemoryRelationIter {
+    type Item = Result<RelationRecord, ArchiveError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let Some((source, record)) = self
+            .snapshot
+            .range((self.lower.as_ref(), Bound::Unbounded))
+            .next()
+        else {
+            self.done = true;
+            return None;
+        };
+        if source.dimension != self.dimension
+            || self
+                .subject
+                .as_ref()
+                .is_some_and(|subject| source.subject != *subject)
+        {
+            self.done = true;
+            return None;
+        }
+        self.lower = Bound::Excluded(source.clone());
+        Some(Ok(record.clone()))
+    }
+}
+
 impl ArchiveStore for MemoryArchiveStore {
+    fn iter_relations(
+        &self,
+        dimension: &str,
+        subject: Option<&[u8]>,
+    ) -> Result<crate::archive::RelationIter, ArchiveError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+        let lower = RelationSource {
+            dimension: dimension.into(),
+            subject: subject.unwrap_or_default().to_vec(),
+            object: Vec::new(),
+            source_slot: 0,
+        };
+        Ok(Box::new(MemoryRelationIter {
+            snapshot: tables.relations.clone(),
+            lower: Bound::Included(lower),
+            dimension: dimension.into(),
+            subject: subject.map(<[u8]>::to_vec),
+            done: false,
+        }))
+    }
+
+    fn iter_relations_from(
+        &self,
+        dimension: &str,
+        after: Option<&RelationSource>,
+    ) -> Result<crate::archive::RelationIter, ArchiveError> {
+        if after.is_some_and(|source| source.dimension != dimension) {
+            return Err(ArchiveError::InternalError(
+                "The dimension of the relation cursor is not the requested dimension.".into(),
+            ));
+        }
+        let lower = match after {
+            Some(source) => Bound::Excluded(source.clone()),
+            None => Bound::Included(RelationSource {
+                dimension: dimension.into(),
+                subject: Vec::new(),
+                object: Vec::new(),
+                source_slot: 0,
+            }),
+        };
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+        Ok(Box::new(MemoryRelationIter {
+            snapshot: tables.relations.clone(),
+            lower,
+            dimension: dimension.into(),
+            subject: None,
+            done: false,
+        }))
+    }
+
+    fn relation_context(&self, dimension: &str) -> Result<Option<RelationContext>, ArchiveError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+        Ok(tables.relation_context.get(dimension).cloned())
+    }
+
     type BlockIter<'a> = MemoryBlockIter;
     type Writer = MemoryArchiveWriter;
     type LogIter = MemoryLogIter;
@@ -670,6 +807,7 @@ impl ArchiveStore for MemoryArchiveStore {
         let mut tables = self.tables.write().map_err(|_| poisoned())?;
 
         tables.blocks.retain(|s, _| *s <= slot);
+        Arc::make_mut(&mut tables.relations).retain(|source, _| source.source_slot <= slot);
         tables.logs.retain(|(_, key), _| log_slot(key) < slot);
 
         Ok(())
@@ -781,5 +919,61 @@ impl ArchiveStore for MemoryArchiveStore {
             .collect::<Result<_, _>>()?;
 
         Ok(MemoryExactIter(records.into_iter()))
+    }
+}
+
+#[cfg(test)]
+mod relation_tests {
+    use super::*;
+
+    #[test]
+    fn relation_iterators_share_the_map_and_commits_copy_on_write() {
+        let store = MemoryArchiveStore::new(StateSchema::default());
+        let writer = store.start_writer().unwrap();
+        for slot in 0..1024 {
+            writer
+                .put_relation(&RelationRecord::new(RelationSource {
+                    dimension: "relation".into(),
+                    subject: vec![0],
+                    object: vec![1],
+                    source_slot: slot,
+                }))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        let snapshot = store.tables.read().unwrap().relations.clone();
+        let first = snapshot.first_key_value().unwrap().1.clone();
+        let mut subject = store.iter_relations("relation", Some(&[0])).unwrap();
+        let mut seek = store.iter_relations_from("relation", None).unwrap();
+        assert_eq!(Arc::strong_count(&snapshot), 4);
+        assert_eq!(subject.next().unwrap().unwrap(), first);
+        assert_eq!(seek.next().unwrap().unwrap(), first);
+        assert_eq!(Arc::strong_count(&snapshot), 4);
+
+        let writer = store.start_writer().unwrap();
+        writer.delete_relation(&first.source).unwrap();
+        let mut updated = snapshot.last_key_value().unwrap().1.clone();
+        updated.observe(2000, true);
+        writer.put_relation(&updated).unwrap();
+        writer.commit().unwrap();
+        let current = store.tables.read().unwrap().relations.clone();
+        assert!(!Arc::ptr_eq(&snapshot, &current));
+        assert_eq!(snapshot.len(), 1024);
+        assert_eq!(current.len(), 1023);
+        let expected: Vec<_> = snapshot.values().skip(1).cloned().collect();
+        assert_eq!(subject.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        assert_eq!(seek.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+
+        drop(current);
+        let retained = store.iter_relations_from("relation", None).unwrap();
+        store.truncate_front(&ChainPoint::Origin).unwrap();
+        assert!(store
+            .iter_relations("relation", None)
+            .unwrap()
+            .next()
+            .is_none());
+        let rows = retained.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows.len(), 1023);
+        assert_eq!(rows.last(), Some(&updated));
     }
 }

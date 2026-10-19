@@ -60,7 +60,7 @@ use dolos_core::{
     config::FjallArchiveConfig, key_hash, ArchiveError, ArchiveIndexDelta,
     ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot,
     ChainPoint, EntityValue, ExactKind, IndexRecord, KeyRange, LogKey, Namespace, RawBlock,
-    StateSchema, TagDimension, KEY_HASH_SIZE,
+    RelationContext, RelationRecord, RelationSource, StateSchema, TagDimension, KEY_HASH_SIZE,
 };
 use fjall::{
     compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
@@ -75,6 +75,7 @@ use crate::Error;
 
 pub mod exact;
 pub mod log_keys;
+mod relations;
 pub mod scan;
 pub mod tags;
 
@@ -133,6 +134,8 @@ mod keyspace_names {
     pub const TAGS: &str = "archive-tags";
     /// Exact-match keyspace (block hash, tx hash, block number -> slot)
     pub const EXACT: &str = "index-exact";
+    pub const RELATIONS: &str = "archive-relations";
+    pub const RELATION_CONTEXT: &str = "archive-relation-context";
 }
 
 fn io_err(e: std::io::Error) -> ArchiveError {
@@ -154,6 +157,9 @@ pub struct ArchiveStore {
     logs: Keyspace,
     tags: Keyspace,
     exact: Keyspace,
+    relations: Keyspace,
+    relation_context: Keyspace,
+    commit_lock: Arc<Mutex<()>>,
     flatfiles: Arc<FlatFileStore>,
     schema: Arc<StateSchema>,
     flush_on_commit: bool,
@@ -265,6 +271,8 @@ impl ArchiveStore {
         };
         let tags = db.keyspace(keyspace_names::TAGS, index_opts)?;
         let exact = db.keyspace(keyspace_names::EXACT, index_opts)?;
+        let relations = db.keyspace(keyspace_names::RELATIONS, index_opts)?;
+        let relation_context = db.keyspace(keyspace_names::RELATION_CONTEXT, build_opts)?;
 
         Ok(Self {
             db,
@@ -272,6 +280,9 @@ impl ArchiveStore {
             logs,
             tags,
             exact,
+            relations,
+            relation_context,
+            commit_lock: Arc::new(Mutex::new(())),
             flatfiles: Arc::new(flatfiles),
             schema: Arc::new(schema),
             flush_on_commit,
@@ -297,6 +308,8 @@ impl ArchiveStore {
             (keyspace_names::LOGS, &self.logs),
             (keyspace_names::TAGS, &self.tags),
             (keyspace_names::EXACT, &self.exact),
+            (keyspace_names::RELATIONS, &self.relations),
+            (keyspace_names::RELATION_CONTEXT, &self.relation_context),
         ]
         .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
         .to_vec()
@@ -312,6 +325,8 @@ impl ArchiveStore {
         self.logs.major_compact()?;
         self.tags.major_compact()?;
         self.exact.major_compact()?;
+        self.relations.major_compact()?;
+        self.relation_context.major_compact()?;
         self.db.persist(PersistMode::SyncAll)?;
 
         Ok(())
@@ -527,6 +542,12 @@ impl ArchiveStore {
     }
 }
 
+enum RelationOp {
+    Insert(Vec<u8>, RelationRecord),
+    Put(Vec<u8>, RelationRecord),
+    Delete(Vec<u8>),
+}
+
 /// Writer for batched archive operations.
 ///
 /// Log writes and index entries go straight into the shared write batch:
@@ -549,6 +570,7 @@ pub struct ArchiveWriter {
     batch: Mutex<OwnedWriteBatch>,
     pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
     overlay: Mutex<HashMap<BlockSlot, Vec<BlockLocation>>>,
+    relation_ops: Mutex<Vec<RelationOp>>,
     #[cfg(test)]
     fail_index_commit: bool,
 }
@@ -560,6 +582,7 @@ impl ArchiveWriter {
             store: store.clone(),
             pending_blocks: Mutex::new(Vec::new()),
             overlay: Mutex::new(HashMap::new()),
+            relation_ops: Mutex::new(Vec::new()),
             #[cfg(test)]
             fail_index_commit: false,
         }
@@ -580,6 +603,44 @@ impl ArchiveWriter {
 }
 
 impl CoreArchiveWriter for ArchiveWriter {
+    fn put_relation(&self, record: &RelationRecord) -> Result<(), ArchiveError> {
+        let key = relations::key(&record.source)?;
+        self.relation_ops
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .push(RelationOp::Put(key, record.clone()));
+        Ok(())
+    }
+
+    fn delete_relation(&self, source: &RelationSource) -> Result<(), ArchiveError> {
+        let key = relations::key(source)?;
+        self.relation_ops
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .push(RelationOp::Delete(key));
+        Ok(())
+    }
+
+    fn set_relation_context(
+        &self,
+        dimension: &str,
+        context: &RelationContext,
+    ) -> Result<(), ArchiveError> {
+        let value = relations::context_value(context)?;
+        let key = relations::prefix(dimension, None);
+        if key.len() > u16::MAX as usize {
+            return Err(ArchiveError::InternalError(
+                "The relation dimension produces a key with more than 65535 bytes.".into(),
+            ));
+        }
+        self.batch.lock().map_err(|_| Error::LockPoisoned)?.insert(
+            &self.store.relation_context,
+            key,
+            value,
+        );
+        Ok(())
+    }
+
     fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError> {
         self.pending_blocks
             .lock()
@@ -653,6 +714,13 @@ impl CoreArchiveWriter for ArchiveWriter {
 
         exact::apply(&mut batch, &self.store.exact, deltas)?;
         tags::apply(&mut batch, &self.store.tags, deltas)?;
+        let mut ops = self.relation_ops.lock().map_err(|_| Error::LockPoisoned)?;
+        for source in deltas.iter().flat_map(|delta| &delta.relations) {
+            ops.push(RelationOp::Insert(
+                relations::key(source)?,
+                RelationRecord::new(source.clone()),
+            ));
+        }
 
         Ok(())
     }
@@ -662,6 +730,10 @@ impl CoreArchiveWriter for ArchiveWriter {
 
         exact::undo(&mut batch, &self.store.exact, deltas)?;
         tags::undo(&mut batch, &self.store.tags, deltas)?;
+        let mut ops = self.relation_ops.lock().map_err(|_| Error::LockPoisoned)?;
+        for source in deltas.iter().rev().flat_map(|delta| &delta.relations) {
+            ops.push(RelationOp::Delete(relations::key(source)?));
+        }
 
         Ok(())
     }
@@ -715,9 +787,55 @@ impl CoreArchiveWriter for ArchiveWriter {
         // 1. Batch-append all pending blocks to flat files (fsync inside).
         // 2. Insert all location entries into the write batch.
         // 3. Commit the batch (log rows and index entries are already in it).
+        let _commit = self
+            .store
+            .commit_lock
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
         let pending = self.pending_blocks.into_inner().unwrap();
         let mut overlay = self.overlay.into_inner().unwrap();
         let mut batch = self.batch.into_inner().unwrap();
+        let snapshot = self.store.db.snapshot();
+        let mut present = HashMap::new();
+        for op in self
+            .relation_ops
+            .into_inner()
+            .map_err(|_| Error::LockPoisoned)?
+        {
+            match op {
+                RelationOp::Insert(key, record) => {
+                    let exists = match present.get(&key) {
+                        Some(exists) => *exists,
+                        None => snapshot
+                            .get(&self.store.relations, key.as_slice())
+                            .map_err(fjall_err)?
+                            .map(|value| relations::record(&key, &value))
+                            .transpose()?
+                            .is_some(),
+                    };
+                    if !exists {
+                        batch.insert(
+                            &self.store.relations,
+                            key.clone(),
+                            relations::value(&record),
+                        );
+                    }
+                    present.insert(key, true);
+                }
+                RelationOp::Put(key, record) => {
+                    batch.insert(
+                        &self.store.relations,
+                        key.clone(),
+                        relations::value(&record),
+                    );
+                    present.insert(key, true);
+                }
+                RelationOp::Delete(key) => {
+                    batch.remove(&self.store.relations, key.clone());
+                    present.insert(key, false);
+                }
+            }
+        }
 
         if !pending.is_empty() {
             let items: Vec<(u32, &[u8])> = pending
@@ -963,6 +1081,41 @@ impl dolos_core::archive::Skippable for BlockIter {
 }
 
 impl CoreArchiveStore for ArchiveStore {
+    fn iter_relations(
+        &self,
+        dimension: &str,
+        subject: Option<&[u8]>,
+    ) -> Result<dolos_core::archive::RelationIter, ArchiveError> {
+        let snapshot = self.db.snapshot();
+        Ok(Box::new(relations::RelationIter::new(
+            &snapshot,
+            &self.relations,
+            &relations::prefix(dimension, subject),
+        )))
+    }
+
+    fn iter_relations_from(
+        &self,
+        dimension: &str,
+        after: Option<&RelationSource>,
+    ) -> Result<dolos_core::archive::RelationIter, ArchiveError> {
+        Ok(Box::new(relations::RelationIter::from(
+            &self.db.snapshot(),
+            &self.relations,
+            dimension,
+            after,
+        )?))
+    }
+
+    fn relation_context(&self, dimension: &str) -> Result<Option<RelationContext>, ArchiveError> {
+        self.db
+            .snapshot()
+            .get(&self.relation_context, relations::prefix(dimension, None))
+            .map_err(fjall_err)?
+            .map(|value| relations::context(&value))
+            .transpose()
+    }
+
     type BlockIter<'a> = BlockIter;
     type Writer = ArchiveWriter;
     type LogIter = LogIter;
@@ -1100,6 +1253,7 @@ impl CoreArchiveStore for ArchiveStore {
         max_prune_slots: Option<u64>,
         max_prune_index_rows: Option<u64>,
     ) -> Result<bool, ArchiveError> {
+        let _commit = self.commit_lock.lock().map_err(|_| Error::LockPoisoned)?;
         let snapshot = self.db.snapshot();
         let max_entries =
             max_prune_index_rows.map(|rows| usize::try_from(rows).unwrap_or(usize::MAX));
@@ -1172,7 +1326,7 @@ impl CoreArchiveStore for ArchiveStore {
 
         // Log rows with a temporal prefix strictly before the cutoff, per
         // namespace — the price of the shared keyspace's hash prefix.
-        for (&ns, _) in self.schema.iter() {
+        for &ns in self.schema.keys() {
             let range = snapshot.range(
                 &self.logs,
                 namespace_start(ns)..build_temporal_bound(ns, prune_before),
@@ -1199,6 +1353,7 @@ impl CoreArchiveStore for ArchiveStore {
     /// the cut — the exact boundary redb's `remove_after` draws by comparing
     /// full log keys against the bare 8-byte temporal prefix.
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
+        let _commit = self.commit_lock.lock().map_err(|_| Error::LockPoisoned)?;
         let slot = after.slot();
         let snapshot = self.db.snapshot();
 
@@ -1234,7 +1389,7 @@ impl CoreArchiveStore for ArchiveStore {
         }
 
         // Log rows with a temporal prefix at or after the cut slot.
-        for (&ns, _) in self.schema.iter() {
+        for &ns in self.schema.keys() {
             let range = snapshot.range(
                 &self.logs,
                 (
@@ -1245,6 +1400,14 @@ impl CoreArchiveStore for ArchiveStore {
             for guard in range {
                 let key = guard.key().map_err(fjall_err)?;
                 batch.remove(&self.logs, key);
+            }
+        }
+
+        for guard in snapshot.iter(&self.relations) {
+            let (key, value) = guard.into_inner().map_err(fjall_err)?;
+            let record = relations::record(&key, &value)?;
+            if record.source.source_slot > slot {
+                batch.remove(&self.relations, key);
             }
         }
 
@@ -1373,6 +1536,185 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
+    }
+
+    #[test]
+    fn relations_and_context_persist_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = FjallArchiveConfig::default();
+        let record = RelationRecord {
+            source: RelationSource {
+                dimension: "relation".into(),
+                subject: vec![0, 255],
+                object: vec![1, 0],
+                source_slot: 10,
+            },
+            observed_at: Some(100),
+            active: false,
+        };
+        let context = RelationContext {
+            version: 1,
+            complete: false,
+            initialized_at: 100,
+        };
+        {
+            let store = ArchiveStore::open(StateSchema::default(), dir.path(), &config).unwrap();
+            let writer = store.start_writer().unwrap();
+            writer.put_relation(&record).unwrap();
+            writer.set_relation_context("relation", &context).unwrap();
+            writer.commit().unwrap();
+            store.shutdown().unwrap();
+        }
+        let store = ArchiveStore::open(StateSchema::default(), dir.path(), &config).unwrap();
+        assert_eq!(
+            store
+                .iter_relations("relation", None)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            [record]
+        );
+        assert_eq!(store.relation_context("relation").unwrap(), Some(context));
+        assert_eq!(store.relation_context("absent").unwrap(), None);
+    }
+
+    #[test]
+    fn relation_commit_failure_publishes_nothing() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        let source = RelationSource {
+            dimension: "relation".into(),
+            subject: vec![0],
+            object: vec![1],
+            source_slot: 10,
+        };
+        let delta = ArchiveIndexDelta {
+            slot: 10,
+            block_number: Some(10),
+            relations: vec![source],
+            ..Default::default()
+        };
+        let mut writer = ArchiveWriter::new(&store);
+        writer.apply(&point(10), &body(10, 1)).unwrap();
+        writer.apply_index(&[delta]).unwrap();
+        writer
+            .set_relation_context(
+                "relation",
+                &RelationContext {
+                    version: 1,
+                    complete: true,
+                    initialized_at: 10,
+                },
+            )
+            .unwrap();
+        writer.fail_index_commit = true;
+        assert!(writer.commit().is_err());
+        assert!(store
+            .iter_relations("relation", None)
+            .unwrap()
+            .next()
+            .is_none());
+        assert_eq!(store.relation_context("relation").unwrap(), None);
+        assert_eq!(store.slot_by_block_number(10).unwrap(), None);
+        assert_eq!(store.get_block_by_slot(&10).unwrap(), None);
+    }
+
+    #[test]
+    fn malformed_relation_iteration_fuses_and_blocks_truncation() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        let source = RelationSource {
+            dimension: "relation".into(),
+            subject: vec![0],
+            object: vec![1],
+            source_slot: 10,
+        };
+        let key = relations::key(&source).unwrap();
+        store.relations.insert(&key, [1, 2, 0]).unwrap();
+        let later = RelationSource {
+            source_slot: 20,
+            ..source.clone()
+        };
+        let writer = store.start_writer().unwrap();
+        writer.put_relation(&RelationRecord::new(later)).unwrap();
+        writer.commit().unwrap();
+        let mut iter = store.iter_relations("relation", None).unwrap();
+        assert!(iter.next().unwrap().is_err());
+        assert!(iter.next().is_none());
+        assert!(store.truncate_front(&point(0)).is_err());
+        let writer = store.start_writer().unwrap();
+        writer
+            .apply_index(&[ArchiveIndexDelta {
+                relations: vec![source],
+                ..Default::default()
+            }])
+            .unwrap();
+        assert!(writer.commit().is_err());
+        store.relations.remove(key).unwrap();
+        let mut malformed = relations::prefix("relation", None);
+        malformed.extend_from_slice(&[0, 1]);
+        store.relations.insert(malformed, [1, 0, 0]).unwrap();
+        assert!(store
+            .iter_relations("relation", None)
+            .unwrap()
+            .next()
+            .unwrap()
+            .is_err());
+        store
+            .relation_context
+            .insert(relations::prefix("relation", None), [0])
+            .unwrap();
+        assert!(store.relation_context("relation").is_err());
+    }
+
+    #[test]
+    fn relation_seek_skips_earlier_faults_and_fuses_on_later_faults() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        let source = RelationSource {
+            dimension: "relation".into(),
+            subject: vec![0, 255],
+            object: vec![0],
+            source_slot: 10,
+        };
+        let later = RelationSource {
+            source_slot: 11,
+            ..source.clone()
+        };
+        let last = RelationSource {
+            object: vec![0, 0],
+            ..source.clone()
+        };
+        let writer = store.start_writer().unwrap();
+        writer
+            .put_relation(&RelationRecord::new(last.clone()))
+            .unwrap();
+        writer.commit().unwrap();
+        store
+            .relations
+            .insert(relations::key(&source).unwrap(), [2, 0, 0])
+            .unwrap();
+        store
+            .relations
+            .insert(relations::key(&later).unwrap(), [1, 2, 0])
+            .unwrap();
+        let mut iter = store
+            .iter_relations_from("relation", Some(&source))
+            .unwrap();
+        assert!(iter.next().unwrap().is_err());
+        assert!(iter.next().is_none());
+        assert_eq!(
+            store
+                .iter_relations_from("relation", Some(&later))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            [RelationRecord::new(last)]
+        );
+        let mut malformed = relations::prefix("relation", Some(&[1]));
+        malformed.extend_from_slice(&[0, 1]);
+        store.relations.insert(malformed, [1, 0, 0]).unwrap();
+        let mut iter = store.iter_relations_from("relation", Some(&later)).unwrap();
+        assert!(iter.next().unwrap().is_ok());
+        assert!(iter.next().unwrap().is_err());
+        assert!(iter.next().is_none());
     }
 
     #[test]

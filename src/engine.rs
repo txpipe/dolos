@@ -221,6 +221,7 @@ impl<'a> ReplayWorkspace<'a> {
                 domain,
                 boundary: None,
                 failed: false,
+                imported: false,
             }),
             Err(error) => complete(Err(error), self.finish()),
         }
@@ -280,6 +281,7 @@ pub struct BulkReplaySession {
     domain: DomainAdapter,
     boundary: Option<ChainPoint>,
     failed: bool,
+    imported: bool,
 }
 
 impl BulkReplaySession {
@@ -352,6 +354,7 @@ impl BulkReplaySession {
             self.boundary = Some(position.clone());
             Ok(ReplayProgress::Boundary { position })
         } else {
+            self.imported = true;
             Ok(ReplayProgress::Committed { position })
         }
     }
@@ -365,6 +368,29 @@ impl BulkReplaySession {
             return Err(BulkReplayError::new(
                 "pruning history",
                 "finish the session before starting the next replay round",
+            ));
+        }
+        if self.imported {
+            if !dolos_cardano::committee::archive_aligned(
+                self.domain.state(),
+                self.domain.archive(),
+            )
+            .map_err(|error| BulkReplayError::new("The replay archive check failed", error))?
+            {
+                return Err(BulkReplayError::new(
+                    "History pruning failed",
+                    "The replay archive and state do not agree",
+                ));
+            }
+            checkpoint::reconcile(self.domain.state(), self.domain.wal())
+                .map_err(|error| BulkReplayError::new("The replay checkpoint failed", error))?;
+        }
+        if !dolos_cardano::committee::maintenance_ready(&self.domain)
+            .map_err(|error| BulkReplayError::new("The maintenance check failed", error))?
+        {
+            return Err(BulkReplayError::new(
+                "History pruning failed",
+                "The replay stores are not ready for maintenance",
             ));
         }
         self.domain

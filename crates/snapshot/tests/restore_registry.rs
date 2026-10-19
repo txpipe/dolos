@@ -47,8 +47,8 @@ mod watcher;
 
 use dolos_cardano::indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta};
 use dolos_core::{
-    ArchiveStore, BlockHash, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey,
-    StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, StateStore,
+    StateWriter as _, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
 };
 use dolos_snapshot::{
     export::Plan,
@@ -82,7 +82,7 @@ const EPOCH_0: usize = 4;
 const EPOCH_1: usize = 2;
 
 /// Layers a publish of sequence 0 writes: epoch 0 plus the state tip.
-const PER_PUBLISH: usize = EPOCH_0 + state_layer_count();
+const PER_PUBLISH: usize = EPOCH_0 + state_layer_count() + 1;
 
 // ---------------------------------------------------------------------------
 // The node, and the two chain points it publishes from
@@ -112,7 +112,7 @@ impl Node {
         let network = Network::for_magic(magic);
         let boundary = summary.epoch_start(1);
 
-        let point = |slot| ChainPoint::Specific(slot, BlockHash::new([0xab; 32]));
+        let point = |slot| node::align_archive(domain.archive(), slot);
 
         let first = Plan::new(
             &summary,
@@ -135,6 +135,13 @@ impl Node {
     }
 
     fn publish(&self, repository: &Registry, plan: &Plan) {
+        assert_eq!(
+            node::align_archive(self.domain.archive(), plan.cursor.slot()),
+            plan.cursor
+        );
+        let writer = self.domain.state().start_writer().unwrap();
+        writer.set_cursor(plan.cursor.clone()).unwrap();
+        writer.commit().unwrap();
         registry::publish(
             registry::Publishing::new(repository),
             plan,
@@ -508,7 +515,7 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
 
     assert_eq!(
         resumed.layers_fetched,
-        EPOCH_1 + state_layer_count(),
+        EPOCH_1 + state_layer_count() + 1,
         "epoch 1's two layers and every state layer, and nothing else"
     );
 

@@ -3,7 +3,10 @@ use std::{marker::PhantomData, ops::Range};
 use thiserror::Error;
 
 use crate::{
-    indexes::{ArchiveIndexDelta, ExactRecord, IndexRecord, TagDimension, TagRecord},
+    indexes::{
+        ArchiveIndexDelta, ExactRecord, IndexRecord, RelationContext, RelationRecord,
+        RelationSource, TagDimension, TagRecord,
+    },
     keys::{KeyCodec, KeyError, KeyRange, LogKey, LogRangeOf},
     BlockBody, BlockSlot, BrokenInvariant, ChainPoint, Entity, EntityValue, FixedNamespace,
     Namespace, RawBlock,
@@ -104,7 +107,25 @@ pub type EmptyTagIter = std::iter::Empty<Result<TagRecord, ArchiveError>>;
 /// so the alias only exists to satisfy the associated type.
 pub type EmptyExactIter = std::iter::Empty<Result<ExactRecord, ArchiveError>>;
 
+pub type RelationIter = Box<dyn Iterator<Item = Result<RelationRecord, ArchiveError>> + Send>;
+
 pub trait ArchiveWriter: Send + Sync + 'static {
+    fn put_relation(&self, _record: &RelationRecord) -> Result<(), ArchiveError> {
+        Err(ArchiveError::Unsupported("put_relation"))
+    }
+
+    fn delete_relation(&self, _source: &RelationSource) -> Result<(), ArchiveError> {
+        Err(ArchiveError::Unsupported("delete_relation"))
+    }
+
+    fn set_relation_context(
+        &self,
+        _dimension: &str,
+        _context: &RelationContext,
+    ) -> Result<(), ArchiveError> {
+        Err(ArchiveError::Unsupported("set_relation_context"))
+    }
+
     fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError>;
 
     /// Write the index entries the blocks of this batch project: their tags
@@ -187,6 +208,26 @@ pub trait Skippable {
 }
 
 pub trait ArchiveStore: Clone + Send + Sync + 'static {
+    fn iter_relations(
+        &self,
+        _dimension: &str,
+        _subject: Option<&[u8]>,
+    ) -> Result<RelationIter, ArchiveError> {
+        Err(ArchiveError::Unsupported("iter_relations"))
+    }
+
+    fn iter_relations_from(
+        &self,
+        _dimension: &str,
+        _after: Option<&RelationSource>,
+    ) -> Result<RelationIter, ArchiveError> {
+        Err(ArchiveError::Unsupported("iter_relations_from"))
+    }
+
+    fn relation_context(&self, _dimension: &str) -> Result<Option<RelationContext>, ArchiveError> {
+        Err(ArchiveError::Unsupported("relation_context"))
+    }
+
     type BlockIter<'a>: Iterator<Item = (BlockSlot, BlockBody)>
         + DoubleEndedIterator
         + Skippable

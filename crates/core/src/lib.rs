@@ -531,6 +531,38 @@ pub trait ChainLogic: Sized + Send + Sync {
     /// The concrete work unit type produced by this chain logic.
     type WorkUnit<D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta>>: WorkUnit<D>;
 
+    fn archive_maintenance_ready<D: Domain<Chain = Self>>(
+        _domain: &D,
+    ) -> Result<bool, DomainError> {
+        Ok(true)
+    }
+
+    fn reconcile_archive_rollback<D: Domain<Chain = Self>>(_domain: &D) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    fn before_archive_rollback<D: Domain<Chain = Self>>(_domain: &D) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    fn after_archive_rollback<D: Domain<Chain = Self>>(
+        &mut self,
+        _domain: &D,
+    ) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    fn prepare_archive<D: Domain<Chain = Self>>(_domain: &D) -> Result<bool, DomainError> {
+        Ok(true)
+    }
+
+    fn maintain_archive<D: Domain<Chain = Self>>(
+        &mut self,
+        _domain: &D,
+    ) -> Result<bool, DomainError> {
+        Ok(true)
+    }
+
     /// Initialize the chain logic with configuration and state.
     fn initialize<D: Domain>(
         config: Self::Config,
@@ -698,6 +730,13 @@ pub trait Domain: Send + Sync + Clone + 'static {
     const MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING: u64 = 100_000;
 
     fn housekeeping(&self) -> Result<bool, DomainError> {
+        let mut chain = self.write_chain();
+        if !Self::Chain::archive_maintenance_ready(self)? {
+            return Ok(true);
+        }
+        if !Self::Chain::prepare_archive(self)? {
+            return Ok(false);
+        }
         let max_ledger_slots = self
             .storage_config()
             .state
@@ -728,7 +767,8 @@ pub trait Domain: Send + Sync + Clone + 'static {
                 .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
         }
 
-        Ok(archive_pruned && wal_pruned)
+        let context_pruned = chain.maintain_archive(self)?;
+        Ok(archive_pruned && wal_pruned && context_pruned)
     }
 
     /// Run bounded housekeeping rounds until no active or currently due work

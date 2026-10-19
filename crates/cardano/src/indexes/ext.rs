@@ -310,6 +310,7 @@ mod tests {
                 block_number: Some(slot),
                 tx_hashes: vec![],
                 tags,
+                relations: vec![],
             })
             .collect();
         let writer = store.start_writer().unwrap();

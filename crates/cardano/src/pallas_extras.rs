@@ -617,10 +617,8 @@ fn aux_data_cbor<'a>(tx: &'a MultiEraTx<'_>) -> Option<&'a [u8]> {
         &x.auxiliary_data
     } else if let Some(x) = tx.as_babbage() {
         &x.auxiliary_data
-    } else if let Some(x) = tx.as_alonzo() {
-        &x.auxiliary_data
     } else {
-        return None;
+        &tx.as_alonzo()?.auxiliary_data
     };
 
     match aux {
@@ -758,6 +756,37 @@ pub fn committee_cold_id_bytes(cred: &StakeCredential) -> Vec<u8> {
 pub const CC_HOT_KEY_PREFIX: u8 = 0b00000010;
 pub const CC_HOT_SCRIPT_PREFIX: u8 = 0b00000011;
 
+pub fn committee_hot_id_bytes(cred: &StakeCredential) -> Vec<u8> {
+    match cred {
+        StakeCredential::AddrKeyhash(hash) => [&[CC_HOT_KEY_PREFIX][..], hash.as_slice()].concat(),
+        StakeCredential::ScriptHash(hash) => {
+            [&[CC_HOT_SCRIPT_PREFIX][..], hash.as_slice()].concat()
+        }
+    }
+}
+
+fn committee_credential_from_id_bytes(
+    bytes: &[u8],
+    key_prefix: u8,
+    script_prefix: u8,
+) -> Option<StakeCredential> {
+    let (prefix, hash) = bytes.split_first()?;
+    let hash = Hash::new(<[u8; 28]>::try_from(hash).ok()?);
+    match *prefix {
+        prefix if prefix == key_prefix => Some(StakeCredential::AddrKeyhash(hash)),
+        prefix if prefix == script_prefix => Some(StakeCredential::ScriptHash(hash)),
+        _ => None,
+    }
+}
+
+pub fn committee_cold_credential_from_id_bytes(bytes: &[u8]) -> Option<StakeCredential> {
+    committee_credential_from_id_bytes(bytes, CC_COLD_KEY_PREFIX, CC_COLD_SCRIPT_PREFIX)
+}
+
+pub fn committee_hot_credential_from_id_bytes(bytes: &[u8]) -> Option<StakeCredential> {
+    committee_credential_from_id_bytes(bytes, CC_HOT_KEY_PREFIX, CC_HOT_SCRIPT_PREFIX)
+}
+
 /// Returns the bytes that identify a governance voter.
 ///
 /// DReps get their CIP-129 DRep id bytes, as [`drep_id_bytes`] builds them.
@@ -880,6 +909,48 @@ mod tests {
         assert_eq!(key.len(), 29);
         assert_eq!(script.len(), 29);
         assert_ne!(key, script);
+    }
+
+    #[test]
+    fn committee_typed_ids_roundtrip_and_reject_wrong_roles_and_lengths() {
+        for cred in [
+            StakeCredential::AddrKeyhash(Hash::new([0x99; 28])),
+            StakeCredential::ScriptHash(Hash::new([0x99; 28])),
+        ] {
+            let cold = committee_cold_id_bytes(&cred);
+            let hot = committee_hot_id_bytes(&cred);
+            assert_eq!(
+                committee_cold_credential_from_id_bytes(&cold),
+                Some(cred.clone())
+            );
+            assert_eq!(
+                committee_hot_credential_from_id_bytes(&hot),
+                Some(cred.clone())
+            );
+            assert_eq!(committee_cold_credential_from_id_bytes(&hot), None);
+            assert_eq!(committee_hot_credential_from_id_bytes(&cold), None);
+            assert_eq!(committee_hot_credential_from_id_bytes(&hot[..28]), None);
+            assert_eq!(committee_cold_credential_from_id_bytes(&cold[..28]), None);
+            assert_eq!(
+                committee_hot_credential_from_id_bytes(&[hot.clone(), vec![0]].concat()),
+                None
+            );
+            assert_eq!(
+                committee_cold_credential_from_id_bytes(&[cold, vec![0]].concat()),
+                None
+            );
+            assert_eq!(
+                hot,
+                voter_id_bytes(&match cred {
+                    StakeCredential::AddrKeyhash(hash) => Voter::ConstitutionalCommitteeKey(hash),
+                    StakeCredential::ScriptHash(hash) => Voter::ConstitutionalCommitteeScript(hash),
+                })
+            );
+        }
+        for bytes in [vec![], vec![0x22; 29], vec![0x23; 29], vec![0x04; 29]] {
+            assert_eq!(committee_hot_credential_from_id_bytes(&bytes), None);
+            assert_eq!(committee_cold_credential_from_id_bytes(&bytes), None);
+        }
     }
 
     #[test]

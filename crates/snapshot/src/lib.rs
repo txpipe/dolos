@@ -421,11 +421,12 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
 /// Every layer kind, in the order the inscription lists them.
-pub const KINDS: [&str; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 1] = {
-    let mut kinds = [""; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 1];
+pub const KINDS: [&str; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 2] = {
+    let mut kinds = [""; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 2];
     let at = fill(&mut kinds, 0, &EPOCH_KINDS);
     let at = fill(&mut kinds, at, &STATE_KIND_NAMES);
-    kinds[at] = DIGESTS;
+    kinds[at] = layers::committee::KIND;
+    kinds[at + 1] = DIGESTS;
 
     kinds
 };
@@ -486,10 +487,10 @@ pub fn log_ns_for(kind: &str) -> Option<Namespace> {
 /// Scope field by which a layer declares that a reader who cannot restore it
 /// must refuse the stele rather than skip it.
 ///
-/// Absent means skippable, which is what every kind this profile publishes
-/// today leaves it at — so no scope shape writes this field and no golden
-/// carries it. It lives in the profile-owned `scope` rather than an OCI
-/// annotation because it is planning input: the scope is canonicalized into the
+/// If the field is absent, the reader can skip the layer.
+/// The committee context sets this field to true.
+/// The field is part of the `scope` that the profile defines, not an OCI annotation.
+/// The plan uses the field. The scope is canonical in the
 /// inscription and covered by the digest a publisher signs, while annotations
 /// ride on the manifest, unsigned and transport-side.
 ///

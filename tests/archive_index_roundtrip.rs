@@ -210,6 +210,7 @@ fn seed_deltas(spec: &SeedSpec, sink: &mut impl FnMut(Vec<ArchiveIndexDelta>)) -
                     block_number: Some(epoch * 1_000_000 + b),
                     tx_hashes,
                     tags,
+                    relations: Vec::new(),
                 });
             }
 
@@ -426,6 +427,7 @@ fn slots_by_tag_are_ordered_in_both_directions<B: Backend>() {
             block_number: Some(slot),
             tx_hashes: Vec::new(),
             tags: vec![Tag::new(archive_dimensions::POLICY, policy.clone())],
+            relations: Vec::new(),
         })
         .collect();
 
@@ -1341,6 +1343,7 @@ fn malformed_exact_keys_are_refused<B: Backend>() {
             block_number: Some(1),
             tx_hashes: vec![vec![0xCD; 32]],
             tags: Vec::new(),
+            relations: Vec::new(),
         }];
 
         let writer = store.start_writer().expect("start_writer failed");
@@ -1378,6 +1381,7 @@ fn malformed_exact_keys_are_refused<B: Backend>() {
             block_number: Some(1),
             tx_hashes: vec![vec![0xEF; width]],
             tags: Vec::new(),
+            relations: Vec::new(),
         }];
 
         let writer = store.start_writer().expect("start_writer failed");

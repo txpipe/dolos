@@ -35,7 +35,7 @@ use blockfrost_openapi::models::{
     DrepsInner, DrepsInnerMetadata, DrepsInnerMetadataError,
 };
 use dolos_cardano::{
-    indexes::CardanoArchiveIndexExt as _,
+    indexes::{CardanoArchiveIndexExt as _, COMMITTEE_AUTHORIZATIONS},
     model::{
         gov::{CommitteeAuthorization, GovState},
         AccountState, CertPosition, DRepKey, DRepSightingState, DRepState, ProposalAction,
@@ -1062,20 +1062,76 @@ enum CommitteeVoteQuery {
     Cold(StakeCredential),
 }
 
+fn require_committee_authorization_coverage(
+    context: Option<dolos_core::RelationContext>,
+) -> Result<(), Error> {
+    if context.is_none_or(|context| !context.complete) {
+        tracing::warn!(
+            "The committee authorization history is absent or has missing records. Vote queries for cold credentials require full coverage."
+        );
+        return Err(StatusCode::SERVICE_UNAVAILABLE.into());
+    }
+    Ok(())
+}
+
 fn committee_hot_credentials<D: Domain>(
     domain: &D,
     cold: &StakeCredential,
     tip: BlockSlot,
+    max_scan_items: usize,
     budget: &mut usize,
 ) -> Result<BTreeSet<StakeCredential>, Error> {
     let archive = domain.archive();
+    require_committee_authorization_coverage(
+        archive
+            .relation_context(COMMITTEE_AUTHORIZATIONS)
+            .map_err(log_and_500(
+                "The API cannot read the coverage of committee authorizations.",
+            ))?,
+    )?;
+
+    let cold_id = pallas_extras::committee_cold_id_bytes(cold);
+    let witnesses = archive
+        .iter_relations(COMMITTEE_AUTHORIZATIONS, Some(&cold_id))
+        .map_err(log_and_500(
+            "The API cannot read the witnesses for committee authorizations.",
+        ))?;
+    let mut voters = BTreeSet::new();
+    for (index, witness) in witnesses.enumerate() {
+        if index >= max_scan_items {
+            return Err(Error::ScanBudgetExceeded);
+        }
+        let source = witness
+            .map_err(log_and_500(
+                "The API cannot decode the witness for the committee authorization.",
+            ))?
+            .source;
+        if source.dimension != COMMITTEE_AUTHORIZATIONS
+            || pallas_extras::committee_cold_credential_from_id_bytes(&source.subject).as_ref()
+                != Some(cold)
+        {
+            return Err(log_and_500(
+                "The witness for the committee authorization has a cold credential that is not valid.",
+            )(hex::encode(&source.subject))
+            .into());
+        }
+        let hot = pallas_extras::committee_hot_credential_from_id_bytes(&source.object)
+            .ok_or_else(|| {
+                log_and_500("The witness for the committee authorization has a hot credential that is not valid.")(
+                    hex::encode(&source.object),
+                )
+            })?;
+        if source.source_slot <= tip {
+            voters.insert(hot);
+        }
+    }
+
     let slots = archive
         .slots_by_committee_certs(cold, 0, tip)
         .map_err(log_and_500(
             "The read of the index for committee certificates failed.",
         ))?;
 
-    let mut voters = BTreeSet::new();
     collect_block_rows::<()>(
         slots,
         |slot| archive.get_block_by_slot(&slot),
@@ -1119,13 +1175,15 @@ fn committee_vote_rows<D: Domain>(
         return Ok(Vec::new());
     }
 
+    let _chain = domain.read_chain();
     let archive = domain.archive();
+    let max_scan_items = budget;
     let descending = matches!(pagination.order, Order::Desc);
     let voters = match query {
         CommitteeVoteQuery::All => None,
         CommitteeVoteQuery::Hot(hot) => Some(BTreeSet::from([committee_voter(hot)])),
         CommitteeVoteQuery::Cold(cold) => Some(
-            committee_hot_credentials(domain, cold, tip, &mut budget)?
+            committee_hot_credentials(domain, cold, tip, max_scan_items, &mut budget)?
                 .iter()
                 .map(committee_voter)
                 .collect(),
@@ -5187,7 +5245,7 @@ mod tests {
         let domain =
             dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::ArchiveStoreError);
         let tip = vectors.blocks[2].slot;
-        let result = committee_hot_credentials(&domain, &cc_cold_key(31), tip, &mut 1);
+        let result = committee_hot_credentials(&domain, &cc_cold_key(31), tip, 1, &mut 1);
         assert!(matches!(
             result,
             Err(Error::Code(StatusCode::INTERNAL_SERVER_ERROR))
@@ -5234,6 +5292,203 @@ mod tests {
         assert_eq!(rows.len(), 3);
     }
 
+    #[test]
+    fn governance_committee_authorization_witness_budget_is_separate_from_body_budget() {
+        use dolos_core::{ArchiveWriter as _, RelationRecord, RelationSource};
+
+        let (domain, vectors) =
+            TestDomainBuilder::new_with_synthetic(committee_votes_config()).finish();
+        let tip = vectors.blocks[2].slot;
+        let writer = domain.archive().start_writer().unwrap();
+        for slot in [vectors.blocks[0].slot, vectors.blocks[1].slot] {
+            writer
+                .put_relation(&RelationRecord::new(RelationSource {
+                    dimension: COMMITTEE_AUTHORIZATIONS.into(),
+                    subject: pallas_extras::committee_cold_id_bytes(&cc_cold_key(31)),
+                    object: pallas_extras::committee_hot_id_bytes(&cc_hot_key()),
+                    source_slot: slot,
+                }))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        let query = CommitteeVoteQuery::Cold(cc_cold_key(31));
+        let rows = committee_vote_rows(&domain, &query, tip, &Pagination::default(), 2).unwrap();
+        assert_eq!(rows.len(), 4);
+        let result = committee_vote_rows(
+            &domain,
+            &query,
+            tip,
+            &Pagination {
+                count: 1,
+                ..Default::default()
+            },
+            1,
+        );
+        assert!(matches!(result, Err(Error::ScanBudgetExceeded)));
+    }
+
+    #[tokio::test]
+    async fn governance_committee_corrupt_witness_fails_only_cold_queries() {
+        use dolos_core::{ArchiveWriter as _, RelationRecord, RelationSource};
+
+        for object in [vec![], vec![0x22; 29], vec![0x02; 28], vec![0x03; 30]] {
+            let app =
+                TestApp::new_with_cfg_and_setup(committee_votes_config(), |domain, vectors| {
+                    let writer = domain.archive().start_writer().unwrap();
+                    writer
+                        .put_relation(&RelationRecord::new(RelationSource {
+                            dimension: COMMITTEE_AUTHORIZATIONS.into(),
+                            subject: pallas_extras::committee_cold_id_bytes(&cc_cold_key(31)),
+                            object,
+                            source_slot: vectors.blocks[0].slot,
+                        }))
+                        .unwrap();
+                    writer.commit().unwrap();
+                });
+            let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+            assert_status(
+                &app,
+                &format!("/governance/committee/{cold}/votes"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+            .await;
+            assert_eq!(
+                get_committee_votes(&app, "/governance/committee/votes")
+                    .await
+                    .len(),
+                5
+            );
+            let hot = bech32_committee_hot(&cc_hot_key()).unwrap();
+            assert_eq!(
+                get_committee_votes(&app, &format!("/governance/committee/{hot}/votes"))
+                    .await
+                    .len(),
+                4
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_committee_incomplete_coverage_fails_only_cold_queries() {
+        use dolos_core::{ArchiveWriter as _, RelationContext};
+
+        let mut cfg = committee_votes_config();
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_key(),
+        )]];
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let writer = domain.archive().start_writer().unwrap();
+            writer
+                .set_relation_context(
+                    COMMITTEE_AUTHORIZATIONS,
+                    &RelationContext {
+                        version: RelationContext::VERSION,
+                        complete: false,
+                        initialized_at: vectors.blocks[2].slot,
+                    },
+                )
+                .unwrap();
+            writer.commit().unwrap();
+            let rows = committee_vote_rows(
+                domain,
+                &CommitteeVoteQuery::Cold(cc_cold_key(31)),
+                vectors.blocks[2].slot,
+                &Pagination {
+                    count: 0,
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+            assert!(rows.is_empty());
+        });
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        assert_status(
+            &app,
+            &format!("/governance/committee/{cold}/votes"),
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+        .await;
+        assert_eq!(
+            get_committee_votes(&app, "/governance/committee/votes")
+                .await
+                .len(),
+            5
+        );
+        let hot = bech32_committee_hot(&cc_hot_key()).unwrap();
+        assert_eq!(
+            get_committee_votes(&app, &format!("/governance/committee/{hot}/votes"))
+                .await
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn governance_committee_authorization_coverage_requires_initialized_complete_context() {
+        use dolos_core::RelationContext;
+
+        for context in [
+            None,
+            Some(RelationContext {
+                version: RelationContext::VERSION,
+                complete: false,
+                initialized_at: 0,
+            }),
+        ] {
+            assert!(matches!(
+                require_committee_authorization_coverage(context),
+                Err(Error::Code(StatusCode::SERVICE_UNAVAILABLE))
+            ));
+        }
+        assert!(
+            require_committee_authorization_coverage(Some(RelationContext {
+                version: RelationContext::VERSION,
+                complete: true,
+                initialized_at: 0,
+            }))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn governance_committee_no_witnesses_uses_retained_certificates() {
+        use dolos_core::ArchiveWriter as _;
+
+        let mut cfg = committee_votes_config();
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_key(),
+        )]];
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        let writer = domain.archive().start_writer().unwrap();
+        for record in domain
+            .archive()
+            .iter_relations(COMMITTEE_AUTHORIZATIONS, None)
+            .unwrap()
+        {
+            writer.delete_relation(&record.unwrap().source).unwrap();
+        }
+        writer.commit().unwrap();
+        assert!(domain
+            .archive()
+            .relation_context(COMMITTEE_AUTHORIZATIONS)
+            .unwrap()
+            .is_some_and(|context| context.complete));
+        let rows = committee_vote_rows(
+            &domain,
+            &CommitteeVoteQuery::Cold(cc_cold_key(31)),
+            vectors.blocks[2].slot,
+            &Pagination::default(),
+            3,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 4);
+    }
+
     #[tokio::test]
     async fn governance_committee_votes_missing_and_invalid_bodies() {
         use dolos_cardano::indexes::archive_dimensions::{
@@ -5272,6 +5527,7 @@ mod tests {
                                 block_number: None,
                                 tx_hashes: vec![],
                                 tags: vec![Tag::new(dimension, key)],
+                                relations: vec![],
                             }])
                             .unwrap();
                         writer.commit().unwrap();
@@ -5673,10 +5929,9 @@ mod tests {
             rows
         );
         let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
-        assert!(
-            get_committee_votes(&app, &format!("/governance/committee/{cold}/votes?count=1"))
-                .await
-                .is_empty()
+        assert_eq!(
+            get_committee_votes(&app, &format!("/governance/committee/{cold}/votes?count=1")).await,
+            rows
         );
 
         assert!(
@@ -8355,6 +8610,7 @@ mod tests {
                     block_number: None,
                     tx_hashes: vec![],
                     tags: vec![Tag::new(DREP_CERTS, pallas_extras::drep_id_bytes(&cred))],
+                    relations: vec![],
                 }])
                 .expect("failed to tag the block");
             writer.commit().expect("failed to commit the block");

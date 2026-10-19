@@ -47,6 +47,31 @@ fn archive_import_cli_preserves_same_slot_byron_order_and_resume() {
 }
 
 #[test]
+fn bulk_replay_prunes_after_successful_wal_free_import() {
+    let mut node = node::Node::new();
+    node.config.sync.max_history = Some(2);
+    node.config.sync.max_rollback = Some(2);
+    let blocks = (100..108)
+        .map(|slot| dolos_testing::blocks::make_conway_block(slot).1)
+        .collect();
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    dolos::storage::ensure_storage_path(&node.config).unwrap();
+    let mut session = dolos::engine::BulkReplaySession::open(&node.config, genesis, None).unwrap();
+    session.import_blocks(blocks).unwrap();
+    assert!(session.prune_history().unwrap() >= 1);
+    let tip = session.committed_position().unwrap().unwrap().slot();
+    session.finish().unwrap();
+    let archive = dolos::storage::open_archive_store(&node.config).unwrap();
+    let slots = archive
+        .get_range(None, None)
+        .unwrap()
+        .map(|(slot, _)| slot)
+        .collect::<Vec<_>>();
+    assert!(slots.len() < 8);
+    assert!(slots.iter().all(|slot| *slot >= tip - 2));
+}
+
+#[test]
 fn import_and_sync_share_encoding_without_changing_their_lifecycles() {
     let (blocks, _, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
         block_count: 8,
@@ -68,19 +93,20 @@ fn import_and_sync_share_encoding_without_changing_their_lifecycles() {
     let recovery_wal = recovery.wal().find_tip().unwrap().map(|(point, _)| point);
     offline.import_blocks(blocks.clone()).unwrap();
     recovery.import_blocks(blocks.clone()).unwrap();
-    {
-        let mut chain = live_batch.write_chain();
-        for block in blocks.iter().cloned() {
-            if !chain.can_receive_block() {
-                while let Some(mut work) = chain.pop_work(&live_batch) {
-                    dolos_core::sync::execute_work_unit(&live_batch, &mut work).unwrap();
-                }
+    for block in blocks.iter().cloned() {
+        if !live_batch.read_chain().can_receive_block() {
+            loop {
+                let work = live_batch.write_chain().pop_work(&live_batch);
+                let Some(mut work) = work else { break };
+                dolos_core::sync::execute_work_unit(&live_batch, &mut work).unwrap();
             }
-            assert!(chain.receive_block(block).is_ok());
         }
-        while let Some(mut work) = chain.pop_work(&live_batch) {
-            dolos_core::sync::execute_work_unit(&live_batch, &mut work).unwrap();
-        }
+        assert!(live_batch.write_chain().receive_block(block).is_ok());
+    }
+    loop {
+        let work = live_batch.write_chain().pop_work(&live_batch);
+        let Some(mut work) = work else { break };
+        dolos_core::sync::execute_work_unit(&live_batch, &mut work).unwrap();
     }
     for block in blocks {
         live.roll_forward(block).unwrap();

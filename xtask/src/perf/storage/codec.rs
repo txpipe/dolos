@@ -676,7 +676,7 @@ pub fn evict_file(path: &Path) -> io::Result<bool> {
         use std::os::unix::io::AsRawFd;
         file.sync_all()?;
         let rc = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
-        return Ok(rc == 0);
+        Ok(rc == 0)
     }
     #[cfg(not(target_os = "linux"))]
     {

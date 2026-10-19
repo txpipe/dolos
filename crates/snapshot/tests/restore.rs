@@ -513,7 +513,7 @@ fn a_restore_interrupted_in_utxo_tags_commits_neither_utxos_nor_cursor_and_resum
     assert_eq!(
         resumed.layers_skipped,
         plan.layers()
-            .filter(|layer| !is_state_kind(&layer.kind))
+            .filter(|layer| dolos_snapshot::EPOCH_KINDS.contains(&layer.kind.as_str()))
             .count()
     );
     assert_stores_match(&blank, &domain);
@@ -1527,7 +1527,7 @@ fn a_stele_with_retained_dumps_restores_the_tip_and_reports_the_dumps() {
         plain_plan.layers().count() + state_layer_count(),
     );
     assert_eq!(dumped_plan.layers().count(), plain_plan.layers().count());
-    assert_eq!(dumped_plan.tip_layers().count(), state_layer_count());
+    assert_eq!(dumped_plan.tip_layers().count(), state_layer_count() + 1);
     assert_eq!(
         dumped_plan.uncompressed_size(),
         plain_plan.uncompressed_size(),
@@ -1742,7 +1742,7 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
 
     assert_eq!(
         seeded,
-        first.layers.len() - state_layer_count(),
+        first.layers.len() - state_layer_count() - 1,
         "every epoch layer committed before the tip was reached"
     );
 
@@ -1813,17 +1813,19 @@ fn export_standing_at<B: ToyStores>(
 ) -> Inscription {
     let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
 
-    // Any hash will do: `position` needs one to exist, and nothing in an export
-    // reads it back out of the store.
+    let point = node::align_archive(domain.archive(), slot);
     let plan = dolos_snapshot::export::Plan::new(
         &summary,
         dolos_snapshot::Network::for_magic(magic_of(domain)),
-        ChainPoint::Specific(slot, dolos_core::BlockHash::new([0xab; 32])),
+        point,
         Default::default(),
     )
     .unwrap();
 
     let stele = SteleDir::create(root).unwrap();
+    let writer = domain.state().start_writer().unwrap();
+    writer.set_cursor(plan.cursor.clone()).unwrap();
+    writer.commit().unwrap();
 
     dolos_snapshot::export::export(
         &stele,
@@ -1940,7 +1942,7 @@ fn the_remaining_download_excludes_what_is_already_done() {
     assert!(resumed.compressed_bytes < fresh.compressed_bytes);
 
     // The tip is still in it, always.
-    assert_eq!(resumed.layers, state_layer_count());
+    assert_eq!(resumed.layers, state_layer_count() + 1);
 
     // So the peak a resumed run stages is the widest state layer, not the widest
     // layer of the stele — the epoch layers it skips are not staged either.
@@ -1979,7 +1981,7 @@ fn epoch_diff_ids(inscription: &Inscription) -> Vec<Digest> {
     inscription
         .layers
         .iter()
-        .filter(|layer| !is_state_kind(&layer.kind))
+        .filter(|layer| dolos_snapshot::EPOCH_KINDS.contains(&layer.kind.as_str()))
         .map(|layer| layer.diff_id)
         .collect()
 }
@@ -2007,7 +2009,7 @@ fn max_history_selects_epochs_and_never_the_tip() {
         assert_eq!(plan.state.len(), STATE_KINDS.len(), "{max_history:?}");
         assert_eq!(
             plan.tip_layers().count(),
-            state_layer_count(),
+            state_layer_count() + 1,
             "{max_history:?}"
         );
 

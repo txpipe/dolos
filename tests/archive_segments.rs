@@ -595,12 +595,11 @@ fn real_block_shapes_across_a_byron_boundary_are_frames_the_oracle_agrees_with()
     let main = make_conway_block_with_prev(byron_ebb_slot(epoch), ebb.0.hash(), 1);
     chain.push((byron_ebb_slot(epoch), main.1.as_ref().clone()));
     let mut prev = main.0.hash();
-    let mut number = 2;
-    for k in 1..6u64 {
+    for (i, k) in (1..6u64).enumerate() {
+        let number = 2 + i as u64;
         let at = SLOTS_PER_SEGMENT - 3 + k;
         let block = make_conway_block_with_prev(at, prev, number);
         prev = block.0.hash();
-        number += 1;
         chain.push((at, block.1.as_ref().clone()));
     }
 

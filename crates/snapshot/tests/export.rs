@@ -50,7 +50,7 @@ use dolos_core::{
 use dolos_snapshot::{
     export::{self, EpochWindow, Plan},
     facade::{Selection, SnapshotSource as _, StoreSnapshot},
-    layers::{blocks, indexes, logs, state},
+    layers::{blocks, committee, indexes, logs, state},
     state_layer_count, state_ns_for, DolosProfile, Network, RetainedEpochs, BLOCKS, INDEXES,
     LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
@@ -66,7 +66,7 @@ use watcher::Watcher;
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
-    "sha256:d75284fb214e1dce5a5ff9802ff9b2f0de7616e1ad6e458df5be908f7bfa1965";
+    "sha256:c9379d146573b8ce34143c6556e2a68c115cd2a94479b95f1d6736bf92383edf";
 
 /// The chain point the skeleton fixture stands at: mid-epoch-2 under
 /// [`skeleton_summary`], so the export covers three epochs and the last window
@@ -153,7 +153,7 @@ fn an_empty_store_set_exports_the_pinned_skeleton() {
     // `digests` layer: nothing supplies one — and **no log layers at all**,
     // which is the omit-if-empty rule seen from the other side: a store with no
     // logs in it publishes no layer claiming there are none.
-    assert_eq!(inscription.layers.len(), 3 * 2 + state_layer_count());
+    assert_eq!(inscription.layers.len(), 3 * 2 + state_layer_count() + 1);
 
     for (kind, _) in LOG_KINDS {
         assert_eq!(
@@ -280,7 +280,7 @@ fn a_harness_domain_exports_a_complete_stele() {
     // Every kind but the log kinds and `digests`, which have no source in this
     // slice. The state kinds are all here, seeded or not: a namespace the
     // harness never wrote still publishes its shards, empty.
-    for kind in [BLOCKS, INDEXES]
+    for kind in [BLOCKS, INDEXES, committee::KIND]
         .into_iter()
         .chain(STATE_KINDS.into_iter().map(|(kind, _, _)| kind))
     {
@@ -483,6 +483,55 @@ fn every_layer_reads_back_as_the_store_yields_it() {
         records > 0,
         "the fixture produced no state, so the layers prove nothing"
     );
+
+    let written: Vec<_> = inscription.layers_of_kind(committee::KIND).collect();
+    assert_eq!(written.len(), 1);
+    let tip = plan.cursor.slot();
+    let mut context = domain
+        .archive()
+        .relation_context(committee::DIMENSION)
+        .unwrap()
+        .unwrap_or(dolos_core::RelationContext {
+            version: dolos_core::RelationContext::VERSION,
+            complete: false,
+            initialized_at: tip,
+        });
+    context.initialized_at = context.initialized_at.min(tip);
+    let mut backfill = domain
+        .archive()
+        .relation_context(committee::BACKFILL)
+        .unwrap()
+        .unwrap_or_else(committee::reset_backfill);
+    backfill.initialized_at = if backfill.complete {
+        backfill.initialized_at.min(tip)
+    } else {
+        0
+    };
+    let mut rollback = domain
+        .archive()
+        .relation_context(committee::ROLLBACK)
+        .unwrap()
+        .unwrap_or_else(committee::reset_rollback);
+    rollback.initialized_at = rollback.initialized_at.min(tip);
+    let mut expected = vec![
+        committee::Record::Context(context),
+        committee::Record::Backfill(backfill),
+        committee::Record::Rollback(rollback),
+    ];
+    for record in domain
+        .archive()
+        .iter_relations(committee::DIMENSION, None)
+        .unwrap()
+    {
+        let mut record = record.unwrap();
+        record.observed_at = record.observed_at.map(|slot| slot.min(tip));
+        expected.push(committee::Record::Witness(record));
+    }
+    let found: Vec<_> = read_both_ways(&stele, &index, written[0])
+        .iter()
+        .map(|raw| committee::decode(raw).unwrap())
+        .collect();
+    assert_eq!(found, expected);
 }
 
 fn expected_blocks<B: ToyStores>(
@@ -1239,6 +1288,7 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:4145245584090ba5ec600cc41743036cd02580999490cd38e94ccb47e713f529","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":13},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:fa3101937f3491ae614180384787cfeb1d2ffb7e522c4c731b60208472573917","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:e59d8b7ec7144216a9caab188b2de8d09d98c7c419e228a41131722796b81711","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":46}"#,
+    r#",{"diffId":"sha256:4437e8096c1885af2a29000a2dae8a694fe1b3a58d04558b7012fd4932c0bc89","kind":"archive-context-committee","mediaType":"application/vnd.dolos.stele.archive-context-committee.v1+zstd","records":4,"scope":{"point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":250},"required":true},"uncompressedSize":111}"#,
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
     r#""schemas":{"account-address-chunks":1,"account-addresses":1,"account-epochs":1,"account-stakes":0,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"assets":1,"datums":1,"drep-sightings":1,"dreps":2,"epochs":3,"eras":2,"first-mint-chunks":2,"first-mints":2,"first-script-chunks":1,"first-scripts":1,"gov":4,"leader-rewards":0,"member-rewards":0,"metadata-labels":2,"payment-address-chunks":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-mint-chunks":1,"pool-deposit-refunds":0,"pool-epochs":2,"pools":2,"proposals":4,"scripts":1,"utxos":1},"#,
@@ -1350,7 +1400,7 @@ fn a_restricted_reproduction_matches_the_same_restricted_publish() {
 
     // The state tip alone, which is a legitimate publish and the narrowest one
     // there is.
-    assert_eq!(stored.layers.len(), state_layer_count());
+    assert_eq!(stored.layers.len(), state_layer_count() + 1);
 
     assert_eq!(
         stored.canonicalize().unwrap(),
@@ -1496,6 +1546,98 @@ fn a_silent_publish_writes_exactly_what_a_watched_one_does() {
     );
 }
 
+#[test]
+fn committee_cleanup_without_cursor_movement_prevents_sealing() {
+    for iteration in [0, 1] {
+        let domain: ToyDomain = harness();
+        let source = dolos_core::RelationSource {
+            dimension: committee::DIMENSION.to_owned(),
+            subject: [vec![0x12], vec![0xab; 28]].concat(),
+            object: [vec![0x02], vec![0xcd; 28]].concat(),
+            source_slot: 1,
+        };
+        let writer = domain.archive().start_writer().unwrap();
+        writer
+            .put_relation(&dolos_core::RelationRecord::new(source.clone()))
+            .unwrap();
+        writer
+            .set_relation_context(
+                committee::DIMENSION,
+                &dolos_core::RelationContext {
+                    version: 1,
+                    complete: true,
+                    initialized_at: 1,
+                },
+            )
+            .unwrap();
+        writer.commit().unwrap();
+        let mut archive = Counted::new(domain.archive().clone());
+        archive.delete_on_iteration = Some((iteration, source));
+        let plan = plan_for(&domain);
+        let root = tempfile::tempdir().unwrap();
+        let stele = SteleDir::create(root.path()).unwrap();
+        let error = export::export(
+            &stele,
+            &plan,
+            &archive,
+            domain.state(),
+            None,
+            &export::First,
+            &Observer::silent(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, dolos_snapshot::Error::IncompleteStele(_)));
+        assert_eq!(domain.state().read_cursor().unwrap(), Some(plan.cursor));
+        assert!(!root.path().join("inscription.json").exists());
+    }
+}
+
+#[test]
+fn committee_reset_constructs_one_iterator_for_many_delete_batches() {
+    let domain: ToyDomain = harness();
+    let root = tempfile::tempdir().unwrap();
+    export_to(root.path(), &domain);
+    let stele = SteleDir::open(root.path()).unwrap();
+    let plan = dolos_snapshot::restore::plan(&stele, 2, Some(0)).unwrap();
+    let blank = node::Blank::<MemoryStores>::open();
+    let archive = Counted::new(blank.archive.clone());
+    let writer = archive.start_writer().unwrap();
+    for source_slot in 0..100 {
+        writer
+            .put_relation(&dolos_core::RelationRecord::new(
+                dolos_core::RelationSource {
+                    dimension: committee::DIMENSION.to_owned(),
+                    subject: [vec![0x12], vec![0xab; 28]].concat(),
+                    object: [vec![0x02], vec![0xcd; 28]].concat(),
+                    source_slot,
+                },
+            ))
+            .unwrap();
+    }
+    writer.commit().unwrap();
+    dolos_snapshot::restore::restore(
+        &stele,
+        &stele.blob_index().unwrap(),
+        &plan,
+        dolos_snapshot::restore::Target::new(&archive, blank.state()),
+        dolos_snapshot::restore::Budget {
+            commit_records: 1,
+            commit_bytes: 1,
+            ..dolos_snapshot::restore::default_budget()
+        },
+        &mut dolos_snapshot::restore::Checkpoint::none(),
+        &Observer::silent(),
+    )
+    .unwrap();
+    assert_eq!(archive.relations.load(Ordering::Relaxed), 1);
+    assert!(blank
+        .archive
+        .iter_relations(committee::DIMENSION, None)
+        .unwrap()
+        .next()
+        .is_none());
+}
+
 /// An index store that counts how many traversals were *constructed* over it.
 ///
 /// The count is the property under test and inspection is not: banding is a
@@ -1508,6 +1650,8 @@ struct Counted<S> {
     inner: S,
     tags: Arc<AtomicUsize>,
     exacts: Arc<AtomicUsize>,
+    relations: Arc<AtomicUsize>,
+    delete_on_iteration: Option<(usize, dolos_core::RelationSource)>,
 }
 
 impl<S: ArchiveStore> Counted<S> {
@@ -1516,6 +1660,8 @@ impl<S: ArchiveStore> Counted<S> {
             inner,
             tags: Arc::default(),
             exacts: Arc::default(),
+            relations: Arc::default(),
+            delete_on_iteration: None,
         }
     }
 
@@ -1530,6 +1676,33 @@ impl<S: ArchiveStore> Counted<S> {
 }
 
 impl<S: ArchiveStore> ArchiveStore for Counted<S> {
+    fn iter_relations(
+        &self,
+        dimension: &str,
+        subject: Option<&[u8]>,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<dolos_core::RelationRecord, ArchiveError>> + Send>,
+        ArchiveError,
+    > {
+        let iteration = self.relations.fetch_add(1, Ordering::Relaxed);
+        let records = self.inner.iter_relations(dimension, subject)?;
+        if let Some((at, source)) = &self.delete_on_iteration {
+            if iteration == *at {
+                let writer = self.inner.start_writer()?;
+                writer.delete_relation(source)?;
+                writer.commit()?;
+            }
+        }
+        Ok(records)
+    }
+
+    fn relation_context(
+        &self,
+        dimension: &str,
+    ) -> Result<Option<dolos_core::RelationContext>, ArchiveError> {
+        self.inner.relation_context(dimension)
+    }
+
     type BlockIter<'a> = S::BlockIter<'a>;
     type Writer = S::Writer;
     type LogIter = S::LogIter;
@@ -1659,6 +1832,7 @@ fn index_across_the_skeleton() -> MemoryArchiveStore {
                 block_hash: vec![slot as u8; 32],
                 block_number: Some(slot),
                 tx_hashes: vec![vec![0x80 | slot as u8; 32]],
+                relations: Vec::new(),
                 tags: archive_dimensions::ALL
                     .into_iter()
                     .map(|dimension| dolos_core::Tag::new(dimension, vec![slot as u8; 28]))

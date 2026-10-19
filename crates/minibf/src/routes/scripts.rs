@@ -620,6 +620,7 @@ mod tests {
                     block_number: None,
                     tx_hashes: vec![],
                     tags: vec![Tag::new(SCRIPT, hash.clone())],
+                    relations: vec![],
                 })
                 .collect();
 

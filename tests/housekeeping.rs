@@ -7,12 +7,10 @@
 //! that let the WAL slot-range endianness bug (PR #1045) grow a WAL to ~15×
 //! its budget undetected.
 
-use std::sync::Arc;
-
 use dolos_cardano::CardanoDelta;
 use dolos_core::{
-    config::SyncConfig, ArchiveStore as _, ArchiveWriter, ChainPoint, Domain, LogEntry, LogValue,
-    WalStore,
+    config::SyncConfig, ArchiveStore as _, ArchiveWriter, Domain, LogEntry, LogValue, StateStore,
+    StateWriter, WalStore,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
@@ -30,14 +28,27 @@ fn sync_config(max_rollback: Option<u64>, max_history: Option<u64>) -> SyncConfi
 /// WAL entry at `slot` with a nonzero hash, so it survives `remove_before` at
 /// its own slot (the zero-hash cutoff bound compares strictly below it).
 fn wal_entry(slot: u64) -> LogEntry<CardanoDelta> {
-    let mut hash = [1u8; 32];
-    hash[0..8].copy_from_slice(&slot.to_be_bytes());
-    (ChainPoint::Specific(slot, hash.into()), LogValue::origin())
+    (
+        dolos_testing::blocks::make_conway_block(slot).0,
+        LogValue::origin(),
+    )
 }
 
 fn seed_wal(domain: &ToyDomain, slots: std::ops::Range<u64>) {
     let entries: Vec<_> = slots.map(wal_entry).collect();
     domain.wal().append_entries(&entries).unwrap();
+    let point = entries.last().unwrap().0.clone();
+    let writer = domain.archive().start_writer().unwrap();
+    writer
+        .apply(
+            &point,
+            &dolos_testing::blocks::make_conway_block(point.slot()).1,
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    let writer = domain.state().start_writer().unwrap();
+    writer.set_cursor(point).unwrap();
+    writer.commit().unwrap();
 }
 
 fn wal_start(domain: &impl Domain) -> Option<u64> {
@@ -51,10 +62,13 @@ fn wal_tip(domain: &impl Domain) -> Option<u64> {
 fn seed_archive(domain: &ToyDomain, slots: std::ops::Range<u64>) {
     let writer = domain.archive().start_writer().unwrap();
     for slot in slots {
-        let point = ChainPoint::Specific(slot, [0u8; 32].into());
-        let block = Arc::new(format!("block-{slot}").into_bytes());
+        let (point, block) = dolos_testing::blocks::make_conway_block(slot);
         writer.apply(&point, &block).unwrap();
     }
+    writer.commit().unwrap();
+    let cursor = domain.archive().get_tip().unwrap().unwrap().0;
+    let writer = domain.state().start_writer().unwrap();
+    writer.set_cursor(wal_entry(cursor).0).unwrap();
     writer.commit().unwrap();
 }
 
@@ -167,6 +181,7 @@ fn housekeeping_only_prunes_configured_store() {
 #[test]
 fn housekeeping_propagates_wal_error() {
     let inner = ToyDomain::new(None, None).with_sync_config(sync_config(Some(100), None));
+    seed_wal(&inner, 1..200);
     let domain = FaultyToyDomain::new(inner, TestFault::WalStoreError);
 
     assert!(

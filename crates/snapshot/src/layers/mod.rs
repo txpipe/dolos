@@ -25,6 +25,7 @@
 //! the reason they are not re-validating canonical form is documented there.
 
 pub mod blocks;
+pub mod committee;
 pub mod digests;
 pub mod indexes;
 pub mod logs;

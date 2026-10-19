@@ -8,7 +8,8 @@ use std::{
 
 use dolos_core::{
     archive::Skippable, ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, EntityKey,
-    EntityValue, LogKey, Namespace, StateError, StateStore, TagDimension, TxoRef, UtxoMap, UtxoSet,
+    EntityValue, LogKey, Namespace, RelationContext, RelationIter, RelationSource, StateError,
+    StateStore, TagDimension, TxoRef, UtxoMap, UtxoSet,
 };
 use serde::Serialize;
 
@@ -23,6 +24,8 @@ pub struct WorkCounters {
     pub decoded_bytes: Arc<AtomicU64>,
     pub exact_lookups: Arc<AtomicU64>,
     pub tag_candidates: Arc<AtomicU64>,
+    pub relation_rows: Arc<AtomicU64>,
+    pub relation_context_reads: Arc<AtomicU64>,
     pub state_entities: Arc<AtomicU64>,
     pub utxo_refs: Arc<AtomicU64>,
     pub utxo_reads: Arc<AtomicU64>,
@@ -37,6 +40,8 @@ pub struct WorkSnapshot {
     pub decoded_bytes: u64,
     pub exact_lookups: u64,
     pub tag_candidates: u64,
+    pub relation_rows: u64,
+    pub relation_context_reads: u64,
     pub state_entities: u64,
     pub utxo_refs: u64,
     pub utxo_reads: u64,
@@ -52,6 +57,8 @@ impl WorkCounters {
             decoded_bytes: self.decoded_bytes.load(Ordering::Relaxed),
             exact_lookups: self.exact_lookups.load(Ordering::Relaxed),
             tag_candidates: self.tag_candidates.load(Ordering::Relaxed),
+            relation_rows: self.relation_rows.load(Ordering::Relaxed),
+            relation_context_reads: self.relation_context_reads.load(Ordering::Relaxed),
             state_entities: self.state_entities.load(Ordering::Relaxed),
             utxo_refs: self.utxo_refs.load(Ordering::Relaxed),
             utxo_reads: self.utxo_reads.load(Ordering::Relaxed),
@@ -66,6 +73,8 @@ impl WorkCounters {
         self.decoded_bytes.store(0, Ordering::Relaxed);
         self.exact_lookups.store(0, Ordering::Relaxed);
         self.tag_candidates.store(0, Ordering::Relaxed);
+        self.relation_rows.store(0, Ordering::Relaxed);
+        self.relation_context_reads.store(0, Ordering::Relaxed);
         self.state_entities.store(0, Ordering::Relaxed);
         self.utxo_refs.store(0, Ordering::Relaxed);
         self.utxo_reads.store(0, Ordering::Relaxed);
@@ -161,6 +170,35 @@ impl<Inner: ArchiveStore> ArchiveStore for MeasuredArchive<Inner> {
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         self.inner.start_writer()
+    }
+
+    fn iter_relations(
+        &self,
+        dimension: &str,
+        subject: Option<&[u8]>,
+    ) -> Result<RelationIter, ArchiveError> {
+        Ok(Box::new(CountedIter {
+            inner: self.inner.iter_relations(dimension, subject)?,
+            count: self.counters.relation_rows.clone(),
+        }))
+    }
+
+    fn iter_relations_from(
+        &self,
+        dimension: &str,
+        after: Option<&RelationSource>,
+    ) -> Result<RelationIter, ArchiveError> {
+        Ok(Box::new(CountedIter {
+            inner: self.inner.iter_relations_from(dimension, after)?,
+            count: self.counters.relation_rows.clone(),
+        }))
+    }
+
+    fn relation_context(&self, dimension: &str) -> Result<Option<RelationContext>, ArchiveError> {
+        self.counters
+            .relation_context_reads
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.relation_context(dimension)
     }
 
     fn read_logs(
@@ -391,5 +429,57 @@ impl<Inner: ToyStores> ToyStores for MeasuredStores<Inner> {
 
     fn archive(&self) -> &Self::Archive {
         &self.archive
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dolos_core::{builtin::MemoryArchiveStore, ArchiveWriter, RelationRecord};
+
+    #[test]
+    fn relations_are_forwarded_and_counted_lazily() {
+        let store = MeasuredArchive {
+            inner: MemoryArchiveStore::new(Default::default()),
+            counters: WorkCounters::default(),
+        };
+        let first = RelationRecord::new(RelationSource {
+            dimension: "relation".into(),
+            subject: vec![0],
+            object: vec![1],
+            source_slot: 10,
+        });
+        let second = RelationRecord::new(RelationSource {
+            source_slot: 20,
+            ..first.source.clone()
+        });
+        let context = RelationContext {
+            version: RelationContext::VERSION,
+            complete: true,
+            initialized_at: 20,
+        };
+        let writer = store.start_writer().unwrap();
+        writer.put_relation(&first).unwrap();
+        writer.put_relation(&second).unwrap();
+        writer.set_relation_context("relation", &context).unwrap();
+        writer.commit().unwrap();
+
+        let mut iter = store.iter_relations("relation", Some(&[0])).unwrap();
+        assert_eq!(store.counters.snapshot().relation_rows, 0);
+        assert_eq!(iter.next().unwrap().unwrap(), first);
+        assert_eq!(store.counters.snapshot().relation_rows, 1);
+        assert_eq!(
+            store
+                .iter_relations_from("relation", Some(&first.source))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            [second]
+        );
+        assert_eq!(store.counters.snapshot().relation_rows, 2);
+        assert_eq!(store.relation_context("relation").unwrap(), Some(context));
+        assert_eq!(store.counters.snapshot().relation_context_reads, 1);
+        store.counters.reset();
+        assert_eq!(store.counters.snapshot(), WorkSnapshot::default());
     }
 }

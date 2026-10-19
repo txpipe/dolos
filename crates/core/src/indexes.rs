@@ -75,6 +75,55 @@ pub struct ArchiveIndexDelta {
     pub block_number: Option<u64>,
     pub tx_hashes: Vec<Vec<u8>>,
     pub tags: Vec<Tag>,
+    pub relations: Vec<RelationSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RelationSource {
+    pub dimension: String,
+    pub subject: Vec<u8>,
+    pub object: Vec<u8>,
+    pub source_slot: BlockSlot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationRecord {
+    pub source: RelationSource,
+    pub observed_at: Option<BlockSlot>,
+    pub active: bool,
+}
+
+impl RelationRecord {
+    pub fn new(source: RelationSource) -> Self {
+        Self {
+            source,
+            observed_at: None,
+            active: false,
+        }
+    }
+
+    pub fn observe(&mut self, tip: BlockSlot, active: bool) {
+        if self.observed_at.is_none() || self.active != active {
+            self.observed_at = Some(tip);
+        }
+        self.active = active;
+    }
+
+    pub fn merge_protection(&mut self, other: &Self) {
+        self.observed_at = self.observed_at.max(other.observed_at);
+        self.active |= other.active;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationContext {
+    pub version: u16,
+    pub complete: bool,
+    pub initialized_at: BlockSlot,
+}
+
+impl RelationContext {
+    pub const VERSION: u16 = 1;
 }
 
 /// What can go wrong building an index record.
@@ -313,6 +362,33 @@ impl From<ExactRecord> for IndexRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relation_observation_preserves_inactive_expiry() {
+        let source = RelationSource {
+            dimension: "relation".into(),
+            subject: vec![0],
+            object: vec![1],
+            source_slot: 10,
+        };
+        let mut record = RelationRecord::new(source);
+        record.observe(100, true);
+        assert_eq!(record.observed_at, Some(100));
+        record.observe(110, true);
+        assert_eq!(record.observed_at, Some(100));
+        record.observe(120, false);
+        assert_eq!(record.observed_at, Some(120));
+        record.observe(130, false);
+        assert_eq!(record.observed_at, Some(120));
+        let mut other = record.clone();
+        other.observe(140, true);
+        record.merge_protection(&other);
+        assert!(record.active);
+        assert_eq!(record.observed_at, Some(140));
+        record.merge_protection(&RelationRecord::new(record.source.clone()));
+        assert!(record.active);
+        assert_eq!(record.observed_at, Some(140));
+    }
 
     #[test]
     fn exact_kind_all_is_sorted_by_name() {

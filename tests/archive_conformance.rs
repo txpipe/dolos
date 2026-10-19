@@ -22,7 +22,7 @@ use dolos_cardano::indexes::archive_dimensions;
 use dolos_core::{
     builtin::MemoryArchiveStore, ArchiveIndexDelta, ArchiveStore as CoreArchiveStore,
     ArchiveWriter as _, BlockSlot, ChainPoint, KeyRange, LogKey, LogRangeOf, NamespaceType,
-    RawBlock, StateSchema, Tag,
+    RawBlock, RelationContext, RelationRecord, RelationSource, StateSchema, Tag,
 };
 
 use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
@@ -1159,6 +1159,7 @@ fn index_delta(slot: u64, seed: u8) -> ArchiveIndexDelta {
         block_number: Some(slot),
         tx_hashes: vec![vec![0x80 | seed; 32]],
         tags: vec![Tag::new(archive_dimensions::ADDRESS, vec![seed; 28])],
+        relations: Vec::new(),
     }
 }
 
@@ -1255,6 +1256,7 @@ fn slots_by_tag_bounds_are_inclusive<B: Backend>() {
             block_number: Some(slot),
             tx_hashes: Vec::new(),
             tags: vec![Tag::new(archive_dimensions::ADDRESS, key.clone())],
+            relations: Vec::new(),
         })
         .collect();
 
@@ -1296,6 +1298,7 @@ fn slot_delta(slot: u64) -> ArchiveIndexDelta {
             archive_dimensions::ADDRESS,
             SHARED_TAG_KEY.to_vec(),
         )],
+        relations: Vec::new(),
     }
 }
 
@@ -1543,6 +1546,382 @@ impl<S: CoreArchiveStore> WriteSurface for S {
     }
 }
 
+fn relation_source(subject: &[u8], object: &[u8], slot: u64) -> RelationSource {
+    RelationSource {
+        dimension: "relation".into(),
+        subject: subject.into(),
+        object: object.into(),
+        source_slot: slot,
+    }
+}
+
+fn relation_rows<S: CoreArchiveStore>(store: &S) -> Vec<RelationRecord> {
+    store
+        .iter_relations("relation", None)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn relations_commit_atomically_and_restore<B: Backend>() {
+    let (store, _guard) = B::open();
+    assert_eq!(store.relation_context("relation").unwrap(), None);
+    let source = relation_source(&[0, 255], &[1, 0], 10);
+    let mut delta = index_delta(10, 1);
+    delta.relations.push(source.clone());
+    let context = RelationContext {
+        version: 1,
+        complete: true,
+        initialized_at: 10,
+    };
+    let writer = store.start_writer().unwrap();
+    writer.apply(&point(10), &Arc::new(fake_block(10))).unwrap();
+    writer.apply_index(std::slice::from_ref(&delta)).unwrap();
+    writer.set_relation_context("relation", &context).unwrap();
+    assert!(relation_rows(&store).is_empty());
+    assert_eq!(store.relation_context("relation").unwrap(), None);
+    assert_eq!(store.get_block_by_slot(&10).unwrap(), None);
+    writer.commit().unwrap();
+    assert_eq!(relation_rows(&store), [RelationRecord::new(source.clone())]);
+    assert_eq!(
+        store.relation_context("relation").unwrap(),
+        Some(context.clone())
+    );
+    assert_eq!(
+        store.slot_by_tx_hash(&delta.tx_hashes[0]).unwrap(),
+        Some(10)
+    );
+    assert_eq!(store.get_block_by_slot(&10).unwrap(), Some(fake_block(10)));
+
+    let (restored, _guard2) = B::open();
+    let mut protected = relation_rows(&store).remove(0);
+    protected.observe(100, true);
+    let writer = restored.start_writer().unwrap();
+    writer.put_relation(&protected).unwrap();
+    writer.set_relation_context("relation", &context).unwrap();
+    writer.commit().unwrap();
+    assert_eq!(relation_rows(&restored), [protected]);
+    assert_eq!(
+        restored.relation_context("relation").unwrap(),
+        Some(context)
+    );
+
+    let writer = store.start_writer().unwrap();
+    writer.delete_relation(&source).unwrap();
+    drop(writer);
+    assert_eq!(relation_rows(&store).len(), 1);
+}
+
+fn relation_context_is_versioned_and_dimension_scoped<B: Backend>() {
+    let (store, _guard) = B::open();
+    let context = RelationContext {
+        version: RelationContext::VERSION,
+        complete: false,
+        initialized_at: 100,
+    };
+    let writer = store.start_writer().unwrap();
+    writer.set_relation_context("relation", &context).unwrap();
+    let invalid = RelationContext {
+        version: 2,
+        ..context.clone()
+    };
+    assert!(matches!(
+        writer.set_relation_context("other", &invalid),
+        Err(dolos_core::ArchiveError::InvalidStoreVersion)
+    ));
+    writer.commit().unwrap();
+    assert_eq!(
+        store.relation_context("relation").unwrap(),
+        Some(context.clone())
+    );
+    assert_eq!(store.relation_context("other").unwrap(), None);
+    let writer = store.start_writer().unwrap();
+    writer.set_relation_context("other", &context).unwrap();
+    let complete = RelationContext {
+        complete: true,
+        ..context
+    };
+    writer.set_relation_context("relation", &complete).unwrap();
+    writer.commit().unwrap();
+    assert_eq!(store.relation_context("relation").unwrap(), Some(complete));
+    assert!(!store.relation_context("other").unwrap().unwrap().complete);
+}
+
+fn relations_preserve_protection_and_writer_order<B: Backend>() {
+    let (store, _guard) = B::open();
+    let source = relation_source(&[0], &[1], 10);
+    let delta = ArchiveIndexDelta {
+        slot: 10,
+        relations: vec![source.clone()],
+        ..Default::default()
+    };
+    let protected = RelationRecord {
+        source: source.clone(),
+        observed_at: Some(100),
+        active: true,
+    };
+    let writer = store.start_writer().unwrap();
+    writer.put_relation(&protected).unwrap();
+    writer.apply_index(std::slice::from_ref(&delta)).unwrap();
+    writer.commit().unwrap();
+    let writer = store.start_writer().unwrap();
+    writer.apply_index(std::slice::from_ref(&delta)).unwrap();
+    writer.commit().unwrap();
+    assert_eq!(relation_rows(&store), std::slice::from_ref(&protected));
+
+    let writer = store.start_writer().unwrap();
+    writer.delete_relation(&source).unwrap();
+    writer.apply_index(std::slice::from_ref(&delta)).unwrap();
+    writer.commit().unwrap();
+    assert_eq!(relation_rows(&store), [RelationRecord::new(source.clone())]);
+
+    let writer = store.start_writer().unwrap();
+    writer.put_relation(&protected).unwrap();
+    writer.undo_index(std::slice::from_ref(&delta)).unwrap();
+    writer.apply_index(std::slice::from_ref(&delta)).unwrap();
+    writer.put_relation(&protected).unwrap();
+    writer.commit().unwrap();
+    assert_eq!(relation_rows(&store), [protected]);
+
+    let writer = store.start_writer().unwrap();
+    writer.apply_index(std::slice::from_ref(&delta)).unwrap();
+    writer.delete_relation(&source).unwrap();
+    writer.commit().unwrap();
+    assert!(relation_rows(&store).is_empty());
+
+    let writer = store.start_writer().unwrap();
+    writer.apply_index(std::slice::from_ref(&delta)).unwrap();
+    writer.undo_index(std::slice::from_ref(&delta)).unwrap();
+    writer.commit().unwrap();
+    assert!(relation_rows(&store).is_empty());
+}
+
+fn overlapping_relation_writers_follow_commit_order<B: Backend>() {
+    let (store, _guard) = B::open();
+    let source = relation_source(&[0], &[1], 10);
+    let delta = ArchiveIndexDelta {
+        relations: vec![source.clone()],
+        ..Default::default()
+    };
+    let protected = RelationRecord {
+        source: source.clone(),
+        observed_at: Some(100),
+        active: true,
+    };
+    let insertion = store.start_writer().unwrap();
+    insertion.apply_index(std::slice::from_ref(&delta)).unwrap();
+    let protection = store.start_writer().unwrap();
+    protection.put_relation(&protected).unwrap();
+    protection.commit().unwrap();
+    insertion.commit().unwrap();
+    assert_eq!(relation_rows(&store), std::slice::from_ref(&protected));
+
+    let insertion = store.start_writer().unwrap();
+    insertion.apply_index(std::slice::from_ref(&delta)).unwrap();
+    let deletion = store.start_writer().unwrap();
+    deletion.delete_relation(&source).unwrap();
+    deletion.commit().unwrap();
+    insertion.commit().unwrap();
+    assert_eq!(relation_rows(&store), [RelationRecord::new(source.clone())]);
+
+    let deletion = store.start_writer().unwrap();
+    deletion.undo_index(std::slice::from_ref(&delta)).unwrap();
+    let protection = store.start_writer().unwrap();
+    protection.put_relation(&protected).unwrap();
+    deletion.commit().unwrap();
+    protection.commit().unwrap();
+    assert_eq!(relation_rows(&store), std::slice::from_ref(&protected));
+
+    let protection = store.start_writer().unwrap();
+    protection.put_relation(&protected).unwrap();
+    let deletion = store.start_writer().unwrap();
+    deletion.delete_relation(&source).unwrap();
+    protection.commit().unwrap();
+    deletion.commit().unwrap();
+    assert!(relation_rows(&store).is_empty());
+
+    let protection = store.start_writer().unwrap();
+    protection.put_relation(&protected).unwrap();
+    let insertion = store.start_writer().unwrap();
+    insertion.apply_index(std::slice::from_ref(&delta)).unwrap();
+    insertion.commit().unwrap();
+    protection.commit().unwrap();
+    assert_eq!(relation_rows(&store), [protected]);
+}
+
+fn relations_are_ordered_snapshots_and_isolated<B: Backend>() {
+    let (store, _guard) = B::open();
+    let mut sources = vec![
+        relation_source(&[0, 255], &[0], 2),
+        relation_source(&[], &[0], 20),
+        relation_source(&[0], &[0, 0], 10),
+        relation_source(&[0], &[0], 11),
+        relation_source(&[0], &[0], 10),
+        relation_source(&[255], &[], u64::MAX),
+    ];
+    let writer = store.start_writer().unwrap();
+    for source in &sources {
+        writer
+            .put_relation(&RelationRecord::new(source.clone()))
+            .unwrap();
+    }
+    let mut other = sources[0].clone();
+    other.dimension = "relation-extra".into();
+    writer.put_relation(&RelationRecord::new(other)).unwrap();
+    writer.commit().unwrap();
+    let snapshot = store.iter_relations("relation", None).unwrap();
+    let writer = store.start_writer().unwrap();
+    for source in &sources {
+        writer.delete_relation(source).unwrap();
+    }
+    writer.commit().unwrap();
+    sources.sort();
+    let expected: Vec<_> = sources.into_iter().map(RelationRecord::new).collect();
+    assert_eq!(snapshot.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+    let writer = store.start_writer().unwrap();
+    for record in &expected {
+        writer.put_relation(record).unwrap();
+    }
+    writer.commit().unwrap();
+    let rows = store
+        .iter_relations("relation", Some(&[0]))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        expected
+            .into_iter()
+            .filter(|r| r.source.subject == [0])
+            .collect::<Vec<_>>()
+    );
+    assert!(store
+        .iter_relations("missing", None)
+        .unwrap()
+        .next()
+        .is_none());
+    assert!(store
+        .iter_relations("relation", Some(&[0, 0]))
+        .unwrap()
+        .next()
+        .is_none());
+}
+
+fn relations_seek_excludes_full_source_and_preserves_snapshot<B: Backend>() {
+    let (store, _guard) = B::open();
+    let bytes = [
+        vec![],
+        vec![0],
+        vec![0, 0],
+        vec![0, 255],
+        vec![1],
+        vec![255],
+    ];
+    let mut expected = Vec::new();
+    let writer = store.start_writer().unwrap();
+    for subject in &bytes {
+        for object in &bytes {
+            for slot in [0, 10, 11, u64::MAX] {
+                let record = RelationRecord::new(relation_source(subject, object, slot));
+                writer.put_relation(&record).unwrap();
+                expected.push(record);
+            }
+        }
+    }
+    let mut other = expected[0].clone();
+    other.source.dimension = "relation-extra".into();
+    writer.put_relation(&other).unwrap();
+    writer.commit().unwrap();
+    assert_eq!(
+        store
+            .iter_relations_from("relation", None)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        expected
+    );
+    for (index, record) in expected.iter().enumerate() {
+        assert_eq!(
+            store
+                .iter_relations_from("relation", Some(&record.source))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            expected[index + 1..]
+        );
+    }
+    let absent = relation_source(&[0], &[0], 9);
+    assert_eq!(
+        store
+            .iter_relations_from("relation", Some(&absent))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        expected
+            .iter()
+            .filter(|r| r.source > absent)
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    assert!(store
+        .iter_relations_from("relation", Some(&other.source))
+        .is_err());
+    assert!(store
+        .iter_relations_from("missing", None)
+        .unwrap()
+        .next()
+        .is_none());
+    let after = relation_source(&[0], &[0], 10);
+    let snapshot = store.iter_relations_from("relation", Some(&after)).unwrap();
+    let writer = store.start_writer().unwrap();
+    for record in &expected {
+        writer.delete_relation(&record.source).unwrap();
+    }
+    writer.commit().unwrap();
+    assert_eq!(
+        snapshot.collect::<Result<Vec<_>, _>>().unwrap(),
+        expected
+            .into_iter()
+            .filter(|r| r.source > after)
+            .collect::<Vec<_>>()
+    );
+    assert!(store
+        .iter_relations_from("relation", Some(&after))
+        .unwrap()
+        .next()
+        .is_none());
+}
+
+fn relations_undo_only_reverted_sources_and_survive_pruning<B: Backend>() {
+    let (store, _guard) = B::open();
+    let kept = relation_source(&[0], &[1], 10);
+    let reverted = relation_source(&[0], &[1], 20);
+    let deltas: Vec<_> = [kept.clone(), reverted.clone()]
+        .into_iter()
+        .map(|source| ArchiveIndexDelta {
+            slot: source.source_slot,
+            relations: vec![source],
+            ..Default::default()
+        })
+        .collect();
+    let writer = store.start_writer().unwrap();
+    writer.apply_index(&deltas).unwrap();
+    writer.commit().unwrap();
+    let writer = store.start_writer().unwrap();
+    writer.undo_index(&deltas[1..]).unwrap();
+    writer.commit().unwrap();
+    assert_eq!(relation_rows(&store), [RelationRecord::new(kept.clone())]);
+    write_indexed_blocks(&store, &[10, 100]);
+    assert!(store.prune_history(5, None, None).unwrap());
+    assert_eq!(store.get_block_by_slot(&10).unwrap(), None);
+    assert_eq!(relation_rows(&store), [RelationRecord::new(kept.clone())]);
+    let writer = store.start_writer().unwrap();
+    writer.apply_index(&deltas[1..]).unwrap();
+    writer.commit().unwrap();
+    store.truncate_front(&point(10)).unwrap();
+    assert_eq!(relation_rows(&store), [RelationRecord::new(kept)]);
+}
+
 /// Declare the whole suite for one backend. Adding a backend is one line.
 macro_rules! conformance_suite {
     ($module:ident, $backend:ty, [$($name:ident),* $(,)?]) => {
@@ -1565,6 +1944,13 @@ macro_rules! full_suite {
             $module,
             $backend,
             [
+                relation_context_is_versioned_and_dimension_scoped,
+                relations_commit_atomically_and_restore,
+                relations_preserve_protection_and_writer_order,
+                overlapping_relation_writers_follow_commit_order,
+                relations_are_ordered_snapshots_and_isolated,
+                relations_seek_excludes_full_source_and_preserves_snapshot,
+                relations_undo_only_reverted_sources_and_survive_pruning,
                 write_and_read_block,
                 batch_write_and_read,
                 undo_truncates,

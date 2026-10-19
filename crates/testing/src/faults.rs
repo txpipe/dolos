@@ -9,8 +9,9 @@ use std::{
 use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
     ArchiveError, ArchiveIndexDelta, ArchiveStore, ArchiveWriter, BlockBody, BlockSlot, ChainPoint,
-    Domain, DomainError, IndexRecord, LogEntry, LogKey, LogValue, Namespace, RawBlock, StateError,
-    StateStore, StateWriter, TagDimension, TipEvent, UtxoIndexDelta, WalError, WalStore,
+    Domain, DomainError, IndexRecord, LogEntry, LogKey, LogValue, Namespace, RawBlock,
+    RelationContext, RelationIter, RelationRecord, RelationSource, StateError, StateStore,
+    StateWriter, TagDimension, TipEvent, UtxoIndexDelta, WalError, WalStore,
 };
 
 use crate::toy_domain::{Mempool, TipSubscription, ToyDomain};
@@ -315,6 +316,35 @@ impl ArchiveStore for FaultyArchiveStore {
     type TagIter = <MemoryArchiveStore as ArchiveStore>::TagIter;
     type ExactIter = <MemoryArchiveStore as ArchiveStore>::ExactIter;
 
+    fn iter_relations(
+        &self,
+        dimension: &str,
+        subject: Option<&[u8]>,
+    ) -> Result<RelationIter, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.iter_relations(dimension, subject)
+    }
+
+    fn iter_relations_from(
+        &self,
+        dimension: &str,
+        after: Option<&RelationSource>,
+    ) -> Result<RelationIter, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.iter_relations_from(dimension, after)
+    }
+
+    fn relation_context(&self, dimension: &str) -> Result<Option<RelationContext>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.relation_context(dimension)
+    }
+
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
@@ -470,6 +500,22 @@ pub struct FaultyArchiveWriter {
 }
 
 impl ArchiveWriter for FaultyArchiveWriter {
+    fn put_relation(&self, record: &RelationRecord) -> Result<(), ArchiveError> {
+        self.inner.put_relation(record)
+    }
+
+    fn delete_relation(&self, source: &RelationSource) -> Result<(), ArchiveError> {
+        self.inner.delete_relation(source)
+    }
+
+    fn set_relation_context(
+        &self,
+        dimension: &str,
+        context: &RelationContext,
+    ) -> Result<(), ArchiveError> {
+        self.inner.set_relation_context(dimension, context)
+    }
+
     fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError> {
         self.inner.apply(point, block)
     }
@@ -683,5 +729,75 @@ impl Domain for FaultyToyDomain {
 
     fn notify_tip(&self, tip: TipEvent) {
         self.inner.notify_tip(tip)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relation_wrappers_forward_reads_writes_and_crash_faults() {
+        let inner = MemoryArchiveStore::new(Default::default());
+        let store = FaultyArchiveStore::new(inner.clone(), TestFault::CrashAfterCommits(1));
+        let record = RelationRecord {
+            source: RelationSource {
+                dimension: "relation".into(),
+                subject: vec![0],
+                object: vec![1],
+                source_slot: 10,
+            },
+            active: true,
+            observed_at: Some(100),
+        };
+        let context = RelationContext {
+            version: RelationContext::VERSION,
+            complete: true,
+            initialized_at: 100,
+        };
+        let writer = store.start_writer().unwrap();
+        writer.put_relation(&record).unwrap();
+        writer.set_relation_context("relation", &context).unwrap();
+        writer.commit().unwrap();
+        assert_eq!(
+            store
+                .iter_relations("relation", Some(&[0]))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            std::slice::from_ref(&record)
+        );
+        assert!(store
+            .iter_relations_from("relation", Some(&record.source))
+            .unwrap()
+            .next()
+            .is_none());
+        assert_eq!(store.relation_context("relation").unwrap(), Some(context));
+
+        let writer = store.start_writer().unwrap();
+        writer.delete_relation(&record.source).unwrap();
+        assert!(writer.commit().is_err());
+        assert_eq!(
+            inner
+                .iter_relations("relation", None)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            std::slice::from_ref(&record)
+        );
+        let healthy = FaultyArchiveStore::new(inner.clone(), TestFault::None);
+        let writer = healthy.start_writer().unwrap();
+        writer.delete_relation(&record.source).unwrap();
+        writer.commit().unwrap();
+        assert!(healthy
+            .iter_relations("relation", None)
+            .unwrap()
+            .next()
+            .is_none());
+
+        let faulty = FaultyArchiveStore::new(inner, TestFault::ArchiveStoreError);
+        assert!(faulty.iter_relations("relation", None).is_err());
+        assert!(faulty.iter_relations_from("relation", None).is_err());
+        assert!(faulty.relation_context("relation").is_err());
     }
 }

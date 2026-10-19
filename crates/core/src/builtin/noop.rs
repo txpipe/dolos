@@ -294,3 +294,50 @@ impl CacheDiskTier for NoDiskTier {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod relation_tests {
+    use super::*;
+    use crate::{RelationContext, RelationRecord, RelationSource};
+
+    #[test]
+    fn relation_operations_are_explicitly_unsupported() {
+        let store = NoOpArchiveStore;
+        assert!(matches!(
+            store.iter_relations("relation", None),
+            Err(ArchiveError::Unsupported(_))
+        ));
+        assert!(matches!(
+            store.iter_relations_from("relation", None),
+            Err(ArchiveError::Unsupported(_))
+        ));
+        assert!(matches!(
+            store.relation_context("relation"),
+            Err(ArchiveError::Unsupported(_))
+        ));
+        let writer = store.start_writer().unwrap();
+        let source = RelationSource {
+            dimension: "relation".into(),
+            subject: vec![],
+            object: vec![],
+            source_slot: 0,
+        };
+        assert!(matches!(
+            writer.put_relation(&RelationRecord::new(source.clone())),
+            Err(ArchiveError::Unsupported(_))
+        ));
+        assert!(matches!(
+            writer.delete_relation(&source),
+            Err(ArchiveError::Unsupported(_))
+        ));
+        let context = RelationContext {
+            version: 1,
+            complete: false,
+            initialized_at: 0,
+        };
+        assert!(matches!(
+            writer.set_relation_context("relation", &context),
+            Err(ArchiveError::Unsupported(_))
+        ));
+    }
+}

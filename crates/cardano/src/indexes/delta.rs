@@ -7,8 +7,8 @@
 //! store).
 
 use dolos_core::{
-    keys, ArchiveIndexDelta, BlockSlot, EraCbor, Tag, TagDimension, TxoRef, UtxoIndexDelta,
-    UtxoMap, UtxoSetDelta,
+    keys, ArchiveIndexDelta, BlockSlot, EraCbor, RelationSource, Tag, TagDimension, TxoRef,
+    UtxoIndexDelta, UtxoMap, UtxoSetDelta,
 };
 use pallas::{
     codec::minicbor,
@@ -23,7 +23,27 @@ use pallas::{
 };
 
 use super::dimensions::{archive, utxo};
+use super::COMMITTEE_AUTHORIZATIONS;
 use crate::{model::ProposalKey, pallas_extras};
+
+pub fn committee_authorization_sources(
+    block: &pallas::ledger::traverse::MultiEraBlock<'_>,
+) -> Vec<RelationSource> {
+    let mut sources = std::collections::BTreeSet::new();
+    for tx in block.txs().into_iter().filter(|tx| tx.is_valid()) {
+        for cert in tx.certs() {
+            if let Some(auth) = pallas_extras::cert_as_committee_auth(&cert) {
+                sources.insert(RelationSource {
+                    dimension: COMMITTEE_AUTHORIZATIONS.into(),
+                    subject: pallas_extras::committee_cold_id_bytes(&auth.cold),
+                    object: pallas_extras::committee_hot_id_bytes(&auth.hot),
+                    source_slot: block.slot(),
+                });
+            }
+        }
+    }
+    sources.into_iter().collect()
+}
 
 /// Builder for constructing index deltas from Cardano block data.
 ///
@@ -137,6 +157,7 @@ impl CardanoIndexDeltaBuilder {
             block_number: number,
             tx_hashes: Vec::new(),
             tags: Vec::new(),
+            relations: Vec::new(),
         });
     }
 
@@ -441,6 +462,7 @@ impl CardanoIndexDeltaBuilder {
         use pallas::ledger::traverse::{ComputeHash as _, OriginalHash as _};
 
         self.start_block(block.slot(), block.hash().to_vec(), Some(block.number()));
+        self.current_block().relations = committee_authorization_sources(block);
 
         // Byron blocks carry no issuer key, so they stay untagged.
         if let Some(vkey) = block.header().issuer_vkey() {
@@ -1140,6 +1162,50 @@ mod tests {
     }
 
     #[test]
+    fn committee_authorizations_deduplicate_typed_pairs_per_block() {
+        use pallas::codec::utils::NonEmptySet;
+        use pallas::ledger::primitives::{conway::Certificate, StakeCredential};
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        let hash = Hash::new([0x99; 28]);
+        let key = StakeCredential::AddrKeyhash(hash);
+        let script = StakeCredential::ScriptHash(hash);
+        let mut body = empty_tx_body();
+        body.certificates = Some(
+            NonEmptySet::try_from(vec![
+                Certificate::AuthCommitteeHot(key.clone(), key.clone()),
+                Certificate::AuthCommitteeHot(key.clone(), key.clone()),
+                Certificate::AuthCommitteeHot(key.clone(), script.clone()),
+                Certificate::AuthCommitteeHot(script.clone(), key.clone()),
+                Certificate::AuthCommitteeHot(script.clone(), script.clone()),
+                Certificate::ResignCommitteeCold(key.clone(), None),
+            ])
+            .unwrap(),
+        );
+        let (_, raw) = dolos_testing::blocks::make_conway_block_with_txs(
+            100,
+            vec![(body.clone(), true), (body.clone(), true), (body, false)],
+            None,
+        );
+        let block = MultiEraBlock::decode(&raw).unwrap();
+        let sources = committee_authorization_sources(&block);
+        assert_eq!(sources.len(), 4);
+        for cold in [&key, &script] {
+            for hot in [&key, &script] {
+                assert!(sources.contains(&RelationSource {
+                    dimension: COMMITTEE_AUTHORIZATIONS.into(),
+                    subject: pallas_extras::committee_cold_id_bytes(cold),
+                    object: pallas_extras::committee_hot_id_bytes(hot),
+                    source_slot: 100,
+                }));
+            }
+        }
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.index_block(&block, &std::collections::HashMap::new());
+        assert_eq!(builder.build()[0].relations, sources);
+    }
+
+    #[test]
     fn committee_votes_tag_once_per_block_and_exclude_dreps_and_pools() {
         use pallas::ledger::traverse::MultiEraBlock;
         use std::collections::BTreeMap;
@@ -1251,6 +1317,15 @@ mod tests {
             let archive = builder.build();
             let key_id = [&[0x12u8][..], hash.as_slice()].concat();
             let script_id = [&[0x13u8][..], hash.as_slice()].concat();
+            let sources = committee_authorization_sources(&block);
+            assert_eq!(archive[0].relations, sources);
+            assert_eq!(sources.len(), if valid { 2 } else { 0 });
+            for source in sources {
+                assert_eq!(source.dimension, COMMITTEE_AUTHORIZATIONS);
+                assert_eq!(source.source_slot, 100);
+                assert_eq!(source.object, [&[0x02u8][..], &[0xaa; 28]].concat());
+                assert!(source.subject == key_id || source.subject == script_id);
+            }
 
             assert_eq!(
                 sorted_keys(&archive[0], archive::COMMITTEE_CERTS),

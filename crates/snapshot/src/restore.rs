@@ -150,7 +150,7 @@ use stelae::{
 use tracing::info;
 
 use crate::{
-    layers::{blocks, indexes, logs, state},
+    layers::{blocks, committee, indexes, logs, state},
     log_ns_for, preflight, read_position,
     reporting::Cursor,
     state_ns_for, DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, NAMESPACES,
@@ -227,6 +227,7 @@ pub struct Plan {
     /// shards ascending inside. Namespace byte order is kind byte order, so
     /// iterating the map is iterating the inscription's own layer order.
     pub state: BTreeMap<Namespace, Vec<LayerDescriptor>>,
+    pub committee: Option<LayerDescriptor>,
     /// The retained state dumps this stele carries, by the epoch their scope
     /// names, each shaped like [`Plan::state`] inside.
     ///
@@ -296,7 +297,7 @@ impl Plan {
     /// is always redone" is a rule and not a detail — see the module
     /// documentation for the two independent reasons it holds.
     pub fn tip_layers(&self) -> impl Iterator<Item = &LayerDescriptor> {
-        self.state.values().flatten()
+        self.state.values().flatten().chain(self.committee.iter())
     }
 
     /// The distinct layer kinds this restore skipped for want of a codec,
@@ -531,8 +532,29 @@ pub fn plan<R: SteleReader>(
     let epochs = select_epochs(&inscription)?;
     let selected = retain_history(epochs, position.point.slot(), max_history);
     let state = select_state(&inscription)?;
+    let mut committee = None;
+    for descriptor in inscription.layers_of_kind(committee::KIND) {
+        if descriptor.media_type != "application/vnd.dolos.stele.archive-context-committee.v1+zstd"
+        {
+            return Err(Error::malformed_inscription(
+                format!("layers[{}].mediaType", committee::KIND),
+                "The committee context must use v1+zstd.",
+            ));
+        }
+        if committee.is_some()
+            || descriptor.scope.get(SCOPE_REQUIRED) != Some(&serde_json::Value::Bool(true))
+            || descriptor.scope.get("point") != inscription.position.get("point")
+        {
+            return Err(Error::malformed_inscription(
+                format!("layers[{}].scope", committee::KIND),
+                "The context occurs more than once, the required flag is not true, or the positions are different.",
+            ));
+        }
+        committee = Some(descriptor.clone());
+    }
 
     Ok(Plan {
+        committee,
         sequence: inscription.sequence,
         state: state.tip,
         state_dumps: state.dumps,
@@ -843,6 +865,7 @@ pub struct Summary {
     pub index_records: u64,
     pub entities: u64,
     pub utxos: u64,
+    pub relations: u64,
 
     /// Layers this restore read out of the stele.
     pub layers_fetched: usize,
@@ -950,6 +973,25 @@ where
 {
     let Target { archive, state } = target;
 
+    if let Some(existing) = state.read_cursor()? {
+        if existing == plan.position.point
+            && !checkpoint.resume().is_empty()
+            && plan
+                .immutable_layers()
+                .all(|layer| checkpoint.resume().is_done(&layer.diff_id))
+            && crate::export::restored_tip_matches(plan, archive, state)?
+        {
+            checkpoint.clear()?;
+            return Ok(Summary {
+                layers_skipped: plan.layers().count(),
+                ..Summary::default()
+            });
+        }
+        return Err(Error::IncompleteStele(
+            "The restore target has a completion cursor.".to_owned(),
+        ));
+    }
+
     stele.observe(observer.clone());
 
     let reader = Reader {
@@ -1025,6 +1067,8 @@ where
             summary.layers_fetched += 1;
         }
     }
+
+    restore_committee_context(&reader, plan, archive, &cursor, &mut summary)?;
 
     // The last write of the restore, the live-utxo dimensions above included:
     // until this commit lands `has_existing_data()` reports an empty node
@@ -1235,6 +1279,9 @@ impl<R: SteleReader> Reader<'_, R> {
                 .stream_layer(self.index, &DolosProfile, descriptor, self.budget.limits)?;
 
         check_layer_magic(descriptor, layer.header(), self.magic)?;
+        if descriptor.kind == committee::KIND {
+            committee::check_header(layer.header().scope.as_bytes(), &descriptor.scope["point"])?;
+        }
 
         let mut count = 0u64;
         let mut chunk: Vec<T> = Vec::new();
@@ -1307,6 +1354,95 @@ fn check_layer_magic(
         return Err(Error::NetworkMismatch { expected, found });
     }
 
+    Ok(())
+}
+
+fn restore_committee_context<R: SteleReader, A: ArchiveStore>(
+    reader: &Reader<'_, R>,
+    plan: &Plan,
+    archive: &A,
+    cursor: &Cursor<'_>,
+    summary: &mut Summary,
+) -> Result<(), Error> {
+    let tip = plan.position.point.slot();
+    let incomplete = dolos_core::RelationContext {
+        version: dolos_core::RelationContext::VERSION,
+        complete: false,
+        initialized_at: tip,
+    };
+    let writer = archive.start_writer()?;
+    writer.set_relation_context(committee::DIMENSION, &incomplete)?;
+    writer.set_relation_context(committee::BACKFILL, &committee::reset_backfill())?;
+    writer.set_relation_context(committee::ROLLBACK, &committee::reset_rollback())?;
+    writer.commit()?;
+    let mut existing = archive.iter_relations(committee::DIMENSION, None)?;
+    loop {
+        let mut chunk = Vec::new();
+        let mut bytes = 0;
+        for record in existing.by_ref() {
+            let source = record?.source;
+            bytes += source.subject.len() + source.object.len() + source.dimension.len() + 8;
+            chunk.push(source);
+            if chunk.len() >= reader.budget.commit_records || bytes >= reader.budget.commit_bytes {
+                break;
+            }
+        }
+        if chunk.is_empty() {
+            break;
+        }
+        let writer = archive.start_writer()?;
+        for source in chunk {
+            writer.delete_relation(&source)?;
+        }
+        writer.commit()?;
+    }
+    let Some(descriptor) = &plan.committee else {
+        return Ok(());
+    };
+    let at = cursor.open(committee::KIND, &descriptor.scope);
+    let mut order = committee::OrderCheck::default();
+    let mut metadata = None;
+    let mut backfill = None;
+    let mut rollback = None;
+    reader.drain(
+        descriptor,
+        committee::decode,
+        |_| 128,
+        |chunk| {
+            let writer = archive.start_writer()?;
+            for record in chunk {
+                order.check(&record, tip)?;
+                match record {
+                    committee::Record::Context(context) => metadata = Some(context),
+                    committee::Record::Backfill(context) => backfill = Some(context),
+                    committee::Record::Rollback(context) => rollback = Some(context),
+                    committee::Record::Witness(record) => {
+                        writer.put_relation(&record)?;
+                        summary.relations += 1;
+                    }
+                }
+            }
+            writer.commit()?;
+            Ok(())
+        },
+    )?;
+    order.finish()?;
+    let writer = archive.start_writer()?;
+    writer.set_relation_context(
+        committee::DIMENSION,
+        &metadata.expect("Metadata passed validation."),
+    )?;
+    writer.set_relation_context(
+        committee::BACKFILL,
+        &backfill.expect("Backfill must exist."),
+    )?;
+    writer.set_relation_context(
+        committee::ROLLBACK,
+        &rollback.expect("Rollback must exist."),
+    )?;
+    writer.commit()?;
+    cursor.close(at, committee::KIND, Outcome::Transferred);
+    summary.layers_fetched += 1;
     Ok(())
 }
 
@@ -1893,6 +2029,7 @@ mod tests {
             sequence: stele.sequence,
             epochs,
             state: select_state(&stele).unwrap().tip,
+            committee: None,
             state_dumps: BTreeMap::new(),
             skipped_epochs: skipped,
             skipped_unknown: Vec::new(),
@@ -2162,6 +2299,7 @@ mod tests {
             sequence: 3,
             epochs: Vec::new(),
             state: select_state(&inscription(state_layers())).unwrap().tip,
+            committee: None,
             state_dumps: BTreeMap::new(),
             skipped_epochs: 0,
             skipped_unknown: Vec::new(),
@@ -2227,6 +2365,7 @@ mod tests {
             sequence: stele.sequence,
             epochs: select_epochs(&stele).unwrap(),
             state: select_state(&stele).unwrap().tip,
+            committee: None,
             state_dumps: BTreeMap::new(),
             skipped_epochs: 0,
             skipped_unknown: Vec::new(),
@@ -2305,6 +2444,7 @@ mod tests {
             sequence: 3,
             epochs: Vec::new(),
             state: BTreeMap::new(),
+            committee: None,
             state_dumps: BTreeMap::new(),
             skipped_epochs: 0,
             skipped_unknown: Vec::new(),

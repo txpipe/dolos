@@ -749,6 +749,7 @@ pub fn preview<A: ArchiveStore>(
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + export::log_layers(plan, archive, &previous)?
         + export::state_layers(plan, &previous)?
+        + 1
         + usize::from(digest_records.is_some());
 
     // The same lookup `export` will make, through the same `layer_spec`, so a

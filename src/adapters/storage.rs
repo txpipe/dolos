@@ -26,9 +26,10 @@ use dolos_core::{
     ArchiveIndexDelta, BlockBody, BlockSlot, CacheDiskTier, CacheEntry, CacheError, ChainPoint,
     EntityDelta, EntityKey, EntityValue, ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey,
     LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace, QueryLimiter,
-    RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
-    StateWriter as CoreStateWriter, TagDimension, TagRecord, TieredCache, TxHash, TxStatus, TxoRef,
-    UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
+    RawBlock, RelationContext, RelationRecord, RelationSource, StateError, StateSchema,
+    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TagRecord,
+    TieredCache, TxHash, TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet,
+    UtxoSetDelta, WalError, WalStore,
 };
 use dolos_redb3::cache::RedbCacheTier;
 use serde::{de::DeserializeOwned, Serialize};
@@ -917,6 +918,43 @@ pub enum ArchiveWriterBackend {
 }
 
 impl CoreArchiveWriter for ArchiveWriterBackend {
+    fn put_relation(&self, record: &RelationRecord) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(w) => w.put_relation(record),
+            Self::LogsOnly(_) => Err(ArchiveError::Unsupported(
+                "put_relation for an archive that stores only logs",
+            )),
+            Self::Fjall(w) => w.put_relation(record),
+            Self::NoOp(w) => w.put_relation(record),
+        }
+    }
+
+    fn delete_relation(&self, source: &RelationSource) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(w) => w.delete_relation(source),
+            Self::LogsOnly(_) => Err(ArchiveError::Unsupported(
+                "delete_relation for an archive that stores only logs",
+            )),
+            Self::Fjall(w) => w.delete_relation(source),
+            Self::NoOp(w) => w.delete_relation(source),
+        }
+    }
+
+    fn set_relation_context(
+        &self,
+        dimension: &str,
+        context: &RelationContext,
+    ) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(w) => w.set_relation_context(dimension, context),
+            Self::LogsOnly(_) => Err(ArchiveError::Unsupported(
+                "set_relation_context for an archive that stores only logs",
+            )),
+            Self::Fjall(w) => w.set_relation_context(dimension, context),
+            Self::NoOp(w) => w.set_relation_context(dimension, context),
+        }
+    }
+
     fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError> {
         match self {
             Self::Memory(w) => w.apply(point, block),
@@ -1130,6 +1168,41 @@ impl Iterator for ArchiveExactIterBackend {
 }
 
 impl CoreArchiveStore for ArchiveStoreBackend {
+    fn iter_relations(
+        &self,
+        dimension: &str,
+        subject: Option<&[u8]>,
+    ) -> Result<dolos_core::archive::RelationIter, ArchiveError> {
+        match self {
+            Self::Memory(s) => s.iter_relations(dimension, subject),
+            Self::LogsOnly(s) => s.iter_relations(dimension, subject),
+            Self::Fjall(s) => s.iter_relations(dimension, subject),
+            Self::NoOp(s) => s.iter_relations(dimension, subject),
+        }
+    }
+
+    fn iter_relations_from(
+        &self,
+        dimension: &str,
+        after: Option<&RelationSource>,
+    ) -> Result<dolos_core::archive::RelationIter, ArchiveError> {
+        match self {
+            Self::Memory(s) => s.iter_relations_from(dimension, after),
+            Self::LogsOnly(s) => s.iter_relations_from(dimension, after),
+            Self::Fjall(s) => s.iter_relations_from(dimension, after),
+            Self::NoOp(s) => s.iter_relations_from(dimension, after),
+        }
+    }
+
+    fn relation_context(&self, dimension: &str) -> Result<Option<RelationContext>, ArchiveError> {
+        match self {
+            Self::Memory(s) => s.relation_context(dimension),
+            Self::LogsOnly(s) => s.relation_context(dimension),
+            Self::Fjall(s) => s.relation_context(dimension),
+            Self::NoOp(s) => s.relation_context(dimension),
+        }
+    }
+
     type BlockIter<'a> = ArchiveBlockIterBackend;
     type Writer = ArchiveWriterBackend;
     type LogIter = ArchiveLogIterBackend;

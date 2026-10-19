@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
-use dolos_core::{import::ImportExt as _, Domain as _, StateStore as _};
+use dolos_core::{
+    import::ImportExt as _, ArchiveWriter as _, Domain as _, StateStore as _, StateWriter as _,
+};
 use dolos_snapshot::{
     export::{self, First, Plan},
     Network, RetainedEpochs,
@@ -114,7 +116,7 @@ pub use registry_node::Node;
 /// copy of the fixture would be a second answer to "where do the two plans
 /// stand".
 mod registry_node {
-    use dolos_core::{BlockHash, ChainPoint, Domain as _};
+    use dolos_core::{Domain as _, StateStore as _, StateWriter as _};
     use dolos_snapshot::{
         export::Plan,
         registry::{self, Published, Publishing, Registry},
@@ -123,7 +125,7 @@ mod registry_node {
     use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
     use stelae::progress::Observer;
 
-    use super::harness;
+    use super::{align_archive, harness};
 
     /// The harness ledger and the two plans it publishes: sequence 0 standing
     /// on the last slot of epoch 0, and sequence 1 one slot past it — the
@@ -152,9 +154,7 @@ mod registry_node {
             let network = Network::for_magic(magic);
             let boundary = summary.epoch_start(1);
 
-            // Any hash will do: `position` needs one to exist, and nothing in
-            // an export reads it back out of the store.
-            let point = |slot| ChainPoint::Specific(slot, BlockHash::new([0xab; 32]));
+            let point = |slot| align_archive(domain.archive(), slot);
 
             let retained = RetainedEpochs::default();
 
@@ -209,6 +209,13 @@ mod registry_node {
             plan: &Plan,
             observer: &Observer,
         ) -> Result<Published, Error> {
+            assert_eq!(
+                align_archive(self.domain.archive(), plan.cursor.slot()),
+                plan.cursor
+            );
+            let writer = self.domain.state().start_writer()?;
+            writer.set_cursor(plan.cursor.clone())?;
+            writer.commit()?;
             registry::publish(
                 publishing,
                 plan,
@@ -227,6 +234,13 @@ mod registry_node {
             publishing: Publishing<'_>,
             plan: &Plan,
         ) -> Result<Published, Error> {
+            assert_eq!(
+                align_archive(self.domain.archive(), plan.cursor.slot()),
+                plan.cursor
+            );
+            let writer = self.domain.state().start_writer()?;
+            writer.set_cursor(plan.cursor.clone())?;
+            writer.commit()?;
             registry::publish_into(
                 stele,
                 publishing,
@@ -291,6 +305,33 @@ pub fn plan_at_epoch_end<B: ToyStores>(
     )
 }
 
+pub fn align_archive<A: dolos_core::ArchiveStore>(
+    archive: &A,
+    slot: u64,
+) -> dolos_core::ChainPoint {
+    if let Some((at, body)) = archive.get_tip().unwrap() {
+        let block = dolos_cardano::pallas::ledger::traverse::MultiEraBlock::decode(&body).unwrap();
+        if at == slot {
+            return dolos_core::ChainPoint::Specific(slot, block.hash());
+        }
+    }
+    archive
+        .truncate_front(&dolos_core::ChainPoint::Slot(slot.saturating_sub(1)))
+        .unwrap();
+    let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+        block_count: 1,
+        slot,
+        ..Default::default()
+    });
+    let body = &blocks[0];
+    let block = dolos_cardano::pallas::ledger::traverse::MultiEraBlock::decode(body).unwrap();
+    let point = dolos_core::ChainPoint::Specific(slot, block.hash());
+    let writer = archive.start_writer().unwrap();
+    writer.apply(&point, body).unwrap();
+    writer.commit().unwrap();
+    point
+}
+
 fn plan_standing_at<B: ToyStores>(
     domain: &ToyDomain<B>,
     epoch: u64,
@@ -300,11 +341,11 @@ fn plan_standing_at<B: ToyStores>(
     let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
     let magic = u64::from(domain.genesis().network_magic());
 
-    // Any hash will do: `position` needs one to exist, and nothing in an export
-    // reads it back out of the store.
-    let point =
-        dolos_core::ChainPoint::Specific(slot(&summary), dolos_core::BlockHash::new([0xab; 32]));
+    let point = align_archive(domain.archive(), slot(&summary));
 
+    let writer = domain.state().start_writer().unwrap();
+    writer.set_cursor(point.clone()).unwrap();
+    writer.commit().unwrap();
     let plan = Plan::new(&summary, Network::for_magic(magic), point, retained).unwrap();
     assert_eq!(plan.sequence, epoch);
 
@@ -318,6 +359,11 @@ pub fn export_plan<B: ToyStores>(
     plan: &Plan,
 ) -> Inscription {
     let stele = SteleDir::create(root).unwrap();
+    let point = align_archive(domain.archive(), plan.cursor.slot());
+    assert_eq!(point, plan.cursor);
+    let writer = domain.state().start_writer().unwrap();
+    writer.set_cursor(plan.cursor.clone()).unwrap();
+    writer.commit().unwrap();
 
     export::export(
         &stele,

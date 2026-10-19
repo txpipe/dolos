@@ -105,6 +105,8 @@ impl<D: Domain> SyncExt for D {
 
     #[instrument(skip_all, fields(rollback_to = %to))]
     fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError> {
+        let mut chain = self.write_chain();
+        D::Chain::before_archive_rollback(self)?;
         let undo_blocks = self.wal().iter_logs(Some(to.clone()), None)?;
 
         let writer = self.state().start_writer()?;
@@ -162,6 +164,7 @@ impl<D: Domain> SyncExt for D {
         self.archive().truncate_front(to)?;
 
         self.wal().truncate_front(to)?;
+        chain.after_archive_rollback(self)?;
 
         Ok(())
     }
@@ -173,7 +176,7 @@ pub(crate) fn drain_pending_work<D: Domain>(
     domain: &D,
 ) -> Result<(), DomainError> {
     while let Some(mut work) = <D::Chain as ChainLogic>::pop_work::<D>(chain, domain) {
-        execute_work_unit(domain, &mut work)?;
+        execute_work_unit_locked(domain, &mut work)?;
     }
 
     Ok(())
@@ -195,6 +198,14 @@ pub(crate) fn drain_pending_work<D: Domain>(
 /// work unit execution is needed (e.g., manual genesis initialization).
 #[instrument(skip_all, name = "work_unit", fields(name = %work.name()))]
 pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
+    let _chain = domain.write_chain();
+    execute_work_unit_locked(domain, work)
+}
+
+fn execute_work_unit_locked<D: Domain>(
+    domain: &D,
+    work: &mut D::WorkUnit,
+) -> Result<(), DomainError> {
     debug!("executing work unit");
 
     run_lifecycle(domain, work, true)?;
@@ -218,6 +229,7 @@ pub(crate) fn run_lifecycle<D: Domain>(
     work: &mut D::WorkUnit,
     include_wal: bool,
 ) -> Result<(), DomainError> {
+    D::Chain::prepare_archive(domain)?;
     debug!(phase = "initialize", "running phase");
     work.initialize(domain)?;
 

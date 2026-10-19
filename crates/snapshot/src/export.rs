@@ -75,7 +75,7 @@ use stelae::{
 };
 
 use crate::{
-    layers::{blocks, digests, indexes, logs, state},
+    layers::{blocks, committee, digests, indexes, logs, state},
     namespaces::NAMESPACES,
     reporting::{Cursor, Records},
     state_layer_count, DigestsScope, DolosProfile, EpochScope, Error, Network, RetainedEpochs,
@@ -714,6 +714,15 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
+    if state.read_cursor()?.as_ref() != Some(&plan.cursor) {
+        return Err(Error::IncompleteStele(
+            "The cursor in the export plan is not the same as the current state cursor.".to_owned(),
+        ));
+    }
+
+    check_archive_tip(archive, plan)?;
+    let committee_before = committee_checksum(archive, plan)?;
+
     stele.observe(observer.clone());
 
     // Ahead of the count as well as of the build: see `refuse_uncovered_logs`.
@@ -727,6 +736,7 @@ where
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + log_layers(plan, archive, previous)?
         + state_layers(plan, previous)?
+        + 1
         + usize::from(digest_records.is_some());
 
     let cursor = Cursor::new(observer, total);
@@ -786,6 +796,10 @@ where
         }));
     }
 
+    jobs.push(Job::light(move || {
+        Ok(vec![write_committee(stele, plan, archive, cursor)?])
+    }));
+
     if let Some(records) = digest_records {
         jobs.push(Job::light(move || {
             Ok(vec![write_digests(stele, plan, records, cursor)?])
@@ -810,6 +824,22 @@ where
 
     inscription.history = previous.history().to_vec();
     inscription.layers = layers;
+
+    if state.read_cursor()?.as_ref() != Some(&plan.cursor) {
+        return Err(Error::IncompleteStele(
+            "The state cursor changed during the export.".to_owned(),
+        ));
+    }
+
+    check_archive_tip(archive, plan)?;
+    let committee_after = committee_checksum(archive, plan)?;
+    let written = inscription.layers_of_kind(committee::KIND).next().unwrap();
+    if committee_before != committee_after || written.diff_id != committee_after {
+        return Err(Error::IncompleteStele(
+            "The committee context changed during the export. Do not change the source stores during the export."
+                .to_owned(),
+        ));
+    }
 
     // Validated before it is written, so a stele is never sealed over a
     // document that has no digest.
@@ -1118,6 +1148,187 @@ fn layers_by_scope(
     }
 
     Ok(layers)
+}
+
+pub(crate) fn restored_tip_matches<A: ArchiveStore, S: StateStore>(
+    restore: &crate::restore::Plan,
+    archive: &A,
+    state: &S,
+) -> Result<bool, Error> {
+    let summary = dolos_cardano::eras::load_chain_summary_from_state(state)?;
+    let plan = Plan::new(
+        &summary,
+        restore.position.network.clone(),
+        restore.position.point.clone(),
+        RetainedEpochs::default(),
+    )?;
+    let observer = Observer::silent();
+    let cursor = Cursor::new(&observer, state_layer_count());
+    for (kind, ns, shards) in STATE_KINDS {
+        let written = write_state_kind(
+            &stelae::Discarding,
+            &plan,
+            state,
+            kind,
+            ns,
+            shards,
+            &First,
+            &cursor,
+        )?;
+        if restore.state.get(ns) != Some(&written) {
+            return Ok(false);
+        }
+    }
+    match &restore.committee {
+        Some(descriptor) => Ok(committee_checksum(archive, &plan)? == descriptor.diff_id),
+        None => Ok(archive.relation_context(committee::DIMENSION)?
+            == Some(dolos_core::RelationContext {
+                version: dolos_core::RelationContext::VERSION,
+                complete: false,
+                initialized_at: plan.cursor.slot(),
+            })
+            && archive.relation_context(committee::BACKFILL)? == Some(committee::reset_backfill())
+            && archive.relation_context(committee::ROLLBACK)? == Some(committee::reset_rollback())
+            && archive
+                .iter_relations(committee::DIMENSION, None)?
+                .next()
+                .is_none()),
+    }
+}
+
+fn check_archive_tip<A: ArchiveStore>(archive: &A, plan: &Plan) -> Result<(), Error> {
+    match archive.get_tip()? {
+        Some((slot, body)) => {
+            let block = MultiEraBlock::decode(&body)
+                .map_err(dolos_core::ArchiveError::BlockDecodingError)?;
+            if slot != plan.cursor.slot()
+                || block.slot() != slot
+                || Some(block.hash()) != plan.cursor.hash()
+            {
+                return Err(Error::IncompleteStele(
+                    "The archive tip is not the same as the cursor in the export plan.".to_owned(),
+                ));
+            }
+        }
+        None => {
+            if archive
+                .relation_context(committee::DIMENSION)?
+                .is_some_and(|context| context.complete)
+            {
+                return Err(Error::IncompleteStele(
+                    "If the committee context has full coverage, the archive must have a tip."
+                        .to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn committee_checksum<A: ArchiveStore>(archive: &A, plan: &Plan) -> Result<stelae::Digest, Error> {
+    let mut writer = stelae::digest::LayerWriter::new(std::io::sink(), 0)?;
+    use std::io::Write as _;
+    let scope = committee::CommitteeScope {
+        network_magic: plan.network.magic(),
+        point: plan.cursor.clone(),
+    };
+    writer
+        .write_all(
+            stelae::LayerHeader::new(crate::PROFILE_NAME, committee::KIND, scope.header()?)
+                .encode()?
+                .as_bytes(),
+        )
+        .map_err(stelae::Error::Io)?;
+    visit_committee(archive, plan.cursor.slot(), |record| {
+        writer
+            .write_all(committee::encode(&record)?.as_bytes())
+            .map_err(stelae::Error::Io)?;
+        Ok(())
+    })?;
+    Ok(writer.finish()?.1.diff_id)
+}
+
+fn visit_committee<A: ArchiveStore>(
+    archive: &A,
+    tip: u64,
+    mut write: impl FnMut(committee::Record) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let dimensions = [
+        committee::DIMENSION,
+        committee::BACKFILL,
+        committee::ROLLBACK,
+    ];
+    let before = dimensions
+        .map(|dimension| archive.relation_context(dimension))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut context = before[0].clone().unwrap_or(dolos_core::RelationContext {
+        version: dolos_core::RelationContext::VERSION,
+        complete: false,
+        initialized_at: tip,
+    });
+    context.initialized_at = context.initialized_at.min(tip);
+    let mut backfill = before[1].clone().unwrap_or_else(committee::reset_backfill);
+    if backfill.complete {
+        backfill.initialized_at = backfill.initialized_at.min(tip);
+    } else {
+        backfill.initialized_at = 0;
+    }
+    let mut rollback = before[2].clone().unwrap_or_else(committee::reset_rollback);
+    rollback.initialized_at = rollback.initialized_at.min(tip);
+    let mut order = committee::OrderCheck::default();
+    for metadata in [
+        committee::Record::Context(context),
+        committee::Record::Backfill(backfill),
+        committee::Record::Rollback(rollback),
+    ] {
+        order.check(&metadata, tip)?;
+        write(metadata)?;
+    }
+    for record in archive.iter_relations(committee::DIMENSION, None)? {
+        let mut record = record?;
+        record.observed_at = record.observed_at.map(|slot| slot.min(tip));
+        let record = committee::Record::Witness(record);
+        order.check(&record, tip)?;
+        write(record)?;
+    }
+    order.finish()?;
+    let after = dimensions
+        .map(|dimension| archive.relation_context(dimension))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    if before != after {
+        return Err(Error::IncompleteStele(
+            "The committee metadata changed during the export. Do not change the source stores during the export."
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn write_committee<W: SteleWriter, A: ArchiveStore>(
+    stele: &W,
+    plan: &Plan,
+    archive: &A,
+    cursor: &Cursor<'_>,
+) -> Result<LayerDescriptor, Error> {
+    let scope = committee::CommitteeScope {
+        network_magic: plan.network.magic(),
+        point: plan.cursor.clone(),
+    };
+    let spec = scope.layer_spec(committee::KIND)?;
+    let at = cursor.open(committee::KIND, &spec.scope);
+    let mut sink = sink(stele, &spec)?;
+    let mut records = cursor.records();
+    visit_committee(archive, plan.cursor.slot(), |record| {
+        sink.write_record(&committee::encode(&record)?)?;
+        records.tick();
+        Ok(())
+    })?;
+    records.flush();
+    let descriptor = sink.finish()?.descriptor;
+    cursor.close(at, committee::KIND, Outcome::Transferred);
+    Ok(descriptor)
 }
 
 fn sink<W: SteleWriter>(stele: &W, spec: &LayerSpec) -> Result<W::Sink, Error> {

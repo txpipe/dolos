@@ -24,6 +24,7 @@ pub mod pallas_extras;
 pub mod cip151;
 pub mod cip25;
 pub mod cip68;
+pub mod committee;
 pub mod consensus;
 pub mod eras;
 pub mod forks;
@@ -274,6 +275,7 @@ pub struct CardanoLogic {
     /// eras. Set after Genesis or EStart work units are popped, cleared at
     /// next pop_work call.
     needs_cache_refresh: bool,
+    committee_maintenance: committee::Maintenance,
 }
 
 impl CardanoLogic {
@@ -294,6 +296,41 @@ impl dolos_core::ChainLogic for CardanoLogic {
     type Entity = CardanoEntity;
     type WorkUnit<D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta>> =
         CardanoWorkUnit;
+
+    fn archive_maintenance_ready<D: Domain<Chain = Self>>(domain: &D) -> Result<bool, DomainError> {
+        committee::maintenance_ready(domain)
+    }
+
+    fn reconcile_archive_rollback<D: Domain<Chain = Self>>(domain: &D) -> Result<(), DomainError> {
+        committee::reconcile_rollback(domain)
+    }
+
+    fn before_archive_rollback<D: Domain<Chain = Self>>(domain: &D) -> Result<(), DomainError> {
+        committee::before_rollback(domain)
+    }
+
+    fn after_archive_rollback<D: Domain<Chain = Self>>(
+        &mut self,
+        domain: &D,
+    ) -> Result<(), DomainError> {
+        committee::after_rollback(domain)?;
+        self.committee_maintenance = committee::Maintenance::default();
+        Ok(())
+    }
+
+    fn prepare_archive<D: Domain<Chain = Self>>(domain: &D) -> Result<bool, DomainError> {
+        committee::prepare(domain)
+    }
+
+    fn maintain_archive<D: Domain<Chain = Self>>(
+        &mut self,
+        domain: &D,
+    ) -> Result<bool, DomainError> {
+        self.committee_maintenance.run(
+            domain,
+            usize::try_from(D::MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING).unwrap_or(usize::MAX),
+        )
+    }
 
     fn initialize<D: Domain>(
         config: Self::Config,
@@ -379,6 +416,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
             },
             work: Some(work),
             needs_cache_refresh: false,
+            committee_maintenance: committee::Maintenance::default(),
         })
     }
 
