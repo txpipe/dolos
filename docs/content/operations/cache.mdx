@@ -46,10 +46,10 @@ These figures size the `totals` namespace on mainnet. They were measured with do
 | key set       | entries | entry bytes | cache file | `warm` took | memory tier |
 | ------------- | ------- | ----------- | ---------- | ----------- | ----------- |
 | `--scan`      | 191     | 539.0 MB    | 1.14 GB    | 92.8 s      | 539.0 MB    |
-| benchmark set | 7       | 233.7 MB    | 671 MB     | 7.5 s       | 233.7 MB    |
+| benchmark set | 7       | 233.7 MB    | 671 MB     | 8.0 s       | 233.7 MB    |
 
 - **Entry bytes** are what `dolos cache stats` reports and what `disk_budget_bytes` counts. The median entry is 119 KB; the largest, for the busiest credentials, are 47–88 MB.
-- **The cache file** is larger than its entries: Redb rounds each large value up to a power of two and grows the file by doubling. Measured files were 1.6 to 4.6 times their entry bytes, depending on how the entries were committed. Leave room on disk for several times the disk budget. `clear` shrinks the file back.
+- **The cache file** is larger than its entries: Redb rounds each large value up to a power of two and grows the file by doubling. Freshly warmed files measured 1.6 to 4.6 times their entry bytes, depending on how the entries were committed. A running node commits durably only at shutdown, and Redb cannot reuse the pages freed since then, so each entry the node rewrites, such as a `totals` entry refreshed after a seal, can add about another copy to the file until the next restart. Leave room on disk for several times the disk budget, more for a node that runs long between restarts. `clear` frees the space for reuse; the file shrinks only when nothing else sits after the freed pages, as when `totals` is the only namespace on disk.
 - **`warm` took** the wall-clock time on an SSD. For `--scan`, the time `warm` prints leaves out its first pass over the sealed address rows to find the candidates, so it printed 14.6 s of the 92.8 s.
 - **The memory tier** column is the tier's own accounting of the entries it held, keys plus values, which is what `memory_budget_bytes` counts. The tier held the whole benchmark set; the `--scan` figure is its entry bytes, which a node holding all of it would count. The process holds more than the tier, for the response buffers its allocator keeps.
 
