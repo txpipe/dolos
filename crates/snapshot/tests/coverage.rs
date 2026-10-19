@@ -96,8 +96,9 @@ fn every_dimension_resolves_and_nothing_else_does() {
     }
 
     // The UTxO filter dimensions are live-state indexes, rebuilt at restore from
-    // the UTxO set rather than shipped — so they are deliberately not archive
-    // dimensions, and `spent_txo` is the archive one whose name is nearest.
+    // the UTxO set (and ordered by the slots the archive's exact records give)
+    // rather than shipped — so they are deliberately not archive dimensions,
+    // and `spent_txo` is the archive one whose name is nearest.
     for absent in ["utxo::address", "spent-txo", "", "Address"] {
         assert!(indexes::resolve_dimension(absent).is_err(), "{absent:?}");
     }

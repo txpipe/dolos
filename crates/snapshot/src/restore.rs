@@ -20,9 +20,12 @@
 //! 3. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
 //!    `indexes` — all three into the archive store.
 //! 4. The state tip — every shard of every `state-{ns}` kind. Derive the
-//!    live-UTxO tags from each incoming UTxO chunk and commit them with the
-//!    set. They are never shipped — ADR-004's Amendment 2.
-//! 5. Set the cursor as the last write, after all state and tags have landed.
+//!    live-UTxO tags from each incoming UTxO chunk, position each UTxO from the
+//!    archive's exact index — restored in step 3, which is why that step comes
+//!    first — and commit it all with the set. The tags are never shipped —
+//!    ADR-004's Amendment 2.
+//! 5. Set the cursor as the last write, after all state and tags have landed,
+//!    and the positioned mark beside it.
 //!
 //! Nothing is added for the WAL: `bootstrap::run` already reseeds it from the
 //! state cursor after any bootstrap method.
@@ -134,10 +137,10 @@ use std::{
     sync::Arc,
 };
 
-use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
+use dolos_cardano::indexes::utxo_index_delta_with_slots;
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, IndexRecord, Namespace, StateStore,
-    StateWriter, UtxoSetDelta,
+    archive::position_utxos, ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, IndexRecord,
+    Namespace, StateStore, StateWriter, UtxoSetDelta,
 };
 use stelae::{
     frame::Limits,
@@ -1018,7 +1021,7 @@ where
             let kind = descriptor.kind.as_str();
             let at = cursor.open(kind, &descriptor.scope);
 
-            let (entities, utxos) = restore_state(&reader, descriptor, state, ns)?;
+            let (entities, utxos) = restore_state(&reader, descriptor, archive, state, ns)?;
 
             cursor.close(at, kind, Outcome::Transferred);
 
@@ -1030,8 +1033,12 @@ where
 
     // The last write of the restore, the live-utxo dimensions above included:
     // until this commit lands `has_existing_data()` reports an empty node
-    // rather than a half-restored one.
+    // rather than a half-restored one. The positioned mark goes in the same
+    // commit: every UTxO the archive could place is placed by now, and a
+    // mark that landed earlier would have claimed so of a set still half
+    // written.
     let writer = state.start_writer()?;
+    writer.mark_utxos_positioned()?;
     writer.set_cursor(plan.position.point.clone())?;
     writer.commit()?;
 
@@ -1405,12 +1412,19 @@ fn restore_indexes<R: SteleReader, A: ArchiveStore>(
 /// `state-utxos` kind goes through `apply_utxoset` and `apply_utxo_tags` in the
 /// same chunked writer, and every other kind through `write_entity`.
 ///
+/// The UTxO chunks are positioned from `archive`: the exact index the epoch
+/// layers restored before this answers the producing slot of every UTxO
+/// whose epoch the plan kept, and a UTxO from an epoch it dropped stays
+/// unpositioned — below the oldest block held, where the routes that page by
+/// chain position never look. No block body is read for it.
+///
 /// Returns the entities and the UTxOs it wrote, separately, because they are
 /// the two halves the cross-check compares and a layer that restored one and
 /// silently dropped the other would still add up.
-fn restore_state<R: SteleReader, S: StateStore>(
+fn restore_state<R: SteleReader, A: ArchiveStore, S: StateStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
+    archive: &A,
     state: &S,
     ns: Namespace,
 ) -> Result<(u64, u64), Error> {
@@ -1429,8 +1443,10 @@ fn restore_state<R: SteleReader, S: StateStore>(
                 produced.produced_utxo.insert(txo, Arc::new(value));
             }
 
+            let slots = position_utxos(archive, produced.produced_utxo.keys())?;
+
             writer.apply_utxoset(&produced)?;
-            writer.apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&produced))?;
+            writer.apply_utxo_tags(&utxo_index_delta_with_slots(&produced, &slots))?;
             writer.commit()?;
 
             Ok(())

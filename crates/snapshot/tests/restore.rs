@@ -47,8 +47,8 @@ use dolos_cardano::{
     AccountKey, AccountStats, AddressKey, AddressStats,
 };
 use dolos_core::{
-    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, StateStore,
-    StateWriter as _, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, SlotOrder,
+    SlotScan, StateStore, StateWriter as _, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
 };
 use dolos_snapshot::{
     is_state_kind,
@@ -1144,16 +1144,33 @@ fn assert_indexes_match<A: ArchiveStore>(restored: &A, original: &A) {
 /// This is the point. `utxo::*` tags are never shipped — ADR-004's Amendment
 /// 2 — so they exist in a restored node only because the restore rebuilt
 /// them, and only a query proves it did.
+///
+/// The positions are not shipped either: the restore recovers them from the
+/// `indexes` layers it restored first, so the restored node orders every tag
+/// as the original does, carries the same slot beside every UTxO, and
+/// reports itself positioned.
 fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
     // Every dimension the ledger tagged the restored UTxO set under, asked of
     // both stores.
+    let utxos = utxos_of(original);
+    let refs: Vec<TxoRef> = utxos.keys().cloned().collect();
+
     let delta = UtxoSetDelta {
-        produced_utxo: utxos_of(original)
+        produced_utxo: utxos
             .into_iter()
             .map(|(txo, value)| (txo, std::sync::Arc::new(value)))
             .collect(),
         ..Default::default()
     };
+
+    let left = restored.get_utxo_slots(refs.clone()).unwrap();
+    let right = original.get_utxo_slots(refs).unwrap();
+    assert!(!right.is_empty(), "the fixture positioned no utxo");
+    assert_eq!(left, right, "the producing slots of the live utxos");
+    assert!(
+        restored.utxos_positioned().unwrap(),
+        "the restored node does not report itself positioned"
+    );
 
     let rebuilt = utxo_index_delta_from_utxo_delta(&delta);
     let mut asked = 0usize;
@@ -1169,6 +1186,20 @@ fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
                 tag.dimension
             );
             assert_eq!(left, right, "utxos under {}", tag.dimension);
+
+            let scan = SlotScan {
+                slots: 0..=u64::MAX,
+                order: SlotOrder::Asc,
+                after: None,
+                limit: usize::MAX,
+            };
+            let left = restored
+                .utxos_by_tag_in_slots(tag.dimension, &tag.key, &scan)
+                .unwrap();
+            let right = original
+                .utxos_by_tag_in_slots(tag.dimension, &tag.key, &scan)
+                .unwrap();
+            assert_eq!(left, right, "utxos in slot order under {}", tag.dimension);
 
             asked += 1;
         }
