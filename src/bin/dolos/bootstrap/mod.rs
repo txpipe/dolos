@@ -56,11 +56,25 @@ impl Command {
         match cmd.index {
             0 => Ok(Command::Snapshot(snapshot::Args::inquire()?)),
             1 => Ok(Command::Stelae(stelae::Args::inquire()?)),
-            2 => Ok(Command::Mithril(mithril::Args::default())),
+            2 => Ok(Command::Mithril(from_environment()?)),
             3 => Ok(Command::Relay(relay::Args::default())),
             _ => unreachable!(),
         }
     }
+}
+
+/// A subcommand's arguments as an invocation naming none parses them, so
+/// that the prompted path still reads the environment inputs.
+fn from_environment<T: clap::Args>() -> miette::Result<T> {
+    #[derive(Parser)]
+    struct Environment<T: clap::Args> {
+        #[command(flatten)]
+        args: T,
+    }
+
+    Environment::<T>::try_parse_from(["dolos"])
+        .map(|parsed| parsed.args)
+        .into_diagnostic()
 }
 
 #[derive(Debug, Parser, Default)]
@@ -101,6 +115,18 @@ fn inspect_existing_data(config: &RootConfig, args: &Args) -> miette::Result<Exi
     };
 
     dolos::storage::inspect_existing_data(config, policy).into_diagnostic()
+}
+
+/// Resolves what a command defaults from the network, so that a custom
+/// network missing an input is refused before any data is cleared.
+fn check_inputs(config: &RootConfig, command: &Command) -> miette::Result<()> {
+    let network = dolos_cardano::networks::KnownNetwork::by_magic(config.chain.magic());
+
+    match command {
+        Command::Mithril(args) => mithril::mithril_source(args, network).map(drop),
+        Command::Stelae(args) => stelae::source(args, network).map(drop),
+        Command::Relay(_) | Command::Snapshot(_) => Ok(()),
+    }
 }
 
 fn dispatch(
@@ -165,6 +191,8 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         Some(x) => x,
         None => Command::inquire()?,
     };
+
+    check_inputs(config, &command)?;
 
     // The first destructive step, and deliberately the last one before the run:
     // everything that could still refuse — the flags, the prompts, the source a

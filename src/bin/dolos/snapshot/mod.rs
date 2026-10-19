@@ -16,6 +16,8 @@
 //! one restriction, one reading of the plan they produce:
 //! [`dolos_snapshot::planning`].
 
+use std::path::Path;
+
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
@@ -59,6 +61,37 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     }
 }
 
+/// The publisher's retained state-dump epochs, from `--state-epochs` or
+/// `--state-epochs-file`.
+///
+/// Nothing is defaulted: naming neither is the empty list, a publisher that
+/// retains the tip alone, which [`report_plan`] prints so that a mismatch
+/// against a published stele is explained.
+pub fn state_epochs(listed: &[u64], file: Option<&Path>) -> miette::Result<Vec<u64>> {
+    let Some(path) = file else {
+        return Ok(listed.to_vec());
+    };
+
+    let text = std::fs::read_to_string(path)
+        .into_diagnostic()
+        .with_context(|| format!("reading the state epochs in {}", path.display()))?;
+
+    parse_state_epochs(&text)
+        .with_context(|| format!("reading the state epochs in {}", path.display()))
+}
+
+/// Epoch numbers separated by commas or whitespace, newlines included.
+fn parse_state_epochs(text: &str) -> miette::Result<Vec<u64>> {
+    text.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            entry
+                .parse()
+                .map_err(|_| miette::miette!("{entry:?} is not an epoch number"))
+        })
+        .collect()
+}
+
 /// This node's plan, narrowed by the operator's selection.
 ///
 /// One sequence for `digest` and `verify --reproduce`, because a node that gave
@@ -68,13 +101,14 @@ pub fn planned(
     config: &RootConfig,
     stores: &crate::common::Stores,
     selection: &Selection,
+    state_epochs: &[u64],
     what: &'static str,
 ) -> miette::Result<Plan> {
     let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
-    let retained = planning::retained_epochs(config)
+    let retained = planning::retained_epochs(state_epochs)
         .into_diagnostic()
-        .context("reading snapshot.state_epochs")?;
+        .context("reading the state epochs")?;
 
     StoreSnapshot::new(&stores.archive, &stores.state)
         .selected_plan(u64::from(genesis.network_magic()), retained, *selection)
@@ -120,4 +154,25 @@ pub fn report_plan(plan: &Plan) -> miette::Result<()> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_state_epochs_file_lists_epochs_by_comma_or_line() {
+        assert_eq!(
+            parse_state_epochs("208, 236\n290\n\n365\n").unwrap(),
+            vec![208, 236, 290, 365]
+        );
+        assert_eq!(parse_state_epochs("").unwrap(), Vec::<u64>::new());
+        assert!(parse_state_epochs("208, epoch-236").is_err());
+    }
+
+    #[test]
+    fn the_listed_epochs_stand_without_a_file() {
+        assert_eq!(state_epochs(&[208, 236], None).unwrap(), vec![208, 236]);
+        assert_eq!(state_epochs(&[], None).unwrap(), Vec::<u64>::new());
+    }
 }

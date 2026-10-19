@@ -6,6 +6,8 @@ use inquire::list_option::ListOption;
 use miette::{Context, IntoDiagnostic};
 use tar::Archive;
 
+use dolos::storage::CURRENT_STORAGE_VERSION;
+
 use super::ranged;
 use crate::feedback::{Feedback, ProgressReader};
 
@@ -22,6 +24,12 @@ pub struct Args {
     /// Path to a local snapshot tar.gz file to import instead of downloading.
     #[arg(long)]
     pub file: Option<PathBuf>,
+
+    /// URL template to download from; `${VERSION}`, `${NETWORK}`,
+    /// `${VARIANT}` and `${POINT}` are substituted. Defaults to the official
+    /// snapshot host
+    #[arg(long, value_name = "TEMPLATE")]
+    pub download_url: Option<String>,
 }
 
 impl Args {
@@ -46,6 +54,7 @@ impl Args {
             variant,
             point: "latest".to_string(),
             file: None,
+            download_url: None,
         })
     }
 }
@@ -58,21 +67,19 @@ fn define_snapshot_url(config: &RootConfig, args: &Args) -> Option<String> {
         return None;
     }
 
-    let magic = config.chain.magic();
+    Some(snapshot_url(args, config.chain.magic()))
+}
 
-    let download_url_template = config
-        .snapshot
-        .as_ref()
-        .and_then(|x| x.download_url.to_owned())
-        .unwrap_or(DEFAULT_URL_TEMPLATE.to_owned());
-
-    let snapshot_url = download_url_template
-        .replace("${VERSION}", &config.storage.version.to_string())
+/// `${VERSION}` is the storage version this binary writes: a snapshot is
+/// only usable by a binary that reads its layout.
+fn snapshot_url(args: &Args, magic: u64) -> String {
+    args.download_url
+        .as_deref()
+        .unwrap_or(DEFAULT_URL_TEMPLATE)
+        .replace("${VERSION}", &CURRENT_STORAGE_VERSION.to_string())
         .replace("${NETWORK}", &magic.to_string())
         .replace("${POINT}", &args.point)
-        .replace("${VARIANT}", &args.variant);
-
-    Some(snapshot_url)
+        .replace("${VARIANT}", &args.variant)
 }
 
 fn import_local_snapshot(config: &RootConfig, path: &PathBuf) -> miette::Result<()> {
@@ -116,7 +123,7 @@ fn fetch_snapshot(config: &RootConfig, args: &Args, feedback: &Feedback) -> miet
         fetch_snapshot_ranged(root, &client, snapshot_url, probe.total_size, feedback)
     } else {
         // Fall back to a single streamed response for endpoints that don't
-        // advertise range support (e.g. a custom download_url behind a proxy
+        // advertise range support (e.g. a custom --download-url behind a proxy
         // that strips Accept-Ranges).
         fetch_snapshot_streaming(root, snapshot_url, feedback)
     }
@@ -223,4 +230,39 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(download_url: Option<&str>) -> Args {
+        Args {
+            variant: "full".to_owned(),
+            point: "latest".to_owned(),
+            file: None,
+            download_url: download_url.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn the_default_template_names_this_binarys_storage_version() {
+        assert_eq!(
+            snapshot_url(&args(None), 2),
+            format!("https://dolos-snapshots.txpipe.cloud/{CURRENT_STORAGE_VERSION}/2/full/latest.tar.gz")
+        );
+    }
+
+    #[test]
+    fn an_explicit_template_wins() {
+        assert_eq!(
+            snapshot_url(
+                &args(Some(
+                    "https://mirror.example/${VERSION}/${NETWORK}-${VARIANT}-${POINT}.tgz"
+                )),
+                1,
+            ),
+            format!("https://mirror.example/{CURRENT_STORAGE_VERSION}/1-full-latest.tgz")
+        );
+    }
 }

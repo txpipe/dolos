@@ -12,7 +12,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use dolos_core::config::MithrilConfig;
 use mithril_client::cardano_database_client::{DownloadUnpackOptions, ImmutableFileRange};
 use mithril_client::feedback::FeedbackReceiver;
 use mithril_client::{
@@ -21,6 +20,15 @@ use mithril_client::{
 use tracing::{info, warn};
 
 pub use mithril_client;
+
+/// The aggregator a fetch trusts, and the key its certificate chain is
+/// verified against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MithrilSource {
+    pub aggregator: String,
+    /// The aggregator's genesis verification key, JSON-hex encoded.
+    pub genesis_vkey: String,
+}
 
 /// One download round, freed of the CLI that spelled it.
 pub struct Fetch<'a> {
@@ -111,10 +119,10 @@ fn plan_download(fetch: &Fetch<'_>, immutable_dir: &Path, last_immutable: u64) -
 
 /// One aggregator client configuration, shared by the fetch and the beacon
 /// query so the two cannot drift apart on discovery or key handling.
-fn client_builder(config: &MithrilConfig) -> ClientBuilder {
-    ClientBuilder::new(AggregatorDiscoveryType::Url(config.aggregator.clone()))
+fn client_builder(source: &MithrilSource) -> ClientBuilder {
+    ClientBuilder::new(AggregatorDiscoveryType::Url(source.aggregator.clone()))
         .set_genesis_verification_key(mithril_client::GenesisVerificationKey::JsonHex(
-            config.genesis_key.clone(),
+            source.genesis_vkey.clone(),
         ))
 }
 
@@ -122,8 +130,8 @@ fn client_builder(config: &MithrilConfig) -> ClientBuilder {
 ///
 /// What an embedding backfill host sizes its next download window against, and
 /// how it knows the aggregator has nothing past the files already on disk.
-pub async fn latest_immutable_file(config: &MithrilConfig) -> MithrilResult<u64> {
-    let client = client_builder(config).build()?;
+pub async fn latest_immutable_file(source: &MithrilSource) -> MithrilResult<u64> {
+    let client = client_builder(source).build()?;
 
     let snapshots = client.cardano_database_v2().list().await?;
 
@@ -138,10 +146,10 @@ pub async fn latest_immutable_file(config: &MithrilConfig) -> MithrilResult<u64>
 /// `fetch` names.
 pub async fn fetch_snapshot(
     fetch: &Fetch<'_>,
-    config: &MithrilConfig,
+    source: &MithrilSource,
     feedback: Option<Arc<dyn FeedbackReceiver>>,
 ) -> MithrilResult<()> {
-    let mut builder = client_builder(config);
+    let mut builder = client_builder(source);
 
     if let Some(feedback) = feedback {
         builder = builder.add_feedback_receiver(feedback);

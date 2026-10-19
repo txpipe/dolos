@@ -1616,7 +1616,6 @@ dependencies = [
 name = "dolos-mithril"
 version = "2.0.0-alpha.0"
 dependencies = [
- "dolos-core",
  "mithril-client",
  "rustls",
  "tempfile",

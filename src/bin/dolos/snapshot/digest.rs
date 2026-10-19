@@ -87,9 +87,22 @@ pub struct Args {
     /// write the canonical inscription to FILE instead of to stdout
     #[arg(long, value_name = "FILE")]
     output: Option<PathBuf>,
+
+    /// the publisher's retained state-dump epochs, e.g. `208,236,290`; they
+    /// are signed parameters, so they must match what the stele being
+    /// reproduced was published with. Omitted, the stele retains the tip alone
+    #[arg(long, value_name = "EPOCHS", value_delimiter = ',')]
+    state_epochs: Vec<u64>,
+
+    /// read the retained state-dump epochs from FILE, separated by commas or
+    /// newlines, in place of --state-epochs
+    #[arg(long, value_name = "FILE", conflicts_with = "state_epochs")]
+    state_epochs_file: Option<PathBuf>,
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    let state_epochs = super::state_epochs(&args.state_epochs, args.state_epochs_file.as_deref())?;
+
     let stores = crate::common::open_data_stores(config)
         .into_diagnostic()
         .context("opening the data stores")?;
@@ -100,7 +113,13 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         producers: args.producers,
     };
 
-    let plan = super::planned(config, &stores, &selection, "planning the reproduction")?;
+    let plan = super::planned(
+        config,
+        &stores,
+        &selection,
+        &state_epochs,
+        "planning the reproduction",
+    )?;
     let snapshot = StoreSnapshot::new(&stores.archive, &stores.state);
 
     super::report_plan(&plan)?;

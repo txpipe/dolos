@@ -12,6 +12,7 @@ mod daemon;
 mod doctor;
 mod eval;
 mod feedback;
+mod registry;
 mod serve;
 mod snapshot;
 mod sync;

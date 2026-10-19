@@ -20,6 +20,7 @@
 //! column that reads as "none".
 
 use clap::Parser;
+use dolos_cardano::networks::KnownNetwork;
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
     facade::SnapshotRepository,
@@ -27,6 +28,8 @@ use dolos_snapshot::{
     registry::{self, Point, Repository},
 };
 use miette::{Context as _, IntoDiagnostic as _};
+
+use crate::registry::CredentialArgs;
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -52,10 +55,14 @@ pub struct Args {
     /// signatures arrive with phase 5
     #[arg(long, action)]
     json: bool,
+
+    #[command(flatten)]
+    credentials: CredentialArgs,
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    let auth = node::registry_auth(&config.stelae).into_diagnostic()?;
+    let network = KnownNetwork::by_magic(config.chain.magic());
+    let auth = args.credentials.auth(&args.repo, network)?;
 
     // An inspection reads two small blobs into memory, so nothing is staged
     // and this directory is never created here.

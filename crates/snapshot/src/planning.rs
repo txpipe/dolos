@@ -7,7 +7,7 @@
 //! matches. So the parse, the modifiers and the arithmetic a command reports
 //! live here, once, and a command spells none of them again.
 
-use dolos_core::{config::RootConfig, BlockSlot};
+use dolos_core::BlockSlot;
 
 use crate::{
     export::{IndexBand, Plan, Producers},
@@ -100,16 +100,9 @@ impl std::str::FromStr for EpochRange {
 /// `publish`, `digest` and `verify --reproduce` all put this list in
 /// `parameters`, and a node that gave them different lists would be verifying
 /// a different document than the one it published — and being told it does not
-/// match. An absent `[snapshot]` section means an empty list, which is a
-/// publisher that retains the tip alone.
-pub fn retained_epochs(config: &RootConfig) -> Result<RetainedEpochs, Error> {
-    let configured = config
-        .snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.state_epochs.clone())
-        .unwrap_or_default();
-
-    RetainedEpochs::new(configured)
+/// match. An empty list is a publisher that retains the tip alone.
+pub fn retained_epochs(epochs: &[u64]) -> Result<RetainedEpochs, Error> {
+    RetainedEpochs::new(epochs.to_vec())
 }
 
 /// Apply an operator's selection to a plan, or leave it whole.
@@ -254,6 +247,21 @@ mod tests {
     fn a_nonsensical_range_is_refused() {
         for raw in ["520..500", "..0", "abc", "", "500..abc", "500..=", "-1"] {
             assert!(raw.parse::<EpochRange>().is_err(), "{raw:?}");
+        }
+    }
+    /// The list a publisher passes is the list validated, unchanged — what
+    /// the configured `state_epochs` gave before it moved to the invocation.
+    #[test]
+    fn an_explicit_list_is_validated_as_given() {
+        for list in [&[][..], &[208], &[208, 236, 290, 365]] {
+            assert_eq!(retained_epochs(list).unwrap().as_slice(), list);
+        }
+
+        for list in [&[0u64][..], &[208, 208], &[236, 208]] {
+            assert!(
+                matches!(retained_epochs(list), Err(Error::RetainedEpochs(_))),
+                "{list:?}"
+            );
         }
     }
 }

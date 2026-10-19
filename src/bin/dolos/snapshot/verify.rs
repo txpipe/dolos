@@ -31,7 +31,10 @@
 //! Non-zero on any mismatch, with the offending layer named. A determinism job
 //! is this command and nothing else.
 
+use std::path::PathBuf;
+
 use clap::Parser;
+use dolos_cardano::networks::KnownNetwork;
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
     facade::{SnapshotRepository, SnapshotSource as _, StoreSnapshot},
@@ -41,6 +44,7 @@ use dolos_snapshot::{
 use miette::{Context as _, IntoDiagnostic as _};
 
 use super::EpochRange;
+use crate::registry::CredentialArgs;
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -86,10 +90,40 @@ pub struct Args {
     /// the stele was published with
     #[arg(long, value_name = "RANGE", requires = "reproduce")]
     epochs: Option<EpochRange>,
+
+    /// the publisher's retained state-dump epochs the reproduction plans
+    /// with, e.g. `208,236,290`; they are signed parameters, so they must
+    /// match what the stele was published with. Omitted, the reproduction
+    /// retains the tip alone
+    #[arg(
+        long,
+        value_name = "EPOCHS",
+        value_delimiter = ',',
+        requires = "reproduce"
+    )]
+    state_epochs: Vec<u64>,
+
+    /// read the retained state-dump epochs from FILE, separated by commas or
+    /// newlines, in place of --state-epochs
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "reproduce",
+        conflicts_with = "state_epochs"
+    )]
+    state_epochs_file: Option<PathBuf>,
+
+    #[command(flatten)]
+    credentials: CredentialArgs,
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    let auth = node::registry_auth(&config.stelae).into_diagnostic()?;
+    // Read before the transport check, so that a bad list is refused before
+    // every blob has been streamed.
+    let state_epochs = super::state_epochs(&args.state_epochs, args.state_epochs_file.as_deref())?;
+
+    let network = KnownNetwork::by_magic(config.chain.magic());
+    let auth = args.credentials.auth(&args.repo, network)?;
 
     // A verification streams every blob through a staged file. No
     // `--scratch-dir` of its own: it reads what is already published rather
@@ -149,7 +183,13 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         producers: args.producers,
     };
 
-    let plan = super::planned(config, &stores, &selection, "planning the reproduction")?;
+    let plan = super::planned(
+        config,
+        &stores,
+        &selection,
+        &state_epochs,
+        "planning the reproduction",
+    )?;
 
     super::report_plan(&plan)?;
 

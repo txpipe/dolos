@@ -41,6 +41,47 @@ pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
     storage::open_data_stores(config)
 }
 
+/// Sections an older configuration carried that are now inputs of the
+/// commands that read them, and where each one went.
+const MOVED_TO_ARGUMENTS: [(&str, &str); 3] = [
+    (
+        "mithril",
+        "`dolos bootstrap mithril --aggregator --genesis-vkey`",
+    ),
+    (
+        "snapshot",
+        "`dolos bootstrap snapshot --download-url` and `dolos snapshot … --state-epochs`",
+    ),
+    (
+        "stelae",
+        "the `--registry-user` / `DOLOS_STELAE_*` inputs of `dolos bootstrap stelae` and \
+         `dolos snapshot`",
+    ),
+];
+
+/// Refuses a file that still carries a moved section.
+///
+/// The loader ignores unknown keys, so without this a moved section would be
+/// read as nothing and its values silently dropped. Checked on the files
+/// alone: the environment layer would otherwise report the very
+/// `DOLOS_MITHRIL_*` and `DOLOS_STELAE_*` variables the commands now read.
+fn reject_moved_sections(files: &::config::Config) -> Result<(), ::config::ConfigError> {
+    let moved: Vec<String> = MOVED_TO_ARGUMENTS
+        .iter()
+        .filter(|(section, _)| files.get::<::config::Value>(section).is_ok())
+        .map(|(section, destination)| format!("[{section}] moved to {destination}"))
+        .collect();
+
+    if moved.is_empty() {
+        return Ok(());
+    }
+
+    Err(::config::ConfigError::Message(format!(
+        "the configuration carries sections that are now command arguments; remove them: {}",
+        moved.join("; ")
+    )))
+}
+
 pub fn load_config(
     explicit_file: &Option<std::path::PathBuf>,
 ) -> Result<RootConfig, ::config::ConfigError> {
@@ -56,6 +97,8 @@ pub fn load_config(
     if let Some(explicit) = explicit_file.as_ref().and_then(|x| x.to_str()) {
         s = s.add_source(::config::File::with_name(explicit).required(true));
     }
+
+    reject_moved_sections(&s.clone().build()?)?;
 
     // finally, we use env vars to make some last-step overrides
     s = s.add_source(::config::Environment::with_prefix("DOLOS").separator("_"));
@@ -350,79 +393,130 @@ pub async fn monitor_drivers(
     first_failure.map_or(Ok(()), Err)
 }
 
+/// Serializes the tests that set process environment variables.
+#[cfg(test)]
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
-    use dolos_core::config::StelaeConfig;
-    use dolos_snapshot::{node::registry_auth, registry::Auth};
     use futures_util::stream::FuturesUnordered;
     use std::io;
     use tokio::task::JoinHandle;
 
     use super::*;
 
-    /// The environment reaches `[stelae.registry]` by the same route as every
-    /// other setting, and *this* is the assertion that says so.
-    ///
-    /// It stays here, beside [`load_config`], while the credential policy it
-    /// feeds is [`dolos_snapshot::node::registry_auth`]'s: what is being pinned
-    /// is this binary's configuration sources, not what the profile crate makes
-    /// of them. It is the whole of Dolos's registry-credential environment
-    /// story — a publisher exports `DOLOS_STELAE_REGISTRY_USER` and
-    /// `DOLOS_STELAE_REGISTRY_PASSWORD` and nothing in this binary reads them —
-    /// so it is worth pinning rather than trusting. The source is built exactly
-    /// as [`load_config`] builds it; only the file layers are left off, because
-    /// those would make the test depend on the working directory.
-    ///
-    /// What would break it is a rename of either field or a change to the
-    /// prefix or separator, and all three are silent failures at run time: the
-    /// override would simply stop applying, and a publisher would authenticate
-    /// as the read-only user.
+    fn files(document: &str) -> ::config::Config {
+        ::config::Config::builder()
+            .add_source(::config::File::from_str(
+                document,
+                ::config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+    }
+
     #[test]
-    fn the_dolos_environment_prefix_reaches_the_registry_section() {
-        #[derive(serde::Deserialize)]
-        struct Root {
-            stelae: StelaeConfig,
+    fn a_moved_section_is_reported_with_where_it_went() {
+        for (document, section, flag) in [
+            (
+                "[mithril]\naggregator = \"x\"\n",
+                "[mithril]",
+                "--aggregator",
+            ),
+            (
+                "[snapshot]\nstate_epochs = [208]\n",
+                "[snapshot]",
+                "--state-epochs",
+            ),
+            (
+                "[stelae.registry]\nuser = \"stelae\"\n",
+                "[stelae]",
+                "DOLOS_STELAE_",
+            ),
+        ] {
+            let message = reject_moved_sections(&files(document))
+                .unwrap_err()
+                .to_string();
+
+            assert!(message.contains(section), "{message}");
+            assert!(message.contains(flag), "{message}");
         }
 
-        // Process-wide, so this test owns these three names for its duration.
-        // Nothing else in this binary reads them.
-        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        reject_moved_sections(&files("[upstream]\npeer_address = \"x:1\"\n")).unwrap();
+    }
+
+    const MINIMAL: &str = r#"
+[upstream]
+peer_address = "x:1"
+
+[storage]
+version = "v4"
+path = "data"
+
+[genesis]
+byron_path = "byron.json"
+shelley_path = "shelley.json"
+alonzo_path = "alonzo.json"
+conway_path = "conway.json"
+
+[chain]
+type = "cardano"
+magic = 2
+is_testnet = true
+"#;
+
+    fn load(document: &str) -> Result<RootConfig, ::config::ConfigError> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dolos.toml");
+        std::fs::write(&path, document).unwrap();
+
+        load_config(&Some(path))
+    }
+
+    #[test]
+    fn the_loader_refuses_a_file_with_a_moved_section() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        load(MINIMAL).unwrap();
+
+        let message = load(&format!(
+            "{MINIMAL}\n[stelae.registry]\nuser = \"stelae\"\n"
+        ))
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(message.contains("[stelae] moved to"), "{message}");
+    }
+
+    /// The variables the bootstrap commands read reach the loader too, through
+    /// its `DOLOS_` environment layer; they must not read as a moved section.
+    #[test]
+    fn the_bootstrap_variables_are_not_a_moved_section() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let names = [
-            "DOLOS_STELAE_REGISTRY_USER",
-            "DOLOS_STELAE_REGISTRY_PASSWORD",
-            "DOLOS_STELAE_REGISTRY_TOKEN",
+            "DOLOS_MITHRIL_AGGREGATOR",
+            "DOLOS_MITHRIL_GENESIS_VKEY",
+            "DOLOS_STELAE_USER",
+            "DOLOS_STELAE_PASSWORD",
+            "DOLOS_STELAE_TOKEN",
         ];
 
-        let previous: Vec<Option<String>> = names.iter().map(|n| std::env::var(n).ok()).collect();
-
-        std::env::set_var("DOLOS_STELAE_REGISTRY_USER", "publisher");
-        std::env::set_var("DOLOS_STELAE_REGISTRY_PASSWORD", "full-access");
-        std::env::remove_var("DOLOS_STELAE_REGISTRY_TOKEN");
-
-        let built: Root = ::config::Config::builder()
-            .add_source(::config::Environment::with_prefix("DOLOS").separator("_"))
-            .build()
-            .expect("the environment source builds")
-            .try_deserialize()
-            .expect("DOLOS_STELAE_REGISTRY_* deserializes into [stelae.registry]");
-
-        for (name, value) in names.iter().zip(previous) {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
+        for name in names {
+            std::env::set_var(name, "set");
         }
 
-        assert_eq!(
-            registry_auth(&built.stelae).unwrap(),
-            Auth::Basic {
-                user: "publisher".to_owned(),
-                password: "full-access".to_owned(),
-            },
-            "the DOLOS_ prefix no longer reaches [stelae.registry]",
-        );
+        let loaded = load(MINIMAL);
+
+        for name in names {
+            std::env::remove_var(name);
+        }
+
+        loaded.unwrap();
     }
 
     #[tokio::test]
