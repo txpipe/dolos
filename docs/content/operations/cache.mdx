@@ -36,6 +36,25 @@ When a tier is full, it evicts the entries with the lowest build cost per byte f
 
 An entry is kept only if building it cost at least its namespace's admission threshold, so cheap answers do not crowd out expensive ones. A `totals` entry's cost is the number of per-epoch unit sums its build read, and it is kept from 100,000. Set `[storage.cache.admission]` to change a threshold, for example `totals = 20000` to keep more credentials. See the [`storage.cache`](../configuration/schema#storagecache-section) section for every setting.
 
+## Footprint
+
+These figures size the `totals` namespace on mainnet. They were measured with dolos `2.0.0-alpha.0` (commit `ec44940f`) on a store whose sealed epochs ran to 646, so every entry's watermark is epoch 646. Two key sets were measured:
+
+- **Every key worth warming**: `dolos cache warm --namespace totals --scan`. It found 2,251 candidate credentials and kept 191; the other 2,060 cost less than the admission threshold.
+- **A benchmark set** of 8 heavy and light addresses, payment credentials and stake addresses, warmed with `--keys`, of which 7 were kept.
+
+| key set       | entries | entry bytes | cache file | `warm` took | memory tier |
+| ------------- | ------- | ----------- | ---------- | ----------- | ----------- |
+| `--scan`      | 191     | 539.0 MB    | 1.14 GB    | 92.8 s      | 539.0 MB    |
+| benchmark set | 7       | 233.7 MB    | 671 MB     | 7.5 s       | 233.7 MB    |
+
+- **Entry bytes** are what `dolos cache stats` reports and what `disk_budget_bytes` counts. The median entry is 119 KB; the largest, for the busiest credentials, are 47–88 MB.
+- **The cache file** is larger than its entries: Redb rounds each large value up to a power of two and grows the file by doubling. Measured files were 1.6 to 4.6 times their entry bytes, depending on how the entries were committed. Leave room on disk for several times the disk budget. `clear` shrinks the file back.
+- **`warm` took** the wall-clock time on an SSD. For `--scan`, the time `warm` prints leaves out its first pass over the sealed address rows to find the candidates, so it printed 14.6 s of the 92.8 s.
+- **The memory tier** column is the tier's own accounting of the entries it held, keys plus values, which is what `memory_budget_bytes` counts. The tier held the whole benchmark set; the `--scan` figure is its entry bytes, which a node holding all of it would count. The process holds more than the tier, for the response buffers its allocator keeps.
+
+All of `--scan` fits the 4 GiB default disk budget, and the benchmark set fits the 512 MiB default memory budget. All of `--scan` does not fit the memory budget: it exceeds 512 MiB (536,870,912 bytes) by 2.1 MB. Under the default, a node whose clients read every kept key serves its lowest cost-per-byte entries from the disk tier. To keep the whole namespace in memory, raise `storage.cache.memory_budget_bytes` above 539 MB; the namespace grows with the chain, so leave headroom.
+
 ## Commands
 
 The `dolos cache` commands work on the cache file directly, so they run with the node stopped. While a running node, or another `dolos` command, holds the cache file, they exit with an error asking you to stop it first. They print the cache's warnings, such as a cache file found corrupt and recreated empty, on stderr.
