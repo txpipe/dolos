@@ -202,8 +202,8 @@ impl StakeSnapshot {
     /// (one range per `StakeCredential` variant), populating
     /// `accounts_by_pool` (delegators in range) and `registered_accounts`
     /// (registered credentials in range). `pool_stake` /
-    /// `active_stake_sum` are NOT touched here — those came from
-    /// `load_globals`, which already saw every account.
+    /// `active_stake_sum` are NOT touched here — `load_globals` read them
+    /// from the tallies ESTART froze over every account.
     pub fn merge_shard<D: Domain>(
         &mut self,
         state: &D::State,
