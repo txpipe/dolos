@@ -541,7 +541,7 @@ fn scheduled_pool_changes_wait_for_the_next_distribution() {
         .pool
         .replace(PoolDelegation::Pool(pool_hash(EMPTY)), epoch);
 
-    // ... and what its `PoolDelegatorRetire` does to the pool's delegator
+    // what EWRAP's `PoolDelegatorRetire` does to the retiring pool's delegator
     delegator
         .pool
         .schedule(epoch, Some(PoolDelegation::NotDelegated));
