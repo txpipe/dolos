@@ -230,8 +230,8 @@ impl RupdWorkUnit {
     ///
     /// Every field comes from data that `initialize()` rebuilds or that the
     /// shards persisted, never from an in-memory tally spanning shards:
-    /// `total_stake` / `delegators_count` from the globals pass of the stake
-    /// snapshot, and the reward figures from the stored
+    /// `total_stake` / `delegators_count` / `live_pledge` from the pool
+    /// totals ESTART froze, and the reward figures from the stored
     /// `PendingRewardState` entities. A RUPD resumed mid-pipeline therefore
     /// reports the whole epoch rather than only the shards that ran after the
     /// resume cursor.
@@ -278,7 +278,7 @@ impl RupdWorkUnit {
                 blocks_minted,
                 total_stake: pool_stake,
                 relative_size,
-                live_pledge: 0,
+                live_pledge: snapshot.get_pool_live_pledge(pool_hash),
                 declared_pledge,
                 delegators_count: snapshot.get_pool_delegator_count(pool_hash),
                 total_rewards,
@@ -582,6 +582,9 @@ mod tests {
             blocks_minted,
             params: pool_params(pledge, cost),
             is_new: false,
+            stake: None,
+            delegators: None,
+            live_pledge: None,
         };
 
         crate::EpochValue::from_parts(
@@ -643,6 +646,7 @@ mod tests {
         snapshot.pools.insert(pool, pool_snapshot(100, 20, 3));
         snapshot.pool_stake.insert(pool, 1_000);
         snapshot.pool_delegator_counts.insert(pool, 2);
+        snapshot.pool_live_pledges.insert(pool, 400);
         snapshot.active_stake_sum = 1_000;
         assert_eq!(snapshot.iter_accounts().count(), 0);
 
@@ -662,6 +666,7 @@ mod tests {
 
         assert_eq!(log.total_stake, 1_000);
         assert_eq!(log.delegators_count, 2);
+        assert_eq!(log.live_pledge, 400);
         assert_eq!(log.total_rewards, 100);
         assert_eq!(log.operator_share, 30);
         assert_eq!(log.blocks_minted, 3);

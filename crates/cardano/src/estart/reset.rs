@@ -139,9 +139,16 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         &mut self,
         ctx: &mut super::WorkContext,
         id: &PoolId,
-        _: &PoolState,
+        pool: &PoolState,
     ) -> Result<(), ChainError> {
-        ctx.add_delta(PoolTransition::new(*id, ctx.starting_epoch_no()));
+        // The `mark` about to become `set` holds the opening epoch's
+        // distribution.
+        if let Some(stake) = pool.snapshot.mark().and_then(|x| x.stake) {
+            *ctx.active_stake.get_or_insert(0) += stake;
+        }
+
+        let frozen = ctx.frozen_tally(pool);
+        ctx.add_delta(PoolTransition::new(*id, ctx.starting_epoch_no(), frozen));
 
         Ok(())
     }
@@ -162,6 +169,7 @@ pub fn emit_epoch_transition(ctx: &mut WorkContext) {
         ctx.starting_epoch_no(),
         new_pots,
         era_transition,
+        ctx.active_stake,
         Some(genesis),
     ));
 }

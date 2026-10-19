@@ -1602,6 +1602,9 @@ mod tests {
             blocks_minted: 0,
             params,
             is_new: false,
+            stake: None,
+            delegators: None,
+            live_pledge: None,
         };
         PoolState {
             operator: Hash::from(operator),
