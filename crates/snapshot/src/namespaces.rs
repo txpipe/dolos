@@ -90,8 +90,11 @@ pub const NAMESPACES: [Namespace; 31] = [
 /// `epochs`, `eras`, `first-mint-chunks`, `first-mints`, `gov`,
 /// `metadata-labels`, `pool-epochs`, `pools` and `proposals` stopped being
 /// padded or truncated to a fixed width (decision 0051), and each of those
-/// moved one revision for it. Kept beside [`NAMESPACES`], in the same order,
-/// and held to it by `every_namespace_has_a_schema_rev` below.
+/// moved one revision for it. `epochs` (4) and `pools` (3) then gained the
+/// active-stake distribution ESTART freezes: `EpochState.active_stake` and
+/// `estart_tally`, and the frozen tally on each `PoolSnapshot`. Kept beside
+/// [`NAMESPACES`], in the same order, and held to it by
+/// `every_namespace_has_a_schema_rev` below.
 pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (AccountAddressChunk::NS, 1),
     (AccountAddressSet::NS, 1),
@@ -105,7 +108,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (DatumState::NS, 1),
     (DRepSightingState::NS, 1),
     (DRepState::NS, 2),
-    (EpochState::NS, 3),
+    (EpochState::NS, 4),
     (EraState::NS, 2),
     (FirstMintChunk::NS, 2),
     (FirstMintSet::NS, 2),
@@ -120,7 +123,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (PendingRewardState::NS, 1),
     (PolicyMintChunk::NS, 1),
     (PoolEpochLog::NS, 2),
-    (PoolState::NS, 2),
+    (PoolState::NS, 3),
     (ProposalState::NS, 4),
     (ScriptState::NS, 1),
     (UTXOS, 1),

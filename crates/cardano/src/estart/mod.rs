@@ -10,7 +10,8 @@
 //! between the shard body and the finalize pass. Both code paths build
 //! deltas onto the same `WorkDeltas` accumulator. The `nonces` and `reset`
 //! visitors run in finalize; the `reset` visitor's `visit_account` arm is
-//! reused by the shard body.
+//! reused by the shard body, which also tallies the stake distribution the
+//! boundary freezes (`stake`).
 
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ use crate::{
 pub mod avvm;
 pub mod commit;
 pub mod loading;
+pub mod stake;
 pub mod work_unit;
 
 // visitors
@@ -31,6 +33,7 @@ pub mod nonces;
 pub mod reset;
 
 pub use avvm::AvvmReclamation;
+pub use stake::PoolOwners;
 pub use work_unit::EstartWorkUnit;
 
 pub trait BoundaryVisitor {
@@ -98,8 +101,19 @@ pub struct WorkContext {
     /// set, which are one event and travel together. Empty everywhere else.
     pub avvm_reclamation: AvvmReclamation,
 
+    /// The owners of every pool in the closing epoch, built once per
+    /// boundary in `initialize`; the shards tally live pledge with it.
+    pub owners: Arc<PoolOwners>,
+
+    /// The protocol the shards tally stake under (`stake::tally_protocol`).
+    pub tally_protocol: EraKey,
+
     // computed via visitors
     pub deltas: WorkDeltas,
+
+    /// The opening epoch's active stake, summed over the pools' `mark`
+    /// before they rotate. `None` while no pool has a frozen `mark`.
+    pub active_stake: Option<u64>,
 }
 
 impl WorkContext {

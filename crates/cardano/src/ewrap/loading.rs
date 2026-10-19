@@ -2206,6 +2206,9 @@ mod tests {
                     blocks_minted: 0,
                     params,
                     is_new: false,
+                    stake: None,
+                    delegators: None,
+                    live_pledge: None,
                 }),
                 None,
                 None,
@@ -3997,6 +4000,7 @@ mod ratification_tests {
         let mut shard = crate::estart::WorkContext::load_shard::<ToyDomain>(
             domain.state(),
             domain.genesis(),
+            Default::default(),
             Default::default(),
             0,
             1,

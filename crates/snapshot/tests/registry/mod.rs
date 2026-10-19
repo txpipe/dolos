@@ -214,7 +214,8 @@ pub fn registry() -> Vec<Entry> {
             // them — which is exactly what a retained canary asserts, and all
             // it asserts.
             // Revision 3 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
+            // the value is unchanged. Revision 4 appends the epoch's active
+            // stake and the ESTART shards' carried tally.
             &[
                 Pinned {
                     rev: 1,
@@ -227,6 +228,10 @@ pub fn registry() -> Vec<Entry> {
                 Pinned {
                     rev: 3,
                     hex: include_str!("goldens/epochs.rev3.hex"),
+                },
+                Pinned {
+                    rev: 4,
+                    hex: include_str!("goldens/epochs.rev4.hex"),
                 },
             ]
         ),
@@ -337,7 +342,8 @@ pub fn registry() -> Vec<Entry> {
             PoolState,
             canaries::pool_state,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
+            // the value is unchanged. Revision 3 appends the stake,
+            // delegators and live pledge each snapshot freezes with.
             &[
                 Pinned {
                     rev: 1,
@@ -346,6 +352,10 @@ pub fn registry() -> Vec<Entry> {
                 Pinned {
                     rev: 2,
                     hex: include_str!("goldens/pools.rev2.hex"),
+                },
+                Pinned {
+                    rev: 3,
+                    hex: include_str!("goldens/pools.rev3.hex"),
                 },
             ]
         ),
