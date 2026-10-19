@@ -169,7 +169,7 @@ impl Node {
         let stores =
             dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
         let genesis = dolos_cardano::include::preview::load();
-        let retained = dolos_snapshot::planning::retained_epochs(&self.config).unwrap();
+        let retained = dolos_snapshot::planning::retained_epochs(&[]).unwrap();
         let snapshot = StoreSnapshot::new(&stores.archive, &stores.state);
         let plan = snapshot
             .selected_plan(

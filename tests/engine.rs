@@ -81,7 +81,7 @@ fn configured_boundary_survives_inspection_and_requires_explicit_advancement() {
         let plan = snapshot
             .plan(
                 u64::from(genesis.network_magic()),
-                dolos_snapshot::planning::retained_epochs(&node.config).unwrap(),
+                dolos_snapshot::planning::retained_epochs(&[]).unwrap(),
             )
             .unwrap();
         assert_eq!(plan.sequence, 1);

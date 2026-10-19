@@ -31,9 +31,12 @@
 //! Non-zero on any mismatch, with the offending layer named. A determinism job
 //! is this command and nothing else.
 
+use std::path::PathBuf;
+
 use clap::Parser;
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
+    export::Plan,
     facade::{SnapshotRepository, SnapshotSource as _, StoreSnapshot},
     node,
     registry::{self, Point, Repository},
@@ -41,6 +44,7 @@ use dolos_snapshot::{
 use miette::{Context as _, IntoDiagnostic as _};
 
 use super::EpochRange;
+use crate::registry::CredentialArgs;
 
 #[derive(Debug, Parser)]
 pub struct Args {
@@ -86,10 +90,42 @@ pub struct Args {
     /// the stele was published with
     #[arg(long, value_name = "RANGE", requires = "reproduce")]
     epochs: Option<EpochRange>,
+
+    /// the publisher's retained state-dump epochs the reproduction plans
+    /// with, e.g. `208,236,290`; they are signed parameters, so they must
+    /// match what the stele was published with. Omitted, the reproduction
+    /// retains the tip alone
+    #[arg(
+        long,
+        value_name = "EPOCHS",
+        value_delimiter = ',',
+        requires = "reproduce"
+    )]
+    state_epochs: Vec<u64>,
+
+    /// read the retained state-dump epochs from FILE, separated by commas or
+    /// newlines, in place of --state-epochs
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "reproduce",
+        conflicts_with = "state_epochs"
+    )]
+    state_epochs_file: Option<PathBuf>,
+
+    #[command(flatten)]
+    credentials: CredentialArgs,
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    let auth = node::registry_auth(&config.stelae).into_diagnostic()?;
+    // Planned before the transport check, so that a list or a selection this
+    // node cannot plan is refused before every blob has been streamed.
+    let reproduction = args
+        .reproduce
+        .then(|| reproduction(config, args))
+        .transpose()?;
+
+    let auth = args.credentials.auth_for_chain(&args.repo, &config.chain)?;
 
     // A verification streams every blob through a staged file. No
     // `--scratch-dir` of its own: it reads what is already published rather
@@ -135,23 +171,9 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // could vouch for.
     println!("checked:  digests only; signatures and chain provenance are phase 5");
 
-    if !args.reproduce {
+    let Some((stores, plan)) = reproduction else {
         return Ok(());
-    }
-
-    let stores = crate::common::open_data_stores(config)
-        .into_diagnostic()
-        .context("opening the data stores")?;
-
-    let selection = super::Selection {
-        epochs: args.epochs,
-        index_band: args.index_band,
-        producers: args.producers,
     };
-
-    let plan = super::planned(config, &stores, &selection, "planning the reproduction")?;
-
-    super::report_plan(&plan)?;
 
     let reproduced = StoreSnapshot::new(&stores.archive, &stores.state)
         .verify_reproduction(&verified.inscription, &plan)
@@ -166,4 +188,70 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     );
 
     Ok(())
+}
+
+/// The stores and the reported plan `--reproduce` rebuilds the stele from.
+fn reproduction(config: &RootConfig, args: &Args) -> miette::Result<(crate::common::Stores, Plan)> {
+    let retained = super::retained_epochs(&args.state_epochs, args.state_epochs_file.as_deref())?;
+
+    let stores = crate::common::open_data_stores(config)
+        .into_diagnostic()
+        .context("opening the data stores")?;
+
+    let selection = super::Selection {
+        epochs: args.epochs,
+        index_band: args.index_band,
+        producers: args.producers,
+    };
+
+    let plan = super::planned(
+        config,
+        &stores,
+        &selection,
+        retained,
+        "planning the reproduction",
+    )?;
+
+    super::report_plan(&plan)?;
+
+    Ok((stores, plan))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args, clap::Error> {
+        let fixed = [
+            "verify",
+            "--repo",
+            "oci://ghcr.io/txpipe/dolos-snapshots/preview",
+        ];
+
+        Args::try_parse_from(fixed.into_iter().chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn the_state_epochs_are_a_comma_separated_list_for_a_reproduction() {
+        let args = parse(&["--reproduce", "--state-epochs", "208,236,290"]).unwrap();
+        assert_eq!(args.state_epochs, vec![208, 236, 290]);
+
+        assert!(parse(&["--state-epochs", "208"]).is_err());
+        assert!(parse(&["--state-epochs-file", "epochs.txt"]).is_err());
+    }
+
+    #[test]
+    fn a_state_epochs_file_takes_the_place_of_the_list() {
+        assert!(parse(&[
+            "--reproduce",
+            "--state-epochs",
+            "208",
+            "--state-epochs-file",
+            "epochs.txt",
+        ])
+        .is_err());
+
+        let args = parse(&["--reproduce", "--state-epochs-file", "epochs.txt"]).unwrap();
+        assert_eq!(args.state_epochs_file, Some(PathBuf::from("epochs.txt")));
+    }
 }

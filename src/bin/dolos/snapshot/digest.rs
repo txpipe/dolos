@@ -87,9 +87,22 @@ pub struct Args {
     /// write the canonical inscription to FILE instead of to stdout
     #[arg(long, value_name = "FILE")]
     output: Option<PathBuf>,
+
+    /// the publisher's retained state-dump epochs, e.g. `208,236,290`; they
+    /// are signed parameters, so they must match what the stele being
+    /// reproduced was published with. Omitted, the stele retains the tip alone
+    #[arg(long, value_name = "EPOCHS", value_delimiter = ',')]
+    state_epochs: Vec<u64>,
+
+    /// read the retained state-dump epochs from FILE, separated by commas or
+    /// newlines, in place of --state-epochs
+    #[arg(long, value_name = "FILE", conflicts_with = "state_epochs")]
+    state_epochs_file: Option<PathBuf>,
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    let retained = super::retained_epochs(&args.state_epochs, args.state_epochs_file.as_deref())?;
+
     let stores = crate::common::open_data_stores(config)
         .into_diagnostic()
         .context("opening the data stores")?;
@@ -100,7 +113,13 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         producers: args.producers,
     };
 
-    let plan = super::planned(config, &stores, &selection, "planning the reproduction")?;
+    let plan = super::planned(
+        config,
+        &stores,
+        &selection,
+        retained,
+        "planning the reproduction",
+    )?;
     let snapshot = StoreSnapshot::new(&stores.archive, &stores.state);
 
     super::report_plan(&plan)?;
@@ -189,4 +208,29 @@ fn chain_from(path: &std::path::Path, plan: &Plan) -> miette::Result<Following> 
     Following::read(&raw, plan)
         .into_diagnostic()
         .with_context(|| format!("chaining onto {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args, clap::Error> {
+        Args::try_parse_from(std::iter::once("digest").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn the_state_epochs_are_a_comma_separated_list() {
+        let args = parse(&["--state-epochs", "208,236,290"]).unwrap();
+        assert_eq!(args.state_epochs, vec![208, 236, 290]);
+
+        assert!(parse(&[]).unwrap().state_epochs.is_empty());
+    }
+
+    #[test]
+    fn a_state_epochs_file_takes_the_place_of_the_list() {
+        assert!(parse(&["--state-epochs", "208", "--state-epochs-file", "epochs.txt"]).is_err());
+
+        let args = parse(&["--state-epochs-file", "epochs.txt"]).unwrap();
+        assert_eq!(args.state_epochs_file, Some(PathBuf::from("epochs.txt")));
+    }
 }

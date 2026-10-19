@@ -5,8 +5,7 @@ use dolos_cardano::{
 };
 use dolos_core::config::{
     CardanoConfig, ChainConfig, GenesisConfig, GrpcConfig, MinibfConfig, MinikupoConfig,
-    MithrilConfig, PeerConfig, RelayConfig, RootConfig, StelaeConfig, StelaeRegistryConfig,
-    StorageConfig, StorageVersion, TrpConfig, UpstreamConfig,
+    PeerConfig, RelayConfig, RootConfig, StorageConfig, StorageVersion, TrpConfig, UpstreamConfig,
 };
 use inquire::{Confirm, MultiSelect, Select, Text};
 use miette::{miette, Context as _, IntoDiagnostic};
@@ -17,7 +16,7 @@ use std::{
 
 use dolos::storage::{BOOTSTRAP_GUIDE_URL, CURRENT_STORAGE_VERSION};
 
-use crate::{data::cleanup, feedback::Feedback};
+use crate::{common::MovedSections, data::cleanup, feedback::Feedback};
 
 /// The config file `dolos init` writes, and the one whose failure to parse
 /// tells us an older setup is present.
@@ -68,37 +67,6 @@ fn chain_config(network: &KnownNetwork) -> ChainConfig {
         is_testnet: network.is_testnet,
         ..Default::default()
     })
-}
-
-fn mithril_config(network: &KnownNetwork) -> MithrilConfig {
-    MithrilConfig {
-        aggregator: network.mithril.aggregator.into(),
-        genesis_key: network.mithril.genesis_vkey.into(),
-        ancillary_key: network.mithril.ancillary_vkey.map(Into::into),
-    }
-}
-
-/// `[stelae]` as a generated config carries it: the official registry's
-/// read-only user for the network, and no password.
-///
-/// Written into the file, so a config says which identity it reads the
-/// registry as. The password that goes with the user is
-/// `dolos_snapshot::node::OFFICIAL_REGISTRY_PASSWORD`, which is where rotating
-/// the pair is documented.
-///
-/// Empty only while the catalog names no user, which is why it is a function
-/// rather than a `Default` impl on the config type — it asks for the official
-/// registry specifically, and would give the honest answer if there were not
-/// one.
-fn official_stelae(network: &KnownNetwork) -> StelaeConfig {
-    let user = network.stelae.user;
-
-    StelaeConfig {
-        registry: (!user.is_empty()).then(|| StelaeRegistryConfig {
-            user: Some(user.to_owned()),
-            ..Default::default()
-        }),
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -256,15 +224,6 @@ impl Default for ConfigEditor {
         let editor = Self(
             RootConfig {
                 upstream: upstream_config(&networks::MAINNET),
-                mithril: Some(mithril_config(&networks::MAINNET)),
-                snapshot: Default::default(),
-                // Seeded, so a node created here restores from the official
-                // stele registry without an operator having to find a
-                // credential first. Only on a *fresh* config: an existing
-                // `dolos.toml` keeps whatever it carries, because a section
-                // an operator removed and one that predates the field look
-                // the same from here, and overwriting would undo the first.
-                stelae: official_stelae(&networks::MAINNET),
                 storage: StorageConfig {
                     version: CURRENT_STORAGE_VERSION,
                     ..Default::default()
@@ -301,7 +260,6 @@ impl ConfigEditor {
             self.0.genesis = GenesisConfig::default();
             self.0.upstream = upstream_config(network);
             self.0.chain = chain_config(network);
-            self.0.mithril = Some(mithril_config(network));
             self.1 = Some(network);
 
             // Add max rollback window for network from Genesis.
@@ -669,12 +627,29 @@ fn existing_config_is_unreadable(config: &miette::Result<RootConfig>, config_fil
     config.is_err() && config_file.exists()
 }
 
+/// Refuses a config that failed to load only because it still carries a moved
+/// section.
+///
+/// Every `dolos.toml` an older `init` wrote has `[mithril]`. Such a file is one
+/// edit away from loading and names its storage, so it is reported as that
+/// edit rather than as an unreadable setup whose data has to go.
+fn refuse_moved_sections(
+    config: miette::Result<RootConfig>,
+) -> miette::Result<miette::Result<RootConfig>> {
+    match config {
+        Err(report) if report.is::<MovedSections>() => Err(report),
+        other => Ok(other),
+    }
+}
+
 pub fn run(
     config: miette::Result<RootConfig>,
     args: &Args,
     feedback: &Feedback,
 ) -> miette::Result<()> {
     crate::banner::print_init_banner();
+
+    let config = refuse_moved_sections(config)?;
 
     let unparseable_existing = existing_config_is_unreadable(&config, Path::new(CONFIG_FILE));
 
@@ -1082,68 +1057,64 @@ is_testnet = true
         stores.archive.shutdown().unwrap();
     }
 
-    /// A freshly initialized node carries the stelae registry section the
-    /// official registry needs, and no password.
-    ///
-    /// The section appears once the catalog names a user; until
-    /// then there is no user to write and the file says nothing. Either way the
-    /// generated config has to parse and to round-trip to exactly what
-    /// [`official_stelae`] is, which is what will still hold on the day the
-    /// constants are filled in.
+    /// Bootstrap sources and credentials are inputs of the bootstrap
+    /// commands, so a generated config carries none of them — and still loads.
     #[test]
-    fn a_fresh_config_seeds_the_official_registry_and_no_password() {
+    fn a_fresh_config_carries_no_bootstrap_section() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dolos.toml");
 
-        ConfigEditor::default().save(&path).unwrap();
+        ConfigEditor::default()
+            .apply_known_network(Some(&networks::PREPROD))
+            .save(&path)
+            .unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
-        println!("{written}");
 
-        // The password is compiled in, so a generated config never carries one
-        // however the constants are set.
-        assert!(!written.contains("password"), "{written}");
-
-        let parsed: RootConfig = toml::from_str(&written).expect("the generated config parses");
-        assert_eq!(parsed.stelae, official_stelae(&networks::MAINNET));
-
-        if let Some(registry) = &parsed.stelae.registry {
-            assert_eq!(
-                registry.user.as_deref(),
-                Some(networks::MAINNET.stelae.user)
-            );
-            assert_eq!(registry.password, None);
+        for section in ["[mithril", "[snapshot", "[stelae"] {
+            assert!(!written.contains(section), "{written}");
         }
+
+        crate::common::load_file(&path).expect("the generated config loads");
     }
 
-    /// A password an operator wrote is kept, so a private registry is
-    /// configurable in the file the same command generates.
-    ///
-    /// Only the round trip is asserted here. What a section with *no* password
-    /// authenticates with is [`dolos_snapshot::node::registry_auth`]'s
-    /// question, and is answered by its tests against
-    /// [`dolos_snapshot::node::OFFICIAL_REGISTRY_PASSWORD`].
+    /// A config an older `init` wrote carries `[mithril]`; init reports where
+    /// it moved instead of calling the setup unreadable.
     #[test]
-    fn a_configured_password_survives_the_round_trip() {
+    fn an_older_init_config_is_reported_as_its_moved_section() {
+        let _guard = crate::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dolos.toml");
 
-        let mut editor = ConfigEditor::default();
-        editor.0.stelae.registry = Some(StelaeRegistryConfig {
-            user: Some("dolos".to_owned()),
-            password: Some("a-private-registry".to_owned()),
-            token: None,
-        });
+        ConfigEditor::default()
+            .apply_known_network(Some(&networks::PREPROD))
+            .save(&path)
+            .unwrap();
 
-        editor.save(&path).unwrap();
+        let mut written = std::fs::read_to_string(&path).unwrap();
+        written.push_str(
+            "\n[mithril]\naggregator = \"https://aggregator.example\"\ngenesis_key = \"5b31\"\n",
+        );
+        std::fs::write(&path, written).unwrap();
 
-        let written = std::fs::read_to_string(&path).unwrap();
-        assert!(written.contains("[stelae.registry]"), "{written}");
+        let config = crate::common::load_file(&path)
+            .map_err(crate::common::config_report)
+            .context("parsing configuration");
 
-        let parsed: RootConfig = toml::from_str(&written).unwrap();
-        let registry = parsed.stelae.registry.expect("the section round-trips");
+        let report = refuse_moved_sections(config).err().unwrap();
+        let message = format!("{report:?}");
 
-        assert_eq!(registry.user.as_deref(), Some("dolos"));
-        assert_eq!(registry.password.as_deref(), Some("a-private-registry"));
+        assert!(message.contains("[mithril] moved to"), "{message}");
+        assert!(!message.contains("Remove the data directory"), "{message}");
+    }
+
+    #[test]
+    fn any_other_load_failure_is_left_to_the_upgrade_check() {
+        let failed: miette::Result<RootConfig> = Err(miette!("not toml"));
+
+        assert!(refuse_moved_sections(failed).unwrap().is_err());
     }
 }
