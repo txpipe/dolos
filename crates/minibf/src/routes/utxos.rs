@@ -4,16 +4,27 @@ use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use std::collections::{HashMap, HashSet};
 use std::ops::{Range, RangeInclusive};
 
+use dolos_cardano::ChainSummary;
 use dolos_core::async_query::BlockRefMeta;
 use dolos_core::{
-    ArchiveError, ArchiveStore as _, BlockSlot, Domain, StateStore as _, TxHash, TxoIdx, TxoRef,
+    ArchiveError, ArchiveStore as _, BlockSlot, Domain, SlotOrder, SlotScan, StateStore as _,
+    TagDimension, TxHash, TxoIdx, TxoRef,
 };
 
 use crate::{
+    log_and_500,
     mapping::{IntoModel, UtxoOutputModelBuilder},
     pagination::{Order, Pagination},
     Facade,
 };
+
+/// Fewest and most rows one read of the slot-ordered tag index asks for.
+///
+/// A read covers the offset and the page it still has to pass, within these:
+/// the floor keeps a small page from reading the index a few rows at a time,
+/// the ceiling keeps one blocking task short.
+const MIN_TAG_ROWS: usize = 256;
+const MAX_TAG_ROWS: usize = 4096;
 
 /// The outputs that a UTxO listing returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,7 +54,7 @@ impl UtxoFilter {
 ///
 /// `from` / `to` must be cleared by the caller: Blockfrost does not read them
 /// on the address, script and account UTxO endpoints. Use
-/// [`load_utxo_models_in_height_range`] for the endpoints that do.
+/// [`load_utxo_models_by_tag_in_height_range`] for the endpoints that do.
 pub async fn load_utxo_models<D, T>(
     domain: &Facade<D>,
     refs: HashSet<TxoRef>,
@@ -57,21 +68,40 @@ where
 {
     let retention = Retention::read(domain).await?;
 
-    load_utxo_models_in_slot_range(domain, refs, pagination, retention, None, filter).await
+    load_utxo_models_in_slot_range(domain, refs, pagination, retention, filter).await
 }
 
-/// Like [`load_utxo_models`] but honours `from` / `to` as an inclusive block
-/// height range, the way Blockfrost's `/assets/{asset}/utxos` does. The
-/// bounds are plain heights there: an `:index` is validated like on every
-/// endpoint but cuts nothing.
+/// Pages the live UTxOs of one tag by chain position, honouring `from` / `to`
+/// as an inclusive block height range the way Blockfrost's
+/// `/assets/{asset}/utxos` does. The bounds are plain heights there: an
+/// `:index` is validated like on every endpoint but cuts nothing.
 ///
-/// An output whose creation block was pruned by `sync.max_history` has no
-/// known height, so it can never be proven to sit inside the range, and the
-/// model it feeds requires the block hash, height and time. Such rows are
-/// left out rather than reported with made-up block data.
-pub async fn load_utxo_models_in_height_range<D, T>(
+/// The tag is never held. The slot-ordered tag index is read in bounded
+/// chunks, in page order, skipped through to the page and read on for the
+/// rows the page needs, so a request costs the rows it passes — the offset
+/// and the page — and one block decode per slot the page touches, whatever
+/// the size of the tag. The order inside a block (tx index, then output
+/// index) is settled from that decode: the index orders the rows of one slot
+/// by ref, so a slot's rows are gathered whole before any of them is placed.
+///
+/// An output whose creation block was pruned by `sync.max_history` is not
+/// listed, bounds or not: the span starts at the oldest block held, so the
+/// row is never read, and the model it feeds needs the block hash, height and
+/// time anyway. Neither is one that entered the set without a position, a
+/// genesis or custom UTxO, nor one above the newest block archived when the
+/// request began, which has no block yet.
+///
+/// A row can vanish between the index read and the reads below: its block
+/// pruned or its UTxO spent. A vanished row of the page is dropped and the
+/// page topped up from the rows after it, so a short page still means the
+/// end of the list. The offset counts rows as the index listed them,
+/// vanished or not, so a row that vanished mid-request costs a repeated row
+/// on the next page rather than a lost one. A row gone before the read is
+/// simply not listed.
+pub async fn load_utxo_models_by_tag_in_height_range<D, T>(
     domain: &Facade<D>,
-    refs: HashSet<TxoRef>,
+    dimension: TagDimension,
+    key: Vec<u8>,
     mut pagination: Pagination,
 ) -> Result<Vec<T>, StatusCode>
 where
@@ -88,14 +118,101 @@ where
 
     let retention = Retention::read(domain).await?;
 
-    // Heights are monotonic in slots, so the range is applied on slots. A
-    // Byron epoch-boundary block blurs the edges: it takes the height of the
-    // main block before it and the slot of the main block after it, and the
-    // index keeps the boundary block's slot for that height. The main block
-    // of height `h` therefore sits somewhere in `slot(h - 1)..=slot(h)`, and
-    // `slot(h)` can also hold height `h + 1`. The rows of that zone at `from`,
-    // and of `slot(to)` at `to`, are held against the exact heights later,
-    // see [`drop_rows_past_height_bounds`].
+    let Some(bounds) = slot_bounds(domain, &pagination, &retention).await? else {
+        return Ok(vec![]);
+    };
+
+    let order = SlotOrder::from(pagination.order);
+    let to_skip = pagination.skip();
+
+    let mut page = TagPage {
+        domain,
+        chain: domain.get_chain_summary()?,
+        bounds,
+        pagination,
+        metas: HashMap::new(),
+        to_skip,
+        out: Vec::new(),
+    };
+
+    // the rows of the slot being gathered; a slot's rows are placed together
+    let mut group: Vec<(BlockSlot, TxoRef)> = Vec::new();
+    let mut after = None;
+
+    'walk: loop {
+        let limit = page.rows_to_pass().clamp(MIN_TAG_ROWS, MAX_TAG_ROWS);
+        let scan = SlotScan {
+            slots: page.bounds.span.clone(),
+            order,
+            after: after.take(),
+            limit,
+        };
+        let key = key.clone();
+
+        let rows = domain
+            .blocking(move |domain| {
+                domain
+                    .state()
+                    .utxos_by_tag_in_slots(dimension, &key, &scan)
+                    .map_err(log_and_500("failed to read a utxo tag in slot order"))
+            })
+            .await?;
+
+        let last = rows.len() < limit;
+        after = rows.last().cloned();
+
+        for row in rows {
+            if group.last().is_some_and(|(slot, _)| *slot != row.0) {
+                page.serve_group(std::mem::take(&mut group)).await?;
+
+                if page.is_full() {
+                    break 'walk;
+                }
+            }
+
+            group.push(row);
+        }
+
+        if last {
+            page.serve_group(group).await?;
+            break;
+        }
+    }
+
+    Ok(page.out)
+}
+
+/// The slot span of a height range, plus the edge zones whose rows may still
+/// sit past the exact heights and have to be checked block by block.
+struct SlotBounds {
+    span: RangeInclusive<u64>,
+    edges: Vec<RangeInclusive<u64>>,
+}
+
+/// The slot span of `pagination`'s height bounds, clamped to what the archive
+/// holds, and its edge zones; `None` when nothing can be in range.
+///
+/// Heights are monotonic in slots, so the range is applied on slots. A Byron
+/// epoch-boundary block blurs the edges: it takes the height of the main
+/// block before it and the slot of the main block after it, and the index
+/// keeps the boundary block's slot for that height. The main block of height
+/// `h` therefore sits somewhere in `slot(h - 1)..=slot(h)`, and `slot(h)` can
+/// also hold height `h + 1`. The rows of that zone at `from`, and of
+/// `slot(to)` at `to`, are held against the exact heights by the caller.
+///
+/// The span starts no lower than the oldest block held: a row below that
+/// comes from a pruned block, which could neither order nor describe it. And
+/// it ends no higher than the newest block archived when the request began:
+/// the state commits a batch before the archive does, and a row positioned
+/// in that gap has no block to be ordered or described by yet.
+async fn slot_bounds<D>(
+    domain: &Facade<D>,
+    pagination: &Pagination,
+    retention: &Retention,
+) -> Result<Option<SlotBounds>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
     let mut edges = Vec::with_capacity(2);
 
     let start = match pagination.from.as_ref() {
@@ -109,25 +226,28 @@ where
             // everything still held is newer than the pruned bound
             Height::Pruned => 0,
             // nothing held reaches that high
-            Height::Beyond => return Ok(vec![]),
+            Height::Beyond => return Ok(None),
         },
     };
 
     let end = match pagination.to.as_ref() {
-        None => u64::MAX,
+        None => match read_end_block(domain, ArchiveEnd::Tip).await? {
+            Some((slot, _)) => slot,
+            None => return Ok(None),
+        },
         Some(to) => match retention.locate(domain, to.number).await? {
             Height::Held(slot) => {
                 edges.push(slot..=slot);
                 slot
             }
             // nothing still held is that old
-            Height::Pruned => return Ok(vec![]),
+            Height::Pruned => return Ok(None),
             // Everything held is below the bound. The tip caps the span so a
             // block archived while this request runs cannot slip in above
             // the bound; one archived since the lookup that already passes
             // it gets the edge treatment.
             Height::Beyond => match read_end_block(domain, ArchiveEnd::Tip).await? {
-                None => return Ok(vec![]),
+                None => return Ok(None),
                 Some((slot, height)) if height <= to.number => slot,
                 Some((slot, _)) => {
                     edges.push(retention.slot_below(domain, to.number).await?..=slot);
@@ -137,27 +257,139 @@ where
         },
     };
 
-    let bounds = SlotBounds {
-        span: start..=end,
+    Ok(Some(SlotBounds {
+        span: start.max(retention.floor)..=end,
         edges,
-    };
-
-    load_utxo_models_in_slot_range(
-        domain,
-        refs,
-        pagination,
-        retention,
-        Some(bounds),
-        UtxoFilter::All,
-    )
-    .await
+    }))
 }
 
-/// The slot span of a height range, plus the edge zones whose rows may still
-/// sit past the exact heights and have to be checked block by block.
-struct SlotBounds {
-    span: RangeInclusive<u64>,
-    edges: Vec<RangeInclusive<u64>>,
+/// The page a chain-ordered tag walk assembles, one slot group at a time.
+struct TagPage<'a, D: Domain, T> {
+    domain: &'a Facade<D>,
+    chain: ChainSummary,
+    bounds: SlotBounds,
+    pagination: Pagination,
+    /// block metadata decoded so far, by tx; `None` for a tx whose block is
+    /// gone
+    metas: HashMap<TxHash, Option<BlockRefMeta>>,
+    /// rows of the offset still to pass
+    to_skip: usize,
+    out: Vec<T>,
+}
+
+impl<D, T> TagPage<'_, D, T>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    T: serde::Serialize,
+    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T>,
+{
+    fn is_full(&self) -> bool {
+        self.out.len() >= self.pagination.count
+    }
+
+    /// The rows the walk still has to pass: the rest of the offset and of
+    /// the page.
+    fn rows_to_pass(&self) -> usize {
+        self.to_skip + self.pagination.count.saturating_sub(self.out.len())
+    }
+
+    /// Places the rows of one slot and serves those of the page among them.
+    ///
+    /// A group wholly inside the offset and off the edge zones is counted
+    /// and never decoded. Any other group has its block decoded once: an
+    /// edge row is held against the exact heights, and the rows are sorted
+    /// into their order inside the block before the offset and the page cut
+    /// through them. A row whose block is gone since the index read keeps
+    /// its place in the offset and drops out of the page, like a spent one.
+    async fn serve_group(&mut self, group: Vec<(BlockSlot, TxoRef)>) -> Result<(), StatusCode> {
+        let Some(&(slot, _)) = group.first() else {
+            return Ok(());
+        };
+
+        let on_edge = self.bounds.edges.iter().any(|edge| edge.contains(&slot));
+
+        if !on_edge && self.to_skip >= group.len() {
+            self.to_skip -= group.len();
+            return Ok(());
+        }
+
+        let rows: Vec<(Option<u64>, TxoRef)> = group
+            .into_iter()
+            .map(|(slot, txo)| (Some(slot), txo))
+            .collect();
+        resolve_block_meta(self.domain, &rows, &mut self.metas).await?;
+
+        let mut positioned: Vec<_> = rows
+            .iter()
+            .filter_map(|(slot, txo_ref)| {
+                let meta = self.metas.get(&txo_ref.0).cloned().flatten();
+
+                if on_edge {
+                    if let Some(meta) = &meta {
+                        if self.pagination.should_skip(meta.height, meta.tx_index) {
+                            return None;
+                        }
+                    }
+                }
+
+                Some((page_sort_key(meta.as_ref(), *slot, txo_ref), txo_ref, meta))
+            })
+            .collect();
+
+        positioned.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+        if let Order::Desc = self.pagination.order {
+            positioned.reverse();
+        }
+
+        let skipped = self.to_skip.min(positioned.len());
+        self.to_skip -= skipped;
+        let mut candidates = positioned.into_iter().skip(skipped).peekable();
+
+        while !self.is_full() && candidates.peek().is_some() {
+            let batch: Vec<_> = candidates
+                .by_ref()
+                .take(self.pagination.count - self.out.len())
+                .collect();
+
+            // a row whose block is gone has vanished too: its UTxO is not
+            // even read, so it drops out with the spent ones
+            let live: Vec<TxoRef> = batch
+                .iter()
+                .filter(|(_, _, meta)| meta.is_some())
+                .map(|(_, txo_ref, _)| (*txo_ref).clone())
+                .collect();
+
+            let utxos = self
+                .domain
+                .blocking(move |domain| {
+                    domain
+                        .state()
+                        .get_utxos(live)
+                        .map_err(log_and_500("failed to read the page's utxos"))
+                })
+                .await?;
+
+            for (_, txo_ref, meta) in batch {
+                let (Some(cbor), Some(meta)) = (utxos.get(txo_ref), meta) else {
+                    continue;
+                };
+                let output = MultiEraOutput::try_from(cbor.as_ref())
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                let block_time = self.chain.slot_time(meta.slot);
+                let builder = UtxoOutputModelBuilder::from_output(txo_ref.0, txo_ref.1, output)
+                    .with_block_data(meta)
+                    .with_block_time(block_time);
+
+                self.out
+                    .push(<UtxoOutputModelBuilder<'_> as IntoModel<T>>::into_model(
+                        builder,
+                    )?);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Where a bound height stands against what the archive holds.
@@ -301,24 +533,18 @@ impl Retention {
 /// 1. The slot of every creating tx comes from the archive index, no block body
 ///    is read. Rows are sorted by slot, which fixes the order between blocks
 ///    and lets the page window be located.
-/// 2. With `bounds`, the rows in its edge zones get their block decoded to be
-///    held against the exact heights, see [`drop_rows_past_height_bounds`].
-/// 3. The rows of the slots the window touches get their block decoded, which
+/// 2. The rows of the slots the window touches get their block decoded, which
 ///    settles the order inside a block (tx index, then output index). Each
 ///    block is decoded once per request, and rows that vanished mid-request
 ///    pull in the next window.
 ///
-/// A row whose block was pruned has no position. With `bounds` such rows are
-/// dropped, the model needs the block hash, height and time; without it they
-/// stay and sort first, as the oldest.
-///
-/// `bounds` is the slot span of the `from` / `to` heights on `pagination`.
+/// A row whose block was pruned has no position: it stays and sorts first, as
+/// the oldest.
 async fn load_utxo_models_in_slot_range<D, T>(
     domain: &Facade<D>,
     refs: HashSet<TxoRef>,
     pagination: Pagination,
     retention: Retention,
-    bounds: Option<SlotBounds>,
     filter: UtxoFilter,
 ) -> Result<Vec<T>, StatusCode>
 where
@@ -343,22 +569,12 @@ where
             let slot = retention.retained(tx_slots.get(&txo_ref.0).copied().flatten());
             (slot, txo_ref)
         })
-        .filter(|(slot, _)| match (&bounds, slot) {
-            (Some(bounds), Some(slot)) => bounds.span.contains(slot),
-            (Some(_), None) => false,
-            (None, _) => true,
-        })
         .collect();
     // the map is as large as the ref set; do not carry it across the reads
     drop(tx_slots);
 
     // block metadata decoded so far, by tx; `None` for a tx whose block is gone
     let mut metas: HashMap<TxHash, Option<BlockRefMeta>> = HashMap::new();
-
-    if let Some(bounds) = &bounds {
-        drop_rows_past_height_bounds(domain, &mut rows, &bounds.edges, &pagination, &mut metas)
-            .await?;
-    }
 
     // the same order `page_sort_key` gives, minus the position inside a block
     rows.sort_by_key(|(slot, txo_ref)| (*slot, txo_ref.0, txo_ref.1));
@@ -475,11 +691,8 @@ where
                 .take(pagination.count - out.len())
                 .collect();
 
-            // with a height range a row whose block is gone has vanished too:
-            // its UTxO is not even read, so it drops out with the spent ones
             let live: Vec<TxoRef> = batch
                 .iter()
-                .filter(|(_, _, meta)| bounds.is_none() || meta.is_some())
                 .map(|(_, txo_ref, _)| (*txo_ref).clone())
                 .collect();
 
@@ -551,51 +764,6 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     metas.extend(resolved);
-
-    Ok(())
-}
-
-/// Drops the rows in the `edges` zones that sit past the exact `from` / `to`
-/// bounds on `pagination`.
-///
-/// A Byron epoch-boundary block can push the main block of a bound's height
-/// anywhere between the slots of the heights below it and of the bound, and
-/// share the bound's slot with the next height, so the zones cover those
-/// slots. Every slot outside the zones is inside the heights by
-/// monotonicity, so only the zone rows get their block decoded — a couple of
-/// blocks per bound. The decoded metadata stays in `metas` for the page.
-async fn drop_rows_past_height_bounds<D>(
-    domain: &Facade<D>,
-    rows: &mut Vec<(Option<u64>, TxoRef)>,
-    edges: &[RangeInclusive<u64>],
-    pagination: &Pagination,
-    metas: &mut HashMap<TxHash, Option<BlockRefMeta>>,
-) -> Result<(), StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let on_edge =
-        |slot: &Option<u64>| slot.is_some_and(|slot| edges.iter().any(|edge| edge.contains(&slot)));
-
-    let edge_rows: Vec<_> = rows
-        .iter()
-        .filter(|(slot, _)| on_edge(slot))
-        .cloned()
-        .collect();
-    resolve_block_meta(domain, &edge_rows, metas).await?;
-
-    rows.retain(|(slot, txo_ref)| {
-        if !on_edge(slot) {
-            return true;
-        }
-
-        match metas.get(&txo_ref.0).cloned().flatten() {
-            Some(meta) => !pagination.should_skip(meta.height, meta.tx_index),
-            // a block pruned since the slot lookup: the row keeps its place in
-            // the offset and the page loop drops it, like a spent one
-            None => true,
-        }
-    });
 
     Ok(())
 }

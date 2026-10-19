@@ -2,7 +2,6 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
     Json,
 };
 use blockfrost_openapi::models::asset_utxo_content_inner::AssetUtxoContentInner;
@@ -14,7 +13,6 @@ use super::resolve_asset_state;
 use crate::{
     error::Error,
     pagination::{Pagination, PaginationParameters},
-    scan::tag_within_budget,
     Facade,
 };
 
@@ -27,12 +25,12 @@ use crate::{
 /// UTxOs whose creation block was pruned by `sync.max_history` are not listed:
 /// the row requires block data the node no longer has.
 ///
-/// `max_scan_items` caps the page depth, as on `/assets` and
-/// `/assets/{asset}/transactions`, and the live set: every UTxO of the asset
-/// costs one index lookup whatever the page, so an asset held by more live
-/// UTxOs than the budget is refused rather than scanned. The set is one
-/// bounded read under the query limiter, given up at the first ref past the
-/// budget, so the refusal costs `max_scan_items + 1` refs, never the set.
+/// The page comes off the slot-ordered tag index: a request reads the rows
+/// of the offset and the page and decodes one block per slot the page
+/// touches, however many live UTxOs the asset has. `max_scan_items` caps the
+/// page depth, as on `/assets` and `/assets/{asset}/transactions`. A store
+/// without that index — built before it existed and not yet repaired with
+/// `dolos doctor position-utxos` — answers 501.
 pub async fn by_subject_utxos<D>(
     Path(subject): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -46,16 +44,12 @@ where
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
     let (asset, _) = resolve_asset_state(&domain, &subject)?;
 
-    let budget = usize::try_from(domain.config.max_scan_items())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    domain.require_positioned_utxos().await?;
 
-    let refs = tag_within_budget(&domain, utxo_dimensions::ASSET, asset, budget)
-        .await?
-        .ok_or(Error::LiveUtxoSetTooLarge)?;
-
-    let utxos = crate::routes::utxos::load_utxo_models_in_height_range(
+    let utxos = crate::routes::utxos::load_utxo_models_by_tag_in_height_range(
         &domain,
-        refs.into_iter().collect(),
+        utxo_dimensions::ASSET,
+        asset,
         pagination,
     )
     .await?;
@@ -65,6 +59,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
+
     use super::super::testing::*;
     use super::*;
     use crate::test_support::{TestApp, TestFault};
@@ -336,15 +332,17 @@ mod tests {
         }
     }
 
-    /// A block pruned between the slot lookup and the block read leaves its
-    /// rows without block data. Simulated by pointing one tx at the slot of a
-    /// later block that does not hold it: the index still answers, the block
-    /// read does not. Such a row keeps its place in the offset and drops out
-    /// of the page, which is topped up, so walking the pages one row at a time
-    /// still reaches every other row and never the vanished one.
+    /// A block pruned between the index read and the block read leaves its
+    /// rows without block data. Simulated by moving one tx's rows to the slot
+    /// of a later block that does not hold it: the index still lists them,
+    /// the block read does not find the tx. Such a row keeps its place in
+    /// the offset and drops out of the page, which is topped up, so walking
+    /// the pages one row at a time still reaches every other row and never
+    /// the vanished one.
     #[tokio::test]
     async fn assets_by_subject_utxos_block_vanished_mid_request() {
-        use dolos_core::{indexes::ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _};
+        use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
+        use dolos_core::{StateStore as _, StateWriter as _, UtxoIndexDelta, UtxoSetDelta};
 
         let cfg = SyntheticBlockConfig {
             block_count: 5,
@@ -354,7 +352,6 @@ mod tests {
 
         let reference = TestApp::new_with_cfg_and_setup(cfg.clone(), |_, _| {});
         let asset = reference.vectors().asset_unit.clone();
-        // a height range, so a row without block data is left out
         let first = reference.vectors().blocks[0].block_number;
         let query = format!("/assets/{asset}/utxos?from={first}");
         let (status, bytes) = reference.get_bytes(&query).await;
@@ -369,13 +366,46 @@ mod tests {
         let expected: Vec<_> = all.iter().filter(|x| x.tx_hash != gone).cloned().collect();
 
         let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
-            let writer = domain.archive().start_writer().unwrap();
+            let gone_hash: dolos_core::TxHash = gone.parse().unwrap();
+            let subject = hex::decode(&asset).unwrap();
+
+            // the tx's live rows, with the tags their bodies carry
+            let refs: Vec<_> = domain
+                .state()
+                .utxos_by_tag(utxo_dimensions::ASSET, &subject)
+                .unwrap()
+                .into_iter()
+                .filter(|txo| txo.0 == gone_hash)
+                .collect();
+            assert!(!refs.is_empty(), "fixture needs the tx's rows");
+            let bodies = domain.state().get_utxos(refs.clone()).unwrap();
+            let tagged = utxo_index_delta_from_utxo_delta(&UtxoSetDelta {
+                produced_utxo: bodies,
+                ..Default::default()
+            })
+            .produced;
+
+            // out of their own slot, back in under block 3's
+            let (from, to) = (vectors.blocks[1].slot, vectors.blocks[3].slot);
+            let moved = |slot| refs.iter().map(|txo| (txo.clone(), slot)).collect();
+
+            let writer = domain.state().start_writer().unwrap();
             writer
-                .apply_index(&[ArchiveIndexDelta {
-                    slot: vectors.blocks[3].slot,
-                    tx_hashes: vec![hex::decode(&gone).unwrap()],
+                .apply_utxo_tags(&UtxoIndexDelta {
+                    consumed: tagged.clone(),
+                    slots: moved(from),
                     ..Default::default()
-                }])
+                })
+                .unwrap();
+            writer.commit().unwrap();
+
+            let writer = domain.state().start_writer().unwrap();
+            writer
+                .apply_utxo_tags(&UtxoIndexDelta {
+                    produced: tagged,
+                    slots: moved(to),
+                    ..Default::default()
+                })
                 .unwrap();
             writer.commit().unwrap();
         });
@@ -607,12 +637,26 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(parse_utxos(&bytes), expected);
 
-        // pages stay aligned: page 1 of size 1 is the first retained row
+        // pages stay aligned: page 1 of size 1 is the first retained row, and
+        // the pruned rows cost nothing on the pages after it either — a walk
+        // one row at a time lists every retained row once and nothing else
         let (status, bytes) = pruned
             .get_bytes(&format!("/assets/{asset}/utxos?count=1&page=1"))
             .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(parse_utxos(&bytes), vec![expected[0].clone()]);
+
+        for from in [String::new(), format!("&from={pruned_height}")] {
+            let mut walked = Vec::new();
+            for page in 1..=expected.len() + 1 {
+                let (status, bytes) = pruned
+                    .get_bytes(&format!("/assets/{asset}/utxos?count=1&page={page}{from}"))
+                    .await;
+                assert_eq!(status, StatusCode::OK, "page {page}");
+                walked.extend(parse_utxos(&bytes));
+            }
+            assert_eq!(walked, expected, "from={from:?}");
+        }
     }
 
     #[tokio::test]
@@ -652,66 +696,14 @@ mod tests {
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
-    /// Every live UTxO of the asset costs an index lookup whatever the page,
-    /// so a set past the budget is refused outright, however small the page.
+    /// A store built before the slot-ordered tag index existed, and not yet
+    /// repaired, cannot page by chain position: the route says so rather
+    /// than serving a list it cannot complete.
     #[tokio::test]
-    async fn assets_by_subject_utxos_refuses_a_set_past_the_budget() {
-        let cfg = || SyntheticBlockConfig {
-            block_count: 5,
-            txs_per_block: 1,
-            ..Default::default()
-        };
-
-        // five live UTxOs carry the asset, one per block
-        let app = TestApp::new_with_scan_limit(cfg(), 5);
+    async fn assets_by_subject_utxos_needs_positioned_utxos() {
+        let app = TestApp::new_with_fault(Some(TestFault::UtxosNotPositioned));
         let asset = app.vectors().asset_unit.as_str();
-        let path = format!("/assets/{asset}/utxos?count=1&page=1");
-        assert_status(&app, &path, StatusCode::OK).await;
-
-        let app = TestApp::new_with_scan_limit(cfg(), 4);
-        let asset = app.vectors().asset_unit.as_str();
-        let path = format!("/assets/{asset}/utxos?count=1&page=1");
-        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
-    }
-
-    /// The budget is the live set, not the page: a set past it is refused
-    /// from the first page on, and within it every page is served and the
-    /// pages add up to the whole list in order, so the bounded read changed
-    /// neither the rows nor the cut.
-    #[tokio::test]
-    async fn assets_by_subject_utxos_budget_is_the_set_not_the_page() {
-        let cfg = || SyntheticBlockConfig {
-            block_count: 5,
-            txs_per_block: 1,
-            ..Default::default()
-        };
-
-        let app = TestApp::new_with_scan_limit(cfg(), 5);
-        let asset = app.vectors().asset_unit.to_string();
-
-        // the budget also caps the page depth, so the whole list is one page
-        // of five and the walk stops at page five
-        let (status, bytes) = app
-            .get_bytes(&format!("/assets/{asset}/utxos?count=5"))
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        let whole = parse_utxos(&bytes);
-        assert_eq!(whole.len(), 5);
-
-        let mut walked = Vec::new();
-        for page in 1..=5 {
-            let (status, bytes) = app
-                .get_bytes(&format!("/assets/{asset}/utxos?count=1&page={page}"))
-                .await;
-            assert_eq!(status, StatusCode::OK, "page {page}");
-            walked.extend(parse_utxos(&bytes));
-        }
-        assert_eq!(walked, whole);
-
-        let app = TestApp::new_with_scan_limit(cfg(), 4);
-        for page in 1..=2 {
-            let path = format!("/assets/{asset}/utxos?count=1&page={page}");
-            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
-        }
+        let path = format!("/assets/{asset}/utxos");
+        assert_status(&app, &path, StatusCode::NOT_IMPLEMENTED).await;
     }
 }

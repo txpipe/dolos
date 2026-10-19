@@ -9,10 +9,10 @@ use std::marker::PhantomData;
 use axum::http::StatusCode;
 use dolos_core::{
     ArchiveStore as _, BlockSlot, Domain, EntityIterTyped, EntityKey, KeyBytes, KeyRange,
-    LogEntity, LogIterTyped, LogKey, StateEntity, StateStore as _, TagDimension, TxoRef,
+    LogEntity, LogIterTyped, LogKey, StateEntity, StateStore as _,
 };
 
-use crate::{log_and_500, Facade};
+use crate::{error::Error, log_and_500, Facade};
 
 /// Entities or log rows read per blocking task. One chunk of accounts holds
 /// its permit for a few milliseconds.
@@ -235,34 +235,27 @@ where
     }
 }
 
-/// Every live ref of one tag when the tag holds at most `budget` of them,
-/// `None` when it holds more.
-///
-/// One bounded read under the domain's query limiter: the store is asked for
-/// `budget + 1` refs and stops at the first one past the budget, so a tag of
-/// any size costs at most that many refs and is never whole in memory. The
-/// refs come in `TxoRef` order.
-pub async fn tag_within_budget<D>(
-    facade: &Facade<D>,
-    dimension: TagDimension,
-    key: Vec<u8>,
-    budget: usize,
-) -> Result<Option<Vec<TxoRef>>, StatusCode>
+impl<D> Facade<D>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let limit = budget.saturating_add(1);
+    /// Refuse a request that pages through the slot-ordered tag index on a
+    /// store that does not carry it, see `StateStore::utxos_positioned`.
+    pub async fn require_positioned_utxos(&self) -> Result<(), Error> {
+        let positioned = self
+            .blocking(|facade| {
+                facade.state().utxos_positioned().map_err(log_and_500(
+                    "failed to read whether the utxos are positioned",
+                ))
+            })
+            .await?;
 
-    let refs = facade
-        .blocking(move |facade| {
-            facade
-                .state()
-                .utxos_by_tag_limited(dimension, &key, limit)
-                .map_err(log_and_500("failed to read a utxo tag"))
-        })
-        .await?;
-
-    Ok((refs.len() <= budget).then_some(refs))
+        if positioned {
+            Ok(())
+        } else {
+            Err(Error::UtxosNotPositioned)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -275,54 +268,10 @@ mod tests {
         time::Duration,
     };
 
-    use dolos_cardano::{
-        indexes::{utxo_dimensions, CardanoStateIndexExt as _},
-        model::AccountState,
-        AccountKey,
-    };
+    use dolos_cardano::{model::AccountState, AccountKey};
 
     use super::*;
     use crate::test_support::{replicated_app, replicated_app_with_fault, TestApp, TestFault};
-
-    fn asset_subject(app: &TestApp) -> Vec<u8> {
-        hex::decode(&app.vectors().asset_unit).expect("asset unit hex")
-    }
-
-    /// A tag within the budget comes whole and in ref order, as
-    /// `utxos_by_tag` has it; one past the budget is `None`, whether it is
-    /// past by one ref or by a budget of zero.
-    #[tokio::test]
-    async fn tag_within_budget_reads_the_tag_or_gives_it_up() {
-        let app = TestApp::new();
-        let facade = app.facade();
-        let subject = asset_subject(&app);
-
-        let mut whole: Vec<TxoRef> = facade
-            .state()
-            .utxos_by_asset(&subject)
-            .expect("asset refs")
-            .into_iter()
-            .collect();
-        whole.sort();
-        let n = whole.len();
-        assert!(n > 1, "too few utxos for a budget to cut");
-
-        let within = |budget| {
-            let facade = facade.clone();
-            let subject = subject.clone();
-            async move {
-                tag_within_budget(&facade, utxo_dimensions::ASSET, subject, budget)
-                    .await
-                    .expect("tag read")
-            }
-        };
-
-        assert_eq!(within(n).await, Some(whole.clone()));
-        assert_eq!(within(n + 1).await, Some(whole.clone()));
-        assert_eq!(within(usize::MAX).await, Some(whole));
-        assert_eq!(within(n - 1).await, None);
-        assert_eq!(within(0).await, None);
-    }
 
     async fn account_keys(app: &TestApp, chunk: usize) -> Vec<AccountKey> {
         let facade = app.facade();

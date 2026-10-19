@@ -224,6 +224,10 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 
 pallas 1.3 decodes no Plutus V2 or V3 scripts in auxiliary data, so a script only auxiliary data ever carried in those languages is missing from the list.
 
+## Asset UTxOs on stores synced by an earlier version
+
+`/assets/{subject}/utxos` pages through the live UTxOs of an asset by chain position off the slot-ordered live-UTxO tags: a request reads the rows of its offset and its page and decodes one block per slot the page touches, however many live UTxOs the asset has, so `max_scan_items` caps the page depth and nothing else. A node this version bootstrapped — from genesis, a stele or `dolos doctor rebuild-state` — positions every UTxO as it enters the set. A store an earlier version synced carries the plain tags only, and so does one an earlier version wrote to after this one did; such a node logs it at start and answers this route with a `501` until `dolos doctor position-utxos` builds the positions from the UTxO set and the archive, which takes a pass over the live UTxOs and one exact lookup per transaction. A UTxO whose creation block the archive no longer holds gets no position; it is not listed, as on a node that pruned the block itself, since the route starts at the oldest block held.
+
 ## DRep listing on stores synced by an older release
 
 `/governance/dreps` lists every DRep a certificate of a valid tx ever named, vote-delegation targets and the special DReps included, in the order a certificate first named it, with the latest anchor a registration or update carried. It reads them from the `drep-sightings` state namespace, which the roll writes. A state store synced by a release without that namespace has no sightings for the blocks it applied before: it lists only the DReps certificates named since, at the position of that later certificate. Syncing forward does not recover what is behind the cursor; resync the instance, or bootstrap it from a snapshot that carries `state-drep-sightings`, to get the full list in its exact order.

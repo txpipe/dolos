@@ -71,6 +71,7 @@ pub const CASE_NAMES: &[&str] = &[
     "epoch-blocks-reverse",
     "address-transactions-page",
     "account-utxos-wide",
+    "asset-utxos-page",
     "transaction-utxos",
 ];
 
