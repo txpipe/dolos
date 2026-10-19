@@ -704,8 +704,8 @@ pub struct SnapshotConfig {
 /// here.** That is a hardcoded default of the same kind as a network's relay
 /// address or its Mithril aggregator, and it lives where those live: in
 /// `dolos_cardano::networks::KnownNetwork`, which seeds a generated
-/// `dolos.toml`, and beside it the password that answers for a section naming
-/// a user and no password.
+/// `dolos.toml`. The password that answers for a section naming a user and no
+/// password is `dolos_snapshot::node::OFFICIAL_REGISTRY_PASSWORD`.
 /// This crate carries the shape and none of the values.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 pub struct StelaeConfig {

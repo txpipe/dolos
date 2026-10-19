@@ -291,6 +291,21 @@ mod tests {
     }
 
     #[test]
+    fn byron_start_bootstraps_without_nonces() {
+        let genesis = crate::include::preprod::load();
+
+        let domain = ToyDomain::new_with_genesis(Arc::new(genesis), None, None);
+
+        let epoch = domain
+            .state()
+            .read_entity_typed::<EpochState>(&())
+            .unwrap()
+            .expect("epoch state written at bootstrap");
+
+        assert_eq!(epoch.nonces, None);
+    }
+
+    #[test]
     fn derived_conway_start_activates_gov() {
         let mut genesis = crate::include::devnet::load();
         genesis.force_protocol = None;
@@ -315,6 +330,20 @@ mod tests {
             ChainError::UnsupportedStartingProtocol(major)
                 if major == u64::from(crate::forks::LATEST_PROTOCOL) + 1
         ));
+    }
+
+    #[test]
+    fn start_at_the_top_of_the_ladder_is_supported() {
+        let mut genesis = crate::include::preview::load();
+        genesis.shelley.protocol_params.protocol_version.major =
+            crate::forks::LATEST_PROTOCOL.into();
+
+        let pparams = starting_pparams(&genesis).unwrap();
+
+        assert_eq!(
+            pparams.protocol_major(),
+            Some(crate::forks::LATEST_PROTOCOL)
+        );
     }
 
     #[test]
