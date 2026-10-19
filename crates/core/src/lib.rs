@@ -274,6 +274,9 @@ pub enum BrokenInvariant {
     #[error("missing pool {}", hex::encode(.0))]
     MissingPool(Vec<u8>),
 
+    #[error("pool {pool} has no frozen stake for epoch {epoch}")]
+    UnfrozenPoolStake { pool: String, epoch: Epoch },
+
     #[error(
         "CARDANO-002: epoch boundary {epoch} incomplete (estart shards {committed:?}/{total:?})"
     )]
