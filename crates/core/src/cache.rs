@@ -150,6 +150,10 @@ pub enum CacheError {
 
     #[error("cache disk tier: {0}")]
     Disk(String),
+
+    /// Another process, a running node, holds the disk tier's file.
+    #[error("{0} is in use by another process")]
+    InUse(String),
 }
 
 impl CacheError {

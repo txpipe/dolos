@@ -30,7 +30,7 @@ Dolos keeps its data in distinct stores, each serving a specific purpose:
 - **Purpose**: Disposable answers derived from the other stores (decision 0059); it is outside the WAL, steles and restore, and deleting it changes no answer
 - **Contents**: Byte entries by namespace and key; a namespace carries a format version, a validity model (immutable or tip-scoped) and an admission cost
 - **Traits**: `CacheStore`, implemented by `TieredCache` over the builtin memory tier and a `CacheDiskTier`
-- **Database**: `<storage.path>/cache/cache.redb`, a Redb file of immutable entries within `disk_budget_bytes`; writes skip the fsync and the flush at shutdown makes them durable, and a file that fails to open is recreated empty
+- **Database**: `<storage.path>/cache/cache.redb`, a Redb file of immutable entries within `disk_budget_bytes`; writes skip the fsync and the flush at shutdown makes them durable; a file Redb finds corrupt, cut short, or laid out by another release is recreated empty, and any other open failure is an error
 
 ### Where the indexes live
 There is no standalone index store. Every index is a projection and lives in

@@ -39,6 +39,14 @@ pub(crate) mod scan;
 #[cfg(test)]
 mod test_support;
 
+/// Registers the `/network` namespace, as the router does, for tools that
+/// work on the cache without serving.
+pub use routes::network::register_cache as register_network_cache;
+
+/// Registers the off-chain metadata namespaces, as the router does, for tools
+/// that work on the cache without serving.
+pub use routes::governance::register_caches as register_governance_caches;
+
 pub(crate) fn log_and_500<E: std::fmt::Debug>(context: &str) -> impl Fn(E) -> StatusCode + '_ {
     move |err| {
         tracing::error!(error = ?err, "{context}");

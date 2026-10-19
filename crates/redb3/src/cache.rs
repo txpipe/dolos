@@ -12,8 +12,9 @@ use std::{
 use bytes::Bytes;
 use dolos_core::{cache::Cost, CacheDiskTier, CacheEntry, CacheError};
 use redb::{
-    backends::InMemoryBackend, Database, Durability, ReadOnlyTable, ReadTransaction,
-    ReadableDatabase, ReadableTable, TableDefinition, TableError, WriteTransaction,
+    backends::InMemoryBackend, Database, Durability, MultimapTableHandle as _, ReadOnlyTable,
+    ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition, TableError,
+    TableHandle as _, WriteTransaction,
 };
 use tracing::warn;
 
@@ -100,8 +101,10 @@ struct Inner {
 
 impl RedbCacheTier {
     /// Opens `<dir>/cache.redb`, holding at most `budget` bytes of keys and
-    /// values. A file that fails to open is deleted and recreated empty; one
-    /// another process holds is an error that names it.
+    /// values. A file redb finds corrupt, cut short, or laid out by another
+    /// release is deleted and recreated empty; one another process holds, or
+    /// that fails to open for any other reason, such as its permissions, is
+    /// an error that names it.
     pub fn open(dir: impl AsRef<Path>, budget: u64) -> Result<Self, CacheError> {
         let dir = dir.as_ref();
         let path = dir.join(FILE_NAME);
@@ -111,8 +114,11 @@ impl RedbCacheTier {
 
         match Self::create(&path, budget) {
             Ok(tier) => Ok(tier),
-            Err(redb::Error::DatabaseAlreadyOpen) => Err(CacheError::Disk(format!(
-                "{} is in use by another process",
+            Err(redb::Error::DatabaseAlreadyOpen) => {
+                Err(CacheError::InUse(path.display().to_string()))
+            }
+            Err(error) if !is_corrupt(&error) => Err(CacheError::Disk(format!(
+                "opening {}: {error}",
                 path.display()
             ))),
             Err(error) => {
@@ -141,6 +147,8 @@ impl RedbCacheTier {
     }
 
     fn create(path: &Path, budget: u64) -> Result<Self, redb::Error> {
+        check_layout(path)?;
+
         let db = Database::builder()
             .set_cache_size(PAGE_CACHE_BYTES)
             .set_repair_callback(|x| {
@@ -157,6 +165,27 @@ impl RedbCacheTier {
         wx.open_table(USAGE)?;
         wx.open_table(CLOCK)?;
         wx.open_table(RANKS)?;
+
+        // Namespace tables open lazily on use, so open them typed here to
+        // find a layout of another release while it can still be recreated.
+        let names: Vec<String> = wx
+            .list_tables()?
+            .map(|table| table.name().to_string())
+            .chain(
+                wx.list_multimap_tables()?
+                    .map(|table| table.name().to_string()),
+            )
+            .collect();
+
+        for name in &names {
+            match name.split_once(':') {
+                Some(("cache-data", _)) => drop(wx.open_table(DataTable::new(name))?),
+                Some(("cache-entries", _)) => drop(wx.open_table(EntryTable::new(name))?),
+                Some(("cache-previous", _)) => drop(wx.open_table(KeyTable::new(name))?),
+                _ => {}
+            }
+        }
+
         wx.commit()?;
 
         Ok(Self {
@@ -190,7 +219,24 @@ impl RedbCacheTier {
         durability: Durability,
         apply: impl FnOnce(&WriteTransaction) -> Result<(), redb::Error>,
     ) -> Result<(), CacheError> {
-        let touched = std::mem::take(&mut *lock(&self.inner.touched));
+        self.write_wiping(durability, None, apply)
+    }
+
+    /// [`write`](Self::write) for an `apply` that wipes `wiped`, whose hits
+    /// are dropped rather than written: redb 3.1 frees the pages of a table
+    /// written and deleted in one transaction as if they were committed, and
+    /// panics on it in debug builds.
+    fn write_wiping(
+        &self,
+        durability: Durability,
+        wiped: Option<&str>,
+        apply: impl FnOnce(&WriteTransaction) -> Result<(), redb::Error>,
+    ) -> Result<(), CacheError> {
+        let mut touched = std::mem::take(&mut *lock(&self.inner.touched));
+
+        if let Some(wiped) = wiped {
+            touched.retain(|(namespace, _)| namespace != wiped);
+        }
 
         let run = || -> Result<(), redb::Error> {
             let mut wx = self.inner.db.begin_write()?;
@@ -254,7 +300,7 @@ impl CacheDiskTier for RedbCacheTier {
             return Ok(());
         }
 
-        self.write(Durability::None, |wx| {
+        self.write_wiping(Durability::None, Some(namespace), |wx| {
             if known.is_some() {
                 wipe(wx, namespace)?;
             }
@@ -356,7 +402,7 @@ impl CacheDiskTier for RedbCacheTier {
     }
 
     fn wipe(&self, namespace: &str) -> Result<(), CacheError> {
-        self.write(Durability::None, |wx| wipe(wx, namespace))
+        self.write_wiping(Durability::None, Some(namespace), |wx| wipe(wx, namespace))
     }
 
     fn previous_keys(&self, namespace: &str) -> Result<Vec<Bytes>, CacheError> {
@@ -377,6 +423,94 @@ impl CacheDiskTier for RedbCacheTier {
 
     fn flush(&self) -> Result<(), CacheError> {
         self.write(Durability::Immediate, |_| Ok(()))
+    }
+}
+
+/// redb's page size, which its header must record.
+const REDB_PAGE_SIZE: u32 = 4096;
+
+/// Fails as corrupt if the file is shorter than the layout its header records,
+/// is not a whole number of pages, or records a layout redb cannot read: redb
+/// panics on all three before it reports any error. The header is read under a
+/// shared lock, which conflicts with redb's exclusive one, so a file another
+/// process holds fails as open instead.
+fn check_layout(path: &Path) -> Result<(), redb::Error> {
+    use std::{fs::TryLockError, io::Read as _};
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+
+    // a shared lock, since NFS refuses an exclusive one on a read-only handle
+    match file.try_lock_shared() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Err(redb::Error::DatabaseAlreadyOpen),
+        Err(TryLockError::Error(error)) if error.kind() == std::io::ErrorKind::Unsupported => {}
+        Err(TryLockError::Error(error)) => return Err(error.into()),
+    }
+
+    let len = file.metadata()?.len();
+    let mut header = [0; 32];
+
+    // redb reports a file too short for its magic number or its header itself
+    if file.read_exact(&mut header).is_err() || !header.starts_with(b"redb\x1a\x0a\xa9\x0d\x0a") {
+        return Ok(());
+    }
+
+    let field = |offset: usize| {
+        u128::from(u32::from_le_bytes(
+            header[offset..offset + 4].try_into().unwrap(),
+        ))
+    };
+
+    let (page_size, header_pages, max_pages, full_regions, trailing_pages) =
+        (field(12), field(16), field(20), field(24), field(28));
+
+    if page_size != u128::from(REDB_PAGE_SIZE)
+        || max_pages == 0
+        || (full_regions == 0 && trailing_pages == 0)
+    {
+        return Err(redb::Error::Corrupted(
+            "its header records a layout redb cannot read".into(),
+        ));
+    }
+
+    let trailing = if trailing_pages > 0 {
+        (header_pages + trailing_pages) * page_size
+    } else {
+        0
+    };
+
+    let expected = page_size + full_regions * (header_pages + max_pages) * page_size + trailing;
+
+    if u128::from(len) < expected || u128::from(len) % page_size != 0 {
+        return Err(redb::Error::Corrupted(format!(
+            "the file is {len} bytes and its header lays out {expected} in pages of {page_size}"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Whether an open failed on the file's contents rather than on access to it:
+/// damage, a cut-short file, or a format or table layout of another release.
+/// redb only reads the contents once it holds the file's lock, so no other
+/// process is using a file found corrupt.
+fn is_corrupt(error: &redb::Error) -> bool {
+    match error {
+        redb::Error::Corrupted(_)
+        | redb::Error::UpgradeRequired(_)
+        | redb::Error::TableTypeMismatch { .. }
+        | redb::Error::TypeDefinitionChanged { .. }
+        | redb::Error::TableIsMultimap(_)
+        | redb::Error::TableIsNotMultimap(_) => true,
+        redb::Error::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+        ),
+        _ => false,
     }
 }
 
@@ -688,6 +822,31 @@ mod tests {
         assert_eq!(tier.previous_keys("ns").unwrap(), [Bytes::from("c")]);
     }
 
+    /// A hit's access time, still to be written, does not stop a wipe or a
+    /// new format version from dropping its namespace.
+    #[test]
+    fn a_wipe_after_a_hit_drops_the_namespace() {
+        let tier = RedbCacheTier::memory(MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        tier.open_namespace("other", 1).unwrap();
+
+        put(&tier, "a", 10, 1);
+        tier.put("other", b"x", b"0123456789", 1).unwrap();
+        assert!(holds(&tier, "a"));
+        assert!(tier.get("other", b"x").unwrap().is_some());
+
+        tier.wipe("ns").unwrap();
+        assert_eq!(tier.previous_keys("ns").unwrap(), [Bytes::from("a")]);
+        assert!(tier.get("other", b"x").unwrap().is_some());
+
+        put(&tier, "b", 10, 1);
+        assert!(holds(&tier, "b"));
+
+        tier.open_namespace("ns", 2).unwrap();
+        assert!(tier.keys("ns").unwrap().is_empty());
+        assert_eq!(tier.entries("other").unwrap(), 1);
+    }
+
     #[test]
     fn a_corrupt_file_is_recreated_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -698,6 +857,167 @@ mod tests {
         assert!(tier.keys("ns").unwrap().is_empty());
 
         tier.put("ns", b"key", b"value", 1).unwrap();
+        assert!(holds(&tier, "key"));
+    }
+
+    #[test]
+    fn a_file_cut_short_is_recreated_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(RedbCacheTier::open(dir.path(), MIB).unwrap());
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join(FILE_NAME))
+            .unwrap();
+        file.set_len(100).unwrap();
+        drop(file);
+
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        put(&tier, "key", 10, 1);
+        assert!(holds(&tier, "key"));
+    }
+
+    /// redb asserts the file holds the layout its header records before it
+    /// reports any error.
+    #[test]
+    fn a_file_cut_short_past_its_header_is_recreated_empty() {
+        for len in [320, 4096, 8192] {
+            let dir = tempfile::tempdir().unwrap();
+            drop(RedbCacheTier::open(dir.path(), MIB).unwrap());
+
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.path().join(FILE_NAME))
+                .unwrap();
+            file.set_len(len).unwrap();
+            drop(file);
+
+            let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+            tier.open_namespace("ns", 1).unwrap();
+            put(&tier, "key", 10, 1);
+            assert!(holds(&tier, "key"), "cut to {len} bytes");
+        }
+    }
+
+    #[test]
+    fn a_file_not_a_whole_number_of_pages_is_recreated_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(RedbCacheTier::open(dir.path(), MIB).unwrap());
+
+        let path = dir.path().join(FILE_NAME);
+        let len = std::fs::metadata(&path).unwrap().len();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(len + 100).unwrap();
+        drop(file);
+
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        put(&tier, "key", 10, 1);
+        assert!(holds(&tier, "key"));
+    }
+
+    #[test]
+    fn a_file_whose_tables_changed_type_is_recreated_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::create(dir.path().join(FILE_NAME)).unwrap();
+        let wx = db.begin_write().unwrap();
+        wx.open_table(TableDefinition::<&str, u64>::new("cache-usage"))
+            .unwrap()
+            .insert("ns", 1)
+            .unwrap();
+        wx.commit().unwrap();
+        drop(db);
+
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        assert_eq!(tier.entries("ns").unwrap(), 0);
+        put(&tier, "key", 10, 1);
+        assert!(holds(&tier, "key"));
+    }
+
+    #[test]
+    fn a_file_whose_namespace_tables_changed_type_is_recreated_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        put(&tier, "key", 10, 1);
+        tier.flush().unwrap();
+        drop(tier);
+
+        let db = Database::create(dir.path().join(FILE_NAME)).unwrap();
+        let wx = db.begin_write().unwrap();
+        wx.delete_table(Names::of("ns").entries()).unwrap();
+        wx.open_table(TableDefinition::<&[u8], u64>::new("cache-entries:ns"))
+            .unwrap()
+            .insert(b"key".as_slice(), 1)
+            .unwrap();
+        wx.commit().unwrap();
+        drop(db);
+
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        assert!(tier.keys("ns").unwrap().is_empty());
+        put(&tier, "other", 10, 1);
+        assert!(holds(&tier, "other"));
+        tier.wipe("ns").unwrap();
+    }
+
+    /// redb checks a table's kind before its types.
+    #[test]
+    fn a_file_whose_table_became_a_multimap_is_recreated_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::create(dir.path().join(FILE_NAME)).unwrap();
+        let wx = db.begin_write().unwrap();
+        wx.open_multimap_table(redb::MultimapTableDefinition::<&str, u64>::new(
+            "cache-usage",
+        ))
+        .unwrap()
+        .insert("ns", 1)
+        .unwrap();
+        wx.commit().unwrap();
+        drop(db);
+
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        assert_eq!(tier.entries("ns").unwrap(), 0);
+        put(&tier, "key", 10, 1);
+        assert!(holds(&tier, "key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_it_may_not_write_is_an_error_and_kept() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let dir = tempfile::tempdir().unwrap();
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
+        tier.open_namespace("ns", 1).unwrap();
+        put(&tier, "key", 10, 1);
+        tier.flush().unwrap();
+        drop(tier);
+
+        let path = dir.path().join(FILE_NAME);
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        // root writes it regardless
+        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            return;
+        }
+
+        let Err(error) = RedbCacheTier::open(dir.path(), MIB) else {
+            panic!("a cache file it may not write opened");
+        };
+        assert!(matches!(error, CacheError::Disk(_)), "{error}");
+        assert!(
+            error.to_string().contains(&path.display().to_string()),
+            "{error}"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let tier = RedbCacheTier::open(dir.path(), MIB).unwrap();
         assert!(holds(&tier, "key"));
     }
 
