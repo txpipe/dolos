@@ -267,20 +267,23 @@ mod tests {
 
     #[test]
     fn an_empty_variable_is_no_secret() {
-        let env = |name: &str| (name == TOKEN_ENV).then(String::new);
+        for variable in [TOKEN_ENV, PASSWORD_ENV] {
+            let env = |name: &str| (name == variable).then(String::new);
 
-        assert_eq!(
-            auth(
-                &CredentialArgs::default(),
-                &official(),
-                Some(&networks::MAINNET),
-                env
-            ),
-            Auth::Basic {
-                user: networks::MAINNET.stelae.user.to_owned(),
-                password: OFFICIAL_REGISTRY_PASSWORD.to_owned(),
-            }
-        );
+            assert_eq!(
+                auth(
+                    &CredentialArgs::default(),
+                    &official(),
+                    Some(&networks::MAINNET),
+                    env
+                ),
+                Auth::Basic {
+                    user: networks::MAINNET.stelae.user.to_owned(),
+                    password: OFFICIAL_REGISTRY_PASSWORD.to_owned(),
+                },
+                "{variable}"
+            );
+        }
     }
 
     /// An empty value in a credentials file counts as unset, as an empty

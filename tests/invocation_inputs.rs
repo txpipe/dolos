@@ -422,36 +422,42 @@ fn digest_plans_with_the_given_state_epochs() {
 }
 
 /// `snapshot verify --reproduce` plans with the retained epochs it is given,
-/// and reports that plan before it reads the registry.
+/// from the list or from a file, and reports that plan before it reads the
+/// registry.
 #[test]
 fn verify_reproduces_with_the_given_state_epochs() {
     let node = Node::new();
     node.sync();
 
-    let proxy = Proxy::start();
+    let epochs = node.root.path().join("epochs.txt");
+    std::fs::write(&epochs, "208\n236\n").unwrap();
 
-    let output = proxy.run(
-        &node,
-        &[
+    for source in [
+        ["--state-epochs", "208,236"],
+        ["--state-epochs-file", epochs.to_str().unwrap()],
+    ] {
+        let proxy = Proxy::start();
+
+        let mut args = vec![
             "snapshot",
             "verify",
             "--repo",
             networks::PREVIEW.stelae.registry,
             "--insecure",
             "--reproduce",
-            "--state-epochs",
-            "208,236",
-        ],
-        None,
-    );
+        ];
+        args.extend(source);
 
-    assert!(!output.status.success(), "the proxy has no stele");
-    assert!(
-        stderr(&output).contains("dumps:    [208, 236] retained"),
-        "the list did not reach the reproduction's plan:\n{}",
-        stderr(&output)
-    );
-    assert!(proxy.requests() > 0, "the registry was never read");
+        let output = proxy.run(&node, &args, None);
+
+        assert!(!output.status.success(), "the proxy has no stele");
+        assert!(
+            stderr(&output).contains("dumps:    [208, 236] retained"),
+            "{source:?} did not reach the reproduction's plan:\n{}",
+            stderr(&output)
+        );
+        assert!(proxy.requests() > 0, "the registry was never read");
+    }
 }
 
 /// A node on a network with no catalog entry reads even the official registry
