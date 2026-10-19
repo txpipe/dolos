@@ -117,9 +117,9 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    // Read before the transport check, so that a bad list is refused before
-    // every blob has been streamed.
-    let state_epochs = super::state_epochs(&args.state_epochs, args.state_epochs_file.as_deref())?;
+    // Read and validated before the transport check, so that a bad list is
+    // refused before every blob has been streamed.
+    let retained = super::retained_epochs(&args.state_epochs, args.state_epochs_file.as_deref())?;
 
     let auth = args.credentials.auth_for_chain(&args.repo, &config.chain)?;
 
@@ -185,7 +185,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         config,
         &stores,
         &selection,
-        &state_epochs,
+        retained,
         "planning the reproduction",
     )?;
 

@@ -43,7 +43,7 @@ use miette::{Context as _, IntoDiagnostic as _};
 use dolos_snapshot::{
     facade::{self as snapshot, RestoreInput, SnapshotRepository},
     node,
-    registry::{self, Point},
+    registry::{self, Auth, Point, Repository},
     restore::Source,
 };
 
@@ -126,12 +126,24 @@ pub(super) fn source(args: &Args, network: Option<&KnownNetwork>) -> miette::Res
         .map_err(|e: String| miette::miette!("{e}"))
 }
 
+/// Where a restore reads from, with the credentials a repository is read
+/// with.
+pub(super) enum Inputs {
+    Dir(PathBuf),
+    Repo(Repository, Auth),
+}
+
 /// Resolves the source and, for a repository, the credentials, so that
-/// `--force` clears nothing for a restore that would refuse them.
-pub(super) fn check_inputs(args: &Args, network: Option<&KnownNetwork>) -> miette::Result<()> {
+/// `--force` clears nothing for a restore that would refuse them, and the
+/// restore reads with the credentials that were checked.
+pub(super) fn resolve(args: &Args, network: Option<&KnownNetwork>) -> miette::Result<Inputs> {
     match source(args, network)? {
-        Source::Dir(_) => Ok(()),
-        Source::Repo(repo) => args.credentials.auth(&repo, network).map(drop),
+        Source::Dir(dir) => Ok(Inputs::Dir(dir)),
+        Source::Repo(repo) => {
+            let auth = args.credentials.auth(&repo, network)?;
+
+            Ok(Inputs::Repo(repo, auth))
+        }
     }
 }
 
@@ -197,29 +209,31 @@ impl Node {
     }
 }
 
-fn restore(config: &RootConfig, args: &Args, options: RestoreOptions<'_>) -> miette::Result<()> {
-    let network = KnownNetwork::by_magic(config.chain.magic());
-    let source = source(args, network)?;
+fn restore(
+    config: &RootConfig,
+    args: &Args,
+    inputs: Inputs,
+    options: RestoreOptions<'_>,
+) -> miette::Result<()> {
     let node = Node::open(config)?;
     let progress = SteleProgress::restoring(options.feedback);
     let observer = progress.observer();
     let restoring = node.restoring(options.resume, options.skip_space_check);
 
-    let outcome = match &source {
-        Source::Dir(dir) => snapshot::restore(
-            RestoreInput::Directory(dir),
+    let outcome = match inputs {
+        Inputs::Dir(dir) => snapshot::restore(
+            RestoreInput::Directory(&dir),
             restoring,
             node.target(),
             Some(&observer),
         ),
-        Source::Repo(repo) => {
-            // Credential and staging resolution remain node policy. The
-            // profile facade receives the resolved inputs and never reads
-            // configuration or environment on its own.
-            let auth = args.credentials.auth(repo, network)?;
+        Inputs::Repo(repo, auth) => {
+            // Staging resolution remains node policy. The profile facade
+            // receives the resolved inputs and never reads configuration or
+            // environment on its own.
             let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
             let repository = SnapshotRepository::open(
-                repo,
+                &repo,
                 args.insecure,
                 auth,
                 scratch,
@@ -345,9 +359,10 @@ fn report(
     );
 }
 
-pub fn run(
+pub(super) fn run(
     config: &RootConfig,
     args: &Args,
+    inputs: Inputs,
     feedback: &Feedback,
     resume: bool,
 ) -> miette::Result<()> {
@@ -357,7 +372,7 @@ pub fn run(
         skip_space_check: args.skip_space_check,
     };
 
-    restore(config, args, options)
+    restore(config, args, inputs, options)
 }
 
 #[cfg(test)]

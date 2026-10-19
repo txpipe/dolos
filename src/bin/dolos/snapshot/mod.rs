@@ -24,6 +24,7 @@ use dolos_snapshot::{
     export::Plan,
     facade::{Selection, SnapshotSource as _, StoreSnapshot},
     planning::{self, PlanReport},
+    RetainedEpochs,
 };
 use miette::{Context as _, IntoDiagnostic as _};
 
@@ -62,16 +63,23 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 }
 
 /// The publisher's retained state-dump epochs, from `--state-epochs` or
-/// `--state-epochs-file`.
+/// `--state-epochs-file`, read and validated.
 ///
 /// Nothing is defaulted: naming neither is the empty list, a publisher that
 /// retains the tip alone, which [`report_plan`] prints so that a mismatch
 /// against a published stele is explained.
-pub fn state_epochs(listed: &[u64], file: Option<&Path>) -> miette::Result<Vec<u64>> {
-    let Some(path) = file else {
-        return Ok(listed.to_vec());
+pub fn retained_epochs(listed: &[u64], file: Option<&Path>) -> miette::Result<RetainedEpochs> {
+    let epochs = match file {
+        Some(path) => read_state_epochs(path)?,
+        None => listed.to_vec(),
     };
 
+    planning::retained_epochs(&epochs)
+        .into_diagnostic()
+        .context("reading the state epochs")
+}
+
+fn read_state_epochs(path: &Path) -> miette::Result<Vec<u64>> {
     let text = std::fs::read_to_string(path)
         .into_diagnostic()
         .with_context(|| format!("reading the state epochs in {}", path.display()))?;
@@ -101,14 +109,10 @@ pub fn planned(
     config: &RootConfig,
     stores: &crate::common::Stores,
     selection: &Selection,
-    state_epochs: &[u64],
+    retained: RetainedEpochs,
     what: &'static str,
 ) -> miette::Result<Plan> {
     let genesis = crate::common::open_genesis_files(&config.genesis)?;
-
-    let retained = planning::retained_epochs(state_epochs)
-        .into_diagnostic()
-        .context("reading the state epochs")?;
 
     StoreSnapshot::new(&stores.archive, &stores.state)
         .selected_plan(u64::from(genesis.network_magic()), retained, *selection)
@@ -176,16 +180,35 @@ mod tests {
         let path = dir.path().join("epochs.txt");
         std::fs::write(&path, "208,236\n290\n").unwrap();
 
-        assert_eq!(state_epochs(&[], Some(&path)).unwrap(), vec![208, 236, 290]);
+        assert_eq!(
+            retained_epochs(&[], Some(&path)).unwrap().as_slice(),
+            [208, 236, 290]
+        );
 
         let missing = dir.path().join("missing.txt");
-        let message = format!("{:?}", state_epochs(&[], Some(&missing)).unwrap_err());
+        let message = format!("{:?}", retained_epochs(&[], Some(&missing)).unwrap_err());
         assert!(message.contains("missing.txt"), "{message}");
     }
 
     #[test]
     fn the_listed_epochs_stand_without_a_file() {
-        assert_eq!(state_epochs(&[208, 236], None).unwrap(), vec![208, 236]);
-        assert_eq!(state_epochs(&[], None).unwrap(), Vec::<u64>::new());
+        assert_eq!(
+            retained_epochs(&[208, 236], None).unwrap().as_slice(),
+            [208, 236]
+        );
+        assert!(retained_epochs(&[], None).unwrap().as_slice().is_empty());
+    }
+
+    /// A list the plan would refuse is refused as it is read, from either
+    /// source.
+    #[test]
+    fn an_invalid_list_is_refused_as_it_is_read() {
+        assert!(retained_epochs(&[236, 208], None).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("epochs.txt");
+        std::fs::write(&path, "208\n208\n").unwrap();
+
+        assert!(retained_epochs(&[], Some(&path)).is_err());
     }
 }

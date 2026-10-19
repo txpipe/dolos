@@ -101,7 +101,7 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    let state_epochs = super::state_epochs(&args.state_epochs, args.state_epochs_file.as_deref())?;
+    let retained = super::retained_epochs(&args.state_epochs, args.state_epochs_file.as_deref())?;
 
     let stores = crate::common::open_data_stores(config)
         .into_diagnostic()
@@ -117,7 +117,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         config,
         &stores,
         &selection,
-        &state_epochs,
+        retained,
         "planning the reproduction",
     )?;
     let snapshot = StoreSnapshot::new(&stores.archive, &stores.state);

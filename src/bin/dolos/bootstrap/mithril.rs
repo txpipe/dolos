@@ -217,9 +217,12 @@ fn import_hardano_into_domain(
         .map_err(|error| miette::miette!("{error}"))
 }
 
-pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    let source = mithril_source(args, KnownNetwork::by_magic(config.chain.magic()))?;
-
+pub fn run(
+    config: &RootConfig,
+    args: &Args,
+    source: &MithrilSource,
+    feedback: &Feedback,
+) -> miette::Result<()> {
     let target_directory = Path::new(&args.download_dir);
 
     if !target_directory.exists() {
@@ -246,7 +249,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
         let receiver = Arc::new(MithrilFeedback::new(feedback));
 
-        rt.block_on(fetch_snapshot(&fetch, &source, Some(receiver)))
+        rt.block_on(fetch_snapshot(&fetch, source, Some(receiver)))
             .map_err(|err| miette::miette!(err.to_string()))
             .context("fetching and validating mithril snapshot")?;
     } else {
