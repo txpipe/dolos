@@ -402,7 +402,7 @@ fn verify_refuses_a_bad_state_epoch_list_before_streaming() {
 fn digest_plans_with_the_given_state_epochs() {
     let node = Node::new();
     node.sync();
-    node.stand_at_boundary();
+    let parent = node.stand_at_boundary();
 
     let epochs = node.root.path().join("epochs.txt");
     std::fs::write(&epochs, "208\n236\n").unwrap();
@@ -429,7 +429,9 @@ fn digest_plans_with_the_given_state_epochs() {
             stderr(&output)
         );
         assert!(
-            stderr(&output).contains("boundary: first block of epoch 1, after "),
+            stderr(&output).contains(&format!(
+                "boundary: first block of epoch 1, after {parent}\n"
+            )),
             "the plan did not report its boundary evidence:\n{}",
             stderr(&output)
         );

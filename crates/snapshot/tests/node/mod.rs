@@ -285,6 +285,20 @@ mod registry_node {
 /// block a few slots later in the same epoch, chained onto the cursor's, with
 /// the cursor on it. Where a node that kept syncing past `stop_epoch` stands.
 pub fn step_past_boundary<B: ToyStores>(domain: &ToyDomain<B>) -> dolos_core::ChainPoint {
+    let next = extend_archive_past_cursor(domain);
+
+    let state = domain.state().start_writer().unwrap();
+    state.set_cursor(next.clone()).unwrap();
+    state.commit().unwrap();
+
+    next
+}
+
+/// Append one empty block to `domain`'s archive, a few slots after the state
+/// cursor and chained onto its block, leaving the cursor where it is. Where a
+/// `doctor rebuild-state --stop-epoch` leaves a node: a full archive beside a
+/// boundary state.
+pub fn extend_archive_past_cursor<B: ToyStores>(domain: &ToyDomain<B>) -> dolos_core::ChainPoint {
     let cursor = domain.state().read_cursor().unwrap().unwrap();
     let body = domain
         .archive()
@@ -299,10 +313,6 @@ pub fn step_past_boundary<B: ToyStores>(domain: &ToyDomain<B>) -> dolos_core::Ch
     let archive = domain.archive().start_writer().unwrap();
     archive.apply(&next, &next_body).unwrap();
     archive.commit().unwrap();
-
-    let state = domain.state().start_writer().unwrap();
-    state.set_cursor(next.clone()).unwrap();
-    state.commit().unwrap();
 
     next
 }

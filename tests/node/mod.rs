@@ -168,7 +168,9 @@ impl Node {
     /// of epoch 0 and the first of epoch 1 — and moves the state cursor onto
     /// the second. The ledger is not run over them; they are what the
     /// archive shows about where the state stands.
-    pub fn stand_at_boundary(&self) {
+    ///
+    /// Returns the first block's parent, the evidence a plan reports.
+    pub fn stand_at_boundary(&self) -> dolos_core::ChainPoint {
         use dolos_cardano::pallas::ledger::traverse::MultiEraBlock;
         use dolos_core::{ArchiveStore as _, ArchiveWriter as _, StateWriter as _};
         use dolos_testing::blocks::make_conway_block_with_prev;
@@ -196,6 +198,8 @@ impl Node {
         state.commit().unwrap();
 
         drop(stores);
+
+        last
     }
 
     /// Move the stores one block past the boundary [`Self::stand_at_boundary`]

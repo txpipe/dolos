@@ -60,7 +60,10 @@ use dolos_testing::{
     blocks::make_conway_block_with_prev,
     toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
 };
-use node::{export_plan, export_to, harness, plan_at_boundary, plan_for, step_past_boundary};
+use node::{
+    export_plan, export_to, extend_archive_past_cursor, harness, plan_at_boundary, plan_for,
+    step_past_boundary,
+};
 use stelae::{
     dir::SteleDir,
     progress::{Observer, Outcome},
@@ -1502,6 +1505,57 @@ fn a_plan_the_stores_have_moved_past_is_refused_before_a_layer() {
                 reason,
                 Ineligible::PlanMismatch {
                     stored: Some(moved)
+                }
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
+}
+
+/// An archive that runs past a boundary state, as `doctor rebuild-state
+/// --stop-epoch` leaves one, still publishes the boundary: the state cursor is
+/// where the stele stands, not the archive's tip. A plan at that tip is refused
+/// for the state it does not describe.
+#[test]
+fn an_archive_past_a_boundary_state_publishes_the_state_cursor() {
+    let domain: ToyDomain = harness();
+
+    let boundary = domain.state().read_cursor().unwrap().unwrap();
+    let tip = extend_archive_past_cursor(&domain);
+
+    let plan = plan_for(&domain);
+    assert_eq!(plan.cursor, boundary);
+
+    let temp = tempfile::tempdir().unwrap();
+    export_plan(temp.path(), &domain, &plan);
+
+    let ahead = Plan {
+        cursor: tip,
+        ..plan.clone()
+    };
+
+    let watcher = Arc::new(Watcher::default());
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let refused = export::export(
+        &stele,
+        &ahead,
+        domain.archive(),
+        domain.state(),
+        None,
+        &export::First,
+        &watcher.observer(),
+    );
+
+    match refused {
+        Err(dolos_snapshot::Error::NotABoundary { reason, .. }) => {
+            assert_eq!(
+                reason,
+                Ineligible::PlanMismatch {
+                    stored: Some(boundary)
                 }
             )
         }

@@ -30,9 +30,12 @@ be passed to:
 - `verify_reproduction` with the published inscription.
 
 Every one of them requires stores standing on the first block of the plan's
-sequence epoch, as a `chain.stop_epoch` sync leaves them, and refuses others
-with `Error::NotABoundary` before writing a layer; `boundary` asks the same
-question up front. See "Only the boundary cut is published" in
+sequence epoch, as a `chain.stop_epoch` sync leaves them; `Error::NotABoundary`
+is the boundary refusal, and none of them writes a layer for stores that fail
+it. Their own input checks can fail first with other errors: a destination
+that already holds a stele, or a reproduction whose sequence or network does
+not match the published one. `boundary` asks the boundary question up front.
+See "Only the boundary cut is published" in
 [the profile](../crates/snapshot/PROFILE.md).
 
 These operations return plans, documents, inscriptions or typed errors. They
