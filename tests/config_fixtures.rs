@@ -348,6 +348,14 @@ fn each_rule_refuses_its_fixture() {
             "ephemeral-store-with-a-path",
             "an ephemeral store takes no other field; remove `path`",
         ),
+        (
+            "ephemeral-state-over-fjall-archive",
+            "an ephemeral state needs an ephemeral archive",
+        ),
+        (
+            "ephemeral-state-with-a-wal-path",
+            "with an ephemeral state the WAL is kept in memory; remove `sync.wal_path`",
+        ),
         ("unknown-field", "unknown field `version`"),
         ("moved-section", "[mithril] moved to"),
     ] {
@@ -835,8 +843,8 @@ fn an_override_the_file_needs_does_not_hide_a_wrong_one() {
 #[serial]
 fn clashing_overrides_are_named_together() {
     let clash = [
-        ("DOLOS_STORAGE__STATE__TYPE", "ephemeral"),
-        ("DOLOS_STORAGE__STATE__PATH", "state"),
+        ("DOLOS_STORAGE__ARCHIVE__TYPE", "ephemeral"),
+        ("DOLOS_STORAGE__ARCHIVE__PATH", "archive"),
     ];
 
     for single in &clash {
@@ -847,7 +855,7 @@ fn clashing_overrides_are_named_together() {
 
     assert!(
         matches!(&error, ConfigError::Environment { variables, .. }
-            if *variables == ["DOLOS_STORAGE__STATE__PATH", "DOLOS_STORAGE__STATE__TYPE"]),
+            if *variables == ["DOLOS_STORAGE__ARCHIVE__PATH", "DOLOS_STORAGE__ARCHIVE__TYPE"]),
         "{error}"
     );
     assert!(error.to_string().contains("an ephemeral store"), "{error}");

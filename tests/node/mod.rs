@@ -41,11 +41,18 @@ pub struct Node {
 
 impl Node {
     pub fn new() -> Self {
+        Self::with_tables("")
+    }
+
+    /// [`Self::new`] with `tables` appended to its `dolos.toml`, such as
+    /// store types or `[mempool]`.
+    pub fn with_tables(tables: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
         dolos_cardano::include::preview::save(root.path()).unwrap();
 
-        // Storage backends are left at their defaults, which is the point: this
-        // test is meant to run against whatever a real node runs against.
+        // Without `tables`, storage backends are left at their defaults, which
+        // is the point: this test is meant to run against whatever a real node
+        // runs against.
         let toml = format!(
             r#"
             compatibility = "v2-alpha.1"
@@ -59,6 +66,8 @@ impl Node {
 
             [storage]
             path = {data}
+
+            {tables}
             "#,
             data = toml_string(&root.path().join("data")),
         );
@@ -231,6 +240,11 @@ impl Node {
             .stdin(std::process::Stdio::null());
 
         command.output().unwrap()
+    }
+
+    /// `dolos <args>` against the node's `dolos.toml`.
+    pub fn run(&self, args: &[&str]) -> std::process::Output {
+        self.command().args(args).output().unwrap()
     }
 
     fn command(&self) -> Command {
