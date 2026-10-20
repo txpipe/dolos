@@ -204,7 +204,8 @@ pub struct DRepSnapshot {
 
 /// The committee a `NoConfidence` enactment dissolved: its members and
 /// threshold, the members' authorization histories as they stood, the
-/// enacted action, and the first epoch without a seated committee.
+/// enacted action, the first epoch without a seated committee, and the
+/// action that seated the committee (`None` for the Conway-genesis one).
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DissolvedCommittee {
     #[n(0)]
@@ -218,6 +219,9 @@ pub struct DissolvedCommittee {
 
     #[n(3)]
     pub epoch: Epoch,
+
+    #[n(4)]
+    pub seated_by: Option<GovActionId>,
 }
 
 impl DissolvedCommittee {
@@ -704,9 +708,11 @@ impl dolos_core::EntityDelta for CommitteeUpdate {
 }
 
 /// A `NoConfidence` action is about to dissolve the seated committee. Keeps
-/// the committee and its members' authorization histories as
-/// `GovState.dissolved_committee`, ahead of the [`CommitteeUpdate`] that
-/// clears the committee and the [`CommitteeGc`] that drops the histories.
+/// the committee, its members' authorization histories and the committee
+/// root that seated it as `GovState.dissolved_committee`, ahead of the
+/// [`CommitteeUpdate`] that clears the committee, the [`GovRootsUpdate`] that
+/// moves the root to the no-confidence and the [`CommitteeGc`] that drops the
+/// histories.
 /// With no committee seated the delta changes nothing, so a no-confidence
 /// enacted while already dissolved keeps the snapshot it has.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -756,6 +762,7 @@ impl dolos_core::EntityDelta for CommitteeDissolve {
             auths,
             action: self.action.clone(),
             epoch: self.epoch,
+            seated_by: state.prev_gov_action_ids.committee.clone(),
         });
 
         self.applied = true;
@@ -1451,8 +1458,9 @@ pub(crate) mod testing {
             ),
             action in root::any_gov_action_id(),
             epoch in root::any_epoch(),
+            seated_by in prop::option::of(root::any_gov_action_id()),
         ) -> DissolvedCommittee {
-            DissolvedCommittee { committee, auths, action, epoch }
+            DissolvedCommittee { committee, auths, action, epoch, seated_by }
         }
     }
 
@@ -1609,6 +1617,10 @@ mod tests {
                     action_index: 1,
                 },
                 epoch: 506,
+                seated_by: Some(GovActionId {
+                    transaction_id: [12u8; 32].into(),
+                    action_index: 0,
+                }),
             }),
         };
 
@@ -2125,11 +2137,20 @@ mod prop_tests {
             action_index: 0,
         };
 
+        let seating = GovActionId {
+            transaction_id: [5u8; 32].into(),
+            action_index: 1,
+        };
+
         let history = vec![(10, CommitteeAuthorization::HotCredential(hot))];
 
         let mut entity = Some(GovState {
             committee: Some(seated.clone()),
             committee_auths: BTreeMap::from([(sitting.clone(), history.clone())]),
+            prev_gov_action_ids: GovRoots {
+                committee: Some(seating.clone()),
+                ..Default::default()
+            },
             ..Default::default()
         });
 
@@ -2137,12 +2158,15 @@ mod prop_tests {
         snapshot.apply(&mut entity);
         let mut dissolve = CommitteeUpdate::no_confidence();
         dissolve.apply(&mut entity);
+        let mut root = GovRootsUpdate::new(GovPurpose::Committee, action.clone());
+        root.apply(&mut entity);
         let mut gc = CommitteeGc::new();
         gc.apply(&mut entity);
 
         let state = entity.as_ref().unwrap();
         assert_eq!(state.committee, None);
         assert!(state.committee_auths.is_empty());
+        assert_eq!(state.prev_gov_action_ids.committee, Some(action.clone()));
         assert_eq!(
             state.dissolved_committee,
             Some(DissolvedCommittee {
@@ -2150,6 +2174,7 @@ mod prop_tests {
                 auths: BTreeMap::from([(sitting.clone(), history)]),
                 action,
                 epoch: 600,
+                seated_by: Some(seating),
             })
         );
         let dissolved = entity.clone();
@@ -2171,6 +2196,7 @@ mod prop_tests {
         assert_eq!(entity, dissolved);
 
         gc.undo(&mut entity);
+        root.undo(&mut entity);
         dissolve.undo(&mut entity);
         snapshot.undo(&mut entity);
 
@@ -2240,6 +2266,61 @@ mod prop_tests {
 
         again.undo(&mut entity);
         assert_eq!(entity, before);
+    }
+
+    /// The snapshot reads a member's newest authorization: one that resigned
+    /// after authorizing is resigned, with no hot key.
+    #[test]
+    fn dissolved_committee_auth_reads_the_newest_entry() {
+        let resigned = StakeCredential::ScriptHash([1u8; 28].into());
+        let authorized = StakeCredential::ScriptHash([2u8; 28].into());
+        let hot = StakeCredential::AddrKeyhash([3u8; 28].into());
+        let rotated = StakeCredential::AddrKeyhash([4u8; 28].into());
+
+        let snapshot = DissolvedCommittee {
+            committee: Committee {
+                members: BTreeMap::from([(resigned.clone(), 500), (authorized.clone(), 500)]),
+                threshold: RationalNumber {
+                    numerator: 1,
+                    denominator: 2,
+                },
+            },
+            auths: BTreeMap::from([
+                (
+                    resigned.clone(),
+                    vec![
+                        (10, CommitteeAuthorization::HotCredential(hot.clone())),
+                        (20, CommitteeAuthorization::Resigned(None)),
+                    ],
+                ),
+                (
+                    authorized.clone(),
+                    vec![
+                        (10, CommitteeAuthorization::HotCredential(hot)),
+                        (20, CommitteeAuthorization::HotCredential(rotated.clone())),
+                    ],
+                ),
+            ]),
+            action: GovActionId {
+                transaction_id: [5u8; 32].into(),
+                action_index: 0,
+            },
+            epoch: 600,
+            seated_by: None,
+        };
+
+        assert_eq!(
+            snapshot.committee_auth(&resigned),
+            Some(&CommitteeAuthorization::Resigned(None))
+        );
+        assert_eq!(
+            snapshot.committee_auth(&authorized),
+            Some(&CommitteeAuthorization::HotCredential(rotated))
+        );
+        assert_eq!(
+            snapshot.committee_auth(&StakeCredential::ScriptHash([9u8; 28].into())),
+            None
+        );
     }
 
     /// Each purpose writes its own root slot and leaves the others alone.

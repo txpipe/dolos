@@ -611,6 +611,7 @@ pub fn gov_state() -> GovState {
             )]),
             action: gov_action_id(0xdf, 4),
             epoch: 505,
+            seated_by: Some(gov_action_id(0xe0, 5)),
         }),
     }
 }

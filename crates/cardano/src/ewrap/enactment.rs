@@ -428,8 +428,8 @@ mod tests {
     }
 
     /// Enacted through the gov singleton, a no-confidence leaves the last
-    /// committee, its enacting action and the opening epoch in the snapshot,
-    /// and the next `UpdateCommittee` clears it.
+    /// committee, its enacting action, the opening epoch and its seating
+    /// action in the snapshot, and the next `UpdateCommittee` clears it.
     #[test]
     fn no_confidence_snapshot_survives_until_reseat() {
         let member = StakeCredential::ScriptHash([1u8; 28].into());
@@ -469,6 +469,10 @@ mod tests {
             }
         );
         assert_eq!(snapshot.epoch, 600);
+        assert_eq!(
+            snapshot.seated_by, None,
+            "the genesis committee has no seating action"
+        );
 
         let mut row = proposal(
             tx,

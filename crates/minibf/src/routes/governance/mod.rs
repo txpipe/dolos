@@ -786,10 +786,12 @@ fn committee_members<'a>(
 ///
 /// A `NoConfidence` enactment dissolves the committee. Dolos sets the
 /// committee value to null and keeps the last-seated committee as a snapshot,
-/// with each member's authorization history as it stood. A dissolved
-/// committee has `is_dissolved` true and returns the snapshot's members and
-/// quorum, as Blockfrost returns the historical members. A dissolved store
-/// without a snapshot returns an empty member list and a zero quorum.
+/// with each member's authorization history as it stood and the action that
+/// seated it. A dissolved committee has `is_dissolved` true and returns the
+/// snapshot's members, quorum and seating action, as Blockfrost returns the
+/// historical committee; the committee root then holds the `NoConfidence`,
+/// which never seated anyone. A dissolved store without a snapshot returns an
+/// empty member list and a zero quorum.
 ///
 /// The `is_dissolved` flag depends on evidence of a committee lineage action,
 /// not on governance activation. A previous committee action on record makes a
@@ -811,15 +813,19 @@ where
         .filter(|gov| gov.active_since.is_some())
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let (gov_action_id, proposal_tx_hash, proposal_index) =
-        match gov.prev_gov_action_ids.committee.as_ref() {
-            Some(id) => (
-                Some(bech32_gov_action(&id.transaction_id, id.action_index)?),
-                Some(hex::encode(id.transaction_id)),
-                Some(i32_or_500(id.action_index)?),
-            ),
-            None => (None, None, None),
-        };
+    let seating = match (gov.committee.as_ref(), gov.dissolved_committee.as_ref()) {
+        (None, Some(dissolved)) => dissolved.seated_by.as_ref(),
+        _ => gov.prev_gov_action_ids.committee.as_ref(),
+    };
+
+    let (gov_action_id, proposal_tx_hash, proposal_index) = match seating {
+        Some(id) => (
+            Some(bech32_gov_action(&id.transaction_id, id.action_index)?),
+            Some(hex::encode(id.transaction_id)),
+            Some(i32_or_500(id.action_index)?),
+        ),
+        None => (None, None, None),
+    };
 
     let quorum = |threshold: &RationalNumber| -> Result<CommitteeQuorum, StatusCode> {
         Ok(CommitteeQuorum {
@@ -7400,12 +7406,18 @@ mod tests {
     async fn governance_committee_dissolved_serves_last_members() {
         // A NoConfidence enactment keeps the last-seated committee. While the
         // committee is dissolved, the endpoint serves the kept members, each
-        // with the hot key it had, and the kept quorum.
+        // with the hot key it had, the kept quorum and the action that seated
+        // them, not the NoConfidence the committee root now holds.
         let app =
             TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
                 let action = GovActionId {
                     transaction_id: Hash::from([9u8; 32]),
                     action_index: 1,
+                };
+
+                let seating = GovActionId {
+                    transaction_id: Hash::from([8u8; 32]),
+                    action_index: 0,
                 };
 
                 let committee = dolos_cardano::model::gov::Committee {
@@ -7432,6 +7444,7 @@ mod tests {
                             )]),
                             action,
                             epoch: 5,
+                            seated_by: Some(seating),
                         }),
                         ..Default::default()
                     },
@@ -7445,6 +7458,12 @@ mod tests {
             .expect("The JSON parser cannot parse the committee response.");
 
         assert!(model.is_dissolved);
+        assert_eq!(
+            model.gov_action_id,
+            Some(bech32_gov_action(&Hash::from([8u8; 32]), 0).unwrap())
+        );
+        assert_eq!(model.proposal_tx_hash, Some(hex::encode([8u8; 32])));
+        assert_eq!(model.proposal_index, Some(0));
         assert_eq!(model.quorum.numerator, 2);
         assert_eq!(model.quorum.denominator, 3);
         assert_eq!(model.members.len(), 2);
