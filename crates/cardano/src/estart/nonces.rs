@@ -294,31 +294,47 @@ mod tests {
         assert_eq!(next_largest_stable_slot(&ctx), 134_352_000);
     }
 
-    /// The entering epoch's extra entropy is mixed into the nonce:
+    /// The entering epoch's extra entropy is mixed into the nonce under every
+    /// TPraos protocol, across a TPraos hard fork too:
     /// η = blake2b-256(η_plain ‖ entropy).
     #[test]
     fn extra_entropy_is_mixed_into_the_nonce() {
         let entropy = hash(&"66".repeat(32));
 
-        let plain = with_nonces(context(
-            258,
-            pparams(3),
-            pparams(3),
-            summary(3, SHELLEY_START, SHELLEY_EPOCH_LENGTH),
-        ));
-        let plain = next_nonce(&plain).unwrap();
+        let cases = [
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (5, 5),
+            (6, 6),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (5, 6),
+        ];
 
-        let mixed = with_nonces(context(
-            258,
-            pparams(3),
-            with_entropy(pparams(3), entropy_nonce(&entropy.to_string())),
-            summary(3, SHELLEY_START, SHELLEY_EPOCH_LENGTH),
-        ));
-        let mixed = next_nonce(&mixed).unwrap();
+        for (live, next) in cases {
+            let plain = with_nonces(context(
+                258,
+                pparams(live),
+                pparams(next),
+                summary(live, SHELLEY_START, SHELLEY_EPOCH_LENGTH),
+            ));
+            let plain = next_nonce(&plain).unwrap();
 
-        assert_eq!(mixed.active, mix(plain.active, entropy));
-        assert_eq!(mixed.candidate, plain.candidate);
-        assert_eq!(mixed.evolving, plain.evolving);
+            let mixed = with_nonces(context(
+                258,
+                pparams(live),
+                with_entropy(pparams(next), entropy_nonce(&entropy.to_string())),
+                summary(live, SHELLEY_START, SHELLEY_EPOCH_LENGTH),
+            ));
+            let mixed = next_nonce(&mixed).unwrap();
+
+            let label = format!("protocol {live} → {next}");
+            assert_eq!(mixed.active, mix(plain.active, entropy), "{label}");
+            assert_eq!(mixed.candidate, plain.candidate, "{label}");
+            assert_eq!(mixed.evolving, plain.evolving, "{label}");
+        }
     }
 
     /// A neutral entropy, or none at all, gives the plain sweep.
@@ -392,18 +408,18 @@ mod tests {
         assert_eq!(next_nonce(&praos).unwrap().active, candidate);
     }
 
-    /// Mainnet 259: Dolos's nonce without the entropy, mixed with the 2021
-    /// injection, gives the ledger's nonce.
+    /// Mainnet 259, entered at protocol 4: Dolos's nonce without the entropy,
+    /// mixed with the 2021 injection, gives the ledger's nonce.
     #[test]
     fn mainnet_epoch_259_vector() {
         let ctx = context(
             258,
-            pparams(3),
+            pparams(4),
             with_entropy(
-                pparams(3),
+                pparams(4),
                 entropy_nonce("d982e06fd33e7440b43cefad529b7ecafbaa255e38178ad4189a37e4ce9bf1fa"),
             ),
-            summary(3, SHELLEY_START, SHELLEY_EPOCH_LENGTH),
+            summary(4, SHELLEY_START, SHELLEY_EPOCH_LENGTH),
         );
 
         let entropy = extra_entropy(&ctx).unwrap();
