@@ -1,55 +1,54 @@
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "preview"
+
 [upstream]
+type = "peer"
 peer_address = "relay.cnode-m1.demeter.run:3002"
 
+[sync]
+wal_path = "wal"
+pull_batch_size = 20
+
+[sync.retry]
+max_retries = 20
+backoff_unit_seconds = 2
+backoff_factor = 2
+max_backoff_seconds = 60
+dismissible = false
+
 [storage]
-version = "v4"
 path = "data"
 
-[storage.wal]
-backend = "redb"
-path = "wal"
-cache = 50
-
 [storage.state]
-backend = "fjall"
+type = "fjall"
 path = "state"
-cache = 500
-max_history = 25920
-max_journal_size = 1024
-flush_on_commit = false
-l0_threshold = 4
-worker_threads = 8
-memtable_size_mb = 64
+preset = "standard"
 
 [storage.archive]
-backend = "fjall"
+type = "fjall"
 path = "archive"
 blocks_path = "blocks"
-cache = 500
-max_journal_size = 1024
-flush_on_commit = false
-l0_threshold = 4
-worker_threads = 4
-memtable_size_mb = 64
+preset = "standard"
 
-[storage.mempool]
-backend = "in_memory"
+[storage.cache]
+enabled = true
+path = "cache"
+memory_mb = 512
+disk_mb = 4096
 
-[genesis]
-byron_path = "byron.json"
-shelley_path = "shelley.json"
-alonzo_path = "alonzo.json"
-conway_path = "conway.json"
-force_protocol = 6
+[history]
+mode = "rolling"
+window = { unit = "slot", value = 86400 }
 
-[sync]
-pull_batch_size = 20
-max_history = 86400
-max_rollback = 25920
-sync_limit = "NoLimit"
+[mempool]
+persistent = false
+path = "mempool"
 
-[submit]
-prune_height = 200
+[serve]
+max_concurrent_queries = 32
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
@@ -62,14 +61,14 @@ permissive_cors = true
 listen_address = "[::]:6541"
 permissive_cors = true
 token_registry_url = ""
-url = ""
+public_url = ""
 max_scan_items = 3000
 
 [serve.trp]
 listen_address = "[::]:6542"
 max_optimize_rounds = 10
 permissive_cors = true
-extra_fees = 0
+extra_fees_lovelace = 0
 
 [serve.minikupo]
 listen_address = "[::]:6543"
@@ -78,31 +77,6 @@ permissive_cors = true
 [relay]
 listen_address = "[::]:6544"
 
-[retries]
-max_retries = 20
-backoff_unit_sec = 2
-backoff_factor = 2
-max_backoff_sec = 60
-dismissible = false
-
-[chain]
-type = "cardano"
-magic = 2
-is_testnet = true
-custom_utxos = []
-
 [logging]
-max_level = "INFO"
-include_tokio = false
-include_pallas = false
-include_grpc = false
-include_trp = false
-include_minibf = false
-include_minikupo = false
-include_otlp = false
-include_fjall = false
-
-[telemetry]
-enabled = false
-otlp_endpoint = "http://localhost:4317"
-service_name = "dolos"
+level = "info"
+filter = "fjall=warn"

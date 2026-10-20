@@ -12,8 +12,12 @@ pub struct Args {
     pub network: Option<&'static KnownNetwork>,
 }
 
+/// A known network is itself; a custom one is the known network its magic is.
 fn infer_network(config: &RootConfig) -> Option<&'static KnownNetwork> {
-    KnownNetwork::by_magic(config.chain.magic())
+    match &config.chain.cardano {
+        Some(cardano) => KnownNetwork::by_magic(cardano.magic.into()),
+        None => KnownNetwork::by_name(&config.chain.network),
+    }
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {

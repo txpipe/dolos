@@ -1,54 +1,21 @@
 use clap::Parser;
-use dolos_cardano::{
-    mutable_slots,
-    networks::{self, KnownNetwork, Peer},
-};
+use dolos_cardano::networks::{self, KnownNetwork, Peer};
 use dolos_core::config::{
-    CardanoConfig, ChainConfig, GenesisConfig, GrpcConfig, MinibfConfig, MinikupoConfig,
-    PeerConfig, RelayConfig, RootConfig, StorageConfig, StorageVersion, TrpConfig, UpstreamConfig,
+    ChainConfig, GrpcConfig, HistoryConfig, HistoryWindow, MinibfConfig, MinikupoConfig,
+    PeerConfig, RelayConfig, RootConfig, TrpConfig, UpstreamConfig,
 };
 use inquire::{Confirm, MultiSelect, Select, Text};
-use miette::{miette, Context as _, IntoDiagnostic};
+use miette::{Context as _, IntoDiagnostic};
 use std::{
     fmt::Display,
     path::{Path, PathBuf},
 };
 
-use dolos::storage::{BOOTSTRAP_GUIDE_URL, CURRENT_STORAGE_VERSION};
+use crate::feedback::Feedback;
 
-use crate::{common::MovedSections, data::cleanup, feedback::Feedback};
-
-/// The config file `dolos init` writes, and the one whose failure to parse
+/// The config file `dolos init` writes, and the one whose failure to load
 /// tells us an older setup is present.
 const CONFIG_FILE: &str = "dolos.toml";
-
-/// What `dolos init` may do about the storage of a setup it found on disk.
-///
-/// The distinction that matters is whether init knows where the old store
-/// lives. A config that parses names its path, so the delete-and-bootstrap
-/// step can be offered. A config that did not parse — which is what a v1.6
-/// TOML naming a removed backend variant looks like from here — leaves the
-/// editor filled from defaults, and the default path is a guess: deleting on
-/// a guess would aim at a directory the operator never named.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StorageUpgrade {
-    /// The config already reads at the version this binary carries.
-    NotNeeded,
-    /// An older version, at a path init knows: offer to delete and bootstrap.
-    Offer,
-    /// An existing config init cannot read, so the store's path is unknown.
-    Unreadable,
-}
-
-fn storage_upgrade(version: &StorageVersion, unparseable_existing: bool) -> StorageUpgrade {
-    if unparseable_existing {
-        StorageUpgrade::Unreadable
-    } else if *version != CURRENT_STORAGE_VERSION {
-        StorageUpgrade::Offer
-    } else {
-        StorageUpgrade::NotNeeded
-    }
-}
 
 /// Parses `--known-network` / `--network` against the catalog.
 pub fn parse_known_network(name: &str) -> Result<&'static KnownNetwork, String> {
@@ -56,17 +23,11 @@ pub fn parse_known_network(name: &str) -> Result<&'static KnownNetwork, String> 
 }
 
 fn upstream_config(network: &KnownNetwork) -> UpstreamConfig {
-    UpstreamConfig::Peer(PeerConfig {
-        peer_address: network.default_peer.into(),
-    })
+    UpstreamConfig::peer(network.default_peer)
 }
 
 fn chain_config(network: &KnownNetwork) -> ChainConfig {
-    ChainConfig::Cardano(CardanoConfig {
-        magic: network.magic.into(),
-        is_testnet: network.is_testnet,
-        ..Default::default()
-    })
+    ChainConfig::known(network.name)
 }
 
 #[derive(Debug, Clone)]
@@ -99,15 +60,17 @@ impl Display for HistoryPrunningOptions {
     }
 }
 
-impl From<HistoryPrunningOptions> for Option<u64> {
+impl From<HistoryPrunningOptions> for HistoryConfig {
     fn from(value: HistoryPrunningOptions) -> Self {
-        match value {
-            HistoryPrunningOptions::KeepEverything => None,
-            HistoryPrunningOptions::Keep1Day => Some(24 * 60 * 60),
-            HistoryPrunningOptions::Keep1Week => Some(7 * 24 * 60 * 60),
-            HistoryPrunningOptions::Keep1Month => Some(30 * 24 * 60 * 60),
-            HistoryPrunningOptions::Custom(x) => Some(x),
-        }
+        let slots = match value {
+            HistoryPrunningOptions::KeepEverything => return HistoryConfig::default(),
+            HistoryPrunningOptions::Keep1Day => 24 * 60 * 60,
+            HistoryPrunningOptions::Keep1Week => 7 * 24 * 60 * 60,
+            HistoryPrunningOptions::Keep1Month => 30 * 24 * 60 * 60,
+            HistoryPrunningOptions::Custom(x) => x,
+        };
+
+        HistoryConfig::rolling(HistoryWindow::slots(slots))
     }
 }
 
@@ -221,25 +184,10 @@ struct ConfigEditor(RootConfig, IncludeGenesisFiles);
 
 impl Default for ConfigEditor {
     fn default() -> Self {
-        let editor = Self(
-            RootConfig {
-                upstream: upstream_config(&networks::MAINNET),
-                storage: StorageConfig {
-                    version: CURRENT_STORAGE_VERSION,
-                    ..Default::default()
-                },
-                genesis: Default::default(),
-                sync: Default::default(),
-                submit: Default::default(),
-                serve: Default::default(),
-                relay: Default::default(),
-                retries: Default::default(),
-                logging: Default::default(),
-                telemetry: Default::default(),
-                chain: chain_config(&networks::MAINNET),
-            },
-            None,
-        );
+        let mut config = RootConfig::new(chain_config(&networks::MAINNET));
+        config.upstream = Some(upstream_config(&networks::MAINNET));
+
+        let editor = Self(config, None);
 
         let editor = editor
             .apply_serve_grpc(Some(true))
@@ -257,16 +205,9 @@ impl Default for ConfigEditor {
 impl ConfigEditor {
     fn apply_known_network(mut self, network: Option<&'static KnownNetwork>) -> Self {
         if let Some(network) = network {
-            self.0.genesis = GenesisConfig::default();
-            self.0.upstream = upstream_config(network);
+            self.0.upstream = Some(upstream_config(network));
             self.0.chain = chain_config(network);
             self.1 = Some(network);
-
-            // Add max rollback window for network from Genesis.
-            if self.0.sync.max_rollback.is_none() {
-                let genesis = network.genesis();
-                self.0.sync.max_rollback = Some(mutable_slots(&genesis));
-            }
         }
 
         self
@@ -274,10 +215,12 @@ impl ConfigEditor {
 
     fn apply_remote_peer(mut self, value: Option<&String>) -> Self {
         if let Some(remote_peer) = value {
-            let config = self.0.upstream.as_peer_mut();
-
-            if let Some(config) = config {
-                remote_peer.clone_into(&mut config.peer_address)
+            match &mut self.0.upstream {
+                Some(UpstreamConfig::Peer(config)) => {
+                    config.peer_address = Some(remote_peer.clone())
+                }
+                Some(UpstreamConfig::Emulator(_)) => (),
+                None => self.0.upstream = Some(UpstreamConfig::peer(remote_peer)),
             }
         }
 
@@ -285,7 +228,7 @@ impl ConfigEditor {
     }
 
     fn apply_history_pruning(mut self, value: HistoryPrunningOptions) -> Self {
-        self.0.sync.max_history = value.into();
+        self.0.history = value.into();
 
         self
     }
@@ -389,56 +332,10 @@ impl ConfigEditor {
             .apply_enable_relay(args.enable_relay)
     }
 
-    fn prompt_storage_upgrade(self, unparseable_existing: bool) -> miette::Result<Self> {
-        match storage_upgrade(&self.0.storage.version, unparseable_existing) {
-            StorageUpgrade::NotNeeded => Ok(self),
-            StorageUpgrade::Unreadable => Err(miette!(
-                "found a `{CONFIG_FILE}` this dolos cannot read, so the storage it configures \
-                 cannot be located. Remove the data directory your existing `{CONFIG_FILE}` \
-                 names, then delete the file and run `dolos init` again — see the bootstrap \
-                 guide at {BOOTSTRAP_GUIDE_URL}"
-            )),
-            StorageUpgrade::Offer => {
-                let delete = Confirm::new("Your storage is incompatible with the current version. Do you want to delete data and bootstrap?")
-                    .with_default(true)
-                    .prompt()
-                    .into_diagnostic()
-                    .context("asking for storage version upgrade")?;
-
-                self.apply_storage_upgrade(delete)
-            }
-        }
-    }
-
-    /// Carry out the operator's answer to the delete-and-bootstrap offer.
-    ///
-    /// Declining is declining the upgrade: init writes nothing and touches no
-    /// data, so the setup stays exactly as it was found and the daemon keeps
-    /// refusing it. Recording the new version without performing the migration
-    /// would be the tool producing the config/data mismatch the version gate
-    /// puts on the operator alone — which is also why the version is assigned
-    /// only after the cleanup has succeeded: a cleanup that refuses or fails
-    /// ends the init with the editor, and the config on disk, as they were.
-    fn apply_storage_upgrade(mut self, delete: bool) -> miette::Result<Self> {
-        if !delete {
-            return Err(miette!(
-                "storage upgrade declined, leaving the existing setup untouched. Dolos will \
-                 keep refusing to start against it until the data is re-bootstrapped — see \
-                 the bootstrap guide at {BOOTSTRAP_GUIDE_URL}"
-            ));
-        }
-
-        cleanup::clear(&self.0).context("cleaning up data")?;
-
-        self.0.storage.version = CURRENT_STORAGE_VERSION;
-
-        Ok(self)
-    }
-
     fn prompt_known_network(self) -> miette::Result<Self> {
         let options = KnownNetwork::all().to_vec();
 
-        let selected = KnownNetwork::by_magic(self.0.chain.magic());
+        let selected = KnownNetwork::by_name(&self.0.chain.network);
 
         let starting_cursor = selected
             .and_then(|x| options.iter().position(|y| std::ptr::eq(*y, x)))
@@ -468,9 +365,16 @@ impl ConfigEditor {
     }
 
     fn prompt_remote_peer(self) -> miette::Result<Self> {
-        let current = self.0.upstream.peer_address().unwrap_or_default();
+        let network = KnownNetwork::by_name(&self.0.chain.network);
 
-        let Some(network) = KnownNetwork::by_magic(self.0.chain.magic()) else {
+        let current = match &self.0.upstream {
+            Some(UpstreamConfig::Peer(PeerConfig {
+                peer_address: Some(address),
+            })) => address.as_str(),
+            _ => network.map(|x| x.default_peer).unwrap_or_default(),
+        };
+
+        let Some(network) = network else {
             let value = Text::new("Which remote peer (relay) do you want to use?")
                 .with_default(current)
                 .prompt()
@@ -580,9 +484,8 @@ impl ConfigEditor {
         Ok(self.apply_history_pruning(value))
     }
 
-    fn confirm_values(mut self, storage_upgrade: bool) -> miette::Result<ConfigEditor> {
+    fn confirm_values(mut self) -> miette::Result<ConfigEditor> {
         self = self
-            .prompt_storage_upgrade(storage_upgrade)?
             .prompt_known_network()?
             .prompt_include_genesis()?
             .prompt_remote_peer()?
@@ -617,28 +520,20 @@ impl ConfigEditor {
     }
 }
 
-/// Whether a config file is present that this dolos could not read.
-///
-/// A load that failed with the file on disk is an older setup, not a missing
-/// one: a v1.6 `dolos.toml` naming a removed backend, or carrying the retired
-/// `block_compression` table, does not parse here. `storage_upgrade` records
-/// what follows from that.
-fn existing_config_is_unreadable(config: &miette::Result<RootConfig>, config_file: &Path) -> bool {
-    config.is_err() && config_file.exists()
-}
-
-/// Refuses a config that failed to load only because it still carries a moved
-/// section.
-///
-/// Every `dolos.toml` an older `init` wrote has `[mithril]`. Such a file is one
-/// edit away from loading and names its storage, so it is reported as that
-/// edit rather than as an unreadable setup whose data has to go.
-fn refuse_moved_sections(
+/// Refuses a config file that is present but did not load, leaving it
+/// untouched: the load error says what to change, and init never guesses at
+/// the storage such a file names.
+fn refuse_unreadable(
     config: miette::Result<RootConfig>,
-) -> miette::Result<miette::Result<RootConfig>> {
+    config_file: &Path,
+) -> miette::Result<Option<RootConfig>> {
     match config {
-        Err(report) if report.is::<MovedSections>() => Err(report),
-        other => Ok(other),
+        Ok(config) => Ok(Some(config)),
+        Err(report) if config_file.exists() => Err(report.wrap_err(format!(
+            "leaving the existing `{}` untouched",
+            config_file.display()
+        ))),
+        Err(_) => Ok(None),
     }
 }
 
@@ -649,25 +544,27 @@ pub fn run(
 ) -> miette::Result<()> {
     crate::banner::print_init_banner();
 
-    let config = refuse_moved_sections(config)?;
-
-    let unparseable_existing = existing_config_is_unreadable(&config, Path::new(CONFIG_FILE));
+    let config = refuse_unreadable(config, Path::new(CONFIG_FILE))?;
 
     config
         .map(|x| ConfigEditor(x, None))
         .unwrap_or_default()
         .fill_values_from_args(args)
-        .confirm_values(unparseable_existing)?
+        .confirm_values()?
         .include_genesis_files()?
         .save(&PathBuf::from(CONFIG_FILE))?;
 
     println!("config saved to {CONFIG_FILE}");
 
-    let config = crate::common::load_config(&None)
+    let config = crate::common::load_config(None)
         .into_diagnostic()
-        .context("parsing configuration")?;
+        .context("loading configuration")?;
 
-    if let UpstreamConfig::Peer(_) = &config.upstream {
+    if !config
+        .upstream
+        .as_ref()
+        .is_some_and(UpstreamConfig::is_emulator)
+    {
         super::bootstrap::run(&config, &super::bootstrap::Args::default(), feedback)?;
     }
 
@@ -680,335 +577,12 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dolos_snapshot::restore::progress_path_in;
 
-    /// A fresh config is seeded at the version this binary reads, so the
-    /// upgrade prompt does not fire on a node init just created.
+    /// The setup a fresh init writes works: the saved config loads, the
+    /// stores open, and the first block appended lands in a segment file as a
+    /// zstd frame with nothing having been configured for it.
     #[test]
-    fn a_fresh_config_is_seeded_at_the_current_storage_version() {
-        let editor = ConfigEditor::default();
-
-        assert_eq!(editor.0.storage.version, CURRENT_STORAGE_VERSION);
-        assert_eq!(
-            storage_upgrade(&editor.0.storage.version, false),
-            StorageUpgrade::NotNeeded
-        );
-    }
-
-    /// An older version at a path init can read is the case the offer exists
-    /// for; a config that did not parse is not, whatever version the defaults
-    /// filled in for it say.
-    #[test]
-    fn an_unreadable_config_is_never_the_deletable_case() {
-        assert_eq!(
-            storage_upgrade(&StorageVersion::V3, false),
-            StorageUpgrade::Offer
-        );
-        assert_eq!(
-            storage_upgrade(&CURRENT_STORAGE_VERSION, true),
-            StorageUpgrade::Unreadable
-        );
-        assert_eq!(
-            storage_upgrade(&StorageVersion::V3, true),
-            StorageUpgrade::Unreadable
-        );
-    }
-
-    /// An editor pointed at `path` as its storage root, at the version a v1.6
-    /// setup carries.
-    fn editor_over(path: &Path) -> ConfigEditor {
-        let mut editor = ConfigEditor::default();
-        editor.0.storage.path = path.to_path_buf();
-        editor.0.storage.version = StorageVersion::V3;
-        editor
-    }
-
-    /// Lay out what an older node leaves under `root`: the directory-based
-    /// stores with their files nested inside, a block segment, and the
-    /// progress file of a restore that never finished. Returns every file
-    /// written, so a test can say whether all of it is still there.
-    fn old_store_under(root: &Path) -> Vec<PathBuf> {
-        let files = vec![
-            root.join("wal").join("journal"),
-            root.join("state").join("index").join("000001.sst"),
-            root.join("archive").join("index").join("000001.sst"),
-            root.join("archive").join("000000.segment"),
-            progress_path_in(root),
-        ];
-
-        for file in &files {
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(file, b"a store built by v1.6").unwrap();
-        }
-
-        files
-    }
-
-    fn all_present(files: &[PathBuf]) -> bool {
-        files.iter().all(|file| file.is_file())
-    }
-
-    /// Declining the offer costs the operator nothing: no data removed, and no
-    /// version recorded that the data does not back.
-    #[test]
-    fn declining_the_upgrade_touches_neither_data_nor_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("data");
-        let files = old_store_under(&data);
-
-        let error = editor_over(&data)
-            .apply_storage_upgrade(false)
-            .err()
-            .expect("declining aborts the init");
-
-        assert!(
-            error.to_string().contains(BOOTSTRAP_GUIDE_URL),
-            "the abort must point at the bootstrap guide: {error}"
-        );
-        assert!(
-            all_present(&files),
-            "declining must leave the store in place"
-        );
-    }
-
-    /// Accepting is the only path that deletes. The stores are directories
-    /// with files nested inside them, not flat files under the root, and the
-    /// wipe has to take all of it — the restore progress file included — and
-    /// hand back an empty root for the bootstrap that follows. The version is
-    /// recorded only once that has happened.
-    #[test]
-    fn accepting_the_upgrade_clears_the_nested_stores_and_records_the_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("data");
-        let files = old_store_under(&data);
-
-        let editor = editor_over(&data).apply_storage_upgrade(true).unwrap();
-
-        assert!(
-            !files.iter().any(|file| file.exists()),
-            "accepting must clear every store under the root"
-        );
-        assert!(data.is_dir(), "the root comes back for the bootstrap");
-        assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
-        assert_eq!(editor.0.storage.version, CURRENT_STORAGE_VERSION);
-    }
-
-    /// A store the configuration keeps outside the root would survive a wipe
-    /// of the root, and a config recorded at the new version over a surviving
-    /// store is the mismatch the gate exists to refuse. So the accept path
-    /// stops before deleting anything, names the directory to remove by hand,
-    /// and — because the error carries the editor away with it — leaves no
-    /// upgraded config to save.
-    #[test]
-    fn a_store_outside_the_root_aborts_before_anything_is_deleted() {
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("data");
-        let elsewhere = dir.path().join("elsewhere").join("state");
-        let files = old_store_under(&data);
-
-        std::fs::create_dir_all(&elsewhere).unwrap();
-        std::fs::write(elsewhere.join("journal"), b"a store built by v1.6").unwrap();
-
-        let mut editor = editor_over(&data);
-        let dolos_core::config::StateStoreConfig::Fjall(state) = &mut editor.0.storage.state else {
-            panic!("the default state backend is fjall");
-        };
-        state.path = Some(elsewhere.clone());
-
-        let error = editor
-            .apply_storage_upgrade(true)
-            .err()
-            .expect("a store outside the root aborts the init");
-
-        // The CLI prints the whole chain; `Display` alone is the outer context.
-        let message = error
-            .chain()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(": ");
-        assert!(
-            message.contains(&elsewhere.display().to_string()),
-            "the abort must name the store to remove by hand: {message}"
-        );
-        assert!(
-            message.contains("by hand"),
-            "the abort must ask for manual removal: {message}"
-        );
-        assert!(all_present(&files), "nothing under the root may be deleted");
-        assert!(
-            elsewhere.join("journal").is_file(),
-            "nothing outside the root may be deleted"
-        );
-    }
-
-    /// A cleanup that fails partway is an init that fails, not one that
-    /// records a version over whatever survived.
-    #[test]
-    fn a_failed_cleanup_records_no_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("data");
-
-        // A root that is not a directory cannot be cleared as one.
-        std::fs::write(&data, b"not a directory").unwrap();
-
-        let error = editor_over(&data)
-            .apply_storage_upgrade(true)
-            .err()
-            .expect("a failed cleanup aborts the init");
-
-        assert!(
-            error.to_string().contains("cleaning up data"),
-            "the abort must say what failed: {error}"
-        );
-        assert_eq!(std::fs::read(&data).unwrap(), b"not a directory");
-    }
-
-    /// A config init cannot read never reaches the deletion: the store's path
-    /// is whatever that config named, and the defaults filled in for it point
-    /// somewhere else.
-    #[test]
-    fn an_unreadable_config_aborts_without_deleting_anything() {
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("data");
-        let files = old_store_under(&data);
-
-        let error = editor_over(&data)
-            .prompt_storage_upgrade(true)
-            .err()
-            .expect("an unreadable config aborts the init");
-
-        assert!(
-            error.to_string().contains(BOOTSTRAP_GUIDE_URL),
-            "the abort must point at the bootstrap guide: {error}"
-        );
-        assert!(
-            all_present(&files),
-            "an unreadable config must leave every directory alone"
-        );
-    }
-
-    /// A v1.6 `dolos.toml` over `root`. With `block_compression` the table is
-    /// one this release retired, so the file does not parse; without it the
-    /// same file is a readable `v3` configuration.
-    fn v1_6_config(root: &Path, block_compression: bool) -> String {
-        let table = if block_compression {
-            "\n[storage.archive.block_compression]\nprofile = \"per-block\"\n"
-        } else {
-            ""
-        };
-
-        format!(
-            r#"
-[upstream]
-peer_address = "unused.example:3001"
-
-[storage]
-version = "v3"
-path = {path}
-
-[storage.archive]
-backend = "fjall"
-{table}
-[genesis]
-byron_path = "byron.json"
-shelley_path = "shelley.json"
-alonzo_path = "alonzo.json"
-conway_path = "conway.json"
-
-[chain]
-type = "cardano"
-magic = 2
-is_testnet = true
-"#,
-            path = toml::Value::String(root.display().to_string()),
-        )
-    }
-
-    /// The whole of what init does with an existing v1.6 setup, driven by the
-    /// actual config bytes rather than an editor built for the test.
-    ///
-    /// A file carrying the retired `block_compression` table does not load,
-    /// so init sees an existing config it cannot read: it aborts with the
-    /// manual instructions, and neither the file nor the data changes. The
-    /// same file without the table loads as `v3` and gets the offer: declining
-    /// changes nothing either, and accepting clears the nested stores and
-    /// records `v4`.
-    #[test]
-    fn a_v1_6_config_is_refused_or_upgraded_without_ever_being_guessed_at() {
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("data");
-        let config_file = dir.path().join(CONFIG_FILE);
-
-        let unreadable = v1_6_config(&data, true);
-        std::fs::write(&config_file, &unreadable).unwrap();
-        let files = old_store_under(&data);
-
-        let loaded = toml::from_str::<RootConfig>(&unreadable).into_diagnostic();
-        let message = loaded
-            .as_ref()
-            .err()
-            .expect("the retired table fails the load")
-            .to_string();
-        assert!(
-            message.contains("block_compression"),
-            "the load failure must name the retired table: {message}"
-        );
-
-        assert!(existing_config_is_unreadable(&loaded, &config_file));
-        assert!(
-            !existing_config_is_unreadable(&loaded, &dir.path().join("absent.toml")),
-            "a load failure with no file on disk is a fresh init"
-        );
-
-        // What `run` builds for that case: an editor filled from defaults,
-        // whose storage path is not the one the file names.
-        let editor = ConfigEditor::default();
-        assert_ne!(editor.0.storage.path, data);
-
-        let error = editor
-            .prompt_storage_upgrade(true)
-            .err()
-            .expect("an unreadable config aborts the init");
-
-        assert!(error.to_string().contains(BOOTSTRAP_GUIDE_URL));
-        assert_eq!(std::fs::read_to_string(&config_file).unwrap(), unreadable);
-        assert!(all_present(&files), "the abort must delete nothing");
-
-        let readable = v1_6_config(&data, false);
-        std::fs::write(&config_file, &readable).unwrap();
-
-        let config: RootConfig = toml::from_str(&readable).unwrap();
-        assert_eq!(config.storage.version, StorageVersion::V3);
-        assert_eq!(
-            storage_upgrade(&config.storage.version, false),
-            StorageUpgrade::Offer
-        );
-
-        ConfigEditor(config, None)
-            .apply_storage_upgrade(false)
-            .err()
-            .expect("declining aborts the init");
-
-        assert_eq!(std::fs::read_to_string(&config_file).unwrap(), readable);
-        assert!(all_present(&files), "declining must delete nothing");
-
-        let config: RootConfig = toml::from_str(&readable).unwrap();
-        let upgraded = ConfigEditor(config, None)
-            .apply_storage_upgrade(true)
-            .unwrap();
-
-        assert!(!files.iter().any(|file| file.exists()));
-        assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
-        assert_eq!(upgraded.0.storage.version, CURRENT_STORAGE_VERSION);
-    }
-
-    /// The setup a fresh init writes is a working `v4` one: the saved config
-    /// reads back at the current version, the stores open through the same
-    /// gate every command uses, and the first block appended lands in a
-    /// segment file as a zstd frame with nothing having been configured for
-    /// it.
-    #[test]
-    fn a_fresh_v4_init_appends_compressed_frames() {
+    fn a_fresh_init_appends_compressed_frames() {
         use dolos_core::archive::{ArchiveStore as _, ArchiveWriter as _};
         use dolos_core::{ChainPoint, RawBlock};
 
@@ -1020,9 +594,8 @@ is_testnet = true
         editor.0.storage.path = data.clone();
         editor.save(&config_file).unwrap();
 
-        let config: RootConfig =
-            toml::from_str(&std::fs::read_to_string(&config_file).unwrap()).unwrap();
-        assert_eq!(config.storage.version, CURRENT_STORAGE_VERSION);
+        let config = dolos_core::config::load(Some(&config_file)).unwrap();
+        assert_eq!(config.storage.path, data);
 
         let stores = crate::common::open_data_stores(&config).unwrap();
 
@@ -1075,17 +648,13 @@ is_testnet = true
             assert!(!written.contains(section), "{written}");
         }
 
-        crate::common::load_file(&path).expect("the generated config loads");
+        dolos_core::config::load(Some(&path)).expect("the generated config loads");
     }
 
     /// A config an older `init` wrote carries `[mithril]`; init reports where
-    /// it moved instead of calling the setup unreadable.
+    /// it moved and leaves the file as it was.
     #[test]
-    fn an_older_init_config_is_reported_as_its_moved_section() {
-        let _guard = crate::common::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
+    fn an_older_init_config_is_reported_and_left_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dolos.toml");
 
@@ -1098,23 +667,42 @@ is_testnet = true
         written.push_str(
             "\n[mithril]\naggregator = \"https://aggregator.example\"\ngenesis_key = \"5b31\"\n",
         );
-        std::fs::write(&path, written).unwrap();
+        std::fs::write(&path, &written).unwrap();
 
-        let config = crate::common::load_file(&path)
-            .map_err(crate::common::config_report)
-            .context("parsing configuration");
+        let config = dolos_core::config::load(Some(&path)).map_err(miette::Report::from_err);
 
-        let report = refuse_moved_sections(config).err().unwrap();
+        let report = refuse_unreadable(config, &path).err().unwrap();
         let message = format!("{report:?}");
 
         assert!(message.contains("[mithril] moved to"), "{message}");
-        assert!(!message.contains("Remove the data directory"), "{message}");
+        assert!(message.contains("untouched"), "{message}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
     }
 
     #[test]
-    fn any_other_load_failure_is_left_to_the_upgrade_check() {
-        let failed: miette::Result<RootConfig> = Err(miette!("not toml"));
+    fn a_missing_config_is_a_fresh_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dolos.toml");
 
-        assert!(refuse_moved_sections(failed).unwrap().is_err());
+        let config = dolos_core::config::load(Some(&path)).map_err(miette::Report::from_err);
+
+        assert!(refuse_unreadable(config, &path).unwrap().is_none());
+    }
+
+    #[test]
+    fn history_choices_map_onto_history_modes() {
+        assert_eq!(
+            HistoryConfig::from(HistoryPrunningOptions::KeepEverything),
+            HistoryConfig::default()
+        );
+        assert_eq!(
+            HistoryConfig::from(HistoryPrunningOptions::Keep1Day).max_slots(),
+            Some(86_400)
+        );
+
+        let editor =
+            ConfigEditor::default().apply_history_pruning(HistoryPrunningOptions::Custom(5));
+        editor.0.validate().unwrap();
+        assert_eq!(editor.0.history.max_slots(), Some(5));
     }
 }

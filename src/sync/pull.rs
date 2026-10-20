@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dolos_cardano::consensus::{ChainFragment, RollbackResult};
-use dolos_core::config::{PeerConfig, SyncConfig, SyncLimit};
+use dolos_core::config::SyncConfig;
 use dolos_core::ChainPoint;
 use gasket::framework::*;
 use itertools::Itertools;
@@ -11,6 +11,7 @@ use pallas::network::miniprotocols::chainsync::{HeaderContent, NextResponse, Tip
 use pallas::network::miniprotocols::Point;
 use tracing::{debug, info, warn};
 
+use super::SyncLimit;
 use crate::adapters::WalAdapter;
 use crate::prelude::*;
 
@@ -311,15 +312,16 @@ pub struct Stage {
 impl Stage {
     pub fn new(
         config: &SyncConfig,
-        upstream: &PeerConfig,
+        peer_address: String,
         network_magic: u64,
+        limit: SyncLimit,
         wal: WalAdapter,
     ) -> Self {
         Self {
-            peer_address: upstream.peer_address.clone(),
+            peer_address,
             network_magic,
-            quota: config.sync_limit.clone().into(),
-            block_fetch_batch_size: config.pull_batch_size(),
+            quota: limit.into(),
+            block_fetch_batch_size: config.pull_batch_size,
             wal,
             downstream: Default::default(),
             block_count: Default::default(),

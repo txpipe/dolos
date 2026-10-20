@@ -2,7 +2,10 @@
 
 use std::{fmt::Display, path::Path};
 
-use dolos_core::{ChainError, Genesis};
+use dolos_core::{
+    config::{CardanoConfig, ChainConfig, CustomUtxo},
+    ChainError, Genesis,
+};
 
 use crate::include;
 
@@ -193,6 +196,89 @@ pub fn validate_custom(magic: u32, genesis: &Genesis) -> Result<(), ChainError> 
     }
 
     Ok(())
+}
+
+/// A configured `[chain]`: a network from the catalog, or a custom one.
+#[derive(Debug, Clone, Copy)]
+pub enum ResolvedNetwork<'a> {
+    Known(&'static KnownNetwork),
+    Custom(&'a CardanoConfig),
+}
+
+impl<'a> ResolvedNetwork<'a> {
+    /// Looks `chain.network` up in the catalog; an unknown name lists it.
+    pub fn resolve(chain: &'a ChainConfig) -> Result<Self, ChainError> {
+        if let Some(cardano) = chain.cardano.as_ref().filter(|_| chain.is_custom()) {
+            return Ok(Self::Custom(cardano));
+        }
+
+        KnownNetwork::by_name(&chain.network)
+            .map(Self::Known)
+            .ok_or_else(|| ChainError::UnknownNetwork {
+                name: chain.network.clone(),
+                known: KnownNetwork::all()
+                    .iter()
+                    .map(|network| format!("`{}`", network.name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })
+    }
+
+    pub fn known(&self) -> Option<&'static KnownNetwork> {
+        match self {
+            Self::Known(network) => Some(network),
+            Self::Custom(_) => None,
+        }
+    }
+
+    pub fn magic(&self) -> u64 {
+        match self {
+            Self::Known(network) => network.magic.into(),
+            Self::Custom(cardano) => cardano.magic.into(),
+        }
+    }
+
+    pub fn is_testnet(&self) -> bool {
+        match self {
+            Self::Known(network) => network.is_testnet,
+            Self::Custom(cardano) => cardano.is_testnet,
+        }
+    }
+
+    /// The peer an `[upstream]` without `peer_address` syncs from.
+    pub fn default_peer(&self) -> Option<&'static str> {
+        self.known().map(|network| network.default_peer)
+    }
+
+    pub fn custom_utxos(&self) -> &'a [CustomUtxo] {
+        match self {
+            Self::Known(_) => &[],
+            Self::Custom(cardano) => &cardano.custom_utxos,
+        }
+    }
+
+    /// The embedded genesis, or a custom network's files checked against its
+    /// magic.
+    pub fn genesis(&self) -> Result<Genesis, ChainError> {
+        match self {
+            Self::Known(network) => Ok(network.genesis()),
+            Self::Custom(cardano) => {
+                let files = &cardano.genesis;
+                let genesis = Genesis::from_file_paths(
+                    &files.byron_path,
+                    &files.shelley_path,
+                    &files.alonzo_path,
+                    &files.conway_path,
+                    files.force_protocol,
+                )
+                .map_err(ChainError::GenesisFiles)?;
+
+                validate_custom(cardano.magic, &genesis)?;
+
+                Ok(genesis)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

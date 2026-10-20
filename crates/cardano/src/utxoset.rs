@@ -1,4 +1,3 @@
-use dolos_core::config::CardanoConfig;
 use dolos_core::*;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx};
 use std::collections::{HashMap, HashSet};
@@ -160,7 +159,9 @@ pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
     delta
 }
 
-pub fn build_custom_utxos_delta(config: &CardanoConfig) -> Result<UtxoSetDelta, ChainError> {
+pub fn build_custom_utxos_delta(
+    config: &crate::CardanoLogicConfig,
+) -> Result<UtxoSetDelta, ChainError> {
     let mut delta = UtxoSetDelta::default();
 
     for utxo in config.custom_utxos.iter() {

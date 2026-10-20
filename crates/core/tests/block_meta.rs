@@ -8,9 +8,8 @@ use dolos_testing::{
 };
 
 use dolos_core::{
-    async_query::BlockMetaResolver, config::CardanoConfig, indexes::ArchiveIndexDelta,
-    ArchiveStore as _, ArchiveWriter as _, AsyncQueryFacade, ChainPoint, Domain, QueryLimiter,
-    TxHash, LOCATE_CHUNK,
+    async_query::BlockMetaResolver, indexes::ArchiveIndexDelta, ArchiveStore as _,
+    ArchiveWriter as _, AsyncQueryFacade, ChainPoint, Domain, QueryLimiter, TxHash, LOCATE_CHUNK,
 };
 use pallas::ledger::traverse::MultiEraBlock;
 
@@ -287,7 +286,7 @@ type MeasuredDomain = ToyDomain<MeasuredStores<MemoryStores>>;
 fn measured_domain(limiter: QueryLimiter) -> MeasuredDomain {
     ToyDomain::with_stores(
         ToyDomain::new(None, None).genesis(),
-        CardanoConfig::default(),
+        Default::default(),
         None,
         None,
         MeasuredStores::new(MemoryStores::open()),

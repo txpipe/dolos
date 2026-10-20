@@ -95,9 +95,9 @@ fn main() -> Result<()> {
 
     let args = Cli::parse();
 
-    let config = crate::common::load_config(&args.config)
-        .map_err(crate::common::config_report)
-        .context("parsing configuration");
+    let config = crate::common::load_config(args.config.as_deref())
+        .map_err(miette::Report::from_err)
+        .context("loading configuration");
 
     let feedback = crate::feedback::Feedback::default();
 

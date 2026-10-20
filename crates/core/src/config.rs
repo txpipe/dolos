@@ -1,466 +1,509 @@
-use std::{collections::BTreeMap, fmt::Display, net::SocketAddr, path::PathBuf};
+//! The node's configuration: one TOML file, organised by responsibility.
+//!
+//! [`load`] reads it. The file declares the configuration contract it was
+//! written for in the root `compatibility` field, which is checked before
+//! anything else is read. Every table refuses keys it does not know, and
+//! [`RootConfig::validate`] checks the rules that span fields before any store
+//! opens. Network names and custom genesis files are resolved by the chain
+//! crate, which knows the networks.
 
-use pallas::ledger::primitives::Epoch;
+use std::{
+    collections::BTreeMap,
+    fmt::Display,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
+
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 
-use crate::{Cbor, Era, TxoRef};
+use crate::{compat::SUPPORTED_CONTRACTS, Cbor, Era, QueryLimiter, TxoRef};
 
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
+/// The guide that maps an older configuration onto this one.
+pub const MIGRATION_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/configuration/migration";
+
+/// The file read when no path is given.
+pub const DEFAULT_CONFIG_FILE: &str = "dolos.toml";
+
+/// The configuration contract a file declares, one of [`SUPPORTED_CONTRACTS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Compatibility(&'static str);
+
+impl Compatibility {
+    /// The contract this release writes.
+    pub fn current() -> Self {
+        Self(SUPPORTED_CONTRACTS[0])
+    }
+
+    pub fn parse(value: &str) -> Result<Self, ConfigError> {
+        SUPPORTED_CONTRACTS
+            .iter()
+            .find(|contract| **contract == value)
+            .map(|contract| Self(contract))
+            .ok_or_else(|| ConfigError::UnsupportedCompatibility(value.to_string()))
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        self.0
+    }
+}
+
+impl Display for Compatibility {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl Serialize for Compatibility {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Compatibility {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+fn supported_contracts() -> String {
+    SUPPORTED_CONTRACTS
+        .iter()
+        .map(|contract| format!("\"{contract}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Cardano,
+}
+
+/// Which chain the node follows: a network the chain crate knows by name, or
+/// `custom` with its identity under `cardano`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChainConfig {
+    pub protocol: Protocol,
+    pub network: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cardano: Option<CardanoConfig>,
+}
+
+impl ChainConfig {
+    /// The network name that takes its identity from `cardano`.
+    pub const CUSTOM: &'static str = "custom";
+
+    /// A Cardano network known by name.
+    pub fn known(network: &str) -> Self {
+        Self {
+            protocol: Protocol::Cardano,
+            network: network.to_string(),
+            cardano: None,
+        }
+    }
+
+    /// A custom Cardano network.
+    pub fn custom(cardano: CardanoConfig) -> Self {
+        Self {
+            protocol: Protocol::Cardano,
+            network: Self::CUSTOM.to_string(),
+            cardano: Some(cardano),
+        }
+    }
+
+    pub fn is_custom(&self) -> bool {
+        self.network == Self::CUSTOM
+    }
+}
+
+/// The identity of a custom Cardano network.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardanoConfig {
+    /// Must equal the Shelley genesis `networkMagic`.
+    pub magic: u32,
+    pub is_testnet: bool,
+    pub genesis: GenesisConfig,
+    /// Outputs added to the genesis UTxO set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_utxos: Vec<CustomUtxo>,
+}
+
+/// Genesis files, relative to the configuration file's directory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenesisConfig {
+    pub byron_path: PathBuf,
+    pub shelley_path: PathBuf,
+    pub alonzo_path: PathBuf,
+    pub conway_path: PathBuf,
+    /// The protocol major the chain starts at, when it cannot be derived from
+    /// the Shelley genesis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_protocol: Option<usize>,
+}
+
+impl GenesisConfig {
+    /// The four files in `dir`, under their usual names.
+    pub fn in_dir(dir: &Path) -> Self {
+        Self {
+            byron_path: dir.join("byron.json"),
+            shelley_path: dir.join("shelley.json"),
+            alonzo_path: dir.join("alonzo.json"),
+            conway_path: dir.join("conway.json"),
+            force_protocol: None,
+        }
+    }
+
+    fn resolve_against(&mut self, base: &Path) {
+        for path in [
+            &mut self.byron_path,
+            &mut self.shelley_path,
+            &mut self.alonzo_path,
+            &mut self.conway_path,
+        ] {
+            if path.is_relative() {
+                *path = base.join(&*path);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomUtxo {
+    #[serde(rename = "ref")]
+    pub ref_: TxoRef,
+    pub era: Option<Era>,
+    pub cbor: Cbor,
+}
+
+/// Where blocks come from. `type` is optional and defaults to `peer`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawUpstream", into = "RawUpstream")]
 pub enum UpstreamConfig {
     Peer(PeerConfig),
     Emulator(EmulatorConfig),
 }
 
-impl UpstreamConfig {
-    pub fn peer_address(&self) -> Option<&str> {
-        match self {
-            Self::Peer(peer) => Some(&peer.peer_address),
-            Self::Emulator(_) => None,
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PeerConfig {
+    /// `host:port`; a known network defaults it from the catalog.
+    pub peer_address: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmulatorConfig {
+    /// Seconds between produced blocks.
+    pub block_production_interval: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum UpstreamType {
+    Peer,
+    Emulator,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUpstream {
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    kind: Option<UpstreamType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    peer_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    block_production_interval: Option<u64>,
+}
+
+impl TryFrom<RawUpstream> for UpstreamConfig {
+    type Error = String;
+
+    fn try_from(raw: RawUpstream) -> Result<Self, Self::Error> {
+        match raw.kind.unwrap_or(UpstreamType::Peer) {
+            UpstreamType::Peer => {
+                if raw.block_production_interval.is_some() {
+                    return Err(
+                        "`block_production_interval` belongs to `type = \"emulator\"`".into(),
+                    );
+                }
+                Ok(Self::Peer(PeerConfig {
+                    peer_address: raw.peer_address,
+                }))
+            }
+            UpstreamType::Emulator => {
+                if raw.peer_address.is_some() {
+                    return Err("an emulator upstream takes no `peer_address`".into());
+                }
+                let block_production_interval = raw
+                    .block_production_interval
+                    .ok_or("`type = \"emulator\"` requires `block_production_interval`")?;
+                Ok(Self::Emulator(EmulatorConfig {
+                    block_production_interval,
+                }))
+            }
         }
+    }
+}
+
+impl From<UpstreamConfig> for RawUpstream {
+    fn from(config: UpstreamConfig) -> Self {
+        match config {
+            UpstreamConfig::Peer(peer) => Self {
+                kind: None,
+                peer_address: peer.peer_address,
+                block_production_interval: None,
+            },
+            UpstreamConfig::Emulator(emulator) => Self {
+                kind: Some(UpstreamType::Emulator),
+                peer_address: None,
+                block_production_interval: Some(emulator.block_production_interval),
+            },
+        }
+    }
+}
+
+impl UpstreamConfig {
+    pub fn peer(peer_address: impl Into<String>) -> Self {
+        Self::Peer(PeerConfig {
+            peer_address: Some(peer_address.into()),
+        })
     }
 
     pub fn is_emulator(&self) -> bool {
         matches!(self, Self::Emulator(_))
     }
+}
 
-    pub fn as_peer_mut(&mut self) -> Option<&mut PeerConfig> {
-        match self {
-            Self::Peer(peer) => Some(peer),
-            _ => None,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SyncConfig {
+    /// The WAL directory, relative to `storage.path`; default `wal`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wal_path: Option<PathBuf>,
+    /// Blocks fetched per request.
+    pub pull_batch_size: usize,
+    pub retry: RetryConfig,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            wal_path: None,
+            pull_batch_size: 100,
+            retry: RetryConfig::default(),
         }
     }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct EmulatorConfig {
-    pub block_production_interval: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct PeerConfig {
-    pub peer_address: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
-pub enum SyncLimit {
-    #[default]
-    NoLimit,
-    UntilTip,
-    MaxBlocks(u64),
-}
-
-impl SyncLimit {
-    pub fn is_default(&self) -> bool {
-        matches!(self, Self::NoLimit)
-    }
-}
-
-#[derive(Serialize, Deserialize, Default, Clone)]
-pub struct SyncConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pull_batch_size: Option<usize>,
-
-    #[serde(default)]
-    pub max_history: Option<u64>,
-
-    #[serde(default)]
-    pub max_rollback: Option<u64>,
-
-    #[serde(default, skip_serializing_if = "SyncLimit::is_default")]
-    pub sync_limit: SyncLimit,
 }
 
 impl SyncConfig {
-    pub fn with_pull_batch_size(mut self, pull_batch_size: usize) -> Self {
-        self.pull_batch_size = Some(pull_batch_size);
-        self
-    }
-
-    pub fn pull_batch_size(&self) -> usize {
-        self.pull_batch_size.unwrap_or(default_pull_batch_size())
-    }
-
     pub fn is_default(&self) -> bool {
-        self.pull_batch_size.is_none()
-            && self.max_history.is_none()
-            && self.max_rollback.is_none()
-            && self.sync_limit.is_default()
+        *self == Self::default()
     }
 }
 
-fn default_pull_batch_size() -> usize {
-    100
+/// How pipeline stages retry a failed step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RetryConfig {
+    pub max_retries: usize,
+    pub backoff_unit_seconds: u64,
+    pub backoff_factor: u32,
+    pub max_backoff_seconds: u64,
+    pub dismissible: bool,
 }
 
-#[derive(Serialize, Deserialize, Default)]
-pub struct SubmitConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prune_height: Option<u64>,
-}
-
-impl SubmitConfig {
-    pub fn is_default(&self) -> bool {
-        self.prune_height.is_none()
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 20,
+            backoff_unit_seconds: 2,
+            backoff_factor: 2,
+            max_backoff_seconds: 60,
+            dismissible: false,
+        }
     }
 }
 
-#[derive(Serialize, Default, PartialEq, Clone, Debug)]
+/// The tuning a Fjall store opens with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum StorageVersion {
-    V0,
-    V1,
-    V2,
-    V3,
-
+pub enum FjallPreset {
     #[default]
-    V4,
+    Standard,
 }
 
-impl<'de> Deserialize<'de> for StorageVersion {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let repr: Option<String> = Deserialize::deserialize(deserializer)?;
-        match repr {
-            Some(version) => match version.as_str() {
-                "v0" => Ok(StorageVersion::V0),
-                "v1" => Ok(StorageVersion::V1),
-                "v2" => Ok(StorageVersion::V2),
-                "v3" => Ok(StorageVersion::V3),
-                "v4" => Ok(StorageVersion::V4),
-                _ => Err(<D::Error as serde::de::Error>::custom("Invalid version")),
-            },
-            None => Ok(StorageVersion::V0),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreType {
+    /// On disk.
+    Fjall { preset: FjallPreset },
+    /// In memory, lost on restart.
+    Ephemeral,
+}
+
+impl Default for StoreType {
+    fn default() -> Self {
+        Self::Fjall {
+            preset: FjallPreset::default(),
         }
     }
 }
 
-impl Display for StorageVersion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::V0 => "v0",
-                Self::V1 => "v1",
-                Self::V2 => "v2",
-                Self::V3 => "v3",
-                Self::V4 => "v4",
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum StoreKind {
+    Fjall,
+    Ephemeral,
+}
+
+fn store_type(
+    kind: Option<StoreKind>,
+    preset: Option<FjallPreset>,
+    paths: &[(&str, bool)],
+) -> Result<StoreType, String> {
+    match kind.unwrap_or(StoreKind::Fjall) {
+        StoreKind::Fjall => Ok(StoreType::Fjall {
+            preset: preset.unwrap_or_default(),
+        }),
+        StoreKind::Ephemeral => {
+            let set = paths
+                .iter()
+                .chain([("preset", preset.is_some())].iter())
+                .filter(|(_, set)| *set)
+                .map(|(name, _)| format!("`{name}`"))
+                .collect::<Vec<_>>();
+
+            if !set.is_empty() {
+                return Err(format!(
+                    "an ephemeral store takes no other field; remove {}",
+                    set.join(", ")
+                ));
             }
-        )
-    }
-}
 
-// ============================================================================
-// WAL Store Configuration
-// ============================================================================
-
-/// Configuration for the Redb WAL backend.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct RedbWalConfig {
-    /// Optional path override. If relative, resolved from storage root.
-    /// If not specified, defaults to `<storage.path>/wal`.
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    #[serde(default)]
-    pub cache: Option<usize>,
-}
-
-impl RedbWalConfig {
-    pub fn is_default(&self) -> bool {
-        self.path.is_none() && self.cache.is_none()
-    }
-}
-
-/// WAL store configuration.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(tag = "backend", rename_all = "lowercase")]
-pub enum WalStoreConfig {
-    Redb(RedbWalConfig),
-    /// In-memory backend (ephemeral, data lost on restart).
-    #[serde(rename = "in_memory")]
-    InMemory,
-}
-
-impl Default for WalStoreConfig {
-    fn default() -> Self {
-        Self::Redb(RedbWalConfig::default())
-    }
-}
-
-impl WalStoreConfig {
-    pub fn path(&self) -> Option<&PathBuf> {
-        match self {
-            Self::Redb(cfg) => cfg.path.as_ref(),
-            Self::InMemory => None,
-        }
-    }
-
-    pub fn is_default(&self) -> bool {
-        match self {
-            Self::Redb(cfg) => cfg.is_default(),
-            Self::InMemory => false,
+            Ok(StoreType::Ephemeral)
         }
     }
 }
 
-// ============================================================================
-// State Store Configuration
-// ============================================================================
-
-/// Configuration for the Redb state backend.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct RedbStateConfig {
-    /// Optional path override. If relative, resolved from storage root.
-    /// If not specified, defaults to `<storage.path>/state`.
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    #[serde(default)]
-    pub cache: Option<usize>,
-    /// Maximum number of slots to keep before pruning.
-    #[serde(default)]
-    pub max_history: Option<u64>,
-}
-
-impl RedbStateConfig {
-    pub fn is_default(&self) -> bool {
-        self.path.is_none() && self.cache.is_none() && self.max_history.is_none()
+fn store_fields(kind: StoreType) -> (Option<StoreKind>, Option<FjallPreset>) {
+    match kind {
+        StoreType::Fjall { preset } => (Some(StoreKind::Fjall), Some(preset)),
+        StoreType::Ephemeral => (Some(StoreKind::Ephemeral), None),
     }
 }
 
-/// Configuration for the Fjall state backend.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct FjallStateConfig {
-    /// Optional path override. If relative, resolved from storage root.
-    /// If not specified, defaults to `<storage.path>/state`.
-    #[serde(default)]
+/// The ledger state store. `type` defaults to `fjall`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawStateStore", into = "RawStateStore")]
+pub struct StateStoreConfig {
+    pub kind: StoreType,
+    /// Relative to `storage.path`; default `state`.
     pub path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    #[serde(default)]
-    pub cache: Option<usize>,
-    /// Maximum number of slots to keep before pruning.
-    #[serde(default)]
-    pub max_history: Option<u64>,
-    /// Maximum journal size in MB.
-    #[serde(default)]
-    pub max_journal_size: Option<usize>,
-    /// Flush journal after each commit.
-    #[serde(default)]
-    pub flush_on_commit: Option<bool>,
-    /// L0 compaction threshold (default: 4, lower = more aggressive).
-    #[serde(default)]
-    pub l0_threshold: Option<u8>,
-    /// Number of background compaction worker threads.
-    #[serde(default)]
-    pub worker_threads: Option<usize>,
-    /// Memtable size in MB before flush (default: 64).
-    #[serde(default)]
-    pub memtable_size_mb: Option<usize>,
 }
 
-impl FjallStateConfig {
-    pub fn is_default(&self) -> bool {
-        self.path.is_none()
-            && self.cache.is_none()
-            && self.max_history.is_none()
-            && self.max_journal_size.is_none()
-            && self.flush_on_commit.is_none()
-            && self.l0_threshold.is_none()
-            && self.worker_threads.is_none()
-            && self.memtable_size_mb.is_none()
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawStateStore {
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    kind: Option<StoreKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preset: Option<FjallPreset>,
+}
+
+impl TryFrom<RawStateStore> for StateStoreConfig {
+    type Error = String;
+
+    fn try_from(raw: RawStateStore) -> Result<Self, Self::Error> {
+        Ok(Self {
+            kind: store_type(raw.kind, raw.preset, &[("path", raw.path.is_some())])?,
+            path: raw.path,
+        })
     }
 }
 
-/// State store configuration.
-///
-/// The supported persistent state backend is `fjall`; the `redb` backend was
-/// removed.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(tag = "backend", rename_all = "lowercase")]
-pub enum StateStoreConfig {
-    /// Builtin in-memory backend: serves the whole state contract, ephemeral
-    /// by design and sized for devnets, tooling and tests rather than for a
-    /// node following a public network.
-    #[serde(rename = "in_memory")]
-    InMemory,
-    Fjall(FjallStateConfig),
-}
-
-impl Default for StateStoreConfig {
-    fn default() -> Self {
-        Self::Fjall(FjallStateConfig::default())
+impl From<StateStoreConfig> for RawStateStore {
+    fn from(config: StateStoreConfig) -> Self {
+        let (kind, preset) = store_fields(config.kind);
+        Self {
+            kind,
+            path: config.path,
+            preset,
+        }
     }
 }
 
 impl StateStoreConfig {
-    pub fn path(&self) -> Option<&PathBuf> {
-        match self {
-            Self::Fjall(cfg) => cfg.path.as_ref(),
-            Self::InMemory => None,
-        }
-    }
-
-    pub fn max_history(&self) -> Option<u64> {
-        match self {
-            Self::Fjall(cfg) => cfg.max_history,
-            Self::InMemory => None,
-        }
-    }
-
-    /// Whether this selection round-trips through `Default`: true only for
-    /// the default variant carrying no explicit options, so an explicit
-    /// non-default backend choice survives re-serialization.
-    pub fn is_default(&self) -> bool {
-        match self {
-            Self::Fjall(cfg) => cfg.is_default(),
-            Self::InMemory => false,
+    pub fn ephemeral() -> Self {
+        Self {
+            kind: StoreType::Ephemeral,
+            path: None,
         }
     }
 }
 
-// ============================================================================
-// Archive Store Configuration
-// ============================================================================
-
-/// Configuration for the Fjall archive backend.
-///
-/// Block segments are always compressed, one zstd frame per block with the
-/// dictionary bundled in `dolos-flatfiles`; there is nothing to configure
-/// about them, and a key this table does not know is refused rather than
-/// ignored.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-#[serde(deny_unknown_fields)]
-pub struct FjallArchiveConfig {
-    /// Optional path override for the archive directory.
-    /// If relative, resolved from storage root.
-    /// If not specified, defaults to `<storage.path>/archive`.
-    #[serde(default)]
+/// The block archive. `type` defaults to `fjall`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawArchiveStore", into = "RawArchiveStore")]
+pub struct ArchiveStoreConfig {
+    pub kind: StoreType,
+    /// Relative to `storage.path`; default `archive`.
     pub path: Option<PathBuf>,
-    /// Optional path override for block segment files.
-    /// If not specified, segment files are stored in the archive directory.
-    #[serde(default)]
+    /// Where block segment files go; default the archive directory.
     pub blocks_path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    #[serde(default)]
-    pub cache: Option<usize>,
-    /// Maximum journal size in MB.
-    #[serde(default)]
-    pub max_journal_size: Option<usize>,
-    /// Flush journal after each commit.
-    #[serde(default)]
-    pub flush_on_commit: Option<bool>,
-    /// L0 compaction threshold (default: 4, lower = more aggressive).
-    #[serde(default)]
-    pub l0_threshold: Option<u8>,
-    /// Number of background compaction worker threads.
-    #[serde(default)]
-    pub worker_threads: Option<usize>,
-    /// Memtable size in MB before flush (default: 64).
-    #[serde(default)]
-    pub memtable_size_mb: Option<usize>,
 }
 
-impl FjallArchiveConfig {
-    pub fn is_default(&self) -> bool {
-        self.path.is_none()
-            && self.blocks_path.is_none()
-            && self.cache.is_none()
-            && self.max_journal_size.is_none()
-            && self.flush_on_commit.is_none()
-            && self.l0_threshold.is_none()
-            && self.worker_threads.is_none()
-            && self.memtable_size_mb.is_none()
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawArchiveStore {
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    kind: Option<StoreKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocks_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preset: Option<FjallPreset>,
+}
+
+impl TryFrom<RawArchiveStore> for ArchiveStoreConfig {
+    type Error = String;
+
+    fn try_from(raw: RawArchiveStore) -> Result<Self, Self::Error> {
+        let paths = [
+            ("path", raw.path.is_some()),
+            ("blocks_path", raw.blocks_path.is_some()),
+        ];
+        Ok(Self {
+            kind: store_type(raw.kind, raw.preset, &paths)?,
+            path: raw.path,
+            blocks_path: raw.blocks_path,
+        })
     }
 }
 
-/// Archive store configuration.
-///
-/// The supported persistent archive backend is `fjall`; the `redb` backend
-/// was removed.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(tag = "backend", rename_all = "lowercase")]
-pub enum ArchiveStoreConfig {
-    /// Fjall backend, the default.
-    Fjall(FjallArchiveConfig),
-    /// Builtin in-memory backend: serves the whole archive contract,
-    /// ephemeral by design and sized for devnets, tooling and tests rather
-    /// than for a node following a public network.
-    #[serde(rename = "in_memory")]
-    InMemory,
-    /// No-op backend that discards all writes and returns empty results.
-    #[serde(rename = "no_op", alias = "noop")]
-    NoOp,
-}
-
-impl Default for ArchiveStoreConfig {
-    fn default() -> Self {
-        Self::Fjall(FjallArchiveConfig::default())
+impl From<ArchiveStoreConfig> for RawArchiveStore {
+    fn from(config: ArchiveStoreConfig) -> Self {
+        let (kind, preset) = store_fields(config.kind);
+        Self {
+            kind,
+            path: config.path,
+            blocks_path: config.blocks_path,
+            preset,
+        }
     }
 }
 
 impl ArchiveStoreConfig {
-    pub fn path(&self) -> Option<&PathBuf> {
-        match self {
-            Self::Fjall(cfg) => cfg.path.as_ref(),
-            Self::InMemory | Self::NoOp => None,
-        }
-    }
-
-    /// Whether this selection round-trips through `Default`: true only for
-    /// the default variant carrying no explicit options. Any other variant
-    /// must survive re-serialization even with an empty options set — a bare
-    /// `backend = "in_memory"` is an explicit choice, not the default.
-    pub fn is_default(&self) -> bool {
-        match self {
-            Self::Fjall(cfg) => cfg.is_default(),
-            Self::InMemory | Self::NoOp => false,
-        }
-    }
-}
-
-// ============================================================================
-// Mempool Store Configuration
-// ============================================================================
-
-/// Configuration for the Redb mempool backend.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct RedbMempoolConfig {
-    /// Optional path override. If relative, resolved from storage root.
-    /// If not specified, defaults to `<storage.path>/mempool`.
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    #[serde(default)]
-    pub cache: Option<usize>,
-}
-
-impl RedbMempoolConfig {
-    pub fn is_default(&self) -> bool {
-        self.path.is_none() && self.cache.is_none()
-    }
-}
-
-/// Mempool store configuration.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-#[serde(tag = "backend", rename_all = "lowercase")]
-pub enum MempoolStoreConfig {
-    Redb(RedbMempoolConfig),
-    /// In-memory backend (ephemeral, data lost on restart).
-    #[serde(rename = "in_memory")]
-    #[default]
-    InMemory,
-}
-
-impl MempoolStoreConfig {
-    pub fn is_default(&self) -> bool {
-        match self {
-            Self::InMemory => true,
-            Self::Redb(_) => false,
+    pub fn ephemeral() -> Self {
+        Self {
+            kind: StoreType::Ephemeral,
+            path: None,
+            blocks_path: None,
         }
     }
 }
@@ -472,23 +515,30 @@ impl MempoolStoreConfig {
 pub struct CacheConfig {
     /// Off: every lookup misses and nothing is stored.
     pub enabled: bool,
-    /// Optional path override for the disk tier's directory. If relative,
-    /// resolved from storage root. If not specified, defaults to
-    /// `<storage.path>/cache`.
+    /// The disk tier's directory, relative to `storage.path`; default `cache`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
-    /// Bytes the memory tier may hold, apart from the state and archive
-    /// caches.
-    pub memory_budget_bytes: u64,
-    /// Bytes the disk tier may hold.
-    pub disk_budget_bytes: u64,
+    /// MiB the memory tier may hold, apart from the state and archive caches.
+    pub memory_mb: u64,
+    /// MiB the disk tier may hold.
+    pub disk_mb: u64,
     /// The least cost an entry must have to be kept, by namespace, in place
     /// of the namespace's own default.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub admission: BTreeMap<String, u64>,
 }
 
 impl CacheConfig {
-    pub const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
-    pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+    pub const DEFAULT_MEMORY_MB: u64 = 512;
+    pub const DEFAULT_DISK_MB: u64 = 4096;
+
+    pub fn memory_bytes(&self) -> u64 {
+        self.memory_mb.saturating_mul(1 << 20)
+    }
+
+    pub fn disk_bytes(&self) -> u64 {
+        self.disk_mb.saturating_mul(1 << 20)
+    }
 
     pub fn is_default(&self) -> bool {
         *self == Self::default()
@@ -500,167 +550,177 @@ impl Default for CacheConfig {
         Self {
             enabled: true,
             path: None,
-            memory_budget_bytes: Self::DEFAULT_MEMORY_BUDGET_BYTES,
-            disk_budget_bytes: Self::DEFAULT_DISK_BUDGET_BYTES,
+            memory_mb: Self::DEFAULT_MEMORY_MB,
+            disk_mb: Self::DEFAULT_DISK_MB,
             admission: BTreeMap::new(),
         }
     }
 }
 
-// ============================================================================
-// Storage Configuration
-// ============================================================================
-
-/// Storage configuration with nested per-store settings.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
-    pub version: StorageVersion,
-
-    /// Root directory for storage files. Also holds `scratch/`, where a stele
-    /// transfer over an OCI registry stages layers in flight.
-    pub path: std::path::PathBuf,
-
-    /// WAL store configuration.
-    #[serde(default, skip_serializing_if = "WalStoreConfig::is_default")]
-    pub wal: WalStoreConfig,
-
-    /// State store configuration.
-    #[serde(default, skip_serializing_if = "StateStoreConfig::is_default")]
+    /// Root directory for the stores, relative to the working directory. Also
+    /// holds `scratch/`, where a stele transfer over an OCI registry stages
+    /// layers in flight.
+    pub path: PathBuf,
+    #[serde(skip_serializing_if = "is_default")]
     pub state: StateStoreConfig,
-
-    /// Archive store configuration.
-    #[serde(default, skip_serializing_if = "ArchiveStoreConfig::is_default")]
+    #[serde(skip_serializing_if = "is_default")]
     pub archive: ArchiveStoreConfig,
-
-    /// Mempool store configuration.
-    #[serde(default, skip_serializing_if = "MempoolStoreConfig::is_default")]
-    pub mempool: MempoolStoreConfig,
-
-    /// Cache store configuration.
-    #[serde(default, skip_serializing_if = "CacheConfig::is_default")]
+    #[serde(skip_serializing_if = "CacheConfig::is_default")]
     pub cache: CacheConfig,
-}
-
-impl StorageConfig {
-    /// Resolve path with a default subdir for backends that don't specify a
-    /// custom path.
-    fn resolve_store_path_with_default(
-        &self,
-        config_path: Option<&PathBuf>,
-        default_subdir: &str,
-    ) -> PathBuf {
-        match config_path {
-            Some(p) if p.is_absolute() => p.clone(),
-            Some(p) => self.path.join(p),
-            None => self.path.join(default_subdir),
-        }
-    }
-
-    /// Get the resolved path for the WAL store.
-    /// Returns `None` for in-memory backends.
-    pub fn wal_path(&self) -> Option<PathBuf> {
-        match &self.wal {
-            WalStoreConfig::InMemory => None,
-            WalStoreConfig::Redb(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "wal"))
-            }
-        }
-    }
-
-    /// Get the resolved path for the state store.
-    /// Returns `None` for in-memory backends.
-    pub fn state_path(&self) -> Option<PathBuf> {
-        match &self.state {
-            StateStoreConfig::InMemory => None,
-            StateStoreConfig::Fjall(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "state"))
-            }
-        }
-    }
-
-    /// Get the resolved path for the archive store.
-    /// Returns `None` for in-memory or no-op backends.
-    pub fn archive_path(&self) -> Option<PathBuf> {
-        match &self.archive {
-            ArchiveStoreConfig::InMemory | ArchiveStoreConfig::NoOp => None,
-            ArchiveStoreConfig::Fjall(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
-            }
-        }
-    }
-
-    /// Get the resolved path for the mempool store.
-    /// Returns `None` for in-memory backends.
-    pub fn mempool_path(&self) -> Option<PathBuf> {
-        match &self.mempool {
-            MempoolStoreConfig::InMemory => None,
-            MempoolStoreConfig::Redb(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "mempool"))
-            }
-        }
-    }
-
-    /// Get the resolved path for the cache's disk tier.
-    /// Returns `None` when the cache is off.
-    pub fn cache_path(&self) -> Option<PathBuf> {
-        self.cache
-            .enabled
-            .then(|| self.resolve_store_path_with_default(self.cache.path.as_ref(), "cache"))
-    }
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            version: Default::default(),
-            path: std::path::PathBuf::from("data"),
-            wal: WalStoreConfig::default(),
+            path: PathBuf::from("data"),
             state: StateStoreConfig::default(),
             archive: ArchiveStoreConfig::default(),
-            mempool: MempoolStoreConfig::default(),
             cache: CacheConfig::default(),
         }
     }
 }
 
-// ============================================================================
-// Other Configuration Types
-// ============================================================================
+impl StorageConfig {
+    /// `path` resolved against the storage root, or the root's `default`.
+    pub fn resolve(&self, path: Option<&PathBuf>, default: &str) -> PathBuf {
+        match path {
+            Some(path) => self.path.join(path),
+            None => self.path.join(default),
+        }
+    }
 
-#[derive(Serialize, Deserialize)]
-pub struct GenesisConfig {
-    pub byron_path: PathBuf,
-    pub shelley_path: PathBuf,
-    pub alonzo_path: PathBuf,
-    pub conway_path: PathBuf,
-    pub force_protocol: Option<usize>,
+    /// `None` for an ephemeral store.
+    pub fn state_path(&self) -> Option<PathBuf> {
+        match self.state.kind {
+            StoreType::Fjall { .. } => Some(self.resolve(self.state.path.as_ref(), "state")),
+            StoreType::Ephemeral => None,
+        }
+    }
+
+    /// `None` for an ephemeral store.
+    pub fn archive_path(&self) -> Option<PathBuf> {
+        match self.archive.kind {
+            StoreType::Fjall { .. } => Some(self.resolve(self.archive.path.as_ref(), "archive")),
+            StoreType::Ephemeral => None,
+        }
+    }
+
+    /// `None` while the cache is off.
+    pub fn cache_path(&self) -> Option<PathBuf> {
+        self.cache
+            .enabled
+            .then(|| self.resolve(self.cache.path.as_ref(), "cache"))
+    }
 }
 
-impl Default for GenesisConfig {
-    fn default() -> Self {
+/// How much block history the archive keeps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HistoryMode {
+    /// No archive.
+    None,
+    /// The last `window`.
+    Rolling,
+    /// Everything.
+    #[default]
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowUnit {
+    Slot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryWindow {
+    pub unit: WindowUnit,
+    pub value: u64,
+}
+
+impl HistoryWindow {
+    pub fn slots(value: u64) -> Self {
         Self {
-            byron_path: PathBuf::from("byron.json"),
-            shelley_path: PathBuf::from("shelley.json"),
-            alonzo_path: PathBuf::from("alonzo.json"),
-            conway_path: PathBuf::from("conway.json"),
-            force_protocol: None,
+            unit: WindowUnit::Slot,
+            value,
         }
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryConfig {
+    pub mode: HistoryMode,
+    /// Only with `rolling`, and required there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<HistoryWindow>,
+}
+
+impl HistoryConfig {
+    pub fn none() -> Self {
+        Self {
+            mode: HistoryMode::None,
+            window: None,
+        }
+    }
+
+    pub fn rolling(window: HistoryWindow) -> Self {
+        Self {
+            mode: HistoryMode::Rolling,
+            window: Some(window),
+        }
+    }
+
+    /// The slots the archive keeps behind the tip; `None` keeps everything.
+    pub fn max_slots(&self) -> Option<u64> {
+        match (self.mode, self.window) {
+            (HistoryMode::Rolling, Some(window)) => match window.unit {
+                WindowUnit::Slot => Some(window.value),
+            },
+            _ => None,
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MempoolConfig {
+    /// Keep pending transactions across a restart.
+    pub persistent: bool,
+    /// Relative to `storage.path`; default `mempool`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+}
+
+impl MempoolConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct OuroborosConfig {
     pub listen_path: PathBuf,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct GrpcConfig {
     pub listen_address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_ca_root: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     permissive_cors: Option<bool>,
 
-    // --- HTTP/2 transport tuning ---
     /// Enable hyper's adaptive (BDP-based) flow-control windowing. Defaults to
     /// `true`. When enabled, the explicit `http2_initial_*_window_size` values
     /// are ignored by hyper (adaptive sizing takes precedence).
@@ -711,13 +771,17 @@ impl GrpcConfig {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MinibfConfig {
     pub listen_address: SocketAddr,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     permissive_cors: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_registry_url: Option<String>,
-    pub url: Option<String>,
+    /// The URL clients reach this API at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_scan_items: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -730,7 +794,7 @@ impl MinibfConfig {
             listen_address,
             permissive_cors: None,
             token_registry_url: None,
-            url: None,
+            public_url: None,
             max_scan_items: None,
             ipfs_gateways: None,
         }
@@ -768,7 +832,8 @@ impl MinibfConfig {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MinikupoConfig {
     pub listen_address: SocketAddr,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -793,7 +858,8 @@ impl MinikupoConfig {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct TrpConfig {
     pub listen_address: SocketAddr,
 
@@ -803,16 +869,18 @@ pub struct TrpConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     permissive_cors: Option<bool>,
 
-    pub extra_fees: Option<u64>,
+    /// Lovelace added to every resolved transaction's fee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_fees_lovelace: Option<u64>,
 }
 
 impl TrpConfig {
-    pub fn new(listen_address: SocketAddr, extra_fees: Option<u64>) -> Self {
+    pub fn new(listen_address: SocketAddr, extra_fees_lovelace: Option<u64>) -> Self {
         Self {
             listen_address,
             max_optimize_rounds: None,
             permissive_cors: None,
-            extra_fees,
+            extra_fees_lovelace,
         }
     }
 
@@ -856,415 +924,764 @@ fn default_ipfs_gateways() -> Vec<String> {
     ]
 }
 
-#[derive(Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct ServeConfig {
-    pub ouroboros: Option<OuroborosConfig>,
+    /// Blocking query work the node runs at once, across every API.
+    pub max_concurrent_queries: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc: Option<GrpcConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub minibf: Option<MinibfConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub minikupo: Option<MinikupoConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ouroboros: Option<OuroborosConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub trp: Option<TrpConfig>,
 }
 
-impl ServeConfig {
-    pub fn is_default(&self) -> bool {
-        self.ouroboros.is_none()
-            && self.grpc.is_none()
-            && self.minibf.is_none()
-            && self.minikupo.is_none()
-            && self.trp.is_none()
+impl Default for ServeConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_queries: QueryLimiter::DEFAULT_CAP,
+            grpc: None,
+            minibf: None,
+            minikupo: None,
+            ouroboros: None,
+            trp: None,
+        }
     }
+}
+
+impl ServeConfig {
+    pub const MAX_CONCURRENT_QUERIES: std::ops::RangeInclusive<usize> = 1..=64;
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RelayConfig {
+    pub listen_address: String,
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
+    /// The level for Dolos's own events.
     #[serde_as(as = "DisplayFromStr")]
-    #[serde(
-        default = "default_log_level",
-        skip_serializing_if = "is_default_log_level"
-    )]
-    pub max_level: tracing::Level,
-
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub include_tokio: bool,
-
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub include_pallas: bool,
-
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub include_grpc: bool,
-
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub include_trp: bool,
-
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub include_minibf: bool,
-
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub include_minikupo: bool,
-
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub include_otlp: bool,
-
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub include_fjall: bool,
-}
-
-impl LoggingConfig {
-    pub fn is_default(&self) -> bool {
-        is_default_log_level(&self.max_level)
-            && !self.include_tokio
-            && !self.include_pallas
-            && !self.include_grpc
-            && !self.include_trp
-            && !self.include_minibf
-            && !self.include_minikupo
-            && !self.include_otlp
-            && !self.include_fjall
-    }
+    pub level: tracing::Level,
+    /// Further `target=level` directives, comma-separated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
 }
 
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            max_level: default_log_level(),
-            include_tokio: Default::default(),
-            include_pallas: Default::default(),
-            include_grpc: Default::default(),
-            include_trp: Default::default(),
-            include_minibf: Default::default(),
-            include_minikupo: Default::default(),
-            include_fjall: Default::default(),
-            include_otlp: Default::default(),
+            level: tracing::Level::INFO,
+            filter: None,
         }
     }
 }
 
-fn default_log_level() -> tracing::Level {
-    tracing::Level::INFO
-}
-
-fn is_default_log_level(level: &tracing::Level) -> bool {
-    *level == default_log_level()
-}
-
-fn default_otlp_endpoint() -> String {
-    "http://localhost:4317".to_string()
-}
-
-fn default_service_name() -> String {
-    "dolos".to_string()
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct TelemetryConfig {
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub enabled: bool,
-    #[serde(
-        default = "default_otlp_endpoint",
-        skip_serializing_if = "is_default_otlp_endpoint"
-    )]
-    pub otlp_endpoint: String,
-    #[serde(
-        default = "default_service_name",
-        skip_serializing_if = "is_default_service_name"
-    )]
-    pub service_name: String,
-}
-
-impl TelemetryConfig {
+impl LoggingConfig {
     pub fn is_default(&self) -> bool {
-        !self.enabled
-            && is_default_otlp_endpoint(&self.otlp_endpoint)
-            && is_default_service_name(&self.service_name)
+        *self == Self::default()
     }
+}
+
+/// OTLP trace export, on when the section is present.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct TelemetryConfig {
+    pub otlp_endpoint: String,
+    pub service_name: String,
 }
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            otlp_endpoint: default_otlp_endpoint(),
-            service_name: default_service_name(),
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            service_name: "dolos".to_string(),
         }
     }
 }
 
-fn is_default_otlp_endpoint(value: &str) -> bool {
-    value == default_otlp_endpoint()
-}
-
-fn is_default_service_name(value: &str) -> bool {
-    value == default_service_name()
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct CustomUtxo {
-    #[serde(rename = "ref")]
-    pub ref_: TxoRef,
-    pub era: Option<Era>,
-    pub cbor: Cbor,
-}
-
-#[derive(Serialize, Deserialize, Clone, Default)]
-pub struct CardanoConfig {
-    pub magic: u64,
-    pub is_testnet: bool,
-    pub stop_epoch: Option<Epoch>,
-
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub custom_utxos: Vec<CustomUtxo>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChainConfig {
-    Cardano(CardanoConfig),
-}
-
-impl Default for ChainConfig {
-    fn default() -> Self {
-        Self::Cardano(CardanoConfig::default())
-    }
-}
-
-impl ChainConfig {
-    pub fn magic(&self) -> u64 {
-        match self {
-            Self::Cardano(cfg) => cfg.magic,
-        }
-    }
-
-    pub fn set_magic(&mut self, magic: u64) {
-        match self {
-            Self::Cardano(cfg) => cfg.magic = magic,
-        }
-    }
-
-    pub fn is_testnet(&self) -> bool {
-        match self {
-            Self::Cardano(cfg) => cfg.is_testnet,
-        }
-    }
-
-    pub fn set_is_testnet(&mut self, is_testnet: bool) {
-        match self {
-            Self::Cardano(cfg) => cfg.is_testnet = is_testnet,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct RelayConfig {
-    pub listen_address: String,
-}
-
-#[derive(Clone, Deserialize, Serialize, Default, Debug)]
-pub struct RetryConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_retries: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    backoff_unit_sec: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    backoff_factor: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_backoff_sec: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    dismissible: Option<bool>,
-}
-
-impl RetryConfig {
-    pub fn max_retries(&self) -> usize {
-        self.max_retries.unwrap_or(20)
-    }
-
-    pub fn backoff_unit_sec(&self) -> u64 {
-        self.backoff_unit_sec.unwrap_or(2)
-    }
-
-    pub fn backoff_factor(&self) -> u32 {
-        self.backoff_factor.unwrap_or(2)
-    }
-
-    pub fn max_backoff_sec(&self) -> u64 {
-        self.max_backoff_sec.unwrap_or(60)
-    }
-
-    pub fn dismissible(&self) -> bool {
-        self.dismissible.unwrap_or(false)
-    }
-}
-
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct RootConfig {
-    pub upstream: UpstreamConfig,
+    compatibility: Compatibility,
 
-    pub storage: StorageConfig,
+    pub chain: ChainConfig,
 
-    pub genesis: GenesisConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<UpstreamConfig>,
 
     #[serde(default, skip_serializing_if = "SyncConfig::is_default")]
     pub sync: SyncConfig,
 
-    #[serde(default, skip_serializing_if = "SubmitConfig::is_default")]
-    pub submit: SubmitConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
+
+    #[serde(default, skip_serializing_if = "HistoryConfig::is_default")]
+    pub history: HistoryConfig,
+
+    #[serde(default, skip_serializing_if = "MempoolConfig::is_default")]
+    pub mempool: MempoolConfig,
 
     #[serde(default, skip_serializing_if = "ServeConfig::is_default")]
     pub serve: ServeConfig,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayConfig>,
-
-    pub retries: Option<RetryConfig>,
-
-    pub chain: ChainConfig,
 
     #[serde(default, skip_serializing_if = "LoggingConfig::is_default")]
     pub logging: LoggingConfig,
 
-    #[serde(default, skip_serializing_if = "TelemetryConfig::is_default")]
-    pub telemetry: TelemetryConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<TelemetryConfig>,
+}
+
+impl RootConfig {
+    /// A configuration for `chain` at the current contract, every other
+    /// section at its default.
+    pub fn new(chain: ChainConfig) -> Self {
+        Self {
+            compatibility: Compatibility::current(),
+            chain,
+            upstream: None,
+            sync: SyncConfig::default(),
+            storage: StorageConfig::default(),
+            history: HistoryConfig::default(),
+            mempool: MempoolConfig::default(),
+            serve: ServeConfig::default(),
+            relay: None,
+            logging: LoggingConfig::default(),
+            telemetry: None,
+        }
+    }
+
+    pub fn compatibility(&self) -> Compatibility {
+        self.compatibility
+    }
+
+    /// The WAL directory: on disk exactly when the state is.
+    pub fn wal_path(&self) -> Option<PathBuf> {
+        match self.storage.state.kind {
+            StoreType::Fjall { .. } => {
+                Some(self.storage.resolve(self.sync.wal_path.as_ref(), "wal"))
+            }
+            StoreType::Ephemeral => None,
+        }
+    }
+
+    /// `None` for an in-memory mempool.
+    pub fn mempool_path(&self) -> Option<PathBuf> {
+        self.mempool
+            .persistent
+            .then(|| self.storage.resolve(self.mempool.path.as_ref(), "mempool"))
+    }
+
+    /// Whether the node keeps a block archive at all.
+    pub fn keeps_archive(&self) -> bool {
+        self.history.mode != HistoryMode::None
+    }
+
+    /// The rules that span fields. Network names and custom genesis files are
+    /// checked where the chain is resolved.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let invalid = |message: String| Err(ConfigError::Invalid(message));
+
+        match (self.chain.is_custom(), &self.chain.cardano) {
+            (true, None) => {
+                return invalid(
+                    "`network = \"custom\"` requires `[chain.cardano]` with the network's \
+                     `magic`, `is_testnet` and `[chain.cardano.genesis]` files"
+                        .into(),
+                )
+            }
+            (false, Some(_)) => {
+                return invalid(format!(
+                    "`[chain.cardano]` is only for `network = \"custom\"`; the `{}` network's \
+                     magic and genesis are built in",
+                    self.chain.network
+                ))
+            }
+            _ => (),
+        }
+
+        match (&self.upstream, self.chain.is_custom()) {
+            (None, true) => {
+                return invalid(
+                    "a custom network has no default peer; add `[upstream]` with a \
+                     `peer_address`, or `type = \"emulator\"`"
+                        .into(),
+                )
+            }
+            (Some(UpstreamConfig::Peer(PeerConfig { peer_address: None })), true) => {
+                return invalid("`upstream.peer_address` is required on a custom network".into())
+            }
+            (Some(UpstreamConfig::Emulator(_)), false) => {
+                return invalid(
+                    "`upstream.type = \"emulator\"` is only valid with `network = \"custom\"`"
+                        .into(),
+                )
+            }
+            _ => (),
+        }
+
+        match (self.history.mode, self.history.window) {
+            (HistoryMode::Rolling, None) => {
+                return invalid(
+                    "`history.mode = \"rolling\"` requires a `window`, such as \
+                     `{ unit = \"slot\", value = 2592000 }`"
+                        .into(),
+                )
+            }
+            (HistoryMode::None | HistoryMode::Full, Some(_)) => {
+                return invalid("`history.window` is only valid with `mode = \"rolling\"`".into())
+            }
+            _ => (),
+        }
+
+        let queries = self.serve.max_concurrent_queries;
+        if !ServeConfig::MAX_CONCURRENT_QUERIES.contains(&queries) {
+            return invalid(format!(
+                "`serve.max_concurrent_queries` must be between {} and {}, found {queries}",
+                ServeConfig::MAX_CONCURRENT_QUERIES.start(),
+                ServeConfig::MAX_CONCURRENT_QUERIES.end(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn resolve_paths(&mut self, config_dir: &Path) {
+        if let Some(cardano) = &mut self.chain.cardano {
+            cardano.genesis.resolve_against(config_dir);
+        }
+    }
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("no configuration file at {}; pass `--config PATH` or create one with `dolos init`", .0.display())]
+    NotFound(PathBuf),
+
+    #[error("reading {}: {source}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: ::config::ConfigError,
+    },
+
+    #[error(
+        "the configuration does not declare `compatibility`; add `compatibility = \"{}\"` at the \
+         top of the file (supported: {})",
+        Compatibility::current(),
+        supported_contracts()
+    )]
+    MissingCompatibility,
+
+    #[error(
+        "this is a Dolos v1 or v2.0.0-alpha.0 configuration, which this release does not read; \
+         rewrite it as described in the migration guide at {MIGRATION_GUIDE_URL}"
+    )]
+    LegacyShape,
+
+    #[error("`compatibility` must be a string such as \"{current}\", found {0}", current = Compatibility::current())]
+    MalformedCompatibility(String),
+
+    #[error("unsupported `compatibility = \"{0}\"`; this release supports {supported}", supported = supported_contracts())]
+    UnsupportedCompatibility(String),
+
+    #[error(
+        "the configuration carries sections that are now command arguments; remove them: {}",
+        .0.join("; ")
+    )]
+    MovedSections(Vec<String>),
+
+    #[error("invalid configuration: {0}")]
+    Invalid(String),
+}
+
+/// Sections an older configuration carried that are now inputs of the
+/// commands that read them, and where each one went.
+const MOVED_TO_ARGUMENTS: [(&str, &str); 3] = [
+    (
+        "mithril",
+        "`dolos bootstrap mithril --aggregator --genesis-vkey`",
+    ),
+    (
+        "snapshot",
+        "`dolos bootstrap snapshot --download-url` and `dolos snapshot … --state-epochs`",
+    ),
+    (
+        "stelae",
+        "`--registry-user` / `DOLOS_STELAE_USER`, `DOLOS_STELAE_PASSWORD`, `DOLOS_STELAE_TOKEN` \
+         and `--registry-credentials-file` on `dolos bootstrap stelae` and `dolos snapshot`",
+    ),
+];
+
+/// Keys only a v1 or v2.0.0-alpha.0 file has.
+const LEGACY_KEYS: [&str; 3] = ["genesis", "storage.version", "chain.type"];
+
+const ENV_PREFIX: &str = "DOLOS";
+const ENV_NESTING: &str = "__";
+
+/// Read the configuration: `path`, or else `./dolos.toml`, and `DOLOS_`
+/// environment variables over it.
+///
+/// A variable names its key with `__` between levels, as in
+/// `DOLOS_UPSTREAM__PEER_ADDRESS`; one without `__` is not an override, which
+/// leaves the command inputs such as `DOLOS_MITHRIL_AGGREGATOR` alone.
+/// `compatibility` is read from the file alone. Genesis paths resolve against
+/// the file's directory.
+pub fn load(path: Option<&Path>) -> Result<RootConfig, ConfigError> {
+    let path = path.unwrap_or(Path::new(DEFAULT_CONFIG_FILE));
+
+    if !path.is_file() {
+        return Err(ConfigError::NotFound(path.to_path_buf()));
+    }
+
+    let read = |source| ConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    };
+    let file = || ::config::File::from(path).format(::config::FileFormat::Toml);
+
+    let document = ::config::Config::builder()
+        .add_source(file())
+        .build()
+        .map_err(read)?;
+
+    check_compatibility(&document)?;
+    reject_moved_sections(&document)?;
+
+    let mut config: RootConfig = ::config::Config::builder()
+        .add_source(file())
+        .add_source(environment())
+        .build()
+        .and_then(::config::Config::try_deserialize)
+        .map_err(read)?;
+
+    config.resolve_paths(path.parent().unwrap_or(Path::new("")));
+    config.validate()?;
+
+    Ok(config)
+}
+
+fn check_compatibility(document: &::config::Config) -> Result<(), ConfigError> {
+    let Ok(value) = document.get::<::config::Value>("compatibility") else {
+        let legacy = LEGACY_KEYS
+            .iter()
+            .any(|key| document.get::<::config::Value>(key).is_ok());
+
+        return Err(if legacy {
+            ConfigError::LegacyShape
+        } else {
+            ConfigError::MissingCompatibility
+        });
+    };
+
+    match value.kind {
+        ::config::ValueKind::String(value) => Compatibility::parse(&value).map(|_| ()),
+        _ => Err(ConfigError::MalformedCompatibility(value.to_string())),
+    }
+}
+
+/// Refuses a file that still carries a moved section, naming where it went
+/// rather than reporting an unknown field.
+fn reject_moved_sections(document: &::config::Config) -> Result<(), ConfigError> {
+    let moved: Vec<String> = MOVED_TO_ARGUMENTS
+        .iter()
+        .filter(|(section, _)| document.get::<::config::Value>(section).is_ok())
+        .map(|(section, destination)| format!("[{section}] moved to {destination}"))
+        .collect();
+
+    if moved.is_empty() {
+        Ok(())
+    } else {
+        Err(ConfigError::MovedSections(moved))
+    }
+}
+
+fn environment() -> ::config::Environment {
+    let prefix = format!("{ENV_PREFIX}_");
+
+    let overrides = std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+        .filter(|(key, _)| {
+            key.strip_prefix(&prefix)
+                .is_some_and(|key| key.contains(ENV_NESTING))
+        })
+        .collect();
+
+    ::config::Environment::with_prefix(ENV_PREFIX)
+        .prefix_separator("_")
+        .separator(ENV_NESTING)
+        .source(Some(overrides))
+}
+
+/// Options for opening the Redb WAL backend.
+#[derive(Clone, Debug, Default)]
+pub struct RedbWalConfig {
+    /// Size (in MB) of memory allocated for caching.
+    pub cache: Option<usize>,
+}
+
+/// Options for opening the legacy Redb state backend.
+#[derive(Clone, Debug, Default)]
+pub struct RedbStateConfig {
+    /// Size (in MB) of memory allocated for caching.
+    pub cache: Option<usize>,
+}
+
+/// Options for opening the Redb mempool backend.
+#[derive(Clone, Debug, Default)]
+pub struct RedbMempoolConfig {
+    /// Size (in MB) of memory allocated for caching.
+    pub cache: Option<usize>,
+}
+
+/// Options for opening the Fjall state backend. Not read from the file:
+/// `preset = "standard"` opens with the defaults.
+#[derive(Clone, Debug, Default)]
+pub struct FjallStateConfig {
+    /// Size (in MB) of memory allocated for caching.
+    pub cache: Option<usize>,
+    /// Maximum journal size in MB.
+    pub max_journal_size: Option<usize>,
+    /// Flush journal after each commit.
+    pub flush_on_commit: Option<bool>,
+    /// L0 compaction threshold (default: 4, lower = more aggressive).
+    pub l0_threshold: Option<u8>,
+    /// Number of background compaction worker threads.
+    pub worker_threads: Option<usize>,
+    /// Memtable size in MB before flush (default: 64).
+    pub memtable_size_mb: Option<usize>,
+}
+
+/// Options for opening the Fjall archive backend. Not read from the file:
+/// `preset = "standard"` opens with the defaults.
+///
+/// Block segments are always compressed, one zstd frame per block with the
+/// dictionary bundled in `dolos-flatfiles`; there is nothing to configure
+/// about them.
+#[derive(Clone, Debug, Default)]
+pub struct FjallArchiveConfig {
+    /// Where block segment files go; default the archive directory.
+    pub blocks_path: Option<PathBuf>,
+    /// Size (in MB) of memory allocated for caching.
+    pub cache: Option<usize>,
+    /// Maximum journal size in MB.
+    pub max_journal_size: Option<usize>,
+    /// Flush journal after each commit.
+    pub flush_on_commit: Option<bool>,
+    /// L0 compaction threshold (default: 4, lower = more aggressive).
+    pub l0_threshold: Option<u8>,
+    /// Number of background compaction worker threads.
+    pub worker_threads: Option<usize>,
+    /// Memtable size in MB before flush (default: 64).
+    pub memtable_size_mb: Option<usize>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    /// An explicit non-default backend carrying no options must not be
-    /// treated as the default: dropping it on re-serialization would silently
-    /// flip the archive to fjall on the next load.
-    #[test]
-    fn explicit_non_default_backend_survives_reserialization() {
-        let storage = StorageConfig {
-            archive: ArchiveStoreConfig::InMemory,
-            ..Default::default()
-        };
-
-        let json = serde_json::to_value(&storage).unwrap();
-        let restored: StorageConfig = serde_json::from_value(json).unwrap();
-
-        assert!(matches!(restored.archive, ArchiveStoreConfig::InMemory));
+    fn preview() -> RootConfig {
+        RootConfig::new(ChainConfig::known("preview"))
     }
 
-    #[test]
-    fn default_backend_selections_are_not_serialized() {
-        let json = serde_json::to_value(StorageConfig::default()).unwrap();
-
-        assert!(json.get("archive").is_none());
-        assert!(json.get("state").is_none());
-    }
-
-    #[test]
-    fn the_default_archive_backend_is_fjall() {
-        assert!(matches!(
-            ArchiveStoreConfig::default(),
-            ArchiveStoreConfig::Fjall(cfg) if cfg.is_default()
-        ));
-    }
-
-    /// Every spelling the config accepts round-trips, and the default is the
-    /// version this release reads. A *missing* value stays `V0` on purpose:
-    /// it is what makes an un-versioned config fail the startup gate rather
-    /// than inherit whatever the current default happens to be.
-    #[test]
-    fn storage_versions_round_trip_and_default_to_the_current_one() {
-        use serde_json::json;
-
-        for (spelling, expected) in [
-            ("v0", StorageVersion::V0),
-            ("v1", StorageVersion::V1),
-            ("v2", StorageVersion::V2),
-            ("v3", StorageVersion::V3),
-            ("v4", StorageVersion::V4),
-        ] {
-            let parsed: StorageVersion = serde_json::from_value(json!(spelling)).unwrap();
-            assert_eq!(parsed, expected);
-            assert_eq!(parsed.to_string(), spelling);
-            assert_eq!(serde_json::to_value(&parsed).unwrap(), json!(spelling));
+    fn custom() -> CardanoConfig {
+        CardanoConfig {
+            magic: 42,
+            is_testnet: true,
+            genesis: GenesisConfig::in_dir(Path::new("genesis")),
+            custom_utxos: vec![],
         }
-
-        assert_eq!(StorageVersion::default(), StorageVersion::V4);
-
-        let missing: StorageVersion = serde_json::from_value(json!(null)).unwrap();
-        assert_eq!(missing, StorageVersion::V0);
-
-        assert!(serde_json::from_value::<StorageVersion>(json!("v5")).is_err());
     }
 
-    /// The docs spell the opt-out backend `no_op`; the historical serde
-    /// lowercase of `NoOp` was `noop`. Both must parse, and serialization
-    /// must emit the documented spelling.
-    #[test]
-    fn no_op_backend_accepts_both_spellings_and_serializes_documented_one() {
-        use serde_json::json;
-
-        for spelling in ["no_op", "noop"] {
-            let archive: ArchiveStoreConfig =
-                serde_json::from_value(json!({ "backend": spelling })).unwrap();
-            assert!(matches!(archive, ArchiveStoreConfig::NoOp));
+    fn invalid(config: &RootConfig) -> String {
+        match config.validate() {
+            Err(ConfigError::Invalid(message)) => message,
+            other => panic!("expected a validation error, got {other:?}"),
         }
-
-        let json = serde_json::to_value(ArchiveStoreConfig::NoOp).unwrap();
-        assert_eq!(json["backend"], "no_op");
     }
 
     #[test]
-    fn the_cache_table_takes_its_defaults_and_refuses_unknown_keys() {
-        use serde_json::json;
+    fn compatibility_accepts_only_the_supported_contracts() {
+        assert_eq!(
+            Compatibility::parse("v2-alpha.1").unwrap().as_str(),
+            "v2-alpha.1"
+        );
+        assert_eq!(Compatibility::current().as_str(), SUPPORTED_CONTRACTS[0]);
 
-        let cache: CacheConfig =
-            serde_json::from_value(json!({ "admission": { "totals": 5 } })).unwrap();
-        assert!(cache.enabled);
-        assert_eq!(cache.memory_budget_bytes, 512 * 1024 * 1024);
-        assert_eq!(cache.disk_budget_bytes, 4 * 1024 * 1024 * 1024);
-        assert_eq!(cache.admission["totals"], 5);
+        let message = Compatibility::parse("v2-alpha.0").unwrap_err().to_string();
+        assert!(message.contains("v2-alpha.0"), "{message}");
+        assert!(message.contains("\"v2-alpha.1\""), "{message}");
+    }
 
-        let err = serde_json::from_value::<CacheConfig>(json!({ "budget": 1 }))
+    #[test]
+    fn an_omitted_store_type_is_fjall_standard() {
+        let state: StateStoreConfig = serde_json::from_value(json!({ "path": "s" })).unwrap();
+        assert_eq!(
+            state.kind,
+            StoreType::Fjall {
+                preset: FjallPreset::Standard
+            }
+        );
+
+        let err = serde_json::from_value::<StateStoreConfig>(json!({ "preset": "fast" }))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("budget"), "{err}");
+        assert!(err.contains("standard"), "{err}");
+    }
+
+    #[test]
+    fn an_ephemeral_store_takes_no_other_field() {
+        let archive: ArchiveStoreConfig =
+            serde_json::from_value(json!({ "type": "ephemeral" })).unwrap();
+        assert_eq!(archive, ArchiveStoreConfig::ephemeral());
+
+        let err = serde_json::from_value::<ArchiveStoreConfig>(json!({
+            "type": "ephemeral",
+            "blocks_path": "blocks",
+            "preset": "standard",
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`blocks_path`, `preset`"), "{err}");
+    }
+
+    #[test]
+    fn stores_refuse_keys_they_do_not_know() {
+        let err = serde_json::from_value::<StateStoreConfig>(json!({ "blocks_path": "b" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("blocks_path"), "{err}");
+
+        let err = serde_json::from_value::<ArchiveStoreConfig>(json!({ "cache": 16 }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cache"), "{err}");
+    }
+
+    #[test]
+    fn store_selections_round_trip() {
+        for archive in [
+            ArchiveStoreConfig::default(),
+            ArchiveStoreConfig::ephemeral(),
+            ArchiveStoreConfig {
+                path: Some("a".into()),
+                blocks_path: Some("/hdd/blocks".into()),
+                ..Default::default()
+            },
+        ] {
+            let json = serde_json::to_value(&archive).unwrap();
+            assert_eq!(
+                serde_json::from_value::<ArchiveStoreConfig>(json).unwrap(),
+                archive
+            );
+        }
 
         let json = serde_json::to_value(StorageConfig::default()).unwrap();
+        assert!(json.get("state").is_none());
+        assert!(json.get("archive").is_none());
         assert!(json.get("cache").is_none());
     }
 
     #[test]
-    fn the_cache_path_resolves_like_the_other_stores() {
-        let mut storage = StorageConfig {
-            path: PathBuf::from("/data"),
-            ..Default::default()
-        };
-        assert_eq!(storage.cache_path(), Some(PathBuf::from("/data/cache")));
+    fn upstream_type_defaults_to_peer() {
+        let upstream: UpstreamConfig = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(upstream, UpstreamConfig::Peer(PeerConfig::default()));
 
-        storage.cache.path = Some(PathBuf::from("fast/cache"));
+        let upstream: UpstreamConfig = serde_json::from_value(json!({
+            "type": "emulator",
+            "block_production_interval": 5,
+        }))
+        .unwrap();
         assert_eq!(
-            storage.cache_path(),
-            Some(PathBuf::from("/data/fast/cache"))
+            upstream,
+            UpstreamConfig::Emulator(EmulatorConfig {
+                block_production_interval: 5
+            })
         );
 
-        storage.cache.path = Some(PathBuf::from("/ssd/cache"));
-        assert_eq!(storage.cache_path(), Some(PathBuf::from("/ssd/cache")));
-
-        storage.cache.enabled = false;
-        assert_eq!(storage.cache_path(), None);
+        for (raw, field) in [
+            (
+                json!({ "block_production_interval": 5 }),
+                "block_production_interval",
+            ),
+            (json!({ "type": "emulator" }), "block_production_interval"),
+            (
+                json!({ "type": "emulator", "block_production_interval": 5, "peer_address": "x:1" }),
+                "peer_address",
+            ),
+        ] {
+            let err = serde_json::from_value::<UpstreamConfig>(raw)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(field), "{err}");
+        }
     }
 
     #[test]
-    fn the_archive_table_refuses_keys_it_does_not_know() {
-        use serde_json::json;
+    fn the_cache_takes_mebibytes() {
+        let cache: CacheConfig =
+            serde_json::from_value(json!({ "admission": { "totals": 5 } })).unwrap();
+        assert!(cache.enabled);
+        assert_eq!(cache.memory_bytes(), 512 * 1024 * 1024);
+        assert_eq!(cache.disk_bytes(), 4 * 1024 * 1024 * 1024);
+        assert_eq!(cache.admission["totals"], 5);
 
-        let err = serde_json::from_value::<ArchiveStoreConfig>(json!({
-            "backend": "fjall",
-            "block_compression": { "profile": "per-block" }
-        }))
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("block_compression"), "{err}");
+        let err = serde_json::from_value::<CacheConfig>(json!({ "memory_budget_bytes": 1 }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("memory_budget_bytes"), "{err}");
+    }
 
-        let archive: ArchiveStoreConfig =
-            serde_json::from_value(json!({ "backend": "fjall", "cache": 16 })).unwrap();
-        let ArchiveStoreConfig::Fjall(cfg) = archive else {
-            panic!("expected the fjall backend");
+    #[test]
+    fn store_paths_resolve_against_the_storage_root() {
+        let mut config = preview();
+        config.storage.path = PathBuf::from("/data");
+
+        assert_eq!(
+            config.storage.state_path(),
+            Some(PathBuf::from("/data/state"))
+        );
+        assert_eq!(
+            config.storage.archive_path(),
+            Some(PathBuf::from("/data/archive"))
+        );
+        assert_eq!(
+            config.storage.cache_path(),
+            Some(PathBuf::from("/data/cache"))
+        );
+        assert_eq!(config.wal_path(), Some(PathBuf::from("/data/wal")));
+        assert_eq!(config.mempool_path(), None);
+
+        config.storage.state.path = Some(PathBuf::from("fast/state"));
+        config.storage.cache.path = Some(PathBuf::from("/ssd/cache"));
+        config.sync.wal_path = Some(PathBuf::from("w"));
+        config.mempool.persistent = true;
+
+        assert_eq!(
+            config.storage.state_path(),
+            Some(PathBuf::from("/data/fast/state"))
+        );
+        assert_eq!(
+            config.storage.cache_path(),
+            Some(PathBuf::from("/ssd/cache"))
+        );
+        assert_eq!(config.wal_path(), Some(PathBuf::from("/data/w")));
+        assert_eq!(config.mempool_path(), Some(PathBuf::from("/data/mempool")));
+
+        config.storage.state = StateStoreConfig::ephemeral();
+        config.storage.cache.enabled = false;
+
+        assert_eq!(config.storage.state_path(), None);
+        assert_eq!(config.wal_path(), None);
+        assert_eq!(config.storage.cache_path(), None);
+    }
+
+    #[test]
+    fn history_keeps_its_window_only_when_rolling() {
+        assert_eq!(HistoryConfig::default().max_slots(), None);
+        assert_eq!(HistoryConfig::none().max_slots(), None);
+        assert_eq!(
+            HistoryConfig::rolling(HistoryWindow::slots(100)).max_slots(),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn a_default_config_is_valid() {
+        preview().validate().unwrap();
+
+        let mut config = RootConfig::new(ChainConfig::custom(custom()));
+        config.upstream = Some(UpstreamConfig::peer("x:1"));
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn the_chain_section_follows_the_network() {
+        let mut config = RootConfig::new(ChainConfig::custom(custom()));
+        config.chain.cardano = None;
+        assert!(invalid(&config).contains("requires `[chain.cardano]`"));
+
+        let mut config = preview();
+        config.chain.cardano = Some(custom());
+        assert!(invalid(&config).contains("only for `network = \"custom\"`"));
+    }
+
+    #[test]
+    fn a_custom_network_names_its_upstream() {
+        let mut config = RootConfig::new(ChainConfig::custom(custom()));
+        assert!(invalid(&config).contains("add `[upstream]`"));
+
+        config.upstream = Some(UpstreamConfig::Peer(PeerConfig::default()));
+        assert!(invalid(&config).contains("`upstream.peer_address` is required"));
+
+        config.upstream = Some(UpstreamConfig::Emulator(EmulatorConfig {
+            block_production_interval: 1,
+        }));
+        config.validate().unwrap();
+
+        let mut config = preview();
+        config.upstream = Some(UpstreamConfig::Emulator(EmulatorConfig {
+            block_production_interval: 1,
+        }));
+        assert!(invalid(&config).contains("emulator"));
+    }
+
+    #[test]
+    fn a_window_goes_with_rolling_history() {
+        let mut config = preview();
+
+        config.history.mode = HistoryMode::Rolling;
+        assert!(invalid(&config).contains("requires a `window`"));
+
+        config.history = HistoryConfig {
+            mode: HistoryMode::Full,
+            window: Some(HistoryWindow::slots(1)),
         };
-        assert_eq!(cfg.cache, Some(16));
+        assert!(invalid(&config).contains("only valid with `mode = \"rolling\"`"));
+    }
+
+    #[test]
+    fn concurrent_queries_stay_in_range() {
+        let mut config = preview();
+
+        for (queries, valid) in [(0, false), (1, true), (64, true), (65, false)] {
+            config.serve.max_concurrent_queries = queries;
+            assert_eq!(config.validate().is_ok(), valid, "{queries}");
+        }
+    }
+
+    #[test]
+    fn genesis_paths_resolve_against_the_config_directory() {
+        let mut config = RootConfig::new(ChainConfig::custom(custom()));
+        config.chain.cardano.as_mut().unwrap().genesis.conway_path = PathBuf::from("/abs/c.json");
+
+        config.resolve_paths(Path::new("/etc/node"));
+
+        let genesis = &config.chain.cardano.unwrap().genesis;
+        assert_eq!(
+            genesis.byron_path,
+            PathBuf::from("/etc/node/genesis/byron.json")
+        );
+        assert_eq!(genesis.conway_path, PathBuf::from("/abs/c.json"));
     }
 }

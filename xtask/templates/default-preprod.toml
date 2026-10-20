@@ -1,29 +1,20 @@
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "preprod"
+
 [upstream]
 peer_address = "preprod-node.world.dev.cardano.org:30000"
 
-[storage]
-version = "v4"
-path = "./data"
-
-[genesis]
-byron_path = "byron.json"
-shelley_path = "shelley.json"
-alonzo_path = "alonzo.json"
-conway_path = "conway.json"
 [sync]
 pull_batch_size = 200
-max_rollback = 129600
 
-[submit]
-prune_height = 10000
+[storage]
+path = "./data"
 
 [serve.grpc]
 listen_address = "[::]:50051"
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
-
-[chain]
-type = "cardano"
-magic = 1
-is_testnet = true

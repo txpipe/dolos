@@ -1,18 +1,8 @@
-[upstream]
-peer_address = "relay.cnode-m1.demeter.run:3002"
-
-[storage]
-version = "v4"
-path = "data"
-
-[genesis]
-byron_path = "byron.json"
-shelley_path = "shelley.json"
-alonzo_path = "alonzo.json"
-conway_path = "conway.json"
-force_protocol = 6
+compatibility = "v2-alpha.1"
 
 [chain]
-type = "cardano"
-magic = 2
-is_testnet = true
+protocol = "cardano"
+network = "preview"
+
+[upstream]
+peer_address = "relay.cnode-m1.demeter.run:3002"

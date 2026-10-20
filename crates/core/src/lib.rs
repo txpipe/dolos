@@ -33,6 +33,7 @@ pub mod bootstrap;
 pub mod builtin;
 pub mod cache;
 pub mod cbor;
+pub mod compat;
 pub mod config;
 pub mod crawl;
 pub mod import;
@@ -483,13 +484,19 @@ pub enum ChainError {
     #[error("invalid chain config: {0}")]
     InvalidConfig(String),
 
+    #[error("unknown network `{name}`; known networks are {known} and `custom`")]
+    UnknownNetwork { name: String, known: String },
+
+    #[error("loading genesis files: {0}")]
+    GenesisFiles(#[source] std::io::Error),
+
     #[error("network magic {magic} does not match the Shelley genesis networkMagic {genesis}")]
     NetworkMagicMismatch { magic: u32, genesis: u32 },
 
     #[error("protocol params not found: {0}")]
     PParamsNotFound(String),
 
-    #[error("protocol parameter `{0}` is not set at this point of the chain; the genesis probably starts past Byron: set `genesis.force_protocol` to its starting protocol version, then wipe the store and bootstrap it again, since the setting is read only when the genesis is first applied")]
+    #[error("protocol parameter `{0}` is not set at this point of the chain; the genesis probably starts past Byron: set `chain.cardano.genesis.force_protocol` to its starting protocol version, then wipe the store and bootstrap it again, since the setting is read only when the genesis is first applied")]
     StartingPParamMissing(&'static str),
 
     #[error("the genesis starts at protocol version {0}, which this dolos can't fast-forward to")]
@@ -709,7 +716,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type TipSubscription: TipSubscription;
 
     fn storage_config(&self) -> &config::StorageConfig;
-    fn sync_config(&self) -> &config::SyncConfig;
+    fn history_config(&self) -> &config::HistoryConfig;
     fn genesis(&self) -> Arc<Genesis>;
 
     /// The one limiter every query facade built from this domain runs its
@@ -734,17 +741,9 @@ pub trait Domain: Send + Sync + Clone + 'static {
     const MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING: u64 = 100_000;
 
     fn housekeeping(&self) -> Result<bool, DomainError> {
-        let max_ledger_slots = self
-            .storage_config()
-            .state
-            .max_history()
-            .unwrap_or(Self::Chain::mutable_slots(self));
-
-        info!(max_ledger_slots, "pruning ledger for excess history");
-
         let mut archive_pruned = true;
 
-        if let Some(max_slots) = self.sync_config().max_history {
+        if let Some(max_slots) = self.history_config().max_slots() {
             info!(max_slots, "pruning archive for excess history");
 
             archive_pruned = self.archive().prune_history(
@@ -754,15 +753,12 @@ pub trait Domain: Send + Sync + Clone + 'static {
             )?;
         }
 
-        let mut wal_pruned = true;
+        let max_slots = Self::Chain::mutable_slots(self);
+        info!(max_slots, "pruning wal for excess history");
 
-        if let Some(max_slots) = self.sync_config().max_rollback {
-            info!(max_slots, "pruning wal for excess history");
-
-            wal_pruned = self
-                .wal()
-                .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
-        }
+        let wal_pruned = self
+            .wal()
+            .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
 
         Ok(archive_pruned && wal_pruned)
     }

@@ -62,12 +62,14 @@ impl Args {
 const DEFAULT_URL_TEMPLATE: &str =
     "https://dolos-snapshots.txpipe.cloud/${VERSION}/${NETWORK}/${VARIANT}/${POINT}.tar.gz";
 
-fn define_snapshot_url(config: &RootConfig, args: &Args) -> Option<String> {
-    if config.upstream.is_emulator() {
-        return None;
+fn define_snapshot_url(config: &RootConfig, args: &Args) -> miette::Result<Option<String>> {
+    if config.upstream.as_ref().is_some_and(|x| x.is_emulator()) {
+        return Ok(None);
     }
 
-    Some(snapshot_url(args, config.chain.magic()))
+    let magic = crate::common::resolve_network(config)?.magic();
+
+    Ok(Some(snapshot_url(args, magic)))
 }
 
 /// `${VERSION}` is the storage version this binary writes: a snapshot is
@@ -76,7 +78,7 @@ fn snapshot_url(args: &Args, magic: u64) -> String {
     args.download_url
         .as_deref()
         .unwrap_or(DEFAULT_URL_TEMPLATE)
-        .replace("${VERSION}", &CURRENT_STORAGE_VERSION.to_string())
+        .replace("${VERSION}", CURRENT_STORAGE_VERSION)
         .replace("${NETWORK}", &magic.to_string())
         .replace("${POINT}", &args.point)
         .replace("${VARIANT}", &args.variant)
@@ -111,7 +113,7 @@ fn fetch_snapshot(config: &RootConfig, args: &Args, feedback: &Feedback) -> miet
         .into_diagnostic()
         .context("Failed to create target directory")?;
 
-    let snapshot_url = define_snapshot_url(config, args).ok_or(miette::miette!(
+    let snapshot_url = define_snapshot_url(config, args)?.ok_or(miette::miette!(
         "can't find a valid snapshot for this configuration"
     ))?;
 

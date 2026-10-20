@@ -3,7 +3,6 @@ mod node;
 use std::io;
 use std::sync::Arc;
 
-use dolos::core::config::ChainConfig;
 use dolos::core::{ChainPoint, Domain as _, RawBlock, StateStore, StateWriter as _};
 use dolos::engine::{
     BulkReplayRunError, BulkReplaySession, DomainBuilder, ReplayProgress, ReplayWorkspace,
@@ -20,7 +19,7 @@ fn fixture() -> (node::Node, Arc<dolos::core::Genesis>, Vec<RawBlock>) {
         slot: 100,
         ..Default::default()
     });
-    node.config.chain = ChainConfig::Cardano(chain);
+    node.config.chain = node.custom_chain(2, chain.custom_utxos);
     (node, genesis, blocks)
 }
 
@@ -43,7 +42,7 @@ fn inspection_does_not_initialize_a_fresh_workspace() {
 
 #[test]
 fn configured_boundary_survives_inspection_and_requires_explicit_advancement() {
-    let mut node = node::Node::new();
+    let node = node::Node::new();
     let mut genesis = dolos_cardano::include::preview::load();
     genesis.force_protocol = Some(9);
     let epoch_one = genesis.shelley.epoch_length.unwrap() as u64;
@@ -51,7 +50,6 @@ fn configured_boundary_survives_inspection_and_requires_explicit_advancement() {
     let (before, block_before) = make_conway_block_with_prev(epoch_one - 1, None, 1);
     let (boundary, block_boundary) = make_conway_block_with_prev(epoch_one, before.hash(), 2);
     let (after, block_after) = make_conway_block_with_prev(epoch_one + 1, boundary.hash(), 3);
-    node.config.chain = ChainConfig::Cardano(Default::default());
 
     let mut session = BulkReplaySession::open(&node.config, genesis.clone(), Some(1)).unwrap();
     let progress = session

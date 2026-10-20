@@ -31,7 +31,7 @@ use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dolos_core::config::{ChainConfig, RootConfig, StateStoreConfig};
+use dolos_core::config::RootConfig;
 use dolos_core::ImportExt as _;
 use indicatif::ProgressBar;
 use miette::{bail, Context as _, IntoDiagnostic as _};
@@ -108,23 +108,19 @@ fn open_store<T>(what: &str, result: Result<T, Error>) -> miette::Result<T> {
 fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette::Result<()> {
     let mut others: Vec<(&str, PathBuf)> = vec![("storage root", config.storage.path.clone())];
 
-    if let Some(path) = config.storage.wal_path() {
+    if let Some(path) = config.wal_path() {
         others.push(("wal", path));
     }
     if let Some(path) = config.storage.archive_path() {
         others.push(("archive", path));
     }
-    if let Some(path) = config.storage.mempool_path() {
+    if let Some(path) = config.mempool_path() {
         others.push(("mempool", path));
     }
 
     // Segment files can live outside the archive directory; the backend takes
     // `blocks_path` verbatim, so this check does too.
-    let blocks_path = match &config.storage.archive {
-        dolos_core::config::ArchiveStoreConfig::Fjall(cfg) => cfg.blocks_path.as_ref(),
-        _ => None,
-    };
-    if let Some(path) = blocks_path {
+    if let Some(path) = &config.storage.archive.blocks_path {
         others.push(("archive segments", path.clone()));
     }
 
@@ -175,7 +171,7 @@ fn confirm_wipe(state_path: &std::path::Path, force: bool) -> miette::Result<()>
 /// Check the archive is usable as a replay source and return its tip point.
 ///
 /// Two gates: the first block must sit at the start of the chain (an archive
-/// pruned by `max_history` cannot rebuild state from origin, by design), and
+/// pruned by rolling history cannot rebuild state from origin, by design), and
 /// the tip must decode. Deliberately *not* a strict prev-hash walk from
 /// origin: Byron EBBs are overwritten in the slot-keyed blocks table, so that
 /// walk reports broken continuity at essentially every Byron epoch on a
@@ -199,7 +195,7 @@ fn preflight(archive: &ArchiveStoreBackend) -> miette::Result<ChainPoint> {
 
     if first.number() > 1 {
         bail!(
-            help = "instances running a `max_history` window cannot use this command; the replay \
+            help = "instances keeping rolling history cannot use this command; the replay \
                     always starts from origin",
             "the archive does not start at the beginning of the chain (first block is #{} at \
              slot {first_slot}); it looks pruned",
@@ -234,13 +230,14 @@ fn build_domain(
     archive: ArchiveStoreBackend,
     stop_epoch: Option<u64>,
 ) -> miette::Result<DomainAdapter> {
-    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
+    let genesis = Arc::new(crate::common::open_genesis(config)?);
 
-    let ChainConfig::Cardano(mut chain_config) = config.chain.clone();
-
-    if stop_epoch.is_some() {
-        chain_config.stop_epoch = stop_epoch;
-    }
+    let chain_config = dolos_cardano::CardanoLogicConfig {
+        stop_epoch,
+        custom_utxos: crate::common::resolve_network(config)?
+            .custom_utxos()
+            .to_vec(),
+    };
 
     let chain =
         dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(chain_config, &state, &genesis)
@@ -252,15 +249,16 @@ fn build_domain(
         .context("creating the in-memory WAL")?;
 
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
-    let query_limiter = QueryLimiter::default();
+    let query_limiter = QueryLimiter::new(config.serve.max_concurrent_queries);
     let cache = open_store(
         "cache",
         dolos::storage::open_cache_store(config, query_limiter.clone()),
     )?;
 
     Ok(DomainAdapter {
+        compatibility: config.compatibility(),
         storage_config: Arc::new(config.storage.clone()),
-        sync_config: Arc::new(config.sync.clone()),
+        history_config: config.history,
         genesis,
         chain: Arc::new(std::sync::RwLock::new(chain)),
         wal,
@@ -449,13 +447,10 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 );
             }
 
-            let state = match &config.storage.state {
-                StateStoreConfig::Fjall(cfg) => StateStoreBackend::open_fjall(path, cfg),
-                _ => StateStoreBackend::open_fjall(
-                    path,
-                    &dolos_core::config::FjallStateConfig::default(),
-                ),
-            }
+            let state = StateStoreBackend::open_fjall(
+                path,
+                &dolos_core::config::FjallStateConfig::default(),
+            )
             .into_diagnostic()
             .with_context(|| format!("opening the target state store at {}", path.display()))?;
 
