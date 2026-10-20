@@ -215,7 +215,7 @@ pub fn archive_aligned(
             Ok(ChainPoint::Specific(slot, block.hash()))
         })
         .transpose()?;
-    Ok(cursor.is_some() && cursor == point)
+    Ok(cursor == Some(point.unwrap_or(ChainPoint::Origin)))
 }
 
 pub fn reconcile_rollback<D: Domain>(domain: &D) -> Result<(), DomainError> {

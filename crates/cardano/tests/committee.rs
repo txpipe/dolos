@@ -376,6 +376,104 @@ fn housekeeping_preserves_repair_wal_when_archive_commit_is_missing() {
 }
 
 #[test]
+fn archive_alignment_distinguishes_origin_from_missing_and_specific_cursors() {
+    use dolos_core::builtin::{MemoryArchiveStore, MemoryStateStore};
+
+    let cases = [
+        (None, None, false),
+        (Some(ChainPoint::Origin), None, true),
+        (Some(ChainPoint::Slot(0)), None, false),
+        (Some(make_conway_block(0).0), None, false),
+        (Some(make_conway_block(1).0), None, false),
+        (None, Some(1), false),
+        (Some(ChainPoint::Origin), Some(0), false),
+        (Some(ChainPoint::Origin), Some(1), false),
+        (Some(ChainPoint::Slot(1)), Some(1), false),
+        (Some(make_conway_block(0).0), Some(0), true),
+        (Some(make_conway_block(1).0), Some(1), true),
+        (Some(make_conway_block(2).0), Some(1), false),
+        (
+            Some(ChainPoint::Specific(1, [9; 32].into())),
+            Some(1),
+            false,
+        ),
+    ];
+
+    for (cursor, archive_slot, expected) in cases {
+        let state = MemoryStateStore::new();
+        let archive = MemoryArchiveStore::new(dolos_cardano::model::build_log_schema());
+        if let Some(cursor) = &cursor {
+            let writer = state.start_writer().unwrap();
+            writer.set_cursor(cursor.clone()).unwrap();
+            writer.commit().unwrap();
+        }
+        if let Some(slot) = archive_slot {
+            let (point, body) = make_conway_block(slot);
+            let writer = archive.start_writer().unwrap();
+            writer.apply(&point, &body).unwrap();
+            writer.commit().unwrap();
+        }
+        assert_eq!(
+            committee::archive_aligned(&state, &archive).unwrap(),
+            expected,
+            "cursor: {cursor:?}, archive slot: {archive_slot:?}"
+        );
+    }
+}
+
+#[test]
+fn bootstrap_finishes_origin_rollback_after_both_truncations() {
+    use dolos_core::{BootstrapExt, SyncExt};
+    use dolos_testing::faults::{FaultyToyDomain, TestFault};
+
+    let domain = ToyDomain::new(None, None);
+    domain.roll_forward(make_conway_block(1).1).unwrap();
+    let interrupted = FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(3));
+    assert!(interrupted.rollback(&ChainPoint::Origin).is_err());
+    drop(interrupted);
+
+    assert_eq!(
+        domain.state().read_cursor().unwrap(),
+        Some(ChainPoint::Origin)
+    );
+    assert_eq!(
+        domain.wal().find_tip().unwrap().unwrap().0,
+        ChainPoint::Origin
+    );
+    assert!(domain.archive().get_tip().unwrap().is_none());
+    let mut marker = domain
+        .archive()
+        .relation_context("committee_authorizations_rollback")
+        .unwrap()
+        .unwrap();
+    assert!(!marker.complete);
+    assert_eq!(marker.initialized_at, 1);
+    assert!(!committee::maintenance_ready(&domain).unwrap());
+
+    marker.complete = true;
+    for _ in 0..2 {
+        domain.bootstrap().unwrap();
+        assert_eq!(
+            domain
+                .archive()
+                .relation_context("committee_authorizations_rollback")
+                .unwrap(),
+            Some(marker.clone())
+        );
+        assert_eq!(
+            domain.state().read_cursor().unwrap(),
+            Some(ChainPoint::Origin)
+        );
+        assert_eq!(
+            domain.wal().find_tip().unwrap().unwrap().0,
+            ChainPoint::Origin
+        );
+        assert!(domain.archive().get_tip().unwrap().is_none());
+        assert!(committee::maintenance_ready(&domain).unwrap());
+    }
+}
+
+#[test]
 fn bootstrap_finishes_protection_after_completed_rollback_truncation() {
     use dolos_core::BootstrapExt;
     let domain = ToyDomain::new(None, None);
