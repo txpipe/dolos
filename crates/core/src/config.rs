@@ -1358,8 +1358,8 @@ pub enum ConfigError {
     NonUnicodeOverride(String),
 
     #[error(
-        "the environment variable {0} cannot name a key; after `DOLOS_`, use only letters, digits \
-         and `_`, with `__` between levels"
+        "the environment variable {0} cannot name a key; after `DOLOS_`, use only letters, digits, \
+         `_` and `-`, with `__` between levels"
     )]
     MalformedOverride(String),
 
@@ -1418,18 +1418,25 @@ const ENV_NESTING: &str = "__";
 /// environment variables over it.
 ///
 /// A variable names its key with `__` between levels, as in
-/// `DOLOS_UPSTREAM__PEER_ADDRESS`, in letters, digits and `_` only; one
+/// `DOLOS_UPSTREAM__PEER_ADDRESS`, in letters, digits, `_` and `-` only; one
 /// without `__` is not an override, which leaves the command inputs such as
 /// `DOLOS_MITHRIL_AGGREGATOR` alone. A variable that sets a table is refused
 /// beside one that sets a key in it.
 ///
-/// An error the variables cause names them rather than the file: those the
-/// configuration reads without, or else those that set the keys the error is
-/// about. The file's own error is the one it is refused for with only the
-/// variables that supply or replace what its errors are about. A variable
-/// that repeats the file's value is never named. When both the file and a
-/// variable it needs are refused, either error may be the one reported, each
-/// under its own source.
+/// An error the variables cause names them rather than the file:
+/// - each variable the configuration reads without;
+/// - else the file is read with the variables its errors are about, added one
+///   error at a time. A variable about to be added that is refused over a
+///   configuration holding nothing else, such as an unknown key or a value of
+///   the wrong type, is named with that error. An error that stands is the
+///   variables' when every key it is about is theirs: one they set, or one
+///   nobody sets inside a table only they hold. Otherwise it is the file's;
+/// - when the file reads with those variables, every variable is named.
+///
+/// A variable that sets a key to the text the file has there changes nothing,
+/// so it is neither named nor read. When both the file and a variable it needs
+/// are refused, either error may be the one reported, each under its own
+/// source.
 ///
 /// `compatibility` is read from the file alone. Genesis paths resolve against
 /// the file's directory.
@@ -1498,12 +1505,10 @@ pub fn load_checked(
         .collect();
     variables.sort();
 
-    // The overrides to read with: those that repeat the file, and of the
-    // others only `chosen`.
     let only = |chosen: &[String]| -> ::config::Map<String, String> {
         overrides
             .iter()
-            .filter(|(name, _)| !variables.contains(name) || chosen.contains(name))
+            .filter(|(name, _)| chosen.contains(name))
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect()
     };
@@ -1527,8 +1532,7 @@ pub fn load_checked(
     }
 
     // Otherwise the file is read with the variables its errors are about,
-    // added one error at a time, until an error is about none of them (the
-    // file's own) or only about those already added (theirs).
+    // added one error at a time, until an error stands with all of them.
     let mut needed: Vec<String> = Vec::new();
 
     loop {
@@ -1537,25 +1541,55 @@ pub fn load_checked(
             Err(error) => error,
         };
 
-        let about: Vec<String> = variables
+        let added: Vec<String> = variables
             .iter()
-            .filter(|name| error.is_about(&override_key(name)))
+            .filter(|name| !needed.contains(name) && error.is_about(&override_key(name)))
             .cloned()
             .collect();
 
-        if about.is_empty() {
-            return Err(error.in_file(path));
+        if added.is_empty() {
+            return Err(match error.owners(&document, &needed) {
+                Some(owners) => error.in_environment(owners),
+                None => error.in_file(path),
+            });
         }
 
-        if about.iter().all(|name| needed.contains(name)) {
-            return Err(error.in_environment(about));
-        }
-
-        for name in about {
-            if !needed.contains(&name) {
-                needed.push(name);
+        for name in &added {
+            if let Some(own) = refused_alone(name, &overrides[name]) {
+                return Err(Rejection::Parse(own).in_environment(vec![name.clone()]));
             }
         }
+
+        needed.extend(added);
+    }
+}
+
+/// A variable's own error: an unknown key or a value of the wrong type, which
+/// it is refused for over a configuration holding nothing else. Keys missing
+/// beside it and fields that do not go together depend on the file.
+fn refused_alone(name: &str, value: &str) -> Option<::config::ConfigError> {
+    let bare = format!(
+        "compatibility = \"{}\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"mainnet\"\n",
+        Compatibility::current().as_str()
+    );
+    let variable = std::iter::once((name.to_string(), value.to_string())).collect();
+
+    let document = match ::config::Config::builder()
+        .add_source(::config::File::from_str(&bare, ::config::FileFormat::Toml))
+        .add_source(environment(variable))
+        .build()
+    {
+        Ok(document) => document,
+        Err(error) => return Some(error),
+    };
+
+    if check_tables(&document).is_err() {
+        return None;
+    }
+
+    match document.try_deserialize::<RootConfig>() {
+        Ok(_) | Err(::config::ConfigError::NotFound(_)) => None,
+        Err(error) => Some(error),
     }
 }
 
@@ -1578,6 +1612,65 @@ impl Rejection {
                 .any(|rule| is_within(rule, key) || is_within(key, rule)),
             Self::Check(_) => false,
         }
+    }
+
+    /// The keys the refusal is about: a broken rule's, the key a value is
+    /// refused at, or the one missing.
+    fn keys(&self) -> Vec<&str> {
+        use ::config::ConfigError as E;
+
+        match self {
+            Self::Parse(
+                E::NotFound(key) | E::Type { key: Some(key), .. } | E::At { key: Some(key), .. },
+            ) => vec![key.as_str()],
+            Self::Check(ConfigError::Invalid { keys, .. }) => {
+                keys.iter().map(String::as_str).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The variables, of those `read`, the refusal is put down to, or `None`
+    /// for the file. Each key it is about must be theirs: one a variable sets,
+    /// at it or above it, or else, going up from the key, the first that the
+    /// file or one of them has a value in must be one only they do.
+    fn owners(&self, document: &::config::Config, read: &[String]) -> Option<Vec<String>> {
+        let keys = self.keys();
+
+        if keys.is_empty() {
+            return None;
+        }
+
+        let setting = |within: &dyn Fn(&str) -> bool| -> Vec<String> {
+            read.iter()
+                .filter(|name| within(&override_key(name)))
+                .cloned()
+                .collect()
+        };
+
+        let mut owners = Vec::new();
+
+        for key in keys {
+            let mut found = setting(&|set| is_within(key, set));
+            let mut table = Some(key);
+
+            while found.is_empty() {
+                let current = table?;
+
+                if document.get::<::config::Value>(current).is_ok() {
+                    return None;
+                }
+
+                found = setting(&|set| is_within(set, current));
+                table = current.rsplit_once('.').map(|(parent, _)| parent);
+            }
+
+            owners.extend(found);
+        }
+
+        owners.sort();
+        owners.dedup();
+        Some(owners)
     }
 
     fn in_file(self, path: &Path) -> ConfigError {
@@ -1631,12 +1724,13 @@ fn override_key(variable: &str) -> String {
         .replace(ENV_NESTING, ".")
 }
 
-/// Whether the variable `name` sets its key to the value the file has there.
+/// Whether the variable `name` sets its key to the text the file has there.
+/// A number or a flag in the file is read differently from the same text in a
+/// variable, so it is never repeated.
 fn repeats_the_file(document: &::config::Config, name: &str, value: &str) -> bool {
     document
         .get::<::config::Value>(&override_key(name))
-        .and_then(::config::Value::into_string)
-        .is_ok_and(|found| found == value)
+        .is_ok_and(|found| matches!(found.kind, ::config::ValueKind::String(text) if text == value))
 }
 
 /// Refuses fields of a table that do not go together, naming their keys.
@@ -1699,10 +1793,11 @@ fn reject_moved_sections(document: &::config::Config) -> Result<(), ConfigError>
 
 /// The `DOLOS_` variables with `__` in their name. One that is not valid
 /// UTF-8 is refused rather than skipped, which would leave the file's value
-/// in place unnoticed, and so is one with a character outside letters, digits
-/// and `_`, which config would read as a subscript or a path. So is a pair
-/// where one sets a table and the other a key in it, which would apply in no
-/// fixed order.
+/// in place unnoticed. So is one with a character config does not take as part
+/// of a key name, such as `.` or `[`, which it would read as a path or a
+/// subscript; letters, digits, `_` and `-` are kept, so that a key such as the
+/// `offchain-failures` cache namespace can be set. So is a pair where one sets
+/// a table and the other a key in it, which would apply in no fixed order.
 fn environment_overrides() -> Result<::config::Map<String, String>, ConfigError> {
     let prefix = format!("{ENV_PREFIX}_");
     let mut overrides = ::config::Map::new();
@@ -1723,7 +1818,7 @@ fn environment_overrides() -> Result<::config::Map<String, String>, ConfigError>
 
         if !key[prefix.len()..]
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
             return Err(ConfigError::MalformedOverride(key));
         }

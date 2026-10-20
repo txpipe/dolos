@@ -1056,8 +1056,8 @@ fn an_override_the_file_needs_leaves_it_its_own_errors() {
     }
 }
 
-/// A variable that repeats the file's value changes nothing, so the rule the
-/// file breaks stays the file's.
+/// A variable that repeats the file's text changes nothing, so the error the
+/// file has stays the file's, and is reported as the file's.
 #[test]
 #[serial]
 fn a_variable_repeating_the_file_is_not_named() {
@@ -1071,18 +1071,221 @@ fn a_variable_repeating_the_file_is_not_named() {
         matches!(&error, ConfigError::Invalid { message, .. } if message.contains("has no default peer")),
         "{error}"
     );
+
+    let dir = tempfile::tempdir().unwrap();
+    let minimal = std::fs::read_to_string(fixture("minimal.toml")).unwrap();
+    let lots = dir.path().join("lots.toml");
+    std::fs::write(
+        &lots,
+        minimal.clone() + "\n[sync]\npull_batch_size = \"lots\"\n",
+    )
+    .unwrap();
+
+    let error = load_with_env(
+        &lots,
+        &variables(&[("DOLOS_SYNC__PULL_BATCH_SIZE", "lots")]),
+    )
+    .unwrap_err();
+
+    assert!(matches!(&error, ConfigError::Read { .. }), "{error}");
+    let message = error.to_string();
+    assert!(message.ends_with("lots.toml"), "{message}");
+    assert!(!message.contains("environment"), "{message}");
+
+    // A number in the file is not the same as its text in a variable: this
+    // one stands in for a fraction the file has, and is read.
+    let fraction = dir.path().join("fraction.toml");
+    std::fs::write(
+        &fraction,
+        minimal + "\n[serve]\nmax_concurrent_queries = 32.0\n",
+    )
+    .unwrap();
+    let whole = ("DOLOS_SERVE__MAX_CONCURRENT_QUERIES", "32");
+
+    load_with_env(&fraction, &variables(&[whole])).unwrap();
+
+    let error = load_with_env(
+        &fraction,
+        &variables(&[whole, ("DOLOS_HISTORY__MODE", "rolling")]),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(&error, ConfigError::Environment { variables, .. } if *variables == ["DOLOS_HISTORY__MODE"]),
+        "{error}"
+    );
+}
+
+/// A variable the file needs, wrong whatever the file holds, is named with
+/// its own error, also where the file has nothing at its key or has the table
+/// holding it. The merged tables come in no fixed order, so a regression
+/// shows only on some loads.
+#[test]
+#[serial]
+fn a_variable_wrong_on_its_own_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, config: String| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, config).unwrap();
+        path
+    };
+    let minimal = std::fs::read_to_string(fixture("minimal.toml")).unwrap();
+    let upstreamless =
+        std::fs::read_to_string(fixture("reject/custom-without-upstream.toml")).unwrap();
+    let cardano_variables = [
+        ("DOLOS_CHAIN__CARDANO__MAGIC", "42"),
+        ("DOLOS_CHAIN__CARDANO__IS_TESTNET", "true"),
+        ("DOLOS_CHAIN__CARDANO__GENESIS__BYRON_PATH", "byron.json"),
+        ("DOLOS_CHAIN__CARDANO__GENESIS__SHELLY_PATH", "shelley.json"),
+        ("DOLOS_CHAIN__CARDANO__GENESIS__ALONZO_PATH", "alonzo.json"),
+        ("DOLOS_CHAIN__CARDANO__GENESIS__CONWAY_PATH", "conway.json"),
+    ];
+
+    for (path, set, wrong, message) in [
+        (
+            fixture("reject/custom-without-upstream.toml"),
+            &[("DOLOS_UPSTREAM__PEER_ADRESS", "127.0.0.1:3001")][..],
+            "DOLOS_UPSTREAM__PEER_ADRESS",
+            "unknown field `peer_adress`",
+        ),
+        (
+            write(
+                "typed-upstream.toml",
+                upstreamless.clone() + "\n[upstream]\ntype = \"peer\"\n",
+            ),
+            &[("DOLOS_UPSTREAM__PEER_ADRESS", "127.0.0.1:3001")][..],
+            "DOLOS_UPSTREAM__PEER_ADRESS",
+            "unknown field `peer_adress`",
+        ),
+        (
+            write(
+                "chainless.toml",
+                "compatibility = \"v2-alpha.1\"\n".to_string(),
+            ),
+            &[("DOLOS_CHAIN__NETWROK", "preview")][..],
+            "DOLOS_CHAIN__NETWROK",
+            "unknown field `netwrok`",
+        ),
+        (
+            write(
+                "networkless.toml",
+                minimal.replace("network = \"preprod\"\n", ""),
+            ),
+            &[("DOLOS_CHAIN__NETWORK__NAME", "preview")][..],
+            "DOLOS_CHAIN__NETWORK__NAME",
+            "invalid type: map",
+        ),
+        (
+            fixture("reject/custom-without-cardano.toml"),
+            &cardano_variables[..],
+            "DOLOS_CHAIN__CARDANO__GENESIS__SHELLY_PATH",
+            "unknown field `shelly_path`",
+        ),
+    ] {
+        for _ in 0..20 {
+            let error = load_with_env(&path, &variables(set)).unwrap_err();
+
+            assert!(
+                matches!(&error, ConfigError::Environment { variables, .. } if *variables == [wrong]),
+                "{}: {error}",
+                path.display()
+            );
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
+}
+
+/// A key nobody sets, in a table only the variables hold, is theirs to set.
+#[test]
+#[serial]
+fn a_key_missing_from_a_table_only_variables_hold_is_theirs() {
+    for (path, set, message) in [
+        (
+            fixture("reject/custom-without-cardano.toml"),
+            ("DOLOS_CHAIN__CARDANO__MAGIC", "42"),
+            "chain.cardano.is_testnet",
+        ),
+        (
+            fixture("reject/custom-without-upstream.toml"),
+            ("DOLOS_UPSTREAM__TYPE", "emulator"),
+            "requires `block_production_interval`",
+        ),
+    ] {
+        for _ in 0..20 {
+            let error = load_with_env(&path, &variables(&[set])).unwrap_err();
+
+            assert!(
+                matches!(&error, ConfigError::Environment { variables, .. } if *variables == [set.0]),
+                "{}: {error}",
+                path.display()
+            );
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
+}
+
+/// A rule is put down to the variables only when they set every key it is
+/// about. One the file sets, or nobody sets outside a table only they hold,
+/// leaves it the file's, also when a variable the file needs comes with it.
+#[test]
+#[serial]
+fn a_rule_with_a_key_the_file_holds_is_the_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, config: String| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, config).unwrap();
+        path
+    };
+    let minimal = std::fs::read_to_string(fixture("minimal.toml")).unwrap();
+    let upstreamless =
+        std::fs::read_to_string(fixture("reject/custom-without-upstream.toml")).unwrap();
+    let peer = ("DOLOS_UPSTREAM__TYPE", "peer");
+
+    for (path, set, message) in [
+        (
+            write(
+                "empty-upstream.toml",
+                upstreamless.clone() + "\n[upstream]\n",
+            ),
+            peer,
+            "custom network",
+        ),
+        (
+            write(
+                "interval.toml",
+                minimal + "\n[upstream]\nblock_production_interval = 20\n",
+            ),
+            peer,
+            "belongs to `type = \"emulator\"`",
+        ),
+        (
+            write(
+                "networkless-custom.toml",
+                upstreamless.replace("network = \"custom\"\n", ""),
+            ),
+            ("DOLOS_CHAIN__NETWORK", "custom"),
+            "has no default peer",
+        ),
+    ] {
+        for _ in 0..20 {
+            let error = load_with_env(&path, &variables(&[set])).unwrap_err();
+
+            assert!(
+                matches!(&error, ConfigError::Invalid { message: found, .. } if found.contains(message)),
+                "{}: {error}",
+                path.display()
+            );
+        }
+    }
 }
 
 /// config reads a subscript or a dot in a variable's name as part of its
-/// key's path, so one could turn a table into a list. Such a name is refused.
+/// key's path, so one could turn a table into a list. Such a name is refused;
+/// `-`, which config takes as part of a key name, is not.
 #[test]
 #[serial]
-fn an_override_name_is_letters_digits_and_underscores() {
-    for name in [
-        "DOLOS_SERVE__GRPC[0]",
-        "DOLOS_SERVE__GRPC.LISTEN_ADDRESS",
-        "DOLOS_SERVE__GRPC__LISTEN-ADDRESS",
-    ] {
+fn an_override_name_is_a_key_name() {
+    for name in ["DOLOS_SERVE__GRPC[0]", "DOLOS_SERVE__GRPC.LISTEN_ADDRESS"] {
         let error = load_with_env(
             &fixture("minimal.toml"),
             &[(name, std::ffi::OsStr::new("127.0.0.1:50051"))],
@@ -1094,6 +1297,14 @@ fn an_override_name_is_letters_digits_and_underscores() {
             "{name}: {error}"
         );
     }
+
+    let config = load_with_env(
+        &fixture("minimal.toml"),
+        &variables(&[("DOLOS_STORAGE__CACHE__ADMISSION__OFFCHAIN-FAILURES", "5")]),
+    )
+    .unwrap();
+
+    assert_eq!(config.storage.cache.admission["offchain-failures"], 5);
 }
 
 /// A variable that sets a table and one that sets a key in it would apply in
