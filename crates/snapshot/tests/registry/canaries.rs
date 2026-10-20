@@ -595,6 +595,24 @@ pub fn gov_state() -> GovState {
                 },
             )]),
         }),
+        dissolved_committee: Some(dolos_cardano::DissolvedCommittee {
+            committee: Committee {
+                members: BTreeMap::from([(StakeCredential::AddrKeyhash(hash28(0xdd)), 420u64)]),
+                threshold: rational(1, 2),
+            },
+            auths: BTreeMap::from([(
+                StakeCredential::AddrKeyhash(hash28(0xdd)),
+                vec![(
+                    50_000u64,
+                    CommitteeAuthorization::HotCredential(StakeCredential::ScriptHash(hash28(
+                        0xde,
+                    ))),
+                )],
+            )]),
+            action: gov_action_id(0xdf, 4),
+            epoch: 505,
+            seated_by: Some(gov_action_id(0xe0, 5)),
+        }),
     }
 }
 
