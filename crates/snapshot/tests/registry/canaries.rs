@@ -23,13 +23,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use dolos_cardano::{
     model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AssetState,
-        AuthHistory, CalidusKey, Committee, CommitteeAuthorization, Constitution, DRepDelegation,
-        DRepExpiry, DRepSightingState, DRepState, DatumState, EndStats, EpochState, EpochValue,
-        EraBoundary, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet,
-        GovDistr, GovRoots, GovState, MetadataLabelState, Nonces, PParamValue, PParamsSet,
-        PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation, PoolEpochLog,
-        PoolParams, PoolSnapshot, PoolState, PoolTally, ProposalAction, ProposalState,
-        RollingStats, ScriptState, ShardProgress, Stake, VoteEntry,
+        AuthHistory, CalidusRegistration, Committee, CommitteeAuthorization, Constitution,
+        DRepDelegation, DRepExpiry, DRepSightingState, DRepState, DatumState, EndStats, EpochState,
+        EpochValue, EraBoundary, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+        FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces, PParamValue,
+        PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation,
+        PoolEpochLog, PoolParams, PoolSnapshot, PoolState, PoolTally, ProposalAction,
+        ProposalState, RollingStats, ScriptState, ShardProgress, Stake, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
@@ -713,8 +713,8 @@ pub fn pool_state() -> PoolState {
         register_slot: 55_555_555,
         retiring_epoch: Some(777),
         deposit: 500_000_000,
-        calidus: Some(CalidusKey {
-            pub_key: [0xf1; 32],
+        calidus: Some(CalidusRegistration {
+            pub_key: Some([0xf1; 32]),
             nonce: 151,
             tx_hash: hash32(0xf2),
             slot: 66_666_666,

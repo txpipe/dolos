@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::ops::Deref;
 
 use dolos_core::{ChainError, Genesis, TxOrder, TxoRef};
@@ -11,7 +11,7 @@ use crate::owned::OwnedMultiEraOutput;
 use crate::roll::BlockVisitor;
 use crate::{cip151, pallas_extras};
 use crate::{
-    CalidusKey, MintedBlocksInc, PParamsSet, PoolCalidusUpdate, PoolDeRegistration, PoolHash,
+    CalidusRegistration, MintedBlocksInc, PParamsSet, PoolCalidusUpdate, PoolDeRegistration,
     PoolRegistration,
 };
 
@@ -20,10 +20,10 @@ pub struct PoolStateVisitor {
     epoch: Option<Epoch>,
     deposit: Option<u64>,
 
-    /// The block's last CIP-151 registration for each pool, by position;
-    /// `None` is a revocation. Flushed after the certificates, so a
-    /// registration finds the row its own transaction creates.
-    calidus: BTreeMap<PoolHash, Option<CalidusKey>>,
+    /// The current transaction's CIP-151 registration, emitted after its
+    /// certificates: it finds the row its own transaction creates, and none
+    /// a later transaction creates.
+    calidus: Option<PoolCalidusUpdate>,
 }
 
 impl BlockVisitor for PoolStateVisitor {
@@ -54,11 +54,13 @@ impl BlockVisitor for PoolStateVisitor {
 
     fn visit_tx(
         &mut self,
-        _: &mut WorkDeltas,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         _: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
+        self.flush(deltas)?;
+
         if !tx.is_valid() {
             return Ok(());
         }
@@ -71,15 +73,15 @@ impl BlockVisitor for PoolStateVisitor {
             return Ok(());
         };
 
-        let key =
-            (!cip151::calidus_key_is_revoked(&registration.calidus_pub_key)).then(|| CalidusKey {
-                pub_key: registration.calidus_pub_key,
-                nonce: registration.nonce,
-                tx_hash: tx.hash(),
-                slot: block.slot(),
-            });
+        let pub_key = registration.calidus_pub_key;
+        let calidus = CalidusRegistration {
+            pub_key: (!cip151::calidus_key_is_revoked(&pub_key)).then_some(pub_key),
+            nonce: registration.nonce,
+            tx_hash: tx.hash(),
+            slot: block.slot(),
+        };
 
-        self.calidus.insert(registration.pool_id, key);
+        self.calidus = Some(PoolCalidusUpdate::new(registration.pool_id, calidus));
 
         Ok(())
     }
@@ -132,8 +134,8 @@ impl BlockVisitor for PoolStateVisitor {
     }
 
     fn flush(&mut self, deltas: &mut WorkDeltas) -> Result<(), ChainError> {
-        for (pool, key) in std::mem::take(&mut self.calidus) {
-            deltas.add_for_entity(PoolCalidusUpdate::new(pool, key));
+        if let Some(update) = self.calidus.take() {
+            deltas.add_for_entity(update);
         }
 
         Ok(())
@@ -201,29 +203,37 @@ mod tests {
         entity
     }
 
-    /// Visit `raw` as the crawl does: the root, then each transaction and
-    /// the certificates of the valid ones, then the flush.
-    fn deltas_of(visitor: &mut PoolStateVisitor, raw: &RawBlock) -> WorkDeltas {
-        let block = OwnedMultiEraBlock::decode(raw.clone()).unwrap();
-        let block = block.view();
+    /// Visit the transactions of `raws` as one block, the way the crawl
+    /// does: the first block's root, then each transaction and the
+    /// certificates of the valid ones, then the flush.
+    fn deltas_of(raws: &[&RawBlock]) -> WorkDeltas {
+        let blocks: Vec<_> = raws
+            .iter()
+            .map(|raw| OwnedMultiEraBlock::decode((*raw).clone()).unwrap())
+            .collect();
         let genesis = crate::include::devnet::load();
         let pparams = PParamsSet::default().with(Val::PoolDeposit(500_000_000));
+        let mut visitor = PoolStateVisitor::default();
         let mut deltas = WorkDeltas::default();
 
         visitor
-            .visit_root(&mut deltas, block, &genesis, &pparams, 0, 0, 0)
+            .visit_root(&mut deltas, blocks[0].view(), &genesis, &pparams, 0, 0, 0)
             .unwrap();
 
-        for (order, tx) in block.txs().iter().enumerate() {
-            visitor
-                .visit_tx(&mut deltas, block, tx, &HashMap::new())
-                .unwrap();
+        for block in &blocks {
+            let block = block.view();
 
-            if tx.is_valid() {
-                for cert in tx.certs() {
-                    visitor
-                        .visit_cert(&mut deltas, block, tx, &order, &cert)
-                        .unwrap();
+            for (order, tx) in block.txs().iter().enumerate() {
+                visitor
+                    .visit_tx(&mut deltas, block, tx, &HashMap::new())
+                    .unwrap();
+
+                if tx.is_valid() {
+                    for cert in tx.certs() {
+                        visitor
+                            .visit_cert(&mut deltas, block, tx, &order, &cert)
+                            .unwrap();
+                    }
                 }
             }
         }
@@ -233,10 +243,10 @@ mod tests {
         deltas
     }
 
-    /// Apply the deltas `raw` makes for [`POOL`] to `entity`, in order, and
-    /// return them for undo.
-    fn roll(raw: &RawBlock, entity: &mut Option<PoolState>) -> Vec<CardanoDelta> {
-        let mut deltas = deltas_of(&mut PoolStateVisitor::default(), raw);
+    /// Apply the deltas the transactions of `raws`, as one block, make for
+    /// [`POOL`] to `entity`, in order, and return them for undo.
+    fn roll_txs(raws: &[&RawBlock], entity: &mut Option<PoolState>) -> Vec<CardanoDelta> {
+        let mut deltas = deltas_of(raws);
         let key = dolos_core::NsKey::of::<PoolState>(&crate::PoolKey(POOL.into()));
         let mut group = deltas.entities.remove(&key).unwrap_or_default();
 
@@ -251,6 +261,10 @@ mod tests {
         group
     }
 
+    fn roll(raw: &RawBlock, entity: &mut Option<PoolState>) -> Vec<CardanoDelta> {
+        roll_txs(&[raw], entity)
+    }
+
     fn undo(deltas: &[CardanoDelta], entity: &mut Option<PoolState>) {
         for delta in deltas.iter().rev() {
             match delta {
@@ -261,13 +275,12 @@ mod tests {
         }
     }
 
+    fn calidus(entity: &Option<PoolState>) -> Option<&CalidusRegistration> {
+        entity.as_ref().unwrap().calidus.as_ref()
+    }
+
     fn pub_key(entity: &Option<PoolState>) -> Option<[u8; 32]> {
-        entity
-            .as_ref()
-            .unwrap()
-            .calidus
-            .as_ref()
-            .map(|key| key.pub_key)
+        calidus(entity).and_then(|x| x.pub_key)
     }
 
     #[test]
@@ -281,8 +294,8 @@ mod tests {
 
         assert_eq!(
             entity.unwrap().calidus,
-            Some(CalidusKey {
-                pub_key: [0x57; 32],
+            Some(CalidusRegistration {
+                pub_key: Some([0x57; 32]),
                 nonce: 7,
                 tx_hash,
                 slot: 1_000,
@@ -298,56 +311,55 @@ mod tests {
             &mut entity,
         );
 
-        assert_eq!(pub_key(&entity), None);
+        assert_eq!(calidus(&entity), None);
     }
 
     #[test]
-    fn a_later_registration_replaces_the_key() {
+    fn a_higher_nonce_replaces_the_key() {
         let mut entity = Some(pool_state());
         roll(
             &metadata_block(1_000, registration(POOL, 7, [0x57; 32]), true),
             &mut entity,
         );
         roll(
-            &metadata_block(2_000, registration(POOL, 3, [0x58; 32]), true),
+            &metadata_block(2_000, registration(POOL, 8, [0x58; 32]), true),
             &mut entity,
         );
 
         assert_eq!(pub_key(&entity), Some([0x58; 32]));
-        assert_eq!(entity.unwrap().calidus.unwrap().nonce, 3);
+        assert_eq!(calidus(&entity).unwrap().nonce, 8);
     }
 
     #[test]
-    fn the_last_registration_in_a_block_wins() {
-        let mut visitor = PoolStateVisitor::default();
-        let first = OwnedMultiEraBlock::decode(metadata_block(
-            1_000,
-            registration(POOL, 7, [0x57; 32]),
-            true,
-        ))
-        .unwrap();
-        let second = OwnedMultiEraBlock::decode(metadata_block(
-            1_000,
-            registration(POOL, 8, [0x58; 32]),
-            true,
-        ))
-        .unwrap();
-        let mut deltas = WorkDeltas::default();
+    fn a_lower_nonce_in_a_later_block_is_ignored() {
+        let mut entity = Some(pool_state());
+        roll(
+            &metadata_block(1_000, registration(POOL, 7, [0x57; 32]), true),
+            &mut entity,
+        );
+        let before = entity.clone();
 
-        for block in [&first, &second] {
-            let block = block.view();
-            visitor
-                .visit_tx(&mut deltas, block, &block.txs()[0], &HashMap::new())
-                .unwrap();
-        }
-        visitor.flush(&mut deltas).unwrap();
+        roll(
+            &metadata_block(2_000, registration(POOL, 3, [0x58; 32]), true),
+            &mut entity,
+        );
+        roll(
+            &metadata_block(3_000, registration(POOL, 7, [0x59; 32]), true),
+            &mut entity,
+        );
 
-        let updates: Vec<_> = deltas.entities.into_values().flatten().collect();
-        assert!(matches!(
-            updates.as_slice(),
-            [CardanoDelta::PoolCalidusUpdate(x)]
-                if x.new.as_ref().map(|key| key.pub_key) == Some([0x58; 32])
-        ));
+        assert_eq!(entity, before);
+    }
+
+    #[test]
+    fn a_higher_nonce_earlier_in_a_block_wins() {
+        let higher = metadata_block(1_000, registration(POOL, 8, [0x58; 32]), true);
+        let lower = metadata_block(1_000, registration(POOL, 7, [0x57; 32]), true);
+        let mut entity = Some(pool_state());
+        roll_txs(&[&higher, &lower], &mut entity);
+
+        assert_eq!(pub_key(&entity), Some([0x58; 32]));
+        assert_eq!(calidus(&entity).unwrap().nonce, 8);
     }
 
     #[test]
@@ -363,6 +375,23 @@ mod tests {
         );
 
         assert_eq!(pub_key(&entity), None);
+        assert_eq!(calidus(&entity).unwrap().nonce, 8);
+    }
+
+    #[test]
+    fn a_lower_nonce_after_a_revocation_is_ignored() {
+        let mut entity = Some(pool_state());
+        roll(
+            &metadata_block(1_000, registration(POOL, 8, [0; 32]), true),
+            &mut entity,
+        );
+        roll(
+            &metadata_block(2_000, registration(POOL, 7, [0x57; 32]), true),
+            &mut entity,
+        );
+
+        assert_eq!(pub_key(&entity), None);
+        assert_eq!(calidus(&entity).unwrap().nonce, 8);
     }
 
     #[test]
@@ -385,6 +414,21 @@ mod tests {
             ]
         ));
         assert_eq!(pub_key(&entity), Some([0x57; 32]));
+    }
+
+    #[test]
+    fn a_registration_before_the_pools_first_certificate_is_ignored() {
+        let early = metadata_block(1_000, registration(POOL, 7, [0x57; 32]), true);
+        let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 1,
+            ..Default::default()
+        });
+        let mut entity = None;
+        roll_txs(&[&early, &blocks[0]], &mut entity);
+
+        assert!(entity.is_some(), "the later transaction registers the pool");
+        assert_eq!(calidus(&entity), None);
     }
 
     #[test]
@@ -414,6 +458,24 @@ mod tests {
         assert_eq!(pub_key(&entity), Some([0x58; 32]));
 
         undo(&deltas, &mut entity);
+        assert_eq!(entity, before);
+    }
+
+    #[test]
+    fn undo_of_an_ignored_registration_keeps_the_key() {
+        let mut entity = Some(pool_state());
+        roll(
+            &metadata_block(1_000, registration(POOL, 7, [0x57; 32]), true),
+            &mut entity,
+        );
+        let before = entity.clone();
+
+        let deltas = roll(
+            &metadata_block(2_000, registration(POOL, 3, [0x58; 32]), true),
+            &mut entity,
+        );
+        undo(&deltas, &mut entity);
+
         assert_eq!(entity, before);
     }
 

@@ -59,21 +59,22 @@ pub struct PoolState {
     #[n(16)]
     pub deposit: u64,
 
-    /// The pool's current CIP-151 calidus key: the latest registration in a
-    /// valid transaction, by chain position. `None` before any registration
-    /// and after a revocation.
+    /// The pool's highest-nonce CIP-151 registration in a valid transaction.
+    /// `None` before any registration.
     #[n(17)]
     #[cbor(default)]
-    pub calidus: Option<CalidusKey>,
+    pub calidus: Option<CalidusRegistration>,
 }
 
-/// A calidus key a CIP-151 registration set, with the transaction and slot
-/// that registered it.
+/// A CIP-151 calidus key registration, with the transaction and slot that
+/// made it. A revocation keeps its nonce, so a later registration with a
+/// lower one is still rejected.
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CalidusKey {
+pub struct CalidusRegistration {
+    /// The registered key; `None` for a revocation (an all-zero key).
     #[n(0)]
     #[cbor(with = "minicbor::bytes")]
-    pub pub_key: [u8; 32],
+    pub pub_key: Option<[u8; 32]>,
 
     #[n(1)]
     pub nonce: u64,
@@ -282,7 +283,7 @@ pub(crate) mod testing {
             register_slot in root::any_slot(),
             retiring_epoch in prop::option::of(root::any_epoch()),
             deposit in root::any_lovelace(),
-            calidus in prop::option::of(any_calidus_key()),
+            calidus in prop::option::of(any_calidus_registration()),
         ) -> PoolState {
             PoolState {
                 operator,
@@ -297,13 +298,13 @@ pub(crate) mod testing {
     }
 
     prop_compose! {
-        pub fn any_calidus_key()(
-            pub_key in any::<[u8; 32]>(),
+        pub fn any_calidus_registration()(
+            pub_key in prop::option::of(any::<[u8; 32]>()),
             nonce in any::<u64>(),
             tx_hash in root::any_hash_32(),
             slot in root::any_slot(),
-        ) -> CalidusKey {
-            CalidusKey { pub_key, nonce, tx_hash, slot }
+        ) -> CalidusRegistration {
+            CalidusRegistration { pub_key, nonce, tx_hash, slot }
         }
     }
 }
@@ -637,19 +638,19 @@ impl dolos_core::EntityDelta for PoolTransition {
     }
 }
 
-/// A CIP-151 registration sets a pool's calidus key, or revokes it with
-/// `new: None`. A pool with no row is left without one.
+/// A CIP-151 registration for a pool. It replaces the stored one only when
+/// its nonce is higher. A pool with no row is left without one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolCalidusUpdate {
     pub(crate) pool: PoolHash,
-    pub(crate) new: Option<CalidusKey>,
+    pub(crate) new: CalidusRegistration,
 
     // undo
-    pub(crate) prev: Option<CalidusKey>,
+    pub(crate) prev: Option<CalidusRegistration>,
 }
 
 impl PoolCalidusUpdate {
-    pub fn new(pool: PoolHash, new: Option<CalidusKey>) -> Self {
+    pub fn new(pool: PoolHash, new: CalidusRegistration) -> Self {
         Self {
             pool,
             new,
@@ -666,8 +667,18 @@ impl dolos_core::EntityDelta for PoolCalidusUpdate {
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
-        if let Some(entity) = entity {
-            self.prev = std::mem::replace(&mut entity.calidus, self.new.clone());
+        let Some(entity) = entity else {
+            return;
+        };
+
+        self.prev = entity.calidus.clone();
+
+        if entity
+            .calidus
+            .as_ref()
+            .is_none_or(|stored| self.new.nonce > stored.nonce)
+        {
+            entity.calidus = Some(self.new.clone());
         }
     }
 
@@ -682,7 +693,9 @@ impl dolos_core::EntityDelta for PoolCalidusUpdate {
 mod prop_tests {
     use super::testing::any_pool_state;
     use super::*;
-    use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use crate::model::testing::{
+        self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
+    };
     use crate::pallas_extras::testing::any_multi_era_pool_registration;
     use proptest::prelude::*;
 
@@ -730,7 +743,7 @@ mod prop_tests {
     prop_compose! {
         fn any_pool_calidus_update()(
             pool in root::any_pool_hash(),
-            new in prop::option::of(testing::any_calidus_key()),
+            new in testing::any_calidus_registration(),
         ) -> PoolCalidusUpdate {
             PoolCalidusUpdate::new(pool, new)
         }
@@ -796,6 +809,18 @@ mod prop_tests {
             delta in any_pool_calidus_update(),
         ) {
             assert_delta_roundtrip(entity, delta);
+        }
+
+        /// A pool that already holds a registration gives the delta a
+        /// `prev` to carry through the WAL.
+        #[test]
+        fn pool_calidus_update_serde_roundtrip(
+            entity in any_pool_state(),
+            stored in testing::any_calidus_registration(),
+            delta in any_pool_calidus_update(),
+        ) {
+            let entity = PoolState { calidus: Some(stored), ..entity };
+            assert_delta_serde_roundtrip(Some(entity), delta);
         }
     }
 

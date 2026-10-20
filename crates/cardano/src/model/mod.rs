@@ -986,12 +986,12 @@ mod wal_tests {
                 78,
                 PoolCalidusUpdate::new(
                     [0x99; 28].into(),
-                    Some(CalidusKey {
-                        pub_key: [0x57; 32],
+                    CalidusRegistration {
+                        pub_key: Some([0x57; 32]),
                         nonce: 12_345,
                         tx_hash: [0xaa; 32].into(),
                         slot: 100,
-                    }),
+                    },
                 )
                 .into(),
             ),

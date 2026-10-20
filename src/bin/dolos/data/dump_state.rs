@@ -314,7 +314,8 @@ impl TableRow for PoolState {
             ),
             self.calidus
                 .as_ref()
-                .map(|x| hex::encode(x.pub_key))
+                .and_then(|x| x.pub_key)
+                .map(hex::encode)
                 .unwrap_or_default(),
             format_pool_epoch(&self.snapshot, 3),
             format_pool_epoch(&self.snapshot, 2),

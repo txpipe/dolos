@@ -25,7 +25,7 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     cip151,
     indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
-    model::{AccountState, CalidusKey, PoolState},
+    model::{AccountState, CalidusRegistration, PoolState},
     pallas_extras, AccountKey, PoolEpochLog, PoolHash, PoolKey,
 };
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
@@ -519,43 +519,54 @@ where
     Ok(updates)
 }
 
-/// The `calidus_key` answer for a key the pool's state carries. Height,
-/// time and epoch come from the registering block, found by slot.
-fn pool_calidus_key<D>(domain: &Facade<D>, key: &CalidusKey) -> Result<PoolCalidusKey, StatusCode>
+/// The `calidus_key` answer for the registration the pool's state carries.
+/// Height, time and epoch come from the registering block, found by slot. A
+/// revocation, or a block the archive no longer holds, answers `None`.
+fn pool_calidus_key<D>(
+    domain: &Facade<D>,
+    registration: &CalidusRegistration,
+) -> Result<Option<PoolCalidusKey>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let chain = domain.get_chain_summary()?;
-    let body = domain
+    let Some(pub_key) = registration.pub_key else {
+        return Ok(None);
+    };
+
+    let Some(body) = domain
         .archive()
-        .get_block_by_slot(&key.slot)
+        .get_block_by_slot(&registration.slot)
         .map_err(log_and_500("failed to read a calidus registration block"))?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    else {
+        return Ok(None);
+    };
+
     let block = MultiEraBlock::decode(&body)
         .map_err(log_and_500("failed to decode a calidus registration block"))?;
+    let chain = domain.get_chain_summary()?;
 
-    Ok(PoolCalidusKey {
-        id: bech32_calidus(cip151::calidus_key_id_bytes(&key.pub_key))?,
-        pub_key: hex::encode(key.pub_key),
-        nonce: key
+    Ok(Some(PoolCalidusKey {
+        id: bech32_calidus(cip151::calidus_key_id_bytes(&pub_key))?,
+        pub_key: hex::encode(pub_key),
+        nonce: registration
             .nonce
             .try_into()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-        tx_hash: key.tx_hash.to_string(),
+        tx_hash: registration.tx_hash.to_string(),
         block_height: block
             .number()
             .try_into()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         block_time: chain
-            .slot_time(key.slot)
+            .slot_time(registration.slot)
             .try_into()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         epoch: chain
-            .slot_epoch(key.slot)
+            .slot_epoch(registration.slot)
             .0
             .try_into()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-    })
+    }))
 }
 
 pub async fn by_id<D>(
@@ -604,11 +615,10 @@ where
         compute_pool_metrics(&domain, pool.operator, active_pools, owners, ENTITY_CHUNK).await?;
 
     let (registration, retirement) = load_pool_cert_hashes(&domain, pool.operator).await?;
-    let calidus_key = pool
-        .calidus
-        .as_ref()
-        .map(|key| pool_calidus_key(&domain, key))
-        .transpose()?;
+    let calidus_key = match &pool.calidus {
+        Some(registration) => pool_calidus_key(&domain, registration)?,
+        None => None,
+    };
 
     let reward_account = pallas_extras::parse_reward_account(&params.reward_account)
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -1782,7 +1792,7 @@ mod tests {
         replicated_app, PoolIdCase, TestApp, TestFault, REG_POOL_HEX, REG_POOL_ID, SLOW_READ,
     };
     use blockfrost_openapi::models::{
-        pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
+        block_content::BlockContent, pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
         pool_list_extended_inner::PoolListExtendedInner,
         pool_list_retire_inner::PoolListRetireInner,
     };
@@ -1916,10 +1926,15 @@ mod tests {
         ])
     }
 
+    /// Every synthetic block carries the same registration in its first
+    /// transaction; the first one holds, since a later one with the same
+    /// nonce does not exceed it. The chain starts at slot 500,000, so the
+    /// registering block's slot and height differ.
     #[tokio::test]
     async fn pool_by_id_returns_calidus_key() {
         let default_cfg = SyntheticBlockConfig {
             pool_id: bech32_pool([9u8; 28]).expect("valid pool id"),
+            slot: 500_000,
             ..Default::default()
         };
         let pool_id = default_cfg.pool_id.clone();
@@ -1947,6 +1962,65 @@ mod tests {
         assert_eq!(calidus.pub_key, hex::encode(calidus_pub_key));
         assert_eq!(calidus.nonce, 12345);
         assert!(calidus.id.starts_with("calidus1"));
+
+        let registering = &app.vectors().blocks[0];
+        assert_ne!(registering.slot, registering.block_number);
+        assert_eq!(calidus.tx_hash, registering.tx_hashes[0]);
+
+        let (status, bytes) = app
+            .get_bytes(&format!("/blocks/{}", registering.block_hash))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let block: BlockContent = serde_json::from_slice(&bytes).expect("block response");
+        assert_eq!(Some(calidus.block_height), block.height);
+        assert_eq!(calidus.block_time, block.time);
+        assert_eq!(Some(calidus.epoch), block.epoch);
+    }
+
+    /// A registration whose block the archive no longer holds is served as
+    /// no key, not as an error.
+    #[tokio::test]
+    async fn pool_by_id_serves_no_calidus_key_without_its_block() {
+        let app = TestApp::new_with_cfg_and_setup(
+            SyntheticBlockConfig {
+                pool_id: bech32_pool([9u8; 28]).expect("valid pool id"),
+                ..Default::default()
+            },
+            |domain, vectors| {
+                let operator = PoolHash::from([9u8; 28]);
+                let mut pool = domain
+                    .state()
+                    .read_entity_typed::<PoolState>(&PoolKey(operator))
+                    .expect("pool read")
+                    .expect("pool state");
+                let tip = vectors.blocks.last().expect("synthetic blocks");
+                pool.calidus = Some(CalidusRegistration {
+                    pub_key: Some([0x57; 32]),
+                    nonce: 1,
+                    tx_hash: [0xaa; 32].into(),
+                    slot: tip.slot + 1_000,
+                });
+
+                let writer = domain.state().start_writer().expect("state writer");
+                writer
+                    .write_entity_typed(&PoolKey(operator), &pool)
+                    .expect("pool write");
+                writer.commit().expect("state commit");
+            },
+        );
+
+        let pool_id = app.vectors().pool_id.clone();
+        let (status, bytes) = app.get_bytes(&format!("/pools/{pool_id}")).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let pool: Pool = serde_json::from_slice(&bytes).expect("failed to parse pool response");
+        assert!(pool.calidus_key.is_none());
     }
 
     #[tokio::test]
@@ -1979,22 +2053,23 @@ mod tests {
     }
 
     /// A registration in a phase-2-invalid transaction registers nothing, so
-    /// the key a valid one set before it is still the one served.
+    /// the key a valid one set before it is still the one served, though the
+    /// invalid one carries a higher nonce.
     #[tokio::test]
     async fn pool_by_id_skips_an_invalid_transactions_calidus_key() {
         use dolos_core::import::ImportExt as _;
 
         let pool_id = bech32_pool([9u8; 28]).expect("valid pool id");
-        let registration = |key| {
+        let registration = |nonce, key| {
             vec![(
                 cip151::CIP151_METADATA_LABEL,
-                cip151_pool_metadata(&pool_id, 12345, key),
+                cip151_pool_metadata(&pool_id, nonce, key),
             )]
         };
         let app = TestApp::new_with_cfg_and_setup(
             SyntheticBlockConfig {
                 pool_id: pool_id.clone(),
-                metadata_entries: registration([0x57; 32]),
+                metadata_entries: registration(12345, [0x57; 32]),
                 ..Default::default()
             },
             |domain, vectors| {
@@ -2003,7 +2078,7 @@ mod tests {
                     tip.slot + 1,
                     tip.block_number + 1,
                     Some(tip.block_hash.parse().expect("block hash")),
-                    registration([0x58; 32]),
+                    registration(12346, [0x58; 32]),
                     false,
                 );
                 domain
