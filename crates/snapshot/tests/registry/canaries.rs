@@ -22,17 +22,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use dolos_cardano::{
     model::{
-        AccountEpochLog, AccountState, AssetState, AuthHistory, Committee, CommitteeAuthorization,
-        Constitution, DRepDelegation, DRepExpiry, DRepState, DatumState, EndStats, EpochState,
-        EpochValue, EraBoundary, EraState, FirstMintChunk, GovDistr, GovRoots, GovState, Nonces,
-        PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
-        PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, ProposalAction,
-        ProposalState, RollingStats, ShardProgress, StagedFirstMint, StagedStakeAddress, Stake,
-        StakeAddressesRow, VoteEntry,
+        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AssetState,
+        AuthHistory, Committee, CommitteeAuthorization, Constitution, DRepDelegation, DRepExpiry,
+        DRepSightingState, DRepState, DatumState, EndStats, EpochState, EpochValue, EraBoundary,
+        EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet, GovDistr,
+        GovRoots, GovState, MetadataLabelState, Nonces, PParamValue, PParamsSet, PendingMirState,
+        PendingRewardState, PolicyMintChunk, PoolDelegation, PoolEpochLog, PoolParams,
+        PoolSnapshot, PoolState, PoolTally, ProposalAction, ProposalState, RollingStats,
+        ScriptState, ShardProgress, Stake, VoteEntry,
     },
     model::{
-        AccountStats, AddressStats, PaymentStats, StagedAccountStats, StagedAddressStats,
-        StagedPaymentAddress, StagedPaymentStats, Sum, UnitSums,
+        AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
+        PaymentAddressSet, PaymentStats, Sum, UnitSums,
     },
     pallas::{
         codec::utils::Bytes,
@@ -212,8 +213,8 @@ pub fn policy_mint_chunk() -> PolicyMintChunk {
     }
 }
 
-pub fn staged_first_mint() -> StagedFirstMint {
-    StagedFirstMint {
+pub fn first_mint_set() -> FirstMintSet {
+    FirstMintSet {
         policy: hash28(0xb2),
         name: b"staged".to_vec(),
         epoch: 611,
@@ -248,12 +249,8 @@ pub fn address_stats() -> AddressStats {
     }
 }
 
-pub fn staged_address_stats() -> StagedAddressStats {
-    StagedAddressStats(address_stats())
-}
-
-pub fn payment_stats() -> PaymentStats {
-    PaymentStats {
+pub fn payment_address_chunk() -> PaymentAddressChunk {
+    PaymentAddressChunk {
         tails: vec![
             [[0x01].as_slice(), &[0xc2; 28]].concat().into(),
             vec![0x61].into(),
@@ -262,28 +259,39 @@ pub fn payment_stats() -> PaymentStats {
     }
 }
 
-pub fn staged_payment_address() -> StagedPaymentAddress {
-    StagedPaymentAddress {
+pub fn payment_address_set() -> PaymentAddressSet {
+    PaymentAddressSet {
         payment: hash28(0xc1),
         epoch: 612,
         tail: [[0x01].as_slice(), &[0xc2; 28]].concat(),
     }
 }
 
-pub fn staged_payment_stats() -> StagedPaymentStats {
-    StagedPaymentStats { tx_count: 23 }
+pub fn payment_stats() -> PaymentStats {
+    PaymentStats { tx_count: 23 }
+}
+
+/// A mint and a burn, so both signs of the amount are pinned.
+pub fn asset_mint_chunk() -> AssetMintChunk {
+    AssetMintChunk {
+        count: 259,
+        mints: vec![(hash32(0xd0), 1_000_000), (hash32(0xd1), -42)],
+    }
+}
+
+pub fn asset_mint_set() -> AssetMintSet {
+    AssetMintSet {
+        tx_hash: hash32(0xd2),
+        amount: -7,
+    }
 }
 
 pub fn account_stats() -> AccountStats {
-    AccountStats { tx_overlap: 5 }
+    AccountStats { tx_count: 5 }
 }
 
-pub fn staged_account_stats() -> StagedAccountStats {
-    StagedAccountStats { tx_overlap: 7 }
-}
-
-pub fn staged_stake_address() -> StagedStakeAddress {
-    StagedStakeAddress {
+pub fn account_address_set() -> AccountAddressSet {
+    AccountAddressSet {
         account: StakeCredential::ScriptHash(hash28(0xb3)),
         address: [[0x11].as_slice(), &[0xb4; 28], &[0xb3; 28]].concat(),
         epoch: 612,
@@ -293,8 +301,8 @@ pub fn staged_stake_address() -> StagedStakeAddress {
     }
 }
 
-pub fn stake_addresses_row() -> StakeAddressesRow {
-    StakeAddressesRow {
+pub fn account_address_chunk() -> AccountAddressChunk {
+    AccountAddressChunk {
         addresses: vec![
             [[0x01].as_slice(), &[0xb5; 28], &[0xb6; 28]]
                 .concat()
@@ -306,10 +314,40 @@ pub fn stake_addresses_row() -> StakeAddressesRow {
     }
 }
 
+pub fn script_state() -> ScriptState {
+    ScriptState {
+        slot: 99_999_999,
+        tx_index: 321,
+        order: 7,
+    }
+}
+
+pub fn first_script_set() -> FirstScriptSet {
+    FirstScriptSet {
+        slot: 88_888_888,
+        tx_index: 123,
+        order: 5,
+    }
+}
+
+pub fn first_script_chunk() -> FirstScriptChunk {
+    FirstScriptChunk {
+        count: 259,
+        hashes: vec![hash28(0xa0), hash28(0xa1)],
+    }
+}
+
 pub fn datum_state() -> DatumState {
     DatumState {
         refcount: 23,
         bytes: bytes_of::<24>(0x90).to_vec(),
+    }
+}
+
+pub fn drep_sighting_state() -> DRepSightingState {
+    DRepSightingState {
+        first_seen: (44_444, 2, 1),
+        anchor: Some(anchor(0xa2)),
     }
 }
 
@@ -467,6 +505,19 @@ pub fn epoch_state() -> EpochState {
             committed: 7,
             total: 8,
         }),
+        active_stake: Some(21_000_000_000_000_000),
+        estart_tally: Some(BTreeMap::from([
+            (hash28(0xc5), pool_tally(1)),
+            (hash28(0xc6), pool_tally(2)),
+        ])),
+    }
+}
+
+fn pool_tally(seed: u8) -> PoolTally {
+    PoolTally {
+        stake: 1_000_000_000_000 + seed as u64,
+        delegators: 300 + seed as u64,
+        live_pledge: 50_000_000_000 + seed as u64,
     }
 }
 
@@ -566,6 +617,12 @@ fn gov_distr(seed: u8, epoch_offset: Epoch) -> GovDistr {
     }
 }
 
+pub fn metadata_label_state() -> MetadataLabelState {
+    MetadataLabelState {
+        tx_count: 20_912_422,
+    }
+}
+
 pub fn pending_mir_state() -> PendingMirState {
     PendingMirState {
         credential: StakeCredential::ScriptHash(hash28(0xe0)),
@@ -615,6 +672,9 @@ fn pool_snapshot(seed: u8) -> PoolSnapshot {
         blocks_minted: 128 + seed as u32,
         params: pool_params(seed),
         is_new: seed.is_multiple_of(3),
+        stake: Some(2_000_000_000_000 + seed as u64),
+        delegators: Some(400 + seed as u64),
+        live_pledge: Some(60_000_000_000 + seed as u64),
     }
 }
 

@@ -5,7 +5,7 @@ use dolos_core::Domain;
 
 use crate::{error::Error, mapping::IntoModel as _, Facade};
 
-use super::{build_epoch_content, current_epoch, derive_current_active_stake, load_epoch_state};
+use super::{build_epoch_content, current_epoch, load_epoch_state};
 
 pub async fn latest<D: Domain>(State(domain): State<Facade<D>>) -> Result<Json<EpochContent>, Error>
 where
@@ -15,8 +15,7 @@ where
 
     // The current epoch always has a live `EpochState`, so no 404 here.
     let state = load_epoch_state(&domain, &chain, current, current)?;
-    let active_stake = derive_current_active_stake(&domain, &chain, current).await?;
-    let model = build_epoch_content(&domain, &chain, current, state, Some(active_stake))?;
+    let model = build_epoch_content(&domain, &chain, current, state)?;
 
     Ok(model.into_response()?)
 }
@@ -37,7 +36,15 @@ mod tests {
         // epoch 2.
         assert_eq!(content.epoch, 2);
         assert!(content.start_time < content.end_time);
-        assert!(content.active_stake.is_some());
+    }
+
+    /// The current epoch's active stake is the one ESTART stored when the
+    /// epoch opened; no account is scanned for it.
+    #[tokio::test]
+    async fn epochs_latest_reads_the_stored_active_stake() {
+        let app = app_with_active_stake(7_000, &[]);
+        let content: EpochContent = get_ok(&app, "/epochs/latest").await;
+        assert_eq!(content.active_stake.as_deref(), Some("7000"));
     }
 
     #[tokio::test]

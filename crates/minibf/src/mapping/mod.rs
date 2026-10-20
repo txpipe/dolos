@@ -41,8 +41,10 @@ use blockfrost_openapi::models::{
 use dolos_cardano::pallas_extras;
 use dolos_core::{async_query::BlockRefMeta, EraCbor, TxHash, TxoIdx, TxoRef};
 
+pub mod address_stats;
 pub mod blocks;
 pub mod cost_models;
+pub mod direct_json;
 pub mod epochs;
 pub mod network;
 pub mod protocol_params;
@@ -163,7 +165,7 @@ impl RatioFormat for Unrounded {
     }
 }
 
-const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
+pub const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 const ASSET_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("asset");
 const CALIDUS_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("calidus");
@@ -199,6 +201,36 @@ pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
     bech32(DREP_HRP, payload)
 }
 
+/// The role of a constitutional-committee credential.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitteeCredentialRole {
+    Hot,
+    Cold,
+}
+
+impl CommitteeCredentialRole {
+    /// The high nibble of the CIP-129 header byte.
+    const fn nibble(self) -> u8 {
+        match self {
+            Self::Hot => 0x0,
+            Self::Cold => 0x1,
+        }
+    }
+
+    const fn hrp(self) -> bech32::Hrp {
+        match self {
+            Self::Hot => CC_HOT_HRP,
+            Self::Cold => CC_COLD_HRP,
+        }
+    }
+}
+
+/// The low nibble of the CIP-129 header byte for a key hash.
+const CC_KEY_NIBBLE: u8 = 0x2;
+
+/// The low nibble of the CIP-129 header byte for a script hash.
+const CC_SCRIPT_NIBBLE: u8 = 0x3;
+
 /// CIP-129 credential ID for the constitutional committee.
 ///
 /// The header byte contains the role in the high nibble (cold `0x1`, hot
@@ -207,26 +239,148 @@ pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
 /// bech32 payload contains this header. The `..._hex` field that Blockfrost
 /// returns is the bare hash.
 fn bech32_committee(
-    hrp: bech32::Hrp,
-    role_nibble: u8,
+    role: CommitteeCredentialRole,
     cred: &StakeCredential,
 ) -> Result<String, StatusCode> {
-    let (hash, is_script): (&[u8], bool) = match cred {
-        StakeCredential::AddrKeyhash(key) => (key.as_ref(), false),
-        StakeCredential::ScriptHash(key) => (key.as_ref(), true),
+    let (hash, kind_nibble): (&[u8], u8) = match cred {
+        StakeCredential::AddrKeyhash(key) => (key.as_ref(), CC_KEY_NIBBLE),
+        StakeCredential::ScriptHash(key) => (key.as_ref(), CC_SCRIPT_NIBBLE),
     };
 
-    let header = (role_nibble << 4) | if is_script { 0x3 } else { 0x2 };
+    let header = (role.nibble() << 4) | kind_nibble;
 
-    bech32(hrp, [&[header], hash].concat())
+    bech32(role.hrp(), [&[header], hash].concat())
 }
 
 pub fn bech32_committee_cold(cred: &StakeCredential) -> Result<String, StatusCode> {
-    bech32_committee(CC_COLD_HRP, 0x1, cred)
+    bech32_committee(CommitteeCredentialRole::Cold, cred)
 }
 
 pub fn bech32_committee_hot(cred: &StakeCredential) -> Result<String, StatusCode> {
-    bech32_committee(CC_HOT_HRP, 0x0, cred)
+    bech32_committee(CommitteeCredentialRole::Hot, cred)
+}
+
+/// This function parses a CIP-129 constitutional-committee credential ID. It
+/// is the inverse of `bech32_committee_hot` and `bech32_committee_cold`.
+///
+/// The Bech32 prefix and the header byte both give the role. If the two roles
+/// are not the same, the ID is not valid. Bech32 permits an ID in upper case.
+/// The function accepts the prefix in upper case or in lower case.
+pub fn parse_committee_id(
+    id: &str,
+) -> Result<(CommitteeCredentialRole, StakeCredential), StatusCode> {
+    let parsed = bech32::primitives::decode::CheckedHrpstring::new::<bech32::Bech32>(id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let role = if parsed.hrp() == CC_HOT_HRP {
+        CommitteeCredentialRole::Hot
+    } else if parsed.hrp() == CC_COLD_HRP {
+        CommitteeCredentialRole::Cold
+    } else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+
+    let payload: Vec<u8> = parsed.byte_iter().collect();
+    let (header, hash) = payload.split_first().ok_or(StatusCode::BAD_REQUEST)?;
+    let hash: Hash<28> = <[u8; 28]>::try_from(hash)
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .into();
+
+    if header >> 4 != role.nibble() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let credential = match header & 0x0f {
+        CC_KEY_NIBBLE => StakeCredential::AddrKeyhash(hash),
+        CC_SCRIPT_NIBBLE => StakeCredential::ScriptHash(hash),
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    Ok((role, credential))
+}
+
+#[cfg(test)]
+mod committee_id_tests {
+    use super::*;
+
+    fn credentials() -> [StakeCredential; 2] {
+        [
+            StakeCredential::AddrKeyhash(Hash::from([21u8; 28])),
+            StakeCredential::ScriptHash(Hash::from([22u8; 28])),
+        ]
+    }
+
+    fn encode(hrp: &str, payload: &[u8]) -> String {
+        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse_unchecked(hrp), payload)
+            .expect("The test payload cannot be encoded.")
+    }
+
+    #[test]
+    fn parse_committee_id_inverts_the_encoders() {
+        for cred in credentials() {
+            let hot = bech32_committee_hot(&cred).unwrap();
+            assert_eq!(
+                parse_committee_id(&hot).unwrap(),
+                (CommitteeCredentialRole::Hot, cred.clone())
+            );
+
+            let cold = bech32_committee_cold(&cred).unwrap();
+            assert_eq!(
+                parse_committee_id(&cold).unwrap(),
+                (CommitteeCredentialRole::Cold, cred.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn parse_committee_id_ignores_the_case() {
+        for cred in credentials() {
+            let hot = bech32_committee_hot(&cred).unwrap();
+            assert_eq!(
+                parse_committee_id(&hot.to_ascii_uppercase()).unwrap(),
+                (CommitteeCredentialRole::Hot, cred.clone())
+            );
+
+            let cold = bech32_committee_cold(&cred).unwrap();
+            assert_eq!(
+                parse_committee_id(&cold.to_ascii_uppercase()).unwrap(),
+                (CommitteeCredentialRole::Cold, cred)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_committee_id_rejects_malformed_ids() {
+        let hash = [21u8; 28];
+
+        let rejected = [
+            // The payload has no header byte.
+            encode("cc_hot", &hash),
+            // The payload has one byte too many.
+            encode("cc_hot", &[&[0x02u8][..], &hash[..], &[0u8][..]].concat()),
+            // The low nibble is not a key or a script.
+            encode("cc_hot", &[&[0x00u8][..], &hash[..]].concat()),
+            encode("cc_hot", &[&[0x01u8][..], &hash[..]].concat()),
+            // The high nibble is not a role.
+            encode("cc_hot", &[&[0x22u8][..], &hash[..]].concat()),
+            // The prefix and the header give different roles.
+            encode("cc_hot", &[&[0x12u8][..], &hash[..]].concat()),
+            encode("cc_cold", &[&[0x02u8][..], &hash[..]].concat()),
+            // The prefix is not a committee prefix.
+            encode("drep", &[&[0x22u8][..], &hash[..]].concat()),
+            // The text is not Bech32.
+            "cc_hot1deadbeef".to_string(),
+            hex::encode(hash),
+        ];
+
+        for id in rejected {
+            assert_eq!(
+                parse_committee_id(&id),
+                Err(StatusCode::BAD_REQUEST),
+                "The parser accepted {id}."
+            );
+        }
+    }
 }
 
 pub fn bech32_pool(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
@@ -490,7 +644,7 @@ fn anchor_http_client() -> Result<&'static reqwest::Client, &'static reqwest::Er
     CLIENT.as_ref()
 }
 
-fn offchain_hash_mismatch_error(
+pub(crate) fn offchain_hash_mismatch_error(
     url: &str,
     expected_hash: &[u8],
     actual_hash: &[u8],
@@ -619,49 +773,82 @@ fn resolve_anchor_urls(url: &str, ipfs_gateways: &[String]) -> Vec<String> {
 
 /// This function fetches metadata from a governance-anchor URL.
 ///
-/// The function resolves an `ipfs://` URL through `ipfs_gateways`. It sends a
-/// request to each gateway in order. It stops at the first gateway that serves
-/// content with a hash equal to `expected_hash`. The function fetches every
-/// other URL directly.
-///
-/// The function returns the JSON body and the raw bytes. If every candidate
-/// fails, the function returns a typed error from the last candidate. Every
-/// error keeps the original on-chain URL.
+/// The function returns the JSON body and the raw bytes. On failure, it
+/// returns a typed error that keeps the original on-chain URL. See
+/// [`anchor_offchain_body`] for the fetch rules.
 pub async fn anchor_offchain_metadata(
     url: &str,
     expected_hash: &[u8],
     ipfs_gateways: &[String],
 ) -> (Option<AnchorMetadata>, Option<DrepsInnerMetadataError>) {
+    let metadata = anchor_offchain_body(url, expected_hash, ipfs_gateways)
+        .await
+        .and_then(|body| anchor_metadata_from_body(url, &body));
+
+    match metadata {
+        Ok(metadata) => (Some(metadata), None),
+        Err(error) => (None, Some(error)),
+    }
+}
+
+/// This function fetches the raw body of a governance anchor and makes sure
+/// that its hash matches `expected_hash`.
+///
+/// The function resolves an `ipfs://` URL through `ipfs_gateways`. It sends a
+/// request to each gateway in order. It stops at the first gateway that serves
+/// content with a hash equal to `expected_hash`. The function fetches every
+/// other URL directly.
+///
+/// If every candidate fails, the function returns a typed error from the last
+/// candidate. Every error keeps the original on-chain URL.
+pub async fn anchor_offchain_body(
+    url: &str,
+    expected_hash: &[u8],
+    ipfs_gateways: &[String],
+) -> Result<Vec<u8>, DrepsInnerMetadataError> {
     let candidates = resolve_anchor_urls(url, ipfs_gateways);
 
     // The candidate list is empty only for an `ipfs://` URL with no gateway. A
     // direct HTTP(S) URL always gives one candidate.
     if candidates.is_empty() {
-        return (None, Some(offchain_no_gateway_error(url)));
+        return Err(offchain_no_gateway_error(url));
     }
 
-    let client = match anchor_http_client() {
-        Ok(client) => client,
-        Err(error) => {
-            tracing::error!(%error, "cannot create the HTTP client for governance metadata");
-            return (None, Some(offchain_unknown_error(url)));
-        }
-    };
+    let client = anchor_http_client().map_err(|error| {
+        tracing::error!(%error, "cannot create the HTTP client for governance metadata");
+        offchain_unknown_error(url)
+    })?;
 
     let mut last_error = None;
 
     for candidate in candidates {
         match fetch_anchor_candidate(client, &candidate, url, expected_hash).await {
-            Ok(metadata) => return (Some(metadata), None),
+            Ok(body) => return Ok(body),
             Err(error) => last_error = Some(error),
         }
     }
 
-    (None, last_error)
+    Err(last_error.unwrap_or_else(|| offchain_connection_error(url)))
+}
+
+/// This function decodes a verified anchor body into the JSON value and the
+/// raw bytes in the PostgreSQL `bytea` format.
+///
+/// A body that is not JSON gives a decode error that names `url`.
+pub fn anchor_metadata_from_body(
+    url: &str,
+    body: &[u8],
+) -> Result<AnchorMetadata, DrepsInnerMetadataError> {
+    serde_json::from_slice(body)
+        .map(|json| AnchorMetadata {
+            json,
+            bytes: format!("\\x{}", hex::encode(body)),
+        })
+        .map_err(|_| offchain_decode_error(url))
 }
 
 /// This function fetches one resolved candidate URL for
-/// [`anchor_offchain_metadata`]. The function makes sure that the body hash
+/// [`anchor_offchain_body`]. The function makes sure that the body hash
 /// matches `expected_hash`.
 ///
 /// `request_url` is the URL that the function fetches. For an `ipfs://` anchor,
@@ -672,7 +859,7 @@ async fn fetch_anchor_candidate(
     request_url: &str,
     original_url: &str,
     expected_hash: &[u8],
-) -> Result<AnchorMetadata, DrepsInnerMetadataError> {
+) -> Result<Vec<u8>, DrepsInnerMetadataError> {
     let request_url = match reqwest::Url::parse(request_url) {
         Ok(url) if is_public_http_url(&url) => url,
         _ => return Err(offchain_connection_error(original_url)),
@@ -703,12 +890,7 @@ async fn fetch_anchor_candidate(
         ));
     }
 
-    serde_json::from_slice(body.as_ref())
-        .map(|json| AnchorMetadata {
-            json,
-            bytes: format!("\\x{}", hex::encode(body.as_slice())),
-        })
-        .map_err(|_| offchain_decode_error(original_url))
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -864,8 +1046,7 @@ mod anchor_tests {
 
         let error = fetch_anchor_candidate(&client, &request_url, original_url, &[0; 32])
             .await
-            .err()
-            .expect("The hash mismatch was accepted.");
+            .expect_err("The hash mismatch was accepted.");
 
         server.join().expect("The test server did not stop.");
         assert_eq!(error.code, Code::HashMismatch);
@@ -880,16 +1061,19 @@ mod anchor_tests {
         let (url, server) = serve_body(body, None);
         let (client, request_url) = local_candidate_client(&url);
 
-        let metadata = fetch_anchor_candidate(
+        let body = fetch_anchor_candidate(
             &client,
             &request_url,
             "ipfs://bafy-valid-json",
             expected_hash.as_ref(),
         )
         .await
-        .expect("The valid metadata was rejected.");
+        .expect("The valid body was rejected.");
 
         server.join().expect("The test server did not stop.");
+
+        let metadata = anchor_metadata_from_body("ipfs://bafy-valid-json", &body)
+            .expect("The valid metadata was rejected.");
         assert_eq!(metadata.json["name"], "Dolos");
         assert_eq!(metadata.bytes, format!("\\x{expected_hex}"));
     }
@@ -902,13 +1086,17 @@ mod anchor_tests {
         let (client, request_url) = local_candidate_client(&url);
         let original_url = "ipfs://bafy-invalid-json";
 
-        let error =
+        // the hash matches, so the body comes back; only decoding refuses it
+        let body =
             fetch_anchor_candidate(&client, &request_url, original_url, expected_hash.as_ref())
                 .await
-                .err()
-                .expect("The invalid JSON was accepted.");
+                .expect("The body with a matching hash was rejected.");
 
         server.join().expect("The test server did not stop.");
+
+        let error = anchor_metadata_from_body(original_url, &body)
+            .err()
+            .expect("The invalid JSON was accepted.");
         assert_eq!(error.code, Code::DecodeError);
         assert!(error.message.contains(original_url));
     }
@@ -1082,41 +1270,6 @@ impl AssetTotals {
 
         std::iter::once(lovelace).chain(assets).collect()
     }
-}
-
-/// The received and sent amounts of a Stats total, each lovelace first, then
-/// every asset with a nonzero sum on that side, by unit.
-pub fn stats_amounts(
-    stats: &dolos_cardano::AddressStats,
-) -> (
-    Vec<TxContentOutputAmountInner>,
-    Vec<TxContentOutputAmountInner>,
-) {
-    let side = |pick: fn(&dolos_cardano::UnitSums) -> u128| {
-        let lovelace = stats
-            .units
-            .get(&Vec::new().into())
-            .map(pick)
-            .unwrap_or_default();
-
-        let assets = stats
-            .units
-            .iter()
-            .filter(|(unit, sums)| !unit.is_empty() && pick(sums) > 0)
-            .map(|(unit, sums)| TxContentOutputAmountInner {
-                unit: hex::encode(unit.as_slice()),
-                quantity: pick(sums).to_string(),
-            });
-
-        std::iter::once(TxContentOutputAmountInner {
-            unit: "lovelace".to_string(),
-            quantity: lovelace.to_string(),
-        })
-        .chain(assets)
-        .collect()
-    };
-
-    (side(|sums| sums.received.0), side(|sums| sums.sent.0))
 }
 
 pub fn aggregate_assets<'a>(

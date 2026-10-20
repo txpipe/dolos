@@ -1,16 +1,18 @@
 use clap::{Parser, Subcommand};
-use miette::{Context, IntoDiagnostic, Result};
+use miette::{Context, Result};
 
 #[cfg(all(feature = "jemalloc", target_os = "linux"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod banner;
+mod cache;
 mod common;
 mod daemon;
 mod doctor;
 mod eval;
 mod feedback;
+mod registry;
 mod serve;
 mod snapshot;
 mod sync;
@@ -58,6 +60,9 @@ enum Command {
     /// Inspect and reproduce Stelae snapshots for this node
     Snapshot(snapshot::Args),
 
+    /// Fill, clear, inspect and check the cache, with the node stopped
+    Cache(cache::Args),
+
     /// Bootstrap the node using Mithril
     #[cfg(feature = "mithril")]
     Bootstrap(bootstrap::Args),
@@ -91,7 +96,7 @@ fn main() -> Result<()> {
     let args = Cli::parse();
 
     let config = crate::common::load_config(&args.config)
-        .into_diagnostic()
+        .map_err(crate::common::config_report)
         .context("parsing configuration");
 
     let feedback = crate::feedback::Feedback::default();
@@ -103,6 +108,7 @@ fn main() -> Result<()> {
         (Ok(config), Command::Eval(args)) => eval::run(&config, &args),
         (Ok(config), Command::Doctor(args)) => doctor::run(&config, &args, &feedback),
         (Ok(config), Command::Snapshot(args)) => snapshot::run(&config, &args),
+        (Ok(config), Command::Cache(args)) => cache::run(&config, &args),
 
         // the init command is special because it knows how to execute with or without a valid
         // configuration, that is why we pass the whole result and let the command logic decide what

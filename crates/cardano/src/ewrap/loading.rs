@@ -101,6 +101,7 @@ impl BoundaryWork {
         let gov_distr = gov.distr.clone();
 
         let stake_snapshot = stake_snapshot_of(ending_state.number, &chain_summary);
+        let pv9_drep_delegs = crate::hacks::pv9_drep_delegs::entries(genesis.network_magic());
 
         Ok(BoundaryWork {
             ending_state,
@@ -112,6 +113,8 @@ impl BoundaryWork {
             retiring_pools: Default::default(),
             expiring_dreps: Default::default(),
             retiring_dreps: Default::default(),
+            pv9_drep_delegs,
+            pv9_settlements: Default::default(),
             num_dormant_epochs,
             gov_active_since,
             gov_distr,
@@ -456,24 +459,38 @@ impl BoundaryWork {
         total_shards: u32,
         ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<BoundaryWork, ChainError> {
-        let mut boundary = Self::new_empty::<D>(state, genesis)?;
+        Self::new_empty::<D>(state, genesis)?.into_shard::<D>(
+            state,
+            shard_index,
+            total_shards,
+            ranges,
+        )
+    }
 
+    /// The body of [`Self::load_shard`], on an already constructed boundary.
+    fn into_shard<D: Domain>(
+        mut self,
+        state: &D::State,
+        shard_index: u32,
+        total_shards: u32,
+        ranges: Vec<RangeOf<AccountKey>>,
+    ) -> Result<BoundaryWork, ChainError> {
         // drops.visit_account needs retiring_pools + retiring_dreps. These
         // sets are small (handful per epoch) so re-classifying them per shard
         // is cheap.
-        boundary.load_pool_data::<D>(state)?;
-        boundary.load_drep_data::<D>(state)?;
-        boundary.detect_pv10_migration::<D>(state)?;
+        self.load_pool_data::<D>(state)?;
+        self.load_drep_data::<D>(state)?;
+        self.detect_pv10_migration::<D>(state)?;
 
-        if boundary.distr_snapshot_epoch().is_some() {
-            boundary.load_proposal_deposits::<D>(state)?;
+        if self.distr_snapshot_epoch().is_some() {
+            self.load_proposal_deposits::<D>(state)?;
         }
 
-        boundary.load_pending_rewards_ranges::<D>(state, ranges.clone())?;
+        self.load_pending_rewards_ranges::<D>(state, ranges.clone())?;
 
-        boundary.compute_shard_deltas::<D>(state, ranges, shard_index, total_shards)?;
+        self.compute_shard_deltas::<D>(state, ranges, shard_index, total_shards)?;
 
-        Ok(boundary)
+        Ok(self)
     }
 
     fn compute_shard_deltas<D: Domain>(
@@ -820,6 +837,9 @@ impl BoundaryWork {
                 self.expiring_dreps.push(drep.identifier);
             }
         }
+
+        self.pv9_settlements =
+            crate::hacks::pv9_drep_delegs::settle(self.pv9_drep_delegs, &self.retiring_dreps);
 
         Ok(())
     }
@@ -1557,8 +1577,8 @@ impl BoundaryWork {
             self.add_delta(crate::GovDormancyTick::new());
         }
 
-        // committee-state GC (step 7) — reads the post-enactment
-        // committee when the delta applies
+        // committee-state GC (step 7). The delta reads the
+        // post-enactment committee when it applies.
         self.add_delta(crate::CommitteeGc::new());
 
         // fold the boundary-paid amounts (enacted withdrawals and
@@ -1701,6 +1721,7 @@ mod tests {
     use pallas::ledger::primitives::StakeCredential;
 
     use super::*;
+    use crate::hacks::pv9_drep_delegs::{Action as Pv9Action, Entry as Pv9Entry};
     use crate::{
         ewrap::AppliedReward, AccountTransition, AssignRewards, ControlledAmountInc,
         DRepDelegation, DRepRegistration, DRepUnRegistration, EpochValue, PoolDelegation, Stake,
@@ -1980,16 +2001,24 @@ mod tests {
     }
 
     fn run_shard(domain: &ToyDomain, shard: u32) {
+        run_shard_with(domain, shard, None);
+    }
+
+    /// A shard pass, with `pv9_table` in place of the network's PV9
+    /// delegator-set table when given.
+    fn run_shard_with(domain: &ToyDomain, shard: u32, pv9_table: Option<&'static [Pv9Entry]>) {
         let ranges = AccountKey::shard_ranges(shard, TOTAL_SHARDS);
 
-        let mut boundary = BoundaryWork::load_shard::<ToyDomain>(
-            domain.state(),
-            domain.genesis(),
-            shard,
-            TOTAL_SHARDS,
-            ranges.clone(),
-        )
-        .unwrap();
+        let mut boundary =
+            BoundaryWork::new_empty::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+
+        if let Some(table) = pv9_table {
+            boundary.pv9_drep_delegs = table;
+        }
+
+        let mut boundary = boundary
+            .into_shard::<ToyDomain>(domain.state(), shard, TOTAL_SHARDS, ranges.clone())
+            .unwrap();
 
         boundary
             .commit_shard::<ToyDomain>(domain.state(), domain.archive(), ranges)
@@ -2177,6 +2206,9 @@ mod tests {
                     blocks_minted: 0,
                     params,
                     is_new: false,
+                    stake: None,
+                    delegators: None,
+                    live_pledge: None,
                 }),
                 None,
                 None,
@@ -2600,6 +2632,291 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The table's spelling of a DRep or credential: `key:` or `script:`
+    /// and the hash.
+    fn tagged(credential: &StakeCredential) -> &'static str {
+        let tagged = match credential {
+            StakeCredential::AddrKeyhash(hash) => format!("key:{hash}"),
+            StakeCredential::ScriptHash(hash) => format!("script:{hash}"),
+        };
+
+        Box::leak(tagged.into_boxed_str())
+    }
+
+    fn drep_tagged(drep: &DRep) -> &'static str {
+        match drep {
+            DRep::Key(hash) => tagged(&StakeCredential::AddrKeyhash(*hash)),
+            DRep::Script(hash) => tagged(&StakeCredential::ScriptHash(*hash)),
+            _ => panic!("the table lists key and script DReps"),
+        }
+    }
+
+    /// A PV9 table of one certificate: `drep` deregistering at `position`,
+    /// settling `accounts`.
+    fn pv9_table(
+        drep: &DRep,
+        position: (BlockSlot, TxOrder),
+        accounts: &[(&crate::AccountState, Pv9Action)],
+    ) -> &'static [Pv9Entry] {
+        let accounts = accounts
+            .iter()
+            .map(|(account, action)| (tagged(&account.credential), *action))
+            .collect::<Vec<_>>();
+
+        Box::leak(Box::new([Pv9Entry {
+            tx: "00",
+            cert_index: 0,
+            drep: drep_tagged(drep),
+            position,
+            accounts: Box::leak(accounts.into_boxed_slice()),
+        }]))
+    }
+
+    fn run_shards_with(domain: &ToyDomain, table: &'static [Pv9Entry]) {
+        for shard in 0..TOTAL_SHARDS {
+            run_shard_with(domain, shard, Some(table));
+        }
+    }
+
+    /// The boundary's own attribution of an account, read through the same
+    /// loads the shard pass runs.
+    fn snapshot_drep(
+        domain: &ToyDomain,
+        table: &'static [Pv9Entry],
+        account: &crate::AccountState,
+    ) -> Option<DRep> {
+        let mut boundary =
+            BoundaryWork::new_empty::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+        boundary.pv9_drep_delegs = table;
+        boundary
+            .load_drep_data::<ToyDomain>(domain.state())
+            .unwrap();
+
+        boundary.snapshot_drep_of(account)
+    }
+
+    /// #1364, stale reverse delegation: the account moved from X to Y (or on
+    /// to abstain) and X deregisters. The ledger's PV9 delegator set of X still
+    /// holds it and clears its delegation, whatever it now points at. Listed
+    /// `Clear`, the account is dropped at the boundary closing the
+    /// certificate's epoch and counts toward no DRep there; its unlisted twin
+    /// keeps serving Y.
+    #[test]
+    fn a_listed_stale_delegation_is_cleared() {
+        let domain = ToyDomain::new(None, None);
+        let at = |offset| closing_epoch_slot(&domain, offset);
+
+        let x = DRep::Key([0x21; 28].into());
+        let y = DRep::Key([0x22; 28].into());
+
+        let dreps = [
+            replay_drep_certs(x.clone(), &[Cert::Reg(at(10), 0), Cert::UnReg(at(100), 0)]),
+            replay_drep_certs(y.clone(), &[Cert::Reg(at(10), 0)]),
+        ];
+
+        let stale = weighted_delegator(0xa1, 1, y.clone(), (at(50), 0));
+        let stale_abstain = weighted_delegator(0xa2, 2, DRep::Abstain, (at(60), 0));
+        let unlisted = weighted_delegator(0xb1, 4, y.clone(), (at(50), 0));
+        let unlisted_abstain = weighted_delegator(0xb2, 8, DRep::Abstain, (at(60), 0));
+
+        let table = pv9_table(
+            &x,
+            (at(100), 0),
+            &[
+                (&stale, Pv9Action::Clear),
+                (&stale_abstain, Pv9Action::Clear),
+            ],
+        );
+
+        let accounts = [stale, stale_abstain, unlisted, unlisted_abstain];
+        let domain = seed_delegation_domain(&dreps, &accounts);
+        let [stale, stale_abstain, unlisted, unlisted_abstain] = &accounts;
+
+        assert_eq!(snapshot_drep(&domain, table, stale), None);
+        assert_eq!(snapshot_drep(&domain, table, stale_abstain), None);
+        assert_eq!(snapshot_drep(&domain, table, unlisted), Some(y.clone()));
+
+        run_shards_with(&domain, table);
+
+        assert!(delegation_dropped(&domain, stale));
+        assert!(delegation_dropped(&domain, stale_abstain));
+        assert!(!delegation_dropped(&domain, unlisted));
+        assert!(!delegation_dropped(&domain, unlisted_abstain));
+
+        let distr = read_distr(&domain);
+        assert!(distr.is_complete_for(CLOSING_EPOCH));
+        assert_eq!(
+            distr.drep_distr,
+            BTreeMap::from([(y.clone(), 4), (DRep::Abstain, 8)])
+        );
+    }
+
+    /// Without its entry the same stale delegation keeps today's positional
+    /// attribution: Y's delegation postdates nothing that retires.
+    #[test]
+    fn without_its_entry_a_stale_delegation_stands() {
+        let domain = ToyDomain::new(None, None);
+        let at = |offset| closing_epoch_slot(&domain, offset);
+
+        let x = DRep::Key([0x21; 28].into());
+        let y = DRep::Key([0x22; 28].into());
+
+        let dreps = [
+            replay_drep_certs(x.clone(), &[Cert::Reg(at(10), 0), Cert::UnReg(at(100), 0)]),
+            replay_drep_certs(y.clone(), &[Cert::Reg(at(10), 0)]),
+        ];
+
+        let stale = weighted_delegator(0xa1, 1, y.clone(), (at(50), 0));
+        let stale_abstain = weighted_delegator(0xa2, 2, DRep::Abstain, (at(60), 0));
+
+        let accounts = [stale, stale_abstain];
+        let domain = seed_delegation_domain(&dreps, &accounts);
+        let [stale, stale_abstain] = &accounts;
+
+        assert_eq!(snapshot_drep(&domain, &[], stale), Some(y.clone()));
+
+        run_shards_with(&domain, &[]);
+
+        assert!(!delegation_dropped(&domain, stale));
+        assert!(!delegation_dropped(&domain, stale_abstain));
+        assert_eq!(
+            read_distr(&domain).drep_distr,
+            BTreeMap::from([(y.clone(), 1), (DRep::Abstain, 2)])
+        );
+    }
+
+    /// Delegation before registration: the account delegated to D in the
+    /// transaction that registered D, which the ledger's PV9 set of D does not
+    /// hold, so D's deregistration leaves it. Listed `Keep`, it is not dropped
+    /// and counts toward D, registered again before the boundary; with no drop
+    /// scheduled the delegation carries into the boundaries after. Its unlisted
+    /// twin falls to the positional rule.
+    #[test]
+    fn a_listed_delegation_before_registration_is_kept() {
+        let domain = ToyDomain::new(None, None);
+        let at = |offset| closing_epoch_slot(&domain, offset);
+
+        let d = DRep::Key([0x31; 28].into());
+
+        let dreps = [replay_drep_certs(
+            d.clone(),
+            &[
+                Cert::Reg(at(10), 0),
+                Cert::UnReg(at(100), 0),
+                Cert::Reg(at(200), 0),
+            ],
+        )];
+
+        let kept = weighted_delegator(0xc1, 16, d.clone(), (at(10), 0));
+        let unlisted = weighted_delegator(0xc2, 32, d.clone(), (at(10), 0));
+
+        let table = pv9_table(&d, (at(100), 0), &[(&kept, Pv9Action::Keep)]);
+
+        let accounts = [kept, unlisted];
+        let domain = seed_delegation_domain(&dreps, &accounts);
+        let [kept, unlisted] = &accounts;
+
+        assert_eq!(snapshot_drep(&domain, table, kept), Some(d.clone()));
+        assert_eq!(snapshot_drep(&domain, table, unlisted), None);
+
+        run_shards_with(&domain, table);
+
+        assert!(!delegation_dropped(&domain, kept));
+        assert!(delegation_dropped(&domain, unlisted));
+        assert_eq!(
+            read_distr(&domain).drep_distr,
+            BTreeMap::from([(d.clone(), 16)])
+        );
+    }
+
+    /// A listed account that delegated again after the certificate was never
+    /// in the set it folded over: the positional rule decides. A `Clear`
+    /// account's new delegation to Y stands; a `Keep` account that moved on to
+    /// another DRep retiring at the same boundary is cleared by that DRep's
+    /// certificate.
+    #[test]
+    fn a_later_delegation_is_left_to_the_positional_rule() {
+        let domain = ToyDomain::new(None, None);
+        let at = |offset| closing_epoch_slot(&domain, offset);
+
+        let x = DRep::Key([0x21; 28].into());
+        let y = DRep::Key([0x22; 28].into());
+        let z = DRep::Key([0x23; 28].into());
+
+        let dreps = [
+            replay_drep_certs(x.clone(), &[Cert::Reg(at(10), 0), Cert::UnReg(at(100), 0)]),
+            replay_drep_certs(y.clone(), &[Cert::Reg(at(10), 0)]),
+            replay_drep_certs(z.clone(), &[Cert::Reg(at(10), 0), Cert::UnReg(at(300), 0)]),
+        ];
+
+        let redelegated = weighted_delegator(0xd1, 1, y.clone(), (at(150), 0));
+        let moved_on = weighted_delegator(0xd2, 2, z.clone(), (at(150), 0));
+
+        let table = pv9_table(
+            &x,
+            (at(100), 0),
+            &[
+                (&redelegated, Pv9Action::Clear),
+                (&moved_on, Pv9Action::Keep),
+            ],
+        );
+
+        let accounts = [redelegated, moved_on];
+        let domain = seed_delegation_domain(&dreps, &accounts);
+        let [redelegated, moved_on] = &accounts;
+
+        run_shards_with(&domain, table);
+
+        assert!(!delegation_dropped(&domain, redelegated));
+        assert!(delegation_dropped(&domain, moved_on));
+        assert_eq!(
+            read_distr(&domain).drep_distr,
+            BTreeMap::from([(y.clone(), 1)])
+        );
+    }
+
+    /// An entry acts only at the boundary acting on its own certificate: not
+    /// when its DRep does not retire here, and not when the DRep retires on
+    /// another certificate.
+    #[test]
+    fn an_entry_for_another_boundary_has_no_effect() {
+        let domain = ToyDomain::new(None, None);
+        let at = |offset| closing_epoch_slot(&domain, offset);
+
+        let not_retiring = DRep::Key([0x21; 28].into());
+        let other_cert = DRep::Key([0x24; 28].into());
+        let y = DRep::Key([0x22; 28].into());
+
+        let dreps = [
+            replay_drep_certs(not_retiring.clone(), &[Cert::Reg(at(10), 0)]),
+            replay_drep_certs(
+                other_cert.clone(),
+                &[Cert::Reg(at(10), 0), Cert::UnReg(at(120), 0)],
+            ),
+            replay_drep_certs(y.clone(), &[Cert::Reg(at(10), 0)]),
+        ];
+
+        let account = weighted_delegator(0xe1, 1, y.clone(), (at(50), 0));
+        let accounts = [account];
+        let domain = seed_delegation_domain(&dreps, &accounts);
+        let [account] = &accounts;
+
+        for (drep, position) in [(&not_retiring, (at(100), 0)), (&other_cert, (at(100), 0))] {
+            let table = pv9_table(drep, position, &[(account, Pv9Action::Clear)]);
+
+            assert_eq!(snapshot_drep(&domain, table, account), Some(y.clone()));
+        }
+
+        let table = pv9_table(&other_cert, (at(100), 0), &[(account, Pv9Action::Clear)]);
+        run_shards_with(&domain, table);
+
+        assert!(!delegation_dropped(&domain, account));
+        assert_eq!(
+            read_distr(&domain).drep_distr,
+            BTreeMap::from([(y.clone(), 1)])
+        );
     }
 
     const STAKE_EPOCH: Epoch = 5;
@@ -3683,6 +4000,7 @@ mod ratification_tests {
         let mut shard = crate::estart::WorkContext::load_shard::<ToyDomain>(
             domain.state(),
             domain.genesis(),
+            Default::default(),
             Default::default(),
             0,
             1,

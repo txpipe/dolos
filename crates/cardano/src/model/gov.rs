@@ -215,8 +215,9 @@ pub struct GovState {
     #[n(1)]
     pub committee: Option<Committee>,
 
-    /// Per cold credential, the slot-stamped history of hot-key
-    /// authorizations and resignations.
+    /// The slot-stamped history of hot-key authorizations and resignations,
+    /// for each cold credential of the current committee. The EPOCH rule
+    /// removes an entry when the cold credential leaves the committee.
     #[n(2)]
     #[cbor(default)]
     pub committee_auths: BTreeMap<StakeCredential, AuthHistory>,
@@ -991,11 +992,11 @@ impl dolos_core::EntityDelta for GovDormancyTick {
 }
 
 /// Committee-state GC — the EPOCH rule's step 7 (`updateCommitteeState`,
-/// research §5.5): drop the authorization histories of cold credentials
-/// that are not members of the post-enactment committee (everything, if
-/// the committee dissolved into the no-confidence state). Reads the
-/// committee at apply time, so it must be queued after the boundary's
-/// enactment deltas.
+/// research §5.5). The delta removes the authorization histories of
+/// cold credentials that are not members of the post-enactment committee.
+/// If the committee is in the no-confidence state, the delta removes all
+/// authorization histories. The delta reads the committee in `apply`.
+/// This delta must come after the enactment deltas for the boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitteeGc {
     // undo — the removed entries, re-inserted wholesale
@@ -2085,9 +2086,10 @@ mod prop_tests {
         assert_eq!(distr.pool_total, 7);
     }
 
-    /// The GC keeps the authorization histories of sitting members,
-    /// drops everyone else's, and clears the whole map when the
-    /// committee dissolved — with undo restoring the removed entries.
+    /// The GC keeps the authorization histories of committee members.
+    /// The GC removes the histories of other cold credentials.
+    /// If the committee is in the no-confidence state, the GC removes all
+    /// histories from the map. The `undo` method restores the removed entries.
     #[test]
     fn committee_gc_intersects_with_members() {
         use dolos_core::EntityDelta as _;
@@ -2129,7 +2131,8 @@ mod prop_tests {
         gc.undo(&mut entity);
         assert_eq!(entity.as_ref().unwrap().committee_auths, auths);
 
-        // no-confidence state: everything is dropped
+        // In the no-confidence state, the GC removes all committee authorization
+        // histories.
         let mut entity = Some(GovState {
             committee: None,
             committee_auths: auths.clone(),

@@ -88,6 +88,9 @@ impl<'a> DomainBuilder<'a> {
         .map_err(DomainBuildError::Chain)?;
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
+        let query_limiter = QueryLimiter::default();
+        let cache = storage::open_cache_store(self.config, query_limiter.clone())
+            .map_err(DomainBuildError::Storage)?;
 
         let domain = DomainAdapter {
             storage_config: Arc::new(self.config.storage.clone()),
@@ -98,8 +101,9 @@ impl<'a> DomainBuilder<'a> {
             state: stores.state.clone(),
             archive: stores.archive.clone(),
             mempool: stores.mempool.clone(),
+            cache,
             tip_broadcast,
-            query_limiter: QueryLimiter::default(),
+            query_limiter,
         };
 
         domain.bootstrap().map_err(DomainBuildError::Bootstrap)?;

@@ -1,6 +1,12 @@
+mod dreps;
 mod mapping;
+mod metadata;
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    future::Future,
+    time::Duration,
+};
 
 use self::mapping::description_json;
 
@@ -13,6 +19,7 @@ use blockfrost_openapi::models::{
     committee::Committee,
     committee_members_inner::{CommitteeMembersInner, Status},
     committee_quorum::CommitteeQuorum,
+    committee_votes_inner::{self, CommitteeVotesInner},
     drep_delegators_inner::DrepDelegatorsInner,
     drep_metadata::DrepMetadata,
     drep_updates_inner::{self, DrepUpdatesInner},
@@ -25,13 +32,14 @@ use blockfrost_openapi::models::{
     proposal_votes_inner::{self, ProposalVotesInner},
     proposal_withdrawals_inner::ProposalWithdrawalsInner,
     proposals_inner::{GovernanceType, ProposalsInner},
-    DrepsInnerMetadataError,
+    DrepsInner, DrepsInnerMetadata, DrepsInnerMetadataError,
 };
 use dolos_cardano::{
     indexes::CardanoArchiveIndexExt as _,
     model::{
         gov::{CommitteeAuthorization, GovState},
-        AccountState, DRepKey, DRepState, ProposalAction, ProposalKey, ProposalState,
+        AccountState, CertPosition, DRepKey, DRepSightingState, DRepState, ProposalAction,
+        ProposalKey, ProposalState,
     },
     pallas_extras, ChainSummary, PParamsSet,
 };
@@ -39,204 +47,429 @@ use dolos_core::{
     ArchiveError, ArchiveStore as _, BlockBody, BlockSlot, ChainPoint, Domain, EntityKey,
     KeyCodec as _, StateStore as _, TxOrder,
 };
+use dreps::{drep_is_expired, drep_is_retired, drep_list_item, parse_drep_id, DrepModelBuilder};
+use futures::{stream, FutureExt as _, StreamExt as _};
+use itertools::Itertools;
+use metadata::{cached_drep_metadata, fetch_drep_metadata, unfetched, OnOverload};
+
+pub use metadata::register as register_caches;
+pub(crate) use metadata::remove_legacy_dir;
 use pallas::{
     crypto::hash::Hash,
     ledger::{
         addresses::Network,
         primitives::{
-            conway::{DRep, GovAction, GovActionId, Vote, Voter},
+            conway::{Anchor, DRep, GovAction, GovActionId, Vote, Voter},
             Coin, Epoch, StakeCredential,
         },
         traverse::{MultiEraBlock, MultiEraTx},
     },
 };
+use serde::Deserialize;
 
 use crate::{
     error::Error,
+    log_and_500,
     mapping::{
-        anchor_offchain_metadata, bech32, bech32_committee_cold, bech32_committee_hot, bech32_drep,
+        anchor_offchain_metadata, bech32_committee_cold, bech32_committee_hot, bech32_drep,
         bech32_gov_action, bech32_pool, cost_models::map_cost_models_raw, i32_or_500,
-        parse_gov_action_id, protocol_params::protocol_params_model, rational_to_f64_unrounded,
-        stake_cred_to_address, AnchorMetadata, IntoModel, Unrounded,
+        parse_committee_id, parse_gov_action_id, protocol_params::protocol_params_model,
+        rational_to_f64_unrounded, stake_cred_to_address, AnchorMetadata, CommitteeCredentialRole,
+        IntoModel, Unrounded,
     },
     pagination::{Order, Pagination, PaginationParameters},
     scan::{EntityScan, ENTITY_CHUNK},
     Facade,
 };
 
-fn parse_drep_id(drep_id: &str) -> Result<(String, Vec<u8>, bool, bool), StatusCode> {
-    match drep_id {
-        "drep_always_abstain" => Ok((drep_id.to_string(), vec![0], false, true)),
-        "drep_always_no_confidence" => Ok((drep_id.to_string(), vec![1], false, true)),
-        drep_id => {
-            // Blockfrost decodes a DRep id as bech32 and does no other check.
-            // As a result, a hex id is a 400, not a lookup. This rule keeps
-            // the same behavior as Blockfrost.
-            let (hrp, payload) = bech32::decode(drep_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+/// How many anchors one page loads at a time. A page asks for up to 100 rows
+/// and every miss costs a round trip capped at the fetch timeout, so the bound
+/// keeps a slow page from queueing all of them at once while a cached row
+/// still costs nothing. Outbound requests have their own process-wide bound
+/// (`metadata::MAX_CONCURRENT_FETCHES`), shared by every page.
+const MAX_CONCURRENT_METADATA_FETCHES: usize = 8;
 
-            match (hrp.as_str(), payload.len()) {
-                ("drep", 29) => {
-                    let header_byte = *payload.first().ok_or(StatusCode::BAD_REQUEST)?;
+/// How long a page waits for the anchors it misses. A cold page of 100 rows
+/// behind dead hosts would otherwise wait out one fetch timeout per wave of
+/// [`MAX_CONCURRENT_METADATA_FETCHES`]. A load the page started before the
+/// deadline keeps going in the background and fills the caches for the next
+/// request; one it had not started yet is dropped. Either way its row goes out
+/// unfetched, the way Blockfrost serves a DRep whose metadata db-sync has not
+/// fetched yet.
+const PAGE_METADATA_DEADLINE: Duration = Duration::from_secs(3);
 
-                    // A CIP-129 DRep header is the key prefix or the script prefix.
-                    if header_byte != pallas_extras::DREP_KEY_PREFIX
-                        && header_byte != pallas_extras::DREP_SCRIPT_PREFIX
-                    {
-                        return Err(StatusCode::BAD_REQUEST);
-                    }
+/// Runs `loads`, at most `concurrency` at a time, and returns, in order, what
+/// each one settled to within `deadline`: `None` for a load still running or
+/// never started. Every load is dropped at the deadline, so one that should
+/// outlive it has to detach its own work, the way `fetch_drep_metadata` does.
+async fn settle_within<F: Future>(
+    loads: Vec<F>,
+    concurrency: usize,
+    deadline: Duration,
+) -> Vec<Option<F::Output>> {
+    let mut settled: Vec<_> = loads.iter().map(|_| None).collect();
 
-                    Ok((drep_id.to_string(), payload, false, false))
-                }
-                ("drep", 28) => Ok((
-                    drep_id.to_string(),
-                    [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
-                    true,
-                    false,
-                )),
-                ("drep_vkh", 28) => Ok((
-                    bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
-                        .map_err(|_| StatusCode::BAD_REQUEST)?,
-                    [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
-                    true,
-                    false,
-                )),
-                ("drep_script", 28) => Ok((
-                    bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
-                        .map_err(|_| StatusCode::BAD_REQUEST)?,
-                    [vec![pallas_extras::DREP_SCRIPT_PREFIX], payload].concat(),
-                    true,
-                    false,
-                )),
-                _ => Err(StatusCode::BAD_REQUEST),
-            }
+    let mut running = stream::iter(loads.into_iter().enumerate())
+        .map(|(index, load)| load.map(move |value| (index, value)))
+        .buffer_unordered(concurrency);
+
+    let _ = tokio::time::timeout(deadline, async {
+        while let Some((index, value)) = running.next().await {
+            settled[index] = Some(value);
+        }
+    })
+    .await;
+
+    settled
+}
+
+/// The metadata of each anchor of a page, in page order. What `cached` holds
+/// is answered up front, outside the fetch slots: only the misses go to
+/// `load`, through [`settle_within`], so slow hosts early in the page never
+/// keep a later row that is already at hand from going out.
+async fn page_metadata<'a, C, L>(
+    anchors: &'a [Anchor],
+    cached: impl Fn(&'a Anchor) -> C,
+    load: impl Fn(&'a Anchor) -> L,
+    deadline: Duration,
+) -> Vec<DrepsInnerMetadata>
+where
+    C: Future<Output = Option<DrepsInnerMetadata>>,
+    L: Future<Output = DrepsInnerMetadata>,
+{
+    let cached = futures::future::join_all(anchors.iter().map(cached)).await;
+
+    let loads = anchors
+        .iter()
+        .zip(&cached)
+        .filter(|(_, cached)| cached.is_none())
+        .map(|(anchor, _)| load(anchor))
+        .collect();
+
+    let mut settled = settle_within(loads, MAX_CONCURRENT_METADATA_FETCHES, deadline)
+        .await
+        .into_iter();
+
+    anchors
+        .iter()
+        .zip(cached)
+        .map(|(anchor, cached)| {
+            // `settled` holds the misses alone, in page order
+            cached
+                .or_else(|| settled.next().flatten())
+                .unwrap_or_else(|| unfetched(anchor))
+        })
+        .collect()
+}
+
+fn chain_context<D: Domain>(
+    domain: &Facade<D>,
+) -> Result<(ChainSummary, BlockSlot, PParamsSet), StatusCode> {
+    let chain = domain.get_chain_summary()?;
+    let tip = domain.get_tip_slot()?;
+    let pparams = domain.get_current_effective_pparams()?;
+
+    Ok((chain, tip, pparams))
+}
+
+/// Query parameters of `/governance/dreps`: the shared pagination set plus
+/// the endpoint's own `order_by`, `retired` and `expired`. Blockfrost does
+/// not define `from`/`to` here.
+#[derive(Debug, Deserialize)]
+pub struct DrepsListParameters {
+    pub count: Option<String>,
+    pub page: Option<String>,
+    pub order: Option<String>,
+    pub order_by: Option<String>,
+    pub retired: Option<String>,
+    pub expired: Option<String>,
+}
+
+impl DrepsListParameters {
+    fn pagination(&self) -> PaginationParameters {
+        PaginationParameters {
+            count: self.count.clone(),
+            page: self.page.clone(),
+            order: self.order.clone(),
+            from: None,
+            to: None,
+        }
+    }
+
+    /// `order_by` accepts only `amount`, mirroring the openapi enum.
+    fn order_by_amount(&self) -> Result<bool, Error> {
+        match self.order_by.as_deref() {
+            None => Ok(false),
+            Some("amount") => Ok(true),
+            Some(_) => Err(StatusCode::BAD_REQUEST.into()),
         }
     }
 }
 
-/// The `dreps` key of the DRep whose id bytes `parse_drep_id` returned.
-fn drep_key(drep_bytes: &[u8]) -> Result<DRepKey, StatusCode> {
-    DRepKey::decode_key(drep_bytes).map_err(|_| StatusCode::BAD_REQUEST)
+/// Blockfrost validates these as booleans and rejects anything else.
+fn parse_bool_filter(value: Option<&str>) -> Result<Option<bool>, Error> {
+    match value {
+        None => Ok(None),
+        Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        Some(_) => Err(StatusCode::BAD_REQUEST.into()),
+    }
 }
 
-pub struct DrepModelBuilder<'a> {
-    drep_id: String,
-    drep_id_encoded: Vec<u8>,
-    is_legacy: bool,
+/// One listed DRep: its sighting, and its ledger row where the ledger has
+/// one. A DRep only a vote delegation named has none.
+struct DrepRow {
+    key: DRepKey,
+    sighting: DRepSightingState,
     state: Option<DRepState>,
-    pparams: PParamsSet,
-    chain: &'a ChainSummary,
-    tip: BlockSlot,
 }
 
-impl<'a> DrepModelBuilder<'a> {
-    fn is_special_case(&self) -> bool {
-        ["drep_always_abstain", "drep_always_no_confidence"].contains(&self.drep_id.as_str())
+impl DrepRow {
+    /// The listing's default order, db-sync's `drep_hash` order: first
+    /// sighting, down to the certificate, the key breaking ties no chain
+    /// produces.
+    fn appearance(&self) -> (CertPosition, &DRepKey) {
+        (self.sighting.first_seen, &self.key)
     }
 
-    fn first_active_epoch(&self) -> Option<Epoch> {
-        if self.is_special_case() {
-            return None;
+    fn amount(&self) -> u64 {
+        self.state
+            .as_ref()
+            .map(|state| state.voting_power)
+            .unwrap_or_default()
+    }
+}
+
+/// One page of `/governance/dreps`, with the chain context its rows render
+/// against.
+struct DrepsPage {
+    rows: Vec<DrepRow>,
+    chain: ChainSummary,
+    tip: BlockSlot,
+    pparams: PParamsSet,
+}
+
+/// Every DRep a certificate has named, in key order.
+async fn load_drep_sightings<D>(
+    domain: &Facade<D>,
+    chunk: usize,
+) -> Result<Vec<(DRepKey, DRepSightingState)>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    EntityScan::<DRepSightingState>::all(chunk)
+        .filter_map(domain, |key, sighting| Some((key, sighting)))
+        .await
+}
+
+/// The ledger row of every sighted DRep, read by one scan of `dreps` rather
+/// than a point read per DRep: the filters and `order_by=amount` need every
+/// row before they can cut a page.
+async fn join_drep_states<D>(
+    domain: &Facade<D>,
+    sightings: Vec<(DRepKey, DRepSightingState)>,
+    chunk: usize,
+) -> Result<Vec<DrepRow>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let mut states: HashMap<DRepKey, DRepState> = EntityScan::<DRepState>::all(chunk)
+        .filter_map(domain, |key, state| Some((key, state)))
+        .await?
+        .into_iter()
+        .collect();
+
+    let rows = sightings
+        .into_iter()
+        .map(|(key, sighting)| {
+            let state = states.remove(&key);
+
+            DrepRow {
+                key,
+                sighting,
+                state,
+            }
+        })
+        .collect();
+
+    Ok(rows)
+}
+
+/// The ledger rows of one page's DReps, by point reads in one blocking task.
+async fn read_drep_states<D>(
+    domain: &Facade<D>,
+    sightings: Vec<(DRepKey, DRepSightingState)>,
+) -> Result<Vec<DrepRow>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    domain
+        .blocking(move |facade| {
+            sightings
+                .into_iter()
+                .map(|(key, sighting)| {
+                    let state = facade.read_cardano_entity::<DRepState>(&key)?;
+
+                    Ok(DrepRow {
+                        key,
+                        sighting,
+                        state,
+                    })
+                })
+                .collect()
+        })
+        .await
+}
+
+/// The listing sorts every sighted DRep before it cuts the page. Without a
+/// filter or `order_by=amount`, only the page's ledger rows are read.
+///
+/// Blockfrost applies the filters before pagination, so every page holds up
+/// to `count` matching rows.
+async fn drep_page<D>(
+    domain: &Facade<D>,
+    retired: Option<bool>,
+    expired: Option<bool>,
+    order_by_amount: bool,
+    pagination: &Pagination,
+) -> Result<DrepsPage, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let (chain, tip, pparams) = chain_context(domain)?;
+
+    let mut sightings = load_drep_sightings(domain, ENTITY_CHUNK).await?;
+
+    if retired.is_none() && expired.is_none() && !order_by_amount {
+        sightings
+            .sort_by(|(a_key, a), (b_key, b)| (a.first_seen, a_key).cmp(&(b.first_seen, b_key)));
+
+        if matches!(pagination.order, Order::Desc) {
+            sightings.reverse();
         }
 
-        if self
+        let page = sightings
+            .into_iter()
+            .skip(pagination.from())
+            .take(pagination.count)
+            .collect();
+
+        let rows = read_drep_states(domain, page).await?;
+
+        return Ok(DrepsPage {
+            rows,
+            chain,
+            tip,
+            pparams,
+        });
+    }
+
+    let mut rows = join_drep_states(domain, sightings, ENTITY_CHUNK).await?;
+
+    // a DRep with no ledger row is listed, neither retired nor expired
+    rows.retain(|row| {
+        let is_retired = row.state.as_ref().is_some_and(drep_is_retired);
+
+        let is_expired = row
             .state
             .as_ref()
-            .map(|x| x.is_unregistered())
-            .unwrap_or(true)
-        {
-            return None;
-        }
+            .is_some_and(|state| drep_is_expired(state, &chain, tip, &pparams));
 
-        self.state
-            .as_ref()?
-            .registered_at
-            .map(|x| self.chain.slot_epoch(x.0).0)
-    }
+        retired.is_none_or(|wanted| is_retired == wanted)
+            && expired.is_none_or(|wanted| is_expired == wanted)
+    });
 
-    fn last_active_epoch(&self) -> Option<Epoch> {
-        if self.is_special_case() {
-            return None;
-        }
+    if order_by_amount {
+        // `order` flips only the amount; the appearance order stays the
+        // ascending tie-breaker, like Blockfrost's `ORDER BY amount, id ASC`.
+        rows.sort_by(|a, b| {
+            let amounts = match pagination.order {
+                Order::Desc => b.amount().cmp(&a.amount()),
+                Order::Asc => a.amount().cmp(&b.amount()),
+            };
 
-        self.state
-            .as_ref()?
-            .last_active_slot
-            .map(|x| self.chain.slot_epoch(x).0)
-    }
+            amounts.then_with(|| a.appearance().cmp(&b.appearance()))
+        });
+    } else {
+        rows.sort_by(|a, b| a.appearance().cmp(&b.appearance()));
 
-    fn is_drep_expired(&self) -> bool {
-        if self.is_special_case() {
-            return false;
-        }
-
-        if self.is_drep_retired() {
-            return false;
-        }
-
-        let last_active_epoch = self.last_active_epoch();
-
-        let inactivity_period = self.pparams.drep_inactivity_period().unwrap_or_default();
-
-        let expiring_epoch = last_active_epoch.map(|x| x + inactivity_period);
-
-        let (current_epoch, _) = self.chain.slot_epoch(self.tip);
-
-        expiring_epoch
-            .map(|expiration| expiration <= current_epoch)
-            .unwrap_or(false)
-    }
-
-    fn is_drep_retired(&self) -> bool {
-        if self.is_special_case() {
-            return false;
-        }
-
-        let Some(state) = self.state.as_ref() else {
-            return false;
-        };
-
-        match (state.registered_at, state.unregistered_at) {
-            (Some(registered), Some(unregistered)) => unregistered > registered,
-            (Some(_), None) => false,
-            _ => false,
+        if matches!(pagination.order, Order::Desc) {
+            rows.reverse();
         }
     }
 
-    fn is_drep_active(&self) -> bool {
-        !self.is_drep_retired()
-    }
+    let rows = rows
+        .into_iter()
+        .skip(pagination.from())
+        .take(pagination.count)
+        .collect();
+
+    Ok(DrepsPage {
+        rows,
+        chain,
+        tip,
+        pparams,
+    })
 }
 
-impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<'a> {
-    type SortKey = ();
+pub async fn all_dreps<D>(
+    Query(params): Query<DrepsListParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<DrepsInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let order_by_amount = params.order_by_amount()?;
+    let retired = parse_bool_filter(params.retired.as_deref())?;
+    let expired = parse_bool_filter(params.expired.as_deref())?;
 
-    fn into_model(self) -> Result<blockfrost_openapi::models::drep::Drep, StatusCode> {
-        let expired = self.is_drep_expired();
+    let pagination = Pagination::try_from(params.pagination())?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
-        let out = blockfrost_openapi::models::drep::Drep {
-            drep_id: self.drep_id.clone(),
-            hex: if self.is_special_case() {
-                "".to_string()
-            } else if self.is_legacy {
-                hex::encode(&self.drep_id_encoded[1..])
-            } else {
-                hex::encode(&self.drep_id_encoded)
-            },
-            amount: self
-                .state
-                .as_ref()
-                .map(|x| x.voting_power.to_string())
-                .unwrap_or_default(),
-            active: self.is_drep_active(),
-            active_epoch: self.first_active_epoch().map(|x| x as i32),
-            has_script: pallas_extras::drep_id_is_script(&self.drep_id_encoded),
-            retired: self.is_drep_retired(),
-            expired,
-            last_active_epoch: self.last_active_epoch().map(|x| x as i32),
-        };
+    let DrepsPage {
+        rows,
+        chain,
+        tip,
+        pparams,
+    } = drep_page(&domain, retired, expired, order_by_amount, &pagination).await?;
 
-        Ok(out)
-    }
+    let cache = domain.inner.cache();
+    let gateways = domain.config.ipfs_gateways();
+
+    // the latest anchor a registration or update carried, as db-sync serves
+    // it; the ledger's own anchor is cleared by an update that carries none
+    let anchors: Vec<_> = rows
+        .iter()
+        .flat_map(|row| row.sighting.anchor.clone())
+        .collect();
+
+    // a page shows what it has rather than wait on a backlog of loads
+    let on_overload = OnOverload::Unfetched;
+
+    let metadata = page_metadata(
+        &anchors,
+        |anchor| cached_drep_metadata(cache, anchor),
+        |anchor| fetch_drep_metadata(cache, &gateways, anchor, on_overload),
+        PAGE_METADATA_DEADLINE,
+    )
+    .await;
+
+    let mut metadata = metadata.into_iter();
+
+    let page = rows
+        .into_iter()
+        .map(|row| {
+            let has_anchor = row.sighting.anchor.is_some();
+            let mut model = drep_list_item(row.key.into(), row.state, &pparams, &chain, tip)?;
+
+            // `anchors` keeps the anchored rows in page order
+            model.metadata = has_anchor.then(|| metadata.next()).flatten().map(Box::new);
+
+            Ok(model)
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(page))
 }
 
 pub async fn drep_by_id<D: Domain>(
@@ -246,37 +479,27 @@ pub async fn drep_by_id<D: Domain>(
 where
     Option<DRepState>: From<D::Entity>,
 {
-    let (drep, drep_bytes, is_legacy, is_special_case) =
-        parse_drep_id(&drep).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let parsed = parse_drep_id(&drep)?;
 
-    let drep_state = if is_special_case {
-        None
+    let drep_state = if parsed.is_special {
+        domain.read_cardano_entity::<DRepState>(&drep_key(&parsed.encoded)?)?
     } else {
         Some(
             domain
-                .read_cardano_entity::<DRepState>(&drep_key(&drep_bytes)?)?
+                .read_cardano_entity::<DRepState>(&drep_key(&parsed.encoded)?)?
                 .ok_or(StatusCode::NOT_FOUND)?,
         )
     };
 
-    let chain = domain
-        .get_chain_summary()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let (tip, _) = domain
-        .archive()
-        .get_tip()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let pparams = domain.get_current_effective_pparams()?;
+    let (chain, tip, pparams) = chain_context(&domain)?;
 
     let model = DrepModelBuilder {
-        drep_id: drep,
-        drep_id_encoded: drep_bytes,
-        is_legacy,
+        drep_id: parsed.drep_id,
+        drep_id_encoded: parsed.encoded,
+        is_legacy: parsed.is_legacy,
+        is_special: parsed.is_special,
         state: drep_state,
-        pparams,
+        pparams: &pparams,
         chain: &chain,
         tip,
     };
@@ -306,44 +529,40 @@ pub async fn drep_metadata<D: Domain>(
 where
     Option<DRepState>: From<D::Entity>,
 {
-    let (drep_id, drep_bytes, is_legacy, is_special_case) = parse_drep_id(&drep)?;
+    let parsed = parse_drep_id(&drep)?;
 
     // The special DReps have no registration, so they have no anchor.
-    if is_special_case {
+    if parsed.is_special {
         return Err(StatusCode::NOT_FOUND);
     }
 
     let state = domain
-        .read_cardano_entity::<DRepState>(&drep_key(&drep_bytes)?)?
+        .read_cardano_entity::<DRepState>(&drep_key(&parsed.encoded)?)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
 
-    let hex = if is_legacy {
-        hex::encode(&drep_bytes[1..])
+    let hex = if parsed.is_legacy {
+        hex::encode(&parsed.encoded[1..])
     } else {
-        hex::encode(&drep_bytes)
+        hex::encode(&parsed.encoded)
     };
-
-    let hash = hex::encode(anchor.content_hash);
 
     let gateways = domain.config.ipfs_gateways();
-    let (metadata, error) =
-        anchor_offchain_metadata(&anchor.url, anchor.content_hash.as_ref(), &gateways).await;
 
-    let (json_metadata, bytes) = match metadata {
-        Some(AnchorMetadata { json, bytes }) => (Some(json), Some(bytes)),
-        None => (None, None),
-    };
+    // the cache the list fills, so one anchor reads alike on both endpoints
+    // and a verified body is fetched once
+    let metadata =
+        fetch_drep_metadata(domain.inner.cache(), &gateways, anchor, OnOverload::Inline).await;
 
     Ok(Json(DrepMetadata {
-        drep_id,
+        drep_id: parsed.drep_id,
         hex,
-        url: anchor.url.clone(),
-        hash,
-        json_metadata,
-        bytes,
-        error: error.map(Box::new),
+        url: metadata.url,
+        hash: metadata.hash,
+        json_metadata: metadata.json_metadata,
+        bytes: metadata.bytes,
+        error: metadata.error,
     }))
 }
 
@@ -436,17 +655,17 @@ where
     Option<AccountState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
 {
-    let (_, drep_bytes, _, is_special_case) = parse_drep_id(&drep_id)?;
+    let parsed = parse_drep_id(&drep_id)?;
     let pagination = Pagination::try_from(params)?;
 
-    let drep_key = drep_key(&drep_bytes)?;
+    let drep_key = drep_key(&parsed.encoded)?;
     let drep = drep_key.0.clone();
 
-    let registered_at = if is_special_case {
+    let registered_at = if parsed.is_special {
         None
     } else {
         match domain.read_cardano_entity::<DRepState>(&drep_key)? {
-            Some(state) if !state.is_unregistered() => state.registered_at,
+            Some(state) if !drep_is_retired(&state) => state.registered_at,
             // Blockfrost returns an empty list for an unknown or retired DRep.
             _ => return Ok(Json(vec![])),
         }
@@ -619,6 +838,451 @@ where
         quorum: Box::new(quorum),
         members,
     }))
+}
+
+/// One vote of a committee member, as the archived block records it.
+struct CommitteeCast {
+    /// The hash of the transaction that contains the vote.
+    tx: Hash<32>,
+
+    /// The hot credential that cast the vote.
+    voter: StakeCredential,
+
+    proposal_tx: Hash<32>,
+    proposal_idx: u32,
+    governance_type: committee_votes_inner::GovernanceType,
+    vote: Vote,
+    anchor: Option<Anchor>,
+    block_height: u64,
+    slot: BlockSlot,
+}
+
+fn committee_governance_type(
+    action: &ProposalAction,
+) -> Option<committee_votes_inner::GovernanceType> {
+    use committee_votes_inner::GovernanceType;
+
+    match action {
+        ProposalAction::ParamChange(_) => Some(GovernanceType::ParameterChange),
+        ProposalAction::HardFork(_) => Some(GovernanceType::HardForkInitiation),
+        ProposalAction::TreasuryWithdrawal(_) => Some(GovernanceType::TreasuryWithdrawals),
+        ProposalAction::NoConfidence => Some(GovernanceType::NoConfidence),
+        ProposalAction::UpdateCommittee { .. } => Some(GovernanceType::NewCommittee),
+        ProposalAction::NewConstitution { .. } => Some(GovernanceType::NewConstitution),
+        ProposalAction::Info => Some(GovernanceType::InfoAction),
+        ProposalAction::Other => None,
+    }
+}
+
+fn committee_vote_model(vote: &Vote) -> committee_votes_inner::Vote {
+    match vote {
+        Vote::Yes => committee_votes_inner::Vote::Yes,
+        Vote::No => committee_votes_inner::Vote::No,
+        Vote::Abstain => committee_votes_inner::Vote::Abstain,
+    }
+}
+
+fn committee_voter(cred: &StakeCredential) -> Voter {
+    match cred {
+        StakeCredential::AddrKeyhash(hash) => Voter::ConstitutionalCommitteeKey(*hash),
+        StakeCredential::ScriptHash(hash) => Voter::ConstitutionalCommitteeScript(*hash),
+    }
+}
+
+/// The governance action type of each proposal that a request has looked
+/// up. A request reads each `ProposalState` row once, however many votes it
+/// lists on the same action.
+///
+/// A proposal row is never deleted, so a vote on an action always finds its
+/// row. The legacy `Other` variant has no Blockfrost type, so a vote on such a
+/// row has no type (`None`).
+struct ProposalTypes<'a, D: Domain> {
+    domain: &'a D,
+    types: HashMap<(Hash<32>, u32), Option<committee_votes_inner::GovernanceType>>,
+}
+
+impl<'a, D: Domain> ProposalTypes<'a, D> {
+    fn new(domain: &'a D) -> Self {
+        Self {
+            domain,
+            types: HashMap::new(),
+        }
+    }
+
+    fn get(
+        &mut self,
+        tx: Hash<32>,
+        idx: u32,
+    ) -> Result<Option<committee_votes_inner::GovernanceType>, StatusCode> {
+        if let Some(governance_type) = self.types.get(&(tx, idx)) {
+            return Ok(*governance_type);
+        }
+
+        let key = ProposalKey::new(tx, idx);
+
+        let state = self
+            .domain
+            .state()
+            .read_entity_typed::<ProposalState>(&key)
+            .map_err(log_and_500("failed to read proposal state"))?;
+
+        let governance_type = match state {
+            Some(state) => committee_governance_type(&state.action),
+            None => {
+                // The ledger rejects a vote on an unknown action, so a block
+                // that holds the vote also holds, or follows, the proposal.
+                // If the row is missing, the state and the archive do not
+                // agree.
+                tracing::warn!(
+                    proposal_tx = %tx,
+                    proposal_idx = idx,
+                    "the state has no proposal row for a committee vote, so the vote leaves the listing"
+                );
+                None
+            }
+        };
+
+        self.types.insert((tx, idx), governance_type);
+
+        Ok(governance_type)
+    }
+}
+
+/// This function returns the committee votes of `voters` in one block, in
+/// Blockfrost order: the position of the transaction first, then the ballot
+/// map of the transaction. The map sorts the ballots by voter and the votes
+/// in a ballot by governance action ID. A committee script sorts before a
+/// committee key.
+///
+/// The ledger ignores the votes of a phase-2-invalid transaction, so the
+/// function skips those transactions. A vote without a governance action type
+/// also leaves the listing. Both filters run before pagination, so the
+/// offsets are the same on every page.
+fn committee_casts_in_block<D: Domain>(
+    block: &MultiEraBlock,
+    voters: Option<&BTreeSet<Voter>>,
+    types: &mut ProposalTypes<'_, D>,
+) -> Result<Vec<CommitteeCast>, StatusCode> {
+    let mut out = Vec::new();
+
+    for tx in block.txs() {
+        if !tx.is_valid() {
+            continue;
+        }
+
+        let MultiEraTx::Conway(conway) = &tx else {
+            continue;
+        };
+
+        let Some(procedures) = conway.transaction_body.voting_procedures.as_ref() else {
+            continue;
+        };
+
+        for (voter, ballot) in procedures {
+            if voters.is_some_and(|voters| !voters.contains(voter)) {
+                continue;
+            }
+
+            let cred = match voter {
+                Voter::ConstitutionalCommitteeKey(hash) => StakeCredential::AddrKeyhash(*hash),
+                Voter::ConstitutionalCommitteeScript(hash) => StakeCredential::ScriptHash(*hash),
+                _ => continue,
+            };
+
+            for (action, procedure) in ballot {
+                let Some(governance_type) =
+                    types.get(action.transaction_id, action.action_index)?
+                else {
+                    continue;
+                };
+
+                out.push(CommitteeCast {
+                    tx: tx.hash(),
+                    voter: cred.clone(),
+                    proposal_tx: action.transaction_id,
+                    proposal_idx: action.action_index,
+                    governance_type,
+                    vote: procedure.vote.clone(),
+                    anchor: procedure.anchor.clone(),
+                    block_height: block.number(),
+                    slot: block.slot(),
+                });
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// This function merges sorted slot lanes into one sorted lane without
+/// repeated slots. Every lane is ascending, or every lane is descending for
+/// `descending`. A block that holds the votes of two voters is in two lanes,
+/// and the merged lane lists it once.
+///
+/// An error stops the merge at its position. The caller reads the lane until
+/// the page is full, so an error after the page has no effect.
+fn merge_slots(
+    lanes: Vec<Box<dyn Iterator<Item = Result<BlockSlot, ArchiveError>>>>,
+    descending: bool,
+) -> impl Iterator<Item = Result<BlockSlot, ArchiveError>> {
+    let mut lanes = lanes.into_iter().map(|lane| lane.peekable()).collect_vec();
+    let mut previous = None;
+
+    std::iter::from_fn(move || loop {
+        let mut selected = None;
+        let mut selected_slot = None;
+        for (index, lane) in lanes.iter_mut().enumerate() {
+            match lane.peek() {
+                Some(Err(_)) => return lane.next(),
+                Some(Ok(slot))
+                    if selected_slot.is_none_or(|best| {
+                        if descending {
+                            *slot > best
+                        } else {
+                            *slot < best
+                        }
+                    }) =>
+                {
+                    selected = Some(index);
+                    selected_slot = Some(*slot);
+                }
+                _ => {}
+            }
+        }
+        let slot = lanes[selected?].next()?;
+        if selected_slot != previous {
+            previous = selected_slot;
+            return Some(slot);
+        }
+    })
+}
+
+enum CommitteeVoteQuery {
+    All,
+    Hot(StakeCredential),
+    Cold(StakeCredential),
+}
+
+fn committee_hot_credentials<D: Domain>(
+    domain: &D,
+    cold: &StakeCredential,
+    tip: BlockSlot,
+    budget: &mut usize,
+) -> Result<BTreeSet<StakeCredential>, Error> {
+    let archive = domain.archive();
+    let slots = archive
+        .slots_by_committee_certs(cold, 0, tip)
+        .map_err(log_and_500(
+            "The read of the index for committee certificates failed.",
+        ))?;
+
+    let mut voters = BTreeSet::new();
+    collect_block_rows::<()>(
+        slots,
+        |slot| archive.get_block_by_slot(&slot),
+        false,
+        usize::MAX,
+        budget,
+        |block| {
+            for tx in block.txs().into_iter().filter(|tx| tx.is_valid()) {
+                for cert in tx.certs() {
+                    if let Some(auth) = pallas_extras::cert_as_committee_auth(&cert) {
+                        if auth.cold == *cold {
+                            voters.insert(auth.hot);
+                        }
+                    }
+                }
+            }
+            Ok(Vec::new())
+        },
+    )?;
+    Ok(voters)
+}
+
+/// This function reads committee votes from retained blocks in chain order.
+/// For `Order::Desc`, it reads the votes in the opposite order.
+/// For a cold credential, it reads retained certificates to find distinct hot
+/// credentials. It merges their voter indexes into one sequence of slots.
+/// The query for all committee votes uses one index.
+///
+/// The certificate scan and the vote scan share one limit for reads of block
+/// bodies. Both scans use the same state tip.
+/// The function omits votes from missing block bodies under
+/// `sync.max_history`.
+fn committee_vote_rows<D: Domain>(
+    domain: &D,
+    query: &CommitteeVoteQuery,
+    tip: BlockSlot,
+    pagination: &Pagination,
+    mut budget: usize,
+) -> Result<Vec<CommitteeCast>, Error> {
+    if pagination.count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let archive = domain.archive();
+    let descending = matches!(pagination.order, Order::Desc);
+    let voters = match query {
+        CommitteeVoteQuery::All => None,
+        CommitteeVoteQuery::Hot(hot) => Some(BTreeSet::from([committee_voter(hot)])),
+        CommitteeVoteQuery::Cold(cold) => Some(
+            committee_hot_credentials(domain, cold, tip, &mut budget)?
+                .iter()
+                .map(committee_voter)
+                .collect(),
+        ),
+    };
+
+    let mut lanes: Vec<Box<dyn Iterator<Item = Result<BlockSlot, ArchiveError>>>> = Vec::new();
+
+    if let Some(voters) = &voters {
+        for voter in voters {
+            let slots = archive
+                .slots_by_voter_votes(&pallas_extras::voter_id_bytes(voter), 0, tip)
+                .map_err(log_and_500(
+                    "The read of the index for votes by voter failed.",
+                ))?;
+
+            if descending {
+                lanes.push(Box::new(slots.rev()));
+            } else {
+                lanes.push(Box::new(slots));
+            }
+        }
+    } else {
+        let slots = archive
+            .slots_by_committee_votes(0, tip)
+            .map_err(log_and_500(
+                "The read of the index for committee votes failed.",
+            ))?;
+        if descending {
+            lanes.push(Box::new(slots.rev()));
+        } else {
+            lanes.push(Box::new(slots));
+        }
+    }
+
+    let mut types = ProposalTypes::new(domain);
+    let rows = collect_block_rows(
+        merge_slots(lanes, descending),
+        |slot| archive.get_block_by_slot(&slot),
+        descending,
+        pagination.to(),
+        &mut budget,
+        |block| committee_casts_in_block(block, voters.as_ref(), &mut types),
+    )?;
+
+    Ok(rows
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect())
+}
+
+/// This function lists committee votes on the requested page.
+///
+/// `max_scan_items` limits both the page depth and the number of blocks that
+/// one request reads.
+async fn query_committee_votes<D>(
+    domain: Facade<D>,
+    query: CommitteeVoteQuery,
+    pagination: Pagination,
+) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    if pagination.count == 0 {
+        return Ok(Json(Vec::new()));
+    }
+
+    let tip = domain.get_tip_slot()?;
+    let chain = domain.get_chain_summary()?;
+    let budget = domain.config.max_scan_items() as usize;
+
+    let rows = domain
+        .query()
+        .run_blocking(move |domain| {
+            Ok(committee_vote_rows(
+                &domain,
+                &query,
+                tip,
+                &pagination,
+                budget,
+            ))
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    let page = rows
+        .into_iter()
+        .map(|cast| {
+            let (metadata_url, metadata_hash) = match cast.anchor {
+                Some(anchor) => (Some(anchor.url), Some(hex::encode(anchor.content_hash))),
+                None => (None, None),
+            };
+
+            Ok(CommitteeVotesInner {
+                tx_hash: hex::encode(cast.tx),
+                voter_hot_id: bech32_committee_hot(&cast.voter)?,
+                proposal_id: bech32_gov_action(&cast.proposal_tx, cast.proposal_idx)?,
+                proposal_tx_hash: hex::encode(cast.proposal_tx),
+                proposal_index: i32_or_500(cast.proposal_idx)?,
+                governance_type: cast.governance_type,
+                vote: committee_vote_model(&cast.vote),
+                metadata_url,
+                metadata_hash,
+                block_height: i32_or_500(cast.block_height)?,
+                block_time: i32_or_500(chain.slot_time(cast.slot))?,
+            })
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(page))
+}
+
+/// `GET /governance/committee/votes` lists all committee votes from retained
+/// blocks. It reads the index for committee votes and does not use
+/// authorization state.
+pub async fn committee_votes<D>(
+    Query(mut params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    params.from = None;
+    params.to = None;
+
+    let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
+
+    query_committee_votes(domain, CommitteeVoteQuery::All, pagination).await
+}
+
+/// `GET /governance/committee/{cc_id}/votes` accepts a hot or cold CIP-129
+/// credential. A cold credential selects every hot credential that its
+/// retained authorization certificates name.
+pub async fn committee_votes_by_id<D>(
+    Path(cc_id): Path<String>,
+    Query(mut params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<CommitteeVotesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    params.from = None;
+    params.to = None;
+
+    let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
+    let (role, credential) = parse_committee_id(&cc_id).map_err(|_| Error::InvalidCommitteeId)?;
+
+    let query = match role {
+        CommitteeCredentialRole::Hot => CommitteeVoteQuery::Hot(credential),
+        CommitteeCredentialRole::Cold => CommitteeVoteQuery::Cold(credential),
+    };
+
+    query_committee_votes(domain, query, pagination).await
 }
 
 struct ProposalRow {
@@ -870,6 +1534,11 @@ pub(crate) struct CastVote {
     pub vote: Vote,
 }
 
+/// The `dreps` key of the DRep whose id bytes `parse_drep_id` returned.
+fn drep_key(drep_bytes: &[u8]) -> Result<DRepKey, StatusCode> {
+    DRepKey::decode_key(drep_bytes).map_err(|_| StatusCode::BAD_REQUEST)
+}
+
 /// This function converts a DRep ID to the voter key of its ballots.
 ///
 /// `parse_drep_id` builds the bytes of a `DRepKey`, which decodes them. The
@@ -956,7 +1625,7 @@ pub(crate) fn voter_casts<D: Domain>(
     voter: &Voter,
     tip: BlockSlot,
     pagination: &Pagination,
-    budget: usize,
+    mut budget: usize,
 ) -> Result<Vec<CastVote>, Error> {
     let archive = domain.archive();
 
@@ -972,11 +1641,14 @@ pub(crate) fn voter_casts<D: Domain>(
         Box::new(slots)
     };
 
-    let blocks = slots.map(|slot| archive.get_block_by_slot(&slot?));
-
-    let rows = collect_block_rows(blocks, descending, pagination.to(), budget, |block| {
-        Ok(voter_casts_in_block(block, voter))
-    })?;
+    let rows = collect_block_rows(
+        slots,
+        |slot| archive.get_block_by_slot(&slot),
+        descending,
+        pagination.to(),
+        &mut budget,
+        |block| Ok(voter_casts_in_block(block, voter)),
+    )?;
 
     Ok(rows
         .into_iter()
@@ -1027,15 +1699,15 @@ where
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
-    let (_, drep_bytes, _, is_special_case) = parse_drep_id(&drep_id)?;
+    let parsed = parse_drep_id(&drep_id)?;
 
     // The two special DReps are delegation targets, not voters. They cannot
     // cast votes.
-    if is_special_case {
+    if parsed.is_special {
         return Ok(Json(Vec::new()));
     }
 
-    let voter = drep_voter(&drep_bytes)?;
+    let voter = drep_voter(&parsed.encoded)?;
     let tip = domain.get_tip_slot()?;
     let budget = domain.config.max_scan_items() as usize;
 
@@ -1106,25 +1778,27 @@ fn drep_updates_in_block(
 /// no row. So the function stops with `ScanBudgetExceeded` when it has read
 /// `budget` blocks and still needs another one.
 fn collect_block_rows<T>(
-    mut blocks: impl Iterator<Item = Result<Option<BlockBody>, ArchiveError>>,
+    mut slots: impl Iterator<Item = Result<BlockSlot, ArchiveError>>,
+    mut fetch: impl FnMut(BlockSlot) -> Result<Option<BlockBody>, ArchiveError>,
     descending: bool,
     needed: usize,
-    budget: usize,
+    budget: &mut usize,
     mut rows_in_block: impl FnMut(&MultiEraBlock) -> Result<Vec<T>, StatusCode>,
 ) -> Result<Vec<T>, Error> {
     let mut rows = Vec::new();
-    let mut scanned = 0;
 
     while rows.len() < needed {
-        let Some(body) = blocks.next() else {
+        let Some(slot) = slots.next() else {
             break;
         };
 
-        if scanned == budget {
+        if *budget == 0 {
             return Err(Error::ScanBudgetExceeded);
         }
 
-        scanned += 1;
+        *budget -= 1;
+        let slot = slot.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let body = fetch(slot);
 
         // A block that the archive no longer has leaves the list. The other
         // history endpoints do the same under `sync.max_history`.
@@ -1157,7 +1831,7 @@ fn read_drep_updates<D: Domain>(
     tip: BlockSlot,
     descending: bool,
     needed: usize,
-    budget: usize,
+    mut budget: usize,
 ) -> Result<Vec<DrepUpdatesInner>, Error> {
     let archive = domain.archive();
 
@@ -1171,11 +1845,14 @@ fn read_drep_updates<D: Domain>(
         Box::new(slots)
     };
 
-    let blocks = slots.map(|slot| archive.get_block_by_slot(&slot?));
-
-    collect_block_rows(blocks, descending, needed, budget, |block| {
-        drep_updates_in_block(block, drep)
-    })
+    collect_block_rows(
+        slots,
+        |slot| archive.get_block_by_slot(&slot),
+        descending,
+        needed,
+        &mut budget,
+        |block| drep_updates_in_block(block, drep),
+    )
 }
 
 /// `GET /governance/dreps/{drep_id}/updates` lists the registration,
@@ -1205,11 +1882,13 @@ where
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
-    let (_, drep_bytes, _, is_special_case) = parse_drep_id(&drep_id)?;
+    let parsed = parse_drep_id(&drep_id)?;
 
-    if is_special_case {
+    if parsed.is_special {
         return Ok(Json(Vec::new()));
     }
+
+    let drep_bytes = parsed.encoded;
 
     let tip = domain.get_tip_slot()?;
     let descending = matches!(pagination.order, Order::Desc);
@@ -1247,7 +1926,7 @@ where
 async fn proposal_metadata_parts(
     tx: &Hash<32>,
     idx: u32,
-    anchor: &pallas::ledger::primitives::conway::Anchor,
+    anchor: &Anchor,
     ipfs_gateways: &[String],
 ) -> Result<
     (
@@ -1856,7 +2535,7 @@ fn read_votes<D: Domain>(
     tx: Hash<32>,
     idx: u32,
     pagination: &Pagination,
-    budget: usize,
+    mut budget: usize,
 ) -> Result<Vec<ProposalVotesInner>, Error> {
     let key = ProposalKey::new(tx, idx);
 
@@ -1916,16 +2595,19 @@ fn read_votes<D: Domain>(
         Box::new(slots)
     };
 
-    let blocks = slots.map(|slot| archive.get_block_by_slot(&slot?));
-
     let action = GovActionId {
         transaction_id: tx,
         action_index: idx,
     };
 
-    let rows = collect_block_rows(blocks, descending, pagination.to(), budget, |block| {
-        Ok(proposal_votes_in_block(block, &action))
-    })?;
+    let rows = collect_block_rows(
+        slots,
+        |slot| archive.get_block_by_slot(&slot),
+        descending,
+        pagination.to(),
+        &mut budget,
+        |block| Ok(proposal_votes_in_block(block, &action)),
+    )?;
 
     let chain = dolos_cardano::eras::load_era_summary::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -2317,22 +2999,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mapping::bech32;
     use crate::mapping::bech32_drep;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{TestApp, TestDomainBuilder, TestFault};
     use bech32::{Bech32, Hrp};
-    use dolos_cardano::model::{DRepDelegation, EpochValue, GovPurpose, Stake};
+    use blockfrost_openapi::models::drep::Drep as DrepModel;
+    use dolos_cardano::model::{DRepDelegation, DRepExpiry, EpochValue, GovPurpose, Stake};
     use dolos_core::StateWriter as _;
     use dolos_testing::{
         synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote},
         toy_domain::ToyDomain,
     };
     use itertools::Itertools;
+    use pallas::ledger::primitives::conway::DRep;
     use pallas::{
         codec::utils::Bytes,
+        crypto::hash::Hasher,
         ledger::primitives::{
             conway::{
-                CostModels, DRepVotingThresholds, ExUnitPrices, GovAction, GovActionId,
-                PoolVotingThresholds, ProtocolParamUpdate,
+                Anchor, Certificate, CostModels, DRepVotingThresholds, ExUnitPrices, GovAction,
+                GovActionId, PoolVotingThresholds, ProtocolParamUpdate,
             },
             ExUnits, RationalNumber,
         },
@@ -2343,12 +3029,20 @@ mod tests {
         "not-a-drep"
     }
 
+    fn encode_id(hrp: &str, payload: &[u8]) -> String {
+        let hrp = Hrp::parse_unchecked(hrp);
+        bech32::encode::<Bech32>(hrp, payload).expect("failed to encode bech32 id")
+    }
+
     fn missing_drep() -> String {
-        let mut payload = Vec::with_capacity(29);
-        payload.push(0b00100010);
-        payload.extend_from_slice(&[8u8; 28]);
-        let hrp = Hrp::parse_unchecked("drep");
-        bech32::encode::<Bech32>(hrp, &payload).expect("failed to encode missing drep")
+        let payload = [vec![pallas_extras::DREP_KEY_PREFIX], vec![8u8; 28]].concat();
+        encode_id("drep", &payload)
+    }
+
+    fn vector_drep_hash(app: &TestApp) -> Vec<u8> {
+        let (_, payload) = bech32::decode(&app.vectors().drep_id).expect("invalid vector drep id");
+
+        payload[1..].to_vec()
     }
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
@@ -2356,21 +3050,25 @@ mod tests {
         assert_eq!(status, expected);
     }
 
-    #[tokio::test]
-    async fn governance_drep_happy_path() {
-        let app = TestApp::new();
-        let drep = &app.vectors().drep_id;
-        let path = format!("/governance/dreps/{drep}");
+    async fn get_drep(app: &TestApp, drep_id: &str) -> DrepModel {
+        let path = format!("/governance/dreps/{drep_id}");
         let (status, body) = app.get_bytes(&path).await;
-        assert_eq!(status, StatusCode::OK);
-        let _model: blockfrost_openapi::models::drep::Drep =
-            serde_json::from_slice(&body).expect("failed to parse drep model");
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&body)
+        );
+
+        serde_json::from_slice(&body).expect("failed to parse drep model")
     }
 
     #[tokio::test]
     async fn governance_drep_bad_request() {
         let app = TestApp::new();
         let path = format!("/governance/dreps/{}", invalid_drep());
+
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
@@ -2379,6 +3077,7 @@ mod tests {
         let app = TestApp::new();
         let missing = missing_drep();
         let path = format!("/governance/dreps/{missing}");
+
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
@@ -2387,7 +3086,82 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}");
+
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_happy_path() {
+        let app = TestApp::builder()
+            .with_cfg(SyntheticBlockConfig {
+                drep_deposit: 7777,
+                ..Default::default()
+            })
+            .with_protocol(9)
+            .build();
+
+        let drep_id = app.vectors().drep_id.clone();
+        let model = get_drep(&app, &drep_id).await;
+
+        let (_, payload) = bech32::decode(&drep_id).expect("invalid vector drep id");
+
+        let expected = DrepModel {
+            drep_id,
+            hex: hex::encode(&payload),
+            // the ledger's drep_distr counts the DRep's own deposit
+            amount: "7777".to_string(),
+            active: true,
+            active_epoch: Some(2),
+            has_script: false,
+            retired: false,
+            expired: false,
+            last_active_epoch: Some(2),
+        };
+
+        assert_eq!(model, expected);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_special_ids() {
+        let app = TestApp::new();
+
+        for id in ["drep_always_abstain", "drep_always_no_confidence"] {
+            let model = get_drep(&app, id).await;
+
+            let expected = DrepModel {
+                drep_id: id.to_string(),
+                hex: "".to_string(),
+                amount: "0".to_string(),
+                active: true,
+                active_epoch: None,
+                has_script: false,
+                retired: false,
+                expired: false,
+                last_active_epoch: None,
+            };
+
+            assert_eq!(model, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_drep_by_id_accepts_legacy_encodings() {
+        let app = TestApp::new();
+        let hash = vector_drep_hash(&app);
+        let cip105 = encode_id("drep", &hash);
+        let cip129 = get_drep(&app, &app.vectors().drep_id.clone()).await;
+
+        let expected = DrepModel {
+            drep_id: cip105.clone(),
+            hex: hex::encode(&hash),
+            ..cip129
+        };
+
+        assert_eq!(get_drep(&app, &cip105).await, expected);
+
+        // Blockfrost rejects the drep_vkh prefix
+        let path = format!("/governance/dreps/{}", encode_id("drep_vkh", &hash));
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     /// This function gives the synthetic DRep an anchor that Dolos can never
@@ -2397,8 +3171,15 @@ mod tests {
     /// endpoint reads. The synthetic chain imported a registration with no
     /// anchor, and this function replaces it.
     fn seed_drep_anchor(domain: &ToyDomain, drep_bytes: Vec<u8>) {
-        use pallas::ledger::primitives::conway::Anchor;
+        let anchor = Anchor {
+            url: "https://example.invalid/drep".to_string(),
+            content_hash: Hash::from([9u8; 32]),
+        };
 
+        seed_drep_with_anchor(domain, drep_bytes, anchor);
+    }
+
+    fn seed_drep_with_anchor(domain: &ToyDomain, drep_bytes: Vec<u8>, anchor: Anchor) {
         // This code builds the identifier from the same bytes as the entity
         // key. If the keyhash of the synthetic vector changes, the identifier
         // and the key still agree.
@@ -2406,19 +3187,29 @@ mod tests {
             .try_into()
             .expect("drep bytes carry a 28-byte hash");
 
+        let key = drep_key(&drep_bytes).unwrap();
+
         let mut state = DRepState::new(DRep::Key(Hash::from(keyhash)));
-        state.anchor = Some(Anchor {
-            url: "https://example.invalid/drep".to_string(),
-            content_hash: Hash::from([9u8; 32]),
-        });
+        state.anchor = Some(anchor.clone());
+
+        // the list serves the sighting's anchor, so it carries the same one
+        let mut sighting = domain
+            .state()
+            .read_entity_typed::<DRepSightingState>(&key)
+            .expect("failed to read drep sighting")
+            .expect("the synthetic drep has a sighting");
+        sighting.anchor = Some(anchor);
 
         let writer = domain
             .state()
             .start_writer()
             .expect("failed to start writer");
         writer
-            .write_entity_typed(&drep_key(&drep_bytes).unwrap(), &state)
+            .write_entity_typed(&key, &state)
             .expect("failed to write drep state");
+        writer
+            .write_entity_typed(&key, &sighting)
+            .expect("failed to write drep sighting");
         writer.commit().expect("failed to commit drep state");
     }
 
@@ -2430,9 +3221,8 @@ mod tests {
             ..Default::default()
         };
         let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
-            let (_, drep_bytes, _, _) =
-                parse_drep_id(&vectors.drep_id).expect("failed to parse drep id");
-            seed_drep_anchor(domain, drep_bytes);
+            let parsed = parse_drep_id(&vectors.drep_id).expect("failed to parse drep id");
+            seed_drep_anchor(domain, parsed.encoded);
         });
 
         let drep = &app.vectors().drep_id;
@@ -2455,6 +3245,161 @@ mod tests {
             model.error.expect("the fetch error is absent").code,
             blockfrost_openapi::models::dreps_inner_metadata_error::Code::ConnectionError
         );
+    }
+
+    /// `/governance/dreps/{drep_id}/metadata` answers from the cache the list
+    /// fills: a body kept there is served without a fetch, which for this
+    /// unresolvable url could only end in a connection error.
+    #[tokio::test]
+    async fn governance_drep_metadata_answers_from_the_metadata_cache() {
+        let body = br#"{"name":"cached"}"#;
+        let anchor = Anchor {
+            url: "https://example.invalid/cached".to_string(),
+            content_hash: Hasher::<256>::hash(body),
+        };
+
+        let app = TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), {
+            let anchor = anchor.clone();
+
+            move |domain, vectors| {
+                let parsed = parse_drep_id(&vectors.drep_id).expect("failed to parse drep id");
+                seed_drep_with_anchor(domain, parsed.encoded, anchor);
+            }
+        });
+
+        metadata::cache_verified_body(app.facade().inner.cache(), &anchor, body).await;
+
+        let drep = &app.vectors().drep_id;
+        let path = format!("/governance/dreps/{drep}/metadata");
+        let (status, response) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: DrepMetadata =
+            serde_json::from_slice(&response).expect("failed to parse drep metadata");
+
+        assert_eq!(model.url, anchor.url);
+        assert_eq!(
+            model.json_metadata,
+            Some(serde_json::json!({"name": "cached"}))
+        );
+        assert_eq!(model.bytes, Some(format!("\\x{}", hex::encode(body))));
+        assert!(model.error.is_none());
+    }
+
+    /// A page answers by its deadline: a slow load leaves its row unsettled,
+    /// and the deadline drops it along with every load not started yet, so a
+    /// page leaves nothing of its own running once it has answered.
+    #[tokio::test]
+    async fn settle_within_answers_by_the_deadline_and_drops_the_rest() {
+        let (_release, released) = tokio::sync::oneshot::channel::<()>();
+        let (dropped, was_dropped) = tokio::sync::oneshot::channel::<()>();
+
+        let slow = async move {
+            // dropped with the load, which closes the channel
+            let _dropped = dropped;
+            let _ = released.await;
+            2
+        }
+        .boxed();
+
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let queued = {
+            let started = started.clone();
+
+            async move {
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
+                3
+            }
+            .boxed()
+        };
+
+        // one at a time: the slow load holds the only slot past the deadline
+        let loads = vec![async { 1 }.boxed(), slow, queued];
+
+        let settled = settle_within(loads, 1, Duration::from_millis(100)).await;
+
+        assert_eq!(settled, vec![Some(1), None, None]);
+
+        // the deadline dropped the slow load rather than leaving it running,
+        // and the queued one never started
+        assert!(was_dropped.await.is_err());
+        assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A row already at hand goes out with its metadata however many slow
+    /// misses come before it on the page: only the misses wait for a fetch
+    /// slot, and only they can run out the deadline.
+    #[tokio::test]
+    async fn page_metadata_answers_held_rows_past_slow_misses() {
+        let anchor = |name: &str| Anchor {
+            url: format!("https://example.invalid/{name}"),
+            content_hash: Hasher::<256>::hash(name.as_bytes()),
+        };
+
+        // every fetch slot taken by a miss that outlasts the deadline, then
+        // a row the caches hold
+        let mut anchors: Vec<_> = (0..MAX_CONCURRENT_METADATA_FETCHES)
+            .map(|index| anchor(&format!("slow-{index}")))
+            .collect();
+        anchors.push(anchor("held"));
+
+        let held = |anchor: &Anchor| {
+            let mut out = unfetched(anchor);
+            out.bytes = Some("\\x00".to_string());
+            out
+        };
+
+        let metadata = page_metadata(
+            &anchors,
+            |anchor| {
+                let hit = anchor.url.ends_with("held").then(|| held(anchor));
+                async move { hit }
+            },
+            |_| futures::future::pending(),
+            Duration::from_millis(100),
+        )
+        .await;
+
+        let fetched: Vec<_> = metadata.iter().map(|x| x.bytes.is_some()).collect();
+        let mut expected = vec![false; MAX_CONCURRENT_METADATA_FETCHES];
+        expected.push(true);
+
+        assert_eq!(fetched, expected);
+        assert_eq!(metadata.last(), Some(&held(&anchors[anchors.len() - 1])));
+    }
+
+    /// The list and `/governance/dreps/{drep_id}/metadata` fetch through the
+    /// same client, so one anchor reads the same in both.
+    #[tokio::test]
+    async fn governance_dreps_list_metadata_matches_the_drep_metadata_endpoint() {
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, vectors| {
+                let parsed = parse_drep_id(&vectors.drep_id).expect("failed to parse drep id");
+                seed_drep_anchor(domain, parsed.encoded);
+            });
+
+        let drep = app.vectors().drep_id.clone();
+
+        let listed = get_dreps_list(&app, "/governance/dreps?count=100")
+            .await
+            .into_iter()
+            .find(|x| x.drep_id == drep)
+            .expect("the drep is not listed")
+            .metadata
+            .expect("the listed drep has no metadata");
+
+        let path = format!("/governance/dreps/{drep}/metadata");
+        let (status, body) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let single: DrepMetadata =
+            serde_json::from_slice(&body).expect("failed to parse drep metadata");
+
+        assert_eq!(listed.url, single.url);
+        assert_eq!(listed.hash, single.hash);
+        assert_eq!(listed.error, single.error);
+        assert!(listed.error.is_some());
     }
 
     #[test]
@@ -2499,6 +3444,505 @@ mod tests {
         let app = TestApp::new();
         let path = format!("/governance/dreps/{}/metadata", invalid_drep());
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_by_id_script_variant_not_found() {
+        let app = TestApp::new();
+        let hash = vector_drep_hash(&app);
+
+        let path = format!("/governance/dreps/{}", encode_id("drep_script", &hash));
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        let cip129_script = [vec![pallas_extras::DREP_SCRIPT_PREFIX], hash].concat();
+        let path = format!("/governance/dreps/{}", encode_id("drep", &cip129_script));
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    async fn get_dreps_list(app: &TestApp, path: &str) -> Vec<DrepsInner> {
+        let (status, body) = app.get_bytes(path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        serde_json::from_slice(&body).expect("failed to parse dreps list")
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_happy_path() {
+        let app = TestApp::builder()
+            .with_cfg(SyntheticBlockConfig {
+                drep_deposit: 7777,
+                ..Default::default()
+            })
+            .with_protocol(9)
+            .build();
+
+        let models = get_dreps_list(&app, "/governance/dreps").await;
+
+        let drep_id = app.vectors().drep_id.clone();
+        let (_, payload) = bech32::decode(&drep_id).expect("invalid vector drep id");
+
+        assert_eq!(
+            models,
+            vec![DrepsInner {
+                drep_id,
+                hex: hex::encode(&payload),
+                // the ledger's drep_distr counts the DRep's own deposit
+                amount: "7777".to_string(),
+                has_script: false,
+                retired: false,
+                expired: false,
+                last_active_epoch: Some(2),
+                metadata: None,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_pagination() {
+        let app = TestApp::new();
+
+        let models = get_dreps_list(&app, "/governance/dreps?page=2").await;
+        assert!(models.is_empty());
+
+        let models = get_dreps_list(&app, "/governance/dreps?order=desc&count=1").await;
+        assert_eq!(models.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_bad_request() {
+        let app = TestApp::new();
+
+        assert_status(&app, "/governance/dreps?count=0", StatusCode::BAD_REQUEST).await;
+        assert_status(
+            &app,
+            "/governance/dreps?order=sideways",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/dreps?order_by=alphabet",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/dreps?retired=banana",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/dreps?expired=banana",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_filters_apply_before_pagination() {
+        let app = TestApp::new();
+
+        // the synthetic drep is registered and active: it survives the
+        // negative filters and disappears behind the positive ones
+        let models = get_dreps_list(&app, "/governance/dreps?retired=false&expired=false").await;
+        assert_eq!(models.len(), 1);
+
+        let models = get_dreps_list(&app, "/governance/dreps?retired=true").await;
+        assert!(models.is_empty());
+
+        let models = get_dreps_list(&app, "/governance/dreps?expired=true").await;
+        assert!(models.is_empty());
+    }
+
+    /// Writes a DRep's sighting, as the roll would have.
+    fn write_sighting(
+        writer: &impl dolos_core::StateWriter,
+        identifier: &DRep,
+        first_seen: CertPosition,
+        anchor: Option<Anchor>,
+    ) {
+        writer
+            .write_entity_typed(
+                &DRepKey::from(identifier),
+                &DRepSightingState { first_seen, anchor },
+            )
+            .expect("failed to write drep sighting");
+    }
+
+    /// Three DReps whose voting powers and first sightings disagree, so
+    /// ordering by amount cannot be mistaken for the default ordering and
+    /// each direction names a different row first.
+    fn amount_app() -> TestApp {
+        TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+            let writer = domain
+                .state()
+                .start_writer()
+                .expect("failed to start writer");
+
+            // seen in this order, so appearance order is a, b, c while the
+            // amounts run the other way
+            for (byte, power, seen) in [(0xa1u8, 300u64, 10u64), (0xb2, 100, 20), (0xc3, 200, 30)] {
+                let identifier = DRep::Key([byte; 28].into());
+
+                let mut state = DRepState::new(identifier.clone());
+                state.registered_at = Some((seen, 0));
+                state.voting_power = power;
+                state.expiry = Some(DRepExpiry::new(u64::MAX, 0));
+
+                writer
+                    .write_entity_typed(&DRepKey::from(&identifier), &state)
+                    .expect("failed to write drep");
+
+                write_sighting(&writer, &identifier, (seen, 0, 0), None);
+            }
+
+            writer.commit().expect("failed to commit dreps");
+        })
+    }
+
+    /// The seeded DReps in the order they first appeared, which is the
+    /// listing's default order.
+    fn seeded_ids() -> Vec<String> {
+        [0xa1u8, 0xb2, 0xc3]
+            .iter()
+            .map(|byte| bech32_drep(&DRep::Key([*byte; 28].into())).expect("failed to encode"))
+            .collect()
+    }
+
+    fn listed_ids(models: &[DrepsInner], seeded: &[String]) -> Vec<String> {
+        models
+            .iter()
+            .map(|x| x.drep_id.clone())
+            .filter(|id| seeded.contains(id))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_order_by_amount() {
+        let app = amount_app();
+        let seeded = seeded_ids();
+        let (a, b, c) = (seeded[0].clone(), seeded[1].clone(), seeded[2].clone());
+
+        // default: the order they were first seen, amounts ignored
+        let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
+        assert_eq!(
+            listed_ids(&models, &seeded),
+            vec![a.clone(), b.clone(), c.clone()]
+        );
+
+        // by amount ascending: 100, 200, 300
+        let models = get_dreps_list(&app, "/governance/dreps?count=100&order_by=amount").await;
+        assert_eq!(
+            listed_ids(&models, &seeded),
+            vec![b.clone(), c.clone(), a.clone()]
+        );
+
+        // and descending is that read backwards
+        let models = get_dreps_list(
+            &app,
+            "/governance/dreps?count=100&order_by=amount&order=desc",
+        )
+        .await;
+        assert_eq!(listed_ids(&models, &seeded), vec![a, c, b]);
+    }
+
+    /// DReps the synthetic chain's first tx names after its own DRep, whose
+    /// keys sort in neither their appearance order nor its reverse.
+    mod sighted {
+        use super::*;
+
+        /// Delegated to in certificate 5, registered in certificate 8.
+        pub const DELEGATED_FIRST: [u8; 28] = [0xf1; 28];
+        /// Registered in certificate 6, delegated to in certificate 7.
+        pub const REGISTERED_FIRST: [u8; 28] = [0xe2; 28];
+        /// Delegated to in certificate 9, never registered.
+        pub const NEVER_REGISTERED: [u8; 28] = [0xd3; 28];
+
+        pub fn drep(hash: [u8; 28]) -> DRep {
+            DRep::Key(hash.into())
+        }
+
+        pub fn id(drep: &DRep) -> String {
+            bech32_drep(drep).expect("failed to encode")
+        }
+
+        fn delegation(target: DRep) -> Certificate {
+            Certificate::VoteDeleg(
+                crate::test_support::stake_address_accounts::primary(),
+                target,
+            )
+        }
+
+        fn registration(hash: [u8; 28], anchor: Option<Anchor>) -> Certificate {
+            Certificate::RegDRepCert(StakeCredential::AddrKeyhash(hash.into()), 1000, anchor)
+        }
+
+        pub fn anchor(byte: u8) -> Anchor {
+            Anchor {
+                url: format!("https://example.invalid/drep/{byte}"),
+                content_hash: Hash::from([byte; 32]),
+            }
+        }
+
+        /// Two blocks. The first tx of block 0 names, after the synthetic
+        /// DRep's certificates 3 and 4, the DReps above and then the two
+        /// special DReps. The first tx of block 1 updates `REGISTERED_FIRST`
+        /// without an anchor.
+        pub fn config() -> SyntheticBlockConfig {
+            SyntheticBlockConfig {
+                block_count: 2,
+                extra_certs_by_block: vec![
+                    vec![vec![
+                        delegation(drep(DELEGATED_FIRST)),
+                        registration(REGISTERED_FIRST, Some(anchor(0x51))),
+                        delegation(drep(REGISTERED_FIRST)),
+                        registration(DELEGATED_FIRST, None),
+                        delegation(drep(NEVER_REGISTERED)),
+                        delegation(DRep::Abstain),
+                        delegation(DRep::NoConfidence),
+                    ]],
+                    vec![vec![Certificate::UpdateDRepCert(
+                        StakeCredential::AddrKeyhash(REGISTERED_FIRST.into()),
+                        None,
+                    )]],
+                ],
+                ..Default::default()
+            }
+        }
+
+        /// Every DRep the chain names, in the order its certificates first
+        /// name them.
+        pub fn appearance(app: &TestApp) -> Vec<String> {
+            vec![
+                app.vectors().drep_id.clone(),
+                id(&drep(DELEGATED_FIRST)),
+                id(&drep(REGISTERED_FIRST)),
+                id(&drep(NEVER_REGISTERED)),
+                id(&DRep::Abstain),
+                id(&DRep::NoConfidence),
+            ]
+        }
+    }
+
+    /// The list follows the chain's certificate order, in both directions,
+    /// whatever order the keys sort in: a DRep a tx delegates to before it
+    /// registers sorts by the delegation, one it registers first by the
+    /// registration.
+    #[tokio::test]
+    async fn governance_dreps_list_follows_certificate_order() {
+        let app = TestApp::new_with_cfg(sighted::config());
+        let expected = sighted::appearance(&app);
+
+        let ids = |models: Vec<DrepsInner>| -> Vec<String> {
+            models.into_iter().map(|x| x.drep_id).collect()
+        };
+
+        let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
+        assert_eq!(ids(models), expected);
+
+        let models = get_dreps_list(&app, "/governance/dreps?count=100&order=desc").await;
+        let mut reversed = expected.clone();
+        reversed.reverse();
+        assert_eq!(ids(models), reversed);
+
+        // pages cut the same order
+        let mut paged = vec![];
+
+        for page in 1..=3 {
+            let path = format!("/governance/dreps?count=2&page={page}");
+            paged.extend(ids(get_dreps_list(&app, &path).await));
+        }
+
+        assert_eq!(paged, expected);
+    }
+
+    /// A DRep only a vote delegation names has no ledger row. It is listed
+    /// all the same, neither retired nor expired, with no amount, no
+    /// activity and no metadata, and the filters agree.
+    #[tokio::test]
+    async fn governance_dreps_list_includes_dreps_only_a_delegation_names() {
+        let app = TestApp::new_with_cfg(sighted::config());
+        let drep = sighted::drep(sighted::NEVER_REGISTERED);
+        let drep_id = sighted::id(&drep);
+
+        let ledger_row = app
+            .facade()
+            .read_cardano_entity::<DRepState>(&DRepKey::from(&drep))
+            .expect("drep read");
+        assert!(ledger_row.is_none(), "the ledger holds no row for it");
+
+        let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
+        let listed = models
+            .into_iter()
+            .find(|x| x.drep_id == drep_id)
+            .expect("the drep is not listed");
+
+        assert_eq!(
+            listed,
+            DrepsInner {
+                drep_id: drep_id.clone(),
+                hex: hex::encode(dolos_core::keys::encode(&DRepKey::from(&drep))),
+                amount: "0".to_string(),
+                has_script: false,
+                retired: false,
+                expired: false,
+                last_active_epoch: None,
+                metadata: None,
+            }
+        );
+
+        for (path, kept) in [
+            ("/governance/dreps?count=100&retired=false", true),
+            ("/governance/dreps?count=100&expired=false", true),
+            ("/governance/dreps?count=100&retired=true", false),
+            ("/governance/dreps?count=100&expired=true", false),
+        ] {
+            let models = get_dreps_list(&app, path).await;
+            assert_eq!(models.iter().any(|x| x.drep_id == drep_id), kept, "{path}");
+        }
+    }
+
+    /// The special DReps are listed where a delegation first names them,
+    /// with an empty `hex`, as Blockfrost lists them.
+    #[tokio::test]
+    async fn governance_dreps_list_includes_the_special_dreps() {
+        let app = TestApp::new_with_cfg(sighted::config());
+        let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
+
+        for drep in [DRep::Abstain, DRep::NoConfidence] {
+            let drep_id = sighted::id(&drep);
+
+            let listed = models
+                .iter()
+                .find(|x| x.drep_id == drep_id)
+                .unwrap_or_else(|| panic!("{drep_id} is not listed"));
+
+            assert_eq!(listed.hex, "");
+            assert!(!listed.has_script);
+            assert!(!listed.retired);
+            assert!(!listed.expired);
+            assert_eq!(listed.last_active_epoch, None);
+            assert_eq!(listed.metadata, None);
+        }
+    }
+
+    /// An update without an anchor clears the ledger's anchor, but the list
+    /// serves the one the registration carried, as Blockfrost does.
+    #[tokio::test]
+    async fn governance_dreps_list_keeps_the_anchor_an_update_omits() {
+        let app = TestApp::new_with_cfg(sighted::config());
+        let drep = sighted::drep(sighted::REGISTERED_FIRST);
+        let registered = sighted::anchor(0x51);
+
+        let ledger_row = app
+            .facade()
+            .read_cardano_entity::<DRepState>(&DRepKey::from(&drep))
+            .expect("drep read")
+            .expect("drep state");
+        assert_eq!(ledger_row.anchor, None, "the update cleared the ledger's");
+
+        let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
+        let metadata = models
+            .into_iter()
+            .find(|x| x.drep_id == sighted::id(&drep))
+            .expect("the drep is not listed")
+            .metadata
+            .expect("the drep has no metadata");
+
+        assert_eq!(metadata.url, registered.url);
+        assert_eq!(metadata.hash, hex::encode(registered.content_hash));
+    }
+
+    /// A DRep that never registered and never voted — a vote-delegation
+    /// target the chain only ever mentioned — has no last-active epoch, and
+    /// Blockfrost's SQL sends that row to the `ELSE FALSE` arm however old
+    /// it is. Verified against live Blockfrost on preview, where 13 such
+    /// DReps sit in the first 3000 rows.
+    #[tokio::test]
+    async fn governance_dreps_list_never_active_dreps_never_expire() {
+        let identifier = DRep::Key([0xd4u8; 28].into());
+
+        let app = {
+            let identifier = identifier.clone();
+
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), move |domain, _| {
+                let writer = domain
+                    .state()
+                    .start_writer()
+                    .expect("failed to start writer");
+
+                // seen at the very first slot and silent ever since, with the
+                // ledger expiry the boundary would have long since tripped
+                let mut state = DRepState::new(identifier.clone());
+                state.expiry = Some(DRepExpiry::new(0, 0));
+                state.expired = true;
+
+                writer
+                    .write_entity_typed(&DRepKey::from(&identifier), &state)
+                    .expect("failed to write drep");
+
+                write_sighting(&writer, &identifier, (0, 0, 0), None);
+
+                writer.commit().expect("failed to commit drep");
+            })
+        };
+
+        let drep_id = bech32_drep(&identifier).expect("failed to encode");
+        let model = get_drep(&app, &drep_id).await;
+
+        assert_eq!(model.last_active_epoch, None);
+        assert!(!model.retired);
+        assert!(!model.expired, "Blockfrost reports these as not expired");
+
+        // and the filter agrees with the field
+        let listed = get_dreps_list(&app, "/governance/dreps?count=100&expired=true").await;
+        assert!(listed.iter().all(|x| x.drep_id != drep_id));
+
+        let listed = get_dreps_list(&app, "/governance/dreps?count=100&expired=false").await;
+        assert!(listed.iter().any(|x| x.drep_id == drep_id));
+    }
+
+    /// Ordering by amount has to hold across a page boundary, not just
+    /// inside one page, which is what the Blockfrost suite checks too.
+    #[tokio::test]
+    async fn governance_dreps_list_order_by_amount_spans_pages() {
+        let app = amount_app();
+        let seeded = seeded_ids();
+
+        let mut paged = vec![];
+
+        for page in 1..=4 {
+            let path = format!("/governance/dreps?count=1&order_by=amount&page={page}");
+            paged.extend(listed_ids(&get_dreps_list(&app, &path).await, &seeded));
+        }
+
+        let whole = listed_ids(
+            &get_dreps_list(&app, "/governance/dreps?count=100&order_by=amount").await,
+            &seeded,
+        );
+
+        assert_eq!(paged, whole);
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_scan_limit() {
+        let app = TestApp::new();
+
+        // page * count above `max_scan_items` (default 3000)
+        assert_status(
+            &app,
+            "/governance/dreps?page=1000&count=100",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+
+        assert_status(&app, "/governance/dreps", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
@@ -2806,6 +4250,26 @@ mod tests {
             voter,
             proposal: SyntheticProposalRef { block, tx, action },
             vote,
+            anchor: None,
+        }
+    }
+
+    /// A vote with an anchor. The committee endpoints show this anchor as
+    /// `metadata_url` and `metadata_hash`.
+    fn synthetic_vote_with_anchor(
+        voter: Voter,
+        block: usize,
+        tx: usize,
+        action: u32,
+        vote: Vote,
+        url: &str,
+    ) -> SyntheticVote {
+        SyntheticVote {
+            anchor: Some(Anchor {
+                url: url.to_string(),
+                content_hash: Hash::from([9u8; 32]),
+            }),
+            ..synthetic_vote(voter, block, tx, action, vote)
         }
     }
 
@@ -3121,6 +4585,1189 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let path = format!("/governance/dreps/{}/votes", app.vectors().drep_id);
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    fn cc_hot_key() -> StakeCredential {
+        StakeCredential::AddrKeyhash(Hash::from([21u8; 28]))
+    }
+
+    fn cc_hot_script() -> StakeCredential {
+        StakeCredential::ScriptHash(Hash::from([22u8; 28]))
+    }
+
+    fn seed_committee_votes_gov(domain: &ToyDomain) {
+        seed_gov(
+            domain,
+            GovState {
+                committee_auths: BTreeMap::from([(
+                    cc_cold_key(31),
+                    vec![
+                        (15, CommitteeAuthorization::HotCredential(cc_hot_key())),
+                        (25, CommitteeAuthorization::Resigned(None)),
+                    ],
+                )]),
+                active_since: Some(0),
+                ..Default::default()
+            },
+        );
+    }
+
+    fn committee_votes_app(mut cfg: SyntheticBlockConfig) -> TestApp {
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![
+            Certificate::AuthCommitteeHot(cc_cold_key(31), cc_hot_script()),
+            Certificate::AuthCommitteeHot(cc_cold_key(31), cc_hot_key()),
+            Certificate::ResignCommitteeCold(cc_cold_key(31), None),
+        ]];
+        TestApp::new_with_cfg(cfg)
+    }
+
+    /// Transaction 0 in block 0 proposes two actions. Transaction 1 proposes
+    /// one more action. Block 1 casts four committee votes, and three of them
+    /// are in one transaction. The listing must therefore resolve the order
+    /// inside one block. Block 2 changes an earlier vote. As a result, one hot
+    /// credential has two rows for one proposal.
+    fn committee_votes_config() -> SyntheticBlockConfig {
+        let key = Voter::ConstitutionalCommitteeKey(Hash::from([21u8; 28]));
+        let script = Voter::ConstitutionalCommitteeScript(Hash::from([22u8; 28]));
+
+        SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![
+                vec![
+                    vec![GovAction::Information, GovAction::Information],
+                    vec![GovAction::Information],
+                ],
+                vec![],
+                vec![],
+            ],
+            votes_by_block: vec![
+                vec![],
+                vec![
+                    vec![
+                        synthetic_vote_with_anchor(
+                            key.clone(),
+                            0,
+                            0,
+                            1,
+                            Vote::No,
+                            "https://example.com/no",
+                        ),
+                        synthetic_vote_with_anchor(
+                            key.clone(),
+                            0,
+                            0,
+                            0,
+                            Vote::Yes,
+                            "https://example.com/yes",
+                        ),
+                        synthetic_vote(script, 0, 0, 1, Vote::Abstain),
+                    ],
+                    vec![synthetic_vote(key.clone(), 0, 1, 0, Vote::Abstain)],
+                ],
+                vec![vec![synthetic_vote(key, 0, 0, 0, Vote::No)]],
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// Transaction 0 in block 0 proposes one action. Each subsequent block
+    /// casts one committee vote on that action. Thus, the four votes are in
+    /// four different blocks.
+    fn committee_votes_across_blocks_config() -> SyntheticBlockConfig {
+        committee_votes_in_blocks_config(&[1, 1, 1, 1])
+    }
+
+    /// Transaction 0 in block 0 proposes one action for each vote in the
+    /// largest block. Each subsequent block casts the given number of
+    /// committee votes in one transaction. The votes go to action 0, action
+    /// 1, and so on. The blocks therefore hold different numbers of rows. The
+    /// votes cycle through yes, no, abstain, and no in cast order. Thus, two
+    /// consecutive rows are different, and the fourth row is no.
+    fn committee_votes_in_blocks_config(votes_per_block: &[usize]) -> SyntheticBlockConfig {
+        let key = Voter::ConstitutionalCommitteeKey(Hash::from([21u8; 28]));
+        let votes = [Vote::Yes, Vote::No, Vote::Abstain, Vote::No];
+        let actions = votes_per_block.iter().copied().max().unwrap_or(1);
+
+        let mut gov_actions_by_block =
+            vec![vec![(0..actions).map(|_| GovAction::Information).collect()]];
+        let mut votes_by_block = vec![vec![]];
+        let mut cast = 0;
+
+        for &count in votes_per_block {
+            gov_actions_by_block.push(vec![]);
+            votes_by_block.push(vec![(0..count)
+                .map(|action| {
+                    let vote = votes[cast % votes.len()].clone();
+                    cast += 1;
+                    synthetic_vote(key.clone(), 0, 0, action as u32, vote)
+                })
+                .collect()]);
+        }
+
+        SyntheticBlockConfig {
+            block_count: votes_per_block.len() + 1,
+            txs_per_block: 1,
+            gov_actions_by_block,
+            votes_by_block,
+            ..Default::default()
+        }
+    }
+
+    /// Transaction 0 in block 0 proposes one action. The hot key votes in
+    /// blocks 1 and 3, and the hot script votes in block 2. Each voter lane
+    /// therefore skips a block that the other lane holds.
+    fn committee_votes_interleaved_config() -> SyntheticBlockConfig {
+        let key = Voter::ConstitutionalCommitteeKey(Hash::from([21u8; 28]));
+        let script = Voter::ConstitutionalCommitteeScript(Hash::from([22u8; 28]));
+
+        SyntheticBlockConfig {
+            block_count: 4,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![], vec![]],
+            votes_by_block: vec![
+                vec![],
+                vec![vec![synthetic_vote(key.clone(), 0, 0, 0, Vote::Yes)]],
+                vec![vec![synthetic_vote(script, 0, 0, 0, Vote::No)]],
+                vec![vec![synthetic_vote(key, 0, 0, 0, Vote::Abstain)]],
+            ],
+            ..Default::default()
+        }
+    }
+
+    async fn get_committee_votes(app: &TestApp, path: &str) -> Vec<CommitteeVotesInner> {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "The request to {path} returned status {status}. The response body was {}.",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes)
+            .expect("The committee vote response did not contain valid JSON.")
+    }
+
+    /// The identity of a row. The tests use this identity when the assertion
+    /// is about the order and not about the content.
+    fn committee_row_id(row: &CommitteeVotesInner) -> (&String, &String, &String) {
+        (&row.tx_hash, &row.voter_hot_id, &row.proposal_id)
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_happy_path() {
+        let app = committee_votes_app(committee_votes_config());
+        let rows = get_committee_votes(&app, "/governance/committee/votes").await;
+        let blocks = &app.vectors().blocks;
+        let hot_key = bech32_committee_hot(&cc_hot_key()).unwrap();
+        let hot_script = bech32_committee_hot(&cc_hot_script()).unwrap();
+        let (domain, _) = TestDomainBuilder::new_with_synthetic(committee_votes_config()).finish();
+        let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+
+        assert_eq!(rows.len(), 5);
+
+        // A committee script sorts before a committee key. The script row is
+        // therefore first, but the chain configuration lists this vote last.
+        assert_eq!(rows[0].tx_hash, blocks[1].tx_hashes[0]);
+        assert_eq!(rows[0].voter_hot_id, hot_script);
+        assert_eq!(rows[0].proposal_tx_hash, blocks[0].tx_hashes[0]);
+        assert_eq!(rows[0].proposal_index, 1);
+        assert_eq!(rows[0].vote, committee_votes_inner::Vote::Abstain);
+        assert_eq!(rows[0].metadata_url, None);
+        assert_eq!(rows[0].metadata_hash, None);
+
+        assert_eq!(rows[1].tx_hash, blocks[1].tx_hashes[0]);
+        assert_eq!(rows[1].voter_hot_id, hot_key);
+        assert_eq!(rows[1].proposal_index, 0);
+        assert_eq!(rows[1].vote, committee_votes_inner::Vote::Yes);
+        assert_eq!(
+            rows[1].metadata_url.as_deref(),
+            Some("https://example.com/yes")
+        );
+        assert_eq!(
+            rows[1].metadata_hash.as_deref(),
+            Some(&hex::encode([9u8; 32])[..])
+        );
+
+        assert_eq!(rows[2].tx_hash, blocks[1].tx_hashes[0]);
+        assert_eq!(rows[2].voter_hot_id, hot_key);
+        assert_eq!(rows[2].proposal_index, 1);
+        assert_eq!(rows[2].vote, committee_votes_inner::Vote::No);
+        assert_eq!(
+            rows[2].metadata_url.as_deref(),
+            Some("https://example.com/no")
+        );
+
+        assert_eq!(rows[3].tx_hash, blocks[1].tx_hashes[1]);
+        assert_eq!(rows[3].proposal_tx_hash, blocks[0].tx_hashes[1]);
+        assert_eq!(rows[3].vote, committee_votes_inner::Vote::Abstain);
+
+        // The second vote adds a row. It does not replace the first row.
+        assert_eq!(rows[4].tx_hash, blocks[2].tx_hashes[0]);
+        assert_eq!(rows[4].proposal_index, 0);
+        assert_eq!(rows[4].vote, committee_votes_inner::Vote::No);
+
+        for (row, block) in rows.iter().zip([1usize, 1, 1, 1, 2]) {
+            let proposal_tx: Hash<32> = row.proposal_tx_hash.parse().unwrap();
+            assert_eq!(
+                row.proposal_id,
+                bech32_gov_action(&proposal_tx, row.proposal_index as u32).unwrap()
+            );
+            assert_eq!(
+                row.governance_type,
+                committee_votes_inner::GovernanceType::InfoAction
+            );
+            assert_eq!(row.block_height, blocks[block].block_number as i32);
+            assert_eq!(row.block_time, chain.slot_time(blocks[block].slot) as i32);
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_list_is_independent_of_authorization_state() {
+        let app = TestApp::new_with_cfg_and_setup(committee_votes_config(), |domain, _| {
+            seed_gov(
+                domain,
+                GovState {
+                    committee_auths: BTreeMap::from([(
+                        cc_cold_key(31),
+                        vec![(15, CommitteeAuthorization::HotCredential(cc_hot_script()))],
+                    )]),
+                    active_since: Some(0),
+                    ..Default::default()
+                },
+            );
+        });
+        let rows = get_committee_votes(&app, "/governance/committee/votes").await;
+        assert_eq!(rows.len(), 5);
+
+        let app = TestApp::new_with_cfg_and_setup(committee_votes_config(), |domain, _| {
+            let writer = domain.state().start_writer().unwrap();
+            writer.save_entity_typed::<GovState>(&(), None).unwrap();
+            writer.commit().unwrap();
+        });
+        assert_eq!(
+            get_committee_votes(&app, "/governance/committee/votes").await,
+            rows
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_orders_and_paginates() {
+        let app = committee_votes_app(committee_votes_config());
+        let ascending = get_committee_votes(&app, "/governance/committee/votes").await;
+        let descending = get_committee_votes(&app, "/governance/committee/votes?order=desc").await;
+
+        assert_eq!(
+            descending.iter().map(committee_row_id).collect_vec(),
+            ascending.iter().rev().map(committee_row_id).collect_vec()
+        );
+
+        let page = get_committee_votes(&app, "/governance/committee/votes?count=2&page=2").await;
+        assert_eq!(
+            page.iter().map(committee_row_id).collect_vec(),
+            ascending[2..4].iter().map(committee_row_id).collect_vec()
+        );
+
+        assert!(
+            get_committee_votes(&app, "/governance/committee/votes?page=9")
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_ignores_from_and_to() {
+        let app = committee_votes_app(committee_votes_config());
+        let hot = bech32_committee_hot(&cc_hot_key()).unwrap();
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+
+        for path in [
+            "/governance/committee/votes".to_string(),
+            format!("/governance/committee/{hot}/votes"),
+            format!("/governance/committee/{cold}/votes"),
+        ] {
+            for pagination in [
+                "order=asc",
+                "count=1&page=2&order=asc",
+                "count=1&page=2&order=desc",
+            ] {
+                let base = format!("{path}?{pagination}");
+                let expected = get_committee_votes(&app, &base).await;
+                assert!(!expected.is_empty());
+
+                for query in [
+                    "from=bad",
+                    "to=bad",
+                    "from=200&to=100",
+                    "from=100:2&to=100:1",
+                    "from=0&to=0",
+                ] {
+                    let url = format!("{base}&{query}");
+                    assert_eq!(
+                        get_committee_votes(&app, &url).await,
+                        expected,
+                        "The response for {url} must ignore from and to."
+                    );
+                }
+            }
+
+            for pagination in ["count=0", "page=0", "order=sideways"] {
+                assert_status(
+                    &app,
+                    &format!("{path}?{pagination}&from=bad&to=bad"),
+                    StatusCode::BAD_REQUEST,
+                )
+                .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_by_hot_id_selects_one_voter() {
+        let app = committee_votes_app(committee_votes_config());
+        let hot_key = bech32_committee_hot(&cc_hot_key()).unwrap();
+        let hot_script = bech32_committee_hot(&cc_hot_script()).unwrap();
+
+        let rows =
+            get_committee_votes(&app, &format!("/governance/committee/{hot_key}/votes")).await;
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|row| row.voter_hot_id == hot_key));
+
+        let rows =
+            get_committee_votes(&app, &format!("/governance/committee/{hot_script}/votes")).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].voter_hot_id, hot_script);
+        assert_eq!(rows[0].vote, committee_votes_inner::Vote::Abstain);
+
+        // Bech32 permits an ID in upper case. Blockfrost accepts it.
+        let upper = get_committee_votes(
+            &app,
+            &format!(
+                "/governance/committee/{}/votes",
+                hot_script.to_ascii_uppercase()
+            ),
+        )
+        .await;
+        assert_eq!(
+            upper.iter().map(committee_row_id).collect_vec(),
+            rows.iter().map(committee_row_id).collect_vec()
+        );
+    }
+
+    /// A cold credential selects every hot credential that it authorized. A
+    /// rotation therefore returns the votes of both hot keys. A resignation
+    /// adds no hot credential.
+    #[tokio::test]
+    async fn governance_committee_votes_by_cold_id_follows_authorizations() {
+        let app = committee_votes_app(committee_votes_config());
+
+        let cold_id = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        let rows =
+            get_committee_votes(&app, &format!("/governance/committee/{cold_id}/votes")).await;
+        let all = get_committee_votes(&app, "/governance/committee/votes").await;
+
+        // Both authorized hot credentials voted. The cold listing is therefore
+        // the full listing.
+        assert_eq!(rows.len(), 5);
+        assert_eq!(
+            rows.iter().map(committee_row_id).collect_vec(),
+            all.iter().map(committee_row_id).collect_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_by_unauthorized_cold_id_is_empty() {
+        let app = committee_votes_app(committee_votes_config());
+        let cold_id = bech32_committee_cold(&cc_cold_key(32)).unwrap();
+
+        assert!(
+            get_committee_votes(&app, &format!("/governance/committee/{cold_id}/votes"))
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_cold_votes_ignore_stale_state() {
+        let app = TestApp::new_with_cfg_and_setup(committee_votes_config(), |domain, _| {
+            seed_committee_votes_gov(domain);
+        });
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        assert!(
+            get_committee_votes(&app, &format!("/governance/committee/{cold}/votes"))
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            get_committee_votes(&app, "/governance/committee/votes")
+                .await
+                .len(),
+            5
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_cold_votes_retained_auth_overrides_stale_state() {
+        let mut cfg = committee_votes_config();
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_script(),
+        )]];
+        let app =
+            TestApp::new_with_cfg_and_setup(cfg, |domain, _| seed_committee_votes_gov(domain));
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        let rows = get_committee_votes(&app, &format!("/governance/committee/{cold}/votes")).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].voter_hot_id,
+            bech32_committee_hot(&cc_hot_script()).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_cold_votes_match_typed_credentials_and_shared_hots() {
+        let cold_key = cc_cold_key(31);
+        let cold_script = StakeCredential::ScriptHash(Hash::from([31u8; 28]));
+        let hot_key = cc_hot_key();
+        let hot_script = StakeCredential::ScriptHash(Hash::from([21u8; 28]));
+        let cfg = SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![]],
+            extra_certs_by_block: vec![
+                vec![vec![
+                    Certificate::AuthCommitteeHot(cold_key.clone(), hot_key.clone()),
+                    Certificate::AuthCommitteeHot(cold_key.clone(), hot_key.clone()),
+                    Certificate::AuthCommitteeHot(cold_script.clone(), hot_script.clone()),
+                    Certificate::AuthCommitteeHot(cc_cold_key(32), hot_key.clone()),
+                    Certificate::ResignCommitteeCold(cc_cold_key(33), None),
+                ]],
+                vec![
+                    vec![],
+                    vec![Certificate::AuthCommitteeHot(
+                        cc_cold_key(34),
+                        hot_key.clone(),
+                    )],
+                ],
+                vec![],
+            ],
+            votes_by_block: vec![
+                vec![],
+                vec![],
+                vec![vec![
+                    synthetic_vote(committee_voter(&hot_key), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(committee_voter(&hot_script), 0, 0, 0, Vote::No),
+                    synthetic_vote(Voter::DRepKey(Hash::from([21u8; 28])), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(
+                        Voter::StakePoolKey(Hash::from([21u8; 28])),
+                        0,
+                        0,
+                        0,
+                        Vote::Yes,
+                    ),
+                ]],
+            ],
+            invalid_txs_by_block: vec![vec![], vec![1], vec![]],
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg(cfg);
+        let all = get_committee_votes(&app, "/governance/committee/votes").await;
+        assert_eq!(all.len(), 2);
+        for (cold, hot) in [
+            (cold_key, hot_key.clone()),
+            (cold_script, hot_script),
+            (cc_cold_key(32), hot_key),
+        ] {
+            let id = bech32_committee_cold(&cold).unwrap();
+            let rows =
+                get_committee_votes(&app, &format!("/governance/committee/{id}/votes")).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].voter_hot_id, bech32_committee_hot(&hot).unwrap());
+        }
+        for cold in [cc_cold_key(33), cc_cold_key(34)] {
+            let id = bech32_committee_cold(&cold).unwrap();
+            assert!(
+                get_committee_votes(&app, &format!("/governance/committee/{id}/votes"))
+                    .await
+                    .is_empty()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_committee_cold_votes_include_before_auth_and_after_resign() {
+        let mut cfg = committee_votes_in_blocks_config(&[1, 1, 1, 1]);
+        cfg.extra_certs_by_block = vec![vec![]; 5];
+        cfg.extra_certs_by_block[2] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_key(),
+        )]];
+        cfg.extra_certs_by_block[3] = vec![vec![Certificate::ResignCommitteeCold(
+            cc_cold_key(31),
+            None,
+        )]];
+        let app = TestApp::new_with_cfg(cfg);
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        let path = format!("/governance/committee/{cold}/votes");
+        let all = get_committee_votes(&app, "/governance/committee/votes").await;
+        assert_eq!(all.len(), 4);
+        assert_eq!(get_committee_votes(&app, &path).await, all);
+        assert_eq!(
+            get_committee_votes(&app, &format!("{path}?order=desc")).await,
+            all.iter().rev().cloned().collect_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_committee_cold_votes_share_certificate_and_vote_budget() {
+        let mut cfg = committee_votes_across_blocks_config();
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_key(),
+        )]];
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        let path = format!("/governance/committee/{cold}/votes?count=1&page=2");
+        let app = TestApp::new_with_scan_limit(cfg.clone(), 2);
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        let app = TestApp::new_with_scan_limit(cfg, 3);
+        let rows = get_committee_votes(&app, &path).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, app.vectors().blocks[2].tx_hashes[0]);
+    }
+
+    #[test]
+    fn governance_committee_cold_votes_exact_shared_budget_and_deduplicated_blocks() {
+        let mut cfg = committee_votes_config();
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![
+            Certificate::AuthCommitteeHot(cc_cold_key(31), cc_hot_script()),
+            Certificate::AuthCommitteeHot(cc_cold_key(31), cc_hot_key()),
+        ]];
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        let query = CommitteeVoteQuery::Cold(cc_cold_key(31));
+        let tip = vectors.blocks[2].slot;
+        let rows = committee_vote_rows(&domain, &query, tip, &Pagination::default(), 3).unwrap();
+        assert_eq!(rows.len(), 5);
+        let pagination = Pagination {
+            count: 1,
+            page: 2,
+            ..Default::default()
+        };
+        let rows = committee_vote_rows(&domain, &query, tip, &pagination, 2).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].slot, vectors.blocks[1].slot);
+        let result = committee_vote_rows(&domain, &query, tip, &Pagination::default(), 2);
+        assert!(matches!(result, Err(Error::ScanBudgetExceeded)));
+        let query = CommitteeVoteQuery::Cold(cc_cold_key(32));
+        assert!(
+            committee_vote_rows(&domain, &query, tip, &Pagination::default(), 0)
+                .unwrap()
+                .is_empty()
+        );
+        let pagination = Pagination {
+            count: 0,
+            ..Default::default()
+        };
+        for query in [
+            CommitteeVoteQuery::All,
+            CommitteeVoteQuery::Hot(cc_hot_key()),
+            CommitteeVoteQuery::Cold(cc_cold_key(31)),
+        ] {
+            assert!(committee_vote_rows(&domain, &query, tip, &pagination, 0)
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn governance_committee_vote_queries_fail_independently_on_archive_index_errors() {
+        let (domain, vectors) =
+            TestDomainBuilder::new_with_synthetic(committee_votes_config()).finish();
+        let domain =
+            dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::ArchiveStoreError);
+        let tip = vectors.blocks[2].slot;
+        let result = committee_hot_credentials(&domain, &cc_cold_key(31), tip, &mut 1);
+        assert!(matches!(
+            result,
+            Err(Error::Code(StatusCode::INTERNAL_SERVER_ERROR))
+        ));
+        for query in [
+            CommitteeVoteQuery::All,
+            CommitteeVoteQuery::Hot(cc_hot_key()),
+        ] {
+            let result = committee_vote_rows(&domain, &query, tip, &Pagination::default(), 1);
+            assert!(matches!(
+                result,
+                Err(Error::Code(StatusCode::INTERNAL_SERVER_ERROR))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_committee_cold_votes_exclude_future_auth_at_captured_tip() {
+        let mut cfg = committee_votes_interleaved_config();
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_key(),
+        )]];
+        cfg.extra_certs_by_block[3] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_script(),
+        )]];
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        let tip = vectors.blocks[2].slot;
+        let query = CommitteeVoteQuery::Cold(cc_cold_key(31));
+        let rows = committee_vote_rows(&domain, &query, tip, &Pagination::default(), 100).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].slot, vectors.blocks[1].slot);
+        assert_eq!(rows[0].voter, cc_hot_key());
+        let rows = committee_vote_rows(
+            &domain,
+            &query,
+            vectors.blocks[3].slot,
+            &Pagination::default(),
+            100,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_missing_and_invalid_bodies() {
+        use dolos_cardano::indexes::archive_dimensions::{
+            COMMITTEE_CERTS, COMMITTEE_VOTES, VOTER_VOTES,
+        };
+        use dolos_core::{ArchiveIndexDelta, ArchiveWriter as _, Tag};
+
+        for dimension in [COMMITTEE_CERTS, COMMITTEE_VOTES, VOTER_VOTES] {
+            for body in [None, Some(vec![0xFF; 8])] {
+                let invalid = body.is_some();
+                let app =
+                    TestApp::new_with_cfg_and_setup(committee_votes_config(), |domain, vectors| {
+                        seed_committee_votes_gov(domain);
+                        let slot = vectors.blocks[2].slot + 1;
+                        let hash = Hash::<32>::from([0xEE; 32]);
+                        let writer = domain.archive().start_writer().unwrap();
+                        if let Some(body) = body {
+                            writer
+                                .apply(
+                                    &ChainPoint::Specific(slot, hash),
+                                    &std::sync::Arc::new(body),
+                                )
+                                .unwrap();
+                        }
+                        let key = match dimension {
+                            COMMITTEE_CERTS => {
+                                pallas_extras::committee_cold_id_bytes(&cc_cold_key(31))
+                            }
+                            COMMITTEE_VOTES => b"committee".to_vec(),
+                            _ => pallas_extras::voter_id_bytes(&committee_voter(&cc_hot_key())),
+                        };
+                        writer
+                            .apply_index(&[ArchiveIndexDelta {
+                                slot,
+                                block_hash: hash.to_vec(),
+                                block_number: None,
+                                tx_hashes: vec![],
+                                tags: vec![Tag::new(dimension, key)],
+                            }])
+                            .unwrap();
+                        writer.commit().unwrap();
+                        let writer = domain.state().start_writer().unwrap();
+                        writer.set_cursor(ChainPoint::Specific(slot, hash)).unwrap();
+                        writer.commit().unwrap();
+                    });
+                let id = if dimension == COMMITTEE_CERTS {
+                    Some(bech32_committee_cold(&cc_cold_key(31)).unwrap())
+                } else if dimension == VOTER_VOTES {
+                    Some(bech32_committee_hot(&cc_hot_key()).unwrap())
+                } else {
+                    None
+                };
+                let path = match id {
+                    Some(id) => format!("/governance/committee/{id}/votes"),
+                    None => "/governance/committee/votes".to_string(),
+                };
+                if invalid {
+                    assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+                } else {
+                    let rows = get_committee_votes(&app, &path).await;
+                    assert_eq!(
+                        rows.len(),
+                        if dimension == COMMITTEE_CERTS {
+                            0
+                        } else if dimension == COMMITTEE_VOTES {
+                            5
+                        } else {
+                            4
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_archive_index_errors() {
+        let app = TestApp::new_with_cfg_and_fault(
+            committee_votes_config(),
+            Some(TestFault::ArchiveStoreError),
+        );
+        for id in [
+            None,
+            Some(bech32_committee_hot(&cc_hot_key()).unwrap()),
+            Some(bech32_committee_cold(&cc_cold_key(31)).unwrap()),
+        ] {
+            let path = match id {
+                None => "/governance/committee/votes".to_string(),
+                Some(id) => format!("/governance/committee/{id}/votes"),
+            };
+            assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_bad_request() {
+        let app = committee_votes_app(committee_votes_config());
+        let hot = bech32_committee_hot(&cc_hot_key()).unwrap();
+
+        assert_status(
+            &app,
+            "/governance/committee/votes?count=0",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/committee/votes?order=sideways",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            &format!("/governance/committee/{hot}/votes?page=0"),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        let (status, body) = app
+            .get_bytes("/governance/committee/not-a-credential/votes")
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["message"], "Invalid or malformed cc credential id.");
+
+        // A DRep credential is correct Bech32 text with the wrong prefix.
+        assert_status(
+            &app,
+            &format!("/governance/committee/{}/votes", app.vectors().drep_id),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+
+        // The prefix says hot, but the CIP-129 header says cold.
+        let mismatched = bech32::encode::<Bech32>(
+            Hrp::parse_unchecked("cc_hot"),
+            &[&[0x12u8][..], &[21u8; 28][..]].concat(),
+        )
+        .unwrap();
+        assert_status(
+            &app,
+            &format!("/governance/committee/{mismatched}/votes"),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn governance_committee_votes_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let hot = bech32_committee_hot(&cc_hot_key()).unwrap();
+
+        assert_status(
+            &app,
+            "/governance/committee/votes",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+        assert_status(
+            &app,
+            &format!("/governance/committee/{hot}/votes"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+    }
+
+    /// The page depth is limited like on the other endpoints that read a
+    /// block for each row.
+    #[tokio::test]
+    async fn governance_committee_votes_rejects_a_deep_page() {
+        let app = TestApp::new_with_scan_limit(committee_votes_across_blocks_config(), 3);
+        let hot = bech32_committee_hot(&cc_hot_key()).unwrap();
+
+        let rows = get_committee_votes(
+            &app,
+            &format!("/governance/committee/{hot}/votes?count=1&page=3"),
+        )
+        .await;
+        assert_eq!(rows.len(), 1);
+
+        let (status, bytes) = app
+            .get_bytes(&format!("/governance/committee/{hot}/votes?count=2&page=2"))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("scan limit"), "The response body was {body}.");
+
+        assert_status(
+            &app,
+            "/governance/committee/votes?count=2&page=2",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    /// A page can start and end in the middle of a block, and it can span
+    /// blocks. Each page must be the same slice of the full listing, in both
+    /// orders.
+    #[tokio::test]
+    async fn governance_committee_votes_pages_across_blocks() {
+        let app = committee_votes_app(committee_votes_across_blocks_config());
+        let blocks = app.vectors().blocks.clone();
+
+        let page = get_committee_votes(&app, "/governance/committee/votes?count=1&page=2").await;
+        assert_eq!(
+            page.iter().map(|row| &row.tx_hash).collect_vec(),
+            vec![&blocks[2].tx_hashes[0]]
+        );
+
+        let descending = get_committee_votes(
+            &app,
+            "/governance/committee/votes?count=1&page=2&order=desc",
+        )
+        .await;
+        assert_eq!(
+            descending.iter().map(|row| &row.tx_hash).collect_vec(),
+            vec![&blocks[3].tx_hashes[0]]
+        );
+
+        let all = get_committee_votes(&app, "/governance/committee/votes").await;
+        assert_eq!(
+            all.iter().map(|row| &row.tx_hash).collect_vec(),
+            blocks[1..5].iter().map(|b| &b.tx_hashes[0]).collect_vec()
+        );
+    }
+
+    /// The blocks hold different numbers of rows. A block that is larger
+    /// than the page does not move the rows around it. Each page must be
+    /// equal to the same slice of the full listing.
+    #[tokio::test]
+    async fn governance_committee_votes_page_uneven_blocks() {
+        let app = committee_votes_app(committee_votes_in_blocks_config(&[1, 5, 1, 1]));
+        let blocks = app.vectors().blocks.clone();
+
+        let all = get_committee_votes(&app, "/governance/committee/votes").await;
+        assert_eq!(all.len(), 8);
+        assert_eq!(
+            all.iter().map(|row| &row.tx_hash).collect_vec(),
+            [1usize, 2, 2, 2, 2, 2, 3, 4]
+                .iter()
+                .map(|&block| &blocks[block].tx_hashes[0])
+                .collect_vec()
+        );
+        assert_eq!(
+            all.iter().map(|row| row.vote).collect_vec(),
+            [
+                committee_votes_inner::Vote::Yes,
+                committee_votes_inner::Vote::No,
+                committee_votes_inner::Vote::Abstain,
+                committee_votes_inner::Vote::No,
+                committee_votes_inner::Vote::Yes,
+                committee_votes_inner::Vote::No,
+                committee_votes_inner::Vote::Abstain,
+                committee_votes_inner::Vote::No,
+            ]
+        );
+
+        let reversed = all.iter().rev().cloned().collect_vec();
+
+        for count in 1..=8 {
+            for page in 1..=8 {
+                let from = (page - 1) * count;
+                let to = (from + count).min(all.len());
+                let slice = |listing: &[CommitteeVotesInner]| {
+                    listing.get(from..to).unwrap_or_default().to_vec()
+                };
+
+                let ascending = get_committee_votes(
+                    &app,
+                    &format!("/governance/committee/votes?count={count}&page={page}"),
+                )
+                .await;
+                assert_eq!(
+                    ascending,
+                    slice(&all),
+                    "The ascending page {page} with count {count} is wrong."
+                );
+
+                let descending = get_committee_votes(
+                    &app,
+                    &format!("/governance/committee/votes?count={count}&page={page}&order=desc"),
+                )
+                .await;
+                assert_eq!(
+                    descending,
+                    slice(&reversed),
+                    "The descending page {page} with count {count} is wrong."
+                );
+            }
+        }
+    }
+
+    /// Two hot credentials vote in different blocks. The listing merges
+    /// their block lanes in chain order, in both directions, and a page can
+    /// cross from one lane to the other.
+    #[tokio::test]
+    async fn governance_committee_votes_merge_voter_lanes() {
+        let app = committee_votes_app(committee_votes_interleaved_config());
+        let blocks = app.vectors().blocks.clone();
+        let hot_key = bech32_committee_hot(&cc_hot_key()).unwrap();
+        let hot_script = bech32_committee_hot(&cc_hot_script()).unwrap();
+
+        let all = get_committee_votes(&app, "/governance/committee/votes").await;
+        assert_eq!(
+            all.iter()
+                .map(|row| (&row.tx_hash, &row.voter_hot_id))
+                .collect_vec(),
+            vec![
+                (&blocks[1].tx_hashes[0], &hot_key),
+                (&blocks[2].tx_hashes[0], &hot_script),
+                (&blocks[3].tx_hashes[0], &hot_key),
+            ]
+        );
+
+        let descending = get_committee_votes(&app, "/governance/committee/votes?order=desc").await;
+        assert_eq!(
+            descending.iter().map(committee_row_id).collect_vec(),
+            all.iter().rev().map(committee_row_id).collect_vec()
+        );
+
+        let page = get_committee_votes(&app, "/governance/committee/votes?count=1&page=2").await;
+        assert_eq!(
+            page.iter().map(committee_row_id).collect_vec(),
+            vec![committee_row_id(&all[1])]
+        );
+
+        let page = get_committee_votes(
+            &app,
+            "/governance/committee/votes?count=2&page=1&order=desc",
+        )
+        .await;
+        assert_eq!(
+            page.iter().map(committee_row_id).collect_vec(),
+            vec![committee_row_id(&all[2]), committee_row_id(&all[1])]
+        );
+
+        // The cold listing is the same merge.
+        let cold_id = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        let path = format!("/governance/committee/{cold_id}/votes");
+        let rows = get_committee_votes(&app, &path).await;
+        assert_eq!(rows, all);
+        assert_eq!(
+            get_committee_votes(&app, &format!("{path}?order=desc")).await,
+            all.iter().rev().cloned().collect_vec()
+        );
+        for order in ["asc", "desc"] {
+            let expected = if order == "asc" {
+                all.clone()
+            } else {
+                all.iter().rev().cloned().collect_vec()
+            };
+            for page in 1..=4 {
+                let rows =
+                    get_committee_votes(&app, &format!("{path}?count=1&page={page}&order={order}"))
+                        .await;
+                assert_eq!(rows, expected.get(page - 1..page).unwrap_or_default());
+            }
+        }
+    }
+
+    /// A block that holds the votes of two hot credentials is in two lanes.
+    /// The merge lists it once, so the listing has no repeated rows.
+    #[test]
+    fn merge_slots_lists_a_shared_slot_once() {
+        type Lane = Box<dyn Iterator<Item = Result<BlockSlot, ArchiveError>>>;
+
+        let lanes = |slots: Vec<Vec<BlockSlot>>| -> Vec<Lane> {
+            slots
+                .into_iter()
+                .map(|lane| Box::new(lane.into_iter().map(Ok)) as Lane)
+                .collect()
+        };
+
+        let ascending = merge_slots(lanes(vec![vec![10, 20, 40], vec![20, 30], vec![]]), false)
+            .map(Result::unwrap)
+            .collect_vec();
+        assert_eq!(ascending, vec![10, 20, 30, 40]);
+
+        let descending = merge_slots(lanes(vec![vec![40, 20, 10], vec![30, 20], vec![]]), true)
+            .map(Result::unwrap)
+            .collect_vec();
+        assert_eq!(descending, vec![40, 30, 20, 10]);
+
+        assert!(merge_slots(lanes(vec![]), false).next().is_none());
+
+        // An error comes out at its position in the lane.
+        let faulty: Vec<Lane> = vec![
+            Box::new(vec![Ok(10), Ok(30)].into_iter()),
+            Box::new(
+                vec![
+                    Ok(20),
+                    Err(ArchiveError::InternalError("fault".to_string())),
+                ]
+                .into_iter(),
+            ),
+        ];
+        let merged = merge_slots(faulty, false).collect_vec();
+        assert_eq!(merged.len(), 4);
+        assert_eq!(*merged[0].as_ref().unwrap(), 10);
+        assert_eq!(*merged[1].as_ref().unwrap(), 20);
+        assert!(merged[2].is_err());
+        assert_eq!(*merged[3].as_ref().unwrap(), 30);
+    }
+
+    /// A pruned block takes its votes out of the listing, and the retained
+    /// votes move up to fill the pages. The other history endpoints return
+    /// the same under `sync.max_history`.
+    ///
+    /// The test prunes the archive to one slot. Only the last block remains.
+    /// The three votes of the first three vote blocks are gone. The one vote
+    /// of the last block is the first row.
+    #[tokio::test]
+    async fn governance_committee_votes_paginate_retained_rows() {
+        let mut cfg = committee_votes_across_blocks_config();
+        cfg.extra_certs_by_block = vec![vec![]; cfg.block_count];
+        cfg.extra_certs_by_block[0] = vec![vec![Certificate::AuthCommitteeHot(
+            cc_cold_key(31),
+            cc_hot_key(),
+        )]];
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
+            seed_committee_votes_gov(domain);
+            domain
+                .archive()
+                .prune_history(0, None, None)
+                .expect("The archive did not prune its history.");
+        });
+        let last = app.vectors().blocks[4].tx_hashes[0].clone();
+
+        let rows = get_committee_votes(&app, "/governance/committee/votes?count=1").await;
+        assert_eq!(
+            rows.iter().map(|row| &row.tx_hash).collect_vec(),
+            vec![&last]
+        );
+        assert_eq!(rows[0].vote, committee_votes_inner::Vote::No);
+        let hot = bech32_committee_hot(&cc_hot_key()).unwrap();
+        assert_eq!(
+            get_committee_votes(&app, &format!("/governance/committee/{hot}/votes?count=1")).await,
+            rows
+        );
+        let cold = bech32_committee_cold(&cc_cold_key(31)).unwrap();
+        assert!(
+            get_committee_votes(&app, &format!("/governance/committee/{cold}/votes?count=1"))
+                .await
+                .is_empty()
+        );
+
+        assert!(
+            get_committee_votes(&app, "/governance/committee/votes?count=1&page=2")
+                .await
+                .is_empty()
+        );
+        assert!(
+            get_committee_votes(&app, "/governance/committee/votes?count=1&page=4")
+                .await
+                .is_empty()
+        );
+
+        let rows =
+            get_committee_votes(&app, "/governance/committee/votes?count=1&order=desc").await;
+        assert_eq!(
+            rows.iter().map(|row| &row.tx_hash).collect_vec(),
+            vec![&last]
+        );
+    }
+
+    /// The ledger ignores the votes of a phase-2-invalid tx, so they are not
+    /// listed, although their block is tagged for the voter.
+    #[tokio::test]
+    async fn governance_committee_votes_skip_invalid_transactions() {
+        let key = Voter::ConstitutionalCommitteeKey(Hash::from([21u8; 28]));
+        let app = committee_votes_app(SyntheticBlockConfig {
+            block_count: 2,
+            txs_per_block: 2,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information], vec![]], vec![]],
+            votes_by_block: vec![
+                vec![],
+                vec![
+                    vec![
+                        synthetic_vote(key.clone(), 0, 0, 0, Vote::Yes),
+                        synthetic_vote(drep_key_voter(), 0, 0, 0, Vote::Yes),
+                        synthetic_vote(spo_voter(), 0, 0, 0, Vote::Yes),
+                    ],
+                    vec![
+                        synthetic_vote(key, 0, 0, 0, Vote::No),
+                        synthetic_vote(committee_voter(&cc_hot_script()), 0, 0, 0, Vote::No),
+                    ],
+                ],
+            ],
+            invalid_txs_by_block: vec![vec![], vec![1]],
+            ..Default::default()
+        });
+
+        let rows = get_committee_votes(&app, "/governance/committee/votes").await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, app.vectors().blocks[1].tx_hashes[0]);
+        assert_eq!(rows[0].vote, committee_votes_inner::Vote::Yes);
+    }
+
+    /// A tagged block whose committee votes sit in phase-2-invalid txs adds
+    /// no row, but the scan still counts it. Enough of those blocks stop the
+    /// request instead of letting it read without end.
+    #[tokio::test]
+    async fn governance_committee_votes_scan_stops_at_the_budget() {
+        let key = Voter::ConstitutionalCommitteeKey(Hash::from([21u8; 28]));
+        let cfg = SyntheticBlockConfig {
+            block_count: 4,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![], vec![]],
+            votes_by_block: vec![
+                vec![],
+                vec![vec![synthetic_vote(key.clone(), 0, 0, 0, Vote::Yes)]],
+                vec![vec![synthetic_vote(key.clone(), 0, 0, 0, Vote::No)]],
+                vec![vec![synthetic_vote(key, 0, 0, 0, Vote::Abstain)]],
+            ],
+            invalid_txs_by_block: vec![vec![], vec![0], vec![0], vec![]],
+            ..Default::default()
+        };
+        let hot = bech32_committee_hot(&cc_hot_key()).unwrap();
+        let path = format!("/governance/committee/{hot}/votes?count=1");
+
+        // Two empty blocks spend a budget of two before the row appears.
+        let app = TestApp::new_with_scan_limit(cfg.clone(), 2);
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("scan limit"), "The response body was {body}.");
+
+        // A budget of three reaches the block that holds the row.
+        let app = TestApp::new_with_scan_limit(cfg, 3);
+        let rows = get_committee_votes(&app, &path).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_hash, app.vectors().blocks[3].tx_hashes[0]);
+        assert_eq!(rows[0].vote, committee_votes_inner::Vote::Abstain);
     }
 
     /// Three blocks: the first tx of block 1 proposes two actions, block 2
@@ -4970,28 +7617,200 @@ mod tests {
         let drep = drep_updates_test_drep();
         let updates = |block: &MultiEraBlock| drep_updates_in_block(block, &drep);
 
-        let blocks = || {
-            [false, false, true]
-                .into_iter()
-                .map(|valid| Ok(Some(drep_registration_block(valid))))
-        };
+        let slots = || (0..3).map(Ok);
+        let fetch = |slot| Ok(Some(drep_registration_block(slot == 2)));
 
         // two empty blocks spend a budget of two before the row appears
         assert!(matches!(
-            collect_block_rows(blocks(), false, 1, 2, updates),
+            collect_block_rows(slots(), fetch, false, 1, &mut 2, updates),
             Err(Error::ScanBudgetExceeded)
         ));
 
         // a budget of three reaches the block that holds the row
-        let rows = collect_block_rows(blocks(), false, 1, 3, updates).unwrap();
+        let rows = collect_block_rows(slots(), fetch, false, 1, &mut 3, updates).unwrap();
         assert_eq!(rows.len(), 1);
 
         // a full page stops the scan before the budget matters
-        let blocks = [true, false, false]
-            .into_iter()
-            .map(|valid| Ok(Some(drep_registration_block(valid))));
-        let rows = collect_block_rows(blocks, false, 1, 1, updates).unwrap();
+        let fetch = |slot| Ok(Some(drep_registration_block(slot == 0)));
+        let rows = collect_block_rows(slots(), fetch, false, 1, &mut 1, updates).unwrap();
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn collect_block_rows_exact_budget_and_extra_slot_without_fetch() {
+        let mut fetched = Vec::new();
+        let rows = collect_block_rows::<()>(
+            (0..2).map(Ok),
+            |slot| {
+                fetched.push(slot);
+                Ok(None)
+            },
+            false,
+            1,
+            &mut 2,
+            |_| Ok(Vec::new()),
+        )
+        .unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(fetched, [0, 1]);
+
+        fetched.clear();
+        let result = collect_block_rows::<()>(
+            (0..3).map(Ok),
+            |slot| {
+                fetched.push(slot);
+                Ok(None)
+            },
+            false,
+            1,
+            &mut 2,
+            |_| Ok(Vec::new()),
+        );
+        assert!(matches!(result, Err(Error::ScanBudgetExceeded)));
+        assert_eq!(fetched, [0, 1]);
+    }
+
+    #[test]
+    fn collect_block_rows_full_page_and_zero_rows_do_not_pull_extra_slots() {
+        let pulled = std::cell::Cell::new(0);
+        let fetched = std::cell::Cell::new(0);
+        let slots = (0..3).map(Ok).inspect(|_| pulled.set(pulled.get() + 1));
+        let rows = collect_block_rows(
+            slots,
+            |_| {
+                fetched.set(fetched.get() + 1);
+                Ok(Some(drep_registration_block(true)))
+            },
+            false,
+            1,
+            &mut 1,
+            |_| Ok(vec![()]),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(pulled.get(), 1);
+        assert_eq!(fetched.get(), 1);
+
+        let rows = collect_block_rows::<()>(
+            std::iter::from_fn(|| -> Option<Result<BlockSlot, ArchiveError>> {
+                panic!("The scan read a slot.")
+            }),
+            |_| panic!("The scan read a block body."),
+            false,
+            0,
+            &mut 0,
+            |_| panic!("The scan read a row."),
+        )
+        .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn collect_block_rows_errors_and_budget_precedence() {
+        let fault = || ArchiveError::InternalError("The test caused an archive error.".into());
+        let result = collect_block_rows::<()>(
+            std::iter::once(Err(fault())),
+            |_| panic!("The scan read a block body."),
+            false,
+            1,
+            &mut 0,
+            |_| Ok(Vec::new()),
+        );
+        assert!(matches!(result, Err(Error::ScanBudgetExceeded)));
+        let result = collect_block_rows::<()>(
+            std::iter::once(Err(fault())),
+            |_| panic!("The scan read a block body."),
+            false,
+            1,
+            &mut 1,
+            |_| Ok(Vec::new()),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Code(StatusCode::INTERNAL_SERVER_ERROR))
+        ));
+        let result = collect_block_rows::<()>(
+            std::iter::once(Ok(0)),
+            |_| Err(fault()),
+            false,
+            1,
+            &mut 1,
+            |_| Ok(Vec::new()),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Code(StatusCode::INTERNAL_SERVER_ERROR))
+        ));
+        let result = collect_block_rows::<()>(
+            std::iter::once(Ok(0)),
+            |_| Ok(Some(vec![0xFF; 8])),
+            false,
+            1,
+            &mut 1,
+            |_| Ok(Vec::new()),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Code(StatusCode::INTERNAL_SERVER_ERROR))
+        ));
+    }
+
+    #[test]
+    fn merge_slots_overlapping_lanes_stop_before_failing_tails() {
+        for descending in [false, true] {
+            let (first, last) = if descending { (3, 1) } else { (1, 3) };
+            let pulled = std::rc::Rc::new(std::cell::Cell::new(0));
+            let lanes = [last, 2]
+                .into_iter()
+                .map(|next| {
+                    let count = pulled.clone();
+                    let lane = [
+                        Ok(first),
+                        Ok(next),
+                        Err(ArchiveError::InternalError(
+                            "The scan must stop before this archive error.".into(),
+                        )),
+                    ]
+                    .into_iter()
+                    .inspect(move |_| count.set(count.get() + 1));
+                    Box::new(lane) as Box<dyn Iterator<Item = Result<BlockSlot, ArchiveError>>>
+                })
+                .collect();
+            let mut fetched = Vec::new();
+            let rows = collect_block_rows(
+                merge_slots(lanes, descending),
+                |slot| {
+                    fetched.push(slot);
+                    Ok(Some(drep_registration_block(true)))
+                },
+                descending,
+                2,
+                &mut 2,
+                |_| Ok(vec![()]),
+            )
+            .unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(fetched, [first, 2]);
+            assert_eq!(pulled.get(), 4);
+        }
+    }
+
+    #[test]
+    fn merge_slots_does_not_prefetch_after_single_lane_page() {
+        let pulled = std::rc::Rc::new(std::cell::Cell::new(0));
+        let count = pulled.clone();
+        let lane = (0..3).map(Ok).inspect(move |_| count.set(count.get() + 1));
+        let rows = collect_block_rows(
+            merge_slots(vec![Box::new(lane)], false),
+            |_| Ok(Some(drep_registration_block(true))),
+            false,
+            1,
+            &mut 1,
+            |_| Ok(vec![()]),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(pulled.get(), 1);
     }
 
     /// Blockfrost declares no `from`/`to` for this endpoint, so a malformed
@@ -5850,6 +8669,80 @@ mod tests {
                 STABLE_CURSOR_ATTEMPTS
             )
         );
+    }
+
+    /// Writes `copies` copies of the synthetic DRep and its sighting under
+    /// new keys, so that a scan of either reads several chunks.
+    fn replicate_dreps(domain: &ToyDomain, copies: u8) {
+        use dolos_core::StateWriter as _;
+
+        let key = DRepKey::from(&synthetic_drep());
+
+        let state = domain
+            .state()
+            .read_entity_typed::<DRepState>(&key)
+            .expect("drep read")
+            .expect("drep state");
+
+        let sighting = domain
+            .state()
+            .read_entity_typed::<DRepSightingState>(&key)
+            .expect("sighting read")
+            .expect("drep sighting");
+
+        let writer = domain.state().start_writer().expect("state writer");
+
+        for copy in 1..=copies {
+            let drep = DRep::Key(Hash::from([copy; 28]));
+            let mut state = state.clone();
+            state.identifier = drep.clone();
+
+            let mut sighting = sighting.clone();
+            sighting.first_seen.2 += usize::from(copy);
+
+            writer
+                .write_entity_typed(&DRepKey(drep.clone()), &state)
+                .expect("drep write");
+            writer
+                .write_entity_typed(&DRepKey(drep), &sighting)
+                .expect("sighting write");
+        }
+
+        writer.commit().expect("state commit");
+    }
+
+    #[tokio::test]
+    async fn chunked_drep_rows_match_unchunked() {
+        let app = TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+            replicate_dreps(domain, 4)
+        });
+        let facade = app.facade();
+
+        let rows = |chunk| {
+            let facade = facade.clone();
+            async move {
+                let sightings = load_drep_sightings(&facade, chunk)
+                    .await
+                    .expect("drep sightings");
+
+                join_drep_states(&facade, sightings, chunk)
+                    .await
+                    .expect("drep rows")
+                    .into_iter()
+                    .map(|row| {
+                        let power = row.state.map(|state| state.voting_power);
+                        (row.sighting.first_seen, row.key, power)
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let whole = rows(usize::MAX).await;
+        assert!(whole.len() > 2, "too few dreps to split into chunks");
+
+        for chunk in [1, 2] {
+            assert_eq!(rows(chunk).await, whole);
+        }
     }
 
     #[tokio::test]

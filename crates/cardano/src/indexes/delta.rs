@@ -16,7 +16,7 @@ use pallas::{
         addresses::Address,
         primitives::{
             alonzo::InstantaneousRewardTarget,
-            conway::{DatumOption, VotingProcedures},
+            conway::{DatumOption, Voter, VotingProcedures},
         },
         traverse::{MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraValue},
     },
@@ -235,6 +235,48 @@ impl CardanoIndexDeltaBuilder {
             .push(Tag::new(archive::SCRIPT_REDEEMERS, hash));
     }
 
+    /// Tag the current block with every script `tx` carries outside the
+    /// outputs it produces: the witnesses, the auxiliary data, and the
+    /// collateral return of a valid tx.
+    ///
+    /// They count because `/scripts` lists them
+    /// (`roll::scripts::tx_script_hashes`): a listed script is found through
+    /// the archive index once the block that carried it first is pruned. The
+    /// tags do not follow phase-2 validity; `script_by_hash` filters the
+    /// blocks it reads. A produced output's reference script is tagged with
+    /// it, see [`Self::extract_utxo_tags`].
+    pub fn add_tx_scripts(&mut self, tx: &MultiEraTx) {
+        use pallas::ledger::traverse::{ComputeHash as _, OriginalHash as _};
+
+        for script in tx.native_scripts() {
+            self.add_script_hash(script.original_hash().to_vec());
+        }
+        for script in tx.plutus_v1_scripts() {
+            self.add_script_hash(script.compute_hash().to_vec());
+        }
+        for script in tx.plutus_v2_scripts() {
+            self.add_script_hash(script.compute_hash().to_vec());
+        }
+        for script in tx.plutus_v3_scripts() {
+            self.add_script_hash(script.compute_hash().to_vec());
+        }
+
+        for script in pallas_extras::aux_native_scripts(tx) {
+            self.add_script_hash(pallas_extras::native_script_hash(&script).to_vec());
+        }
+        for script in tx.aux_plutus_v1_scripts() {
+            self.add_script_hash(script.compute_hash().to_vec());
+        }
+
+        // a phase-2-invalid tx produces its collateral return, which is tagged
+        // with the other outputs it produces
+        let collateral_return = tx.collateral_return().filter(|_| tx.is_valid());
+
+        if let Some(script_ref) = collateral_return.as_ref().and_then(|x| x.script_ref()) {
+            self.add_script_hash(pallas_extras::script_ref_hash(&script_ref).to_vec());
+        }
+    }
+
     /// Add certificate tags to the current block.
     pub fn add_cert(&mut self, cert: &MultiEraCert) {
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
@@ -296,6 +338,17 @@ impl CardanoIndexDeltaBuilder {
                 pallas_extras::drep_id_bytes(&cred),
             ));
         }
+
+        let cold = pallas_extras::cert_as_committee_auth(cert)
+            .map(|x| x.cold)
+            .or_else(|| pallas_extras::cert_as_committee_resign(cert).map(|x| x.cold));
+
+        if let Some(cred) = cold {
+            self.current_block().tags.push(Tag::new(
+                archive::COMMITTEE_CERTS,
+                pallas_extras::committee_cold_id_bytes(&cred),
+            ));
+        }
     }
 
     /// Add withdrawal tags to the current block.
@@ -327,6 +380,16 @@ impl CardanoIndexDeltaBuilder {
         for (voter, ballot) in procedures {
             self.add_vote_tag(archive::VOTER_VOTES, pallas_extras::voter_id_bytes(voter));
 
+            if matches!(
+                voter,
+                Voter::ConstitutionalCommitteeKey(_) | Voter::ConstitutionalCommitteeScript(_)
+            ) {
+                self.add_vote_tag(
+                    archive::COMMITTEE_VOTES,
+                    archive::COMMITTEE_VOTES_KEY.to_vec(),
+                );
+            }
+
             for action in ballot.keys() {
                 let key = ProposalKey::new(action.transaction_id, action.action_index);
                 self.add_vote_tag(archive::ACTION_VOTES, keys::encode(&key).to_vec());
@@ -357,9 +420,19 @@ impl CardanoIndexDeltaBuilder {
     /// Index all archive entries for a single block.
     ///
     /// Calls `start_block`, then iterates all transactions adding
-    /// tx hashes, metadata, inputs (with resolved UTxO lookups),
-    /// outputs (with script refs), witness scripts/datums, certs,
+    /// tx hashes, metadata, consumed inputs (with resolved UTxO lookups),
+    /// produced outputs (with script refs), witness scripts/datums, certs,
     /// redeemers, and governance votes.
+    ///
+    /// Input-derived tags follow validity: a transaction is tagged by what it
+    /// consumes (`MultiEraTx::consumes`) and produces (`MultiEraTx::produces`),
+    /// so a phase-2-invalid one contributes its collateral and collateral
+    /// return, never its ordinary inputs. That is the set dependency loading
+    /// resolves, so every input looked up here is in `resolved_inputs` however
+    /// the blocks were split into work batches, and a map holding more than
+    /// that set changes nothing. It is also the set db-sync records as an
+    /// invalid transaction's inputs, which Blockfrost's address and UTxO
+    /// queries read.
     pub fn index_block(
         &mut self,
         block: &pallas::ledger::traverse::MultiEraBlock<'_>,
@@ -381,11 +454,13 @@ impl CardanoIndexDeltaBuilder {
                 self.add_metadata_label(label);
             }
 
-            for input in tx.inputs() {
-                self.add_spent_input(&input);
+            let consumes = tx.consumes();
+            let consumed: Vec<TxoRef> = consumes.iter().map(TxoRef::from).collect();
 
-                let txo_ref: TxoRef = (&input).into();
-                if let Some(resolved) = resolved_inputs.get(&txo_ref) {
+            for (input, txo_ref) in consumes.iter().zip(&consumed) {
+                self.add_spent_input(input);
+
+                if let Some(resolved) = resolved_inputs.get(txo_ref) {
                     resolved.with_dependent(|_, output| {
                         if let Ok(addr) = output.address() {
                             self.add_address(&addr);
@@ -412,18 +487,7 @@ impl CardanoIndexDeltaBuilder {
                 }
             }
 
-            for script in tx.native_scripts() {
-                self.add_script_hash(script.original_hash().to_vec());
-            }
-            for script in tx.plutus_v1_scripts() {
-                self.add_script_hash(script.compute_hash().to_vec());
-            }
-            for script in tx.plutus_v2_scripts() {
-                self.add_script_hash(script.compute_hash().to_vec());
-            }
-            for script in tx.plutus_v3_scripts() {
-                self.add_script_hash(script.compute_hash().to_vec());
-            }
+            self.add_tx_scripts(&tx);
 
             for datum in tx.plutus_data() {
                 self.add_datum_hash(datum.original_hash().to_vec());
@@ -441,20 +505,23 @@ impl CardanoIndexDeltaBuilder {
                 self.add_datum_hash(redeemer.data().compute_hash().to_vec());
             }
 
-            // tags are candidates, not response rows: phase-2-failed txs get
-            // tagged like every other dimension does, and the Blockfrost
-            // rule (db-sync stores no redeemers for failed txs) stays a
-            // query-time filter. resolution is best effort — a spend
-            // redeemer only tags when its declared input is in
-            // `resolved_inputs`.
+            // tags are candidates, not response rows: a phase-2-failed tx's
+            // redeemers get tagged, and the Blockfrost rule (db-sync stores
+            // no redeemers for failed txs) stays a query-time filter. A spend
+            // redeemer names an ordinary input, so it resolves only when that
+            // input is consumed: a failed tx's spend redeemers stay untagged,
+            // whatever else the batch loaded.
             for redeemer in tx.redeemers() {
                 let resolved =
                     crate::pallas_extras::redeemer_script_hash(&tx, &redeemer, &mut |input| {
                         let txo_ref: TxoRef = input.into();
+                        if !consumed.contains(&txo_ref) {
+                            return Ok::<_, std::convert::Infallible>(None);
+                        }
                         let address = resolved_inputs.get(&txo_ref).and_then(|resolved| {
                             resolved.with_dependent(|_, output| output.address().ok())
                         });
-                        Ok::<_, std::convert::Infallible>(address)
+                        Ok(address)
                     });
 
                 let Ok(Some(hash)) = resolved else {
@@ -673,6 +740,134 @@ mod tests {
         assert!(tags.is_empty());
     }
 
+    /// A script that only the auxiliary data carries is tagged like a
+    /// witness: the registry lists it, so `script_by_hash` has to find the
+    /// block.
+    #[test]
+    fn auxiliary_scripts_get_script_tags() {
+        use pallas::codec::minicbor;
+        use pallas::codec::utils::{Bytes, KeepRaw, Nullable};
+        use pallas::ledger::primitives::{
+            alonzo::{AuxiliaryData, NativeScript, PostAlonzoAuxiliaryData},
+            conway::{TransactionBody, TransactionInput, Tx, WitnessSet},
+            PlutusScript, Set,
+        };
+        use pallas::ledger::traverse::{ComputeHash as _, MultiEraTx};
+
+        let native = NativeScript::InvalidBefore(9);
+        let plutus = PlutusScript::<1>(Bytes::from(vec![0x46, 0x01, 0x00, 0x00, 0x22, 0x26, 0x01]));
+
+        let body = TransactionBody {
+            inputs: Set::from(vec![TransactionInput {
+                transaction_id: [1u8; 32].into(),
+                index: 0,
+            }]),
+            outputs: vec![],
+            fee: 200_000,
+            ttl: None,
+            certificates: None,
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: None,
+            proposal_procedures: None,
+            treasury_value: None,
+            donation: None,
+        };
+
+        let body = minicbor::to_vec(&body).unwrap();
+        let body = minicbor::decode::<KeepRaw<'_, TransactionBody<'_>>>(&body)
+            .unwrap()
+            .to_owned();
+
+        let witness_set = WitnessSet {
+            vkeywitness: None,
+            native_script: None,
+            bootstrap_witness: None,
+            plutus_v1_script: None,
+            plutus_data: None,
+            redeemer: None,
+            plutus_v2_script: None,
+            plutus_v3_script: None,
+        };
+
+        let tx = Tx {
+            transaction_body: body,
+            transaction_witness_set: KeepRaw::from(witness_set),
+            success: true,
+            auxiliary_data: Nullable::Some(KeepRaw::from(AuxiliaryData::PostAlonzo(
+                PostAlonzoAuxiliaryData {
+                    metadata: None,
+                    native_scripts: Some(vec![native.clone()]),
+                    plutus_scripts: Some(vec![plutus.clone()]),
+                },
+            ))),
+        };
+
+        let cbor = minicbor::to_vec(tx).unwrap();
+        let tx = MultiEraTx::decode(&cbor).unwrap();
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.start_block(1, vec![0xaa; 32], Some(1));
+        builder.add_tx_scripts(&tx);
+
+        let archive = builder.build();
+        let scripts: Vec<&[u8]> = archive
+            .iter()
+            .flat_map(|block| block.tags.iter())
+            .filter(|tag| tag.dimension == archive::SCRIPT)
+            .map(|tag| tag.key.as_slice())
+            .collect();
+
+        assert_eq!(
+            scripts,
+            vec![
+                native.compute_hash().as_slice(),
+                plutus.compute_hash().as_slice()
+            ]
+        );
+    }
+
+    /// Every script `/scripts` counts a valid tx for, past the reference
+    /// scripts of the outputs it produces, gets a tag: the collateral return's,
+    /// the witnesses' and the auxiliary data's, an auxiliary native script
+    /// under the hash of its bytes as written.
+    #[test]
+    fn every_listed_script_outside_the_outputs_gets_a_script_tag() {
+        use pallas::ledger::traverse::MultiEraTx;
+
+        let (tx, listed) = crate::roll::scripts::tests::every_place();
+        let produced = tx.outputs.len();
+        let cbor = tx.cbor();
+        let tx = MultiEraTx::decode(&cbor).unwrap();
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.start_block(1, vec![0xaa; 32], Some(1));
+        builder.add_tx_scripts(&tx);
+
+        let mut tagged: Vec<Vec<u8>> = builder
+            .build()
+            .iter()
+            .flat_map(|block| block.tags.iter())
+            .filter(|tag| tag.dimension == archive::SCRIPT)
+            .map(|tag| tag.key.clone())
+            .collect();
+        tagged.sort();
+
+        let mut expected: Vec<Vec<u8>> = listed[produced..].iter().map(|x| x.to_vec()).collect();
+        expected.sort();
+
+        assert_eq!(tagged, expected);
+    }
+
     /// Drive every tag-producing method on the builder once.
     ///
     /// This is the producer side of the registry: what a block turns into.
@@ -740,6 +935,16 @@ mod tests {
         let drep_update =
             Certificate::UpdateDRepCert(StakeCredential::AddrKeyhash(Hash::new([0x88; 28])), None);
         builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(drep_update))));
+
+        let committee_auth = Certificate::AuthCommitteeHot(
+            StakeCredential::AddrKeyhash(Hash::new([0x99; 28])),
+            StakeCredential::ScriptHash(Hash::new([0xaa; 28])),
+        );
+        builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(committee_auth))));
+        builder.add_votes(&BTreeMap::from([(
+            Voter::ConstitutionalCommitteeKey(Hash::new([0xaa; 28])),
+            BTreeMap::from([(gov_action(0xbb, 0), voting_procedure(Vote::Yes))]),
+        )]));
 
         // POOL_BLOCKS
         builder.add_block_issuer(&[0x88; 32]);
@@ -897,6 +1102,176 @@ mod tests {
             keys::encode(&DRepKey::from(&DRep::Key(hash))).as_slice(),
             key_id.as_slice()
         );
+    }
+
+    #[test]
+    fn committee_certificates_tag_the_cip129_cold_id() {
+        use pallas::ledger::primitives::{conway::Certificate, StakeCredential};
+        use std::borrow::Cow;
+
+        let hash = Hash::new([0x99; 28]);
+        let key = StakeCredential::AddrKeyhash(hash);
+        let script = StakeCredential::ScriptHash(hash);
+        let hot = StakeCredential::AddrKeyhash(Hash::new([0xaa; 28]));
+        let certs = [
+            Certificate::AuthCommitteeHot(key.clone(), hot.clone()),
+            Certificate::ResignCommitteeCold(key, None),
+            Certificate::AuthCommitteeHot(script.clone(), hot),
+            Certificate::ResignCommitteeCold(script, None),
+            Certificate::UpdateDRepCert(StakeCredential::AddrKeyhash(hash), None),
+            Certificate::StakeRegistration(StakeCredential::AddrKeyhash(hash)),
+        ];
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.start_block(100, vec![0; 32], Some(50));
+
+        for cert in certs {
+            builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(cert))));
+        }
+
+        let archive = builder.build();
+        let key_id = [&[0x12u8][..], hash.as_slice()].concat();
+        let script_id = [&[0x13u8][..], hash.as_slice()].concat();
+
+        assert_eq!(
+            sorted_keys(&archive[0], archive::COMMITTEE_CERTS),
+            [key_id.clone(), key_id, script_id.clone(), script_id]
+        );
+    }
+
+    #[test]
+    fn committee_votes_tag_once_per_block_and_exclude_dreps_and_pools() {
+        use pallas::ledger::traverse::MultiEraBlock;
+        use std::collections::BTreeMap;
+
+        let ballot = BTreeMap::from([
+            (gov_action(0xa0, 0), voting_procedure(Vote::Yes)),
+            (gov_action(0xa0, 1), voting_procedure(Vote::No)),
+        ]);
+        let committees = BTreeMap::from([
+            (
+                Voter::ConstitutionalCommitteeKey(Hash::new([0x01; 28])),
+                ballot.clone(),
+            ),
+            (
+                Voter::ConstitutionalCommitteeScript(Hash::new([0x02; 28])),
+                ballot.clone(),
+            ),
+        ]);
+        let other_voters = BTreeMap::from([
+            (Voter::DRepKey(Hash::new([0x03; 28])), ballot.clone()),
+            (Voter::DRepScript(Hash::new([0x04; 28])), ballot.clone()),
+            (Voter::StakePoolKey(Hash::new([0x05; 28])), ballot),
+        ]);
+        let mut body = empty_tx_body();
+        body.voting_procedures = Some(committees.clone());
+        let mut other_body = empty_tx_body();
+        other_body.voting_procedures = Some(other_voters);
+
+        let (_, raw) = dolos_testing::blocks::make_conway_block_with_txs(
+            100,
+            vec![
+                (body.clone(), true),
+                (body, true),
+                (other_body.clone(), true),
+            ],
+            None,
+        );
+        let block = MultiEraBlock::decode(&raw).unwrap();
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.index_block(&block, &std::collections::HashMap::new());
+
+        let (_, other_raw) =
+            dolos_testing::blocks::make_conway_block_with_tx(101, other_body, None, true);
+        let other_block = MultiEraBlock::decode(&other_raw).unwrap();
+        builder.index_block(&other_block, &std::collections::HashMap::new());
+
+        for (index, (voter, ballot)) in committees.into_iter().enumerate() {
+            builder.start_block(102 + index as u64, vec![0; 32], None);
+            builder.add_votes(&BTreeMap::from([(voter, ballot)]));
+        }
+
+        let archive = builder.build();
+        assert_eq!(
+            sorted_keys(&archive[0], archive::COMMITTEE_VOTES),
+            [b"committee".to_vec()]
+        );
+        assert_eq!(sorted_keys(&archive[0], archive::VOTER_VOTES).len(), 5);
+        assert_eq!(sorted_keys(&archive[0], archive::ACTION_VOTES).len(), 2);
+        assert!(sorted_keys(&archive[1], archive::COMMITTEE_VOTES).is_empty());
+        assert_eq!(sorted_keys(&archive[1], archive::VOTER_VOTES).len(), 3);
+        for block in &archive[2..] {
+            assert_eq!(
+                sorted_keys(block, archive::COMMITTEE_VOTES),
+                [b"committee".to_vec()]
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_transactions_keep_committee_certificate_and_vote_candidates() {
+        use pallas::codec::utils::NonEmptySet;
+        use pallas::ledger::primitives::{conway::Certificate, StakeCredential};
+        use pallas::ledger::traverse::MultiEraBlock;
+        use std::collections::BTreeMap;
+
+        let hash = Hash::new([0x99; 28]);
+        let key = StakeCredential::AddrKeyhash(hash);
+        let script = StakeCredential::ScriptHash(hash);
+        let hot = StakeCredential::AddrKeyhash(Hash::new([0xaa; 28]));
+        let mut body = empty_tx_body();
+        body.certificates = Some(
+            NonEmptySet::try_from(vec![
+                Certificate::AuthCommitteeHot(key.clone(), hot.clone()),
+                Certificate::ResignCommitteeCold(key, None),
+                Certificate::AuthCommitteeHot(script.clone(), hot),
+                Certificate::ResignCommitteeCold(script, None),
+            ])
+            .unwrap(),
+        );
+        let ballot = BTreeMap::from([(gov_action(0xbb, 0), voting_procedure(Vote::Yes))]);
+        body.voting_procedures = Some(BTreeMap::from([
+            (
+                Voter::ConstitutionalCommitteeKey(Hash::new([0xaa; 28])),
+                ballot.clone(),
+            ),
+            (
+                Voter::ConstitutionalCommitteeScript(Hash::new([0xaa; 28])),
+                ballot,
+            ),
+        ]));
+
+        for valid in [true, false] {
+            let (_, raw) =
+                dolos_testing::blocks::make_conway_block_with_tx(100, body.clone(), None, valid);
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            assert_eq!(block.txs()[0].is_valid(), valid);
+            let mut builder = CardanoIndexDeltaBuilder::new();
+            builder.index_block(&block, &std::collections::HashMap::new());
+            let archive = builder.build();
+            let key_id = [&[0x12u8][..], hash.as_slice()].concat();
+            let script_id = [&[0x13u8][..], hash.as_slice()].concat();
+
+            assert_eq!(
+                sorted_keys(&archive[0], archive::COMMITTEE_CERTS),
+                [key_id.clone(), key_id, script_id.clone(), script_id]
+            );
+            assert_eq!(
+                sorted_keys(&archive[0], archive::COMMITTEE_VOTES),
+                [b"committee".to_vec()]
+            );
+            assert_eq!(
+                sorted_keys(&archive[0], archive::VOTER_VOTES),
+                [
+                    [&[0x02u8][..], &[0xaa; 28]].concat(),
+                    [&[0x03u8][..], &[0xaa; 28]].concat(),
+                ]
+            );
+            assert_eq!(
+                sorted_keys(&archive[0], archive::ACTION_VOTES),
+                [keys::encode(&ProposalKey::new(Hash::new([0xbb; 32]), 0)).to_vec()]
+            );
+        }
     }
 
     /// The dimension registry has to hold every dimension this builder emits.

@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use dolos_cardano::{CardanoDelta, CardanoLogic, CardanoWorkUnit};
 use dolos_core::{
+    builtin::NoDiskTier,
     config::{CardanoConfig, FjallStateConfig, StorageConfig, SyncConfig},
     BootstrapExt, ChainLogic, Domain, DomainError, Genesis, MempoolError, MempoolEvent,
     MempoolStore, MempoolTx, MempoolTxStage, StateStore as CoreStateStore, TipEvent,
@@ -136,6 +137,7 @@ pub struct HarnessDomain {
     sync_config: SyncConfig,
     genesis: Arc<Genesis>,
     query_limiter: QueryLimiter,
+    cache: TieredCache<NoDiskTier>,
 }
 
 impl Domain for HarnessDomain {
@@ -148,6 +150,7 @@ impl Domain for HarnessDomain {
     type WorkUnit = CardanoWorkUnit;
     type TipSubscription = StubTipSubscription;
     type Mempool = Mempool;
+    type Cache = TieredCache<NoDiskTier>;
 
     fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
@@ -189,6 +192,10 @@ impl Domain for HarnessDomain {
         &self.mempool
     }
 
+    fn cache(&self) -> &Self::Cache {
+        &self.cache
+    }
+
     fn watch_tip(&self, _from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {
         Ok(StubTipSubscription)
     }
@@ -217,16 +224,21 @@ impl LedgerHarness {
         let chain = CardanoLogic::initialize::<HarnessDomain>(config.chain, &state, &genesis)?;
 
         // 4. Assemble domain
+        let storage_config = StorageConfig::default();
+        let query_limiter = QueryLimiter::default();
+        let cache = TieredCache::memory(&storage_config.cache, query_limiter.clone());
+
         let domain = HarnessDomain {
             wal: dolos_redb3::wal::RedbWalStore::memory()?,
             chain: Arc::new(RwLock::new(chain)),
             state,
             archive: dolos_core::builtin::NoOpArchiveStore,
             mempool: Mempool {},
-            storage_config: StorageConfig::default(),
+            storage_config,
             sync_config: SyncConfig::default(),
             genesis,
-            query_limiter: QueryLimiter::default(),
+            query_limiter,
+            cache,
         };
 
         // 5. Bootstrap (integrity check + drain pending work)

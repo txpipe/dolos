@@ -8,11 +8,12 @@ use axum::{
     http::{HeaderMap, Method, Request, StatusCode},
     Router,
 };
+use dolos_cardano::periods::stats::TOTALS;
 use dolos_core::{
-    config::{CardanoConfig, MinibfConfig},
+    config::{CacheConfig, CardanoConfig, MinibfConfig, SyncConfig},
     import::ImportExt as _,
-    ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _, ChainPoint, Domain, RawBlock,
-    StateStore,
+    ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _, CacheStore as _, ChainPoint, Domain,
+    RawBlock, StateStore,
 };
 use dolos_testing::{
     synthetic::{
@@ -225,7 +226,7 @@ pub mod first_mint_policies {
 /// what first-mint order has to get right: several mints in one tx, several
 /// policies in one block and in one tx, re-mints within and across epochs, a
 /// full burn minted again, a repeat across the txs of one block, a policy
-/// sharing another's staged-key prefix, and an epoch with more first mints than
+/// sharing another's group-key prefix, and an epoch with more first mints than
 /// a sealed chunk holds. The tip's epoch seals epochs 2 to 5 and leaves 6 and 7
 /// staged.
 pub fn first_mint_chain() -> SyntheticBlockConfig {
@@ -407,8 +408,19 @@ pub struct TestDomainBuilder {
 }
 
 impl TestDomainBuilder {
-    pub fn new_with_synthetic(mut cfg: SyntheticBlockConfig) -> Self {
-        let genesis = Arc::new(dolos_cardano::include::preview::load());
+    pub fn new_with_synthetic(cfg: SyntheticBlockConfig) -> Self {
+        Self::new_with_synthetic_and_protocol(cfg, None)
+    }
+
+    pub fn new_with_synthetic_and_protocol(
+        mut cfg: SyntheticBlockConfig,
+        force_protocol: Option<usize>,
+    ) -> Self {
+        let mut genesis = dolos_cardano::include::preview::load();
+        if let Some(protocol) = force_protocol {
+            genesis.force_protocol = Some(protocol);
+        }
+        let genesis = Arc::new(genesis);
         let min_slot = {
             let temp = ToyDomain::new_with_genesis_and_config(
                 genesis.clone(),
@@ -494,6 +506,19 @@ impl TestApp {
         Self::new_with_cfg_and_fault(cfg, None)
     }
 
+    /// Customize the app beyond what the `new_*` constructors cover (e.g.
+    /// forcing the bootstrap protocol version). Defaults match [`Self::new`].
+    pub fn builder() -> TestAppBuilder {
+        TestAppBuilder {
+            cfg: SyntheticBlockConfig {
+                block_count: 5,
+                txs_per_block: 3,
+                ..Default::default()
+            },
+            force_protocol: None,
+        }
+    }
+
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         Self::from_domain(domain, Some(vectors), fault, None)
@@ -506,6 +531,16 @@ impl TestApp {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         setup(&domain, &vectors);
         Self::from_domain(domain, Some(vectors), None, None)
+    }
+
+    /// App over `cfg`'s chain on the domain `adjust` returns, for a domain
+    /// configured otherwise than the default.
+    pub fn new_with_cfg_and_domain(
+        cfg: SyntheticBlockConfig,
+        adjust: impl FnOnce(ToyDomain) -> ToyDomain,
+    ) -> Self {
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        Self::from_domain(adjust(domain), Some(vectors), None, None)
     }
 
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
@@ -571,7 +606,6 @@ impl TestApp {
         let facade = Facade {
             inner: domain,
             config: cfg,
-            cache: crate::cache::CacheService::default(),
         };
 
         let router = build_router_with_facade(facade.clone());
@@ -653,6 +687,17 @@ impl TestApp {
             .expect("app built from synthetic blocks")
     }
 
+    /// The entries the totals cache holds in memory, if it is registered.
+    pub fn cache_entries(&self) -> Option<u64> {
+        let stats = self.facade.inner.cache().stats().expect("cache stats");
+
+        stats
+            .namespaces
+            .iter()
+            .find(|ns| ns.name == TOTALS.name)
+            .map(|ns| ns.memory.entries)
+    }
+
     /// Epoch at the domain's tip. Only usable on fault-free apps — fault
     /// wrappers make the underlying state reads fail.
     pub fn tip_epoch(&self) -> u64 {
@@ -716,7 +761,7 @@ pub async fn health_beside(app: &TestApp, path: &str) -> StatusCode {
 /// Writes `copies` copies of every account and every pool under new keys, so
 /// that a scan of either reads several chunks. The account copies keep the
 /// delegations of the originals.
-pub fn replicate_accounts_and_pools(domain: &ToyDomain, copies: u8) {
+pub fn replicate_accounts_and_pools<D: Domain>(domain: &D, copies: u8) {
     use dolos_cardano::{
         model::{AccountState, PoolState},
         AccountKey, PoolKey,
@@ -776,4 +821,80 @@ pub fn replicated_app_with_fault(fault: Option<TestFault>) -> TestApp {
     replicate_accounts_and_pools(&domain, 4);
 
     TestApp::from_domain(domain, Some(vectors), fault, None)
+}
+
+/// The body of a totals route with the totals cache off, then on and keeping
+/// every entry, missed and hit, over [`stake_address_chain`], whose first
+/// epochs are sealed and last staged. The miss must keep its entry.
+pub async fn totals_bodies(path: impl Fn(&SyntheticVectors) -> String) -> [Vec<u8>; 3] {
+    let mut sync = SyncConfig::default();
+    sync.max_history = Some(1_000);
+
+    let off = TestApp::new_with_cfg_and_domain(stake_address_chain(), |domain| {
+        domain.with_sync_config(sync)
+    });
+
+    let cache = CacheConfig {
+        admission: [(TOTALS.name.to_string(), 0)].into(),
+        ..CacheConfig::default()
+    };
+
+    let on = TestApp::new_with_cfg_and_domain(stake_address_chain(), |domain| {
+        domain.with_cache_config(cache)
+    });
+
+    let off_body = ok_body(&off, &path(off.vectors())).await;
+    assert!(off.cache_entries().is_none(), "the totals cache is on");
+
+    let path = path(on.vectors());
+
+    let miss = ok_body(&on, &path).await;
+    assert_eq!(
+        on.cache_entries(),
+        Some(1),
+        "{path}: the miss kept no entry"
+    );
+
+    let hit = ok_body(&on, &path).await;
+    assert_eq!(on.cache_entries(), Some(1), "{path}");
+
+    [off_body, miss, hit]
+}
+
+async fn ok_body(app: &TestApp, path: &str) -> Vec<u8> {
+    let (status, bytes) = app.get_bytes(path).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{path}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    bytes
+}
+
+pub struct TestAppBuilder {
+    cfg: SyntheticBlockConfig,
+    force_protocol: Option<usize>,
+}
+
+impl TestAppBuilder {
+    pub fn with_cfg(mut self, cfg: SyntheticBlockConfig) -> Self {
+        self.cfg = cfg;
+        self
+    }
+
+    pub fn with_protocol(mut self, protocol: usize) -> Self {
+        self.force_protocol = Some(protocol);
+        self
+    }
+
+    pub fn build(self) -> TestApp {
+        let (domain, vectors) =
+            TestDomainBuilder::new_with_synthetic_and_protocol(self.cfg, self.force_protocol)
+                .finish();
+
+        TestApp::from_domain(domain, Some(vectors), None, None)
+    }
 }

@@ -41,7 +41,11 @@
 mod node;
 mod watcher;
 
-use dolos_cardano::indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta};
+use dolos_cardano::{
+    indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta},
+    periods::stats,
+    AccountKey, AccountStats, AddressKey, AddressStats,
+};
 use dolos_core::{
     ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, StateStore,
     StateWriter as _, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
@@ -50,7 +54,7 @@ use dolos_snapshot::{
     is_state_kind,
     restore::{self, default_budget, progress_path_in, Budget, Checkpoint},
     state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL, KINDS,
-    NAMESPACES, STATE_KINDS, UTXOS,
+    LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::{
     faults::{FaultyStateStore, TestFault},
@@ -737,6 +741,109 @@ fn a_restored_node_is_the_node_it_came_from_on_fjall() {
     roundtrip::<FjallStores>();
 }
 
+/// The address and account totals of every key the harness's stats name.
+fn stats_totals<B: ToyStores>(
+    domain: &ToyDomain<B>,
+    addresses: &[AddressKey],
+    accounts: &[AccountKey],
+) -> Vec<AddressStats> {
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain<B>>(domain.state()).unwrap();
+    let epochs = || 0..=2;
+
+    let mut out: Vec<_> = addresses
+        .iter()
+        .map(|key| stats::address_totals(domain, &chain, epochs(), key).unwrap())
+        .collect();
+
+    out.extend(
+        accounts
+            .iter()
+            .map(|key| stats::account_totals(domain, &chain, epochs(), key).unwrap()),
+    );
+
+    out
+}
+
+/// A restored store answers the totals endpoints as the node it came from,
+/// with its stats staged in the state tip and with them sealed into logs.
+fn stats_survive_a_restore<B: ToyStores>() {
+    for seal in [false, true] {
+        let domain: ToyDomain<B> = harness();
+
+        let addresses: Vec<AddressKey> = domain
+            .state()
+            .iter_entities_typed::<AddressStats>(None)
+            .unwrap()
+            .map(|row| row.unwrap().0 .1)
+            .collect();
+
+        let accounts: Vec<AccountKey> = domain
+            .state()
+            .iter_entities_typed::<AccountStats>(None)
+            .unwrap()
+            .map(|row| row.unwrap().0 .1)
+            .collect();
+
+        assert!(!accounts.is_empty(), "the fixture moved no staked value");
+
+        let before = stats_totals(&domain, &addresses, &accounts);
+        assert!(before.iter().all(|totals| totals.tx_count > 0));
+
+        if seal {
+            let chain =
+                dolos_cardano::eras::load_era_summary::<ToyDomain<B>>(domain.state()).unwrap();
+
+            dolos_cardano::periods::seal_staged::<ToyDomain<B>>(
+                domain.state(),
+                domain.archive(),
+                &chain,
+                &domain.genesis(),
+                2,
+            )
+            .unwrap();
+
+            let staged = domain
+                .state()
+                .iter_entities_typed::<AddressStats>(None)
+                .unwrap()
+                .count();
+            assert_eq!(staged, 0, "epoch 0 did not seal");
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        export_to(temp.path(), &domain);
+
+        let blank = Blank::<B>::open();
+        restore_into(temp.path(), magic_of(&domain), &blank, default_budget()).unwrap();
+
+        // a domain over the restored stores; the genesis it applies writes no
+        // stats
+        let restored = ToyDomain::with_stores(
+            domain.genesis(),
+            Default::default(),
+            None,
+            None,
+            blank.stores,
+        );
+
+        assert_eq!(
+            stats_totals(&restored, &addresses, &accounts),
+            before,
+            "sealed: {seal}"
+        );
+    }
+}
+
+#[test]
+fn a_restored_store_answers_the_totals_on_memory() {
+    stats_survive_a_restore::<MemoryStores>();
+}
+
+#[test]
+fn a_restored_store_answers_the_totals_on_fjall() {
+    stats_survive_a_restore::<FjallStores>();
+}
+
 /// Every segment file under `archive` is nothing but zstd frames for the
 /// bundled dictionary, and every body the store answers with is one of them.
 fn assert_segments_are_frames<A: ArchiveStore>(archive: &std::path::Path, store: &A) {
@@ -1008,11 +1115,7 @@ fn assert_archive_matches<A: ArchiveStore>(restored: &A, original: &A) {
 
     let mut any = false;
 
-    for ns in NAMESPACES {
-        if ns == UTXOS {
-            continue;
-        }
-
+    for ns in LOG_NAMESPACES {
         let left = logs_of(restored, ns);
         let right = logs_of(original, ns);
 
@@ -1899,8 +2002,8 @@ fn max_history_selects_epochs_and_never_the_tip() {
     for max_history in [None, Some(0), Some(u64::MAX)] {
         let plan = restore::plan(&stele, magic_of(&domain), max_history).unwrap();
 
-        // Keyed by namespace now, so the tip is twenty-six entries and every
-        // layer under them.
+        // Keyed by namespace now, so the tip is one entry per state kind and
+        // every layer under them.
         assert_eq!(plan.state.len(), STATE_KINDS.len(), "{max_history:?}");
         assert_eq!(
             plan.tip_layers().count(),

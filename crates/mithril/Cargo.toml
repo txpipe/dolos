@@ -5,8 +5,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-dolos-core = { path = "../core" }
-
 tracing.workspace = true
 
 # `rustls-no-provider` keeps reqwest's hard-wired aws-lc-rs crypto provider

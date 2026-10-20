@@ -15,7 +15,7 @@ use crate::{
     pallas_extras::{self, stake_cred_to_drep},
     roll::BlockVisitor,
     DRepActivity, DRepAnchorUpdate, DRepDormancyRelease, DRepExpiryUpdate, DRepKey,
-    DRepRegistration, DRepUnRegistration, GovDormancyReset, PParamsSet,
+    DRepRegistration, DRepSighting, DRepUnRegistration, GovDormancyReset, PParamsSet,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -24,6 +24,27 @@ fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
             conway::Certificate::RegDRepCert(cert, _, _) => Some(stake_cred_to_drep(cert)),
             conway::Certificate::UnRegDRepCert(cert, _) => Some(stake_cred_to_drep(cert)),
             conway::Certificate::UpdateDRepCert(cert, _) => Some(stake_cred_to_drep(cert)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The DRep a certificate puts on chain, as db-sync's `drep_hash` records it:
+/// the target of a vote delegation or the subject of a DRep certificate.
+fn cert_sighting(cert: &MultiEraCert) -> Option<DRep> {
+    pallas_extras::cert_as_vote_delegation(cert)
+        .map(|delegation| delegation.drep)
+        .or_else(|| cert_drep(cert))
+}
+
+/// The anchor a DRep registration or update carries; db-sync serves the
+/// latest one as the DRep's metadata.
+fn cert_anchor(cert: &MultiEraCert) -> Option<conway::Anchor> {
+    match &cert {
+        MultiEraCert::Conway(conway) => match conway.deref().deref() {
+            conway::Certificate::RegDRepCert(_, _, anchor) => anchor.clone(),
+            conway::Certificate::UpdateDRepCert(_, anchor) => anchor.clone(),
             _ => None,
         },
         _ => None,
@@ -79,6 +100,9 @@ pub struct DRepStateVisitor {
     protocol: u16,
     drep_activity: Option<u64>,
     dormancy: DormancyContext,
+    // position of the next certificate within the current tx; the crawl
+    // visits a tx before its certificates, in body order
+    cert_index: usize,
 }
 
 impl DRepStateVisitor {
@@ -143,6 +167,8 @@ impl BlockVisitor for DRepStateVisitor {
         tx: &MultiEraTx,
         _: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
+        self.cert_index = 0;
+
         let MultiEraTx::Conway(conway_tx) = tx else {
             return Ok(());
         };
@@ -225,6 +251,16 @@ impl BlockVisitor for DRepStateVisitor {
                 resign.anchor,
                 block.slot(),
             ));
+        }
+
+        let cert_index = self.cert_index;
+        self.cert_index += 1;
+
+        // Sightings mirror db-sync's `drep_hash` rows, which db-sync only
+        // writes for certs of valid txs, the only certs the crawl visits.
+        if let Some(drep) = cert_sighting(cert) {
+            let at = (block.slot(), *order, cert_index);
+            deltas.add_for_entity(DRepSighting::new(drep, at, cert_anchor(cert)));
         }
 
         let Some(drep) = cert_drep(cert) else {
@@ -311,5 +347,90 @@ mod tests {
         let targets = dormancy.release_targets();
 
         assert_eq!(targets, vec![key(1), key(2), key(3)]);
+    }
+
+    mod sightings {
+        use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+        use pallas::ledger::primitives::{conway::Certificate, StakeCredential};
+
+        use super::*;
+        use crate::DRepSightingState;
+
+        const REGISTERED: [u8; 28] = [0xd1; 28];
+        // named by one tx, the larger key first: certificate order and key
+        // order disagree
+        const NAMED_FIRST: [u8; 28] = [0xd5; 28];
+        const NAMED_SECOND: [u8; 28] = [0xd4; 28];
+
+        fn delegation(target: [u8; 28]) -> Certificate {
+            Certificate::VoteDeleg(
+                StakeCredential::AddrKeyhash([0xee; 28].into()),
+                DRep::Key(target.into()),
+            )
+        }
+
+        /// One block of two txs. Every synthetic tx registers `REGISTERED` in
+        /// its certificate 3 and delegates to it in its certificate 4; extra
+        /// certificates follow from 5 on. Tx 0 also delegates to
+        /// `NAMED_FIRST` and then `NAMED_SECOND`.
+        fn block() -> Vec<u8> {
+            let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+                block_count: 1,
+                txs_per_block: 2,
+                drep_keyhash: REGISTERED,
+                extra_certs_by_block: vec![vec![vec![
+                    delegation(NAMED_FIRST),
+                    delegation(NAMED_SECOND),
+                ]]],
+                ..Default::default()
+            });
+
+            blocks[0].to_vec()
+        }
+
+        fn key(hash: [u8; 28]) -> DRepKey {
+            DRepKey::from(DRep::Key(hash.into()))
+        }
+
+        /// Each sighting the roll records carries its certificate's place in
+        /// its transaction.
+        #[test]
+        fn roll_sightings_carry_the_certificate_position() {
+            let raw = block();
+            let block = MultiEraBlock::decode(&raw).unwrap();
+
+            let mut visitor = DRepStateVisitor::default();
+            let mut deltas = WorkDeltas::default();
+
+            for (order, tx) in block.txs().iter().enumerate() {
+                visitor
+                    .visit_tx(&mut deltas, &block, tx, &HashMap::new())
+                    .unwrap();
+
+                for cert in tx.certs() {
+                    visitor
+                        .visit_cert(&mut deltas, &block, tx, &order, &cert)
+                        .unwrap();
+                }
+            }
+
+            let first_seen = |hash: [u8; 28]| {
+                let ns_key = dolos_core::NsKey::of::<DRepSightingState>(&key(hash));
+
+                deltas.entities[&ns_key]
+                    .iter()
+                    .filter_map(|delta| match delta {
+                        crate::CardanoDelta::DRepSighting(sighting) => Some(sighting.at),
+                        _ => None,
+                    })
+                    .min()
+            };
+
+            let slot = block.slot();
+
+            assert_eq!(first_seen(REGISTERED), Some((slot, 0, 3)));
+            assert_eq!(first_seen(NAMED_FIRST), Some((slot, 0, 5)));
+            assert_eq!(first_seen(NAMED_SECOND), Some((slot, 0, 6)));
+        }
     }
 }

@@ -265,7 +265,10 @@ mod tests {
             chain_summary: ChainSummary::default(),
             genesis: domain.genesis(),
             avvm_reclamation: Default::default(),
+            owners: Default::default(),
+            tally_protocol: EraKey::from(9),
             deltas: Default::default(),
+            active_stake: None,
         }
     }
 

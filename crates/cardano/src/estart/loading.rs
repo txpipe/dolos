@@ -9,12 +9,12 @@
 //! `AvvmReclamation::at_boundary`, which the work unit hoists into
 //! `initialize`.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{ChainError, Domain, Genesis, RangeOf, StateStore};
 
 use crate::{
-    estart::{avvm::AvvmReclamation, BoundaryVisitor as _, WorkContext},
+    estart::{avvm::AvvmReclamation, stake, BoundaryVisitor as _, PoolOwners, WorkContext},
     gov_from_conway_genesis, load_era_summary,
     roll::WorkDeltas,
     AccountKey, AccountState, DRepState, EStartProgress, EraKey, GovGenesisInit, PoolState,
@@ -111,6 +111,7 @@ impl WorkContext {
         let ended_state = crate::load_epoch::<D>(state)?;
         let chain_summary = load_era_summary::<D>(state)?;
         let active_protocol = EraKey::from(chain_summary.edge().protocol);
+        let tally_protocol = stake::tally_protocol(&ended_state, active_protocol);
 
         Ok(Self {
             ended_state,
@@ -118,7 +119,10 @@ impl WorkContext {
             active_protocol,
             genesis,
             avvm_reclamation,
+            owners: Default::default(),
+            tally_protocol,
             deltas: WorkDeltas::default(),
+            active_stake: None,
         })
     }
 
@@ -135,10 +139,11 @@ impl WorkContext {
         Ok(ctx)
     }
 
-    /// Iterate accounts in this shard's two ranges and emit
-    /// `AccountTransition` deltas via the snapshot-rotation visitor.
-    /// Closes by emitting `EStartProgress` to advance
-    /// `EpochState.estart_progress`.
+    /// Iterate accounts in this shard's two ranges, emit
+    /// `AccountTransition` deltas via the snapshot-rotation visitor and
+    /// tally the stake distribution being frozen. Closes by emitting
+    /// `EStartProgress`, which advances `EpochState.estart_progress` and
+    /// carries the shard's tally.
     fn compute_shard_deltas<D: Domain>(
         &mut self,
         state: &D::State,
@@ -147,6 +152,7 @@ impl WorkContext {
         total_shards: u32,
     ) -> Result<(), ChainError> {
         let mut visitor_reset = super::reset::BoundaryVisitor;
+        let mut tally = BTreeMap::new();
 
         for range in ranges {
             let accounts = state.iter_entities_typed::<AccountState>(Some(range))?;
@@ -154,27 +160,30 @@ impl WorkContext {
             for record in accounts {
                 let (account_id, account) = record?;
                 visitor_reset.visit_account(self, &account_id, &account)?;
+                self.tally_account(&mut tally, &account);
             }
         }
 
-        self.add_delta(EStartProgress::new(shard_index, total_shards));
+        self.add_delta(EStartProgress::new(shard_index, total_shards, tally));
 
         Ok(())
     }
 
     /// Load + compute for a per-shard Estart phase: build a fresh
-    /// context (no global iteration) using a precomputed AVVM reclamation
-    /// total (hoisted into the work unit's `initialize`) and run the
-    /// per-shard account branch.
+    /// context (no global iteration) using the AVVM reclamation total and
+    /// the pool owners precomputed in the work unit's `initialize`, and run
+    /// the per-shard account branch.
     pub fn load_shard<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
         avvm_reclamation: AvvmReclamation,
+        owners: Arc<PoolOwners>,
         shard_index: u32,
         total_shards: u32,
         ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<Self, ChainError> {
         let mut ctx = Self::new_empty_with_avvm::<D>(state, genesis, avvm_reclamation)?;
+        ctx.owners = owners;
         ctx.compute_shard_deltas::<D>(state, ranges, shard_index, total_shards)?;
         Ok(ctx)
     }
