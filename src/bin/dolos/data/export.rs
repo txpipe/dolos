@@ -177,7 +177,7 @@ pub fn run(
         | ArchiveStoreBackend::LogsOnly(_)
         | ArchiveStoreBackend::Fjall(_) => {}
         ArchiveStoreBackend::NoOp(_) => {
-            bail!("export command is not available for noop archive backend")
+            bail!("`history.mode = \"none\"` keeps no archive to export")
         }
     }
 

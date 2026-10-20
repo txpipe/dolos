@@ -1126,7 +1126,7 @@ fn committee_hot_credentials<D: Domain>(
 /// The certificate scan and the vote scan share one limit for reads of block
 /// bodies. Both scans use the same state tip.
 /// The function omits votes from missing block bodies under
-/// `sync.max_history`.
+/// rolling history.
 fn committee_vote_rows<D: Domain>(
     domain: &D,
     query: &CommitteeVoteQuery,
@@ -1637,7 +1637,7 @@ fn voter_casts_in_block(block: &MultiEraBlock, voter: &Voter) -> Vec<CastVote> {
 ///
 /// A block that the archive no longer holds leaves the list, and the votes
 /// after it move up. The other history endpoints do the same under
-/// `sync.max_history`.
+/// rolling history.
 pub(crate) fn voter_casts<D: Domain>(
     domain: &D,
     voter: &Voter,
@@ -1819,7 +1819,7 @@ fn collect_block_rows<T>(
         let body = fetch(slot);
 
         // A block that the archive no longer has leaves the list. The other
-        // history endpoints do the same under `sync.max_history`.
+        // history endpoints do the same under rolling history.
         let Some(body) = body.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? else {
             continue;
         };
@@ -2543,7 +2543,7 @@ fn read_at_stable_cursor<T>(
 /// the proposal. The function reads blocks only until the page is full, and
 /// at most `budget` of them. A block that the archive no longer holds leaves
 /// the list, and the votes after it move up, like the other history endpoints
-/// under `sync.max_history`.
+/// under rolling history.
 ///
 /// Only the newest vote of a voter can count, and the proposal's state row
 /// holds that vote's position (`VoteEntry`), so only the rows on the page pay
@@ -4442,7 +4442,7 @@ mod tests {
 
     /// A pruned block takes its votes out of the listing, and the retained
     /// votes move up to fill the pages. The other history endpoints return
-    /// the same under `sync.max_history`.
+    /// the same under rolling history.
     ///
     /// The test prunes the archive to one slot. Only the last block remains.
     /// The three votes of block 1 are gone. The one vote of block 2 is the
@@ -5658,7 +5658,7 @@ mod tests {
 
     /// A pruned block takes its votes out of the listing, and the retained
     /// votes move up to fill the pages. The other history endpoints return
-    /// the same under `sync.max_history`.
+    /// the same under rolling history.
     ///
     /// The test prunes the archive to one slot. Only the last block remains.
     /// The three votes of the first three vote blocks are gone. The one vote

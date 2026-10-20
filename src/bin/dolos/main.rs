@@ -76,6 +76,19 @@ enum Command {
     Minikupo(minikupo::Args),
 }
 
+impl Command {
+    /// `init` and `doctor reset-genesis` write a custom network's genesis
+    /// files, so they run before those files exist.
+    fn writes_genesis(&self) -> bool {
+        match self {
+            #[cfg(feature = "utils")]
+            Command::Init(_) => true,
+            Command::Doctor(args) => args.writes_genesis(),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[clap(name = "Dolos")]
 #[clap(bin_name = "dolos")]
@@ -95,9 +108,17 @@ fn main() -> Result<()> {
 
     let args = Cli::parse();
 
-    let config = crate::common::load_config(&args.config)
-        .map_err(crate::common::config_report)
-        .context("parsing configuration");
+    // A custom network's genesis is checked before any command that could
+    // touch a store, since several of them clear data before they need it.
+    let config = crate::common::load_config(args.config.as_deref())
+        .map_err(miette::Report::from_err)
+        .and_then(|config| {
+            if !args.command.writes_genesis() {
+                crate::common::check_network(&config)?;
+            }
+            Ok(config)
+        })
+        .context("loading configuration");
 
     let feedback = crate::feedback::Feedback::default();
 

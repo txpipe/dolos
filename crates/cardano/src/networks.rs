@@ -2,7 +2,10 @@
 
 use std::{fmt::Display, path::Path};
 
-use dolos_core::{ChainError, Genesis};
+use dolos_core::{
+    config::{CardanoConfig, ChainConfig, CustomUtxo, GenesisConfig},
+    ChainError, Genesis,
+};
 
 use crate::include;
 
@@ -42,7 +45,8 @@ pub struct KnownNetwork {
     pub mithril: Mithril,
     pub stelae: Stelae,
     load_genesis: fn() -> Genesis,
-    save_genesis: fn(&Path) -> std::io::Result<()>,
+    /// The embedded Byron, Shelley, Alonzo and Conway files.
+    genesis_files: [&'static [u8]; 4],
 }
 
 const OFFICIAL_STELAE_USER: &str = "stelae";
@@ -80,7 +84,12 @@ pub static MAINNET: KnownNetwork = KnownNetwork {
         user: OFFICIAL_STELAE_USER,
     },
     load_genesis: include::mainnet::load,
-    save_genesis: include::mainnet::save,
+    genesis_files: [
+        include::mainnet::BYRON,
+        include::mainnet::SHELLEY,
+        include::mainnet::ALONZO,
+        include::mainnet::CONWAY,
+    ],
 };
 
 pub static PREPROD: KnownNetwork = KnownNetwork {
@@ -109,7 +118,12 @@ pub static PREPROD: KnownNetwork = KnownNetwork {
         user: OFFICIAL_STELAE_USER,
     },
     load_genesis: include::preprod::load,
-    save_genesis: include::preprod::save,
+    genesis_files: [
+        include::preprod::BYRON,
+        include::preprod::SHELLEY,
+        include::preprod::ALONZO,
+        include::preprod::CONWAY,
+    ],
 };
 
 pub static PREVIEW: KnownNetwork = KnownNetwork {
@@ -138,7 +152,12 @@ pub static PREVIEW: KnownNetwork = KnownNetwork {
         user: OFFICIAL_STELAE_USER,
     },
     load_genesis: include::preview::load,
-    save_genesis: include::preview::save,
+    genesis_files: [
+        include::preview::BYRON,
+        include::preview::SHELLEY,
+        include::preview::ALONZO,
+        include::preview::CONWAY,
+    ],
 };
 
 static ALL: [&KnownNetwork; 3] = [&MAINNET, &PREPROD, &PREVIEW];
@@ -168,7 +187,35 @@ impl KnownNetwork {
 
     /// Writes the embedded genesis files into `root`.
     pub fn save_genesis(&self, root: &Path) -> std::io::Result<()> {
-        (self.save_genesis)(root)
+        self.save_genesis_to(&GenesisConfig::in_dir(root))
+    }
+
+    /// Writes the embedded genesis files to `files`' paths, creating their
+    /// directories.
+    pub fn save_genesis_to(&self, files: &GenesisConfig) -> std::io::Result<()> {
+        let paths = [
+            &files.byron_path,
+            &files.shelley_path,
+            &files.alonzo_path,
+            &files.conway_path,
+        ];
+
+        let named = |path: &Path| {
+            let path = path.display().to_string();
+            move |error: std::io::Error| {
+                std::io::Error::new(error.kind(), format!("{path}: {error}"))
+            }
+        };
+
+        for (path, bytes) in paths.into_iter().zip(self.genesis_files) {
+            if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).map_err(named(dir))?;
+            }
+
+            std::fs::write(path, bytes).map_err(named(path))?;
+        }
+
+        Ok(())
     }
 }
 
@@ -193,6 +240,89 @@ pub fn validate_custom(magic: u32, genesis: &Genesis) -> Result<(), ChainError> 
     }
 
     Ok(())
+}
+
+/// A configured `[chain]`: a network from the catalog, or a custom one.
+#[derive(Debug, Clone, Copy)]
+pub enum ResolvedNetwork<'a> {
+    Known(&'static KnownNetwork),
+    Custom(&'a CardanoConfig),
+}
+
+impl<'a> ResolvedNetwork<'a> {
+    /// Looks `chain.network` up in the catalog; an unknown name lists it.
+    pub fn resolve(chain: &'a ChainConfig) -> Result<Self, ChainError> {
+        if let Some(cardano) = chain.cardano.as_ref().filter(|_| chain.is_custom()) {
+            return Ok(Self::Custom(cardano));
+        }
+
+        KnownNetwork::by_name(&chain.network)
+            .map(Self::Known)
+            .ok_or_else(|| ChainError::UnknownNetwork {
+                name: chain.network.clone(),
+                known: KnownNetwork::all()
+                    .iter()
+                    .map(|network| format!("`{}`", network.name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })
+    }
+
+    pub fn known(&self) -> Option<&'static KnownNetwork> {
+        match self {
+            Self::Known(network) => Some(network),
+            Self::Custom(_) => None,
+        }
+    }
+
+    pub fn magic(&self) -> u64 {
+        match self {
+            Self::Known(network) => network.magic.into(),
+            Self::Custom(cardano) => cardano.magic.into(),
+        }
+    }
+
+    pub fn is_testnet(&self) -> bool {
+        match self {
+            Self::Known(network) => network.is_testnet,
+            Self::Custom(cardano) => cardano.is_testnet,
+        }
+    }
+
+    /// The peer an `[upstream]` without `peer_address` syncs from.
+    pub fn default_peer(&self) -> Option<&'static str> {
+        self.known().map(|network| network.default_peer)
+    }
+
+    pub fn custom_utxos(&self) -> &'a [CustomUtxo] {
+        match self {
+            Self::Known(_) => &[],
+            Self::Custom(cardano) => &cardano.custom_utxos,
+        }
+    }
+
+    /// The embedded genesis, or a custom network's files checked against its
+    /// magic.
+    pub fn genesis(&self) -> Result<Genesis, ChainError> {
+        match self {
+            Self::Known(network) => Ok(network.genesis()),
+            Self::Custom(cardano) => {
+                let files = &cardano.genesis;
+                let genesis = Genesis::from_file_paths(
+                    &files.byron_path,
+                    &files.shelley_path,
+                    &files.alonzo_path,
+                    &files.conway_path,
+                    files.force_protocol,
+                )
+                .map_err(ChainError::GenesisFiles)?;
+
+                validate_custom(cardano.magic, &genesis)?;
+
+                Ok(genesis)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

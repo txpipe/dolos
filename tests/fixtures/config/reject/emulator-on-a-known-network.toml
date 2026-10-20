@@ -1,0 +1,9 @@
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "preview"
+
+[upstream]
+type = "emulator"
+block_production_interval = 20

@@ -52,6 +52,17 @@ pub struct Args {
     command: Command,
 }
 
+impl Args {
+    pub fn writes_genesis(&self) -> bool {
+        #[cfg(feature = "utils")]
+        if let Command::ResetGenesis(_) = self.command {
+            return true;
+        }
+
+        false
+    }
+}
+
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     match &args.command {
         Command::Check(x) => check::run(config, x)?,

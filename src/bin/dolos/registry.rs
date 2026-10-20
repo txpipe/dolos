@@ -61,13 +61,13 @@ impl CredentialArgs {
     }
 
     /// How this invocation reads `repository` from a node of `chain`, whose
-    /// magic names the network that supplies the published read-only user.
+    /// network supplies the published read-only user.
     pub fn auth_for_chain(
         &self,
         repository: &Repository,
         chain: &ChainConfig,
     ) -> miette::Result<Auth> {
-        self.auth(repository, KnownNetwork::by_magic(chain.magic()))
+        self.auth(repository, KnownNetwork::by_name(&chain.network))
     }
 
     /// The profile crate's refusal, with which of this invocation's inputs to
@@ -503,10 +503,7 @@ mod tests {
         std::env::remove_var(PASSWORD_ENV);
         std::env::remove_var(TOKEN_ENV);
 
-        let chain = ChainConfig::Cardano(dolos_core::config::CardanoConfig {
-            magic: u64::from(networks::PREVIEW.magic),
-            ..Default::default()
-        });
+        let chain = ChainConfig::known(networks::PREVIEW.name);
 
         let auth = CredentialArgs::default()
             .auth_for_chain(&repo(networks::PREVIEW.stelae.registry), &chain)

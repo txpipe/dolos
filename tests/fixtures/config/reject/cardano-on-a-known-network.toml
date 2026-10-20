@@ -1,0 +1,15 @@
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "preview"
+
+[chain.cardano]
+magic = 2
+is_testnet = true
+
+[chain.cardano.genesis]
+byron_path = "byron.json"
+shelley_path = "shelley.json"
+alonzo_path = "alonzo.json"
+conway_path = "conway.json"

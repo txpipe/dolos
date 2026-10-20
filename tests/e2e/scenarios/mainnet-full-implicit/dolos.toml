@@ -1,17 +1,14 @@
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "mainnet"
+
 [upstream]
 peer_address = "relay.cnode-m1.demeter.run:3000"
 
 [storage]
-version = "v4"
 path = "data"
-
-[genesis]
-byron_path = "byron.json"
-shelley_path = "shelley.json"
-alonzo_path = "alonzo.json"
-conway_path = "conway.json"
-
-[sync]
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
@@ -27,8 +24,3 @@ listen_address = "[::]:6572"
 
 [serve.minikupo]
 listen_address = "[::]:6573"
-
-[chain]
-type = "cardano"
-magic = 764824073
-is_testnet = false
