@@ -30,10 +30,11 @@ be passed to:
 - `verify_reproduction` with the published inscription.
 
 Every one of them requires stores standing on the first block of the plan's
-sequence epoch, as a `chain.stop_epoch` sync leaves them; `Error::NotABoundary`
-is the boundary refusal, `Error::UnanchoredPoint` refuses a hand-built plan
-whose cursor has no hash, and none of them writes a layer for stores that fail
-the check. Their own input checks can fail first with other errors: a destination
+sequence epoch, with the archive ending there, as a sync stopped at that epoch
+(`dolos sync --stop-epoch`, or a headless replay's `stop_epoch`) leaves them;
+`Error::NotABoundary` is the boundary refusal, `Error::UnanchoredPoint` refuses
+a hand-built plan whose cursor has no hash, and none of them writes a layer for
+stores that fail the check. Their own input checks can fail first with other errors: a destination
 that already holds a stele, or a reproduction whose sequence or network does
 not match the published one. `boundary` asks the boundary question up front.
 See "Only the boundary cut is published" in

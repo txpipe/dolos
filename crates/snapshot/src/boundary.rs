@@ -17,12 +17,12 @@
 //! Byron epoch-boundary block, which shares its slot with the first main block
 //! after it, is the first block of its epoch while that main block is not.
 //!
-//! The archive must hold nothing after the cursor's block at the cursor's slot.
-//! The last window ends at that slot, and index and log records carry a slot
-//! but no block hash, so a Byron main block beside the boundary block would
-//! put its records in the stele. A `stop_epoch` sync stops on the boundary
-//! block and never stores the main block; an archive that does hold it is
-//! refused.
+//! The archive must end at the cursor's block. Export reads logs and indexes by
+//! slot alone, and blocks applied after the cursor write rows inside the
+//! stele's windows: Ewrap keys an epoch's closing rows at its start, and a
+//! Byron main block shares the boundary block's slot. A sync stopped at the
+//! epoch stores nothing past its first block; an archive that ran on past a
+//! rebuilt state is refused.
 //!
 //! Neither the configured `stop_epoch` nor the cursor's slot is evidence: a
 //! node can be configured one way and stand somewhere else, and an epoch's
@@ -75,8 +75,8 @@ pub enum Ineligible {
     BrokenChain { predecessor: ChainPoint },
     /// The cursor's parent is already in the sequence epoch.
     LaterBlock { parent: ChainPoint },
-    /// The archive holds a block after the cursor's at the cursor's slot.
-    SharedSlot { next: ChainPoint },
+    /// The archive holds blocks after the cursor's, up to `tip`.
+    ArchivePastCursor { tip: ChainPoint },
 }
 
 impl std::fmt::Display for Ineligible {
@@ -99,7 +99,7 @@ impl std::fmt::Display for Ineligible {
             Self::InitialEpoch => write!(
                 f,
                 "no boundary opens epoch 0, so the first stele a chain can carry is epoch 1; \
-                 sync with chain.stop_epoch = 1"
+                 run dolos sync --stop-epoch 1"
             ),
             Self::MissingCursorBlock => write!(
                 f,
@@ -122,15 +122,14 @@ impl std::fmt::Display for Ineligible {
                 f,
                 "the cursor block's parent {parent} is in the same epoch, so the state is past \
                  the epoch's first block and the boundary state is no longer in these stores; \
-                 restore the stele for this epoch, or cut the next one by syncing with \
-                 chain.stop_epoch set to the following epoch"
+                 restore the stele for this epoch, or cut the next one with \
+                 dolos sync --stop-epoch set to the following epoch"
             ),
-            Self::SharedSlot { next } => write!(
+            Self::ArchivePastCursor { tip } => write!(
                 f,
-                "the archive also holds {next} at the cursor's slot, after the cursor's block; \
-                 index and log records carry no block hash, so that block's records cannot be \
-                 left out of the stele; publish from a node whose archive ends at the cursor, \
-                 as a chain.stop_epoch sync leaves it"
+                "the archive runs on past the cursor to {tip}, and the blocks after the cursor \
+                 wrote log and index records the stele cannot tell from the boundary's; publish \
+                 from a node whose archive ends at the cursor, as dolos sync --stop-epoch leaves it"
             ),
         }
     }
@@ -220,10 +219,17 @@ fn evidence<A: ArchiveStore>(
         return Err(refuse(Ineligible::LaterBlock { parent }));
     }
 
-    if let Some(after) = at_slot.get(position + 1) {
-        let next = ChainPoint::Specific(slot, decode(slot, after)?.hash());
+    let beyond = match archive.get_tip()? {
+        Some((tip_slot, tip_body)) if tip_slot > slot => Some((tip_slot, tip_body)),
+        _ => at_slot[position + 1..]
+            .last()
+            .map(|body| (slot, body.clone())),
+    };
 
-        return Err(refuse(Ineligible::SharedSlot { next }));
+    if let Some((tip_slot, tip_body)) = beyond {
+        let tip = ChainPoint::Specific(tip_slot, decode(tip_slot, &tip_body)?.hash());
+
+        return Err(refuse(Ineligible::ArchivePastCursor { tip }));
     }
 
     Ok(Boundary {
@@ -510,8 +516,23 @@ mod tests {
 
         assert_eq!(
             reason(judge(&summary, &blocks, &ebb.0)),
-            Ineligible::SharedSlot {
-                next: main.0.clone()
+            Ineligible::ArchivePastCursor {
+                tip: main.0.clone()
+            }
+        );
+    }
+
+    /// An archive that ran on past a boundary state holds the rows later
+    /// blocks wrote inside the stele's windows, and is refused up to its tip.
+    #[test]
+    fn an_archive_past_the_cursor_is_refused() {
+        let summary = summary(100);
+        let blocks = chain(&[180, 205, 210, 320]);
+
+        assert_eq!(
+            reason(judge(&summary, &blocks, &blocks[1].0)),
+            Ineligible::ArchivePastCursor {
+                tip: blocks[3].0.clone()
             }
         );
     }

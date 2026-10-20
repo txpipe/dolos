@@ -1515,25 +1515,73 @@ fn a_plan_the_stores_have_moved_past_is_refused_before_a_layer() {
 }
 
 /// An archive that runs past a boundary state, as `doctor rebuild-state
-/// --stop-epoch` leaves one, still publishes the boundary: the state cursor is
-/// where the stele stands, not the archive's tip. A plan at that tip is refused
-/// for the state it does not describe.
+/// --stop-epoch` over a synced archive leaves one, is refused before a layer:
+/// the blocks after the cursor wrote log and index rows inside the stele's
+/// windows. A plan at the archive's tip is refused for the state it does not
+/// describe.
 #[test]
-fn an_archive_past_a_boundary_state_publishes_the_state_cursor() {
+fn an_archive_past_a_boundary_state_is_refused_before_a_layer() {
     let domain: ToyDomain = harness();
 
     let boundary = domain.state().read_cursor().unwrap().unwrap();
     let tip = extend_archive_past_cursor(&domain);
 
-    // The rebuild keeps the original sync's log rows past the cursor: one per
-    // namespace, in the sliver's epoch.
+    let plan = plan_for(&domain);
+    assert_eq!(plan.cursor, boundary);
+
+    let ahead = Plan {
+        cursor: tip.clone(),
+        ..plan.clone()
+    };
+
+    for (plan, expected) in [
+        (plan, Ineligible::ArchivePastCursor { tip }),
+        (
+            ahead,
+            Ineligible::PlanMismatch {
+                stored: Some(boundary),
+            },
+        ),
+    ] {
+        let watcher = Arc::new(Watcher::default());
+        let temp = tempfile::tempdir().unwrap();
+        let stele = SteleDir::create(temp.path()).unwrap();
+
+        let refused = export::export(
+            &stele,
+            &plan,
+            domain.archive(),
+            domain.state(),
+            None,
+            &export::First,
+            &watcher.observer(),
+        );
+
+        match refused {
+            Err(dolos_snapshot::Error::NotABoundary { reason, .. }) => {
+                assert_eq!(reason, expected)
+            }
+            other => panic!("{other:?}"),
+        }
+
+        assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
+    }
+}
+
+/// Log rows keyed past the cursor stay out of the stele: the last window ends
+/// at the cursor's slot whatever the log tables hold beyond it.
+#[test]
+fn log_rows_past_the_cursor_stay_out_of_the_stele() {
+    let domain: ToyDomain = harness();
+
+    let cursor = domain.state().read_cursor().unwrap().unwrap();
     let writer = domain.archive().start_writer().unwrap();
 
     for (i, ns) in LOG_NAMESPACES.into_iter().enumerate() {
         writer
             .write_log(
                 ns,
-                &common::log_key(ns, tip.slot(), 0x30 + i as u8),
+                &common::log_key(ns, cursor.slot() + 5, 0x30 + i as u8),
                 &vec![0x81, i as u8],
             )
             .unwrap();
@@ -1541,50 +1589,12 @@ fn an_archive_past_a_boundary_state_publishes_the_state_cursor() {
 
     writer.commit().unwrap();
 
-    let plan = plan_for(&domain);
-    assert_eq!(plan.cursor, boundary);
-
     let temp = tempfile::tempdir().unwrap();
-    let published = export_plan(temp.path(), &domain, &plan);
+    let published = export_to(temp.path(), &domain);
 
-    // The block and the logs past the cursor stay out: the stele is the one the
-    // same stores publish without them.
     let bare: ToyDomain = harness();
     let temp = tempfile::tempdir().unwrap();
     assert_eq!(published.layers, export_to(temp.path(), &bare).layers);
-
-    let ahead = Plan {
-        cursor: tip,
-        ..plan.clone()
-    };
-
-    let watcher = Arc::new(Watcher::default());
-    let temp = tempfile::tempdir().unwrap();
-    let stele = SteleDir::create(temp.path()).unwrap();
-
-    let refused = export::export(
-        &stele,
-        &ahead,
-        domain.archive(),
-        domain.state(),
-        None,
-        &export::First,
-        &watcher.observer(),
-    );
-
-    match refused {
-        Err(dolos_snapshot::Error::NotABoundary { reason, .. }) => {
-            assert_eq!(
-                reason,
-                Ineligible::PlanMismatch {
-                    stored: Some(boundary)
-                }
-            )
-        }
-        other => panic!("{other:?}"),
-    }
-
-    assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
 }
 
 /// A block after the cursor's at the cursor's own slot, as a Byron main block
@@ -1629,7 +1639,7 @@ fn a_block_beside_the_cursor_at_its_slot_is_refused_before_a_layer() {
 
     match refused {
         Err(dolos_snapshot::Error::NotABoundary { reason, .. }) => {
-            assert_eq!(reason, Ineligible::SharedSlot { next: beside })
+            assert_eq!(reason, Ineligible::ArchivePastCursor { tip: beside })
         }
         other => panic!("{other:?}"),
     }

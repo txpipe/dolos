@@ -465,7 +465,7 @@ fn digest_refuses_stores_off_the_boundary() {
 
     assert!(!output.status.success(), "{message}");
     assert!(message.contains("epoch-0 boundary cut"), "{message}");
-    assert!(message.contains("chain.stop_epoch = 1"), "{message}");
+    assert!(message.contains("dolos sync --stop-epoch 1"), "{message}");
     assert!(!inscription.exists(), "a refused digest wrote a document");
 }
 
@@ -500,7 +500,7 @@ fn digest_refuses_stores_past_the_boundary_as_it_plans() {
         "{message}"
     );
     assert!(
-        message.contains("chain.stop_epoch set to the following epoch"),
+        message.contains("dolos sync --stop-epoch set to the following epoch"),
         "{message}"
     );
     assert!(
