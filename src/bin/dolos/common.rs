@@ -49,14 +49,12 @@ pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
 /// Load the configuration, resolve its network against the catalog and parse
 /// its log filter.
 pub fn load_config(explicit_file: Option<&Path>) -> Result<RootConfig, ConfigError> {
-    let config = dolos_core::config::load(explicit_file)?;
+    dolos_core::config::load_checked(explicit_file, |config| {
+        ResolvedNetwork::resolve(&config.chain)
+            .map_err(|error| ConfigError::Invalid(error.to_string()))?;
 
-    ResolvedNetwork::resolve(&config.chain)
-        .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-
-    log_filter(&config.logging)?;
-
-    Ok(config)
+        log_filter(&config.logging).map(|_| ())
+    })
 }
 
 pub fn resolve_network(config: &RootConfig) -> miette::Result<ResolvedNetwork<'_>> {

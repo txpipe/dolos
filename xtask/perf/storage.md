@@ -44,13 +44,16 @@ Provisional write gates require throughput ≥90% of raw and p95 commit latency
 
 ```sh
 "$XTASK" perf storage node \
-  --bin baseline=/path/to/baseline/dolos --bin candidate=/path/to/candidate/dolos \
+  --bin baseline=/path/to/baseline/dolos:v4 --bin candidate=/path/to/candidate/dolos \
   --run storage-01 --immutable /path/to/immutable --genesis /path/to/genesis \
   --work /path/to/scratch --out node.jsonl --repeat 3 --verify
 ```
 
 The runner creates fresh disposable instances. Binary specs are
-`LABEL=PATH[:STORAGE_VERSION]`, defaulting to v4. Historical raw revision
+`LABEL=PATH[:STORAGE_VERSION]`. Without a version the binary gets a v2
+configuration file. A version marks a binary that predates v2 configuration,
+such as v1 or v2.0.0-alpha.0, and gives it the older file with that
+`storage.version`; the baseline above is one, at v4. Historical raw revision
 `9165dbd8` needs `:v3`; that is a compression baseline, not a redb comparison.
 
 `import` uses 500-block batches; `live` models one-block commits through offline

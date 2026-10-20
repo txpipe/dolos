@@ -200,14 +200,19 @@ impl KnownNetwork {
             &files.conway_path,
         ];
 
+        let named = |path: &Path| {
+            let path = path.display().to_string();
+            move |error: std::io::Error| {
+                std::io::Error::new(error.kind(), format!("{path}: {error}"))
+            }
+        };
+
         for (path, bytes) in paths.into_iter().zip(self.genesis_files) {
             if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
-                std::fs::create_dir_all(dir)?;
+                std::fs::create_dir_all(dir).map_err(named(dir))?;
             }
 
-            std::fs::write(path, bytes).map_err(|error| {
-                std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
-            })?;
+            std::fs::write(path, bytes).map_err(named(path))?;
         }
 
         Ok(())

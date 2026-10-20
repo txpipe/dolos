@@ -20,7 +20,7 @@ use serde_with::{serde_as, DisplayFromStr};
 use crate::{compat::SUPPORTED_CONTRACTS, Cbor, Era, QueryLimiter, TxoRef};
 
 /// The guide that maps an older configuration onto this one.
-pub const MIGRATION_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/configuration/migration";
+pub const MIGRATION_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/migration/dolos-v2";
 
 /// The file read when no path is given.
 pub const DEFAULT_CONFIG_FILE: &str = "dolos.toml";
@@ -1107,8 +1107,8 @@ impl RootConfig {
             }
             (false, Some(_)) => {
                 return invalid(format!(
-                    "`[chain.cardano]` is only for `network = \"custom\"`; the `{}` network's \
-                     magic and genesis are built in",
+                    "`[chain.cardano]` is only for `network = \"custom\"`, found `network = \
+                     \"{}\"`; a known network's magic and genesis are built in",
                     self.chain.network
                 ))
             }
@@ -1214,7 +1214,7 @@ pub enum ConfigError {
     Environment {
         variables: Vec<String>,
         #[source]
-        source: ::config::ConfigError,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     #[error("the environment variable {0} is not valid UTF-8")]
@@ -1254,53 +1254,95 @@ const ENV_NESTING: &str = "__";
 /// A variable names its key with `__` between levels, as in
 /// `DOLOS_UPSTREAM__PEER_ADDRESS`; one without `__` is not an override, which
 /// leaves the command inputs such as `DOLOS_MITHRIL_AGGREGATOR` alone. An
-/// error the overrides cause names them rather than the file.
+/// error the overrides cause names them rather than the file; when the file
+/// is refused on its own, its error is the one reported.
 /// `compatibility` is read from the file alone. Genesis paths resolve against
 /// the file's directory.
 pub fn load(path: Option<&Path>) -> Result<RootConfig, ConfigError> {
+    load_checked(path, |_| Ok(()))
+}
+
+/// [`load`], with `check` among the rules the result must pass, so that an
+/// override it refuses is named like one [`RootConfig::validate`] refuses.
+pub fn load_checked(
+    path: Option<&Path>,
+    check: impl Fn(&RootConfig) -> Result<(), ConfigError>,
+) -> Result<RootConfig, ConfigError> {
     let path = path.unwrap_or(Path::new(DEFAULT_CONFIG_FILE));
 
     if !path.is_file() {
         return Err(ConfigError::NotFound(path.to_path_buf()));
     }
 
-    let read = |source| ConfigError::Read {
-        path: path.to_path_buf(),
-        source,
-    };
     let file = || ::config::File::from(path).format(::config::FileFormat::Toml);
 
     let document = ::config::Config::builder()
         .add_source(file())
         .build()
-        .map_err(read)?;
+        .map_err(|source| Rejection::Parse(source).in_file(path))?;
 
     check_compatibility(&document)?;
     reject_moved_sections(&document)?;
 
     let overrides = environment_overrides()?;
-    let deserialize = |overrides: ::config::Map<String, String>| {
-        ::config::Config::builder()
+    let read = |overrides: ::config::Map<String, String>| -> Result<RootConfig, Rejection> {
+        let mut config = ::config::Config::builder()
             .add_source(file())
             .add_source(environment(overrides))
             .build()
             .and_then(::config::Config::try_deserialize::<RootConfig>)
+            .map_err(Rejection::Parse)?;
+
+        config.resolve_paths(path.parent().unwrap_or(Path::new("")));
+        config.validate().map_err(Rejection::Check)?;
+        check(&config).map_err(Rejection::Check)?;
+
+        Ok(config)
     };
 
-    let mut config = match deserialize(overrides.clone()) {
-        Ok(config) => config,
-        Err(source) if !overrides.is_empty() && deserialize(Default::default()).is_ok() => {
-            let mut variables: Vec<String> = overrides.into_keys().collect();
-            variables.sort();
-            return Err(ConfigError::Environment { variables, source });
+    if overrides.is_empty() {
+        return read(overrides).map_err(|rejection| rejection.in_file(path));
+    }
+
+    match read(overrides.clone()) {
+        Ok(config) => Ok(config),
+        Err(rejection) => match read(Default::default()) {
+            Ok(_) => {
+                let mut variables: Vec<String> = overrides.into_keys().collect();
+                variables.sort();
+                Err(rejection.in_environment(variables))
+            }
+            Err(rejection) => Err(rejection.in_file(path)),
+        },
+    }
+}
+
+/// Why one reading of the configuration was refused, before it is put down to
+/// the file or to the overrides.
+enum Rejection {
+    Parse(::config::ConfigError),
+    Check(ConfigError),
+}
+
+impl Rejection {
+    fn in_file(self, path: &Path) -> ConfigError {
+        match self {
+            Self::Parse(source) => ConfigError::Read {
+                path: path.to_path_buf(),
+                source,
+            },
+            Self::Check(error) => error,
         }
-        Err(source) => return Err(read(source)),
-    };
+    }
 
-    config.resolve_paths(path.parent().unwrap_or(Path::new("")));
-    config.validate()?;
+    fn in_environment(self, variables: Vec<String>) -> ConfigError {
+        let source: Box<dyn std::error::Error + Send + Sync> = match self {
+            Self::Parse(source) => Box::new(source),
+            Self::Check(error) => Box::new(error),
+        };
 
-    Ok(config)
+        ConfigError::Environment { variables, source }
+    }
 }
 
 fn check_compatibility(document: &::config::Config) -> Result<(), ConfigError> {

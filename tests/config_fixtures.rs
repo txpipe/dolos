@@ -8,13 +8,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use dolos_cardano::networks::ResolvedNetwork;
+use dolos_cardano::networks::{KnownNetwork, ResolvedNetwork};
 use dolos_core::config::{
     load, ArchiveStoreConfig, CacheConfig, ChainConfig, ConfigError, CustomUtxo, FjallPreset,
-    HistoryConfig, HistoryMode, HistoryWindow, LoggingConfig, MempoolConfig, Protocol, RetryConfig,
-    RootConfig, StateStoreConfig, StoreType, SyncConfig, TelemetryConfig, UpstreamConfig,
-    MIGRATION_GUIDE_URL,
+    GenesisConfig, HistoryConfig, HistoryMode, HistoryWindow, LoggingConfig, MempoolConfig,
+    Protocol, RetryConfig, RootConfig, StateStoreConfig, StoreType, SyncConfig, TelemetryConfig,
+    UpstreamConfig, MIGRATION_GUIDE_URL,
 };
+use dolos_core::Genesis;
 use serial_test::serial;
 
 fn fixture(name: &str) -> PathBuf {
@@ -308,7 +309,7 @@ fn each_rule_refuses_its_fixture() {
         ("custom-without-cardano", "requires `[chain.cardano]`"),
         (
             "cardano-on-a-known-network",
-            "`[chain.cardano]` is only for `network = \"custom\"`",
+            "`[chain.cardano]` is only for `network = \"custom\"`, found `network = \"preview\"`",
         ),
         (
             "unknown-network",
@@ -405,6 +406,15 @@ fn older_files_point_to_the_migration_guide() {
 /// set. `data summary` opens every store, so a refused file shows that none
 /// was.
 fn run_dolos(cwd: &Path, args: &[&str]) -> std::process::Output {
+    run_dolos_with_env(cwd, args, &[])
+}
+
+/// [`run_dolos`] with `variables` as its only `DOLOS_` variables.
+fn run_dolos_with_env(
+    cwd: &Path,
+    args: &[&str],
+    variables: &[(&str, &str)],
+) -> std::process::Output {
     let inherited =
         std::env::vars_os().filter(|(key, _)| !key.to_string_lossy().starts_with("DOLOS_"));
 
@@ -413,6 +423,7 @@ fn run_dolos(cwd: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .env_clear()
         .envs(inherited)
+        .envs(variables.iter().copied())
         .output()
         .unwrap()
 }
@@ -479,6 +490,7 @@ fn an_invalid_log_filter_stops_every_command_before_its_stores() {
 /// The genesis files land where the configuration reads them, whatever the
 /// working directory.
 #[test]
+#[serial]
 fn reset_genesis_writes_the_configured_files() {
     let dir = tempfile::tempdir().unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
@@ -511,6 +523,48 @@ fn reset_genesis_writes_the_configured_files() {
 
     let config = check(&path).unwrap();
     assert_eq!(config.chain.cardano.unwrap().magic, 2);
+}
+
+/// What tells the known networks' genesis apart. Their Alonzo genesis is the
+/// same, so for it parsing is the check.
+fn fingerprint(genesis: &Genesis) -> impl PartialEq + std::fmt::Debug {
+    let mut committee: Vec<String> = genesis.conway.committee.members.keys().cloned().collect();
+    committee.sort();
+
+    (
+        genesis.byron.protocol_consts.protocol_magic,
+        genesis.byron.start_time,
+        genesis.shelley_hash,
+        genesis.conway.committee_min_size,
+        committee,
+    )
+}
+
+/// The files `reset-genesis` writes for a network load to the genesis Dolos
+/// embeds for it.
+#[test]
+fn every_known_network_saves_the_genesis_it_embeds() {
+    for network in KnownNetwork::all() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = GenesisConfig::in_dir(&dir.path().join("genesis"));
+
+        network.save_genesis_to(&files).unwrap();
+
+        let saved = Genesis::from_file_paths(
+            &files.byron_path,
+            &files.shelley_path,
+            &files.alonzo_path,
+            &files.conway_path,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fingerprint(&saved),
+            fingerprint(&network.genesis()),
+            "{}",
+            network.name
+        );
+    }
 }
 
 #[test]
@@ -668,8 +722,69 @@ fn an_error_an_override_causes_names_the_override() {
         "{message}"
     );
 
-    let error = load_with_env(&fixture("reject/unknown-field.toml"), &typo).unwrap_err();
-    assert!(matches!(error, ConfigError::Read { .. }), "{error}");
+    let error = load_with_env(
+        &fixture("full.toml"),
+        &[(
+            "DOLOS_SERVE__MAX_CONCURRENT_QUERIES",
+            std::ffi::OsStr::new("0"),
+        )],
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, ConfigError::Environment { .. }), "{error}");
+    let message = error.to_string();
+    assert!(
+        message.contains("DOLOS_SERVE__MAX_CONCURRENT_QUERIES"),
+        "{message}"
+    );
+    assert!(message.contains("between 1 and 64, found 0"), "{message}");
+}
+
+/// With the file refused on its own, its error is reported, never one about
+/// the override's key. The merged tables come in no fixed order, so a
+/// regression shows only on some loads.
+#[test]
+#[serial]
+fn a_refused_file_is_reported_over_a_refused_override() {
+    let typo = [(
+        "DOLOS_SERVE__MINIBF__LISTEN_ADRESS",
+        std::ffi::OsStr::new("127.0.0.1:4000"),
+    )];
+
+    for _ in 0..32 {
+        let error = load_with_env(&fixture("reject/unknown-field.toml"), &typo).unwrap_err();
+
+        assert!(matches!(error, ConfigError::Read { .. }), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("unknown field `version`"), "{message}");
+        assert!(!message.contains("listen_adress"), "{message}");
+    }
+}
+
+/// The binary also refuses an unknown network and a bad log filter, and names
+/// an override that brings either in.
+#[test]
+fn an_override_the_binary_refuses_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture("full.toml"), dir.path().join("dolos.toml")).unwrap();
+
+    for (name, value, message) in [
+        ("DOLOS_CHAIN__NETWORK", "preveiw", "`preveiw`"),
+        ("DOLOS_LOGGING__FILTER", "dolos=loud", "logging.filter"),
+    ] {
+        let output = run_dolos_with_env(dir.path(), &["data", "summary"], &[(name, value)]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(!output.status.success(), "{name}: {stderr}");
+        assert!(stderr.contains(name), "{name}: {stderr}");
+        assert!(stderr.contains(message), "{name}: {stderr}");
+    }
+
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "only the config file is there"
+    );
 }
 
 #[cfg(unix)]
