@@ -31,7 +31,7 @@ use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dolos_core::config::RootConfig;
+use dolos_core::config::{RootConfig, StoreType};
 use dolos_core::ImportExt as _;
 use indicatif::ProgressBar;
 use miette::{bail, Context as _, IntoDiagnostic as _};
@@ -449,12 +449,14 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 );
             }
 
-            let state = StateStoreBackend::open_fjall(
-                path,
-                &dolos_core::config::FjallStateConfig::default(),
-            )
-            .into_diagnostic()
-            .with_context(|| format!("opening the target state store at {}", path.display()))?;
+            let preset = match config.storage.state.kind {
+                StoreType::Fjall { preset } => preset.into(),
+                StoreType::Ephemeral => dolos_fjall::Preset::default(),
+            };
+
+            let state = StateStoreBackend::open_fjall(path, preset)
+                .into_diagnostic()
+                .with_context(|| format!("opening the target state store at {}", path.display()))?;
 
             (state, None)
         }

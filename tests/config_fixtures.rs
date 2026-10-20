@@ -348,6 +348,10 @@ fn each_rule_refuses_its_fixture() {
             "ephemeral-store-with-a-path",
             "an ephemeral store takes no other field; remove `path`",
         ),
+        (
+            "store-tuning-field",
+            "in `[storage.state]`, tuning is set by `preset`; remove `cache`",
+        ),
         ("unknown-field", "unknown field `version`"),
         ("moved-section", "[mithril] moved to"),
     ] {

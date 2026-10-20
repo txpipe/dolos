@@ -26,8 +26,9 @@ Select workloads with `--cases name,name` (default: all):
 | `transaction-utxos` | Transaction lookup and input/output mapping |
 
 Scale with `--blocks`, `--transactions-per-block`, `--log-rows`, `--pool-stride`,
-`--page` and `--page-size`; keep `--seed`, `--cache-mib` and `--max-scan-items`
-fixed when comparing versions. Pages must fit the generated population.
+`--page` and `--page-size`; keep `--seed` and `--max-scan-items` fixed when
+comparing versions. Both stores open with the `standard` Fjall preset, the
+tuning a node runs with. Pages must fit the generated population.
 
 Fixtures contain synthetic Conway blocks in preview epoch zero and an equally
 sized replay tail. Setup is untimed; logs are populated in bounded batches, but

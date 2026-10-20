@@ -187,7 +187,7 @@ writer.commit()?;
 
 2. **Batched writes** - The `StateWriter` accumulates changes and commits atomically.
 
-3. **Flush on commit** - Configurable journal flushing prevents unbounded memory growth during bulk imports.
+3. **Tuning by preset** - Cache, journal, workers, flush-on-commit and every keyspace's memtable and compaction come from the store's preset (`dolos_fjall::preset`); none of them is configured field by field.
 
 4. **Graceful shutdown** - Call `shutdown()` before dropping to ensure all background work completes.
 

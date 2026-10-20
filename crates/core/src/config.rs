@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{de::IgnoredAny, Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 
 use crate::{compat::SUPPORTED_CONTRACTS, Cbor, Era, QueryLimiter, TxoRef};
@@ -430,6 +430,19 @@ impl Display for Mismatch {
     }
 }
 
+/// Refuses the per-store tuning fields of earlier files: a store's preset
+/// sets all of it.
+fn refuse_retired_tuning(set: Vec<&'static str>) -> Result<(), Mismatch> {
+    if set.is_empty() {
+        return Ok(());
+    }
+
+    let names: Vec<String> = set.iter().map(|name| format!("`{name}`")).collect();
+    let message = format!("tuning is set by `preset`; remove {}", names.join(", "));
+
+    Err(Mismatch::new(set, message))
+}
+
 fn store_fields(kind: StoreType) -> (Option<StoreKind>, Option<FjallPreset>) {
     match kind {
         StoreType::Fjall { preset } => (Some(StoreKind::Fjall), Some(preset)),
@@ -446,7 +459,7 @@ pub struct StateStoreConfig {
     pub path: Option<PathBuf>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawStateStore {
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
@@ -455,12 +468,45 @@ struct RawStateStore {
     path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preset: Option<FjallPreset>,
+    // Tuning earlier files set field by field, refused by name.
+    #[serde(default, skip_serializing)]
+    cache: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    max_journal_size: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    flush_on_commit: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    l0_threshold: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    worker_threads: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    memtable_size_mb: Option<IgnoredAny>,
+}
+
+impl RawStateStore {
+    /// The retired tuning fields the table sets.
+    fn retired_tuning(&self) -> Vec<&'static str> {
+        [
+            ("cache", self.cache.is_some()),
+            ("max_journal_size", self.max_journal_size.is_some()),
+            ("flush_on_commit", self.flush_on_commit.is_some()),
+            ("l0_threshold", self.l0_threshold.is_some()),
+            ("worker_threads", self.worker_threads.is_some()),
+            ("memtable_size_mb", self.memtable_size_mb.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, set)| *set)
+        .map(|(name, _)| name)
+        .collect()
+    }
 }
 
 impl TryFrom<RawStateStore> for StateStoreConfig {
     type Error = Mismatch;
 
     fn try_from(raw: RawStateStore) -> Result<Self, Self::Error> {
+        refuse_retired_tuning(raw.retired_tuning())?;
+
         Ok(Self {
             kind: store_type(raw.kind, raw.preset, &[("path", raw.path.is_some())])?,
             path: raw.path,
@@ -475,6 +521,7 @@ impl From<StateStoreConfig> for RawStateStore {
             kind,
             path: config.path,
             preset,
+            ..Default::default()
         }
     }
 }
@@ -499,7 +546,7 @@ pub struct ArchiveStoreConfig {
     pub blocks_path: Option<PathBuf>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawArchiveStore {
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
@@ -510,12 +557,45 @@ struct RawArchiveStore {
     blocks_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preset: Option<FjallPreset>,
+    // Tuning earlier files set field by field, refused by name.
+    #[serde(default, skip_serializing)]
+    cache: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    max_journal_size: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    flush_on_commit: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    l0_threshold: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    worker_threads: Option<IgnoredAny>,
+    #[serde(default, skip_serializing)]
+    memtable_size_mb: Option<IgnoredAny>,
+}
+
+impl RawArchiveStore {
+    /// The retired tuning fields the table sets.
+    fn retired_tuning(&self) -> Vec<&'static str> {
+        [
+            ("cache", self.cache.is_some()),
+            ("max_journal_size", self.max_journal_size.is_some()),
+            ("flush_on_commit", self.flush_on_commit.is_some()),
+            ("l0_threshold", self.l0_threshold.is_some()),
+            ("worker_threads", self.worker_threads.is_some()),
+            ("memtable_size_mb", self.memtable_size_mb.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, set)| *set)
+        .map(|(name, _)| name)
+        .collect()
+    }
 }
 
 impl TryFrom<RawArchiveStore> for ArchiveStoreConfig {
     type Error = Mismatch;
 
     fn try_from(raw: RawArchiveStore) -> Result<Self, Self::Error> {
+        refuse_retired_tuning(raw.retired_tuning())?;
+
         let paths = [
             ("path", raw.path.is_some()),
             ("blocks_path", raw.blocks_path.is_some()),
@@ -536,6 +616,7 @@ impl From<ArchiveStoreConfig> for RawArchiveStore {
             path: config.path,
             blocks_path: config.blocks_path,
             preset,
+            ..Default::default()
         }
     }
 }
@@ -1881,48 +1962,6 @@ pub struct RedbMempoolConfig {
     pub cache: Option<usize>,
 }
 
-/// Options for opening the Fjall state backend. Not read from the file:
-/// `preset = "standard"` opens with the defaults.
-#[derive(Clone, Debug, Default)]
-pub struct FjallStateConfig {
-    /// Size (in MB) of memory allocated for caching.
-    pub cache: Option<usize>,
-    /// Maximum journal size in MB.
-    pub max_journal_size: Option<usize>,
-    /// Flush journal after each commit.
-    pub flush_on_commit: Option<bool>,
-    /// L0 compaction threshold (default: 4, lower = more aggressive).
-    pub l0_threshold: Option<u8>,
-    /// Number of background compaction worker threads.
-    pub worker_threads: Option<usize>,
-    /// Memtable size in MB before flush (default: 64).
-    pub memtable_size_mb: Option<usize>,
-}
-
-/// Options for opening the Fjall archive backend. Not read from the file:
-/// `preset = "standard"` opens with the defaults.
-///
-/// Block segments are always compressed, one zstd frame per block with the
-/// dictionary bundled in `dolos-flatfiles`; there is nothing to configure
-/// about them.
-#[derive(Clone, Debug, Default)]
-pub struct FjallArchiveConfig {
-    /// Where block segment files go; default the archive directory.
-    pub blocks_path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    pub cache: Option<usize>,
-    /// Maximum journal size in MB.
-    pub max_journal_size: Option<usize>,
-    /// Flush journal after each commit.
-    pub flush_on_commit: Option<bool>,
-    /// L0 compaction threshold (default: 4, lower = more aggressive).
-    pub l0_threshold: Option<u8>,
-    /// Number of background compaction worker threads.
-    pub worker_threads: Option<usize>,
-    /// Memtable size in MB before flush (default: 64).
-    pub memtable_size_mb: Option<usize>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2000,10 +2039,35 @@ mod tests {
             .to_string();
         assert!(err.contains("blocks_path"), "{err}");
 
-        let err = serde_json::from_value::<ArchiveStoreConfig>(json!({ "cache": 16 }))
+        let err = serde_json::from_value::<ArchiveStoreConfig>(json!({ "compression": "zstd" }))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("cache"), "{err}");
+        assert!(err.contains("compression"), "{err}");
+    }
+
+    #[test]
+    fn stores_refuse_tuning_a_preset_sets() {
+        let err = serde_json::from_value::<StateStoreConfig>(json!({
+            "cache": 1024,
+            "l0_threshold": 8,
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("tuning is set by `preset`; remove `cache`, `l0_threshold`"),
+            "{err}"
+        );
+
+        let err = serde_json::from_value::<ArchiveStoreConfig>(json!({
+            "preset": "standard",
+            "memtable_size_mb": 128,
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("tuning is set by `preset`; remove `memtable_size_mb`"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -1,0 +1,319 @@
+//! The tuning a Fjall store opens with.
+//!
+//! Tuning is chosen by name, never field by field: a preset is one table per
+//! store that sets every value Dolos relies on, Fjall's own defaults included,
+//! so that upgrading Fjall cannot change them silently.
+//!
+//! Fjall records a keyspace's memtable size and compaction strategy when it
+//! creates the keyspace and keeps them for its lifetime, so a preset's keyspace
+//! rows govern the stores it creates. Its database row applies at every open.
+
+use std::fmt::{self, Display};
+use std::path::Path;
+use std::sync::Arc;
+
+use dolos_core::config::FjallPreset;
+use fjall::{compaction::Leveled, Database, DatabaseBuilder, KeyspaceCreateOptions};
+
+const MIB: u64 = 1024 * 1024;
+
+/// A named tuning for both stores.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Preset {
+    /// What a default-configured store got before presets existed.
+    #[default]
+    Standard,
+}
+
+impl Preset {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+        }
+    }
+
+    pub fn state(self) -> &'static StatePreset {
+        match self {
+            Self::Standard => &StatePreset::STANDARD,
+        }
+    }
+
+    pub fn archive(self) -> &'static ArchivePreset {
+        match self {
+            Self::Standard => &ArchivePreset::STANDARD,
+        }
+    }
+}
+
+impl From<FjallPreset> for Preset {
+    fn from(preset: FjallPreset) -> Self {
+        match preset {
+            FjallPreset::Standard => Self::Standard,
+        }
+    }
+}
+
+/// Settings of one Fjall database, applied at every open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatabaseTuning {
+    /// Block cache, in MiB.
+    pub cache_mb: u64,
+    /// Journal size across all keyspaces before memtables are flushed, in MiB.
+    pub journal_mb: u64,
+    /// Background flush and compaction workers: one per core, at most this
+    /// many.
+    pub max_workers: usize,
+    /// Hand the journal to the OS after every commit instead of when its
+    /// buffer fills.
+    pub flush_on_commit: bool,
+}
+
+impl DatabaseTuning {
+    /// The worker count on this machine.
+    pub fn workers(&self) -> usize {
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(self.max_workers)
+    }
+
+    pub(crate) fn builder(&self, path: &Path) -> DatabaseBuilder<Database> {
+        Database::builder(path)
+            .cache_size(self.cache_mb * MIB)
+            .max_journaling_size(self.journal_mb * MIB)
+            .worker_threads(self.workers())
+    }
+}
+
+/// Settings of one keyspace, fixed when Fjall creates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyspaceTuning {
+    /// Memtable size before it is flushed to a table, in MiB.
+    pub memtable_mb: u64,
+    /// Leveled compaction: L0 tables that trigger a compaction into L1.
+    pub l0_threshold: u8,
+    /// Leveled compaction: target size of a table, in MiB.
+    pub table_mb: u64,
+    /// Leveled compaction: size ratio between one level and the next.
+    pub level_ratio: u8,
+}
+
+impl KeyspaceTuning {
+    /// Fjall 3.1's own keyspace defaults, which the primary keyspaces always
+    /// opened with.
+    const FJALL_DEFAULT: Self = Self {
+        memtable_mb: 64,
+        l0_threshold: 4,
+        table_mb: 64,
+        level_ratio: 10,
+    };
+
+    /// The index keyspaces: what the standalone index store applied to them,
+    /// kept when they moved into the state and archive stores.
+    const INDEX: Self = Self {
+        memtable_mb: 128,
+        l0_threshold: 8,
+        ..Self::FJALL_DEFAULT
+    };
+
+    pub(crate) fn options(&self) -> KeyspaceCreateOptions {
+        let compaction = Leveled::default()
+            .with_l0_threshold(self.l0_threshold)
+            .with_table_target_size(self.table_mb * MIB)
+            .with_level_ratio_policy(vec![f32::from(self.level_ratio)]);
+
+        KeyspaceCreateOptions::default()
+            .max_memtable_size(self.memtable_mb * MIB)
+            .compaction_strategy(Arc::new(compaction))
+    }
+}
+
+impl Display for KeyspaceTuning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "memtable {} MiB, leveled l0 {} table {} MiB ratio {}",
+            self.memtable_mb, self.l0_threshold, self.table_mb, self.level_ratio
+        )
+    }
+}
+
+/// The state store's tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatePreset {
+    pub database: DatabaseTuning,
+    pub cursor: KeyspaceTuning,
+    pub utxos: KeyspaceTuning,
+    pub entities: KeyspaceTuning,
+    pub tags: KeyspaceTuning,
+}
+
+impl StatePreset {
+    pub const STANDARD: Self = Self {
+        database: DatabaseTuning::STANDARD,
+        cursor: KeyspaceTuning::FJALL_DEFAULT,
+        utxos: KeyspaceTuning::FJALL_DEFAULT,
+        entities: KeyspaceTuning::FJALL_DEFAULT,
+        tags: KeyspaceTuning::INDEX,
+    };
+}
+
+/// The archive store's tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchivePreset {
+    pub database: DatabaseTuning,
+    pub blocks: KeyspaceTuning,
+    pub logs: KeyspaceTuning,
+    pub tags: KeyspaceTuning,
+    pub exact: KeyspaceTuning,
+}
+
+impl ArchivePreset {
+    pub const STANDARD: Self = Self {
+        database: DatabaseTuning::STANDARD,
+        blocks: KeyspaceTuning::FJALL_DEFAULT,
+        logs: KeyspaceTuning::FJALL_DEFAULT,
+        tags: KeyspaceTuning::INDEX,
+        exact: KeyspaceTuning::INDEX,
+    };
+}
+
+impl DatabaseTuning {
+    /// The store's own 500 MiB cache over Fjall 3.1's other defaults.
+    const STANDARD: Self = Self {
+        cache_mb: 500,
+        journal_mb: 512,
+        max_workers: 4,
+        flush_on_commit: false,
+    };
+}
+
+/// The tuning a store opened with, its workers counted for this machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tuning {
+    pub preset: Preset,
+    pub cache_mb: u64,
+    pub journal_mb: u64,
+    pub workers: usize,
+    pub flush_on_commit: bool,
+    /// Each keyspace by name, in the store's order.
+    pub keyspaces: Vec<(&'static str, KeyspaceTuning)>,
+}
+
+impl Tuning {
+    pub(crate) fn new(
+        preset: Preset,
+        database: &DatabaseTuning,
+        keyspaces: Vec<(&'static str, KeyspaceTuning)>,
+    ) -> Self {
+        Self {
+            preset,
+            cache_mb: database.cache_mb,
+            journal_mb: database.journal_mb,
+            workers: database.workers(),
+            flush_on_commit: database.flush_on_commit,
+            keyspaces,
+        }
+    }
+}
+
+impl Display for Tuning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "preset {}: cache {} MiB, journal {} MiB, {} workers, flush on commit {}",
+            self.preset.name(),
+            self.cache_mb,
+            self.journal_mb,
+            self.workers,
+            self.flush_on_commit
+        )?;
+
+        for (name, keyspace) in &self.keyspaces {
+            write!(f, "; {name}: {keyspace}")?;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The values the pre-preset code applied to a default-configured store:
+    /// its own cache and index constants, and Fjall 3.1.0's defaults where it
+    /// set nothing (`Config::new`, `CreateOptions::default`,
+    /// `Leveled::default`). Written out rather than read from Fjall, so a
+    /// Fjall upgrade that moves a default fails here instead of retuning
+    /// stores.
+    const PRIMARY: KeyspaceTuning = KeyspaceTuning {
+        memtable_mb: 64,
+        l0_threshold: 4,
+        table_mb: 64,
+        level_ratio: 10,
+    };
+
+    const INDEX: KeyspaceTuning = KeyspaceTuning {
+        memtable_mb: 128,
+        l0_threshold: 8,
+        table_mb: 64,
+        level_ratio: 10,
+    };
+
+    const DATABASE: DatabaseTuning = DatabaseTuning {
+        cache_mb: 500,
+        journal_mb: 512,
+        max_workers: 4,
+        flush_on_commit: false,
+    };
+
+    #[test]
+    fn standard_state_is_the_pre_preset_default() {
+        let StatePreset {
+            database,
+            cursor,
+            utxos,
+            entities,
+            tags,
+        } = StatePreset::STANDARD;
+
+        assert_eq!(database, DATABASE);
+        assert_eq!(cursor, PRIMARY);
+        assert_eq!(utxos, PRIMARY);
+        assert_eq!(entities, PRIMARY);
+        assert_eq!(tags, INDEX);
+    }
+
+    #[test]
+    fn standard_archive_is_the_pre_preset_default() {
+        let ArchivePreset {
+            database,
+            blocks,
+            logs,
+            tags,
+            exact,
+        } = ArchivePreset::STANDARD;
+
+        assert_eq!(database, DATABASE);
+        assert_eq!(blocks, PRIMARY);
+        assert_eq!(logs, PRIMARY);
+        assert_eq!(tags, INDEX);
+        assert_eq!(exact, INDEX);
+    }
+
+    #[test]
+    fn workers_are_the_cores_up_to_four() {
+        let cores = std::thread::available_parallelism().map_or(1, usize::from);
+
+        assert_eq!(DATABASE.workers(), cores.min(4));
+    }
+
+    #[test]
+    fn the_configured_preset_selects_the_tables() {
+        let preset = Preset::from(FjallPreset::Standard);
+
+        assert_eq!(preset, Preset::Standard);
+        assert_eq!(preset.state(), &StatePreset::STANDARD);
+        assert_eq!(preset.archive(), &ArchivePreset::STANDARD);
+    }
+}

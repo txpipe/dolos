@@ -40,14 +40,20 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
             json.insert("state".to_string(), redb_section(stats));
         }
         StateStoreBackend::Fjall(state) => {
-            json.insert("state".to_string(), fjall_section(state.disk_usage()));
+            json.insert(
+                "state".to_string(),
+                fjall_section(state.disk_usage(), &state.tuning()),
+            );
         }
         StateStoreBackend::Memory(_) => (),
     }
 
     match &stores.archive {
         ArchiveStoreBackend::Fjall(archive) => {
-            json.insert("archive".to_string(), fjall_section(archive.disk_usage()));
+            json.insert(
+                "archive".to_string(),
+                fjall_section(archive.disk_usage(), &archive.tuning()),
+            );
         }
         ArchiveStoreBackend::Memory(_)
         | ArchiveStoreBackend::LogsOnly(_)
@@ -79,16 +85,49 @@ fn redb_section<'a>(
     json!({ "engine": "redb", "tables": serde_json::Value::Object(tables) })
 }
 
-fn fjall_section(usage: Vec<(&'static str, u64, std::path::PathBuf)>) -> serde_json::Value {
+fn fjall_section(
+    usage: Vec<(&'static str, u64, std::path::PathBuf)>,
+    tuning: &dolos_fjall::preset::Tuning,
+) -> serde_json::Value {
     let keyspaces: serde_json::Map<_, _> = usage
         .into_iter()
         .map(|(name, bytes, path)| {
+            let keyspace = tuning
+                .keyspaces
+                .iter()
+                .find(|(tuned, _)| *tuned == name)
+                .map(|(_, keyspace)| {
+                    json!({
+                        "memtable_mb": keyspace.memtable_mb,
+                        "compaction": {
+                            "strategy": "leveled",
+                            "l0_threshold": keyspace.l0_threshold,
+                            "table_mb": keyspace.table_mb,
+                            "level_ratio": keyspace.level_ratio,
+                        },
+                    })
+                });
+
             (
                 name.to_string(),
-                json!({ "disk_bytes": bytes, "path": path.display().to_string() }),
+                json!({
+                    "disk_bytes": bytes,
+                    "path": path.display().to_string(),
+                    "tuning": keyspace,
+                }),
             )
         })
         .collect();
 
-    json!({ "engine": "fjall", "keyspaces": serde_json::Value::Object(keyspaces) })
+    json!({
+        "engine": "fjall",
+        "tuning": {
+            "preset": tuning.preset.name(),
+            "cache_mb": tuning.cache_mb,
+            "journal_mb": tuning.journal_mb,
+            "workers": tuning.workers,
+            "flush_on_commit": tuning.flush_on_commit,
+        },
+        "keyspaces": serde_json::Value::Object(keyspaces),
+    })
 }

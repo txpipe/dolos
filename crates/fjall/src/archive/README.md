@@ -12,8 +12,9 @@ This module implements the `ArchiveStore` trait using [Fjall](https://github.com
 | 4 | `index-exact` | Block hash / block number / tx hash → slot | Point lookups |
 
 The last two are projections of the blocks. Keeping them here lets the history
-and its lookups commit in the same batch. Both keyspaces use
-`l0_threshold = 8` and `memtable_size_mb = 128`.
+and its lookups commit in the same batch. Both keyspaces take the preset's
+index tuning (L0 threshold 8, 128 MiB memtable) rather than the 4 and 64 MiB
+of the other two.
 
 ## Key Schemas
 

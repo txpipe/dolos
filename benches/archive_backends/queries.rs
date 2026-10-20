@@ -141,7 +141,8 @@ fn logs_only_scale(bencher: divan::Bencher, rows: u64) {
     let store = dolos_fjall::archive::ArchiveStore::open(
         dolos_cardano::model::build_log_schema(),
         directory.path(),
-        &Default::default(),
+        None,
+        dolos_fjall::Preset::Standard,
     )
     .unwrap();
     populate_archive(&store, "account-epochs", &shape).unwrap();
@@ -169,7 +170,8 @@ fn compressed_real_alonzo_block(bencher: divan::Bencher) {
     let store = dolos_fjall::archive::ArchiveStore::open(
         dolos_cardano::model::build_log_schema(),
         directory.path(),
-        &Default::default(),
+        None,
+        dolos_fjall::Preset::Standard,
     )
     .unwrap();
     let writer = store.start_writer().unwrap();

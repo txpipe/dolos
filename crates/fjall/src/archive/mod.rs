@@ -57,20 +57,17 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    config::FjallArchiveConfig, key_hash, ArchiveError, ArchiveIndexDelta,
-    ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot,
-    ChainPoint, EntityValue, ExactKind, IndexRecord, KeyRange, LogKey, Namespace, RawBlock,
-    StateSchema, TagDimension, KEY_HASH_SIZE,
+    key_hash, ArchiveError, ArchiveIndexDelta, ArchiveStore as CoreArchiveStore,
+    ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot, ChainPoint, EntityValue, ExactKind,
+    IndexRecord, KeyRange, LogKey, Namespace, RawBlock, StateSchema, TagDimension, KEY_HASH_SIZE,
 };
-use fjall::{
-    compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
-    Readable, Snapshot,
-};
+use fjall::{Database, Keyspace, OwnedWriteBatch, PersistMode, Readable, Snapshot};
 use pallas::ledger::traverse::MultiEraBlock;
 
 use dolos_flatfiles::{decode_locations, encode_locations, BlockLocation, FlatFileStore};
 
 use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
+use crate::preset::{Preset, Tuning};
 use crate::Error;
 
 pub mod exact;
@@ -85,15 +82,6 @@ use log_keys::{
 
 pub use exact::ExactRecordIterator as ExactIter;
 pub use tags::{SlotIterator as SlotIter, TagRecordIterator as TagIter};
-
-/// Default cache size in MB
-const DEFAULT_CACHE_SIZE_MB: usize = 500;
-
-/// Compaction settings of the two index keyspaces: what the standalone index
-/// store applied to them before they moved here, kept so their behavior does
-/// not change.
-const INDEX_L0_THRESHOLD: u8 = 8;
-const INDEX_MEMTABLE_SIZE_MB: usize = 128;
 
 /// The index keyspaces are swept once the prune cutoff has advanced by this
 /// fraction of the retained window since the last sweep.
@@ -156,7 +144,7 @@ pub struct ArchiveStore {
     exact: Keyspace,
     flatfiles: Arc<FlatFileStore>,
     schema: Arc<StateSchema>,
-    flush_on_commit: bool,
+    preset: Preset,
     /// Shared progress only; no snapshot or iterator survives a prune call.
     /// ponytail: reopen rescans; persist cursors only if restart rescans prove
     /// material.
@@ -165,50 +153,28 @@ pub struct ArchiveStore {
 }
 
 impl ArchiveStore {
-    /// Open or create an archive store.
+    /// Open or create an archive store, tuned by `preset`.
     ///
     /// `path` is the archive **directory** (e.g. `<storage.path>/archive/`).
     /// The fjall database is stored at `<path>/index`. Segment files are
-    /// stored in `config.blocks_path` if set, otherwise in `<path>/`.
+    /// stored in `blocks_path` if set, otherwise in `<path>/`.
     pub fn open(
         schema: StateSchema,
         path: impl AsRef<Path>,
-        config: &FjallArchiveConfig,
+        blocks_path: Option<&Path>,
+        preset: Preset,
     ) -> Result<Self, Error> {
         let path = path.as_ref();
         std::fs::create_dir_all(path).map_err(|e| Error::Io(e.to_string()))?;
 
-        let cache_size = config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB);
-        let cache_bytes = (cache_size * 1024 * 1024) as u64;
-
-        let mut builder = Database::builder(path.join("index")).cache_size(cache_bytes);
-
-        if let Some(journal_mb) = config.max_journal_size {
-            builder = builder.max_journaling_size((journal_mb as u64) * 1024 * 1024);
-        }
-
-        if let Some(threads) = config.worker_threads {
-            builder = builder.worker_threads(threads);
-        }
-
-        let db = builder.open()?;
-
-        let segments_dir = config
-            .blocks_path
-            .clone()
-            .unwrap_or_else(|| path.to_path_buf());
-
+        let segments_dir = blocks_path.unwrap_or(path).to_path_buf();
         let flatfiles = FlatFileStore::new(segments_dir).map_err(|e| Error::Io(e.to_string()))?;
 
-        Self::from_database(
-            db,
-            schema,
-            flatfiles,
-            config.flush_on_commit.unwrap_or(false),
-            config.l0_threshold,
-            config.memtable_size_mb,
-            None,
-        )
+        let store = Self::from_database(&path.join("index"), schema, flatfiles, preset, None)?;
+
+        tracing::info!(tuning = %store.tuning(), "archive store opened");
+
+        Ok(store)
     }
 
     /// Create an archive store over temporary directories, for tests.
@@ -218,66 +184,56 @@ impl ArchiveStore {
     pub fn for_tempdir(schema: StateSchema) -> Result<Self, Error> {
         let dir = tempfile::TempDir::new().map_err(|e| Error::Io(e.to_string()))?;
 
-        let db = Database::builder(dir.path().join("index")).open()?;
-
         let flatfiles =
             FlatFileStore::new(dir.path().to_path_buf()).map_err(|e| Error::Io(e.to_string()))?;
 
-        let mut store = Self::from_database(db, schema, flatfiles, false, None, None, None)?;
-        store._tempdir = Some(Arc::new(dir));
-
-        Ok(store)
+        Self::from_database(
+            &dir.path().join("index"),
+            schema,
+            flatfiles,
+            Preset::Standard,
+            Some(Arc::new(dir)),
+        )
     }
 
     fn from_database(
-        db: Database,
+        index_path: &Path,
         schema: StateSchema,
         flatfiles: FlatFileStore,
-        flush_on_commit: bool,
-        l0_threshold: Option<u8>,
-        memtable_size_mb: Option<usize>,
+        preset: Preset,
         tempdir: Option<Arc<tempfile::TempDir>>,
     ) -> Result<Self, Error> {
-        let build_opts = || {
-            let mut opts = KeyspaceCreateOptions::default();
-
-            if let Some(threshold) = l0_threshold {
-                opts = opts
-                    .compaction_strategy(Arc::new(Leveled::default().with_l0_threshold(threshold)));
-            }
-
-            if let Some(size_mb) = memtable_size_mb {
-                opts = opts.max_memtable_size((size_mb as u64) * 1024 * 1024);
-            }
-
-            opts
-        };
-
-        let blocks = db.keyspace(keyspace_names::BLOCKS, build_opts)?;
-        let logs = db.keyspace(keyspace_names::LOGS, build_opts)?;
-
-        let index_opts = || {
-            KeyspaceCreateOptions::default()
-                .compaction_strategy(Arc::new(
-                    Leveled::default().with_l0_threshold(INDEX_L0_THRESHOLD),
-                ))
-                .max_memtable_size((INDEX_MEMTABLE_SIZE_MB as u64) * 1024 * 1024)
-        };
-        let tags = db.keyspace(keyspace_names::TAGS, index_opts)?;
-        let exact = db.keyspace(keyspace_names::EXACT, index_opts)?;
+        let tuning = preset.archive();
+        let db = tuning.database.builder(index_path).open()?;
 
         Ok(Self {
+            blocks: db.keyspace(keyspace_names::BLOCKS, || tuning.blocks.options())?,
+            logs: db.keyspace(keyspace_names::LOGS, || tuning.logs.options())?,
+            tags: db.keyspace(keyspace_names::TAGS, || tuning.tags.options())?,
+            exact: db.keyspace(keyspace_names::EXACT, || tuning.exact.options())?,
             db,
-            blocks,
-            logs,
-            tags,
-            exact,
             flatfiles: Arc::new(flatfiles),
             schema: Arc::new(schema),
-            flush_on_commit,
+            preset,
             index_sweep: Arc::new(Mutex::new(IndexSweepState::default())),
             _tempdir: tempdir,
         })
+    }
+
+    /// The tuning the store opened with.
+    pub fn tuning(&self) -> Tuning {
+        let tuning = self.preset.archive();
+
+        Tuning::new(
+            self.preset,
+            &tuning.database,
+            vec![
+                (keyspace_names::BLOCKS, tuning.blocks),
+                (keyspace_names::LOGS, tuning.logs),
+                (keyspace_names::TAGS, tuning.tags),
+                (keyspace_names::EXACT, tuning.exact),
+            ],
+        )
     }
 
     /// Automatic encoding decisions and peak per-batch encoding resources.
@@ -761,7 +717,7 @@ impl CoreArchiveWriter for ArchiveWriter {
         let batch = batch.durability(Some(PersistMode::Buffer));
         batch.commit().map_err(fjall_err)?;
 
-        if self.store.flush_on_commit {
+        if self.store.preset.archive().database.flush_on_commit {
             self.store
                 .db
                 .persist(PersistMode::Buffer)
@@ -1591,11 +1547,6 @@ mod tests {
     #[test]
     fn reopen_finishes_index_cleanup_without_new_blocks() {
         let dir = tempfile::tempdir().unwrap();
-        let config = FjallArchiveConfig {
-            cache: Some(16),
-            worker_threads: Some(1),
-            ..Default::default()
-        };
         let mut deltas = vec![
             number_delta(0, 0),
             number_delta(10, 10),
@@ -1610,7 +1561,9 @@ mod tests {
                 .push(dolos_core::Tag::new("address", vec![1; 28]));
         }
         {
-            let store = ArchiveStore::open(StateSchema::default(), dir.path(), &config).unwrap();
+            let store =
+                ArchiveStore::open(StateSchema::default(), dir.path(), None, Preset::Standard)
+                    .unwrap();
             write(&store, &[(1_000, body(1_000, 0))]);
             write_indexes(&store, &deltas);
             let clone = store.clone();
@@ -1620,7 +1573,8 @@ mod tests {
             assert_eq!(tagged_slots(&store, &[1; 28]), [10, 1_000]);
             store.shutdown().unwrap();
         }
-        let store = ArchiveStore::open(StateSchema::default(), dir.path(), &config).unwrap();
+        let store =
+            ArchiveStore::open(StateSchema::default(), dir.path(), None, Preset::Standard).unwrap();
         let mut done = false;
         for _ in 0..20 {
             done = store
