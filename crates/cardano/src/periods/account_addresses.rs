@@ -1,5 +1,5 @@
-//! Stake addresses: the addresses each stake credential saw in each epoch,
-//! serving `/accounts/{stake}/addresses`.
+//! Account addresses: the addresses each account saw in each epoch, serving
+//! `/accounts/{stake}/addresses`.
 //!
 //! A sealed epoch holds one row per account that saw an address in it, at
 //! `epoch_start(e) ‖ account`, listing its addresses in order of first
@@ -17,20 +17,20 @@ use pallas::{codec::minicbor::bytes::ByteVec, ledger::primitives::Epoch};
 
 use super::Period;
 use crate::{
-    indexes::SlotOrder, AccountKey, ChainSummary, FixedNamespace as _, StagedStakeAddress,
-    StakeAddressesRow,
+    indexes::SlotOrder, AccountAddressChunk, AccountAddressSet, AccountKey, ChainSummary,
+    FixedNamespace as _,
 };
 
 /// Epochs read from the archive per call while walking an account's history.
 const EPOCH_BATCH: usize = 64;
 
 /// One epoch's addresses, in order of first appearance within it.
-fn staged_addresses(mut rows: Vec<StagedStakeAddress>) -> Vec<Vec<u8>> {
-    rows.sort_by_key(StagedStakeAddress::chain_order);
+fn staged_addresses(mut rows: Vec<AccountAddressSet>) -> Vec<Vec<u8>> {
+    rows.sort_by_key(AccountAddressSet::chain_order);
     rows.into_iter().map(|row| row.address).collect()
 }
 
-/// Seal the staged stake addresses of every epoch `sealable` accepts.
+/// Seal the account addresses of every epoch `sealable` accepts.
 ///
 /// Each (epoch, account) row depends on its group's staged rows alone, so the
 /// rows seal chunk by chunk, and a re-run writes the same row again.
@@ -43,7 +43,7 @@ pub(crate) fn seal<D: Domain>(
 ) -> Result<(), ChainError> {
     let mut rows = Vec::new();
 
-    for row in state.iter_entities_typed::<StagedStakeAddress>(None)? {
+    for row in state.iter_entities_typed::<AccountAddressSet>(None)? {
         let (key, row) = row?;
 
         if sealable(row.epoch) {
@@ -51,13 +51,13 @@ pub(crate) fn seal<D: Domain>(
         }
     }
 
-    super::seal_groups::<D, StagedStakeAddress, _, _, _>(
+    super::seal_groups::<D, AccountAddressSet, _, _, _>(
         state,
         archive,
         rows,
         batch,
         |chunk, writer| {
-            let mut group: Vec<StagedStakeAddress> = Vec::new();
+            let mut group: Vec<AccountAddressSet> = Vec::new();
 
             // rows come in key order: account, then epoch
             for (i, (key, row)) in chunk.iter().enumerate() {
@@ -76,7 +76,7 @@ pub(crate) fn seal<D: Domain>(
                     writer.write_log_typed(
                         chain.epoch_start(key.epoch),
                         &key.group,
-                        &StakeAddressesRow { addresses },
+                        &AccountAddressChunk { addresses },
                     )?;
                 }
             }
@@ -100,7 +100,7 @@ fn first_appearances<D: Domain>(
 ) -> Result<Vec<Vec<u8>>, ChainError> {
     let (state, archive) = (domain.state(), domain.archive());
 
-    let mut staged = super::read_staged::<_, StagedStakeAddress>(state, RangeOf::prefix(account))?;
+    let mut staged = super::read_staged::<_, AccountAddressSet>(state, RangeOf::prefix(account))?;
 
     staged.retain(|epoch, _| epochs.contains(epoch));
 
@@ -110,7 +110,7 @@ fn first_appearances<D: Domain>(
     let epochs: Vec<Epoch> = epochs.collect();
 
     for batch in epochs.chunks(EPOCH_BATCH) {
-        let sealed = super::read_sealed::<_, StakeAddressesRow>(
+        let sealed = super::read_sealed::<_, AccountAddressChunk>(
             archive,
             chain,
             batch.iter().copied(),
@@ -129,7 +129,7 @@ fn first_appearances<D: Domain>(
             let addresses = match period {
                 Period::Staged(rows) => staged_addresses(rows),
                 Period::Sealed(raw) => {
-                    StakeAddressesRow::decode_entity(StakeAddressesRow::NS, &raw)?
+                    AccountAddressChunk::decode_entity(AccountAddressChunk::NS, &raw)?
                         .addresses
                         .into_iter()
                         .map(Vec::from)
@@ -193,7 +193,7 @@ mod tests {
     use pallas::ledger::primitives::StakeCredential;
 
     use super::*;
-    use crate::periods::{is_sealable, StagedKey, StagedRow as _};
+    use crate::periods::{is_sealable, GroupKey, GroupRow as _};
     use crate::AddressKey;
 
     /// The epoch the sealing boundary opens: 5 and 6 are immutable at it, 7 is
@@ -221,7 +221,7 @@ mod tests {
         let mut rows = Vec::new();
         let mut row =
             |account: StakeCredential, address: u8, epoch: Epoch, offset: u64, tx: u32| {
-                rows.push(StagedStakeAddress {
+                rows.push(AccountAddressSet {
                     account,
                     address: vec![0x01, address],
                     epoch,
@@ -271,19 +271,19 @@ mod tests {
         )
     }
 
-    fn logs(domain: &ToyDomain) -> Vec<(BlockSlot, AccountKey, StakeAddressesRow)> {
+    fn logs(domain: &ToyDomain) -> Vec<(BlockSlot, AccountKey, AccountAddressChunk)> {
         domain
             .archive()
-            .iter_logs_typed::<StakeAddressesRow>(None)
+            .iter_logs_typed::<AccountAddressChunk>(None)
             .unwrap()
             .map(Result::unwrap)
             .collect()
     }
 
-    fn staged(domain: &ToyDomain) -> Vec<(StagedKey<AccountKey, AddressKey>, StagedStakeAddress)> {
+    fn staged(domain: &ToyDomain) -> Vec<(GroupKey<AccountKey, AddressKey>, AccountAddressSet)> {
         domain
             .state()
-            .iter_entities_typed::<StagedStakeAddress>(None)
+            .iter_entities_typed::<AccountAddressSet>(None)
             .unwrap()
             .map(Result::unwrap)
             .collect()

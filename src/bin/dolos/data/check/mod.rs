@@ -503,6 +503,9 @@ mod tests {
                 pool_metadata: None,
             },
             is_new: false,
+            stake: None,
+            delegators: None,
+            live_pledge: None,
         };
 
         let pool = PoolState {

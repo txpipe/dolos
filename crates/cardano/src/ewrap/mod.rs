@@ -21,7 +21,7 @@ use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
 
 use crate::{
     eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountEpochLog,
-    AccountState, CardanoDelta, DRepState, EpochState, EraProtocol, GovDistr, GovState, PoolHash,
+    AccountState, CardanoDelta, DRepState, EpochState, EraKey, GovDistr, GovState, PoolHash,
     PoolState, ProposalOutcome, ProposalState,
 };
 
@@ -165,7 +165,7 @@ impl Ratification {
 pub struct BoundaryWork {
     // loaded
     pub(crate) ending_state: EpochState,
-    pub active_protocol: EraProtocol,
+    pub active_protocol: EraKey,
     pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,
     pub rewards: RewardMap<RupdWork>,
@@ -188,13 +188,20 @@ pub struct BoundaryWork {
     /// [`BoundaryWork::clears_drep_delegation`].
     pub retiring_dreps: Vec<(DRep, (BlockSlot, TxOrder))>,
 
+    /// The network's PV9 delegator-set table (`hacks::pv9_drep_delegs`).
+    pub pv9_drep_delegs: &'static [crate::hacks::pv9_drep_delegs::Entry],
+
+    /// The accounts the table settles at this boundary: those listed under
+    /// the certificate of one of [`Self::retiring_dreps`].
+    pub pv9_settlements: HashMap<StakeCredential, crate::hacks::pv9_drep_delegs::Settlement>,
+
     /// The stake snapshot this boundary's rewards were computed against, and
     /// the protocol its stake totals are read under: RUPD's `snapshot_epoch`
     /// (`C - 3`) and the era of `snapshot_epoch + 1`. `None` where RUPD
     /// computed nothing — `RupdWork::relevant_epochs` returns `None` below
     /// epoch 4 and while the snapshot epoch is still at or before the first
     /// Shelley one, and the merged log has to agree with it epoch for epoch.
-    pub stake_snapshot: Option<(Epoch, EraProtocol)>,
+    pub stake_snapshot: Option<(Epoch, EraKey)>,
 
     /// The pools whose delegators are in [`Self::stake_snapshot`]'s
     /// distribution: those with a snapshot at that epoch that is not retired.
@@ -352,10 +359,10 @@ impl BoundaryWork {
     /// closes.
     ///
     /// Three of the four namespaces this record replaces already used it — the
-    /// stake temporal key, shared with the per-pool `StakeLog` so account- and
-    /// pool-level views of an epoch agree on its label by construction. The
-    /// reward family is what moves onto it (ADR-0027), which is also what lets
-    /// the merge deduplicate the `LogKey` and the pool hash.
+    /// stake temporal key, shared with the per-pool `PoolEpochLog` so account-
+    /// and pool-level views of an epoch agree on its label by construction.
+    /// The reward family is what moves onto it (ADR-0027), which is also
+    /// what lets the merge deduplicate the `LogKey` and the pool hash.
     pub fn account_epoch_slot(&self) -> BlockSlot {
         self.chain_summary
             .epoch_start(self.ending_state.number.saturating_sub(1))
@@ -449,13 +456,33 @@ impl BoundaryWork {
     /// correct under repeated dereg/rereg cycles inside one epoch: only
     /// delegations predating the last certificate are cleared. A registration
     /// on its own never clears anything.
+    ///
+    /// Under protocol 9 the set the ledger saw is not the positional one, and
+    /// [`Self::pv9_settlements`] overrides it for the accounts it lists: a
+    /// `Clear` account loses a delegation predating the certificate whatever
+    /// DRep it now points at, and a `Keep` account keeps its delegation to the
+    /// retiring DRep. A delegation made after the certificate is left to the
+    /// positional rule.
     pub fn clears_drep_delegation(&self, drep: &DRep, account: &AccountState) -> bool {
-        let Some((_, unregistered_at)) = self.retiring_dreps.iter().find(|(x, _)| x == drep) else {
-            return false;
+        let predates = |unregistered_at: &(BlockSlot, TxOrder)| {
+            account
+                .vote_delegated_at
+                .is_some_and(|delegated_at| delegated_at < *unregistered_at)
         };
 
-        account
-            .vote_delegated_at
-            .is_some_and(|delegated_at| delegated_at < *unregistered_at)
+        if let Some(settled) = self.pv9_settlements.get(&account.credential) {
+            use crate::hacks::pv9_drep_delegs::Action;
+
+            match settled.action {
+                Action::Clear if predates(&settled.unregistered_at) => return true,
+                Action::Keep if settled.drep == *drep => return false,
+                _ => (),
+            }
+        }
+
+        self.retiring_dreps
+            .iter()
+            .find(|(x, _)| x == drep)
+            .is_some_and(|(_, unregistered_at)| predates(unregistered_at))
     }
 }

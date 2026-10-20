@@ -9,10 +9,7 @@ use dolos_core::Domain;
 
 use crate::{error::Error, mapping::IntoModel as _, Facade};
 
-use super::{
-    build_epoch_content, current_epoch, derive_current_active_stake, load_epoch_state,
-    parse_epoch_digits,
-};
+use super::{build_epoch_content, current_epoch, load_epoch_state, parse_epoch_digits};
 
 pub async fn by_number<D: Domain>(
     State(domain): State<Facade<D>>,
@@ -30,12 +27,7 @@ where
     }
 
     let state = load_epoch_state(&domain, &chain, current, epoch)?;
-    let active_stake = if epoch == current {
-        Some(derive_current_active_stake(&domain, &chain, current).await?)
-    } else {
-        None
-    };
-    let model = build_epoch_content(&domain, &chain, epoch, state, active_stake)?;
+    let model = build_epoch_content(&domain, &chain, epoch, state)?;
 
     Ok(model.into_response()?)
 }
@@ -59,10 +51,36 @@ mod tests {
 
     #[tokio::test]
     async fn epochs_by_number_current_has_active_stake() {
-        let app = TestApp::new();
-        let path = "/epochs/2";
-        let content: EpochContent = get_ok(&app, path).await;
-        assert!(content.active_stake.is_some());
+        let app = app_with_active_stake(7_000, &[]);
+        let content: EpochContent = get_ok(&app, "/epochs/2").await;
+        assert_eq!(content.active_stake.as_deref(), Some("7000"));
+    }
+
+    /// The previous epoch's active stake was sealed with its epoch log when
+    /// it closed, so it is there before the current epoch's RUPD writes any
+    /// `PoolEpochLog` row — the window in which it used to be `null`.
+    #[tokio::test]
+    async fn epochs_by_number_previous_has_active_stake_before_rupd() {
+        let app = app_with_active_stake(7_000, &[(1, 6_000)]);
+        let content: EpochContent = get_ok(&app, "/epochs/1").await;
+        assert_eq!(content.active_stake.as_deref(), Some("6000"));
+    }
+
+    /// The listings read each epoch's own stored value, the current one's
+    /// included.
+    #[tokio::test]
+    async fn epochs_next_reads_each_stored_active_stake() {
+        let app = app_with_active_stake(7_000, &[(1, 6_000)]);
+        let content: Vec<EpochContent> = get_ok(&app, "/epochs/0/next").await;
+        let stakes: Vec<_> = content
+            .into_iter()
+            .map(|x| (x.epoch, x.active_stake))
+            .collect();
+
+        assert_eq!(
+            stakes,
+            [(1, Some("6000".to_string())), (2, Some("7000".to_string()))]
+        );
     }
 
     #[tokio::test]

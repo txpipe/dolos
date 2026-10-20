@@ -6,14 +6,14 @@ use blockfrost_openapi::models::{
     network_eras_inner_start::NetworkErasInnerStart, network_stake::NetworkStake,
     network_supply::NetworkSupply,
 };
-use dolos_cardano::{model::EpochState, mutable_slots, EraSummary};
+use dolos_cardano::{model::EpochState, mutable_slots, EraState};
 use dolos_core::{BlockSlot, Genesis};
 
 use super::{parse_datetime_into_timestamp, IntoModel};
 
 pub struct ChainModelBuilder<'a> {
     pub tip: BlockSlot,
-    pub eras: Vec<(u16, EraSummary)>,
+    pub eras: Vec<(u16, EraState)>,
     pub genesis: &'a Genesis,
 }
 

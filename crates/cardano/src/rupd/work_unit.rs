@@ -13,7 +13,7 @@
 //! credentials, persists the in-range `PendingRewardState` entities, and
 //! emits a `RupdProgress` delta to advance `EpochState.rupd_progress`.
 //! `finalize()` writes `EpochState.incentives` once and emits the per-pool
-//! `StakeLog` entries, deriving their figures from the rebuilt snapshot
+//! `PoolEpochLog` entries, deriving their figures from the rebuilt snapshot
 //! globals and the persisted `PendingRewardState` entities rather than from
 //! any tally carried across shards.
 //!
@@ -36,7 +36,7 @@ use tracing::{debug, info};
 use crate::{
     rewards::{Reward, RewardMap},
     shard::ACCOUNT_SHARDS,
-    AccountKey, CardanoLogic, EpochState, PendingRewardState, PoolHash, PoolKey, StakeLog,
+    AccountKey, CardanoLogic, EpochState, PendingRewardState, PoolEpochLog, PoolHash, PoolKey,
 };
 
 use super::RupdWork;
@@ -226,12 +226,12 @@ impl RupdWorkUnit {
         Ok(())
     }
 
-    /// Emit the per-pool `StakeLog` entries for the epoch this RUPD covers.
+    /// Emit the per-pool `PoolEpochLog` entries for the epoch this RUPD covers.
     ///
     /// Every field comes from data that `initialize()` rebuilds or that the
     /// shards persisted, never from an in-memory tally spanning shards:
-    /// `total_stake` / `delegators_count` from the globals pass of the stake
-    /// snapshot, and the reward figures from the stored
+    /// `total_stake` / `delegators_count` / `live_pledge` from the pool
+    /// totals ESTART froze, and the reward figures from the stored
     /// `PendingRewardState` entities. A RUPD resumed mid-pipeline therefore
     /// reports the whole epoch rather than only the shards that ran after the
     /// resume cursor.
@@ -274,11 +274,11 @@ impl RupdWorkUnit {
             let (total_rewards, operator_share) =
                 pool_rewards.get(pool_hash).copied().unwrap_or((0, 0));
 
-            let log = StakeLog {
+            let log = PoolEpochLog {
                 blocks_minted,
                 total_stake: pool_stake,
                 relative_size,
-                live_pledge: 0,
+                live_pledge: snapshot.get_pool_live_pledge(pool_hash),
                 declared_pledge,
                 delegators_count: snapshot.get_pool_delegator_count(pool_hash),
                 total_rewards,
@@ -400,7 +400,7 @@ where
     }
 
     fn commit_archive(&mut self, _domain: &D, _shard_index: u32) -> Result<(), DomainError> {
-        // Per-pool StakeLog entries are written in finalize(), once every
+        // Per-pool PoolEpochLog entries are written in finalize(), once every
         // shard's pending rewards have landed in state. The per-account leg of
         // the distribution is no longer RUPD's to write: it is one field of the
         // merged account-epoch row EWRAP assembles at the boundary (ADR-0027).
@@ -432,7 +432,7 @@ where
 
         writer.commit()?;
 
-        // ---- Archive: per-pool StakeLog entries ----
+        // ---- Archive: per-pool PoolEpochLog entries ----
         self.write_stake_logs(domain.state(), domain.archive())?;
 
         debug!("rupd finalize committed");
@@ -486,7 +486,7 @@ mod tests {
         let mut summary = crate::ChainSummary::default();
         summary.append_era(
             7,
-            crate::model::EraSummary {
+            crate::model::EraState {
                 start: crate::model::EraBoundary {
                     epoch: 0,
                     slot: 0,
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(committed_shards(&domain), Some(1));
     }
 
-    // --- per-pool StakeLog figures survive a mid-RUPD restart ---
+    // --- per-pool PoolEpochLog figures survive a mid-RUPD restart ---
 
     fn pool_params(pledge: u64, cost: u64) -> crate::PoolParams {
         crate::PoolParams {
@@ -571,7 +571,7 @@ mod tests {
     }
 
     /// A pool snapshot aligned to `CURRENT_EPOCH`: `go` carries the params
-    /// `StakeLog` reports, `mark` the blocks minted.
+    /// `PoolEpochLog` reports, `mark` the blocks minted.
     fn pool_snapshot(
         pledge: u64,
         cost: u64,
@@ -582,6 +582,9 @@ mod tests {
             blocks_minted,
             params: pool_params(pledge, cost),
             is_new: false,
+            stake: None,
+            delegators: None,
+            live_pledge: None,
         };
 
         crate::EpochValue::from_parts(
@@ -614,18 +617,18 @@ mod tests {
         writer.commit().unwrap();
     }
 
-    fn read_stake_log<D: Domain>(domain: &D, slot: u64, pool: PoolHash) -> Option<StakeLog> {
+    fn read_stake_log<D: Domain>(domain: &D, slot: u64, pool: PoolHash) -> Option<PoolEpochLog> {
         domain
             .archive()
-            .read_log_typed::<StakeLog>(slot, &PoolKey(pool))
+            .read_log_typed::<PoolEpochLog>(slot, &PoolKey(pool))
             .unwrap()
     }
 
     /// The bug three reviewers flagged: `finalize` used to read a per-pool
     /// tally accumulated by each shard's `commit_state`, but a restart builds a
     /// fresh work unit and `initialize` skips already-committed shards — so a
-    /// resumed RUPD wrote `StakeLog` with under-counted rewards and delegators,
-    /// or zeros if every shard had committed before the crash.
+    /// resumed RUPD wrote `PoolEpochLog` with under-counted rewards and
+    /// delegators, or zeros if every shard had committed before the crash.
     ///
     /// This drives exactly that state: a work unit that ran no shards at all
     /// (`start_shard == total_shards`), with the shards' `PendingRewardState`
@@ -643,6 +646,7 @@ mod tests {
         snapshot.pools.insert(pool, pool_snapshot(100, 20, 3));
         snapshot.pool_stake.insert(pool, 1_000);
         snapshot.pool_delegator_counts.insert(pool, 2);
+        snapshot.pool_live_pledges.insert(pool, 400);
         snapshot.active_stake_sum = 1_000;
         assert_eq!(snapshot.iter_accounts().count(), 0);
 
@@ -658,10 +662,11 @@ mod tests {
             .expect("write_stake_logs");
 
         let log = read_stake_log(&domain, chain.epoch_start(CURRENT_EPOCH - 1), pool)
-            .expect("missing stake log");
+            .expect("missing pool epoch log");
 
         assert_eq!(log.total_stake, 1_000);
         assert_eq!(log.delegators_count, 2);
+        assert_eq!(log.live_pledge, 400);
         assert_eq!(log.total_rewards, 100);
         assert_eq!(log.operator_share, 30);
         assert_eq!(log.blocks_minted, 3);

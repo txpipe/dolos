@@ -25,7 +25,7 @@ use dolos_core::{BlockSlot, Domain, DomainError, Genesis, WorkUnit};
 use tracing::{debug, info};
 
 use crate::{
-    estart::{AvvmReclamation, WorkContext},
+    estart::{stake, AvvmReclamation, PoolOwners, WorkContext},
     load_epoch,
     shard::ACCOUNT_SHARDS,
     CardanoLogic, EpochState,
@@ -56,6 +56,12 @@ pub struct EstartWorkUnit {
     /// UTxO set.
     avvm_reclamation: AvvmReclamation,
 
+    /// The owners of every pool in the closing epoch, indexed once in
+    /// `initialize()` and shared by every shard's live-pledge tally. Pools
+    /// rotate only in `finalize()`, so a resumed boundary rebuilds the same
+    /// index.
+    owners: Arc<PoolOwners>,
+
     /// During the per-shard loop, holds the in-flight shard's
     /// `WorkContext` (build-and-discard between shards). After
     /// `finalize()`, holds the global Estart pass's `WorkContext` so
@@ -72,6 +78,7 @@ impl EstartWorkUnit {
             total_shards: 0,
             start_shard: 0,
             avvm_reclamation: AvvmReclamation::default(),
+            owners: Default::default(),
             context: None,
         }
     }
@@ -125,12 +132,15 @@ where
         // boundary.
         self.avvm_reclamation = AvvmReclamation::at_boundary::<D>(domain.state(), &self.genesis)?;
 
+        self.owners = Arc::new(stake::pool_owners::<D>(domain.state(), epoch.number)?);
+
         debug!(
             slot = self.slot,
             total = self.total_shards,
             start = self.start_shard,
             avvm = self.avvm_reclamation.total,
             avvm_utxos = self.avvm_reclamation.utxos.len(),
+            pool_owners = self.owners.len(),
             "estart initialize"
         );
         Ok(())
@@ -150,6 +160,7 @@ where
             domain.state(),
             self.genesis.clone(),
             self.avvm_reclamation.clone(),
+            self.owners.clone(),
             shard_index,
             self.total_shards,
             ranges,

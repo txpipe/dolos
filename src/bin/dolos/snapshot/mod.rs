@@ -16,12 +16,15 @@
 //! one restriction, one reading of the plan they produce:
 //! [`dolos_snapshot::planning`].
 
+use std::path::Path;
+
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
     export::Plan,
     facade::{Selection, SnapshotSource as _, StoreSnapshot},
     planning::{self, PlanReport},
+    RetainedEpochs,
 };
 use miette::{Context as _, IntoDiagnostic as _};
 
@@ -59,6 +62,44 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     }
 }
 
+/// The publisher's retained state-dump epochs, from `--state-epochs` or
+/// `--state-epochs-file`, read and validated.
+///
+/// Nothing is defaulted: naming neither is the empty list, a publisher that
+/// retains the tip alone, which [`report_plan`] prints so that a mismatch
+/// against a published stele is explained.
+pub fn retained_epochs(listed: &[u64], file: Option<&Path>) -> miette::Result<RetainedEpochs> {
+    let epochs = match file {
+        Some(path) => read_state_epochs(path)?,
+        None => listed.to_vec(),
+    };
+
+    planning::retained_epochs(&epochs)
+        .into_diagnostic()
+        .context("reading the state epochs")
+}
+
+fn read_state_epochs(path: &Path) -> miette::Result<Vec<u64>> {
+    let text = std::fs::read_to_string(path)
+        .into_diagnostic()
+        .with_context(|| format!("reading the state epochs in {}", path.display()))?;
+
+    parse_state_epochs(&text)
+        .with_context(|| format!("reading the state epochs in {}", path.display()))
+}
+
+/// Epoch numbers separated by commas or whitespace, newlines included.
+fn parse_state_epochs(text: &str) -> miette::Result<Vec<u64>> {
+    text.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            entry
+                .parse()
+                .map_err(|_| miette::miette!("{entry:?} is not an epoch number"))
+        })
+        .collect()
+}
+
 /// This node's plan, narrowed by the operator's selection.
 ///
 /// One sequence for `digest` and `verify --reproduce`, because a node that gave
@@ -68,13 +109,10 @@ pub fn planned(
     config: &RootConfig,
     stores: &crate::common::Stores,
     selection: &Selection,
+    retained: RetainedEpochs,
     what: &'static str,
 ) -> miette::Result<Plan> {
     let genesis = crate::common::open_genesis_files(&config.genesis)?;
-
-    let retained = planning::retained_epochs(config)
-        .into_diagnostic()
-        .context("reading snapshot.state_epochs")?;
 
     StoreSnapshot::new(&stores.archive, &stores.state)
         .selected_plan(u64::from(genesis.network_magic()), retained, *selection)
@@ -120,4 +158,57 @@ pub fn report_plan(plan: &Plan) -> miette::Result<()> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_state_epochs_file_lists_epochs_by_comma_or_line() {
+        assert_eq!(
+            parse_state_epochs("208, 236\n290\n\n365\n").unwrap(),
+            vec![208, 236, 290, 365]
+        );
+        assert_eq!(parse_state_epochs("").unwrap(), Vec::<u64>::new());
+        assert!(parse_state_epochs("208, epoch-236").is_err());
+    }
+
+    #[test]
+    fn a_state_epochs_file_is_read_in_place_of_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("epochs.txt");
+        std::fs::write(&path, "208,236\n290\n").unwrap();
+
+        assert_eq!(
+            retained_epochs(&[], Some(&path)).unwrap().as_slice(),
+            [208, 236, 290]
+        );
+
+        let missing = dir.path().join("missing.txt");
+        let message = format!("{:?}", retained_epochs(&[], Some(&missing)).unwrap_err());
+        assert!(message.contains("missing.txt"), "{message}");
+    }
+
+    #[test]
+    fn the_listed_epochs_stand_without_a_file() {
+        assert_eq!(
+            retained_epochs(&[208, 236], None).unwrap().as_slice(),
+            [208, 236]
+        );
+        assert!(retained_epochs(&[], None).unwrap().as_slice().is_empty());
+    }
+
+    /// A list the plan would refuse is refused as it is read, from either
+    /// source.
+    #[test]
+    fn an_invalid_list_is_refused_as_it_is_read() {
+        assert!(retained_epochs(&[236, 208], None).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("epochs.txt");
+        std::fs::write(&path, "208\n208\n").unwrap();
+
+        assert!(retained_epochs(&[], Some(&path)).is_err());
+    }
 }

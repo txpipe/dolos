@@ -10,7 +10,7 @@ use csv_diff::diff_row::DiffByteRecord;
 use pallas::ledger::addresses::Network;
 
 use dolos_cardano::ewrap::AppliedReward;
-use dolos_cardano::model::{EpochState, EraSummary, PParamKind, PParamValue, PParamsSet};
+use dolos_cardano::model::{EpochState, EraState, PParamKind, PParamValue, PParamsSet};
 use dolos_cardano::pallas_extras;
 use dolos_cardano::rupd::StakeSnapshot;
 use dolos_cardano::CardanoWorkUnit;
@@ -368,7 +368,7 @@ fn dump_eras(state: &impl StateStore, path: &Path) -> Result<()> {
     wtr.write_record(["protocol", "start_epoch", "epoch_length", "slot_length"])?;
 
     let iter = state
-        .iter_entities_typed::<EraSummary>(None)
+        .iter_entities_typed::<EraState>(None)
         .context("iterating eras")?;
 
     for result in iter {

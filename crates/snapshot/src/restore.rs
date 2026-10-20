@@ -698,8 +698,8 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
 /// available and none is wanted: the two roles share a kind, a media type and
 /// a record codec, and the scope is the only field that tells them apart.
 ///
-/// Completeness is structural, in both dimensions — **for the tip**. Every one
-/// of the twenty-six kinds must be there, and per kind exactly the shards its
+/// Completeness is structural, in both dimensions — **for the tip**. Every
+/// state kind must be there, and per kind exactly the shards its
 /// spec'd count promises, empty ones included. A missing piece is a missing
 /// slice of the ledger that no later step would notice — the write path
 /// dispatches on the kind, not the shard — so it is refused rather than
@@ -1679,7 +1679,7 @@ mod tests {
         let err = select_state(&inscription(short)).unwrap_err();
         assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
 
-        // An absent kind: tip completeness is all twenty-six, not "what's there".
+        // An absent kind: tip completeness is every kind, not "what's there".
         let absent: Vec<LayerDescriptor> = state_layers()
             .into_iter()
             .filter(|layer| layer.kind != "state-epochs")
@@ -1782,7 +1782,7 @@ mod tests {
         let layers = vec![
             epoch_descriptor(BLOCKS, 0, 1),
             epoch_descriptor(BLOCKS, 1, 2),
-            epoch_descriptor("log-stakes", 0, 3),
+            epoch_descriptor("log-pool-epochs", 0, 3),
             epoch_descriptor("log-epochs", 0, 5),
             epoch_descriptor(INDEXES, 1, 4),
         ];
@@ -1796,12 +1796,12 @@ mod tests {
         assert!(epochs[0].indexes.is_none(), "a kind nobody published");
 
         // Grouped by the namespace the kind names, and only the two kinds that
-        // were published: the other four log kinds are absent, not empty.
+        // were published: the other log kinds are absent, not empty.
         assert_eq!(
             epochs[0].logs.keys().copied().collect::<Vec<_>>(),
-            ["epochs", "stakes"]
+            ["epochs", "pool-epochs"]
         );
-        assert_eq!(epochs[0].logs["stakes"].kind, "log-stakes");
+        assert_eq!(epochs[0].logs["pool-epochs"].kind, "log-pool-epochs");
 
         assert_eq!(epochs[1].epoch, 1);
         assert_eq!((epochs[1].start_slot, epochs[1].end_slot), (100, 199));
@@ -1820,7 +1820,7 @@ mod tests {
         // And so is one epoch carrying two different slot windows.
         let mut disagreeing = vec![epoch_descriptor(BLOCKS, 0, 1)];
         disagreeing.push(descriptor(
-            "log-stakes",
+            "log-pool-epochs",
             json!({"epoch": 0, "startSlot": 0, "endSlot": 50}),
             2,
         ));
@@ -2016,8 +2016,8 @@ mod tests {
 
         // The two halves of the rule compose: a `state-{ns}` this build has no
         // namespace for is skipped like any other unknown kind, and the tip is
-        // still complete, because completeness is counted over the twenty-six
-        // kinds this profile defines rather than over the state layers present.
+        // still complete, because completeness is counted over the kinds this
+        // profile defines rather than over the state layers present.
         assert_eq!(select_state(&stele).unwrap().tip.len(), STATE_KINDS.len());
 
         // And a stele written by a publisher this build keeps up with skips

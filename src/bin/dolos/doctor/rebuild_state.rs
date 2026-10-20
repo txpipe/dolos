@@ -56,8 +56,10 @@ pub struct Args {
     #[arg(long)]
     ephemeral: bool,
 
-    /// Also re-write the derived log records the archive carries (StakeLog,
-    /// reward logs, EpochState, period logs); in-place mode only
+    /// Also re-write what the archive derives from its blocks: the log
+    /// records (PoolEpochLog, reward logs, EpochState, period logs) and the
+    /// index entries, filling in any an older version did not index; in-place
+    /// mode only
     #[arg(long, conflicts_with_all = ["target", "ephemeral"])]
     rewrite_logs: bool,
 
@@ -250,6 +252,11 @@ fn build_domain(
         .context("creating the in-memory WAL")?;
 
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
+    let query_limiter = QueryLimiter::default();
+    let cache = open_store(
+        "cache",
+        dolos::storage::open_cache_store(config, query_limiter.clone()),
+    )?;
 
     Ok(DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
@@ -260,8 +267,9 @@ fn build_domain(
         state,
         archive,
         mempool: MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
+        cache,
         tip_broadcast,
-        query_limiter: QueryLimiter::default(),
+        query_limiter,
     })
 }
 

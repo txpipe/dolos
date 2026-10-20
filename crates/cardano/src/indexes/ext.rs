@@ -5,6 +5,7 @@
 //! history lookups to any `ArchiveStore`.
 
 use dolos_core::{keys, ArchiveError, ArchiveStore, BlockSlot, StateError, StateStore, UtxoSet};
+use pallas::ledger::primitives::StakeCredential;
 
 use super::dimensions::{archive, utxo};
 use crate::ProposalKey;
@@ -182,6 +183,20 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
         self.slots_by_tag(archive::DREP_CERTS, drep, start, end)
     }
 
+    fn slots_by_committee_certs(
+        &self,
+        cold: &StakeCredential,
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(
+            archive::COMMITTEE_CERTS,
+            &crate::pallas_extras::committee_cold_id_bytes(cold),
+            start,
+            end,
+        )
+    }
+
     /// Iterate over slots of blocks containing withdrawals for an account.
     fn slots_by_account_withdrawals(
         &self,
@@ -243,6 +258,19 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
         self.slots_by_tag(archive::ACTION_VOTES, &keys::encode(action), start, end)
     }
 
+    fn slots_by_committee_votes(
+        &self,
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        self.slots_by_tag(
+            archive::COMMITTEE_VOTES,
+            archive::COMMITTEE_VOTES_KEY,
+            start,
+            end,
+        )
+    }
+
     // ============ Bulk Export ============
 
     /// Iterate every archive tag record in `slots`, across every Cardano
@@ -265,3 +293,98 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
 }
 
 impl<T: ArchiveStore> CardanoArchiveIndexExt for T {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dolos_core::{builtin::MemoryArchiveStore, ArchiveIndexDelta, ArchiveWriter, Tag};
+    use pallas::crypto::hash::Hash;
+
+    fn store_with_tags(tags: Vec<(BlockSlot, Vec<Tag>)>) -> MemoryArchiveStore {
+        let store = MemoryArchiveStore::new(crate::model::build_log_schema());
+        let deltas: Vec<_> = tags
+            .into_iter()
+            .map(|(slot, tags)| ArchiveIndexDelta {
+                slot,
+                block_hash: vec![slot as u8; 32],
+                block_number: Some(slot),
+                tx_hashes: vec![],
+                tags,
+            })
+            .collect();
+        let writer = store.start_writer().unwrap();
+        writer.apply_index(&deltas).unwrap();
+        writer.commit().unwrap();
+        store
+    }
+
+    #[test]
+    fn committee_certificate_lookup_uses_cold_cip129_bytes_and_slot_bounds() {
+        let hash = Hash::new([0x99; 28]);
+        let key_id = [&[0x12u8][..], hash.as_slice()].concat();
+        let script_id = [&[0x13u8][..], hash.as_slice()].concat();
+        let store = store_with_tags(vec![
+            (90, vec![Tag::new(archive::COMMITTEE_CERTS, key_id.clone())]),
+            (100, vec![Tag::new(archive::COMMITTEE_CERTS, key_id)]),
+            (110, vec![Tag::new(archive::COMMITTEE_CERTS, script_id)]),
+        ]);
+
+        assert_eq!(
+            store
+                .slots_by_committee_certs(&StakeCredential::AddrKeyhash(hash), 100, 110)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            [100]
+        );
+        assert_eq!(
+            store
+                .slots_by_committee_certs(&StakeCredential::ScriptHash(hash), 100, 110)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            [110]
+        );
+        assert!(store
+            .slots_by_committee_certs(&StakeCredential::ScriptHash(hash), 100, 109)
+            .unwrap()
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn committee_vote_lookup_uses_fixed_key_and_slot_bounds() {
+        let store = store_with_tags(vec![
+            (
+                90,
+                vec![Tag::new(archive::COMMITTEE_VOTES, b"committee".to_vec())],
+            ),
+            (
+                100,
+                vec![Tag::new(archive::COMMITTEE_VOTES, b"committee".to_vec())],
+            ),
+            (
+                105,
+                vec![Tag::new(archive::COMMITTEE_VOTES, b"other".to_vec())],
+            ),
+            (
+                110,
+                vec![Tag::new(archive::COMMITTEE_VOTES, b"committee".to_vec())],
+            ),
+        ]);
+
+        assert_eq!(
+            store
+                .slots_by_committee_votes(100, 110)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            [100, 110]
+        );
+        assert!(store
+            .slots_by_committee_votes(101, 109)
+            .unwrap()
+            .next()
+            .is_none());
+    }
+}

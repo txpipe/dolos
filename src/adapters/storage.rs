@@ -11,23 +11,26 @@
 
 use std::{ops::Range, path::Path, path::PathBuf};
 
+use bytes::Bytes;
 use dolos_core::{
     archive::{ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter},
     builtin::{
         EmptyBlockIter, EmptyLogIter, EmptySlotIter, MemoryArchiveStore, MemoryStateStore,
-        MemoryStateWriter, NoOpArchiveStore, NoOpArchiveWriter,
+        MemoryStateWriter, NoDiskTier, NoOpArchiveStore, NoOpArchiveWriter,
     },
+    cache::Cost,
     config::{
         ArchiveStoreConfig, FjallStateConfig, MempoolStoreConfig, RedbStateConfig, RedbWalConfig,
         RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
     },
-    ArchiveIndexDelta, BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
-    ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey, LogValue, MempoolError, MempoolEvent,
-    MempoolStore, MempoolTx, Namespace, RawBlock, StateError, StateSchema,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TagRecord, TxHash,
-    TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError,
-    WalStore,
+    ArchiveIndexDelta, BlockBody, BlockSlot, CacheDiskTier, CacheEntry, CacheError, ChainPoint,
+    EntityDelta, EntityKey, EntityValue, ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey,
+    LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace, QueryLimiter,
+    RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
+    StateWriter as CoreStateWriter, TagDimension, TagRecord, TieredCache, TxHash, TxStatus, TxoRef,
+    UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
 };
+use dolos_redb3::cache::RedbCacheTier;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::prelude::Error;
@@ -186,7 +189,7 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
     ensure_store_path(&path)?;
     Ok(ArchiveStoreBackend::open(
         &path,
-        dolos_cardano::model::build_schema(),
+        dolos_cardano::model::build_log_schema(),
         &config.storage.archive,
     )?)
 }
@@ -220,6 +223,20 @@ pub fn open_mempool_store(config: &RootConfig) -> Result<MempoolBackend, Error> 
     }
 }
 
+/// The cache store, filling under `limiter`, the domain's query limiter. An
+/// enabled cache keeps its immutable entries in the redb disk tier too.
+pub fn open_cache_store(config: &RootConfig, limiter: QueryLimiter) -> Result<CacheBackend, Error> {
+    let disk = match config.storage.cache_path() {
+        Some(path) => CacheDiskBackend::Redb(
+            RedbCacheTier::open(path, config.storage.cache.disk_budget_bytes)
+                .map_err(|error| Error::StorageError(error.to_string()))?,
+        ),
+        None => CacheDiskBackend::Off(NoDiskTier),
+    };
+
+    Ok(TieredCache::new(&config.storage.cache, disk, limiter))
+}
+
 pub fn open_data_stores<D>(config: &RootConfig) -> Result<Stores<D>, Error>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
@@ -232,6 +249,90 @@ where
         archive: open_archive_store(config)?,
         mempool: open_mempool_store(config)?,
     })
+}
+
+pub type CacheBackend = TieredCache<CacheDiskBackend>;
+
+// ============================================================================
+// Cache Disk Tier Backend
+// ============================================================================
+
+/// The cache's disk tier: none while the cache is disabled.
+pub enum CacheDiskBackend {
+    Off(NoDiskTier),
+    Redb(RedbCacheTier),
+}
+
+impl CacheDiskTier for CacheDiskBackend {
+    fn open_namespace(&self, namespace: &str, version: u32) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.open_namespace(namespace, version),
+            Self::Redb(tier) => tier.open_namespace(namespace, version),
+        }
+    }
+
+    fn get(&self, namespace: &str, key: &[u8]) -> Result<Option<CacheEntry>, CacheError> {
+        match self {
+            Self::Off(tier) => tier.get(namespace, key),
+            Self::Redb(tier) => tier.get(namespace, key),
+        }
+    }
+
+    fn put(&self, namespace: &str, key: &[u8], value: &[u8], cost: Cost) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.put(namespace, key, value, cost),
+            Self::Redb(tier) => tier.put(namespace, key, value, cost),
+        }
+    }
+
+    fn remove(&self, namespace: &str, key: &[u8]) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.remove(namespace, key),
+            Self::Redb(tier) => tier.remove(namespace, key),
+        }
+    }
+
+    fn wipe(&self, namespace: &str) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.wipe(namespace),
+            Self::Redb(tier) => tier.wipe(namespace),
+        }
+    }
+
+    fn previous_keys(&self, namespace: &str) -> Result<Vec<Bytes>, CacheError> {
+        match self {
+            Self::Off(tier) => tier.previous_keys(namespace),
+            Self::Redb(tier) => tier.previous_keys(namespace),
+        }
+    }
+
+    fn keys(&self, namespace: &str) -> Result<Vec<Bytes>, CacheError> {
+        match self {
+            Self::Off(tier) => tier.keys(namespace),
+            Self::Redb(tier) => tier.keys(namespace),
+        }
+    }
+
+    fn bytes(&self, namespace: &str) -> Result<u64, CacheError> {
+        match self {
+            Self::Off(tier) => tier.bytes(namespace),
+            Self::Redb(tier) => tier.bytes(namespace),
+        }
+    }
+
+    fn entries(&self, namespace: &str) -> Result<u64, CacheError> {
+        match self {
+            Self::Off(tier) => tier.entries(namespace),
+            Self::Redb(tier) => tier.entries(namespace),
+        }
+    }
+
+    fn flush(&self) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.flush(),
+            Self::Redb(tier) => tier.flush(),
+        }
+    }
 }
 
 // ============================================================================
@@ -715,15 +816,19 @@ impl CoreStateStore for StateStoreBackend {
 #[derive(Clone)]
 pub enum ArchiveStoreBackend {
     Memory(MemoryArchiveStore),
-    /// Write-gated view over an already-open archive: reads and derived-log
-    /// writes pass through, block appends and undos are discarded.
+    /// Write-gated view over an already-open archive: reads, derived-log
+    /// writes and index applies pass through, block appends and undos are
+    /// discarded.
     ///
     /// This exists for replays over an archive that already holds the chain
     /// (`dolos doctor rebuild-state --rewrite-logs`): block appends are not
     /// idempotent — replaying them would double every shared segment file,
     /// whichever backend owns the index — while boundary log keys are
     /// slot-derived and identical under replay, so re-written log rows
-    /// overwrite the originals in place.
+    /// overwrite the originals in place. Index entries are keyed by what they
+    /// project and the slot, so a replay re-writes the ones the archive holds
+    /// and adds the ones an older indexer never emitted (the auxiliary-data
+    /// script tags `script_by_hash` falls back on).
     ///
     /// [`Self::logs_only`] is the sole constructor, and it never nests one
     /// gate inside another.
@@ -803,8 +908,9 @@ impl ArchiveStoreBackend {
 
 pub enum ArchiveWriterBackend {
     Memory(Box<<MemoryArchiveStore as CoreArchiveStore>::Writer>),
-    /// Delegates `write_log` and `commit`; discards `apply`, `undo` and the
-    /// index writes, which project the blocks the gate refuses.
+    /// Delegates `write_log`, `apply_index` and `commit`; discards `apply`,
+    /// `undo`, `undo_index` and `append_prehashed`. See
+    /// [`ArchiveStoreBackend::LogsOnly`].
     LogsOnly(Box<ArchiveWriterBackend>),
     Fjall(Box<<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::Writer>),
     NoOp(NoOpArchiveWriter),
@@ -846,7 +952,7 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
     fn apply_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
         match self {
             Self::Memory(w) => w.apply_index(deltas),
-            Self::LogsOnly(_) => Ok(()),
+            Self::LogsOnly(w) => w.apply_index(deltas),
             Self::Fjall(w) => w.apply_index(deltas),
             Self::NoOp(w) => w.apply_index(deltas),
         }

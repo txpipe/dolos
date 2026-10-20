@@ -128,6 +128,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/assets/policy/{policy_id}`                               | Get assets minted under a specific policy                |
 | `/assets/{subject}`                                        | Get asset information                                    |
 | `/assets/{subject}/addresses`                              | Get addresses holding a specific asset                   |
+| `/assets/{subject}/history`                                | Get the mint and burn history of a specific asset        |
 | `/assets/{subject}/transactions`                           | Get transactions involving a specific asset              |
 | `/assets/{subject}/txs`                                    | Alias of `/assets/{subject}/transactions` (hashes only)  |
 | `/blocks/latest`                                           | Get latest block information                             |
@@ -153,6 +154,9 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/epochs/{epoch}/stakes/{pool_id}`                         | Get epoch stake distribution for a specific pool         |
 | `/genesis`                                                 | Get genesis information                                  |
 | `/governance/committee`                                    | Get the current constitutional committee                 |
+| `/governance/committee/votes`                              | Get votes cast by every constitutional committee member  |
+| `/governance/committee/{cc_id}/votes`                      | Get votes cast by a constitutional committee member      |
+| `/governance/dreps`                                        | Get list of DReps                                        |
 | `/governance/dreps/{drep_id}`                              | Get DRep information                                     |
 | `/governance/dreps/{drep_id}/delegators`                   | Get delegators for a specific DRep                       |
 | `/governance/dreps/{drep_id}/metadata`                     | Get DRep metadata                                        |
@@ -169,6 +173,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/governance/proposals/{tx_hash}/{cert_index}/parameters`  | Get parameter change of a specific proposal              |
 | `/governance/proposals/{tx_hash}/{cert_index}/votes`       | Get votes of a specific proposal                         |
 | `/governance/proposals/{tx_hash}/{cert_index}/withdrawals` | Get withdrawals of a specific proposal                   |
+| `/metadata/txs/labels`                                     | Get the list of transaction metadata labels              |
 | `/metadata/txs/labels/{label}`                             | Get metadata for transactions with a specific label      |
 | `/metadata/txs/labels/{label}/cbor`                        | Get CBOR metadata for transactions with a specific label |
 | `/network`                                                 | Get network information                                  |
@@ -185,6 +190,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/pools/{id}/relays`                                       | Get relays for a specific pool                           |
 | `/pools/{id}/updates`                                      | Get certificate updates for a specific pool              |
 | `/pools/{id}/votes`                                        | Get votes cast by a specific pool                        |
+| `/scripts`                                                 | List scripts in order of first appearance                |
 | `/scripts/{script_hash}`                                   | Get script information                                   |
 | `/scripts/{script_hash}/json`                              | Get script JSON                                          |
 | `/scripts/{script_hash}/cbor`                              | Get script CBOR                                          |
@@ -211,3 +217,15 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 ## Lifetime totals and `sync.max_history`
 
 `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` read per-epoch sums from the Stats period logs rather than folding blocks. When `sync.max_history` is set, housekeeping prunes those logs by slot like any other, so the sums and `tx_count` only cover the epochs the retained window still holds. Run with full history if you need true lifetime totals.
+
+## The script list and data synced by an earlier version
+
+`/scripts` reads the first-script period logs the node builds while it rolls blocks: per epoch, the scripts it saw first, in the order cardano-db-sync first sees them, sealed into archive chunks once the epoch can no longer roll back. A `scripts` witness in the ledger state tells a script's first sighting from a repeat. Data synced by a version without them has none for the blocks it already holds, so the list would start wherever the upgrade happened. Run `dolos doctor rebuild-state --rewrite-logs` (or bootstrap again) to build them from the start of the chain. The rebuild replays the archive from the first block, so it refuses an archive that `sync.max_history` has already pruned; such a node has to bootstrap again. The sealed chunks are archive logs, so `sync.max_history` prunes them by slot like any other: a pruned node lists the scripts first seen in the epochs its archive still holds. A stele snapshot published by such a version has no `scripts` or `first-scripts` state either; a restore refuses it by name rather than leaving the list empty, so bootstrap from a stele published by a version that carries them.
+
+`/scripts/{script_hash}` and its `/json`, `/cbor` and `/utxos` variants answer for the scripts the list holds, the way Blockfrost does: a transaction that failed phase-2 validation contributes only the reference script of its collateral return, so a script only its witnesses or auxiliary data carried is in neither. The witness points each script at the block that carried it first, so after `dolos doctor rebuild-state` those lookups need nothing rebuilt in the archive while that block is kept. Once `sync.max_history` prunes it, a lookup finds a later carrier through the archive index, and an archive written by a version that did not tag scripts carried in auxiliary data or in a valid transaction's collateral return has no index entries for them: if the node is going to prune, run the rebuild as `dolos doctor rebuild-state --rewrite-logs` before turning `sync.max_history` on, which fills them in. Like any rebuild it needs the full history, so a node whose archive is already pruned has to bootstrap again instead. A script whose every carrying block was pruned is not found by hash.
+
+pallas 1.3 decodes no Plutus V2 or V3 scripts in auxiliary data, so a script only auxiliary data ever carried in those languages is missing from the list.
+
+## DRep listing on stores synced by an older release
+
+`/governance/dreps` lists every DRep a certificate of a valid tx ever named, vote-delegation targets and the special DReps included, in the order a certificate first named it, with the latest anchor a registration or update carried. It reads them from the `drep-sightings` state namespace, which the roll writes. A state store synced by a release without that namespace has no sightings for the blocks it applied before: it lists only the DReps certificates named since, at the position of that later certificate. Syncing forward does not recover what is behind the cursor; resync the instance, or bootstrap it from a snapshot that carries `state-drep-sightings`, to get the full list in its exact order.

@@ -1,6 +1,6 @@
 //! Walking a live Dolos store set into a stele.
 //!
-//! Everything the byte shapes need is already frozen: the five codecs in
+//! Everything the byte shapes need is already frozen: the codecs in
 //! [`crate::layers`], the scopes and `position`/`parameters` builders in
 //! [`crate`], and the record order each store iterator already promises. This
 //! module is the part that has to *drive* them — the one place that knows which
@@ -66,7 +66,7 @@ use dolos_cardano::{
     eras::ChainSummary, indexes::archive_dimensions, pallas::ledger::traverse::MultiEraBlock,
 };
 use dolos_core::{
-    ArchiveStore, BlockSlot, ChainPoint, IndexRecord, KeyRange, Namespace, StateStore,
+    ArchiveError, ArchiveStore, BlockSlot, ChainPoint, IndexRecord, KeyRange, Namespace, StateStore,
 };
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
@@ -776,8 +776,8 @@ where
         }
     }
 
-    // One job per state kind: each walks its own namespace once, so the
-    // twenty-six walks that ran in sequence overlap instead. The tip shards are
+    // One job per state kind: each walks its own namespace once, so the walks
+    // that ran in sequence overlap instead. The tip shards are
     // not offered to the predecessor; the dumps among them are. See
     // [`Predecessor::landed`].
     for (kind, ns, shards) in STATE_KINDS {
@@ -1529,7 +1529,8 @@ pub(crate) fn log_layers<A: ArchiveStore>(
 /// built so the refusal costs a scan rather than an upload.
 ///
 /// `utxos` is excluded because the walk this replaced excluded it: the UTxO set
-/// is state, and no writer puts a log under it.
+/// is state, and no writer puts a log under it. A namespace the archive was not
+/// opened with holds no logs, so it is passed over rather than refused.
 fn refuse_uncovered_logs<A: ArchiveStore>(archive: &A, window: &EpochWindow) -> Result<(), Error> {
     let range = log_key_range(&window.slots());
 
@@ -1538,12 +1539,12 @@ fn refuse_uncovered_logs<A: ArchiveStore>(archive: &A, window: &EpochWindow) -> 
             continue;
         }
 
-        if archive
-            .iter_logs(ns, range.clone())?
-            .next()
-            .transpose()?
-            .is_some()
-        {
+        let mut logs = match archive.iter_logs(ns, range.clone()) {
+            Err(ArchiveError::NamespaceNotFound(_)) => continue,
+            logs => logs?,
+        };
+
+        if logs.next().transpose()?.is_some() {
             return Err(Error::UncoveredLogNamespace {
                 epoch: window.epoch,
                 ns: ns.to_owned(),
@@ -2029,14 +2030,14 @@ mod tests {
 
     /// A summary with one era: 100-slot epochs starting at slot 0.
     fn summary() -> ChainSummary {
-        use dolos_cardano::model::EraSummary;
+        use dolos_cardano::model::EraState;
         use dolos_cardano::EraBoundary;
 
         let mut chain = ChainSummary::default();
 
         chain.append_era(
             6,
-            EraSummary {
+            EraState {
                 start: EraBoundary {
                     epoch: 0,
                     slot: 0,

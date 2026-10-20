@@ -291,6 +291,45 @@ fn force_does_not_clear_before_the_command_is_resolved() {
     );
 }
 
+/// The credentials a repository restore reads with are resolved before
+/// `--force` clears anything.
+///
+/// The credentials file is read after the source is known, so a missing or
+/// malformed one could otherwise cost the node and then fail the run.
+#[test]
+fn force_does_not_clear_before_the_credentials_resolve() {
+    let node = Node::new();
+    node.sync();
+
+    let before = Contents::read(&node);
+    before.assert_populated();
+
+    let missing = node.root.path().join("no-such-credentials.toml");
+
+    let output = node.bootstrap_headless(&[
+        "--force",
+        "stelae",
+        "--source",
+        "oci://127.0.0.1:1/txpipe/dolos-snapshots/preview",
+        "--registry-credentials-file",
+        missing.to_str().unwrap(),
+    ]);
+
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("registry credentials"),
+        "expected the credentials to be refused, got: {stderr}"
+    );
+
+    assert_eq!(
+        Contents::read(&node),
+        before,
+        "--force cleared the node before its credentials resolved"
+    );
+}
+
 /// The verdicts that are not destructive still come before the prompt.
 ///
 /// `--skip-if-data` on a populated node is a no-op, and existing data with no
