@@ -150,7 +150,7 @@ pub fn ensure_offline(storage: &StorageConfig) -> miette::Result<()> {
         );
     };
 
-    match RedbCacheTier::open(&dir, storage.cache.disk_budget_bytes) {
+    match RedbCacheTier::open(&dir, storage.cache.disk_bytes()) {
         Ok(_) => Ok(()),
         Err(CacheError::InUse(path)) => Err(miette!(
             help = "stop the node first, or wait for the other dolos command to finish: the cache commands run with the node stopped",
@@ -234,7 +234,7 @@ pub fn register<D: Domain>(domain: &D) -> miette::Result<Namespaces<D>> {
     } else {
         namespaces.off.push(Off {
             name: TOTALS.name,
-            why: "`sync.max_history` prunes the archive",
+            why: "rolling history prunes the archive",
         });
     }
 
@@ -815,7 +815,7 @@ mod tests {
     use std::sync::Arc;
 
     use dolos_core::{
-        config::{CacheConfig, SyncConfig},
+        config::{CacheConfig, HistoryConfig, HistoryWindow},
         import::ImportExt as _,
         CacheEntry,
     };
@@ -868,14 +868,19 @@ mod tests {
     }
 
     /// The chain on a domain whose cache, under `cache`, keeps its disk tier
-    /// in `dir`.
-    fn domain_with(dir: &Path, cache: CacheConfig) -> (ToyDomain, SyntheticVectors) {
+    /// in `dir`, within `disk_bytes` when given.
+    fn domain_with(
+        dir: &Path,
+        cache: CacheConfig,
+        disk_bytes: Option<u64>,
+    ) -> (ToyDomain, SyntheticVectors) {
         let genesis = Arc::new(dolos_cardano::include::preview::load());
         let (blocks, vectors, chain_config) = build_synthetic_blocks(chain());
+        let disk_bytes = disk_bytes.unwrap_or(cache.disk_bytes());
 
         let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None)
             .with_cache_config(cache)
-            .with_persistent_cache(dir)
+            .with_persistent_cache_within(dir, disk_bytes)
             .unwrap();
 
         domain.import_blocks(blocks).unwrap();
@@ -886,7 +891,7 @@ mod tests {
     /// The chain on a domain whose cache keeps its disk tier in `dir` and
     /// totals entries of at least `admission`.
     fn domain(dir: &Path, admission: u64) -> (ToyDomain, SyntheticVectors) {
-        domain_with(dir, cache_config(admission))
+        domain_with(dir, cache_config(admission), None)
     }
 
     /// A pruned node over the cache in `dir`, so with totals off.
@@ -894,11 +899,10 @@ mod tests {
         let genesis = Arc::new(dolos_cardano::include::preview::load());
         let (_, _, chain_config) = build_synthetic_blocks(chain());
 
-        let mut sync = SyncConfig::default();
-        sync.max_history = Some(1_000);
+        let history = HistoryConfig::rolling(HistoryWindow::slots(1_000));
 
         ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None)
-            .with_sync_config(sync)
+            .with_history_config(history)
             .with_cache_config(cache_config(0))
             .with_persistent_cache(dir)
             .unwrap()
@@ -1037,12 +1041,7 @@ mod tests {
     async fn warm_tells_a_budget_refusal_from_the_threshold() {
         let dir = tempfile::tempdir().unwrap();
 
-        let cache = CacheConfig {
-            disk_budget_bytes: 1,
-            ..cache_config(0)
-        };
-
-        let (domain, vectors) = domain_with(dir.path(), cache);
+        let (domain, vectors) = domain_with(dir.path(), cache_config(0), Some(1));
         let namespaces = register(&domain).unwrap();
         let file = keys_file(dir.path(), &keys(&vectors));
 
@@ -1074,11 +1073,8 @@ mod tests {
             (account, sibling)
         };
 
-        let cache = CacheConfig {
-            disk_budget_bytes: size(&a).max(size(&b)),
-            ..cache_config(0)
-        };
-        let (domain, _) = domain_with(&dir.path().join("cache"), cache);
+        let budget = size(&a).max(size(&b));
+        let (domain, _) = domain_with(&dir.path().join("cache"), cache_config(0), Some(budget));
         let namespaces = register(&domain).unwrap();
         let pace = Pace {
             parallel: 1,

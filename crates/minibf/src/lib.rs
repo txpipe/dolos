@@ -831,9 +831,8 @@ mod tests {
         use std::sync::atomic::Ordering;
 
         use dolos_core::{
-            config::{CardanoConfig, MinibfConfig},
-            indexes::ArchiveIndexDelta,
-            ArchiveStore as _, ArchiveWriter as _, ChainPoint, Domain as _,
+            config::MinibfConfig, indexes::ArchiveIndexDelta, ArchiveStore as _,
+            ArchiveWriter as _, ChainPoint, Domain as _,
         };
         use dolos_testing::{
             measured::MeasuredStores,
@@ -846,7 +845,7 @@ mod tests {
 
         let domain = ToyDomain::with_stores(
             ToyDomain::new(None, None).genesis(),
-            CardanoConfig::default(),
+            dolos_cardano::CardanoLogicConfig::default(),
             None,
             None,
             MeasuredStores::new(MemoryStores::open()),

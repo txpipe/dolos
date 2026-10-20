@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use dolos_cardano::networks;
-use dolos_core::StateStore as _;
+use dolos_core::{config::GenesisConfig, StateStore as _};
 use dolos_snapshot::node::OFFICIAL_REGISTRY_PASSWORD;
 use node::Node;
 
@@ -30,17 +30,22 @@ fn cursor(node: &Node) -> Option<dolos_core::ChainPoint> {
     cursor
 }
 
-/// Gives `node` a magic no known network has, so nothing is defaulted from
-/// the catalog.
+/// Puts `node` on a custom network of a magic no known network has, so
+/// nothing is defaulted from the catalog.
 fn set_custom_magic(node: &Node) {
-    let config_path = node.config_path();
-    let mut document: toml::Value =
-        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    document["chain"]
-        .as_table_mut()
+    let genesis = node.root.path().join("custom-genesis");
+    std::fs::create_dir_all(&genesis).unwrap();
+    dolos_cardano::include::preview::save(&genesis).unwrap();
+
+    let shelley = genesis.join("shelley.json");
+    let patched = std::fs::read_to_string(&shelley)
         .unwrap()
-        .insert("magic".to_owned(), toml::Value::Integer(4242));
-    std::fs::write(&config_path, toml::to_string(&document).unwrap()).unwrap();
+        .replace("\"networkMagic\": 2,", "\"networkMagic\": 4242,");
+    std::fs::write(&shelley, patched).unwrap();
+
+    let mut chain = node.custom_chain(4242, vec![]);
+    chain.cardano.as_mut().unwrap().genesis = GenesisConfig::in_dir(&genesis);
+    node.write_chain(&chain);
 }
 
 /// `dolos init` over a config an older `init` wrote, which always carries

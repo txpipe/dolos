@@ -15,8 +15,9 @@ use std::sync::Arc;
 
 use dolos::adapters::DomainAdapter;
 use dolos_core::{
-    config::RootConfig, import::ImportExt as _, BootstrapExt as _, ChainLogic as _, Domain as _,
-    QueryLimiter, StateStore as _,
+    config::{CardanoConfig, ChainConfig, CustomUtxo, GenesisConfig, RootConfig},
+    import::ImportExt as _,
+    BootstrapExt as _, ChainLogic as _, Domain as _, QueryLimiter, StateStore as _,
 };
 use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
 
@@ -43,40 +44,29 @@ impl Node {
         let root = tempfile::tempdir().unwrap();
         dolos_cardano::include::preview::save(root.path()).unwrap();
 
-        let genesis = |name: &str| toml_string(&root.path().join(name));
-
         // Storage backends are left at their defaults, which is the point: this
         // test is meant to run against whatever a real node runs against.
         let toml = format!(
             r#"
+            compatibility = "v2-alpha.1"
+
+            [chain]
+            protocol = "cardano"
+            network = "preview"
+
             [upstream]
             peer_address = "unused.example:3001"
 
             [storage]
-            version = "v4"
             path = {data}
-
-            [genesis]
-            byron_path = {byron}
-            shelley_path = {shelley}
-            alonzo_path = {alonzo}
-            conway_path = {conway}
-            force_protocol = 6
-
-            [chain]
-            type = "cardano"
-            magic = 2
-            is_testnet = true
             "#,
             data = toml_string(&root.path().join("data")),
-            byron = genesis("byron.json"),
-            shelley = genesis("shelley.json"),
-            alonzo = genesis("alonzo.json"),
-            conway = genesis("conway.json"),
         );
 
         std::fs::write(root.path().join("dolos.toml"), &toml).unwrap();
 
+        // Parsed as written: `load` would apply the developer's `DOLOS_`
+        // variables, which could point these stores anywhere.
         Self {
             root,
             config: toml::from_str(&toml).unwrap(),
@@ -85,6 +75,26 @@ impl Node {
 
     pub fn config_path(&self) -> std::path::PathBuf {
         self.root.path().join("dolos.toml")
+    }
+
+    /// A custom network of `magic` over the preview genesis in the node's
+    /// directory.
+    pub fn custom_chain(&self, magic: u32, custom_utxos: Vec<CustomUtxo>) -> ChainConfig {
+        ChainConfig::custom(CardanoConfig {
+            magic,
+            is_testnet: true,
+            genesis: GenesisConfig::in_dir(self.root.path()),
+            custom_utxos,
+        })
+    }
+
+    /// Replace the `[chain]` of the node's `dolos.toml`.
+    pub fn write_chain(&self, chain: &ChainConfig) {
+        let config_path = self.config_path();
+        let mut document: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        document["chain"] = toml::Value::try_from(chain).unwrap();
+        std::fs::write(&config_path, toml::to_string(&document).unwrap()).unwrap();
     }
 
     /// Apply synthetic blocks through the real domain, then close every store
@@ -110,19 +120,9 @@ impl Node {
         // config's `custom_utxos`, so they are part of this chain's genesis.
         // Persist them into `dolos.toml`: a separate process replaying from
         // origin (`doctor rebuild-state`) runs genesis from the file and must
-        // seed the same set.
-        let config_path = self.config_path();
-        let mut document: toml::Value =
-            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-        document
-            .get_mut("chain")
-            .and_then(|chain| chain.as_table_mut())
-            .unwrap()
-            .insert(
-                "custom_utxos".to_owned(),
-                toml::Value::try_from(&chain_config.custom_utxos).unwrap(),
-            );
-        std::fs::write(&config_path, toml::to_string(&document).unwrap()).unwrap();
+        // seed the same set. Only a custom network carries them, so the file
+        // becomes preview's genesis under a custom chain.
+        self.write_chain(&self.custom_chain(2, chain_config.custom_utxos.clone()));
 
         let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
             chain_config,
@@ -132,12 +132,14 @@ impl Node {
         .unwrap();
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
-        let query_limiter = QueryLimiter::default();
+        let query_limiter = QueryLimiter::new(self.config.serve.max_concurrent_queries);
         let cache = dolos::storage::open_cache_store(&self.config, query_limiter.clone()).unwrap();
 
         let domain = DomainAdapter {
+            compatibility: self.config.compatibility(),
             storage_config: Arc::new(self.config.storage.clone()),
-            sync_config: Arc::new(self.config.sync.clone()),
+            history_config: self.config.history,
+            mempool_config: self.config.mempool.clone(),
             genesis,
             chain: Arc::new(std::sync::RwLock::new(chain)),
             wal: stores.wal,

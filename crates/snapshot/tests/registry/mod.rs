@@ -275,7 +275,8 @@ pub fn registry() -> Vec<Entry> {
             canaries::gov_state,
             // Revision 3 appends each snapshot DRep's newest deregistration.
             // Revision 4 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
+            // the value is unchanged. Field 9, the dissolved committee, joins
+            // revision 4 in place: the v2 freeze resets every revision to 1.
             &[
                 Pinned {
                     rev: 1,

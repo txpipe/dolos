@@ -117,7 +117,7 @@ pub fn planned(
     retained: RetainedEpochs,
     what: &'static str,
 ) -> miette::Result<(Plan, Boundary)> {
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = crate::common::open_genesis(config)?;
     let snapshot = StoreSnapshot::new(&stores.archive, &stores.state);
 
     let plan = snapshot

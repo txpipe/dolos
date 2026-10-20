@@ -1,10 +1,14 @@
-use dolos_core::config::{GenesisConfig, LoggingConfig, RootConfig, TelemetryConfig};
+use dolos_cardano::networks::ResolvedNetwork;
+use dolos_core::config::{ConfigError, LoggingConfig, RootConfig, TelemetryConfig};
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig as _;
 use std::sync::Arc;
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
@@ -15,6 +19,7 @@ use dolos::core::Genesis;
 use dolos::engine::{DomainBuildError, DomainBuilder};
 use dolos::prelude::*;
 use dolos::storage;
+use dolos::sync::SyncLimit;
 
 pub type Stores = storage::Stores<dolos_cardano::CardanoDelta>;
 
@@ -41,133 +46,78 @@ pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
     storage::open_data_stores(config)
 }
 
-/// Sections an older configuration carried that are now inputs of the
-/// commands that read them, and where each one went.
-const MOVED_TO_ARGUMENTS: [(&str, &str); 3] = [
-    (
-        "mithril",
-        "`dolos bootstrap mithril --aggregator --genesis-vkey`",
-    ),
-    (
-        "snapshot",
-        "`dolos bootstrap snapshot --download-url` and `dolos snapshot … --state-epochs`",
-    ),
-    (
-        "stelae",
-        "`--registry-user` / `DOLOS_STELAE_USER`, `DOLOS_STELAE_PASSWORD`, `DOLOS_STELAE_TOKEN` \
-         and `--registry-credentials-file` on `dolos bootstrap stelae` and `dolos snapshot`",
-    ),
-];
+/// Load the configuration, resolve its network against the catalog and parse
+/// its log filter.
+pub fn load_config(explicit_file: Option<&Path>) -> Result<RootConfig, ConfigError> {
+    dolos_core::config::load_checked(explicit_file, |config| {
+        ResolvedNetwork::resolve(&config.chain)
+            .map_err(|error| ConfigError::invalid(["chain.network"], error.to_string()))?;
 
-/// A file that still carries a moved section, and where each one went.
-///
-/// Its own type so that `init` can tell a file one edit away from loading
-/// apart from one it cannot read at all.
-#[derive(Debug)]
-pub struct MovedSections(Vec<String>);
-
-impl std::fmt::Display for MovedSections {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "the configuration carries sections that are now command arguments; remove them: {}",
-            self.0.join("; ")
-        )
-    }
+        log_filter(&config.logging).map(|_| ())
+    })
 }
 
-impl std::error::Error for MovedSections {}
-
-impl miette::Diagnostic for MovedSections {}
-
-/// A failed [`load_config`] as a report, with a moved section kept as its own
-/// type so that a caller can still tell it apart.
-pub fn config_report(error: ::config::ConfigError) -> miette::Report {
-    match error {
-        ::config::ConfigError::Foreign(cause) => match cause.downcast::<MovedSections>() {
-            Ok(moved) => miette::Report::new(*moved),
-            Err(cause) => miette::Report::from_err(::config::ConfigError::Foreign(cause)),
-        },
-        other => miette::Report::from_err(other),
-    }
+pub fn resolve_network(config: &RootConfig) -> miette::Result<ResolvedNetwork<'_>> {
+    ResolvedNetwork::resolve(&config.chain).into_diagnostic()
 }
 
-/// Refuses a file that still carries a moved section.
-///
-/// The loader ignores unknown keys, so without this a moved section would be
-/// read as nothing and its values silently dropped. Checked on the files
-/// alone: the environment layer would otherwise report the very
-/// `DOLOS_MITHRIL_*` and `DOLOS_STELAE_*` variables the commands now read.
-fn reject_moved_sections(files: &::config::Config) -> Result<(), ::config::ConfigError> {
-    let moved: Vec<String> = MOVED_TO_ARGUMENTS
-        .iter()
-        .filter(|(section, _)| files.get::<::config::Value>(section).is_ok())
-        .map(|(section, destination)| format!("[{section}] moved to {destination}"))
-        .collect();
-
-    if moved.is_empty() {
-        return Ok(());
+/// Reads a custom network's genesis files and checks them against its magic,
+/// so that a command stops before it touches a store. A known network's
+/// genesis is built in.
+pub fn check_network(config: &RootConfig) -> miette::Result<()> {
+    if resolve_network(config)?.known().is_none() {
+        open_genesis(config)?;
     }
 
-    Err(::config::ConfigError::Foreign(Box::new(MovedSections(
-        moved,
-    ))))
+    Ok(())
 }
 
-pub fn load_config(
-    explicit_file: &Option<std::path::PathBuf>,
-) -> Result<RootConfig, ::config::ConfigError> {
-    let mut s = ::config::Config::builder();
+/// The network's genesis: embedded for a known network, read from the
+/// configured files for a custom one.
+pub fn open_genesis(config: &RootConfig) -> miette::Result<Genesis> {
+    resolve_network(config)?
+        .genesis()
+        .into_diagnostic()
+        .context("loading genesis")
+}
 
-    // our base config will always be in /etc/dolos
-    s = s.add_source(::config::File::with_name("/etc/dolos/daemon.toml").required(false));
+/// When `daemon` and `sync` stop.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct StopArgs {
+    /// Stop once the ledger reaches this epoch
+    #[arg(long, value_name = "N")]
+    pub stop_epoch: Option<u64>,
 
-    // but we can override it by having a file in the working dir
-    s = s.add_source(::config::File::with_name("dolos.toml").required(false));
+    /// Stop pulling once the upstream tip is reached
+    #[arg(long, conflicts_with = "max_blocks")]
+    pub until_tip: bool,
 
-    // if an explicit file was passed, then we load it as mandatory
-    if let Some(explicit) = explicit_file.as_ref().and_then(|x| x.to_str()) {
-        s = s.add_source(::config::File::with_name(explicit).required(true));
+    /// Stop pulling after this many blocks
+    #[arg(long, value_name = "N")]
+    pub max_blocks: Option<u64>,
+}
+
+impl StopArgs {
+    pub fn sync_limit(&self) -> SyncLimit {
+        match (self.until_tip, self.max_blocks) {
+            (true, _) => SyncLimit::UntilTip,
+            (false, Some(blocks)) => SyncLimit::MaxBlocks(blocks),
+            (false, None) => SyncLimit::NoLimit,
+        }
     }
-
-    load_layers(s)
-}
-
-/// The file layers given, then the environment over them.
-fn load_layers(
-    files: ::config::ConfigBuilder<::config::builder::DefaultState>,
-) -> Result<RootConfig, ::config::ConfigError> {
-    reject_moved_sections(&files.clone().build()?)?;
-
-    // finally, we use env vars to make some last-step overrides
-    files
-        .add_source(::config::Environment::with_prefix("DOLOS").separator("_"))
-        .build()?
-        .try_deserialize()
-}
-
-/// [`load_config`] over one file and the environment, without the
-/// `/etc/dolos` and working-directory layers a test cannot control.
-#[cfg(test)]
-pub fn load_file(path: &std::path::Path) -> Result<RootConfig, ::config::ConfigError> {
-    load_layers(::config::Config::builder().add_source(::config::File::from(path)))
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     setup_domain_with_stop_epoch(config, None)
 }
 
-/// The same domain [`setup_domain`] assembles, with `chain.stop_epoch` forced.
-///
-/// For embedding callers that replay to a chosen epoch boundary over the live
-/// stores, the way `doctor rebuild-state` forces it on the domain it
-/// hand-builds. A `Some` here overrides whatever the configuration says;
-/// `None` leaves it alone.
+/// The same domain [`setup_domain`] assembles, stopping once the ledger
+/// reaches `stop_epoch`.
 pub fn setup_domain_with_stop_epoch(
     config: &RootConfig,
     stop_epoch: Option<u64>,
 ) -> miette::Result<DomainAdapter> {
-    let genesis = Arc::new(open_genesis_files(&config.genesis)?);
+    let genesis = Arc::new(open_genesis(config)?);
 
     DomainBuilder::new(config, genesis)
         .stop_epoch(stop_epoch)
@@ -241,50 +191,39 @@ pub fn setup_tracing_warnings() -> miette::Result<()> {
     Ok(())
 }
 
-pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> miette::Result<()> {
-    let level = config.max_level;
-
+/// Dolos's own targets at `level`, then the `filter` directives over them.
+fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     let mut filter = Targets::new()
-        .with_target("dolos", level)
-        .with_target("gasket", level);
+        .with_target("dolos", config.level)
+        .with_target("gasket", config.level);
 
-    if config.include_tokio {
-        filter = filter
-            .with_target("tokio", level)
-            .with_target("runtime", level);
+    if let Some(directives) = &config.filter {
+        let extra: Targets = directives.parse().map_err(|error| {
+            ConfigError::invalid(
+                ["logging.filter"],
+                format!("`logging.filter = \"{directives}\"`: {error}"),
+            )
+        })?;
+
+        if let Some(default) = extra.default_level() {
+            filter = filter.with_default(default);
+        }
+
+        for (target, level) in extra.iter() {
+            filter = filter.with_target(target, level);
+        }
     }
 
-    if config.include_pallas {
-        filter = filter.with_target("pallas", level);
-    }
+    Ok(filter)
+}
 
-    if config.include_grpc {
-        filter = filter.with_target("tonic", level);
-    }
+pub fn setup_tracing(
+    config: &LoggingConfig,
+    telemetry: Option<&TelemetryConfig>,
+) -> miette::Result<()> {
+    let filter = log_filter(config).into_diagnostic()?;
 
-    if config.include_trp {
-        filter = filter.with_target("jsonrpsee-server", level);
-    }
-
-    if config.include_minibf {
-        filter = filter.with_target("minibf", level);
-    }
-
-    if config.include_minikupo {
-        filter = filter.with_target("minikupo", level);
-    }
-
-    if config.include_fjall {
-        filter = filter
-            .with_target("fjall", level)
-            .with_target("lsm_tree", level);
-    }
-
-    if config.include_otlp {
-        filter = filter.with_target("opentelemetry", level);
-    }
-
-    let otel_layer = if telemetry.enabled {
+    let otel_layer = if let Some(telemetry) = telemetry {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
             .with_endpoint(&telemetry.otlp_endpoint)
@@ -334,18 +273,6 @@ pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> mie
     tracing_log::LogTracer::init().ok();
 
     Ok(())
-}
-
-pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {
-    Genesis::from_file_paths(
-        &config.byron_path,
-        &config.shelley_path,
-        &config.alonzo_path,
-        &config.conway_path,
-        config.force_protocol,
-    )
-    .into_diagnostic()
-    .context("loading genesis files")
 }
 
 #[inline]
@@ -452,131 +379,26 @@ mod tests {
 
     use super::*;
 
-    fn files(document: &str) -> ::config::Config {
-        ::config::Config::builder()
-            .add_source(::config::File::from_str(
-                document,
-                ::config::FileFormat::Toml,
-            ))
-            .build()
-            .unwrap()
-    }
-
     #[test]
-    fn a_moved_section_is_reported_with_where_it_went() {
-        for (document, section, flag) in [
-            (
-                "[mithril]\naggregator = \"x\"\n",
-                "[mithril]",
-                "--aggregator",
-            ),
-            (
-                "[snapshot]\nstate_epochs = [208]\n",
-                "[snapshot]",
-                "--state-epochs",
-            ),
-        ] {
-            let message = reject_moved_sections(&files(document))
-                .unwrap_err()
-                .to_string();
+    fn the_log_filter_adds_targets_over_the_level() {
+        let config = LoggingConfig {
+            level: tracing::Level::WARN,
+            filter: Some("dolos=debug,fjall=info".into()),
+        };
 
-            assert!(message.contains(section), "{message}");
-            assert!(message.contains(flag), "{message}");
-        }
+        let filter = log_filter(&config).unwrap();
 
-        // Named exactly: a wildcard would also match the legacy
-        // `DOLOS_STELAE_REGISTRY_*` names, which nothing reads any more.
-        let message = reject_moved_sections(&files("[stelae.registry]\nuser = \"stelae\"\n"))
-            .unwrap_err()
-            .to_string();
+        assert!(filter.would_enable("dolos", &tracing::Level::DEBUG));
+        assert!(filter.would_enable("gasket", &tracing::Level::WARN));
+        assert!(!filter.would_enable("gasket", &tracing::Level::INFO));
+        assert!(filter.would_enable("fjall", &tracing::Level::INFO));
+        assert!(!filter.would_enable("tonic", &tracing::Level::ERROR));
 
-        for input in [
-            "[stelae]",
-            "--registry-user",
-            "`DOLOS_STELAE_USER`",
-            "`DOLOS_STELAE_PASSWORD`",
-            "`DOLOS_STELAE_TOKEN`",
-            "--registry-credentials-file",
-        ] {
-            assert!(message.contains(input), "{message}");
-        }
-        assert!(!message.contains("DOLOS_STELAE_*"), "{message}");
-
-        reject_moved_sections(&files("[upstream]\npeer_address = \"x:1\"\n")).unwrap();
-    }
-
-    const MINIMAL: &str = r#"
-[upstream]
-peer_address = "x:1"
-
-[storage]
-version = "v4"
-path = "data"
-
-[genesis]
-byron_path = "byron.json"
-shelley_path = "shelley.json"
-alonzo_path = "alonzo.json"
-conway_path = "conway.json"
-
-[chain]
-type = "cardano"
-magic = 2
-is_testnet = true
-"#;
-
-    fn load(document: &str) -> Result<RootConfig, ::config::ConfigError> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dolos.toml");
-        std::fs::write(&path, document).unwrap();
-
-        load_file(&path)
-    }
-
-    #[test]
-    fn the_loader_refuses_a_file_with_a_moved_section() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        load(MINIMAL).unwrap();
-
-        let message = load(&format!(
-            "{MINIMAL}\n[stelae.registry]\nuser = \"stelae\"\n"
-        ))
-        .err()
-        .unwrap()
-        .to_string();
-        assert!(message.contains("[stelae] moved to"), "{message}");
-    }
-
-    /// The variables the bootstrap commands read reach the loader too, through
-    /// its `DOLOS_` environment layer; they must not read as a moved section.
-    #[test]
-    fn the_bootstrap_variables_are_not_a_moved_section() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let names = [
-            "DOLOS_MITHRIL_AGGREGATOR",
-            "DOLOS_MITHRIL_GENESIS_VKEY",
-            "DOLOS_STELAE_USER",
-            "DOLOS_STELAE_PASSWORD",
-            "DOLOS_STELAE_TOKEN",
-        ];
-
-        for name in names {
-            std::env::set_var(name, "set");
-        }
-
-        let loaded = load(MINIMAL);
-
-        for name in names {
-            std::env::remove_var(name);
-        }
-
-        loaded.unwrap();
+        let config = LoggingConfig {
+            filter: Some("dolos=loud".into()),
+            ..Default::default()
+        };
+        assert!(log_filter(&config).is_err());
     }
 
     #[tokio::test]

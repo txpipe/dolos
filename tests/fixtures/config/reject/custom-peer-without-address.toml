@@ -1,0 +1,18 @@
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "custom"
+
+[chain.cardano]
+magic = 42
+is_testnet = true
+
+[chain.cardano.genesis]
+byron_path = "./genesis/byron.json"
+shelley_path = "./genesis/shelley.json"
+alonzo_path = "./genesis/alonzo.json"
+conway_path = "./genesis/conway.json"
+
+[upstream]
+type = "peer"

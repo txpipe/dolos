@@ -45,6 +45,11 @@ pub const SCENARIOS: &[Scenario] = &[
         port_prefix: 6590,
         expect_ports: true,
     },
+    Scenario {
+        name: "preview-ordinary",
+        port_prefix: 6600,
+        expect_ports: true,
+    },
 ];
 
 /// Where a scenario's checked-in fixture lives.
@@ -60,7 +65,7 @@ fn fixture_path(scenario: &Scenario) -> PathBuf {
 
 /// Ports handed out to workspaces, one block of ten each.
 ///
-/// Deliberately above every `Scenario::port_prefix` (6540..6599), which buys
+/// Deliberately above every `Scenario::port_prefix` (6540..6609), which buys
 /// two things: a workspace can never collide with a daemon a previous run left
 /// holding a fixture's ports, and the rewrite in `rewrite_ports` can never
 /// rewrite a port it has itself just written.

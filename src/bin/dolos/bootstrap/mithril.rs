@@ -59,6 +59,10 @@ pub struct Args {
     /// Download up to this immutable file number (inclusive)
     #[arg(long)]
     pub(crate) download_end: Option<u64>,
+
+    /// Stop the import once the ledger reaches this epoch
+    #[arg(long, value_name = "N")]
+    pub(crate) stop_epoch: Option<u64>,
 }
 
 impl Default for Args {
@@ -74,6 +78,7 @@ impl Default for Args {
             start_from: None,
             download_start: None,
             download_end: None,
+            stop_epoch: None,
         }
     }
 }
@@ -192,8 +197,8 @@ fn import_hardano_into_domain(
     feedback: &Feedback,
     chunk_size: usize,
 ) -> Result<(), miette::Error> {
-    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
-    let session = BulkReplaySession::open(config, genesis, None)
+    let genesis = Arc::new(crate::common::open_genesis(config)?);
+    let session = BulkReplaySession::open(config, genesis, args.stop_epoch)
         .map_err(|error| miette::miette!("opening the bulk-replay session: {error}"))?;
 
     session

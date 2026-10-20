@@ -348,7 +348,7 @@ mod tests {
     fn build_epoch_content_nulls_active_stake_across_the_preprod_gap() {
         use std::sync::Arc;
 
-        use dolos_core::config::{CardanoConfig, MinibfConfig};
+        use dolos_core::config::MinibfConfig;
         use dolos_testing::toy_domain::ToyDomain;
 
         use crate::mapping::IntoModel as _;
@@ -358,7 +358,7 @@ mod tests {
         fn facade_for(genesis: dolos_core::Genesis) -> Facade<ToyDomain> {
             let domain = ToyDomain::new_with_genesis_and_config(
                 Arc::new(genesis),
-                CardanoConfig::default(),
+                dolos_cardano::CardanoLogicConfig::default(),
                 None,
                 None,
             );

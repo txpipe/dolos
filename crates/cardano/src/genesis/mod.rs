@@ -1,7 +1,4 @@
-use dolos_core::{
-    config::CardanoConfig, ChainError, ChainPoint, Domain, Genesis, StateStore as _,
-    StateWriter as _,
-};
+use dolos_core::{ChainError, ChainPoint, Domain, Genesis, StateStore as _, StateWriter as _};
 
 use crate::{
     gov_from_conway_genesis, indexes::utxo_index_delta_from_utxo_delta, pots::Pots,
@@ -162,7 +159,7 @@ pub fn bootstrap_gov<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(
 pub fn bootstrap_utxos<D: Domain>(
     state: &D::State,
     genesis: &Genesis,
-    config: &CardanoConfig,
+    config: &crate::CardanoLogicConfig,
 ) -> Result<(), ChainError> {
     let state_writer = state.start_writer()?;
 
@@ -184,7 +181,7 @@ pub fn bootstrap_utxos<D: Domain>(
 pub fn execute<D: Domain>(
     state: &D::State,
     genesis: &Genesis,
-    config: &CardanoConfig,
+    config: &crate::CardanoLogicConfig,
 ) -> Result<(), ChainError> {
     let epoch = bootstrap_epoch::<D>(state, genesis)?;
 
