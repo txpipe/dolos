@@ -208,7 +208,7 @@ fn configured_boundary_survives_inspection_and_requires_explicit_advancement() {
 /// refused before a layer is written.
 #[test]
 fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
-    let mut node = node::Node::new();
+    let node = node::Node::new();
     let mut genesis = dolos_cardano::include::preview::load();
     genesis.force_protocol = Some(9);
     let epoch_one = genesis.shelley.epoch_length.unwrap() as u64;
@@ -217,7 +217,6 @@ fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
     let (before, block_before) = make_conway_block_with_prev(epoch_one - 1, None, 1);
     let (boundary, block_boundary) = make_conway_block_with_prev(epoch_one, before.hash(), 2);
     let (_, block_after) = make_conway_block_with_prev(epoch_one + 1, boundary.hash(), 3);
-    node.config.chain = ChainConfig::Cardano(Default::default());
 
     let mut session = BulkReplaySession::open(&node.config, genesis.clone(), Some(1)).unwrap();
     session
