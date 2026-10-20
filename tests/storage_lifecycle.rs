@@ -318,6 +318,7 @@ fn kept_tip(node: &Node) -> Option<(u64, Vec<u8>)> {
 /// A snapshot carries the segments from `blocks_path` in the default layout:
 /// a forced restore puts them back under the storage root it cleared, and a
 /// node keeping its segments in the archive directory restores them there.
+/// Each restore brings back the state and a WAL seeded at its cursor.
 #[test]
 fn a_snapshot_carries_the_segments_at_blocks_path() {
     let (node, genesis, blocks) = fixture("[storage.archive]\nblocks_path = \"segments\"\n");
@@ -325,6 +326,9 @@ fn a_snapshot_carries_the_segments_at_blocks_path() {
 
     let synced = Some((point(&blocks[2]).slot(), blocks[2].to_vec()));
     assert_eq!(kept_tip(&node), synced);
+
+    let tip = point(&blocks[2]);
+    let restored = (Some(tip.clone()), Some(tip.clone()), Some(tip.slot()));
 
     let snapshot = node.root.path().join("snapshot.tar.gz");
     let snapshot = snapshot.to_str().unwrap();
@@ -343,10 +347,41 @@ fn a_snapshot_carries_the_segments_at_blocks_path() {
     assert!(has_segments(&storage.join("segments")));
     assert!(!has_segments(&storage.join("archive")));
     assert_eq!(kept_tip(&node), synced);
+    assert_eq!(store_positions(&node), restored);
 
     let (other, _, _) = fixture("");
     assert_ok(&other.run(&["bootstrap", "snapshot", "--file", snapshot]));
 
     assert!(has_segments(&other.config.storage.path.join("archive")));
     assert_eq!(kept_tip(&other), synced);
+    assert_eq!(store_positions(&other), restored);
+}
+
+/// A `blocks_path` under the state directory exports its segments once, with
+/// the archive.
+#[test]
+fn segments_under_the_state_directory_are_exported_once() {
+    let (node, genesis, blocks) = fixture("[storage.archive]\nblocks_path = \"state/blocks\"\n");
+    sync_and_stop(&node, &genesis, &blocks);
+    assert!(has_segments(&node.config.storage.path.join("state/blocks")));
+
+    let snapshot = node.root.path().join("snapshot.tar.gz");
+    assert_ok(&node.run(&[
+        "data",
+        "export",
+        "-o",
+        snapshot.to_str().unwrap(),
+        "--include-state",
+        "--include-archive",
+    ]));
+
+    let file = std::fs::File::open(&snapshot).unwrap();
+    let mut entries: Vec<_> = tar::Archive::new(flate2::read::GzDecoder::new(file))
+        .entries()
+        .unwrap()
+        .map(|entry| entry.unwrap().path().unwrap().into_owned())
+        .collect();
+    entries.retain(|path| path.extension() == Some("segment".as_ref()));
+
+    assert_eq!(entries, [Path::new("archive/000000.segment")]);
 }

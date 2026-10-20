@@ -1,6 +1,7 @@
 use clap::Parser;
 use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
 use dolos_core::config::RootConfig;
+use dolos_fjall::flatfiles::parse_segment_filename;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use miette::{bail, IntoDiagnostic as _};
@@ -67,13 +68,15 @@ fn deterministic_header(source: &Path) -> miette::Result<tar::Header> {
     Ok(header)
 }
 
+/// `source` under `name`, leaving out `skip` wherever it sits inside.
 fn append_path_filtered(
     archive: &mut Builder<GzEncoder<File>>,
     source: &Path,
     name: &Path,
+    skip: Option<&Path>,
 ) -> miette::Result<()> {
     if source.is_dir() {
-        append_dir_filtered(archive, source, name)?;
+        append_dir_filtered(archive, source, name, skip)?;
         return Ok(());
     }
 
@@ -90,6 +93,7 @@ fn append_dir_filtered(
     archive: &mut Builder<GzEncoder<File>>,
     source: &Path,
     name: &Path,
+    skip: Option<&Path>,
 ) -> miette::Result<()> {
     let header = deterministic_header(source)?;
     archive
@@ -106,14 +110,14 @@ fn append_dir_filtered(
     for entry in entries {
         let path = entry.path();
 
-        if is_macos_metadata(&path) {
+        if is_macos_metadata(&path) || skip == Some(path.as_path()) {
             continue;
         }
 
         let entry_name = name.join(entry.file_name());
 
         if path.is_dir() {
-            append_dir_filtered(archive, &path, &entry_name)?;
+            append_dir_filtered(archive, &path, &entry_name, skip)?;
         } else {
             let header = deterministic_header(&path)?;
             let file = File::open(&path).into_diagnostic()?;
@@ -126,16 +130,17 @@ fn append_dir_filtered(
     Ok(())
 }
 
-/// The archive under `archive/` in the default layout, its segment files beside
-/// `index/`, wherever this node keeps them: a snapshot restores the same way
-/// whatever `blocks_path` the node it came from had.
+/// The archive directory under `archive/`; for a node keeping its segment
+/// files at `segments_dir`, its `index/` with those segments beside it. That is
+/// the default layout, so a snapshot restores the same way whatever
+/// `blocks_path` the node it came from had.
 fn append_archive(
     archive: &mut Builder<GzEncoder<File>>,
     archive_dir: &Path,
     segments_dir: Option<&Path>,
 ) -> miette::Result<()> {
     let Some(segments_dir) = segments_dir else {
-        return append_path_filtered(archive, archive_dir, Path::new("archive"));
+        return append_path_filtered(archive, archive_dir, Path::new("archive"), None);
     };
 
     let name = Path::new("archive");
@@ -150,16 +155,24 @@ fn append_archive(
         .into_diagnostic()?;
 
     segments.retain(|entry| {
-        let path = entry.path();
-        path.extension() == Some(OsStr::new("segment")) && !is_macos_metadata(&path)
+        entry
+            .file_name()
+            .to_str()
+            .and_then(parse_segment_filename)
+            .is_some()
     });
     segments.sort_by_key(|entry| entry.file_name());
 
     for entry in segments {
-        append_path_filtered(archive, &entry.path(), &name.join(entry.file_name()))?;
+        append_path_filtered(archive, &entry.path(), &name.join(entry.file_name()), None)?;
     }
 
-    append_path_filtered(archive, &archive_dir.join("index"), &name.join("index"))
+    append_path_filtered(
+        archive,
+        &archive_dir.join("index"),
+        &name.join("index"),
+        None,
+    )
 }
 
 fn ensure_state_exportable(state: &StateStoreBackend, include_state: bool) -> miette::Result<()> {
@@ -224,9 +237,10 @@ pub fn run(
     stores.archive.shutdown().into_diagnostic()?;
     drop(stores);
 
+    let segments = config.storage.blocks_path();
+
     if args.include_archive {
         let path = root.join("archive");
-        let segments = config.storage.blocks_path();
 
         append_archive(&mut archive, &path, segments.as_deref())?;
 
@@ -236,7 +250,9 @@ pub fn run(
     if args.include_state {
         let path = root.join("state");
 
-        append_path_filtered(&mut archive, &path, Path::new("state"))?;
+        // A `blocks_path` under the state directory holds the archive's
+        // segments, which travel with the archive.
+        append_path_filtered(&mut archive, &path, Path::new("state"), segments.as_deref())?;
 
         pb.set_message("creating archive");
     }

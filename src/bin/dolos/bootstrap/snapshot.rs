@@ -1,7 +1,8 @@
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-use dolos_core::config::RootConfig;
+use dolos_core::config::{RootConfig, StorageConfig};
+use dolos_fjall::flatfiles::parse_segment_filename;
 use flate2::read::GzDecoder;
 use inquire::list_option::ListOption;
 use miette::{Context, IntoDiagnostic};
@@ -99,20 +100,22 @@ fn import_local_snapshot(config: &RootConfig, path: &PathBuf) -> miette::Result<
     let tar_gz = GzDecoder::new(file);
     let mut archive = Archive::new(tar_gz);
 
-    unpack(&mut archive, root, config.storage.blocks_path().as_deref())
+    unpack(&mut archive, &config.storage)
         .into_diagnostic()
         .context("Failed to extract snapshot")?;
 
     Ok(())
 }
 
-/// The file name of a segment the snapshot keeps under `archive/`.
+/// The file name of a segment the snapshot keeps under `archive/`, in the
+/// segment store's own form. Nothing else, a drive-prefixed name on Windows
+/// included, is joined onto `blocks_path`.
 fn segment_name(path: &Path) -> Option<PathBuf> {
     let mut components = path.components();
 
     match (components.next(), components.next(), components.next()) {
         (Some(Component::Normal(dir)), Some(Component::Normal(name)), None)
-            if dir == "archive" && Path::new(name).extension() == Some("segment".as_ref()) =>
+            if dir == "archive" && name.to_str().and_then(parse_segment_filename).is_some() =>
         {
             Some(PathBuf::from(name))
         }
@@ -120,19 +123,17 @@ fn segment_name(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Unpack a snapshot into `root`, and its segment files into `segments` when
-/// the node keeps them outside the archive directory.
-fn unpack<R: Read>(
-    archive: &mut Archive<R>,
-    root: &Path,
-    segments: Option<&Path>,
-) -> std::io::Result<()> {
-    let Some(segments) = segments else {
+/// Unpack a snapshot into the storage root, and its segment files into the
+/// node's `blocks_path` when it keeps them outside the archive directory.
+fn unpack<R: Read>(archive: &mut Archive<R>, storage: &StorageConfig) -> std::io::Result<()> {
+    let root = &storage.path;
+
+    let Some(segments) = storage.blocks_path() else {
         return archive.unpack(root);
     };
 
     std::fs::create_dir_all(root)?;
-    std::fs::create_dir_all(segments)?;
+    std::fs::create_dir_all(&segments)?;
 
     let mut directories = Vec::new();
 
@@ -181,12 +182,9 @@ fn fetch_snapshot(config: &RootConfig, args: &Args, feedback: &Feedback) -> miet
 
     let probe = ranged::probe(&client, &snapshot_url)?;
 
-    let segments = config.storage.blocks_path();
-
     if probe.supports_ranges && probe.total_size > 0 {
         fetch_snapshot_ranged(
-            root,
-            segments.as_deref(),
+            &config.storage,
             &client,
             snapshot_url,
             probe.total_size,
@@ -196,7 +194,7 @@ fn fetch_snapshot(config: &RootConfig, args: &Args, feedback: &Feedback) -> miet
         // Fall back to a single streamed response for endpoints that don't
         // advertise range support (e.g. a custom --download-url behind a proxy
         // that strips Accept-Ranges).
-        fetch_snapshot_streaming(root, segments.as_deref(), snapshot_url, feedback)
+        fetch_snapshot_streaming(&config.storage, snapshot_url, feedback)
     }
 }
 
@@ -204,14 +202,13 @@ fn fetch_snapshot(config: &RootConfig, args: &Args, feedback: &Feedback) -> miet
 /// Resilient to servers (such as Cloudflare R2) that drop long-lived, slowly
 /// drained streamed responses.
 fn fetch_snapshot_ranged(
-    root: &Path,
-    segments: Option<&Path>,
+    storage: &StorageConfig,
     client: &reqwest::blocking::Client,
     snapshot_url: String,
     total_size: u64,
     feedback: &Feedback,
 ) -> miette::Result<()> {
-    let staging = root.join(".dolos-snapshot-tmp");
+    let staging = storage.path.join(".dolos-snapshot-tmp");
 
     // Start from a clean staging dir in case a previous attempt left chunks behind.
     let _ = std::fs::remove_dir_all(&staging);
@@ -237,7 +234,7 @@ fn fetch_snapshot_ranged(
     let tar_gz = GzDecoder::new(reader);
     let mut archive = Archive::new(tar_gz);
 
-    let result = unpack(&mut archive, root, segments)
+    let result = unpack(&mut archive, storage)
         .into_diagnostic()
         .context("Failed to extract snapshot");
 
@@ -252,8 +249,7 @@ fn fetch_snapshot_ranged(
 /// Stream a single HTTP response directly into the extractor. Used only when
 /// the endpoint does not support range requests.
 fn fetch_snapshot_streaming(
-    root: &Path,
-    segments: Option<&Path>,
+    storage: &StorageConfig,
     snapshot_url: String,
     feedback: &Feedback,
 ) -> miette::Result<()> {
@@ -286,7 +282,7 @@ fn fetch_snapshot_streaming(
     let tar_gz = GzDecoder::new(response);
     let mut archive = Archive::new(tar_gz);
 
-    unpack(&mut archive, root, segments)
+    unpack(&mut archive, storage)
         .into_diagnostic()
         .context("Failed to extract snapshot")?;
 
@@ -327,6 +323,9 @@ mod tests {
             "archive",
             "archive/index/000012.segment",
             "archive/000012.segment.tmp",
+            "archive/12.segment",
+            "archive/C:x.segment",
+            "archive/C:000012.segment",
             "state/000012.segment",
             "000012.segment",
         ] {
