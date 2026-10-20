@@ -479,6 +479,8 @@ pub enum CardanoDelta {
     StageFirstScript(Box<StageFirstScript>),
     StageAssetMint(Box<StageAssetMint>),
     DRepSighting(Box<DRepSighting>),
+    CommitteeDissolve(Box<CommitteeDissolve>),
+    CommitteeReseat(Box<CommitteeReseat>),
 }
 
 impl CardanoDelta {
@@ -595,6 +597,8 @@ delta_from!(ScriptFirstSeen);
 delta_from!(StageFirstScript);
 delta_from!(MetadataLabelTxInc);
 delta_from!(StageAssetMint);
+delta_from!(CommitteeDissolve);
+delta_from!(CommitteeReseat);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -678,6 +682,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StageAccountStats(x) => x.key(),
             Self::MetadataLabelTxInc(x) => x.key(),
             Self::StageAssetMint(x) => x.key(),
+            Self::CommitteeDissolve(x) => x.key(),
+            Self::CommitteeReseat(x) => x.key(),
         }
     }
 
@@ -759,6 +765,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StageAccountStats(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::MetadataLabelTxInc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StageAssetMint(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::CommitteeDissolve(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::CommitteeReseat(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -840,6 +848,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StageAccountStats(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::MetadataLabelTxInc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StageAssetMint(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::CommitteeDissolve(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::CommitteeReseat(x) => Self::downcast_undo(x.as_ref(), entity),
         }
     }
 }
@@ -955,6 +965,18 @@ mod wal_tests {
                 )
                 .into(),
             ),
+            (
+                76,
+                CommitteeDissolve::new(
+                    pallas::ledger::primitives::conway::GovActionId {
+                        transaction_id: [0x88; 32].into(),
+                        action_index: 0,
+                    },
+                    7,
+                )
+                .into(),
+            ),
+            (77, CommitteeReseat::new().into()),
         ];
 
         for (index, delta) in deltas {

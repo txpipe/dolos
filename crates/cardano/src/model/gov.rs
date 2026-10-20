@@ -202,6 +202,34 @@ pub struct DRepSnapshot {
     pub dreps: BTreeMap<StakeCredential, DRepSnapshotEntry>,
 }
 
+/// The committee a `NoConfidence` enactment dissolved: its members and
+/// threshold, the members' authorization histories as they stood, the
+/// enacted action, and the first epoch without a seated committee.
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DissolvedCommittee {
+    #[n(0)]
+    pub committee: Committee,
+
+    #[n(1)]
+    pub auths: BTreeMap<StakeCredential, AuthHistory>,
+
+    #[n(2)]
+    pub action: GovActionId,
+
+    #[n(3)]
+    pub epoch: Epoch,
+}
+
+impl DissolvedCommittee {
+    /// Effective authorization of `cold` when the committee was dissolved.
+    pub fn committee_auth(&self, cold: &StakeCredential) -> Option<&CommitteeAuthorization> {
+        self.auths
+            .get(cold)
+            .and_then(|history| history.last())
+            .map(|(_, auth)| auth)
+    }
+}
+
 #[derive(Debug, Encode, Decode, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GovState {
     /// The enacted constitution. `None` before governance activates
@@ -271,6 +299,13 @@ pub struct GovState {
     #[n(8)]
     #[cbor(default)]
     pub drep_snapshot: Option<DRepSnapshot>,
+
+    /// The last seated committee while a no-confidence keeps the committee
+    /// dissolved; cleared when a committee is seated again. Ratification
+    /// never reads it.
+    #[n(9)]
+    #[cbor(default)]
+    pub dissolved_committee: Option<DissolvedCommittee>,
 }
 
 entity_boilerplate!(GovState, "gov", state = ());
@@ -665,6 +700,109 @@ impl dolos_core::EntityDelta for CommitteeUpdate {
         let state = entity.as_mut().expect(GOV_MUST_EXIST);
 
         state.committee = self.prev.clone();
+    }
+}
+
+/// A `NoConfidence` action is about to dissolve the seated committee. Keeps
+/// the committee and its members' authorization histories as
+/// `GovState.dissolved_committee`, ahead of the [`CommitteeUpdate`] that
+/// clears the committee and the [`CommitteeGc`] that drops the histories.
+/// With no committee seated the delta changes nothing, so a no-confidence
+/// enacted while already dissolved keeps the snapshot it has.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitteeDissolve {
+    pub(crate) action: GovActionId,
+    pub(crate) epoch: Epoch,
+
+    // undo
+    pub(crate) applied: bool,
+    pub(crate) prev: Option<DissolvedCommittee>,
+}
+
+impl CommitteeDissolve {
+    pub fn new(action: GovActionId, epoch: Epoch) -> Self {
+        Self {
+            action,
+            epoch,
+            applied: false,
+            prev: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for CommitteeDissolve {
+    type Entity = GovState;
+
+    fn key(&self) -> NsKey {
+        GovState::ns_key()
+    }
+
+    fn apply(&mut self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        let Some(committee) = state.committee.clone() else {
+            return;
+        };
+
+        let auths = state
+            .committee_auths
+            .iter()
+            .filter(|(cold, _)| committee.members.contains_key(*cold))
+            .map(|(cold, history)| (cold.clone(), history.clone()))
+            .collect();
+
+        self.prev = state.dissolved_committee.replace(DissolvedCommittee {
+            committee,
+            auths,
+            action: self.action.clone(),
+            epoch: self.epoch,
+        });
+
+        self.applied = true;
+    }
+
+    fn undo(&self, entity: &mut Option<GovState>) {
+        if !self.applied {
+            return;
+        }
+
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        state.dissolved_committee = self.prev.clone();
+    }
+}
+
+/// An `UpdateCommittee` action is about to seat a committee. Clears
+/// `GovState.dissolved_committee`; undo restores it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CommitteeReseat {
+    // undo
+    pub(crate) prev: Option<DissolvedCommittee>,
+}
+
+impl CommitteeReseat {
+    pub fn new() -> Self {
+        Self { prev: None }
+    }
+}
+
+impl dolos_core::EntityDelta for CommitteeReseat {
+    type Entity = GovState;
+
+    fn key(&self) -> NsKey {
+        GovState::ns_key()
+    }
+
+    fn apply(&mut self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        self.prev = state.dissolved_committee.take();
+    }
+
+    fn undo(&self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        state.dissolved_committee = self.prev.clone();
     }
 }
 
@@ -1304,6 +1442,21 @@ pub(crate) mod testing {
     }
 
     prop_compose! {
+        pub fn any_dissolved_committee()(
+            committee in any_committee(),
+            auths in prop::collection::btree_map(
+                root::any_stake_credential(),
+                any_auth_history(),
+                0..3,
+            ),
+            action in root::any_gov_action_id(),
+            epoch in root::any_epoch(),
+        ) -> DissolvedCommittee {
+            DissolvedCommittee { committee, auths, action, epoch }
+        }
+    }
+
+    prop_compose! {
         pub fn any_gov_state()(
             constitution in prop::option::of(any_constitution()),
             committee in prop::option::of(any_committee()),
@@ -1317,6 +1470,7 @@ pub(crate) mod testing {
             active_since in prop::option::of(root::any_epoch()),
             distr in prop::option::of(any_gov_distr()),
             prev_distr in prop::option::of(any_gov_distr()),
+            dissolved_committee in prop::option::of(any_dissolved_committee()),
         ) -> GovState {
             GovState {
                 constitution,
@@ -1328,6 +1482,7 @@ pub(crate) mod testing {
                 distr,
                 prev_distr,
                 drep_snapshot: None,
+                dissolved_committee,
             }
         }
     }
@@ -1429,6 +1584,32 @@ mod tests {
                 pool_total: 5_000_000,
             }),
             drep_snapshot: None,
+            dissolved_committee: Some(DissolvedCommittee {
+                committee: Committee {
+                    members: BTreeMap::from([(
+                        StakeCredential::AddrKeyhash([9u8; 28].into()),
+                        520,
+                    )]),
+                    threshold: RationalNumber {
+                        numerator: 1,
+                        denominator: 2,
+                    },
+                },
+                auths: BTreeMap::from([(
+                    StakeCredential::AddrKeyhash([9u8; 28].into()),
+                    vec![(
+                        90,
+                        CommitteeAuthorization::HotCredential(StakeCredential::ScriptHash(
+                            [10u8; 28].into(),
+                        )),
+                    )],
+                )]),
+                action: GovActionId {
+                    transaction_id: [11u8; 32].into(),
+                    action_index: 1,
+                },
+                epoch: 506,
+            }),
         };
 
         let bytes = minicbor::to_vec(&state).unwrap();
@@ -1556,6 +1737,15 @@ mod prop_tests {
             ],
         ) -> CommitteeUpdate {
             CommitteeUpdate { change, prev: None }
+        }
+    }
+
+    prop_compose! {
+        fn any_committee_dissolve()(
+            action in root::any_gov_action_id(),
+            epoch in root::any_epoch(),
+        ) -> CommitteeDissolve {
+            CommitteeDissolve::new(action, epoch)
         }
     }
 
@@ -1795,6 +1985,36 @@ mod prop_tests {
         }
 
         #[test]
+        fn committee_dissolve_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_committee_dissolve(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn committee_dissolve_serde_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_committee_dissolve(),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn committee_reseat_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+        ) {
+            assert_delta_roundtrip(entity, CommitteeReseat::new());
+        }
+
+        #[test]
+        fn committee_reseat_serde_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, CommitteeReseat::new());
+        }
+
+        #[test]
         fn constitution_update_roundtrip(
             entity in any_gov_state().prop_map(Some),
             delta in any_constitution_update(),
@@ -1879,32 +2099,63 @@ mod prop_tests {
         assert_eq!(entity.unwrap().committee, Some(before));
     }
 
-    /// `NoConfidence` dissolves the committee; a later `UpdateCommittee`
-    /// rebuilds it from an empty member set.
+    /// `NoConfidence` dissolves the committee and keeps it as the snapshot;
+    /// a later `UpdateCommittee` rebuilds it from an empty member set and
+    /// clears the snapshot. Undo walks both steps back.
     #[test]
     fn no_confidence_dissolves_then_rebuilds() {
         use dolos_core::EntityDelta as _;
 
         let sitting = StakeCredential::ScriptHash([1u8; 28].into());
         let fresh = StakeCredential::AddrKeyhash([2u8; 28].into());
+        let hot = StakeCredential::AddrKeyhash([3u8; 28].into());
 
         let threshold = RationalNumber {
             numerator: 2,
             denominator: 3,
         };
 
+        let seated = Committee {
+            members: BTreeMap::from([(sitting.clone(), 500)]),
+            threshold: threshold.clone(),
+        };
+
+        let action = GovActionId {
+            transaction_id: [4u8; 32].into(),
+            action_index: 0,
+        };
+
+        let history = vec![(10, CommitteeAuthorization::HotCredential(hot))];
+
         let mut entity = Some(GovState {
-            committee: Some(Committee {
-                members: BTreeMap::from([(sitting.clone(), 500)]),
-                threshold: threshold.clone(),
-            }),
+            committee: Some(seated.clone()),
+            committee_auths: BTreeMap::from([(sitting.clone(), history.clone())]),
             ..Default::default()
         });
 
+        let mut snapshot = CommitteeDissolve::new(action.clone(), 600);
+        snapshot.apply(&mut entity);
         let mut dissolve = CommitteeUpdate::no_confidence();
         dissolve.apply(&mut entity);
-        assert_eq!(entity.as_ref().unwrap().committee, None);
+        let mut gc = CommitteeGc::new();
+        gc.apply(&mut entity);
 
+        let state = entity.as_ref().unwrap();
+        assert_eq!(state.committee, None);
+        assert!(state.committee_auths.is_empty());
+        assert_eq!(
+            state.dissolved_committee,
+            Some(DissolvedCommittee {
+                committee: seated,
+                auths: BTreeMap::from([(sitting.clone(), history)]),
+                action,
+                epoch: 600,
+            })
+        );
+        let dissolved = entity.clone();
+
+        let mut reseat = CommitteeReseat::new();
+        reseat.apply(&mut entity);
         let mut rebuild =
             CommitteeUpdate::update(vec![], vec![(fresh.clone(), 700)], threshold.clone());
         rebuild.apply(&mut entity);
@@ -1913,15 +2164,82 @@ mod prop_tests {
             entity.as_ref().unwrap().committee.as_ref().unwrap().members,
             BTreeMap::from([(fresh, 700)])
         );
+        assert_eq!(entity.as_ref().unwrap().dissolved_committee, None);
 
         rebuild.undo(&mut entity);
-        assert_eq!(entity.as_ref().unwrap().committee, None);
+        reseat.undo(&mut entity);
+        assert_eq!(entity, dissolved);
 
+        gc.undo(&mut entity);
         dissolve.undo(&mut entity);
+        snapshot.undo(&mut entity);
+
+        let state = entity.unwrap();
         assert_eq!(
-            entity.unwrap().committee.unwrap().members,
+            state.committee.unwrap().members,
             BTreeMap::from([(sitting, 500)])
         );
+        assert_eq!(state.dissolved_committee, None);
+    }
+
+    /// The snapshot keeps the members' authorization histories only, and a
+    /// no-confidence enacted while already dissolved leaves the snapshot as
+    /// it is, through apply and undo.
+    #[test]
+    fn committee_dissolve_keeps_members_and_skips_when_dissolved() {
+        use dolos_core::EntityDelta as _;
+
+        let member = StakeCredential::ScriptHash([1u8; 28].into());
+        let outsider = StakeCredential::ScriptHash([2u8; 28].into());
+        let hot = StakeCredential::AddrKeyhash([3u8; 28].into());
+
+        let history = vec![(10, CommitteeAuthorization::HotCredential(hot))];
+
+        let mut entity = Some(GovState {
+            committee: Some(Committee {
+                members: BTreeMap::from([(member.clone(), 500)]),
+                threshold: RationalNumber {
+                    numerator: 1,
+                    denominator: 2,
+                },
+            }),
+            committee_auths: BTreeMap::from([
+                (member.clone(), history.clone()),
+                (outsider, vec![(20, CommitteeAuthorization::Resigned(None))]),
+            ]),
+            ..Default::default()
+        });
+
+        let first = GovActionId {
+            transaction_id: [5u8; 32].into(),
+            action_index: 0,
+        };
+
+        CommitteeDissolve::new(first.clone(), 600).apply(&mut entity);
+        CommitteeUpdate::no_confidence().apply(&mut entity);
+
+        let snapshot = entity
+            .as_ref()
+            .unwrap()
+            .dissolved_committee
+            .clone()
+            .unwrap();
+        assert_eq!(snapshot.auths, BTreeMap::from([(member, history)]));
+        assert_eq!(snapshot.action, first);
+
+        let before = entity.clone();
+
+        let second = GovActionId {
+            transaction_id: [6u8; 32].into(),
+            action_index: 0,
+        };
+
+        let mut again = CommitteeDissolve::new(second, 610);
+        again.apply(&mut entity);
+        assert_eq!(entity, before);
+
+        again.undo(&mut entity);
+        assert_eq!(entity, before);
     }
 
     /// Each purpose writes its own root slot and leaves the others alone.
