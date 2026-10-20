@@ -6,7 +6,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use miette::{bail, IntoDiagnostic as _};
 use std::ffi::OsStr;
-use std::fs::File;
+use std::fs::{DirEntry, File};
 use std::path::{Path, PathBuf};
 use tar::Builder;
 
@@ -68,15 +68,25 @@ fn deterministic_header(source: &Path) -> miette::Result<tar::Header> {
     Ok(header)
 }
 
-/// `source` under `name`, leaving out `skip` wherever it sits inside.
+/// A segment file in the store's own naming.
+fn is_segment(entry: &DirEntry) -> bool {
+    entry
+        .file_name()
+        .to_str()
+        .and_then(parse_segment_filename)
+        .is_some()
+}
+
+/// `source` under `name`, leaving out the segment files kept in `segments`, a
+/// canonical path, when that directory is `source` or lies inside it.
 fn append_path_filtered(
     archive: &mut Builder<GzEncoder<File>>,
     source: &Path,
     name: &Path,
-    skip: Option<&Path>,
+    segments: Option<&Path>,
 ) -> miette::Result<()> {
     if source.is_dir() {
-        append_dir_filtered(archive, source, name, skip)?;
+        append_dir_filtered(archive, source, name, segments)?;
         return Ok(());
     }
 
@@ -93,7 +103,7 @@ fn append_dir_filtered(
     archive: &mut Builder<GzEncoder<File>>,
     source: &Path,
     name: &Path,
-    skip: Option<&Path>,
+    segments: Option<&Path>,
 ) -> miette::Result<()> {
     let header = deterministic_header(source)?;
     archive
@@ -107,17 +117,20 @@ fn append_dir_filtered(
 
     entries.sort_by_key(|e| e.file_name());
 
+    let holds_segments = segments
+        .is_some_and(|segments| std::fs::canonicalize(source).is_ok_and(|dir| dir == segments));
+
     for entry in entries {
         let path = entry.path();
 
-        if is_macos_metadata(&path) || skip == Some(path.as_path()) {
+        if is_macos_metadata(&path) || holds_segments && is_segment(&entry) {
             continue;
         }
 
         let entry_name = name.join(entry.file_name());
 
         if path.is_dir() {
-            append_dir_filtered(archive, &path, &entry_name, skip)?;
+            append_dir_filtered(archive, &path, &entry_name, segments)?;
         } else {
             let header = deterministic_header(&path)?;
             let file = File::open(&path).into_diagnostic()?;
@@ -154,13 +167,7 @@ fn append_archive(
         .collect::<Result<Vec<_>, _>>()
         .into_diagnostic()?;
 
-    segments.retain(|entry| {
-        entry
-            .file_name()
-            .to_str()
-            .and_then(parse_segment_filename)
-            .is_some()
-    });
+    segments.retain(is_segment);
     segments.sort_by_key(|entry| entry.file_name());
 
     for entry in segments {
@@ -250,8 +257,11 @@ pub fn run(
     if args.include_state {
         let path = root.join("state");
 
-        // A `blocks_path` under the state directory holds the archive's
-        // segments, which travel with the archive.
+        // A `blocks_path` at or under the state directory holds the archive's
+        // segments, which travel with the archive. Compared canonically, so
+        // any spelling of it is recognised.
+        let segments = segments.and_then(|dir| std::fs::canonicalize(dir).ok());
+
         append_path_filtered(&mut archive, &path, Path::new("state"), segments.as_deref())?;
 
         pb.set_message("creating archive");
