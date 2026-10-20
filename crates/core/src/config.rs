@@ -690,7 +690,7 @@ impl HistoryConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MempoolConfig {
     /// Keep pending transactions across a restart.
@@ -698,11 +698,26 @@ pub struct MempoolConfig {
     /// Relative to `storage.path`; default `mempool`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
+    /// The confirmations a transaction stays in the mempool for before it is
+    /// finalized.
+    pub retain_confirmed_blocks: u32,
 }
 
 impl MempoolConfig {
+    pub const DEFAULT_RETAIN_CONFIRMED_BLOCKS: u32 = 6;
+
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+impl Default for MempoolConfig {
+    fn default() -> Self {
+        Self {
+            persistent: false,
+            path: None,
+            retain_confirmed_blocks: Self::DEFAULT_RETAIN_CONFIRMED_BLOCKS,
+        }
     }
 }
 
@@ -924,10 +939,43 @@ fn default_ipfs_gateways() -> Vec<String> {
     ]
 }
 
+/// A count, refusing the fraction the file reader would otherwise round away.
+fn whole_number<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<usize, D::Error> {
+    use serde::de::{Error, Unexpected, Visitor};
+
+    struct WholeNumber;
+
+    impl Visitor<'_> for WholeNumber {
+        type Value = usize;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a non-negative whole number")
+        }
+
+        fn visit_u64<E: Error>(self, value: u64) -> Result<usize, E> {
+            usize::try_from(value).map_err(|_| E::invalid_value(Unexpected::Unsigned(value), &self))
+        }
+
+        fn visit_i64<E: Error>(self, value: i64) -> Result<usize, E> {
+            usize::try_from(value).map_err(|_| E::invalid_value(Unexpected::Signed(value), &self))
+        }
+
+        // An environment override arrives as text.
+        fn visit_str<E: Error>(self, value: &str) -> Result<usize, E> {
+            value
+                .parse()
+                .map_err(|_| E::invalid_value(Unexpected::Str(value), &self))
+        }
+    }
+
+    deserializer.deserialize_any(WholeNumber)
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServeConfig {
     /// Blocking query work the node runs at once, across every API.
+    #[serde(deserialize_with = "whole_number")]
     pub max_concurrent_queries: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc: Option<GrpcConfig>,
@@ -1158,6 +1206,28 @@ impl RootConfig {
             ));
         }
 
+        let (state, archive) = (&self.storage.state, &self.storage.archive);
+        let ephemeral_paths: Vec<String> = [
+            (state.kind, "storage.state.path", state.path.is_some()),
+            (archive.kind, "storage.archive.path", archive.path.is_some()),
+            (
+                archive.kind,
+                "storage.archive.blocks_path",
+                archive.blocks_path.is_some(),
+            ),
+        ]
+        .into_iter()
+        .filter(|(kind, _, set)| *kind == StoreType::Ephemeral && *set)
+        .map(|(_, key, _)| format!("`{key}`"))
+        .collect();
+
+        if !ephemeral_paths.is_empty() {
+            return invalid(format!(
+                "an ephemeral store takes no other field; remove {}",
+                ephemeral_paths.join(", ")
+            ));
+        }
+
         Ok(())
     }
 
@@ -1254,8 +1324,9 @@ const ENV_NESTING: &str = "__";
 /// A variable names its key with `__` between levels, as in
 /// `DOLOS_UPSTREAM__PEER_ADDRESS`; one without `__` is not an override, which
 /// leaves the command inputs such as `DOLOS_MITHRIL_AGGREGATOR` alone. An
-/// error the overrides cause names them rather than the file; when the file
-/// is refused on its own, its error is the one reported.
+/// error the overrides cause names them rather than the file, or only those
+/// the configuration reads without. The file's own error is reported when it
+/// stands with the overrides applied.
 /// `compatibility` is read from the file alone. Genesis paths resolve against
 /// the file's directory.
 pub fn load(path: Option<&Path>) -> Result<RootConfig, ConfigError> {
@@ -1304,16 +1375,32 @@ pub fn load_checked(
         return read(overrides).map_err(|rejection| rejection.in_file(path));
     }
 
-    match read(overrides.clone()) {
-        Ok(config) => Ok(config),
-        Err(rejection) => match read(Default::default()) {
-            Ok(_) => {
-                let mut variables: Vec<String> = overrides.into_keys().collect();
-                variables.sort();
-                Err(rejection.in_environment(variables))
-            }
-            Err(rejection) => Err(rejection.in_file(path)),
-        },
+    let rejection = match read(overrides.clone()) {
+        Ok(config) => return Ok(config),
+        Err(rejection) => rejection,
+    };
+
+    let mut variables: Vec<String> = overrides.keys().cloned().collect();
+    variables.sort();
+
+    // To blame: each variable the configuration reads without.
+    let culprits: Vec<String> = variables
+        .iter()
+        .filter(|variable| {
+            let mut others = overrides.clone();
+            others.remove(*variable);
+            read(others).is_ok()
+        })
+        .cloned()
+        .collect();
+
+    if !culprits.is_empty() {
+        return Err(rejection.in_environment(culprits));
+    }
+
+    match read(Default::default()) {
+        Err(alone) if alone.survives(&rejection) => Err(alone.in_file(path)),
+        _ => Err(rejection.in_environment(variables)),
     }
 }
 
@@ -1325,6 +1412,20 @@ enum Rejection {
 }
 
 impl Rejection {
+    /// Whether the file's own rejection is the one to report when no variable
+    /// is to blame alone: a parse error, or a rule the overrides break in
+    /// the same words. A rule they break otherwise may be one the file needs
+    /// a variable to meet.
+    fn survives(&self, with_overrides: &Rejection) -> bool {
+        match (self, with_overrides) {
+            (Self::Parse(_), _) => true,
+            (Self::Check(alone), Self::Check(with_overrides)) => {
+                alone.to_string() == with_overrides.to_string()
+            }
+            (Self::Check(_), Self::Parse(_)) => false,
+        }
+    }
+
     fn in_file(self, path: &Path) -> ConfigError {
         match self {
             Self::Parse(source) => ConfigError::Read {
@@ -1399,6 +1500,10 @@ fn environment_overrides() -> Result<::config::Map<String, String>, ConfigError>
 
         match (key.into_string(), value.into_string()) {
             (Ok(key), Ok(value)) => {
+                // Names are read in lowercase, so of two that differ only in
+                // case, the later one in the environment wins.
+                let lowercase = key.to_lowercase();
+                overrides.retain(|name: &String, _| name.to_lowercase() != lowercase);
                 overrides.insert(key, value);
             }
             _ => return Err(ConfigError::NonUnicodeOverride(name)),
@@ -1751,6 +1856,44 @@ mod tests {
             config.serve.max_concurrent_queries = queries;
             assert_eq!(config.validate().is_ok(), valid, "{queries}");
         }
+    }
+
+    #[test]
+    fn concurrent_queries_are_a_whole_number() {
+        let serve = |value| {
+            serde_json::from_value::<ServeConfig>(json!({ "max_concurrent_queries": value }))
+        };
+
+        assert_eq!(serve(json!(8)).unwrap().max_concurrent_queries, 8);
+        assert_eq!(serve(json!("8")).unwrap().max_concurrent_queries, 8);
+
+        for value in [json!(64.4), json!(0.6), json!(-1), json!("8.5")] {
+            let err = serve(value.clone()).unwrap_err().to_string();
+            assert!(
+                err.contains("a non-negative whole number"),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ephemeral_store_with_a_path_is_invalid() {
+        let mut config = preview();
+        config.storage.state = StateStoreConfig {
+            path: Some("state".into()),
+            ..StateStoreConfig::ephemeral()
+        };
+        assert!(invalid(&config).contains("remove `storage.state.path`"));
+
+        config.storage.state = StateStoreConfig::ephemeral();
+        config.storage.archive = ArchiveStoreConfig {
+            blocks_path: Some("/hdd/blocks".into()),
+            ..ArchiveStoreConfig::ephemeral()
+        };
+        assert!(invalid(&config).contains("remove `storage.archive.blocks_path`"));
+
+        config.storage.archive.kind = StoreType::default();
+        assert!(config.validate().is_ok());
     }
 
     #[test]

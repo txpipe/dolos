@@ -49,6 +49,7 @@ window = { unit = "slot", value = 2592000 }
 [mempool]
 persistent = true
 path = "mempool"
+retain_confirmed_blocks = 200
 
 [serve]
 max_concurrent_queries = 32

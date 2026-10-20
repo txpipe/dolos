@@ -735,6 +735,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
     fn storage_config(&self) -> &config::StorageConfig;
     fn history_config(&self) -> &config::HistoryConfig;
+    fn mempool_config(&self) -> &config::MempoolConfig;
     fn genesis(&self) -> Arc<Genesis>;
 
     /// The one limiter every query facade built from this domain runs its

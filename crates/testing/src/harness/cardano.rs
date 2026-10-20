@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use dolos_cardano::{CardanoDelta, CardanoLogic, CardanoWorkUnit};
 use dolos_core::{
     builtin::NoDiskTier,
-    config::{FjallStateConfig, HistoryConfig, StorageConfig},
+    config::{FjallStateConfig, HistoryConfig, MempoolConfig, StorageConfig},
     BootstrapExt, ChainLogic, Domain, DomainError, Genesis, MempoolError, MempoolEvent,
     MempoolStore, MempoolTx, MempoolTxStage, StateStore as CoreStateStore, TipEvent,
     TipSubscription as CoreTipSubscription, *,
@@ -135,6 +135,7 @@ pub struct HarnessDomain {
     mempool: Mempool,
     storage_config: StorageConfig,
     history_config: HistoryConfig,
+    mempool_config: MempoolConfig,
     genesis: Arc<Genesis>,
     query_limiter: QueryLimiter,
     cache: TieredCache<NoDiskTier>,
@@ -158,6 +159,10 @@ impl Domain for HarnessDomain {
 
     fn history_config(&self) -> &HistoryConfig {
         &self.history_config
+    }
+
+    fn mempool_config(&self) -> &MempoolConfig {
+        &self.mempool_config
     }
 
     fn genesis(&self) -> Arc<Genesis> {
@@ -236,6 +241,7 @@ impl LedgerHarness {
             mempool: Mempool {},
             storage_config,
             history_config: HistoryConfig::default(),
+            mempool_config: MempoolConfig::default(),
             genesis,
             query_limiter,
             cache,

@@ -139,6 +139,7 @@ fn the_full_reference_parses() {
         MempoolConfig {
             persistent: true,
             path: Some("mempool".into()),
+            retain_confirmed_blocks: 200,
         }
     );
 
@@ -281,6 +282,7 @@ fn omitted_sections_take_their_defaults() {
     assert_eq!(config.storage.cache.disk_mb, 4096);
     assert_eq!(config.history.mode, HistoryMode::Full);
     assert!(!config.mempool.persistent);
+    assert_eq!(config.mempool.retain_confirmed_blocks, 6);
     assert_eq!(config.serve.max_concurrent_queries, 32);
     assert!(config.serve.grpc.is_none() && config.serve.minibf.is_none());
     assert!(config.relay.is_none());
@@ -336,6 +338,11 @@ fn each_rule_refuses_its_fixture() {
         (
             "too-many-concurrent-queries",
             "`serve.max_concurrent_queries` must be between 1 and 64, found 65",
+        ),
+        (
+            "fractional-concurrent-queries",
+            "floating point `64.4`, expected a non-negative whole number for key \
+             `serve.max_concurrent_queries`",
         ),
         (
             "ephemeral-store-with-a-path",
@@ -674,6 +681,15 @@ fn load_with_env(
     loaded
 }
 
+fn variables(
+    pairs: &[(&'static str, &'static str)],
+) -> Vec<(&'static str, &'static std::ffi::OsStr)> {
+    pairs
+        .iter()
+        .map(|(name, value)| (*name, std::ffi::OsStr::new(*value)))
+        .collect()
+}
+
 /// Every overridden key is one `full.toml` sets, so the file losing shows.
 #[test]
 #[serial]
@@ -758,6 +774,125 @@ fn a_refused_file_is_reported_over_a_refused_override() {
         let message = error.to_string();
         assert!(message.contains("unknown field `version`"), "{message}");
         assert!(!message.contains("listen_adress"), "{message}");
+    }
+}
+
+/// Overrides can complete a file that is refused on its own. A wrong override
+/// beside them is then named alone, never the file.
+#[test]
+#[serial]
+fn an_override_the_file_needs_does_not_hide_a_wrong_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let windowless = dir.path().join("dolos.toml");
+    let config = std::fs::read_to_string(fixture("minimal.toml")).unwrap()
+        + "\n[history]\nmode = \"rolling\"\nwindow = { unit = \"slot\" }\n";
+    std::fs::write(&windowless, config).unwrap();
+
+    // A rule the file breaks alone, and a key it lacks.
+    for (path, completing, wrong, message) in [
+        (
+            fixture("reject/custom-without-upstream.toml"),
+            &[("DOLOS_UPSTREAM__PEER_ADDRESS", "127.0.0.1:3001")][..],
+            ("DOLOS_SERVE__MINIBF__LISTEN_ADRESS", "127.0.0.1:4000"),
+            "listen_adress",
+        ),
+        (
+            fixture("reject/rolling-without-window.toml"),
+            &[
+                ("DOLOS_HISTORY__WINDOW__UNIT", "slot"),
+                ("DOLOS_HISTORY__WINDOW__VALUE", "100"),
+            ][..],
+            ("DOLOS_SERVE__MAX_CONCURRENT_QUERIES", "0"),
+            "found 0",
+        ),
+        (
+            windowless,
+            &[("DOLOS_HISTORY__WINDOW__VALUE", "100")][..],
+            ("DOLOS_SERVE__MAX_CONCURRENT_QUERIES", "0"),
+            "found 0",
+        ),
+    ] {
+        load_with_env(&path, &variables(completing)).unwrap();
+
+        let error = load_with_env(&path, &variables(&[completing, &[wrong]].concat())).unwrap_err();
+
+        assert!(
+            matches!(&error, ConfigError::Environment { variables, .. } if *variables == [wrong.0]),
+            "{}: {error}",
+            path.display()
+        );
+        assert!(error.to_string().contains(message), "{error}");
+    }
+}
+
+/// Two overrides that are each fine alone and clash together are both named.
+#[test]
+#[serial]
+fn clashing_overrides_are_named_together() {
+    let clash = [
+        ("DOLOS_STORAGE__STATE__TYPE", "ephemeral"),
+        ("DOLOS_STORAGE__STATE__PATH", "state"),
+    ];
+
+    for single in &clash {
+        load_with_env(&fixture("minimal.toml"), &variables(&[*single])).unwrap();
+    }
+
+    let error = load_with_env(&fixture("minimal.toml"), &variables(&clash)).unwrap_err();
+
+    assert!(
+        matches!(&error, ConfigError::Environment { variables, .. }
+            if *variables == ["DOLOS_STORAGE__STATE__PATH", "DOLOS_STORAGE__STATE__TYPE"]),
+        "{error}"
+    );
+    assert!(error.to_string().contains("an ephemeral store"), "{error}");
+}
+
+/// With no one variable to blame, the file is named only when the overrides
+/// leave its own error standing.
+#[test]
+#[serial]
+fn a_file_error_is_named_only_when_the_overrides_leave_it() {
+    let error = load_with_env(
+        &fixture("reject/custom-without-upstream.toml"),
+        &variables(&[
+            ("DOLOS_UPSTREAM__PEER_ADDRESS", "127.0.0.1:3001"),
+            ("DOLOS_SERVE__MINIBF__LISTEN_ADRESS", "127.0.0.1:4000"),
+            ("DOLOS_SERVE__MAX_CONCURRENT_QUERIES", "0"),
+        ]),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, ConfigError::Environment { variables, .. } if variables.len() == 3),
+        "{error}"
+    );
+
+    let error = load_with_env(
+        &fixture("reject/rolling-without-window.toml"),
+        &variables(&[("DOLOS_SERVE__MAX_CONCURRENT_QUERIES", "8")]),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, ConfigError::Invalid(message) if message.contains("requires a `window`")),
+        "{error}"
+    );
+}
+
+/// The environment is read in lowercase, so two variables that differ only in
+/// case set one key. The later one wins, on every load.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn of_two_variables_differing_in_case_the_later_wins() {
+    let upper = ("DOLOS_STORAGE__PATH", std::ffi::OsStr::new("upper"));
+    let lower = ("DOLOS_storage__path", std::ffi::OsStr::new("lower"));
+
+    for (earlier, later) in [(upper, lower), (lower, upper)] {
+        for _ in 0..32 {
+            let config = load_with_env(&fixture("minimal.toml"), &[earlier, later]).unwrap();
+
+            assert_eq!(config.storage.path, PathBuf::from(later.1));
+        }
     }
 }
 

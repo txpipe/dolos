@@ -121,6 +121,7 @@ impl<'a> DomainBuilder<'a> {
             compatibility: self.config.compatibility(),
             storage_config: Arc::new(self.config.storage.clone()),
             history_config: self.config.history,
+            mempool_config: self.config.mempool.clone(),
             genesis: self.genesis.clone(),
             chain: Arc::new(std::sync::RwLock::new(chain)),
             wal: stores.wal.clone(),

@@ -2,7 +2,7 @@ use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
-    config::{CacheConfig, HistoryConfig, StorageConfig},
+    config::{CacheConfig, HistoryConfig, MempoolConfig, StorageConfig},
     sync::execute_work_unit,
     BootstrapExt, *,
 };
@@ -282,6 +282,7 @@ pub struct ToyDomain<B: ToyStores = MemoryStores> {
     mempool: Mempool,
     storage_config: StorageConfig,
     history_config: HistoryConfig,
+    mempool_config: MempoolConfig,
     genesis: Arc<dolos_core::Genesis>,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
     query_limiter: QueryLimiter,
@@ -377,6 +378,7 @@ impl<B: ToyStores> ToyDomain<B> {
             },
             storage_config,
             history_config: HistoryConfig::default(),
+            mempool_config: MempoolConfig::default(),
             genesis: genesis.clone(),
             tip_broadcast,
             query_limiter,
@@ -513,6 +515,10 @@ impl<B: ToyStores> dolos_core::Domain for ToyDomain<B> {
 
     fn history_config(&self) -> &HistoryConfig {
         &self.history_config
+    }
+
+    fn mempool_config(&self) -> &MempoolConfig {
+        &self.mempool_config
     }
 
     fn genesis(&self) -> Arc<dolos_core::Genesis> {

@@ -3,14 +3,20 @@ mod node;
 use std::io;
 use std::sync::Arc;
 
-use dolos::core::{ChainPoint, Domain as _, RawBlock, StateStore, StateWriter as _};
+use dolos::core::config::ArchiveStoreConfig;
+use dolos::core::{
+    ChainPoint, Domain as _, MempoolStore as _, MempoolTxStage, RawBlock, StateStore,
+    StateWriter as _, SyncExt as _,
+};
 use dolos::engine::{
     BulkReplayRunError, BulkReplaySession, DomainBuildError, DomainBuilder, ReplayProgress,
     ReplayWorkspace,
 };
 use dolos_snapshot::source::SnapshotSource as _;
 use dolos_testing::blocks::make_conway_block_with_prev;
+use dolos_testing::mempool::make_test_mempool_tx;
 use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+use pallas::ledger::traverse::MultiEraBlock;
 
 fn fixture() -> (node::Node, Arc<dolos::core::Genesis>, Vec<RawBlock>) {
     let mut node = node::Node::new();
@@ -55,20 +61,60 @@ fn a_refused_configuration_opens_no_store() {
     let mut mismatched = node.config.clone();
     mismatched.chain = node.custom_chain(43, vec![]);
 
-    assert!(matches!(
-        DomainBuilder::new(&invalid, genesis.clone()).build(),
-        Err(DomainBuildError::Config(_))
-    ));
+    // Only a configuration built in code can carry this: the file refuses it
+    // as it is read.
+    let mut ephemeral_with_a_path = node.config.clone();
+    ephemeral_with_a_path.storage.archive = ArchiveStoreConfig {
+        blocks_path: Some(node.config.storage.path.join("blocks")),
+        ..ArchiveStoreConfig::ephemeral()
+    };
+
+    for config in [&invalid, &ephemeral_with_a_path] {
+        assert!(matches!(
+            DomainBuilder::new(config, genesis.clone()).build(),
+            Err(DomainBuildError::Config(_))
+        ));
+    }
     assert!(matches!(
         DomainBuilder::new(&mismatched, genesis.clone()).build(),
         Err(DomainBuildError::Chain(_))
     ));
 
-    for config in [&invalid, &mismatched] {
+    for config in [&invalid, &mismatched, &ephemeral_with_a_path] {
         assert!(ReplayWorkspace::open(config, genesis.clone()).is_err());
     }
 
     assert!(!node.config.storage.path.exists());
+}
+
+#[test]
+fn sync_finalizes_a_transaction_after_the_configured_confirmations() {
+    let (mut node, genesis, blocks) = fixture();
+    node.config.mempool.retain_confirmed_blocks = 2;
+
+    let domain = DomainBuilder::new(&node.config, genesis).build().unwrap();
+
+    let tx = MultiEraBlock::decode(&blocks[0]).unwrap().txs()[0].hash();
+    let mempool = domain.mempool();
+    mempool.receive(make_test_mempool_tx(tx)).unwrap();
+    mempool.mark_inflight(&[tx]).unwrap();
+    mempool.mark_acknowledged(&[tx]).unwrap();
+
+    let finalized = || {
+        mempool
+            .dump_finalized(0, 100)
+            .items
+            .iter()
+            .any(|logged| logged.hash == tx && logged.stage == MempoolTxStage::Finalized)
+    };
+
+    domain.roll_forward(blocks[0].clone()).unwrap();
+    assert!(!finalized(), "one confirmation");
+
+    domain.roll_forward(blocks[1].clone()).unwrap();
+    assert!(finalized(), "two confirmations");
+
+    domain.shutdown().unwrap();
 }
 
 #[test]

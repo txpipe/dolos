@@ -259,6 +259,7 @@ fn build_domain(
         compatibility: config.compatibility(),
         storage_config: Arc::new(config.storage.clone()),
         history_config: config.history,
+        mempool_config: config.mempool.clone(),
         genesis,
         chain: Arc::new(std::sync::RwLock::new(chain)),
         wal,
@@ -413,8 +414,9 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         Mode::InPlace => {
             let Some(state_path) = config.storage.state_path() else {
                 bail!(
-                    "the configured state backend is in_memory, so there is no on-disk state \
-                     store to rebuild in place; use --ephemeral or --target"
+                    "the configured state store is `storage.state.type = \"ephemeral\"`, so \
+                     there is no on-disk state store to rebuild in place; use --ephemeral or \
+                     --target"
                 );
             };
 

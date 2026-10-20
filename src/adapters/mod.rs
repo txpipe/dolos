@@ -6,7 +6,7 @@ use std::sync::Arc;
 use dolos_cardano::CardanoLogic;
 use dolos_core::{
     archive::ArchiveStore as _,
-    config::{Compatibility, HistoryConfig, StorageConfig},
+    config::{Compatibility, HistoryConfig, MempoolConfig, StorageConfig},
     *,
 };
 use pallas::ledger::traverse::MultiEraBlock;
@@ -40,6 +40,7 @@ pub struct DomainAdapter {
     pub compatibility: Compatibility,
     pub storage_config: Arc<StorageConfig>,
     pub history_config: HistoryConfig,
+    pub mempool_config: MempoolConfig,
     pub genesis: Arc<Genesis>,
     pub wal: WalAdapter,
     pub chain: Arc<std::sync::RwLock<CardanoLogic>>,
@@ -129,6 +130,10 @@ impl Domain for DomainAdapter {
 
     fn history_config(&self) -> &HistoryConfig {
         &self.history_config
+    }
+
+    fn mempool_config(&self) -> &MempoolConfig {
+        &self.mempool_config
     }
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {

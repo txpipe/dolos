@@ -638,6 +638,10 @@ impl Domain for FaultyToyDomain {
         self.inner.history_config()
     }
 
+    fn mempool_config(&self) -> &dolos_core::config::MempoolConfig {
+        self.inner.mempool_config()
+    }
+
     fn genesis(&self) -> Arc<dolos_core::Genesis> {
         self.genesis_override
             .as_ref()
