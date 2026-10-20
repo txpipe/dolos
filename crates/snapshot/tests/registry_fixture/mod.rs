@@ -253,6 +253,61 @@ impl Fixture {
     }
 }
 
+/// A repository on a listener that answers nothing and counts the connections
+/// it is offered: for a test whose subject is that the registry was never
+/// asked anything at all. No container, so a test using it alone need not be
+/// `#[ignore]`d.
+pub struct Unanswered {
+    connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    scratch: tempfile::TempDir,
+    port: u16,
+}
+
+impl Unanswered {
+    pub fn start() -> Self {
+        install_crypto_provider();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&connections);
+
+        // Each connection is dropped as it is accepted, which fails whatever
+        // the client sent over it.
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+
+        Self {
+            connections,
+            scratch: tempfile::tempdir().unwrap(),
+            port,
+        }
+    }
+
+    pub fn repository(&self, name: &str) -> Registry {
+        let repository = format!("oci://127.0.0.1:{}/{name}", self.port)
+            .parse()
+            .expect("a usable repository");
+
+        registry::open(
+            &repository,
+            true,
+            credentials(),
+            self.scratch.path().to_path_buf(),
+            registry::Tuning::default(),
+        )
+        .unwrap()
+    }
+
+    pub fn connections(&self) -> usize {
+        self.connections.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::process::Command::new("docker")

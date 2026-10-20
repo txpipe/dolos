@@ -12,6 +12,11 @@
 //! omitted, the stele retains the tip alone. The destination must not already
 //! contain a stele. Configuration precedence,
 //! progress rendering and destination cleanup remain host responsibilities.
+//!
+//! The stores must stand on the first block of an epoch, as a
+//! `chain.stop_epoch` sync leaves them; any other cut is refused before a
+//! layer is written (`crates/snapshot/PROFILE.md`, "Only the boundary cut is
+//! published").
 
 use std::{error::Error, path::Path, sync::Arc};
 

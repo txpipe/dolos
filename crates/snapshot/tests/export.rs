@@ -1471,6 +1471,46 @@ fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
     );
 }
 
+/// A plan made while the stores stood on the boundary does not carry them past
+/// it: once they move on, the export refuses the stale plan for the state it
+/// no longer describes, before any layer. The plan alone would pass every
+/// other test of the rule, so the state cursor is what is held against it.
+#[test]
+fn a_plan_the_stores_have_moved_past_is_refused_before_a_layer() {
+    let domain: ToyDomain = harness();
+
+    let plan = plan_for(&domain);
+    let moved = step_past_boundary(&domain);
+
+    let watcher = Arc::new(Watcher::default());
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let refused = export::export(
+        &stele,
+        &plan,
+        domain.archive(),
+        domain.state(),
+        None,
+        &export::First,
+        &watcher.observer(),
+    );
+
+    match refused {
+        Err(dolos_snapshot::Error::NotABoundary { reason, .. }) => {
+            assert_eq!(
+                reason,
+                Ineligible::PlanMismatch {
+                    stored: Some(moved)
+                }
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
+}
+
 /// A verifier checking a *different* stele than the one published is the
 /// failure `--epochs` exists to prevent, so the two commands share one range
 /// type and one restriction.

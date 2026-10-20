@@ -262,6 +262,15 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// [`stderr`] with every run of whitespace one space, so a phrase the
+/// diagnostic renderer wrapped across lines still reads as one.
+fn stderr_words(output: &Output) -> String {
+    stderr(output)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `snapshot inspect` and `snapshot verify` on a preview node read the
 /// official preview repository as its published read-only user, not
 /// anonymously.
@@ -419,6 +428,11 @@ fn digest_plans_with_the_given_state_epochs() {
             "{source:?} did not reach the plan:\n{}",
             stderr(&output)
         );
+        assert!(
+            stderr(&output).contains("boundary: first block of epoch 1, after "),
+            "the plan did not report its boundary evidence:\n{}",
+            stderr(&output)
+        );
     }
 }
 
@@ -446,6 +460,86 @@ fn digest_refuses_stores_off_the_boundary() {
     assert!(message.contains("epoch-0 boundary cut"), "{message}");
     assert!(message.contains("chain.stop_epoch = 1"), "{message}");
     assert!(!inscription.exists(), "a refused digest wrote a document");
+}
+
+/// `snapshot digest` one block past the boundary is refused as it plans, before
+/// it reports a plan: it says the boundary state is gone from these stores and
+/// how to get one.
+#[test]
+fn digest_refuses_stores_past_the_boundary_as_it_plans() {
+    let node = Node::new();
+    node.sync();
+    node.stand_at_boundary();
+    node.step_past_boundary();
+
+    let inscription = node.root.path().join("inscription.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_dolos"))
+        .arg("--config")
+        .arg(node.config_path())
+        .args(["snapshot", "digest", "--output"])
+        .arg(&inscription)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    let message = stderr_words(&output);
+
+    assert!(!output.status.success(), "{message}");
+    assert!(message.contains("epoch-1 boundary cut"), "{message}");
+    assert!(message.contains("is in the same epoch"), "{message}");
+    assert!(
+        message.contains("restore the stele for this epoch"),
+        "{message}"
+    );
+    assert!(
+        message.contains("chain.stop_epoch set to the following epoch"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("sequence:"),
+        "the plan was reported before the refusal:\n{message}"
+    );
+    assert!(!inscription.exists(), "a refused digest wrote a document");
+}
+
+/// `snapshot verify --reproduce` over stores past their boundary is refused
+/// before the registry is read.
+#[test]
+fn verify_refuses_a_reproduction_past_the_boundary_before_streaming() {
+    let node = Node::new();
+    node.sync();
+    node.stand_at_boundary();
+    node.step_past_boundary();
+
+    let proxy = Proxy::start();
+
+    let output = proxy.run(
+        &node,
+        &[
+            "snapshot",
+            "verify",
+            "--repo",
+            networks::PREVIEW.stelae.registry,
+            "--insecure",
+            "--reproduce",
+        ],
+        None,
+    );
+
+    let message = stderr_words(&output);
+
+    assert!(!output.status.success(), "{message}");
+    assert!(message.contains("epoch-1 boundary cut"), "{message}");
+    assert!(
+        message.contains("restore the stele for this epoch"),
+        "{message}"
+    );
+    assert_eq!(
+        proxy.requests(),
+        0,
+        "the registry was read before the boundary"
+    );
 }
 
 /// `snapshot verify --reproduce` plans with the retained epochs it is given,

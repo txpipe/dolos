@@ -1,9 +1,9 @@
 //! Verifying and inspecting a published stele, end to end.
 //!
-//! Everything here needs a **registry**, and spawns one: `docker run` of an
-//! OCI Distribution server, torn down on the way out. So everything here is
-//! `#[ignore]`d, and an `#[ignore]`d test that was never executed proves
-//! nothing — run it with:
+//! Nearly everything here needs a **registry**, and spawns one: `docker run`
+//! of an OCI Distribution server, torn down on the way out. So all of it but
+//! what runs against a listener that answers nothing is `#[ignore]`d, and an
+//! `#[ignore]`d test that was never executed proves nothing — run it with:
 //!
 //! ```text
 //! cargo test -p dolos-snapshot --test snapshot_verify -- --ignored --nocapture
@@ -46,7 +46,7 @@ use serde_json::json;
 use stelae::Digest;
 
 use node::Node;
-use registry_fixture::Fixture;
+use registry_fixture::{Fixture, Unanswered};
 
 /// Layers epoch 0 contributes, and therefore what sequence 2 inherits:
 /// `blocks`, `indexes`, and the two log layers the harness seeds. The other
@@ -343,6 +343,54 @@ fn a_registry_publish_and_its_dry_run_refuse_a_cursor_past_the_boundary() {
 
     let published = node.publish(&repository, &node.first, false);
     assert_eq!(published.inscription.sequence, 1);
+}
+
+/// The same refusals ask the registry nothing: neither opens a connection to
+/// it. The repository answers no request, so a refusal that came after a
+/// read would surface as a transport error instead.
+#[test]
+fn a_registry_refusal_comes_before_any_request() {
+    let unanswered = Unanswered::start();
+    let repository = unanswered.repository("dolos/boundary");
+
+    let past = node::harness::<dolos_testing::toy_domain::MemoryStores>();
+    let first = past.state().read_cursor().unwrap().unwrap();
+    node::step_past_boundary(&past);
+    let plan = node::plan_for(&past);
+
+    let expected = Ineligible::LaterBlock { parent: first };
+
+    let refused = |err: Error| match err {
+        Error::NotABoundary { reason, .. } => reason,
+        other => panic!("{other:?}"),
+    };
+
+    let opened = unanswered.connections();
+
+    let preview = registry::preview(
+        Publishing::new(&repository),
+        &plan,
+        past.archive(),
+        past.state(),
+        None,
+    );
+    assert_eq!(refused(preview.unwrap_err()), expected);
+
+    let publish = registry::publish(
+        Publishing::new(&repository),
+        &plan,
+        past.archive(),
+        past.state(),
+        None,
+        &stelae::progress::Observer::silent(),
+    );
+    assert_eq!(refused(publish.unwrap_err()), expected);
+
+    assert_eq!(
+        unanswered.connections(),
+        opened,
+        "a refused publish reached the registry"
+    );
 }
 
 // ---------------------------------------------------------------------------

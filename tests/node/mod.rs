@@ -198,6 +198,42 @@ impl Node {
         drop(stores);
     }
 
+    /// Move the stores one block past the boundary [`Self::stand_at_boundary`]
+    /// put them on: an empty block a few slots later in epoch 1, chained onto
+    /// the cursor's, with the cursor on it. Where a node that kept syncing
+    /// past `stop_epoch` stands.
+    pub fn step_past_boundary(&self) {
+        use dolos_cardano::pallas::ledger::traverse::MultiEraBlock;
+        use dolos_core::{
+            ArchiveStore as _, ArchiveWriter as _, StateStore as _, StateWriter as _,
+        };
+        use dolos_testing::blocks::make_conway_block_with_prev;
+
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
+
+        let cursor = stores.state.read_cursor().unwrap().unwrap();
+        let body = stores
+            .archive
+            .get_block_by_slot(&cursor.slot())
+            .unwrap()
+            .unwrap();
+        let number = MultiEraBlock::decode(&body).unwrap().number();
+
+        let (next, next_body) =
+            make_conway_block_with_prev(cursor.slot() + 5, cursor.hash(), number + 1);
+
+        let archive = stores.archive.start_writer().unwrap();
+        archive.apply(&next, &next_body).unwrap();
+        archive.commit().unwrap();
+
+        let state = stores.state.start_writer().unwrap();
+        state.set_cursor(next).unwrap();
+        state.commit().unwrap();
+
+        drop(stores);
+    }
+
     /// Write a directory stele as a restore fixture through the retained
     /// headless profile encoder.
     pub fn write_stele(&self, output: &std::path::Path) {

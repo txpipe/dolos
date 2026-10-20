@@ -37,7 +37,9 @@ pub use dolos_snapshot::planning::EpochRange;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// computes a stele's inscription and identity without writing one
+    /// computes a stele's inscription and identity without writing one, from
+    /// stores standing on the first block of an epoch, as a `stop_epoch` sync
+    /// leaves them
     Digest(digest::Args),
 
     /// checks a published stele's digests — manifest against inscription,

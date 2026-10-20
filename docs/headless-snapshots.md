@@ -29,6 +29,12 @@ be passed to:
 - `digest_document` with an explicit predecessor; or
 - `verify_reproduction` with the published inscription.
 
+Every one of them requires stores standing on the first block of the plan's
+sequence epoch, as a `chain.stop_epoch` sync leaves them, and refuses others
+with `Error::NotABoundary` before writing a layer; `boundary` asks the same
+question up front. See "Only the boundary cut is published" in
+[the profile](../crates/snapshot/PROFILE.md).
+
 These operations return plans, documents, inscriptions or typed errors. They
 do not print, exit, load configuration, or construct terminal components.
 
