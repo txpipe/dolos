@@ -1982,7 +1982,7 @@ mod tests {
     /// the key a valid one set before it is still the one served.
     #[tokio::test]
     async fn pool_by_id_skips_an_invalid_transactions_calidus_key() {
-        use dolos_core::sync::SyncExt as _;
+        use dolos_core::import::ImportExt as _;
 
         let pool_id = bech32_pool([9u8; 28]).expect("valid pool id");
         let registration = |key| {
@@ -1994,17 +1994,21 @@ mod tests {
         let app = TestApp::new_with_cfg_and_setup(
             SyntheticBlockConfig {
                 pool_id: pool_id.clone(),
+                metadata_entries: registration([0x57; 32]),
                 ..Default::default()
             },
-            |domain, _| {
-                for (slot, key, valid) in [(100, [0x57; 32], true), (200, [0x58; 32], false)] {
-                    let (_, raw) = dolos_testing::blocks::make_conway_block_with_metadata(
-                        slot,
-                        registration(key),
-                        valid,
-                    );
-                    domain.roll_forward(raw).expect("roll the registration");
-                }
+            |domain, vectors| {
+                let tip = vectors.blocks.last().expect("synthetic blocks");
+                let (_, raw) = dolos_testing::blocks::make_conway_block_with_metadata_at(
+                    tip.slot + 1,
+                    tip.block_number + 1,
+                    Some(tip.block_hash.parse().expect("block hash")),
+                    registration([0x58; 32]),
+                    false,
+                );
+                domain
+                    .import_blocks(vec![raw])
+                    .expect("import the invalid registration");
             },
         );
 
