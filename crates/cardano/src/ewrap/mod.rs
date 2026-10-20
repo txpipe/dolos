@@ -374,10 +374,11 @@ impl BoundaryWork {
     }
 
     /// The slot the `drep-epochs` rows are keyed under: the start of the epoch
-    /// after the one the boundary closes, which is the `epoch_no` Koios labels
-    /// the completed distribution with.
+    /// the boundary closes, like the `epochs` log, so a rollback to the
+    /// boundary itself keeps them. Koios labels the distribution with the
+    /// next epoch: its `epoch_no` is the key's epoch plus one.
     pub fn drep_epoch_slot(&self) -> BlockSlot {
-        self.chain_summary.epoch_start(self.ending_state.number + 1)
+        self.chain_summary.epoch_start(self.ending_state.number)
     }
 
     /// Assemble one account's row of the merged log.

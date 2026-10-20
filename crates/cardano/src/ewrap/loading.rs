@@ -2138,19 +2138,20 @@ mod tests {
     }
 
     /// Finalize archives one `drep-epochs` row per entry of the completed
-    /// distribution, at its full value and under the epoch the distribution
-    /// is labelled with: the registered DReps and the unregistered one in it,
-    /// and both pseudo-DReps, which count as registered. The DRep registered
-    /// after the boundary is outside the distribution and has no row.
+    /// distribution, at its full value and under the start of the closing
+    /// epoch: the registered DReps and the unregistered one in it, and both
+    /// pseudo-DReps, which count as registered. The DRep registered after the
+    /// boundary is outside the distribution and has no row. The second
+    /// registered DRep already stores its power, so its update is elided and
+    /// its row still carries the value.
     #[test]
     fn finalize_archives_one_drep_epoch_row_per_distribution_entry() {
         let domain = seed_domain();
         let state = domain.state();
-        let boundary_slot = load_era_summary::<ToyDomain>(state)
-            .unwrap()
-            .epoch_start(CLOSING_EPOCH + 1);
+        let chain = load_era_summary::<ToyDomain>(state).unwrap();
+        let boundary_slot = chain.epoch_start(CLOSING_EPOCH + 1);
 
-        let second = drep_row(script_drep(), Some(boundary_slot - 10), None, 0);
+        let second = drep_row(script_drep(), Some(boundary_slot - 10), None, 30);
         let writer = state.start_writer().unwrap();
         writer
             .write_entity_typed(&DRepKey::from(&second.identifier), &second)
@@ -2196,12 +2197,19 @@ mod tests {
             .collect();
         assert_eq!(rows, expected);
 
+        let script_key = DRepKey::from(&script_drep());
+        let script_updated = boundary.deltas.entities.values().flatten().any(|delta| {
+            matches!(delta, crate::CardanoDelta::DRepPowerUpdate(update) if update.drep_id == script_key)
+        });
+        assert!(!script_updated, "an unchanged power emits no update");
+
         boundary
             .commit_finalize::<ToyDomain>(state, domain.archive())
             .unwrap();
 
+        let row_slot = chain.epoch_start(CLOSING_EPOCH);
         let archived = drep_epochs(&domain);
-        assert!(archived.iter().all(|(slot, ..)| *slot == boundary_slot));
+        assert!(archived.iter().all(|(slot, ..)| *slot == row_slot));
 
         let archived: BTreeMap<_, _> = archived
             .into_iter()
@@ -2210,13 +2218,29 @@ mod tests {
         assert_eq!(archived, expected);
     }
 
-    /// An incomplete distribution has nothing sound to archive.
+    /// An incomplete distribution has nothing sound to archive, even with
+    /// DReps in it: every shard runs, then the accumulator is set back one
+    /// shard, which is what a shard that never merged leaves.
     #[test]
     fn an_incomplete_distribution_archives_no_drep_epoch_rows() {
         let domain = seed_domain();
+        let state = domain.state();
 
-        run_shard(&domain, 0);
-        assert!(!read_distr(&domain).is_complete_for(CLOSING_EPOCH));
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+
+        let mut gov = crate::load_gov::<ToyDomain>(state).unwrap();
+        let distr = gov.distr.as_mut().expect("accumulator present");
+        distr.committed_shards -= 1;
+
+        let writer = state.start_writer().unwrap();
+        writer.write_entity_typed(&(), &gov).unwrap();
+        writer.commit().unwrap();
+
+        let distr = read_distr(&domain);
+        assert!(!distr.drep_distr.is_empty());
+        assert!(!distr.is_complete_for(CLOSING_EPOCH));
 
         let mut boundary =
             BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
@@ -2226,6 +2250,37 @@ mod tests {
             .commit_finalize::<ToyDomain>(domain.state(), domain.archive())
             .unwrap();
         assert!(drep_epochs(&domain).is_empty());
+    }
+
+    /// A rollback to the boundary itself, the start of the epoch it opens,
+    /// keeps the rows. The archive drops log rows at the rollback slot and
+    /// after it, and EWRAP does not run again for a boundary already crossed.
+    #[test]
+    fn a_rollback_to_the_boundary_keeps_the_drep_epoch_rows() {
+        let domain = seed_domain();
+
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+
+        let mut boundary =
+            BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+        boundary
+            .commit_finalize::<ToyDomain>(domain.state(), domain.archive())
+            .unwrap();
+
+        let rows = drep_epochs(&domain);
+        assert!(!rows.is_empty());
+
+        let boundary_slot = load_era_summary::<ToyDomain>(domain.state())
+            .unwrap()
+            .epoch_start(CLOSING_EPOCH + 1);
+        domain
+            .archive()
+            .truncate_front(&dolos_core::ChainPoint::Slot(boundary_slot))
+            .unwrap();
+
+        assert_eq!(drep_epochs(&domain), rows);
     }
 
     /// Deposit weight follows the ledger's live forest, not the drop-pass
@@ -2399,6 +2454,19 @@ mod tests {
         assert_eq!(distr.pool_total, accumulated.pool_total);
 
         assert_eq!(read_drep_power(&domain, &reg_drep()), 147 + pool_deposit);
+
+        // the archived row carries the credited power too
+        let row = drep_epochs(&domain)
+            .into_iter()
+            .find(|(_, key, _)| key.0 == reg_drep())
+            .map(|(_, _, log)| log);
+        assert_eq!(
+            row,
+            Some(DRepEpochLog {
+                voting_power: 147 + pool_deposit,
+                registered: true,
+            })
+        );
     }
 
     /// A DRep certificate, as the tests below replay it: the position it

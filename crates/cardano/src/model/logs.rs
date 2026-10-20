@@ -132,9 +132,9 @@ entity_boilerplate!(PoolEpochLog, "pool-epochs", log = super::PoolKey);
 ///
 /// Written by EWRAP's finalize pass for every entry of the distribution the
 /// boundary closing epoch `n` completes, Abstain and NoConfidence included,
-/// keyed by `(epoch_start(n + 1), drep)`: the epoch that distribution is
-/// labelled with by Koios (`epoch_no`), and the one whose closing boundary's
-/// ratification tallies it.
+/// keyed by `(epoch_start(n), drep)`, like the `epochs` log. Koios labels that
+/// distribution `epoch_no = n + 1`, the key's epoch plus one, and the
+/// boundary closing `n + 1` tallies it.
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct DRepEpochLog {
     /// Stake in Lovelaces the distribution attributes to the DRep.

@@ -282,7 +282,8 @@ const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
 
 /// One DRep's power in one epoch's distribution. A credential DRep renders as
 /// its CIP-129 id, which is its stored key; the two pseudo-DReps by the names
-/// Koios gives them.
+/// Koios gives them. The epoch is the key's, the one the boundary closed;
+/// Koios's `epoch_no` for the row is one more.
 impl TableRow for DRepEpochLog {
     type Log = DRepEpochLog;
 
