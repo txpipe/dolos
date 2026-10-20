@@ -481,6 +481,7 @@ pub enum CardanoDelta {
     DRepSighting(Box<DRepSighting>),
     CommitteeDissolve(Box<CommitteeDissolve>),
     CommitteeReseat(Box<CommitteeReseat>),
+    PoolCalidusUpdate(Box<PoolCalidusUpdate>),
 }
 
 impl CardanoDelta {
@@ -599,6 +600,7 @@ delta_from!(MetadataLabelTxInc);
 delta_from!(StageAssetMint);
 delta_from!(CommitteeDissolve);
 delta_from!(CommitteeReseat);
+delta_from!(PoolCalidusUpdate);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -684,6 +686,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StageAssetMint(x) => x.key(),
             Self::CommitteeDissolve(x) => x.key(),
             Self::CommitteeReseat(x) => x.key(),
+            Self::PoolCalidusUpdate(x) => x.key(),
         }
     }
 
@@ -767,6 +770,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StageAssetMint(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::CommitteeDissolve(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::CommitteeReseat(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::PoolCalidusUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -850,6 +854,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::StageAssetMint(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::CommitteeDissolve(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::CommitteeReseat(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::PoolCalidusUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
         }
     }
 }
@@ -977,6 +982,19 @@ mod wal_tests {
                 .into(),
             ),
             (77, CommitteeReseat::new().into()),
+            (
+                78,
+                PoolCalidusUpdate::new(
+                    [0x99; 28].into(),
+                    Some(CalidusKey {
+                        pub_key: [0x57; 32],
+                        nonce: 12_345,
+                        tx_hash: [0xaa; 32].into(),
+                        slot: 100,
+                    }),
+                )
+                .into(),
+            ),
         ];
 
         for (index, delta) in deltas {

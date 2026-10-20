@@ -285,6 +285,7 @@ impl TableRow for PoolState {
             "pool bech32",
             "registered at",
             "retiring epoch",
+            "calidus key",
             "pledge (go)",
             "pledge (set)",
             "pledge (mark)",
@@ -311,6 +312,10 @@ impl TableRow for PoolState {
                     .map(|x| x.to_string())
                     .unwrap_or_default()
             ),
+            self.calidus
+                .as_ref()
+                .map(|x| hex::encode(x.pub_key))
+                .unwrap_or_default(),
             format_pool_epoch(&self.snapshot, 3),
             format_pool_epoch(&self.snapshot, 2),
             format_pool_epoch(&self.snapshot, 1),

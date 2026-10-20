@@ -58,6 +58,31 @@ pub struct PoolState {
 
     #[n(16)]
     pub deposit: u64,
+
+    /// The pool's current CIP-151 calidus key: the latest registration in a
+    /// valid transaction, by chain position. `None` before any registration
+    /// and after a revocation.
+    #[n(17)]
+    #[cbor(default)]
+    pub calidus: Option<CalidusKey>,
+}
+
+/// A calidus key a CIP-151 registration set, with the transaction and slot
+/// that registered it.
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CalidusKey {
+    #[n(0)]
+    #[cbor(with = "minicbor::bytes")]
+    pub pub_key: [u8; 32],
+
+    #[n(1)]
+    pub nonce: u64,
+
+    #[n(2)]
+    pub tx_hash: Hash<32>,
+
+    #[n(3)]
+    pub slot: BlockSlot,
 }
 
 /// Pool state that is epoch-specific
@@ -257,6 +282,7 @@ pub(crate) mod testing {
             register_slot in root::any_slot(),
             retiring_epoch in prop::option::of(root::any_epoch()),
             deposit in root::any_lovelace(),
+            calidus in prop::option::of(any_calidus_key()),
         ) -> PoolState {
             PoolState {
                 operator,
@@ -265,7 +291,19 @@ pub(crate) mod testing {
                 register_slot,
                 retiring_epoch,
                 deposit,
+                calidus,
             }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_calidus_key()(
+            pub_key in any::<[u8; 32]>(),
+            nonce in any::<u64>(),
+            tx_hash in root::any_hash_32(),
+            slot in root::any_slot(),
+        ) -> CalidusKey {
+            CalidusKey { pub_key, nonce, tx_hash, slot }
         }
     }
 }
@@ -390,6 +428,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
                 blocks_minted_total: 0,
                 retiring_epoch: None,
                 deposit: self.pool_deposit,
+                calidus: None,
             };
 
             *entity = Some(state);
@@ -598,6 +637,47 @@ impl dolos_core::EntityDelta for PoolTransition {
     }
 }
 
+/// A CIP-151 registration sets a pool's calidus key, or revokes it with
+/// `new: None`. A pool with no row is left without one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolCalidusUpdate {
+    pub(crate) pool: PoolHash,
+    pub(crate) new: Option<CalidusKey>,
+
+    // undo
+    pub(crate) prev: Option<CalidusKey>,
+}
+
+impl PoolCalidusUpdate {
+    pub fn new(pool: PoolHash, new: Option<CalidusKey>) -> Self {
+        Self {
+            pool,
+            new,
+            prev: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for PoolCalidusUpdate {
+    type Entity = PoolState;
+
+    fn key(&self) -> NsKey {
+        NsKey::of::<PoolState>(&PoolKey(self.pool))
+    }
+
+    fn apply(&mut self, entity: &mut Option<PoolState>) {
+        if let Some(entity) = entity {
+            self.prev = std::mem::replace(&mut entity.calidus, self.new.clone());
+        }
+    }
+
+    fn undo(&self, entity: &mut Option<PoolState>) {
+        if let Some(entity) = entity {
+            entity.calidus = self.prev.clone();
+        }
+    }
+}
+
 #[cfg(test)]
 mod prop_tests {
     use super::testing::any_pool_state;
@@ -644,6 +724,15 @@ mod prop_tests {
             frozen in prop::option::of(testing::any_pool_tally()),
         ) -> PoolTransition {
             PoolTransition::new(PoolKey(pool), next_epoch, frozen)
+        }
+    }
+
+    prop_compose! {
+        fn any_pool_calidus_update()(
+            pool in root::any_pool_hash(),
+            new in prop::option::of(testing::any_calidus_key()),
+        ) -> PoolCalidusUpdate {
+            PoolCalidusUpdate::new(pool, new)
         }
     }
 
@@ -700,6 +789,14 @@ mod prop_tests {
                 entity.snapshot.epoch().expect("any_pool_state fills a concrete epoch") + 1;
             assert_delta_roundtrip(Some(entity), delta);
         }
+
+        #[test]
+        fn pool_calidus_update_roundtrip(
+            entity in prop::option::of(any_pool_state()),
+            delta in any_pool_calidus_update(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
     }
 
     /// A snapshot lagging the block's epoch must panic, not silently corrupt
@@ -738,6 +835,7 @@ mod prop_tests {
             register_slot: 0,
             retiring_epoch: None,
             deposit: 0,
+            calidus: None,
         };
 
         // Block epoch 6 runs ahead of the pool's epoch-5 snapshot.

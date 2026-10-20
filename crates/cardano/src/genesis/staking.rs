@@ -66,6 +66,7 @@ fn parse_pool(dto: &ConfigPool) -> PoolState {
         retiring_epoch: None,
         operator,
         deposit: 0,
+        calidus: None,
     }
 }
 
