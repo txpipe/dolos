@@ -351,7 +351,7 @@ impl CoreStateStore for StateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preset::assert_fjall_holds;
+    use crate::preset::{assert_fjall_holds, assert_memtables_hold};
 
     #[test]
     fn a_reopened_store_holds_its_preset() {
@@ -363,5 +363,6 @@ mod tests {
 
         let store = StateStore::open(dir.path(), Preset::Standard).unwrap();
         assert_fjall_holds(store.database(), &store.tuning());
+        assert_memtables_hold(store.database(), &store.tuning());
     }
 }

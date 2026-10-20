@@ -1556,6 +1556,7 @@ mod tests {
 
         let store = open().unwrap();
         crate::preset::assert_fjall_holds(store.database(), &store.tuning());
+        crate::preset::assert_memtables_hold(store.database(), &store.tuning());
     }
 
     #[test]

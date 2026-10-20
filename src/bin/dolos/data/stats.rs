@@ -139,13 +139,15 @@ mod tests {
     use dolos_fjall::{Preset, StateStore};
 
     fn assert_reports(section: &serde_json::Value, tuning: &dolos_fjall::preset::Tuning) {
+        let cores = std::thread::available_parallelism().map_or(1, usize::from);
+
         assert_eq!(
             section["tuning"],
             json!({
                 "preset": "standard",
                 "cache_mb": 500,
                 "journal_mb": 512,
-                "workers": tuning.workers,
+                "workers": cores.min(4),
                 "flush_on_commit": false,
             })
         );

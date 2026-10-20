@@ -239,10 +239,11 @@ impl Display for Tuning {
     }
 }
 
-/// Asserts that Fjall holds `tuning` for `db`: its cache, the store's
-/// keyspaces and each one's leveled compaction, read back from what Fjall
-/// persisted. Fjall keeps the memtable size, journal size and worker count
-/// private, so those are not read back.
+/// Asserts that Fjall holds `tuning` for `db`: its cache as opened, and the
+/// store's keyspaces and each one's leveled compaction as Fjall persisted
+/// them. Fjall keeps the memtable size, journal size and worker count
+/// private, so those are not read back; [`assert_memtables_hold`] observes
+/// the memtable size instead.
 #[cfg(test)]
 pub(crate) fn assert_fjall_holds(db: &Database, tuning: &Tuning) {
     assert_eq!(db.cache_capacity(), tuning.cache_mb * MIB, "cache");
@@ -279,6 +280,36 @@ pub(crate) fn assert_fjall_holds(db: &Database, tuning: &Tuning) {
 
         assert_eq!(strategy.get_name(), "LeveledCompaction", "{name}");
         assert_eq!(held, expected, "{name}");
+    }
+}
+
+/// Asserts that each keyspace whose memtable `tuning` sets above Fjall's
+/// default takes more than the default without rotating it.
+#[cfg(test)]
+pub(crate) fn assert_memtables_hold(db: &Database, tuning: &Tuning) {
+    use fjall::AbstractTree;
+
+    let default = KeyspaceTuning::FJALL_DEFAULT.memtable_mb;
+    let value = vec![0u8; MIB as usize];
+    let larger = tuning
+        .keyspaces
+        .iter()
+        .filter(|(_, row)| row.memtable_mb > default);
+
+    for (name, row) in larger {
+        let keyspace = db.keyspace(name, KeyspaceCreateOptions::default).unwrap();
+
+        for key in 0..(default + row.memtable_mb) / 2 {
+            keyspace.insert(key.to_be_bytes(), &value).unwrap();
+        }
+
+        // An insert past the limit only requests the rotation; a worker runs it.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        let tree = &keyspace.tree;
+        assert!(tree.active_memtable().size() > default * MIB, "{name}");
+        assert_eq!(tree.sealed_memtable_count(), 0, "{name}");
+        assert_eq!(tree.table_count(), 0, "{name}");
     }
 }
 
