@@ -696,6 +696,10 @@ mod tests {
     /// configuration it was written from.
     #[test]
     fn init_writes_and_reloads_the_selected_file() {
+        let _guard = crate::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("other.toml");
         let args = init_args(&[
@@ -719,48 +723,43 @@ mod tests {
         assert_eq!(dolos_core::config::load(Some(&path)).unwrap(), expected);
     }
 
-    /// Restores the working directory when dropped.
-    struct CurrentDir(PathBuf);
-
-    impl CurrentDir {
-        fn enter(dir: &Path) -> Self {
-            let previous = std::env::current_dir().unwrap();
-            std::env::set_current_dir(dir).unwrap();
-            Self(previous)
-        }
-    }
-
-    impl Drop for CurrentDir {
-        fn drop(&mut self) {
-            std::env::set_current_dir(&self.0).unwrap();
-        }
-    }
-
-    /// Without `--config`, init writes and reloads `./dolos.toml`.
+    /// Without `--config`, init writes `dolos.toml` and nothing else.
     #[test]
-    #[serial_test::serial]
     fn without_a_path_init_writes_the_default_file() {
         let dir = tempfile::tempdir().unwrap();
-        let args = init_args(&[
-            "--known-network",
-            "preprod",
-            "--remote-peer",
-            "relay.example:3001",
-        ]);
+        let path = dir.path().join(crate::common::config_file(None));
 
-        let reloaded = {
-            let _cwd = CurrentDir::enter(dir.path());
-            write_unprompted(crate::common::config_file(None), &args).unwrap()
-        };
+        let reloaded =
+            write_unprompted(&path, &init_args(&["--known-network", "preprod"])).unwrap();
+        assert_eq!(reloaded.chain, ChainConfig::known("preprod"));
 
         let files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(files, ["dolos.toml"]);
+    }
 
-        let expected = ConfigEditor::default().fill_values_from_args(&args).0;
-        assert_eq!(reloaded, expected);
+    /// What init returns is read back from the file: a fresh init under a
+    /// `DOLOS_` override carries the override, which the file does not hold.
+    #[test]
+    fn init_returns_the_config_read_back_from_the_file() {
+        let _guard = crate::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dolos.toml");
+        let args = init_args(&["--known-network", "preview"]);
+
+        std::env::set_var("DOLOS_SERVE__MAX_CONCURRENT_QUERIES", "7");
+        let reloaded = write_config(Err(miette::miette!("no file yet")), &path, &args, Ok);
+        std::env::remove_var("DOLOS_SERVE__MAX_CONCURRENT_QUERIES");
+
+        assert_eq!(reloaded.unwrap().serve.max_concurrent_queries, 7);
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("max_concurrent_queries = 7"), "{written}");
     }
 
     /// The hint names the file init wrote.
@@ -773,29 +772,42 @@ mod tests {
         );
     }
 
-    fn with_peer(network: &str) -> ConfigEditor {
-        let mut config = RootConfig::new(ChainConfig::known(network));
+    fn with_peer(chain: ChainConfig) -> ConfigEditor {
+        let mut config = RootConfig::new(chain);
         config.upstream = Some(UpstreamConfig::peer("my-relay:3001"));
         ConfigEditor(config)
     }
 
     /// A re-run on the same network keeps a custom peer, whatever the case
-    /// of the network's name; a switch drops it.
+    /// of the network's name; a switch, from a known or a custom network,
+    /// drops it.
     #[test]
     fn only_a_network_switch_drops_the_peer() {
         let peer = Some(UpstreamConfig::peer("my-relay:3001"));
 
         for network in ["preview", "Preview"] {
-            let editor = with_peer(network).apply_known_network(Some(&networks::PREVIEW));
+            let editor = with_peer(ChainConfig::known(network))
+                .apply_known_network(Some(&networks::PREVIEW));
             assert_eq!(editor.0.upstream, peer, "{network}");
             assert_eq!(editor.0.chain, ChainConfig::known("preview"));
         }
 
-        let editor = with_peer("preview").apply_known_network(Some(&networks::PREPROD));
+        let editor =
+            with_peer(ChainConfig::known("preview")).apply_known_network(Some(&networks::PREPROD));
         assert_eq!(editor.0.upstream, None);
         assert_eq!(editor.0.chain, ChainConfig::known("preprod"));
 
-        let editor = with_peer("preview").apply_known_network(None);
+        let custom = ChainConfig::custom(dolos_core::config::CardanoConfig {
+            magic: 42,
+            is_testnet: true,
+            genesis: dolos_core::config::GenesisConfig::in_dir(Path::new("genesis")),
+            custom_utxos: vec![],
+        });
+        let editor = with_peer(custom).apply_known_network(Some(&networks::PREVIEW));
+        assert_eq!(editor.0.upstream, None);
+        assert_eq!(editor.0.chain, ChainConfig::known("preview"));
+
+        let editor = with_peer(ChainConfig::known("preview")).apply_known_network(None);
         assert_eq!(editor.0.upstream, peer);
     }
 

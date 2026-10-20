@@ -729,6 +729,13 @@ fn assert_check_prints(dir: &Path, args: &[&str], lines: &[&str]) {
     }
 }
 
+/// `line` followed by `path` in the platform's spelling, as the binary joins
+/// and prints store paths.
+fn with_path(line: &str, path: &str) -> String {
+    let path: PathBuf = path.split('/').collect();
+    format!("{line}{}", path.display())
+}
+
 /// What `config check` resolves each reference example's network and stores
 /// to.
 #[test]
@@ -742,10 +749,10 @@ fn config_check_prints_the_network_and_stores() {
         &[
             "valid: dolos.toml",
             "network: mainnet (magic 764824073, mainnet)",
-            "state: fjall (standard) at data/state",
-            "wal: data/wal",
-            "archive: fjall (standard) at data/archive",
-            "cache: data/cache",
+            &with_path("state: fjall (standard) at ", "data/state"),
+            &with_path("wal: ", "data/wal"),
+            &with_path("archive: fjall (standard) at ", "data/archive"),
+            &with_path("cache: ", "data/cache"),
             "mempool: in memory",
         ],
     );
@@ -776,7 +783,19 @@ fn config_check_prints_the_network_and_stores() {
     assert_check_prints(
         dir.path(),
         &["config", "check"],
-        &["blocks: blocks", "mempool: data/mempool"],
+        &["blocks: blocks", &with_path("mempool: ", "data/mempool")],
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("dolos.toml"),
+        "compatibility = \"v2-alpha.1\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"PreView\"\n\n[storage.cache]\nenabled = false\n",
+    )
+    .unwrap();
+    assert_check_prints(
+        dir.path(),
+        &["config", "check"],
+        &["network: preview (magic 2, testnet)", "cache: off"],
     );
 
     let dir = tempfile::tempdir().unwrap();
