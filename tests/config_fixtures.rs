@@ -10,10 +10,10 @@ use std::process::Command;
 
 use dolos_cardano::networks::{KnownNetwork, ResolvedNetwork};
 use dolos_core::config::{
-    load, ArchiveStoreConfig, CacheConfig, ChainConfig, ConfigError, CustomUtxo, FjallPreset,
-    GenesisConfig, HistoryConfig, HistoryMode, HistoryWindow, LoggingConfig, MempoolConfig,
-    Protocol, RetryConfig, RootConfig, StateStoreConfig, StoreType, SyncConfig, TelemetryConfig,
-    UpstreamConfig, MIGRATION_GUIDE_URL,
+    load, load_checked, ArchiveStoreConfig, CacheConfig, ChainConfig, ConfigError, CustomUtxo,
+    FjallPreset, GenesisConfig, HistoryConfig, HistoryMode, HistoryWindow, LoggingConfig,
+    MempoolConfig, Protocol, RetryConfig, RootConfig, StateStoreConfig, StoreType, SyncConfig,
+    TelemetryConfig, UpstreamConfig, MIGRATION_GUIDE_URL,
 };
 use dolos_core::Genesis;
 use serial_test::serial;
@@ -663,22 +663,27 @@ fn the_given_file_is_not_merged_with_the_default_one() {
     );
 }
 
-/// `path` loaded with `variables` set, and unset again whatever happens.
-fn load_with_env(
-    path: &Path,
-    variables: &[(&str, &std::ffi::OsStr)],
-) -> Result<RootConfig, ConfigError> {
+/// `run` with `variables` set, and unset again whatever it returns.
+fn with_env<T>(variables: &[(&str, &std::ffi::OsStr)], run: impl FnOnce() -> T) -> T {
     for (name, value) in variables {
         std::env::set_var(name, value);
     }
 
-    let loaded = load(Some(path));
+    let result = run();
 
     for (name, _) in variables {
         std::env::remove_var(name);
     }
 
-    loaded
+    result
+}
+
+/// `path` loaded with `variables` set.
+fn load_with_env(
+    path: &Path,
+    variables: &[(&str, &std::ffi::OsStr)],
+) -> Result<RootConfig, ConfigError> {
+    with_env(variables, || load(Some(path)))
 }
 
 fn variables(
@@ -876,6 +881,108 @@ fn a_file_error_is_named_only_when_the_overrides_leave_it() {
         matches!(&error, ConfigError::Invalid(message) if message.contains("requires a `window`")),
         "{error}"
     );
+}
+
+/// A key the file lacks or has wrong is not put down to the file when an
+/// override sets it, even with no one variable to blame.
+#[test]
+#[serial]
+fn a_key_an_override_sets_is_not_put_down_to_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let minimal = std::fs::read_to_string(fixture("minimal.toml")).unwrap();
+    let write = |name: &str, config: String| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, config).unwrap();
+        path
+    };
+
+    // As the binary checks it.
+    let networkless = write(
+        "networkless.toml",
+        minimal.replace("network = \"preprod\"\n", ""),
+    );
+    let error = with_env(&variables(&[("DOLOS_CHAIN__NETWORK", "preveiw")]), || {
+        load_checked(Some(&networkless), |config| {
+            ResolvedNetwork::resolve(&config.chain)
+                .map(|_| ())
+                .map_err(|error| ConfigError::Invalid(error.to_string()))
+        })
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&error, ConfigError::Environment { variables, .. } if *variables == ["DOLOS_CHAIN__NETWORK"]),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("unknown network `preveiw`"),
+        "{error}"
+    );
+
+    let wrong = [
+        ("DOLOS_SERVE__MINIBF__LISTEN_ADRESS", "127.0.0.1:4000"),
+        ("DOLOS_SERVE__MAX_CONCURRENT_QUERIES", "0"),
+    ];
+
+    for (path, setting) in [
+        (
+            write(
+                "windowless.toml",
+                minimal.clone() + "\n[history]\nmode = \"rolling\"\nwindow = { unit = \"slot\" }\n",
+            ),
+            ("DOLOS_HISTORY__WINDOW__VALUE", "100"),
+        ),
+        (
+            write(
+                "wrong-type.toml",
+                minimal.clone() + "\n[sync]\npull_batch_size = \"lots\"\n",
+            ),
+            ("DOLOS_SYNC__PULL_BATCH_SIZE", "100"),
+        ),
+    ] {
+        let error =
+            load_with_env(&path, &variables(&[&wrong[..], &[setting]].concat())).unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::Environment { variables, .. } if variables.len() == 3),
+            "{}: {error}",
+            path.display()
+        );
+
+        // Without the setting, the file's error stands.
+        let error = load_with_env(&path, &variables(&wrong)).unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::Read { .. }),
+            "{}: {error}",
+            path.display()
+        );
+    }
+}
+
+/// A variable that sets a table and one that sets a key in it would apply in
+/// no fixed order, and on some loads the file's other keys in that table would
+/// be lost. The pair is refused on every load.
+#[test]
+#[serial]
+fn a_table_and_a_key_in_it_are_not_overridden_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dolos.toml");
+    let config = std::fs::read_to_string(fixture("minimal.toml")).unwrap()
+        + "\n[serve.grpc]\nlisten_address = \"[::]:50051\"\ntls_client_ca_root = \"missing-ca.pem\"\n";
+    std::fs::write(&path, config).unwrap();
+
+    let overlapping = variables(&[
+        ("DOLOS_SERVE__GRPC", "off"),
+        ("DOLOS_SERVE__GRPC__LISTEN_ADDRESS", "127.0.0.1:50052"),
+    ]);
+
+    for _ in 0..32 {
+        let error = load_with_env(&path, &overlapping).unwrap_err();
+
+        assert!(
+            matches!(&error, ConfigError::OverlappingOverrides { table, key }
+                if table == "DOLOS_SERVE__GRPC" && key == "DOLOS_SERVE__GRPC__LISTEN_ADDRESS"),
+            "{error}"
+        );
+    }
 }
 
 /// The environment is read in lowercase, so two variables that differ only in

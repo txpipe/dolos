@@ -63,11 +63,14 @@ impl Node {
             data = toml_string(&root.path().join("data")),
         );
 
-        let path = root.path().join("dolos.toml");
-        std::fs::write(&path, &toml).unwrap();
-        let config = dolos_core::config::load(Some(&path)).unwrap();
+        std::fs::write(root.path().join("dolos.toml"), &toml).unwrap();
 
-        Self { root, config }
+        // Parsed as written: `load` would apply the developer's `DOLOS_`
+        // variables, which could point these stores anywhere.
+        Self {
+            root,
+            config: toml::from_str(&toml).unwrap(),
+        }
     }
 
     pub fn config_path(&self) -> std::path::PathBuf {

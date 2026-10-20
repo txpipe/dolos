@@ -17,6 +17,7 @@ use dolos_testing::blocks::make_conway_block_with_prev;
 use dolos_testing::mempool::make_test_mempool_tx;
 use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
 use pallas::ledger::traverse::MultiEraBlock;
+use serial_test::serial;
 
 fn fixture() -> (node::Node, Arc<dolos::core::Genesis>, Vec<RawBlock>) {
     let mut node = node::Node::new();
@@ -85,6 +86,25 @@ fn a_refused_configuration_opens_no_store() {
     }
 
     assert!(!node.config.storage.path.exists());
+}
+
+/// The harness reads its file as written, so a developer's `DOLOS_` variables
+/// cannot send its stores elsewhere.
+#[test]
+#[serial]
+fn the_harness_configuration_ignores_the_environment() {
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::write(elsewhere.path().join("marker"), "untouched").unwrap();
+
+    std::env::set_var("DOLOS_STORAGE__PATH", elsewhere.path());
+    let (node, genesis, _) = fixture();
+    let built = DomainBuilder::new(&node.config, genesis).build();
+    std::env::remove_var("DOLOS_STORAGE__PATH");
+    built.unwrap().shutdown().unwrap();
+
+    assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 1);
+    assert_eq!(node.config.storage.path, node.root.path().join("data"));
+    assert!(node.config.storage.path.exists());
 }
 
 #[test]

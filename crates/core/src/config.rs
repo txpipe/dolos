@@ -1290,6 +1290,12 @@ pub enum ConfigError {
     #[error("the environment variable {0} is not valid UTF-8")]
     NonUnicodeOverride(String),
 
+    #[error(
+        "the environment variables {table} and {key} overlap, since the first sets the table \
+         holding the second's key; unset one of them"
+    )]
+    OverlappingOverrides { table: String, key: String },
+
     #[error("invalid configuration: {0}")]
     Invalid(String),
 }
@@ -1323,7 +1329,8 @@ const ENV_NESTING: &str = "__";
 ///
 /// A variable names its key with `__` between levels, as in
 /// `DOLOS_UPSTREAM__PEER_ADDRESS`; one without `__` is not an override, which
-/// leaves the command inputs such as `DOLOS_MITHRIL_AGGREGATOR` alone. An
+/// leaves the command inputs such as `DOLOS_MITHRIL_AGGREGATOR` alone. A
+/// variable that sets a table is refused beside one that sets a key in it. An
 /// error the overrides cause names them rather than the file, or only those
 /// the configuration reads without. The file's own error is reported when it
 /// stands with the overrides applied.
@@ -1398,8 +1405,10 @@ pub fn load_checked(
         return Err(rejection.in_environment(culprits));
     }
 
+    let overridden: Vec<String> = variables.iter().map(|name| override_key(name)).collect();
+
     match read(Default::default()) {
-        Err(alone) if alone.survives(&rejection) => Err(alone.in_file(path)),
+        Err(alone) if alone.survives(&rejection, &overridden) => Err(alone.in_file(path)),
         _ => Err(rejection.in_environment(variables)),
     }
 }
@@ -1413,12 +1422,12 @@ enum Rejection {
 
 impl Rejection {
     /// Whether the file's own rejection is the one to report when no variable
-    /// is to blame alone: a parse error, or a rule the overrides break in
-    /// the same words. A rule they break otherwise may be one the file needs
-    /// a variable to meet.
-    fn survives(&self, with_overrides: &Rejection) -> bool {
+    /// is to blame alone: a parse error about a key none of the `overridden`
+    /// keys replaces, or a rule the overrides break in the same words. A rule
+    /// they break otherwise may be one the file needs a variable to meet.
+    fn survives(&self, with_overrides: &Rejection, overridden: &[String]) -> bool {
         match (self, with_overrides) {
-            (Self::Parse(_), _) => true,
+            (Self::Parse(alone), _) => !overridden.iter().any(|key| replaces(key, alone)),
             (Self::Check(alone), Self::Check(with_overrides)) => {
                 alone.to_string() == with_overrides.to_string()
             }
@@ -1444,6 +1453,37 @@ impl Rejection {
 
         ConfigError::Environment { variables, source }
     }
+}
+
+/// Whether an override of `key` takes the place of what the file's parse
+/// `error` is about: the value at the error's key, or the key it lacks. An
+/// unknown key in a table stands beside an override of another key in it.
+fn replaces(key: &str, error: &::config::ConfigError) -> bool {
+    use ::config::ConfigError as E;
+
+    match error {
+        E::NotFound(missing) => is_within(missing, key) || is_within(key, missing),
+        E::Type {
+            key: Some(found), ..
+        }
+        | E::At {
+            key: Some(found), ..
+        } => is_within(found, key),
+        _ => false,
+    }
+}
+
+/// Whether `key` is `table` or a key inside it.
+fn is_within(key: &str, table: &str) -> bool {
+    key.strip_prefix(table)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '[']))
+}
+
+/// The key an override variable sets, as the configuration names it.
+fn override_key(variable: &str) -> String {
+    variable[ENV_PREFIX.len() + 1..]
+        .to_lowercase()
+        .replace(ENV_NESTING, ".")
 }
 
 fn check_compatibility(document: &::config::Config) -> Result<(), ConfigError> {
@@ -1483,7 +1523,8 @@ fn reject_moved_sections(document: &::config::Config) -> Result<(), ConfigError>
 
 /// The `DOLOS_` variables with `__` in their name. One that is not valid
 /// UTF-8 is refused rather than skipped, which would leave the file's value
-/// in place unnoticed.
+/// in place unnoticed. So is a pair where one sets a table and the other a
+/// key in it, which would apply in no fixed order.
 fn environment_overrides() -> Result<::config::Map<String, String>, ConfigError> {
     let prefix = format!("{ENV_PREFIX}_");
     let mut overrides = ::config::Map::new();
@@ -1507,6 +1548,25 @@ fn environment_overrides() -> Result<::config::Map<String, String>, ConfigError>
                 overrides.insert(key, value);
             }
             _ => return Err(ConfigError::NonUnicodeOverride(name)),
+        }
+    }
+
+    let mut keys: Vec<(String, &String)> = overrides
+        .keys()
+        .map(|name| (override_key(name), name))
+        .collect();
+    keys.sort();
+
+    for (table, table_variable) in &keys {
+        let nested = keys
+            .iter()
+            .find(|(key, _)| key != table && is_within(key, table));
+
+        if let Some((_, key_variable)) = nested {
+            return Err(ConfigError::OverlappingOverrides {
+                table: table_variable.to_string(),
+                key: key_variable.to_string(),
+            });
         }
     }
 
