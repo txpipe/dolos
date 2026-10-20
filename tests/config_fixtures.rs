@@ -705,7 +705,8 @@ fn config_check_exits_by_each_fixtures_verdict() {
         );
 
         if accepted {
-            assert!(stdout.starts_with("valid: "), "{name}: {stdout}");
+            let valid = format!("valid: {}\n", path.display());
+            assert!(stdout.starts_with(&valid), "{name}: {stdout}");
         }
 
         assert_eq!(
@@ -716,26 +717,101 @@ fn config_check_exits_by_each_fixtures_verdict() {
     }
 }
 
-/// What `config check` resolves a known network's fjall stores to.
+/// `config check` in `dir`, which must pass, with each of `lines` printed.
+fn assert_check_prints(dir: &Path, args: &[&str], lines: &[&str]) {
+    let output = run_dolos(dir, args);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "{stdout}{stderr}");
+    for line in lines {
+        assert!(stdout.lines().any(|x| x == *line), "{line}: {stdout}");
+    }
+}
+
+/// What `config check` resolves each reference example's network and stores
+/// to.
 #[test]
 fn config_check_prints_the_network_and_stores() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::copy(fixture("ordinary.toml"), dir.path().join("dolos.toml")).unwrap();
 
-    let output = run_dolos(dir.path(), &["config", "check"]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_check_prints(
+        dir.path(),
+        &["config", "check"],
+        &[
+            "valid: dolos.toml",
+            "network: mainnet (magic 764824073, mainnet)",
+            "state: fjall (standard) at data/state",
+            "wal: data/wal",
+            "archive: fjall (standard) at data/archive",
+            "cache: data/cache",
+            "mempool: in memory",
+        ],
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 
-    assert!(output.status.success(), "{stdout}");
-    for line in [
-        "valid: dolos.toml",
-        "network: mainnet (magic 764824073, mainnet)",
-        "state: fjall (standard) at data/state",
-        "wal: data/wal",
-        "archive: fjall (standard) at data/archive",
-    ] {
-        assert!(stdout.contains(line), "{line}: {stdout}");
-    }
+    let (dir, _) = beside_genesis("custom.toml", 42);
+    assert_check_prints(
+        dir.path(),
+        &["config", "check"],
+        &["network: custom (magic 42, testnet)"],
+    );
 
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture("ephemeral.toml"), dir.path().join("dolos.toml")).unwrap();
+    assert_check_prints(
+        dir.path(),
+        &["config", "check"],
+        &[
+            "network: preview (magic 2, testnet)",
+            "state: ephemeral",
+            "wal: in memory",
+            "archive: ephemeral",
+        ],
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture("full.toml"), dir.path().join("dolos.toml")).unwrap();
+    assert_check_prints(
+        dir.path(),
+        &["config", "check"],
+        &["blocks: blocks", "mempool: data/mempool"],
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("other.toml"),
+        "compatibility = \"v2-alpha.1\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"preview\"\n\n[history]\nmode = \"none\"\n",
+    )
+    .unwrap();
+    assert_check_prints(
+        dir.path(),
+        &["--config", "other.toml", "config", "check"],
+        &[
+            "valid: other.toml",
+            "archive: none (history.mode = \"none\")",
+        ],
+    );
+    assert!(!dir.path().join("dolos.toml").exists());
+}
+
+/// `init` reads a custom network's genesis like any other command, so a
+/// custom config whose genesis files are missing is refused and kept.
+#[test]
+fn init_refuses_a_custom_config_without_its_genesis() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dolos.toml");
+    std::fs::copy(fixture("custom.toml"), &path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let output = run_dolos(dir.path(), &["init", "--known-network", "preview"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("loading genesis"), "{stderr}");
+    assert!(stderr.contains("untouched"), "{stderr}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
