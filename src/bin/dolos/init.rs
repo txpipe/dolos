@@ -594,7 +594,10 @@ mod tests {
         editor.0.storage.path = data.clone();
         editor.save(&config_file).unwrap();
 
-        let config = dolos_core::config::load(Some(&config_file)).unwrap();
+        // Parsed as written: `load` would apply the developer's `DOLOS_`
+        // variables, which could point these stores anywhere.
+        let config: dolos_core::config::RootConfig =
+            toml::from_str(&std::fs::read_to_string(&config_file).unwrap()).unwrap();
         assert_eq!(config.storage.path, data);
 
         let stores = crate::common::open_data_stores(&config).unwrap();

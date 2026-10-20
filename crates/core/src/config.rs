@@ -220,15 +220,16 @@ struct RawUpstream {
 }
 
 impl TryFrom<RawUpstream> for UpstreamConfig {
-    type Error = String;
+    type Error = Mismatch;
 
     fn try_from(raw: RawUpstream) -> Result<Self, Self::Error> {
         match raw.kind.unwrap_or(UpstreamType::Peer) {
             UpstreamType::Peer => {
                 if raw.block_production_interval.is_some() {
-                    return Err(
-                        "`block_production_interval` belongs to `type = \"emulator\"`".into(),
-                    );
+                    return Err(Mismatch::new(
+                        ["type", "block_production_interval"],
+                        "`block_production_interval` belongs to `type = \"emulator\"`",
+                    ));
                 }
                 Ok(Self::Peer(PeerConfig {
                     peer_address: raw.peer_address,
@@ -236,11 +237,17 @@ impl TryFrom<RawUpstream> for UpstreamConfig {
             }
             UpstreamType::Emulator => {
                 if raw.peer_address.is_some() {
-                    return Err("an emulator upstream takes no `peer_address`".into());
+                    return Err(Mismatch::new(
+                        ["type", "peer_address"],
+                        "an emulator upstream takes no `peer_address`",
+                    ));
                 }
-                let block_production_interval = raw
-                    .block_production_interval
-                    .ok_or("`type = \"emulator\"` requires `block_production_interval`")?;
+                let block_production_interval = raw.block_production_interval.ok_or_else(|| {
+                    Mismatch::new(
+                        ["type", "block_production_interval"],
+                        "`type = \"emulator\"` requires `block_production_interval`",
+                    )
+                })?;
                 Ok(Self::Emulator(EmulatorConfig {
                     block_production_interval,
                 }))
@@ -362,29 +369,64 @@ enum StoreKind {
 fn store_type(
     kind: Option<StoreKind>,
     preset: Option<FjallPreset>,
-    paths: &[(&str, bool)],
-) -> Result<StoreType, String> {
+    paths: &[(&'static str, bool)],
+) -> Result<StoreType, Mismatch> {
     match kind.unwrap_or(StoreKind::Fjall) {
         StoreKind::Fjall => Ok(StoreType::Fjall {
             preset: preset.unwrap_or_default(),
         }),
         StoreKind::Ephemeral => {
-            let set = paths
+            let set: Vec<&'static str> = paths
                 .iter()
-                .chain([("preset", preset.is_some())].iter())
+                .copied()
+                .chain([("preset", preset.is_some())])
                 .filter(|(_, set)| *set)
-                .map(|(name, _)| format!("`{name}`"))
-                .collect::<Vec<_>>();
+                .map(|(name, _)| name)
+                .collect();
 
             if !set.is_empty() {
-                return Err(format!(
+                let names: Vec<String> = set.iter().map(|name| format!("`{name}`")).collect();
+                let message = format!(
                     "an ephemeral store takes no other field; remove {}",
-                    set.join(", ")
-                ));
+                    names.join(", ")
+                );
+                return Err(Mismatch::new(std::iter::once("type").chain(set), message));
             }
 
             Ok(StoreType::Ephemeral)
         }
+    }
+}
+
+/// Fields of one table that do not go together, named as the table names
+/// them.
+#[derive(Debug)]
+struct Mismatch {
+    fields: Vec<&'static str>,
+    message: String,
+}
+
+impl Mismatch {
+    fn new(fields: impl IntoIterator<Item = &'static str>, message: impl Into<String>) -> Self {
+        Self {
+            fields: fields.into_iter().collect(),
+            message: message.into(),
+        }
+    }
+
+    /// The rule the mismatch breaks in the configuration, with its fields
+    /// under `table`.
+    fn at(self, table: &str) -> ConfigError {
+        ConfigError::invalid(
+            self.fields.iter().map(|field| format!("{table}.{field}")),
+            format!("in `[{table}]`, {}", self.message),
+        )
+    }
+}
+
+impl Display for Mismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
     }
 }
 
@@ -416,7 +458,7 @@ struct RawStateStore {
 }
 
 impl TryFrom<RawStateStore> for StateStoreConfig {
-    type Error = String;
+    type Error = Mismatch;
 
     fn try_from(raw: RawStateStore) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -471,7 +513,7 @@ struct RawArchiveStore {
 }
 
 impl TryFrom<RawArchiveStore> for ArchiveStoreConfig {
-    type Error = String;
+    type Error = Mismatch;
 
     fn try_from(raw: RawArchiveStore) -> Result<Self, Self::Error> {
         let paths = [
@@ -1143,21 +1185,22 @@ impl RootConfig {
     /// The rules that span fields. Network names and custom genesis files are
     /// checked where the chain is resolved.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let invalid = |message: String| Err(ConfigError::Invalid(message));
-
         match (self.chain.is_custom(), &self.chain.cardano) {
             (true, None) => {
-                return invalid(
+                return Err(ConfigError::invalid(
+                    ["chain.network", "chain.cardano"],
                     "`network = \"custom\"` requires `[chain.cardano]` with the network's \
-                     `magic`, `is_testnet` and `[chain.cardano.genesis]` files"
-                        .into(),
-                )
+                     `magic`, `is_testnet` and `[chain.cardano.genesis]` files",
+                ))
             }
             (false, Some(_)) => {
-                return invalid(format!(
-                    "`[chain.cardano]` is only for `network = \"custom\"`, found `network = \
-                     \"{}\"`; a known network's magic and genesis are built in",
-                    self.chain.network
+                return Err(ConfigError::invalid(
+                    ["chain.network", "chain.cardano"],
+                    format!(
+                        "`[chain.cardano]` is only for `network = \"custom\"`, found `network = \
+                         \"{}\"`; a known network's magic and genesis are built in",
+                        self.chain.network
+                    ),
                 ))
             }
             _ => (),
@@ -1165,66 +1208,90 @@ impl RootConfig {
 
         match (&self.upstream, self.chain.is_custom()) {
             (None, true) => {
-                return invalid(
+                return Err(ConfigError::invalid(
+                    ["chain.network", "upstream"],
                     "a custom network has no default peer; add `[upstream]` with a \
-                     `peer_address`, or `type = \"emulator\"`"
-                        .into(),
-                )
+                     `peer_address`, or `type = \"emulator\"`",
+                ))
             }
             (Some(UpstreamConfig::Peer(PeerConfig { peer_address: None })), true) => {
-                return invalid("`upstream.peer_address` is required on a custom network".into())
+                return Err(ConfigError::invalid(
+                    ["chain.network", "upstream"],
+                    "`upstream.peer_address` is required on a custom network",
+                ))
             }
             (Some(UpstreamConfig::Emulator(_)), false) => {
-                return invalid(
-                    "`upstream.type = \"emulator\"` is only valid with `network = \"custom\"`"
-                        .into(),
-                )
+                return Err(ConfigError::invalid(
+                    ["chain.network", "upstream.type"],
+                    "`upstream.type = \"emulator\"` is only valid with `network = \"custom\"`",
+                ))
             }
             _ => (),
         }
 
         match (self.history.mode, self.history.window) {
             (HistoryMode::Rolling, None) => {
-                return invalid(
+                return Err(ConfigError::invalid(
+                    ["history.mode", "history.window"],
                     "`history.mode = \"rolling\"` requires a `window`, such as \
-                     `{ unit = \"slot\", value = 2592000 }`"
-                        .into(),
-                )
+                     `{ unit = \"slot\", value = 2592000 }`",
+                ))
             }
             (HistoryMode::None | HistoryMode::Full, Some(_)) => {
-                return invalid("`history.window` is only valid with `mode = \"rolling\"`".into())
+                return Err(ConfigError::invalid(
+                    ["history.mode", "history.window"],
+                    "`history.window` is only valid with `mode = \"rolling\"`",
+                ))
             }
             _ => (),
         }
 
         let queries = self.serve.max_concurrent_queries;
         if !ServeConfig::MAX_CONCURRENT_QUERIES.contains(&queries) {
-            return invalid(format!(
-                "`serve.max_concurrent_queries` must be between {} and {}, found {queries}",
-                ServeConfig::MAX_CONCURRENT_QUERIES.start(),
-                ServeConfig::MAX_CONCURRENT_QUERIES.end(),
+            return Err(ConfigError::invalid(
+                ["serve.max_concurrent_queries"],
+                format!(
+                    "`serve.max_concurrent_queries` must be between {} and {}, found {queries}",
+                    ServeConfig::MAX_CONCURRENT_QUERIES.start(),
+                    ServeConfig::MAX_CONCURRENT_QUERIES.end(),
+                ),
             ));
         }
 
         let (state, archive) = (&self.storage.state, &self.storage.archive);
-        let ephemeral_paths: Vec<String> = [
-            (state.kind, "storage.state.path", state.path.is_some()),
-            (archive.kind, "storage.archive.path", archive.path.is_some()),
+        let stray: Vec<(&str, &str)> = [
+            (
+                state.kind,
+                "storage.state.type",
+                "storage.state.path",
+                state.path.is_some(),
+            ),
             (
                 archive.kind,
+                "storage.archive.type",
+                "storage.archive.path",
+                archive.path.is_some(),
+            ),
+            (
+                archive.kind,
+                "storage.archive.type",
                 "storage.archive.blocks_path",
                 archive.blocks_path.is_some(),
             ),
         ]
         .into_iter()
-        .filter(|(kind, _, set)| *kind == StoreType::Ephemeral && *set)
-        .map(|(_, key, _)| format!("`{key}`"))
+        .filter(|(kind, _, _, set)| *kind == StoreType::Ephemeral && *set)
+        .map(|(_, kind, key, _)| (kind, key))
         .collect();
 
-        if !ephemeral_paths.is_empty() {
-            return invalid(format!(
-                "an ephemeral store takes no other field; remove {}",
-                ephemeral_paths.join(", ")
+        if !stray.is_empty() {
+            let names: Vec<String> = stray.iter().map(|(_, key)| format!("`{key}`")).collect();
+            return Err(ConfigError::invalid(
+                stray.iter().flat_map(|(kind, key)| [*kind, *key]),
+                format!(
+                    "an ephemeral store takes no other field; remove {}",
+                    names.join(", ")
+                ),
             ));
         }
 
@@ -1291,13 +1358,36 @@ pub enum ConfigError {
     NonUnicodeOverride(String),
 
     #[error(
+        "the environment variable {0} cannot name a key; after `DOLOS_`, use only letters, digits \
+         and `_`, with `__` between levels"
+    )]
+    MalformedOverride(String),
+
+    #[error(
         "the environment variables {table} and {key} overlap, since the first sets the table \
          holding the second's key; unset one of them"
     )]
     OverlappingOverrides { table: String, key: String },
 
-    #[error("invalid configuration: {0}")]
-    Invalid(String),
+    #[error("invalid configuration: {message}")]
+    Invalid {
+        /// The keys the broken rule is about, as the file names them.
+        keys: Vec<String>,
+        message: String,
+    },
+}
+
+impl ConfigError {
+    /// A rule the configuration breaks, about `keys`.
+    pub fn invalid(
+        keys: impl IntoIterator<Item = impl Into<String>>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Invalid {
+            keys: keys.into_iter().map(Into::into).collect(),
+            message: message.into(),
+        }
+    }
 }
 
 /// Sections an older configuration carried that are now inputs of the
@@ -1328,12 +1418,19 @@ const ENV_NESTING: &str = "__";
 /// environment variables over it.
 ///
 /// A variable names its key with `__` between levels, as in
-/// `DOLOS_UPSTREAM__PEER_ADDRESS`; one without `__` is not an override, which
-/// leaves the command inputs such as `DOLOS_MITHRIL_AGGREGATOR` alone. A
-/// variable that sets a table is refused beside one that sets a key in it. An
-/// error the overrides cause names them rather than the file, or only those
-/// the configuration reads without. The file's own error is reported when it
-/// stands with the overrides applied.
+/// `DOLOS_UPSTREAM__PEER_ADDRESS`, in letters, digits and `_` only; one
+/// without `__` is not an override, which leaves the command inputs such as
+/// `DOLOS_MITHRIL_AGGREGATOR` alone. A variable that sets a table is refused
+/// beside one that sets a key in it.
+///
+/// An error the variables cause names them rather than the file: those the
+/// configuration reads without, or else those that set the keys the error is
+/// about. The file's own error is the one it is refused for with only the
+/// variables that supply or replace what its errors are about. A variable
+/// that repeats the file's value is never named. When both the file and a
+/// variable it needs are refused, either error may be the one reported, each
+/// under its own source.
+///
 /// `compatibility` is read from the file alone. Genesis paths resolve against
 /// the file's directory.
 pub fn load(path: Option<&Path>) -> Result<RootConfig, ConfigError> {
@@ -1342,6 +1439,8 @@ pub fn load(path: Option<&Path>) -> Result<RootConfig, ConfigError> {
 
 /// [`load`], with `check` among the rules the result must pass, so that an
 /// override it refuses is named like one [`RootConfig::validate`] refuses.
+/// `check` reports a broken rule as [`ConfigError::Invalid`] with the keys
+/// it is about.
 pub fn load_checked(
     path: Option<&Path>,
     check: impl Fn(&RootConfig) -> Result<(), ConfigError>,
@@ -1364,11 +1463,16 @@ pub fn load_checked(
 
     let overrides = environment_overrides()?;
     let read = |overrides: ::config::Map<String, String>| -> Result<RootConfig, Rejection> {
-        let mut config = ::config::Config::builder()
+        let merged = ::config::Config::builder()
             .add_source(file())
             .add_source(environment(overrides))
             .build()
-            .and_then(::config::Config::try_deserialize::<RootConfig>)
+            .map_err(Rejection::Parse)?;
+
+        check_tables(&merged).map_err(Rejection::Check)?;
+
+        let mut config = merged
+            .try_deserialize::<RootConfig>()
             .map_err(Rejection::Parse)?;
 
         config.resolve_paths(path.parent().unwrap_or(Path::new("")));
@@ -1387,16 +1491,33 @@ pub fn load_checked(
         Err(rejection) => rejection,
     };
 
-    let mut variables: Vec<String> = overrides.keys().cloned().collect();
+    let mut variables: Vec<String> = overrides
+        .iter()
+        .filter(|(name, value)| !repeats_the_file(&document, name, value))
+        .map(|(name, _)| name.clone())
+        .collect();
     variables.sort();
+
+    // The overrides to read with: those that repeat the file, and of the
+    // others only `chosen`.
+    let only = |chosen: &[String]| -> ::config::Map<String, String> {
+        overrides
+            .iter()
+            .filter(|(name, _)| !variables.contains(name) || chosen.contains(name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    };
 
     // To blame: each variable the configuration reads without.
     let culprits: Vec<String> = variables
         .iter()
         .filter(|variable| {
-            let mut others = overrides.clone();
-            others.remove(*variable);
-            read(others).is_ok()
+            let others: Vec<String> = variables
+                .iter()
+                .filter(|other| other != variable)
+                .cloned()
+                .collect();
+            read(only(&others)).is_ok()
         })
         .cloned()
         .collect();
@@ -1405,11 +1526,36 @@ pub fn load_checked(
         return Err(rejection.in_environment(culprits));
     }
 
-    let overridden: Vec<String> = variables.iter().map(|name| override_key(name)).collect();
+    // Otherwise the file is read with the variables its errors are about,
+    // added one error at a time, until an error is about none of them (the
+    // file's own) or only about those already added (theirs).
+    let mut needed: Vec<String> = Vec::new();
 
-    match read(Default::default()) {
-        Err(alone) if alone.survives(&rejection, &overridden) => Err(alone.in_file(path)),
-        _ => Err(rejection.in_environment(variables)),
+    loop {
+        let error = match read(only(&needed)) {
+            Ok(_) => return Err(rejection.in_environment(variables)),
+            Err(error) => error,
+        };
+
+        let about: Vec<String> = variables
+            .iter()
+            .filter(|name| error.is_about(&override_key(name)))
+            .cloned()
+            .collect();
+
+        if about.is_empty() {
+            return Err(error.in_file(path));
+        }
+
+        if about.iter().all(|name| needed.contains(name)) {
+            return Err(error.in_environment(about));
+        }
+
+        for name in about {
+            if !needed.contains(&name) {
+                needed.push(name);
+            }
+        }
     }
 }
 
@@ -1421,17 +1567,16 @@ enum Rejection {
 }
 
 impl Rejection {
-    /// Whether the file's own rejection is the one to report when no variable
-    /// is to blame alone: a parse error about a key none of the `overridden`
-    /// keys replaces, or a rule the overrides break in the same words. A rule
-    /// they break otherwise may be one the file needs a variable to meet.
-    fn survives(&self, with_overrides: &Rejection, overridden: &[String]) -> bool {
-        match (self, with_overrides) {
-            (Self::Parse(alone), _) => !overridden.iter().any(|key| replaces(key, alone)),
-            (Self::Check(alone), Self::Check(with_overrides)) => {
-                alone.to_string() == with_overrides.to_string()
-            }
-            (Self::Check(_), Self::Parse(_)) => false,
+    /// Whether the refusal is about `key`, which a variable sets: a rule
+    /// spanning it, or a parse error about the value at it or the key it
+    /// lacks.
+    fn is_about(&self, key: &str) -> bool {
+        match self {
+            Self::Parse(error) => replaces(key, error),
+            Self::Check(ConfigError::Invalid { keys, .. }) => keys
+                .iter()
+                .any(|rule| is_within(rule, key) || is_within(key, rule)),
+            Self::Check(_) => false,
         }
     }
 
@@ -1455,9 +1600,9 @@ impl Rejection {
     }
 }
 
-/// Whether an override of `key` takes the place of what the file's parse
-/// `error` is about: the value at the error's key, or the key it lacks. An
-/// unknown key in a table stands beside an override of another key in it.
+/// Whether an override of `key` takes the place of what the parse `error` is
+/// about: the value at the error's key, or the key it lacks. An unknown key in
+/// a table stands beside an override of another key in it.
 fn replaces(key: &str, error: &::config::ConfigError) -> bool {
     use ::config::ConfigError as E;
 
@@ -1484,6 +1629,37 @@ fn override_key(variable: &str) -> String {
     variable[ENV_PREFIX.len() + 1..]
         .to_lowercase()
         .replace(ENV_NESTING, ".")
+}
+
+/// Whether the variable `name` sets its key to the value the file has there.
+fn repeats_the_file(document: &::config::Config, name: &str, value: &str) -> bool {
+    document
+        .get::<::config::Value>(&override_key(name))
+        .and_then(::config::Value::into_string)
+        .is_ok_and(|found| found == value)
+}
+
+/// Refuses fields of a table that do not go together, naming their keys.
+/// Deserializing refuses them too, but names only the table, which cannot
+/// tell the file from a variable that sets a key in it. An absent or
+/// malformed table is left to deserializing.
+fn check_tables(document: &::config::Config) -> Result<(), ConfigError> {
+    fn table<Raw, Table>(document: &::config::Config, key: &str) -> Result<(), ConfigError>
+    where
+        Raw: serde::de::DeserializeOwned,
+        Table: TryFrom<Raw, Error = Mismatch>,
+    {
+        match document.get::<Raw>(key) {
+            Ok(raw) => Table::try_from(raw)
+                .map(|_| ())
+                .map_err(|mismatch| mismatch.at(key)),
+            Err(_) => Ok(()),
+        }
+    }
+
+    table::<RawUpstream, UpstreamConfig>(document, "upstream")?;
+    table::<RawStateStore, StateStoreConfig>(document, "storage.state")?;
+    table::<RawArchiveStore, ArchiveStoreConfig>(document, "storage.archive")
 }
 
 fn check_compatibility(document: &::config::Config) -> Result<(), ConfigError> {
@@ -1523,8 +1699,10 @@ fn reject_moved_sections(document: &::config::Config) -> Result<(), ConfigError>
 
 /// The `DOLOS_` variables with `__` in their name. One that is not valid
 /// UTF-8 is refused rather than skipped, which would leave the file's value
-/// in place unnoticed. So is a pair where one sets a table and the other a
-/// key in it, which would apply in no fixed order.
+/// in place unnoticed, and so is one with a character outside letters, digits
+/// and `_`, which config would read as a subscript or a path. So is a pair
+/// where one sets a table and the other a key in it, which would apply in no
+/// fixed order.
 fn environment_overrides() -> Result<::config::Map<String, String>, ConfigError> {
     let prefix = format!("{ENV_PREFIX}_");
     let mut overrides = ::config::Map::new();
@@ -1539,16 +1717,22 @@ fn environment_overrides() -> Result<::config::Map<String, String>, ConfigError>
             continue;
         }
 
-        match (key.into_string(), value.into_string()) {
-            (Ok(key), Ok(value)) => {
-                // Names are read in lowercase, so of two that differ only in
-                // case, the later one in the environment wins.
-                let lowercase = key.to_lowercase();
-                overrides.retain(|name: &String, _| name.to_lowercase() != lowercase);
-                overrides.insert(key, value);
-            }
-            _ => return Err(ConfigError::NonUnicodeOverride(name)),
+        let (Ok(key), Ok(value)) = (key.into_string(), value.into_string()) else {
+            return Err(ConfigError::NonUnicodeOverride(name));
+        };
+
+        if !key[prefix.len()..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(ConfigError::MalformedOverride(key));
         }
+
+        // Names are read in lowercase, so of two that differ only in case,
+        // the later one in the environment wins.
+        let lowercase = key.to_lowercase();
+        overrides.retain(|name: &String, _| name.to_lowercase() != lowercase);
+        overrides.insert(key, value);
     }
 
     let mut keys: Vec<(String, &String)> = overrides
@@ -1663,7 +1847,7 @@ mod tests {
 
     fn invalid(config: &RootConfig) -> String {
         match config.validate() {
-            Err(ConfigError::Invalid(message)) => message,
+            Err(ConfigError::Invalid { message, .. }) => message,
             other => panic!("expected a validation error, got {other:?}"),
         }
     }
@@ -1954,6 +2138,37 @@ mod tests {
 
         config.storage.archive.kind = StoreType::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn a_broken_rule_names_its_keys() {
+        let mut config = preview();
+        config.history.mode = HistoryMode::Rolling;
+
+        match config.validate() {
+            Err(ConfigError::Invalid { keys, .. }) => {
+                assert_eq!(keys, ["history.mode", "history.window"])
+            }
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+
+        let mismatch = UpstreamConfig::try_from(RawUpstream {
+            kind: Some(UpstreamType::Emulator),
+            peer_address: None,
+            block_production_interval: None,
+        })
+        .unwrap_err();
+
+        match mismatch.at("upstream") {
+            ConfigError::Invalid { keys, message } => {
+                assert_eq!(
+                    keys,
+                    ["upstream.type", "upstream.block_production_interval"]
+                );
+                assert!(message.starts_with("in `[upstream]`, "), "{message}");
+            }
+            other => panic!("expected a validation error, got {other:?}"),
+        }
     }
 
     #[test]

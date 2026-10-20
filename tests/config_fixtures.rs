@@ -878,7 +878,7 @@ fn a_file_error_is_named_only_when_the_overrides_leave_it() {
     )
     .unwrap_err();
     assert!(
-        matches!(&error, ConfigError::Invalid(message) if message.contains("requires a `window`")),
+        matches!(&error, ConfigError::Invalid { message, .. } if message.contains("requires a `window`")),
         "{error}"
     );
 }
@@ -905,7 +905,7 @@ fn a_key_an_override_sets_is_not_put_down_to_the_file() {
         load_checked(Some(&networkless), |config| {
             ResolvedNetwork::resolve(&config.chain)
                 .map(|_| ())
-                .map_err(|error| ConfigError::Invalid(error.to_string()))
+                .map_err(|error| ConfigError::invalid(["chain.network"], error.to_string()))
         })
     })
     .unwrap_err();
@@ -922,14 +922,27 @@ fn a_key_an_override_sets_is_not_put_down_to_the_file() {
         ("DOLOS_SERVE__MINIBF__LISTEN_ADRESS", "127.0.0.1:4000"),
         ("DOLOS_SERVE__MAX_CONCURRENT_QUERIES", "0"),
     ];
+    let read: fn(&ConfigError) -> bool = |error| matches!(error, ConfigError::Read { .. });
+    let invalid: fn(&ConfigError) -> bool = |error| matches!(error, ConfigError::Invalid { .. });
 
-    for (path, setting) in [
+    let intervalless = write(
+        "intervalless.toml",
+        std::fs::read_to_string(fixture("reject/custom-without-upstream.toml")).unwrap()
+            + "\n[upstream]\ntype = \"emulator\"\n",
+    );
+    let interval = "DOLOS_UPSTREAM__BLOCK_PRODUCTION_INTERVAL";
+    let fjall = ("DOLOS_STORAGE__STATE__TYPE", "fjall");
+
+    // A missing key, a wrong value, and fields of one table that do not go
+    // together, which the table's own setting reconciles.
+    for (path, setting, alone) in [
         (
             write(
                 "windowless.toml",
                 minimal.clone() + "\n[history]\nmode = \"rolling\"\nwindow = { unit = \"slot\" }\n",
             ),
             ("DOLOS_HISTORY__WINDOW__VALUE", "100"),
+            read,
         ),
         (
             write(
@@ -937,8 +950,26 @@ fn a_key_an_override_sets_is_not_put_down_to_the_file() {
                 minimal.clone() + "\n[sync]\npull_batch_size = \"lots\"\n",
             ),
             ("DOLOS_SYNC__PULL_BATCH_SIZE", "100"),
+            read,
+        ),
+        (intervalless.clone(), (interval, "20"), invalid),
+        (
+            fixture("reject/ephemeral-store-with-a-path.toml"),
+            fjall,
+            invalid,
+        ),
+        (
+            write(
+                "ephemeral-with-a-preset.toml",
+                minimal.clone()
+                    + "\n[storage.state]\ntype = \"ephemeral\"\npreset = \"standard\"\n",
+            ),
+            fjall,
+            invalid,
         ),
     ] {
+        load_with_env(&path, &variables(&[setting])).unwrap();
+
         let error =
             load_with_env(&path, &variables(&[&wrong[..], &[setting]].concat())).unwrap_err();
         assert!(
@@ -949,10 +980,118 @@ fn a_key_an_override_sets_is_not_put_down_to_the_file() {
 
         // Without the setting, the file's error stands.
         let error = load_with_env(&path, &variables(&wrong)).unwrap_err();
+        assert!(alone(&error), "{}: {error}", path.display());
+    }
+
+    // The setting the file needs is named for its own wrong value.
+    let error = load_with_env(&intervalless, &variables(&[(interval, "5s")])).unwrap_err();
+    assert!(
+        matches!(&error, ConfigError::Environment { variables, .. } if *variables == [interval]),
+        "{error}"
+    );
+    assert!(error.to_string().contains("5s"), "{error}");
+}
+
+/// An override that supplies what the file lacks takes no blame for the
+/// file's other errors. The merged tables come in no fixed order, so a
+/// regression shows only on some loads.
+#[test]
+#[serial]
+fn an_override_the_file_needs_leaves_it_its_own_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, config: String| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, config).unwrap();
+        path
+    };
+    let networkless = std::fs::read_to_string(fixture("minimal.toml"))
+        .unwrap()
+        .replace("network = \"preprod\"\n", "");
+    let custom = std::fs::read_to_string(fixture("reject/custom-without-upstream.toml")).unwrap();
+    let network = ("DOLOS_CHAIN__NETWORK", "preview");
+    let cap = "\n[serve]\nmax_concurrent_queries = 100\n";
+
+    for (path, needed) in [
+        (
+            write("networkless.toml", networkless.clone() + cap),
+            network,
+        ),
+        (
+            write("peerless.toml", custom + cap),
+            ("DOLOS_UPSTREAM__PEER_ADDRESS", "127.0.0.1:3001"),
+        ),
+    ] {
+        for _ in 0..32 {
+            let error = load_with_env(&path, &variables(&[needed])).unwrap_err();
+            assert!(
+                matches!(&error, ConfigError::Invalid { message, .. } if message.contains("found 100")),
+                "{}: {error}",
+                path.display()
+            );
+        }
+    }
+
+    for (name, extra, unknown) in [
+        (
+            "url.toml",
+            "\n[serve.minibf]\nlisten_address = \"[::]:3000\"\nurl = \"x\"\n",
+            "unknown field `url`",
+        ),
+        (
+            "max-history.toml",
+            "\n[sync]\nmax_history = 10\n",
+            "unknown field `max_history`",
+        ),
+    ] {
+        let path = write(name, networkless.clone() + extra);
+
+        for _ in 0..32 {
+            let error = load_with_env(&path, &variables(&[network])).unwrap_err();
+            assert!(
+                matches!(&error, ConfigError::Read { .. }),
+                "{name}: {error}"
+            );
+            assert!(error.to_string().contains(unknown), "{name}: {error}");
+        }
+    }
+}
+
+/// A variable that repeats the file's value changes nothing, so the rule the
+/// file breaks stays the file's.
+#[test]
+#[serial]
+fn a_variable_repeating_the_file_is_not_named() {
+    let error = load_with_env(
+        &fixture("reject/custom-without-upstream.toml"),
+        &variables(&[("DOLOS_CHAIN__NETWORK", "custom")]),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(&error, ConfigError::Invalid { message, .. } if message.contains("has no default peer")),
+        "{error}"
+    );
+}
+
+/// config reads a subscript or a dot in a variable's name as part of its
+/// key's path, so one could turn a table into a list. Such a name is refused.
+#[test]
+#[serial]
+fn an_override_name_is_letters_digits_and_underscores() {
+    for name in [
+        "DOLOS_SERVE__GRPC[0]",
+        "DOLOS_SERVE__GRPC.LISTEN_ADDRESS",
+        "DOLOS_SERVE__GRPC__LISTEN-ADDRESS",
+    ] {
+        let error = load_with_env(
+            &fixture("minimal.toml"),
+            &[(name, std::ffi::OsStr::new("127.0.0.1:50051"))],
+        )
+        .unwrap_err();
+
         assert!(
-            matches!(&error, ConfigError::Read { .. }),
-            "{}: {error}",
-            path.display()
+            matches!(&error, ConfigError::MalformedOverride(found) if found == name),
+            "{name}: {error}"
         );
     }
 }

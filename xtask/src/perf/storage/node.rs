@@ -68,8 +68,9 @@ pub struct NodeArgs {
     #[arg(long)]
     genesis: PathBuf,
 
-    #[arg(long, default_value_t = 764_824_073)]
-    magic: u64,
+    /// network magic; default the `networkMagic` of the Shelley genesis
+    #[arg(long)]
+    magic: Option<u64>,
 
     #[arg(long)]
     testnet: bool,
@@ -297,6 +298,14 @@ impl Keys {
 
 fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
+}
+
+/// The `networkMagic` of a Shelley genesis file.
+fn genesis_magic(shelley: &Path) -> anyhow::Result<u64> {
+    let genesis: Value = serde_json::from_slice(&std::fs::read(shelley)?)?;
+    genesis["networkMagic"]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("{} has no networkMagic", shelley.display()))
 }
 
 /// The instance configuration the binary runs under: one archive on the
@@ -1217,6 +1226,10 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
             name
         );
     }
+    let magic = match args.magic {
+        Some(magic) => magic,
+        None => genesis_magic(&genesis.join("shelley.json"))?,
+    };
     let immutable = args.immutable.canonicalize()?;
     std::fs::create_dir_all(&args.work)?;
 
@@ -1263,7 +1276,7 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
 
     for repeat in 0..args.repeat.max(1) {
         for (bin, node) in bins.iter().zip(&identities) {
-            let toml = config_toml(bin, &genesis, args.magic, args.testnet, addr);
+            let toml = config_toml(bin, &genesis, magic, args.testnet, addr);
 
             if selection.import || selection.read || selection.mixed {
                 let instance = Instance::create(&args.work.join(&bin.label), &toml)?;
@@ -1486,6 +1499,18 @@ mod tests {
         assert_eq!(cardano.genesis.byron_path, byron);
         assert_eq!(config.serve.grpc.unwrap().listen_address, "127.0.0.1:3900");
         assert!(config.serve.minibf.is_none());
+    }
+
+    #[test]
+    fn the_magic_defaults_to_the_genesis_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let shelley = dir.path().join("shelley.json");
+        std::fs::write(&shelley, r#"{ "networkMagic": 1, "networkId": "Testnet" }"#).unwrap();
+
+        assert_eq!(genesis_magic(&shelley).unwrap(), 1);
+
+        std::fs::write(&shelley, "{}").unwrap();
+        assert!(genesis_magic(&shelley).is_err());
     }
 
     #[test]

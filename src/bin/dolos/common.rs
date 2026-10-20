@@ -51,7 +51,7 @@ pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
 pub fn load_config(explicit_file: Option<&Path>) -> Result<RootConfig, ConfigError> {
     dolos_core::config::load_checked(explicit_file, |config| {
         ResolvedNetwork::resolve(&config.chain)
-            .map_err(|error| ConfigError::Invalid(error.to_string()))?;
+            .map_err(|error| ConfigError::invalid(["chain.network"], error.to_string()))?;
 
         log_filter(&config.logging).map(|_| ())
     })
@@ -199,7 +199,10 @@ fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
 
     if let Some(directives) = &config.filter {
         let extra: Targets = directives.parse().map_err(|error| {
-            ConfigError::Invalid(format!("`logging.filter = \"{directives}\"`: {error}"))
+            ConfigError::invalid(
+                ["logging.filter"],
+                format!("`logging.filter = \"{directives}\"`: {error}"),
+            )
         })?;
 
         if let Some(default) = extra.default_level() {
