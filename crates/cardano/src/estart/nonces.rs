@@ -1,7 +1,17 @@
 use dolos_core::{BlockSlot, ChainError};
 use pallas::{crypto::hash::Hash, ledger::primitives::NonceVariant};
 
-use crate::{sub, utils::nonce_stability_window, NonceTransition, Nonces};
+use crate::{sub, utils::nonce_stability_window, EraKey, NonceTransition, Nonces};
+
+/// The protocol of the epoch being entered: the transition's new version at a
+/// hard fork, otherwise the active one.
+fn entering_protocol(ctx: &super::WorkContext) -> EraKey {
+    ctx.ended_state
+        .pparams
+        .era_transition()
+        .map(|transition| transition.new_version)
+        .unwrap_or(ctx.active_protocol)
+}
 
 /// The stable slot of the epoch being entered. At a hard fork the new era is
 /// written only at commit, so its epoch length and protocol come from the
@@ -9,7 +19,7 @@ use crate::{sub, utils::nonce_stability_window, NonceTransition, Nonces};
 fn next_largest_stable_slot(ctx: &super::WorkContext) -> BlockSlot {
     let next_epoch = ctx.starting_epoch_no() + 1;
 
-    let (protocol, epoch_finish_slot) = match ctx.ended_state.pparams.era_transition() {
+    let epoch_finish_slot = match ctx.ended_state.pparams.era_transition() {
         Some(transition) => {
             let (_, entering) = super::commit::split_era(
                 ctx.chain_summary.edge().clone(),
@@ -18,22 +28,24 @@ fn next_largest_stable_slot(ctx: &super::WorkContext) -> BlockSlot {
                 &ctx.genesis,
             );
 
-            (transition.new_version, entering.epoch_start(next_epoch))
+            entering.epoch_start(next_epoch)
         }
-        None => (
-            ctx.active_protocol,
-            ctx.chain_summary.epoch_start(next_epoch),
-        ),
+        None => ctx.chain_summary.epoch_start(next_epoch),
     };
 
-    let stability_window = nonce_stability_window(protocol.into(), &ctx.genesis);
+    let stability_window = nonce_stability_window(entering_protocol(ctx).into(), &ctx.genesis);
 
     sub!(epoch_finish_slot, stability_window)
 }
 
 /// The entering epoch's `extra_entropy`. The transition has not rotated the
-/// parameters yet, so they are the scheduled set when there is one.
+/// parameters yet, so they are the scheduled set when there is one. Only
+/// TPraos mixes it in: Praos (protocol 7 onward) has no entropy term.
 fn extra_entropy(ctx: &super::WorkContext) -> Option<Hash<32>> {
+    if entering_protocol(ctx) >= 7 {
+        return None;
+    }
+
     let pparams = &ctx.ended_state.pparams;
 
     let nonce = pparams
@@ -332,6 +344,52 @@ mod tests {
         ));
 
         assert_eq!(next_nonce(&unset), Some(expected));
+    }
+
+    /// Praos has no entropy term, so a set entropy gives the plain sweep from
+    /// protocol 7 onward, including at the boundary entering it.
+    #[test]
+    fn praos_ignores_extra_entropy() {
+        let entropy = entropy_nonce(&"66".repeat(32));
+
+        for (live, next) in [(6, 7), (7, 7), (9, 9)] {
+            let ctx = with_nonces(context(
+                300,
+                with_entropy(pparams(live), entropy.clone()),
+                with_entropy(pparams(next), entropy.clone()),
+                summary(live, SHELLEY_START, SHELLEY_EPOCH_LENGTH),
+            ));
+
+            let current = ctx.ended_state.nonces.clone().unwrap();
+            let expected = current.sweep(ctx.ended_state.previous_nonce_tail, None);
+
+            assert_eq!(next_nonce(&ctx), Some(expected), "protocol {live} → {next}");
+        }
+    }
+
+    /// Without a previous tail the active nonce is the candidate, mixed with
+    /// the entropy under TPraos and left alone under Praos.
+    #[test]
+    fn first_boundary_mixes_extra_entropy() {
+        let entropy = hash(&"66".repeat(32));
+
+        let first = |protocol| {
+            let mut ctx = with_nonces(context(
+                208,
+                pparams(protocol),
+                with_entropy(pparams(protocol), entropy_nonce(&entropy.to_string())),
+                summary(protocol, SHELLEY_START, SHELLEY_EPOCH_LENGTH),
+            ));
+            ctx.ended_state.previous_nonce_tail = None;
+            ctx
+        };
+
+        let tpraos = first(2);
+        let candidate = tpraos.ended_state.nonces.as_ref().unwrap().candidate;
+        assert_eq!(next_nonce(&tpraos).unwrap().active, mix(candidate, entropy));
+
+        let praos = first(7);
+        assert_eq!(next_nonce(&praos).unwrap().active, candidate);
     }
 
     /// Mainnet 259: Dolos's nonce without the entropy, mixed with the 2021
