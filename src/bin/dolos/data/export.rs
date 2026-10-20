@@ -77,8 +77,17 @@ fn is_segment(entry: &DirEntry) -> bool {
         .is_some()
 }
 
+/// `path` as the filesystem resolves it, so that every spelling of a directory
+/// compares equal; made absolute where the filesystem cannot resolve it (some
+/// Windows volumes) rather than matching nothing.
+fn resolved(path: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .ok()
+}
+
 /// `source` under `name`, leaving out the segment files kept in `segments`, a
-/// canonical path, when that directory is `source` or lies inside it.
+/// [`resolved`] path, when that directory is `source` or lies inside it.
 fn append_path_filtered(
     archive: &mut Builder<GzEncoder<File>>,
     source: &Path,
@@ -117,8 +126,8 @@ fn append_dir_filtered(
 
     entries.sort_by_key(|e| e.file_name());
 
-    let holds_segments = segments
-        .is_some_and(|segments| std::fs::canonicalize(source).is_ok_and(|dir| dir == segments));
+    let holds_segments =
+        segments.is_some_and(|segments| resolved(source).is_some_and(|dir| dir == segments));
 
     for entry in entries {
         let path = entry.path();
@@ -144,9 +153,10 @@ fn append_dir_filtered(
 }
 
 /// The archive directory under `archive/`; for a node keeping its segment
-/// files at `segments_dir`, its `index/` with those segments beside it. That is
-/// the default layout, so a snapshot restores the same way whatever
-/// `blocks_path` the node it came from had.
+/// files at `segments_dir`, its `index/` with those segments beside it, and
+/// left out of `index/` where `segments_dir` lies inside it. That is the
+/// default layout, so a snapshot restores the same way whatever `blocks_path`
+/// the node it came from had.
 fn append_archive(
     archive: &mut Builder<GzEncoder<File>>,
     archive_dir: &Path,
@@ -178,7 +188,7 @@ fn append_archive(
         archive,
         &archive_dir.join("index"),
         &name.join("index"),
-        None,
+        resolved(segments_dir).as_deref(),
     )
 }
 
@@ -258,9 +268,8 @@ pub fn run(
         let path = root.join("state");
 
         // A `blocks_path` at or under the state directory holds the archive's
-        // segments, which travel with the archive. Compared canonically, so
-        // any spelling of it is recognised.
-        let segments = segments.and_then(|dir| std::fs::canonicalize(dir).ok());
+        // segments, which travel with the archive.
+        let segments = segments.as_deref().and_then(resolved);
 
         append_path_filtered(&mut archive, &path, Path::new("state"), segments.as_deref())?;
 
@@ -288,5 +297,15 @@ mod tests {
         let error = create_export_file(&output, &state, true).unwrap_err();
         assert!(error.to_string().contains("nothing on disk to export"));
         assert_eq!(std::fs::read(output).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn a_path_the_filesystem_cannot_resolve_is_still_compared() {
+        let missing = Path::new("no/such/dir");
+
+        assert_eq!(
+            resolved(missing),
+            Some(std::path::absolute(missing).unwrap())
+        );
     }
 }

@@ -357,8 +357,9 @@ fn a_snapshot_carries_the_segments_at_blocks_path() {
     assert_eq!(store_positions(&other), restored);
 }
 
-/// The segment files in a full export of `node`, run from its directory.
-fn exported_segments(node: &Node) -> Vec<PathBuf> {
+/// A full export of `node`, run from its directory, and the segment files in
+/// it.
+fn export(node: &Node) -> (PathBuf, Vec<PathBuf>) {
     let snapshot = node.root.path().join("snapshot.tar.gz");
     assert_ok(&node.run_in_root(&[
         "data",
@@ -377,23 +378,51 @@ fn exported_segments(node: &Node) -> Vec<PathBuf> {
         .collect();
     entries.retain(|path| path.extension() == Some("segment".as_ref()));
 
-    entries
+    (snapshot, entries)
 }
 
-/// A `blocks_path` at or under the state directory, however it is spelled,
-/// exports its segments once, with the archive.
+/// A default-layout node restored from `snapshot` holds the synced tip in
+/// every store.
+fn assert_restores(snapshot: &Path, blocks: &[RawBlock]) {
+    let (other, _, _) = fixture("");
+    assert_ok(&other.run(&[
+        "bootstrap",
+        "snapshot",
+        "--file",
+        snapshot.to_str().unwrap(),
+    ]));
+
+    let tip = point(&blocks[2]);
+    assert_eq!(kept_tip(&other), Some((tip.slot(), blocks[2].to_vec())));
+    assert_eq!(
+        store_positions(&other),
+        (Some(tip.clone()), Some(tip.clone()), Some(tip.slot()))
+    );
+}
+
+/// A `blocks_path` at or under the state directory or the archive's index,
+/// however it is spelled, exports its segments once, with the archive, and the
+/// rest of both stores whole.
 #[test]
-fn segments_under_the_state_directory_are_exported_once() {
+fn segments_inside_a_store_directory_are_exported_once() {
     let once = [Path::new("archive/000000.segment")];
 
-    for blocks_path in ["state/blocks", "state/x/blocks", "state"] {
+    for blocks_path in [
+        "state/blocks",
+        "state/x/blocks",
+        "state",
+        "archive/index/blocks",
+        "archive/index",
+    ] {
         let (node, genesis, blocks) = fixture(&format!(
             "[storage.archive]\nblocks_path = \"{blocks_path}\"\n"
         ));
         sync_and_stop(&node, &genesis, &blocks);
         assert!(has_segments(&node.config.storage.path.join(blocks_path)));
 
-        assert_eq!(exported_segments(&node), once, "{blocks_path}");
+        let (snapshot, segments) = export(&node);
+        assert_eq!(segments, once, "{blocks_path}");
+        assert_restores(&snapshot, &blocks);
     }
 
     // An absolute `blocks_path` into the state directory of a relative
@@ -410,5 +439,7 @@ fn segments_under_the_state_directory_are_exported_once() {
     assert!(config.contains("path = \"data\"") && config.contains(&absolute));
     std::fs::write(node.config_path(), config).unwrap();
 
-    assert_eq!(exported_segments(&node), once);
+    let (snapshot, segments) = export(&node);
+    assert_eq!(segments, once);
+    assert_restores(&snapshot, &blocks);
 }
