@@ -1725,8 +1725,9 @@ fn override_key(variable: &str) -> String {
 }
 
 /// Whether the variable `name` sets its key to the text the file has there.
-/// A number or a flag in the file is read differently from the same text in a
-/// variable, so it is never repeated.
+/// Only a string in the file is compared, since config renders a float such
+/// as `32.0` as `32`, the text of a whole number; a number or a flag in the
+/// file is never taken as repeated.
 fn repeats_the_file(document: &::config::Config, name: &str, value: &str) -> bool {
     document
         .get::<::config::Value>(&override_key(name))
