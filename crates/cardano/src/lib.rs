@@ -53,6 +53,9 @@ pub mod validate;
 #[cfg(feature = "include-genesis")]
 pub mod include;
 
+#[cfg(feature = "include-genesis")]
+pub mod networks;
+
 pub use eras::*;
 pub use model::*;
 pub use utils::{mutable_slots, network_from_genesis};

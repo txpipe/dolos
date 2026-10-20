@@ -193,13 +193,13 @@ impl<D: Domain> Facade<D> {
     where
         D: Clone + Send + Sync + 'static,
     {
-        let mut out = TxMap::new();
-        for hash in hashes.into_iter() {
-            let tx = self.get_tx(hash).await?;
-            out.insert(hash, tx);
-        }
+        let txs = self
+            .query()
+            .tx_cbor_batch(hashes)
+            .await
+            .map_err(log_and_500("failed to fetch tx cbor batch"))?;
 
-        Ok(out)
+        Ok(txs.into_iter().collect())
     }
 
     pub async fn get_block_with_tx_batch(
@@ -824,5 +824,77 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let body: Value = serde_json::from_slice(&bytes).expect("json body for /blocks/slot/");
         assert_eq!(body["message"], json!("Missing or malformed block hash."));
+    }
+
+    #[tokio::test]
+    async fn get_tx_batch_reads_each_body_once_however_many_of_its_txs_are_asked() {
+        use std::sync::atomic::Ordering;
+
+        use dolos_core::{
+            config::{CardanoConfig, MinibfConfig},
+            indexes::ArchiveIndexDelta,
+            ArchiveStore as _, ArchiveWriter as _, ChainPoint, Domain as _,
+        };
+        use dolos_testing::{
+            measured::MeasuredStores,
+            synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+            toy_domain::{MemoryStores, ToyDomain, ToyStores as _},
+        };
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        use crate::Facade;
+
+        let domain = ToyDomain::with_stores(
+            ToyDomain::new(None, None).genesis(),
+            CardanoConfig::default(),
+            None,
+            None,
+            MeasuredStores::new(MemoryStores::open()),
+        );
+        let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 4,
+            ..Default::default()
+        });
+        let writer = domain.archive().start_writer().unwrap();
+        let mut hashes = Vec::new();
+        let mut indexes = Vec::new();
+        for raw in &blocks {
+            let block = MultiEraBlock::decode(raw).unwrap();
+            let tx_hashes: Vec<_> = block.txs().iter().map(|tx| tx.hash()).collect();
+            writer
+                .apply(&ChainPoint::Specific(block.slot(), block.hash()), raw)
+                .unwrap();
+            indexes.push(ArchiveIndexDelta {
+                slot: block.slot(),
+                block_hash: block.hash().to_vec(),
+                block_number: Some(block.number()),
+                tx_hashes: tx_hashes.iter().map(|hash| hash.to_vec()).collect(),
+                tags: Vec::new(),
+                relations: Vec::new(),
+            });
+            hashes.extend(tx_hashes);
+        }
+        writer.apply_index(&indexes).unwrap();
+        writer.commit().unwrap();
+
+        let reads = || {
+            domain
+                .archive()
+                .counters
+                .block_reads
+                .load(Ordering::Relaxed)
+        };
+        let facade = Facade {
+            inner: domain.clone(),
+            config: MinibfConfig::new("[::]:0".parse().expect("invalid listen address")),
+        };
+
+        let before = reads();
+        let txs = facade.get_tx_batch(hashes.iter().copied()).await.unwrap();
+
+        assert_eq!(txs.len(), 12);
+        assert!(txs.values().all(Option::is_some));
+        assert_eq!(reads() - before, 3);
     }
 }

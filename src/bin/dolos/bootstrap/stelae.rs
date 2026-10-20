@@ -36,24 +36,30 @@
 
 use std::path::PathBuf;
 
+use dolos_cardano::networks::KnownNetwork;
 use dolos_core::config::RootConfig;
 use miette::{Context as _, IntoDiagnostic as _};
 
 use dolos_snapshot::{
     facade::{self as snapshot, RestoreInput, SnapshotRepository},
     node,
-    registry::{self, Point},
+    registry::{self, Auth, Point, Repository},
     restore::Source,
 };
 
-use crate::feedback::{Feedback, SteleProgress};
+use crate::{
+    feedback::{Feedback, SteleProgress},
+    registry::CredentialArgs,
+};
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct Args {
     /// Where to restore from, as a URL: `file://DIR` naming a stele directory,
-    /// or `oci://HOST/PATH` naming a repository in a registry.
+    /// or `oci://HOST/PATH` naming a repository in a registry. Defaults to the
+    /// configured network's official repository, and is required for a custom
+    /// network
     #[arg(long)]
-    pub source: Source,
+    pub source: Option<Source>,
 
     /// which stele in the repository to restore: `latest`, or `epoch-N` for the
     /// stele published at the end of epoch N. Registry sources only.
@@ -76,6 +82,9 @@ pub struct Args {
     /// stele's declared sizes exceed the available space
     #[arg(long, action)]
     pub skip_space_check: bool,
+
+    #[command(flatten)]
+    pub credentials: CredentialArgs,
 }
 
 impl Args {
@@ -89,12 +98,52 @@ impl Args {
             .into_diagnostic()?;
 
         Ok(Self {
-            source: source.parse().map_err(|e: String| miette::miette!("{e}"))?,
+            source: Some(source.parse().map_err(|e: String| miette::miette!("{e}"))?),
             point: Point::default(),
             insecure: false,
             scratch_dir: None,
             skip_space_check: false,
+            credentials: super::from_environment()?,
         })
+    }
+}
+
+/// The stele to restore: what the invocation names, else the known network's
+/// official repository.
+pub(super) fn source(args: &Args, network: Option<&KnownNetwork>) -> miette::Result<Source> {
+    if let Some(source) = &args.source {
+        return Ok(source.clone());
+    }
+
+    let network = network.ok_or_else(|| {
+        miette::miette!("a custom network has no default stele repository; pass --source")
+    })?;
+
+    network
+        .stelae
+        .registry
+        .parse()
+        .map_err(|e: String| miette::miette!("{e}"))
+}
+
+/// Where a restore reads from, with the credentials a repository is read
+/// with.
+pub(super) enum Inputs {
+    Dir(PathBuf),
+    Repo(Repository, Auth),
+}
+
+/// Resolves the source and, for a repository, the credentials, so that
+/// `--force` clears nothing for a restore that would refuse them, and the
+/// restore reads with the credentials that were checked.
+pub(super) fn resolve(args: &Args, network: Option<&KnownNetwork>) -> miette::Result<Inputs> {
+    match source(args, network)? {
+        Source::Dir(dir) => Ok(Inputs::Dir(dir)),
+        Source::Repo(repo) => {
+            let auth = args.credentials.auth(&repo, network)?;
+
+            Ok(Inputs::Repo(repo, auth))
+        }
     }
 }
 
@@ -160,27 +209,31 @@ impl Node {
     }
 }
 
-fn restore(config: &RootConfig, args: &Args, options: RestoreOptions<'_>) -> miette::Result<()> {
+fn restore(
+    config: &RootConfig,
+    args: &Args,
+    inputs: Inputs,
+    options: RestoreOptions<'_>,
+) -> miette::Result<()> {
     let node = Node::open(config)?;
     let progress = SteleProgress::restoring(options.feedback);
     let observer = progress.observer();
     let restoring = node.restoring(options.resume, options.skip_space_check);
 
-    let outcome = match &args.source {
-        Source::Dir(dir) => snapshot::restore(
-            RestoreInput::Directory(dir),
+    let outcome = match inputs {
+        Inputs::Dir(dir) => snapshot::restore(
+            RestoreInput::Directory(&dir),
             restoring,
             node.target(),
             Some(&observer),
         ),
-        Source::Repo(repo) => {
-            // Credential and staging resolution remain node policy. The
-            // profile facade receives the resolved inputs and never reads
-            // configuration or environment on its own.
-            let auth = node::registry_auth(&config.stelae).into_diagnostic()?;
+        Inputs::Repo(repo, auth) => {
+            // Staging resolution remains node policy. The profile facade
+            // receives the resolved inputs and never reads configuration or
+            // environment on its own.
             let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
             let repository = SnapshotRepository::open(
-                repo,
+                &repo,
                 args.insecure,
                 auth,
                 scratch,
@@ -306,9 +359,10 @@ fn report(
     );
 }
 
-pub fn run(
+pub(super) fn run(
     config: &RootConfig,
     args: &Args,
+    inputs: Inputs,
     feedback: &Feedback,
     resume: bool,
 ) -> miette::Result<()> {
@@ -318,7 +372,7 @@ pub fn run(
         skip_space_check: args.skip_space_check,
     };
 
-    restore(config, args, options)
+    restore(config, args, inputs, options)
 }
 
 #[cfg(test)]
@@ -414,5 +468,65 @@ mod progress_tests {
         );
 
         progress.finish();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use dolos_cardano::networks;
+
+    use super::*;
+
+    fn args(source: Option<&str>) -> Args {
+        Args {
+            source: source.map(|raw| raw.parse().unwrap()),
+            point: Point::default(),
+            insecure: false,
+            scratch_dir: None,
+            skip_space_check: false,
+            credentials: CredentialArgs::default(),
+        }
+    }
+
+    fn repository(source: Source) -> String {
+        match source {
+            Source::Repo(repo) => format!("{}/{}", repo.registry(), repo.repository()),
+            Source::Dir(dir) => panic!("expected a repository, got {}", dir.display()),
+        }
+    }
+
+    #[test]
+    fn a_known_network_restores_from_its_official_repository() {
+        let resolved = source(&args(None), Some(&networks::PREVIEW)).unwrap();
+
+        assert_eq!(
+            format!("oci://{}", repository(resolved)),
+            networks::PREVIEW.stelae.registry
+        );
+    }
+
+    #[test]
+    fn an_explicit_source_wins() {
+        let resolved = source(&args(Some("file://stele")), Some(&networks::PREVIEW)).unwrap();
+        assert!(matches!(resolved, Source::Dir(dir) if dir == Path::new("stele")));
+
+        let resolved = source(
+            &args(Some("oci://ghcr.io/txpipe/dolos-snapshots/preview")),
+            Some(&networks::PREVIEW),
+        )
+        .unwrap();
+        assert_eq!(
+            repository(resolved),
+            "ghcr.io/txpipe/dolos-snapshots/preview"
+        );
+    }
+
+    #[test]
+    fn a_custom_network_without_a_source_names_the_flag() {
+        let message = source(&args(None), None).unwrap_err().to_string();
+
+        assert!(message.contains("--source"), "{message}");
     }
 }

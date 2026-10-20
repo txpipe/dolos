@@ -1,24 +1,22 @@
 use clap::Parser;
-use dolos_cardano::{include, mutable_slots};
-use dolos_core::{
-    config::{
-        CardanoConfig, ChainConfig, GenesisConfig, GrpcConfig, MinibfConfig, MinikupoConfig,
-        MithrilConfig, PeerConfig, RelayConfig, RootConfig, StelaeConfig, StelaeRegistryConfig,
-        StorageConfig, StorageVersion, TrpConfig, UpstreamConfig,
-    },
-    Genesis,
+use dolos_cardano::{
+    mutable_slots,
+    networks::{self, KnownNetwork, Peer},
+};
+use dolos_core::config::{
+    CardanoConfig, ChainConfig, GenesisConfig, GrpcConfig, MinibfConfig, MinikupoConfig,
+    PeerConfig, RelayConfig, RootConfig, StorageConfig, StorageVersion, TrpConfig, UpstreamConfig,
 };
 use inquire::{Confirm, MultiSelect, Select, Text};
 use miette::{miette, Context as _, IntoDiagnostic};
 use std::{
     fmt::Display,
     path::{Path, PathBuf},
-    str::FromStr,
 };
 
 use dolos::storage::{BOOTSTRAP_GUIDE_URL, CURRENT_STORAGE_VERSION};
 
-use crate::{data::cleanup, feedback::Feedback};
+use crate::{common::MovedSections, data::cleanup, feedback::Feedback};
 
 /// The config file `dolos init` writes, and the one whose failure to parse
 /// tells us an older setup is present.
@@ -52,205 +50,23 @@ fn storage_upgrade(version: &StorageVersion, unparseable_existing: bool) -> Stor
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-#[allow(clippy::enum_variant_names)]
-pub enum KnownNetwork {
-    CardanoMainnet,
-    CardanoPreProd,
-    CardanoPreview,
+/// Parses `--known-network` / `--network` against the catalog.
+pub fn parse_known_network(name: &str) -> Result<&'static KnownNetwork, String> {
+    KnownNetwork::by_name(name).ok_or_else(|| format!("unknown network {name}"))
 }
 
-impl KnownNetwork {
-    const VARIANTS: &'static [KnownNetwork] = &[
-        KnownNetwork::CardanoMainnet,
-        KnownNetwork::CardanoPreProd,
-        KnownNetwork::CardanoPreview,
-    ];
-
-    pub fn from_magic(magic: u64) -> Option<Self> {
-        match magic {
-            764824073 => Some(KnownNetwork::CardanoMainnet),
-            1 => Some(KnownNetwork::CardanoPreProd),
-            2 => Some(KnownNetwork::CardanoPreview),
-            _ => None,
-        }
-    }
-
-    pub fn magic(&self) -> u64 {
-        match self {
-            KnownNetwork::CardanoMainnet => 764824073,
-            KnownNetwork::CardanoPreProd => 1,
-            KnownNetwork::CardanoPreview => 2,
-        }
-    }
-
-    pub fn is_testnet(&self) -> bool {
-        !matches!(self, KnownNetwork::CardanoMainnet)
-    }
-
-    pub fn cardano_foundation_peer_address(&self) -> &'static str {
-        match self {
-            KnownNetwork::CardanoMainnet => "backbone.mainnet.cardanofoundation.org:3001",
-            KnownNetwork::CardanoPreProd => "preprod-node.world.dev.cardano.org:30000",
-            KnownNetwork::CardanoPreview => "preview-node.world.dev.cardano.org:30002",
-        }
-    }
-
-    pub fn demeter_peer_address(&self) -> &'static str {
-        match self {
-            KnownNetwork::CardanoMainnet => "relay.cnode-m1.demeter.run:3000",
-            KnownNetwork::CardanoPreProd => "relay.cnode-m1.demeter.run:3001",
-            KnownNetwork::CardanoPreview => "relay.cnode-m1.demeter.run:3002",
-        }
-    }
-
-    pub fn remote_peer_options(&self) -> Vec<RemotePeerPreset> {
-        vec![
-            RemotePeerPreset {
-                name: "Demeter Relay",
-                address: self.demeter_peer_address(),
-            },
-            RemotePeerPreset {
-                name: "CF Relay",
-                address: self.cardano_foundation_peer_address(),
-            },
-        ]
-    }
-
-    pub fn load_included_genesis(&self) -> Genesis {
-        match self {
-            KnownNetwork::CardanoMainnet => include::mainnet::load(),
-            KnownNetwork::CardanoPreProd => include::preprod::load(),
-            KnownNetwork::CardanoPreview => include::preview::load(),
-        }
-    }
-
-    pub fn save_included_genesis(&self, root: &Path) -> miette::Result<()> {
-        let result = match self {
-            KnownNetwork::CardanoMainnet => include::mainnet::save(root),
-            KnownNetwork::CardanoPreProd => include::preprod::save(root),
-            KnownNetwork::CardanoPreview => include::preview::save(root),
-        };
-
-        result.into_diagnostic().context("saving genesis")
-    }
+fn upstream_config(network: &KnownNetwork) -> UpstreamConfig {
+    UpstreamConfig::Peer(PeerConfig {
+        peer_address: network.default_peer.into(),
+    })
 }
 
-impl FromStr for KnownNetwork {
-    type Err = miette::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "mainnet" => Ok(KnownNetwork::CardanoMainnet),
-            "preprod" => Ok(KnownNetwork::CardanoPreProd),
-            "preview" => Ok(KnownNetwork::CardanoPreview),
-            x => Err(miette!("unknown network {x}")),
-        }
-    }
-}
-
-impl Display for KnownNetwork {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            KnownNetwork::CardanoMainnet => f.write_str("Cardano Mainnet"),
-            KnownNetwork::CardanoPreProd => f.write_str("Cardano PreProd"),
-            KnownNetwork::CardanoPreview => f.write_str("Cardano Preview"),
-            // KnownNetwork::CardanoSanchonet => f.write_str("Cardano SanchoNet"),
-        }
-    }
-}
-
-impl From<&KnownNetwork> for PeerConfig {
-    fn from(value: &KnownNetwork) -> Self {
-        PeerConfig {
-            peer_address: value.demeter_peer_address().into(),
-        }
-    }
-}
-
-impl From<&KnownNetwork> for ChainConfig {
-    fn from(value: &KnownNetwork) -> Self {
-        ChainConfig::Cardano(CardanoConfig {
-            magic: value.magic(),
-            is_testnet: value.is_testnet(),
-            ..Default::default()
-        })
-    }
-}
-
-impl From<&KnownNetwork> for UpstreamConfig {
-    fn from(value: &KnownNetwork) -> Self {
-        UpstreamConfig::Peer(value.into())
-    }
-}
-
-impl From<&KnownNetwork> for GenesisConfig {
-    fn from(value: &KnownNetwork) -> Self {
-        match value {
-            KnownNetwork::CardanoPreview => GenesisConfig {
-                force_protocol: Some(6), // Preview network starts at Alonzo
-                ..Default::default()
-            },
-            KnownNetwork::CardanoPreProd => GenesisConfig {
-                ..Default::default()
-            },
-            // KnownNetwork::CardanoSanchonet => todo!(),
-            _ => GenesisConfig::default(),
-        }
-    }
-}
-
-impl From<&KnownNetwork> for MithrilConfig {
-    fn from(value: &KnownNetwork) -> Self {
-        match value {
-            KnownNetwork::CardanoMainnet => MithrilConfig {
-                aggregator: "https://aggregator.release-mainnet.api.mithril.network/aggregator".into(),
-                genesis_key: "5b3139312c36362c3134302c3138352c3133382c31312c3233372c3230372c3235302c3134342c32372c322c3138382c33302c31322c38312c3135352c3230342c31302c3137392c37352c32332c3133382c3139362c3231372c352c31342c32302c35372c37392c33392c3137365d".into(),
-                ancillary_key: Some("5b32332c37312c39362c3133332c34372c3235332c3232362c3133362c3233352c35372c3136342c3130362c3138362c322c32312c32392c3132302c3136332c38392c3132312c3137372c3133382c3230382c3133382c3231342c39392c35382c32322c302c35382c332c36395d".into()),
-            },
-            KnownNetwork::CardanoPreProd => MithrilConfig {
-                aggregator: "https://aggregator.release-preprod.api.mithril.network/aggregator".into(),
-                genesis_key: "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d".into(),
-                ancillary_key: Some("5b3138392c3139322c3231362c3135302c3131342c3231362c3233372c3231302c34352c31382c32312c3139362c3230382c3234362c3134362c322c3235322c3234332c3235312c3139372c32382c3135372c3230342c3134352c33302c31342c3232382c3136382c3132392c38332c3133362c33365d".into()),
-            },
-            KnownNetwork::CardanoPreview => MithrilConfig {
-                aggregator: "https://aggregator.pre-release-preview.api.mithril.network/aggregator".into(),
-                genesis_key: "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d".into(),
-                ancillary_key: Some("5b3138392c3139322c3231362c3135302c3131342c3231362c3233372c3231302c34352c31382c32312c3139362c3230382c3234362c3134362c322c3235322c3234332c3235312c3139372c32382c3135372c3230342c3134352c33302c31342c3232382c3136382c3132392c38332c3133362c33365d".into()),
-            },
-        }
-    }
-}
-
-/// The official stele registry's published read-only user.
-///
-/// A hardcoded default of the same kind as the relay addresses and the Mithril
-/// aggregators above, and here for the same reason: this module is where a
-/// generated `dolos.toml` gets everything it points at. Written into the file,
-/// so a config says which identity it reads the registry as.
-///
-/// Issued by the official registry at `oci.stelae.store`.
-const OFFICIAL_REGISTRY_USER: &str = "stelae";
-
-// The password that goes with `OFFICIAL_REGISTRY_USER` is
-// `dolos_snapshot::node::OFFICIAL_REGISTRY_PASSWORD`, which is where rotating
-// the pair is documented.
-
-/// `[stelae]` as a generated config carries it: the official registry's user,
-/// and no password.
-///
-/// Empty only while [`OFFICIAL_REGISTRY_USER`] is, which is why it is a
-/// function rather than a `Default` impl on the config type — it asks for the
-/// official registry specifically, and would give the honest answer if there
-/// were not one.
-fn official_stelae() -> StelaeConfig {
-    StelaeConfig {
-        registry: (!OFFICIAL_REGISTRY_USER.is_empty()).then(|| StelaeRegistryConfig {
-            user: Some(OFFICIAL_REGISTRY_USER.to_owned()),
-            ..Default::default()
-        }),
-    }
+fn chain_config(network: &KnownNetwork) -> ChainConfig {
+    ChainConfig::Cardano(CardanoConfig {
+        magic: network.magic.into(),
+        is_testnet: network.is_testnet,
+        ..Default::default()
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -344,14 +160,8 @@ impl AvailableApi {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemotePeerPreset {
-    name: &'static str,
-    address: &'static str,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 enum RemotePeerChoice {
-    Preset(RemotePeerPreset),
+    Preset(Peer),
     Other,
 }
 
@@ -369,8 +179,8 @@ impl Display for RemotePeerChoice {
 #[derive(Debug, Parser)]
 pub struct Args {
     /// Use one of the well-known networks
-    #[arg(long)]
-    known_network: Option<KnownNetwork>,
+    #[arg(long, value_parser = parse_known_network)]
+    known_network: Option<&'static KnownNetwork>,
 
     /// Remote peer to use as source
     #[arg(long)]
@@ -405,7 +215,7 @@ pub struct Args {
     enable_relay: Option<bool>,
 }
 
-type IncludeGenesisFiles = Option<KnownNetwork>;
+type IncludeGenesisFiles = Option<&'static KnownNetwork>;
 
 struct ConfigEditor(RootConfig, IncludeGenesisFiles);
 
@@ -413,16 +223,7 @@ impl Default for ConfigEditor {
     fn default() -> Self {
         let editor = Self(
             RootConfig {
-                upstream: From::from(&KnownNetwork::CardanoMainnet),
-                mithril: Some(From::from(&KnownNetwork::CardanoMainnet)),
-                snapshot: Default::default(),
-                // Seeded, so a node created here restores from the official
-                // stele registry without an operator having to find a
-                // credential first. Only on a *fresh* config: an existing
-                // `dolos.toml` keeps whatever it carries, because a section
-                // an operator removed and one that predates the field look
-                // the same from here, and overwriting would undo the first.
-                stelae: official_stelae(),
+                upstream: upstream_config(&networks::MAINNET),
                 storage: StorageConfig {
                     version: CURRENT_STORAGE_VERSION,
                     ..Default::default()
@@ -435,7 +236,7 @@ impl Default for ConfigEditor {
                 retries: Default::default(),
                 logging: Default::default(),
                 telemetry: Default::default(),
-                chain: ChainConfig::from(&KnownNetwork::CardanoMainnet),
+                chain: chain_config(&networks::MAINNET),
             },
             None,
         );
@@ -454,17 +255,16 @@ impl Default for ConfigEditor {
 }
 
 impl ConfigEditor {
-    fn apply_known_network(mut self, network: Option<&KnownNetwork>) -> Self {
+    fn apply_known_network(mut self, network: Option<&'static KnownNetwork>) -> Self {
         if let Some(network) = network {
-            self.0.genesis = network.into();
-            self.0.upstream = network.into();
-            self.0.chain = network.into();
-            self.0.mithril = Some(network.into());
-            self.1 = Some(network.clone());
+            self.0.genesis = GenesisConfig::default();
+            self.0.upstream = upstream_config(network);
+            self.0.chain = chain_config(network);
+            self.1 = Some(network);
 
             // Add max rollback window for network from Genesis.
             if self.0.sync.max_rollback.is_none() {
-                let genesis = network.load_included_genesis();
+                let genesis = network.genesis();
                 self.0.sync.max_rollback = Some(mutable_slots(&genesis));
             }
         }
@@ -578,7 +378,7 @@ impl ConfigEditor {
     }
 
     fn fill_values_from_args(self, args: &Args) -> Self {
-        self.apply_known_network(args.known_network.as_ref())
+        self.apply_known_network(args.known_network)
             .apply_remote_peer(args.remote_peer.as_ref())
             .apply_history_pruning(args.max_chain_history.into())
             .apply_serve_grpc(args.serve_grpc)
@@ -636,12 +436,12 @@ impl ConfigEditor {
     }
 
     fn prompt_known_network(self) -> miette::Result<Self> {
-        let options = KnownNetwork::VARIANTS.to_vec();
+        let options = KnownNetwork::all().to_vec();
 
-        let selected = KnownNetwork::from_magic(self.0.chain.magic());
+        let selected = KnownNetwork::by_magic(self.0.chain.magic());
 
         let starting_cursor = selected
-            .and_then(|x| options.iter().position(|y| y.eq(&x)))
+            .and_then(|x| options.iter().position(|y| std::ptr::eq(*y, x)))
             .unwrap_or_default();
 
         let value = Select::new("Which network are you connecting to?", options)
@@ -650,7 +450,7 @@ impl ConfigEditor {
             .into_diagnostic()
             .context("asking for network")?;
 
-        Ok(self.apply_known_network(Some(&value)))
+        Ok(self.apply_known_network(Some(value)))
     }
 
     fn prompt_include_genesis(mut self) -> miette::Result<Self> {
@@ -670,7 +470,7 @@ impl ConfigEditor {
     fn prompt_remote_peer(self) -> miette::Result<Self> {
         let current = self.0.upstream.peer_address().unwrap_or_default();
 
-        let Some(network) = KnownNetwork::from_magic(self.0.chain.magic()) else {
+        let Some(network) = KnownNetwork::by_magic(self.0.chain.magic()) else {
             let value = Text::new("Which remote peer (relay) do you want to use?")
                 .with_default(current)
                 .prompt()
@@ -681,8 +481,9 @@ impl ConfigEditor {
         };
 
         let mut options: Vec<_> = network
-            .remote_peer_options()
-            .into_iter()
+            .peers
+            .iter()
+            .copied()
             .map(RemotePeerChoice::Preset)
             .collect();
 
@@ -793,8 +594,11 @@ impl ConfigEditor {
     }
 
     fn include_genesis_files(self) -> miette::Result<Self> {
-        if let Some(network) = &self.1 {
-            network.save_included_genesis(&PathBuf::from("./"))?;
+        if let Some(network) = self.1 {
+            network
+                .save_genesis(&PathBuf::from("./"))
+                .into_diagnostic()
+                .context("saving genesis")?;
         }
 
         Ok(self)
@@ -823,12 +627,29 @@ fn existing_config_is_unreadable(config: &miette::Result<RootConfig>, config_fil
     config.is_err() && config_file.exists()
 }
 
+/// Refuses a config that failed to load only because it still carries a moved
+/// section.
+///
+/// Every `dolos.toml` an older `init` wrote has `[mithril]`. Such a file is one
+/// edit away from loading and names its storage, so it is reported as that
+/// edit rather than as an unreadable setup whose data has to go.
+fn refuse_moved_sections(
+    config: miette::Result<RootConfig>,
+) -> miette::Result<miette::Result<RootConfig>> {
+    match config {
+        Err(report) if report.is::<MovedSections>() => Err(report),
+        other => Ok(other),
+    }
+}
+
 pub fn run(
     config: miette::Result<RootConfig>,
     args: &Args,
     feedback: &Feedback,
 ) -> miette::Result<()> {
     crate::banner::print_init_banner();
+
+    let config = refuse_moved_sections(config)?;
 
     let unparseable_existing = existing_config_is_unreadable(&config, Path::new(CONFIG_FILE));
 
@@ -1236,65 +1057,64 @@ is_testnet = true
         stores.archive.shutdown().unwrap();
     }
 
-    /// A freshly initialized node carries the stelae registry section the
-    /// official registry needs, and no password.
-    ///
-    /// The section appears once [`OFFICIAL_REGISTRY_USER`] names one; until
-    /// then there is no user to write and the file says nothing. Either way the
-    /// generated config has to parse and to round-trip to exactly what
-    /// [`official_stelae`] is, which is what will still hold on the day the
-    /// constants are filled in.
+    /// Bootstrap sources and credentials are inputs of the bootstrap
+    /// commands, so a generated config carries none of them — and still loads.
     #[test]
-    fn a_fresh_config_seeds_the_official_registry_and_no_password() {
+    fn a_fresh_config_carries_no_bootstrap_section() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dolos.toml");
 
-        ConfigEditor::default().save(&path).unwrap();
+        ConfigEditor::default()
+            .apply_known_network(Some(&networks::PREPROD))
+            .save(&path)
+            .unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
-        println!("{written}");
 
-        // The password is compiled in, so a generated config never carries one
-        // however the constants are set.
-        assert!(!written.contains("password"), "{written}");
-
-        let parsed: RootConfig = toml::from_str(&written).expect("the generated config parses");
-        assert_eq!(parsed.stelae, official_stelae());
-
-        if let Some(registry) = &parsed.stelae.registry {
-            assert_eq!(registry.user.as_deref(), Some(OFFICIAL_REGISTRY_USER));
-            assert_eq!(registry.password, None);
+        for section in ["[mithril", "[snapshot", "[stelae"] {
+            assert!(!written.contains(section), "{written}");
         }
+
+        crate::common::load_file(&path).expect("the generated config loads");
     }
 
-    /// A password an operator wrote is kept, so a private registry is
-    /// configurable in the file the same command generates.
-    ///
-    /// Only the round trip is asserted here. What a section with *no* password
-    /// authenticates with is [`dolos_snapshot::node::registry_auth`]'s
-    /// question, and is answered by its tests against
-    /// [`dolos_snapshot::node::OFFICIAL_REGISTRY_PASSWORD`].
+    /// A config an older `init` wrote carries `[mithril]`; init reports where
+    /// it moved instead of calling the setup unreadable.
     #[test]
-    fn a_configured_password_survives_the_round_trip() {
+    fn an_older_init_config_is_reported_as_its_moved_section() {
+        let _guard = crate::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dolos.toml");
 
-        let mut editor = ConfigEditor::default();
-        editor.0.stelae.registry = Some(StelaeRegistryConfig {
-            user: Some("dolos".to_owned()),
-            password: Some("a-private-registry".to_owned()),
-            token: None,
-        });
+        ConfigEditor::default()
+            .apply_known_network(Some(&networks::PREPROD))
+            .save(&path)
+            .unwrap();
 
-        editor.save(&path).unwrap();
+        let mut written = std::fs::read_to_string(&path).unwrap();
+        written.push_str(
+            "\n[mithril]\naggregator = \"https://aggregator.example\"\ngenesis_key = \"5b31\"\n",
+        );
+        std::fs::write(&path, written).unwrap();
 
-        let written = std::fs::read_to_string(&path).unwrap();
-        assert!(written.contains("[stelae.registry]"), "{written}");
+        let config = crate::common::load_file(&path)
+            .map_err(crate::common::config_report)
+            .context("parsing configuration");
 
-        let parsed: RootConfig = toml::from_str(&written).unwrap();
-        let registry = parsed.stelae.registry.expect("the section round-trips");
+        let report = refuse_moved_sections(config).err().unwrap();
+        let message = format!("{report:?}");
 
-        assert_eq!(registry.user.as_deref(), Some("dolos"));
-        assert_eq!(registry.password.as_deref(), Some("a-private-registry"));
+        assert!(message.contains("[mithril] moved to"), "{message}");
+        assert!(!message.contains("Remove the data directory"), "{message}");
+    }
+
+    #[test]
+    fn any_other_load_failure_is_left_to_the_upgrade_check() {
+        let failed: miette::Result<RootConfig> = Err(miette!("not toml"));
+
+        assert!(refuse_moved_sections(failed).unwrap().is_err());
     }
 }
