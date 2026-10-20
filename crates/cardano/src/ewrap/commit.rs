@@ -145,8 +145,8 @@ impl BoundaryWork {
     /// `EpochWrapUp` delta on `EpochState` that closes the boundary
     /// (overwrites `entity.end` with the final stats, rotates
     /// rolling/pparams snapshots, clears `ewrap_progress`). Also writes the
-    /// completed `EpochState` snapshot to the archive, at the start of its
-    /// epoch.
+    /// completed `EpochState` snapshot and the `drep-epochs` rows to the
+    /// archive, at the start of its epoch.
     #[instrument(skip_all)]
     pub fn commit_finalize<D: Domain>(
         &mut self,
