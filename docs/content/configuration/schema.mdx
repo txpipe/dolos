@@ -238,7 +238,7 @@ The `chain` section specifies the type of blockchain to connect to.
 - `type`: the type of chain network.
 - `magic`: Cardano network magic used across upstream sync, relay, and Ouroboros services.
 - `is_testnet`: whether the configured chain is testnet.
-- `stop_epoch`: optional epoch number to stop syncing at.
+- `stop_epoch`: optional epoch number to stop syncing at. The node crosses into that epoch, applies its first block and stops, which is the only state a Stelae snapshot of that epoch is cut from: `dolos snapshot digest` and `verify --reproduce` refuse stores that stand anywhere else.
 
 ## `chain.custom_utxos` section
 

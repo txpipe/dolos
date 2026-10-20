@@ -149,6 +149,29 @@ It is load-bearing because of how boundary data is keyed. **All of epoch X's bou
 
 `sequence`, the immutable tag's E, and `position.epoch` are consequently **one number**: the epoch the cursor stands in, which is also the last epoch the layers cover. The operator-facing form of the same rule is *configure the epoch you want the node to start in* — `stop_epoch = E` produces the stele tagged `epoch-E`.
 
+#### Only the boundary cut is published
+
+**A stele captures the state immediately after the first block of its sequence epoch, and no other state.** The cut above is not one choice among several a publisher may make: every path that builds layers — directory and registry publication, a registry dry run, `dolos snapshot digest` and `verify --reproduce` — establishes it from the stores before a layer is written, and refuses otherwise. The check is `dolos_snapshot::boundary::check`, and the export itself runs it, so a library caller holding a hand-built `Plan` cannot reach the layers without it. There is no flag that skips it.
+
+The evidence is the stores' own, never configuration and never arithmetic on the cursor's slot — a node can be configured for one epoch and stand in another, and an epoch's first block rarely sits on its first slot:
+
+1. The state store's cursor is the plan's point, hash included, and the plan's sequence is the epoch that point stands in.
+2. The archive holds the block at the cursor, identified by its hash among the blocks at its slot.
+3. The block before it in the archive, in chain order, is the block its header names as its parent.
+4. That parent stands before `epoch_start(E)`.
+
+Steps 3 and 4 together prove the cursor is the epoch's first block: the parent link rules out anything between the two, however many empty slots separate them. A Byron epoch-boundary block, which shares its slot with the first main block after it, is the epoch's first block — its parent is the last main block of E-1 — while that main block is its second, whose parent is the boundary block in E.
+
+An archive that cannot show step 3 is **insufficient evidence**, and is refused rather than trusted: one pruned past the parent, or one that begins at the cursor because the node was bootstrapped there. A pruned archive's first remaining block says nothing about what came before it. The refusal names the cursor and the epoch, and says which store to publish from instead.
+
+**Epoch 0 is never published.** No boundary opens it, so a stele at sequence 0 would follow no transition; the first stele of any chain is `epoch-1`.
+
+**A node past the boundary cannot publish that epoch.** Its stores no longer hold the boundary state, and nothing reconstructs it. The refusal says so and points at the remedies: restore the `epoch-E` stele, or let the node run on to the next boundary and cut that one with `stop_epoch = E+1`.
+
+**The stores must be still for the duration.** The check reads them once, before the walk; it does not freeze them, and no cursor check could make an export over stores something else is writing to consistent. Stillness comes from how the stores are opened: the storage backends lock their directories, so no second process — a daemon included — writes to stores a `dolos snapshot` command holds, and an in-process host reads through the headless replay API, whose snapshot is a borrow that no import can run beside.
+
+**Reading is unaffected.** The rule is a publisher eligibility check. A restore, `inspect`, and transport `verify` read any well-formed stele exactly as before. What changes is reproduction: `digest` and `verify --reproduce` only run over stores standing on a boundary, so a historical stele published from mid-epoch stores before this rule can be verified for its transport but no longer reproduced.
+
 ### Position, parameters and the inscription
 
 The inscription's generic shape, canonicalization and history invariant are
@@ -216,9 +239,9 @@ and it counts layers rather than epochs.)
 ### Publisher pipeline
 
 1. Restore the publisher node from the previous stele (self-hosting delta pull; first run via Mithril).
-2. Sync with `chain.stop_epoch = E` until `StopEpochReached` — the state crosses the boundary and lands on the **first block of epoch E**, the block that gives `position.point` a hash.
+2. Sync with `chain.stop_epoch = E` until `StopEpochReached` — the state crosses the boundary and lands on the **first block of epoch E**, the block that gives `position.point` a hash. The publish establishes that from the stores before it writes a layer (see "Only the boundary cut is published").
 3. The Stelae Cardano publisher uploads only the newly closed epoch's layers and epoch E's boundary sliver; fresh state layers + inscription; tag `epoch-E`, move `latest`. On networks with a Mithril aggregator, fetch the immutable-file digest list from the aggregator's digest route, verify it against a certificate, and write the `digests` layer for the files within the boundary.
-4. Determinism job: an independent runner that synced by any means runs `dolos snapshot digest` and alerts on inscription mismatch.
+4. Determinism job: an independent runner that synced to the same boundary by any means runs `dolos snapshot digest` and alerts on inscription mismatch.
 5. Matching verifiers sign and push referrer signatures; clients enforce k-of-n.
 
 Registry hygiene: keep a trailing window of `epoch-E` tags (e.g. 12); untagged state blobs are reclaimed by registry GC; epoch blobs remain referenced by later manifests. Trust evidence for reclaimed steles survives in the `history` of every later inscription.

@@ -17,7 +17,9 @@
 //! rather than to the epoch boundary. That last window is a deliberate sliver,
 //! not an accident: a `stop_epoch = E` sync halts after applying the *first
 //! block of epoch E*, so the window carries that one block together with epoch
-//! E's opening (estart) logs, which key at `epoch_start(E)`.
+//! E's opening (estart) logs, which key at `epoch_start(E)`. [`export`] refuses
+//! stores standing anywhere else before it writes a layer — see
+//! [`crate::boundary`].
 //!
 //! **The network name.** It rides inside the canonical JSON, so it is inside
 //! the stele's identity. [`crate::Network::for_magic`] is the only way to build
@@ -714,6 +716,10 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
+    // Ahead of everything else, so a store set this profile does not publish
+    // from has no layer written for it, whatever transport is in hand.
+    crate::boundary::check(plan, archive, state)?;
+
     stele.observe(observer.clone());
 
     // Ahead of the count as well as of the build: see `refuse_uncovered_logs`.
@@ -2127,8 +2133,10 @@ mod tests {
         );
     }
 
-    /// A stele cut mid-epoch clamps its last window to the cursor, so two
-    /// publishers standing at the same point publish the same windows.
+    /// A plan standing mid-epoch clamps its last window to the cursor. The
+    /// geometry is the plan's to compute whatever the cursor; whether the
+    /// stores may be published from is [`crate::boundary`]'s question, and
+    /// the export refuses this one.
     #[test]
     fn the_last_window_is_clamped_to_the_cursor() {
         let plan = Plan::new(&summary(), Network::for_magic(2), point(250), retained()).unwrap();

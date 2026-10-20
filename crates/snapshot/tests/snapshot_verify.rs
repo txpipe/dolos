@@ -35,11 +35,12 @@
 mod node;
 mod registry_fixture;
 
-use dolos_core::Domain as _;
+use dolos_core::{Domain as _, StateStore as _};
 use dolos_snapshot::{
+    boundary::Ineligible,
     export::{self, Following, Predecessor as _},
-    registry::{self, Point},
-    Error,
+    registry::{self, Point, Publishing},
+    DolosProfile, Error,
 };
 use serde_json::json;
 use stelae::Digest;
@@ -47,7 +48,7 @@ use stelae::Digest;
 use node::Node;
 use registry_fixture::Fixture;
 
-/// Layers epoch 0 contributes, and therefore what sequence 1 inherits:
+/// Layers epoch 0 contributes, and therefore what sequence 2 inherits:
 /// `blocks`, `indexes`, and the two log layers the harness seeds. The other
 /// log kinds have no records in the window, so they have no layer.
 const EPOCH_0: usize = 4;
@@ -89,12 +90,12 @@ fn a_freshly_published_stele_verifies_clean() {
     assert!(verified.compressed_bytes > 0);
 
     // The immutable tag reads the predecessor back just as clean.
-    let predecessor = reader.verify(Point::Epoch(0)).unwrap();
+    let predecessor = reader.verify(Point::Epoch(1)).unwrap();
 
     assert_eq!(predecessor.identity, first.identity);
 
     eprintln!(
-        "verified latest = {} ({} layers, {} compressed bytes) and epoch-0 = {}",
+        "verified latest = {} ({} layers, {} compressed bytes) and epoch-1 = {}",
         verified.identity,
         verified.inscription.layers.len(),
         verified.compressed_bytes,
@@ -203,13 +204,13 @@ fn a_history_that_skips_a_sequence_is_refused() {
     let first = node.publish(&repository, &node.first, false);
     let second = node.publish(&repository, &node.second, false);
 
-    // Sequence 3 claiming a history of 0 and 2: the entries themselves ascend,
-    // and the chain still skips sequence 1.
+    // Sequence 4 claiming a history of 1 and 3: the entries themselves ascend,
+    // and the chain still skips sequence 2.
     let mut gapped = serde_json::to_value(&second.inscription).unwrap();
-    gapped["sequence"] = json!(3);
+    gapped["sequence"] = json!(4);
     gapped["history"] = json!([
-        {"sequence": 0, "inscriptionDigest": first.identity.to_string()},
-        {"sequence": 2, "inscriptionDigest": second.identity.to_string()},
+        {"sequence": 1, "inscriptionDigest": first.identity.to_string()},
+        {"sequence": 3, "inscriptionDigest": second.identity.to_string()},
     ]);
 
     let config = stelae::inscription::canonical_json(&gapped).unwrap();
@@ -224,7 +225,7 @@ fn a_history_that_skips_a_sequence_is_refused() {
     let message = err.to_string();
 
     assert!(message.contains("gap"), "{message}");
-    assert!(message.contains('0') && message.contains('2'), "{message}");
+    assert!(message.contains('1') && message.contains('3'), "{message}");
 
     eprintln!("skipped sequence: {message}");
 }
@@ -273,8 +274,8 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
     let err = export::verify_reproduction(
         &verified.inscription,
         &node.first,
-        node.domain.archive(),
-        node.domain.state(),
+        node.earlier.archive(),
+        node.earlier.state(),
         None,
     )
     .unwrap_err();
@@ -283,7 +284,7 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
 
     assert!(matches!(err, Error::ReproductionMismatch { .. }), "{err:?}");
     assert!(
-        message.contains("sequence 1") && message.contains("sequence 0"),
+        message.contains("sequence 2") && message.contains("sequence 1"),
         "{message}"
     );
 
@@ -292,6 +293,56 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
         reproduced.digest().unwrap(),
         verified.identity,
     );
+}
+
+/// A registry publish and its dry run refuse stores past their boundary, and
+/// the refusal comes before the repository is touched: nothing is published,
+/// and a stele at the boundary still publishes into it afterwards.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_registry_publish_and_its_dry_run_refuse_a_cursor_past_the_boundary() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let repository = fixture.repository("dolos/boundary");
+
+    let past = node::harness::<dolos_testing::toy_domain::MemoryStores>();
+    let first = past.state().read_cursor().unwrap().unwrap();
+    node::step_past_boundary(&past);
+    let plan = node::plan_for(&past);
+
+    let refused = |err: Error| match err {
+        Error::NotABoundary { reason, .. } => reason,
+        other => panic!("{other:?}"),
+    };
+
+    let expected = Ineligible::LaterBlock { parent: first };
+
+    let preview = registry::preview(
+        Publishing::new(&repository),
+        &plan,
+        past.archive(),
+        past.state(),
+        None,
+    );
+    assert_eq!(refused(preview.unwrap_err()), expected);
+
+    let publish = registry::publish(
+        Publishing::new(&repository),
+        &plan,
+        past.archive(),
+        past.state(),
+        None,
+        &stelae::progress::Observer::silent(),
+    );
+    assert_eq!(refused(publish.unwrap_err()), expected);
+
+    assert!(
+        repository.latest(&DolosProfile).unwrap().is_none(),
+        "a refused publish left a stele behind"
+    );
+
+    let published = node.publish(&repository, &node.first, false);
+    assert_eq!(published.inscription.sequence, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +390,7 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
     assert_eq!(total, inspected.total_compressed);
 
     // The `--json` output is the canonical document, verbatim.
-    let predecessor = reader.inspect(Point::Epoch(0)).unwrap();
+    let predecessor = reader.inspect(Point::Epoch(1)).unwrap();
 
     assert_eq!(predecessor.identity, first.identity);
 
@@ -364,7 +415,7 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
     );
 
     eprintln!(
-        "inspected {} layers, {} compressed bytes; epoch-0's document chained to {}",
+        "inspected {} layers, {} compressed bytes; epoch-1's document chained to {}",
         inspected.inscription.layers.len(),
         inspected.total_compressed,
         reproduced.digest().unwrap(),

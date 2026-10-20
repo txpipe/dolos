@@ -16,7 +16,10 @@
 //!   kind and scope by scope, then the whole inscription digest, which is what
 //!   a Phase 5 signature will be over. This is the check that closes the
 //!   incremental publish's trust gap: a layer inherited rather than rebuilt was
-//!   attested without being reproduced, until something runs this.
+//!   attested without being reproduced, until something runs this. It runs only
+//!   over stores standing on the first block of the stele's epoch, the one
+//!   state a stele is cut from (`crates/snapshot/PROFILE.md`, "Only the
+//!   boundary cut is published").
 //!
 //! ## What a pass does not prove
 //!
@@ -65,9 +68,10 @@ pub struct Args {
     insecure: bool,
 
     /// also rebuild every layer from this node's stores and require the result
-    /// to be byte-identical to the published inscription. Costs what a publish
-    /// costs — hours on mainnet — which is why it is opt-in and does not
-    /// belong in a pre-flight
+    /// to be byte-identical to the published inscription. The stores must
+    /// stand on the first block of the stele's epoch, as a `stop_epoch` sync
+    /// leaves them. Costs what a publish costs — hours on mainnet — which is
+    /// why it is opt-in and does not belong in a pre-flight
     #[arg(long, action)]
     reproduce: bool,
 
@@ -204,7 +208,7 @@ fn reproduction(config: &RootConfig, args: &Args) -> miette::Result<(crate::comm
         producers: args.producers,
     };
 
-    let plan = super::planned(
+    let (plan, boundary) = super::planned(
         config,
         &stores,
         &selection,
@@ -212,7 +216,7 @@ fn reproduction(config: &RootConfig, args: &Args) -> miette::Result<(crate::comm
         "planning the reproduction",
     )?;
 
-    super::report_plan(&plan)?;
+    super::report_plan(&plan, &boundary)?;
 
     Ok((stores, plan))
 }

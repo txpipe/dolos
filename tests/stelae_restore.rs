@@ -79,6 +79,7 @@ fn wal_tip(node: &Node) -> Option<dolos_core::ChainPoint> {
 fn a_directory_stele_restores_the_node_that_encoded_it() {
     let node = Node::new();
     node.sync();
+    node.stand_at_boundary();
 
     let before = Contents::read(&node);
     before.assert_populated();
@@ -101,6 +102,7 @@ fn a_directory_stele_restores_the_node_that_encoded_it() {
 fn a_stele_restores_into_a_directory_that_does_not_exist() {
     let node = Node::new();
     node.sync();
+    node.stand_at_boundary();
 
     let before = Contents::read(&node);
 
@@ -378,6 +380,7 @@ fn a_decision_that_needs_no_command_does_not_ask_for_one() {
 fn a_restored_node_has_a_wal_seeded_from_its_own_cursor() {
     let node = Node::new();
     node.sync();
+    node.stand_at_boundary();
 
     assert_eq!(
         wal_tip(&node),

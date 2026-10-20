@@ -393,6 +393,7 @@ fn verify_refuses_a_bad_state_epoch_list_before_streaming() {
 fn digest_plans_with_the_given_state_epochs() {
     let node = Node::new();
     node.sync();
+    node.stand_at_boundary();
 
     let epochs = node.root.path().join("epochs.txt");
     std::fs::write(&epochs, "208\n236\n").unwrap();
@@ -421,6 +422,32 @@ fn digest_plans_with_the_given_state_epochs() {
     }
 }
 
+/// `snapshot digest` refuses stores that are not standing on an epoch's first
+/// block, says where they stand and what to do, and writes no document.
+#[test]
+fn digest_refuses_stores_off_the_boundary() {
+    let node = Node::new();
+    node.sync();
+
+    let inscription = node.root.path().join("inscription.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_dolos"))
+        .arg("--config")
+        .arg(node.config_path())
+        .args(["snapshot", "digest", "--output"])
+        .arg(&inscription)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    let message = stderr(&output);
+
+    assert!(!output.status.success(), "{message}");
+    assert!(message.contains("epoch-0 boundary cut"), "{message}");
+    assert!(message.contains("chain.stop_epoch = 1"), "{message}");
+    assert!(!inscription.exists(), "a refused digest wrote a document");
+}
+
 /// `snapshot verify --reproduce` plans with the retained epochs it is given,
 /// from the list or from a file, and reports that plan before it reads the
 /// registry.
@@ -428,6 +455,7 @@ fn digest_plans_with_the_given_state_epochs() {
 fn verify_reproduces_with_the_given_state_epochs() {
     let node = Node::new();
     node.sync();
+    node.stand_at_boundary();
 
     let epochs = node.root.path().join("epochs.txt");
     std::fs::write(&epochs, "208\n236\n").unwrap();
