@@ -1529,7 +1529,13 @@ fn an_archive_past_a_boundary_state_publishes_the_state_cursor() {
     assert_eq!(plan.cursor, boundary);
 
     let temp = tempfile::tempdir().unwrap();
-    export_plan(temp.path(), &domain, &plan);
+    let published = export_plan(temp.path(), &domain, &plan);
+
+    // The block past the cursor stays out: the stele is the one the same stores
+    // publish without it.
+    let bare: ToyDomain = harness();
+    let temp = tempfile::tempdir().unwrap();
+    assert_eq!(published.layers, export_to(temp.path(), &bare).layers);
 
     let ahead = Plan {
         cursor: tip,
