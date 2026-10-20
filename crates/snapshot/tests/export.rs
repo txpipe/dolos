@@ -1525,14 +1525,30 @@ fn an_archive_past_a_boundary_state_publishes_the_state_cursor() {
     let boundary = domain.state().read_cursor().unwrap().unwrap();
     let tip = extend_archive_past_cursor(&domain);
 
+    // The rebuild keeps the original sync's log rows past the cursor: one per
+    // namespace, in the sliver's epoch.
+    let writer = domain.archive().start_writer().unwrap();
+
+    for (i, ns) in LOG_NAMESPACES.into_iter().enumerate() {
+        writer
+            .write_log(
+                ns,
+                &common::log_key(ns, tip.slot(), 0x30 + i as u8),
+                &vec![0x81, i as u8],
+            )
+            .unwrap();
+    }
+
+    writer.commit().unwrap();
+
     let plan = plan_for(&domain);
     assert_eq!(plan.cursor, boundary);
 
     let temp = tempfile::tempdir().unwrap();
     let published = export_plan(temp.path(), &domain, &plan);
 
-    // The block past the cursor stays out: the stele is the one the same stores
-    // publish without it.
+    // The block and the logs past the cursor stay out: the stele is the one the
+    // same stores publish without them.
     let bare: ToyDomain = harness();
     let temp = tempfile::tempdir().unwrap();
     assert_eq!(published.layers, export_to(temp.path(), &bare).layers);
@@ -1564,6 +1580,56 @@ fn an_archive_past_a_boundary_state_publishes_the_state_cursor() {
                     stored: Some(boundary)
                 }
             )
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
+}
+
+/// A block after the cursor's at the cursor's own slot, as a Byron main block
+/// sits beside the boundary block it follows, is refused before a layer. The
+/// last window ends at that slot, and its index and log records carry no block
+/// hash to leave the extra block's out by.
+#[test]
+fn a_block_beside_the_cursor_at_its_slot_is_refused_before_a_layer() {
+    let domain: ToyDomain = harness();
+
+    let cursor = domain.state().read_cursor().unwrap().unwrap();
+    let body = domain
+        .archive()
+        .get_block_by_slot(&cursor.slot())
+        .unwrap()
+        .unwrap();
+    let number = MultiEraBlock::decode(&body).unwrap().number();
+
+    let (beside, beside_body) =
+        make_conway_block_with_prev(cursor.slot(), cursor.hash(), number + 1);
+
+    let archive = domain.archive().start_writer().unwrap();
+    archive.apply(&beside, &beside_body).unwrap();
+    archive.commit().unwrap();
+
+    let plan = plan_for(&domain);
+    assert_eq!(plan.cursor, cursor);
+
+    let watcher = Arc::new(Watcher::default());
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let refused = export::export(
+        &stele,
+        &plan,
+        domain.archive(),
+        domain.state(),
+        None,
+        &export::First,
+        &watcher.observer(),
+    );
+
+    match refused {
+        Err(dolos_snapshot::Error::NotABoundary { reason, .. }) => {
+            assert_eq!(reason, Ineligible::SharedSlot { next: beside })
         }
         other => panic!("{other:?}"),
     }

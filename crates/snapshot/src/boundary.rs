@@ -17,6 +17,13 @@
 //! Byron epoch-boundary block, which shares its slot with the first main block
 //! after it, is the first block of its epoch while that main block is not.
 //!
+//! The archive must hold nothing after the cursor's block at the cursor's slot.
+//! The last window ends at that slot, and index and log records carry a slot
+//! but no block hash, so a Byron main block beside the boundary block would
+//! put its records in the stele. A `stop_epoch` sync stops on the boundary
+//! block and never stores the main block; an archive that does hold it is
+//! refused.
+//!
 //! Neither the configured `stop_epoch` nor the cursor's slot is evidence: a
 //! node can be configured one way and stand somewhere else, and an epoch's
 //! first block rarely sits on its first slot. An archive that does not reach
@@ -68,6 +75,8 @@ pub enum Ineligible {
     BrokenChain { predecessor: ChainPoint },
     /// The cursor's parent is already in the sequence epoch.
     LaterBlock { parent: ChainPoint },
+    /// The archive holds a block after the cursor's at the cursor's slot.
+    SharedSlot { next: ChainPoint },
 }
 
 impl std::fmt::Display for Ineligible {
@@ -115,6 +124,13 @@ impl std::fmt::Display for Ineligible {
                  the epoch's first block and the boundary state is no longer in these stores; \
                  restore the stele for this epoch, or cut the next one by syncing with \
                  chain.stop_epoch set to the following epoch"
+            ),
+            Self::SharedSlot { next } => write!(
+                f,
+                "the archive also holds {next} at the cursor's slot, after the cursor's block; \
+                 index and log records carry no block hash, so that block's records cannot be \
+                 left out of the stele; publish from a node whose archive ends at the cursor, \
+                 as a chain.stop_epoch sync leaves it"
             ),
         }
     }
@@ -202,6 +218,12 @@ fn evidence<A: ArchiveStore>(
 
     if parent_slot >= summary.epoch_start(epoch) {
         return Err(refuse(Ineligible::LaterBlock { parent }));
+    }
+
+    if let Some(after) = at_slot.get(position + 1) {
+        let next = ChainPoint::Specific(slot, decode(slot, after)?.hash());
+
+        return Err(refuse(Ineligible::SharedSlot { next }));
     }
 
     Ok(Boundary {
@@ -449,24 +471,48 @@ mod tests {
         );
     }
 
+    /// A Byron boundary block, then the first main block after it at the same
+    /// slot: the chain a stop_epoch sync over a Byron epoch stores past.
+    fn byron_boundary() -> [(ChainPoint, dolos_core::RawBlock); 3] {
+        let last = make_conway_block_with_prev(byron_ebb_slot(1) - 2, None, 1);
+        let ebb = make_byron_ebb(1, last.0.hash().unwrap());
+        let main = make_conway_block_with_prev(byron_ebb_slot(1), ebb.0.hash(), 2);
+
+        [last, ebb, main]
+    }
+
     /// A Byron boundary block opens its epoch and shares its slot with the
     /// first main block after it. The boundary block is the epoch's first
     /// block; the main block is its second.
     #[test]
     fn a_byron_boundary_block_is_first_and_the_main_block_beside_it_is_not() {
         let summary = summary(BYRON_EPOCH_LENGTH);
-        let last = make_conway_block_with_prev(byron_ebb_slot(1) - 2, None, 1);
-        let ebb = make_byron_ebb(1, last.0.hash().unwrap());
-        let main = make_conway_block_with_prev(byron_ebb_slot(1), ebb.0.hash(), 2);
-        let blocks = [last.clone(), ebb.clone(), main.clone()];
+        let [last, ebb, main] = byron_boundary();
 
-        let boundary = judge(&summary, &blocks, &ebb.0).unwrap();
+        let boundary = judge(&summary, &[last.clone(), ebb.clone()], &ebb.0).unwrap();
         assert_eq!(boundary.epoch, 1);
         assert_eq!(boundary.parent, last.0);
 
         assert_eq!(
-            reason(judge(&summary, &blocks, &main.0)),
+            reason(judge(&summary, &[last, ebb.clone(), main.clone()], &main.0)),
             Ineligible::LaterBlock { parent: ebb.0 }
+        );
+    }
+
+    /// Stores rebuilt to a Byron boundary beside an archive that kept syncing
+    /// hold the main block at the boundary block's slot, and its index and
+    /// log records are indistinguishable from the boundary block's.
+    #[test]
+    fn a_block_after_the_cursor_at_its_slot_is_refused() {
+        let summary = summary(BYRON_EPOCH_LENGTH);
+        let blocks = byron_boundary();
+        let [_, ebb, main] = &blocks;
+
+        assert_eq!(
+            reason(judge(&summary, &blocks, &ebb.0)),
+            Ineligible::SharedSlot {
+                next: main.0.clone()
+            }
         );
     }
 }

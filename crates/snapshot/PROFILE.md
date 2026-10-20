@@ -159,8 +159,11 @@ The evidence is the stores' own, never configuration and never arithmetic on the
 2. The archive holds the block at the cursor, identified by its hash among the blocks at its slot.
 3. The block before it in the archive, in chain order, is the block its header names as its parent.
 4. That parent stands before `epoch_start(E)`.
+5. The archive holds no block after the cursor's at the cursor's slot.
 
 Steps 3 and 4 together prove the cursor is the epoch's first block: the parent link rules out anything between the two, however many empty slots separate them. A Byron epoch-boundary block, which shares its slot with the first main block after it, is the epoch's first block — its parent is the last main block of E-1 — while that main block is its second, whose parent is the boundary block in E.
+
+Step 5 keeps the sliver to the cursor. The last window ends at the cursor's slot, and index and log records carry a slot but no block hash, so a main block beside a Byron boundary block would put its records in the stele. A `stop_epoch` sync stops on the boundary block and never stores that main block. An archive that does hold it is one that ran on past a rebuilt state, such as `doctor rebuild-state --stop-epoch` over a synced archive, and it is refused.
 
 An archive that cannot show step 3 is **insufficient evidence**, and is refused rather than trusted: one pruned past the parent, or one that begins at the cursor because the node was bootstrapped there. A pruned archive's first remaining block says nothing about what came before it. The refusal names the cursor and the epoch, and says which store to publish from instead.
 
