@@ -663,6 +663,110 @@ fn the_given_file_is_not_merged_with_the_default_one() {
     );
 }
 
+/// Every fixture, as a path under `tests/fixtures/config/`.
+fn every_fixture(dir: &Path, prefix: &str, found: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = format!("{prefix}{}", path.file_name().unwrap().to_string_lossy());
+
+        if path.is_dir() {
+            every_fixture(&path, &format!("{name}/"), found);
+        } else {
+            found.push(name);
+        }
+    }
+}
+
+/// The reference examples at the top of `tests/fixtures/config/` pass; every
+/// fixture in a subdirectory is refused. Neither creates anything, though no
+/// store directory exists.
+#[test]
+fn config_check_exits_by_each_fixtures_verdict() {
+    let mut fixtures = Vec::new();
+    every_fixture(&fixture(""), "", &mut fixtures);
+    assert!(fixtures.len() > 20, "{fixtures:?}");
+
+    for name in fixtures {
+        let (dir, path) = beside_genesis(&name, 42);
+        let before = std::fs::read_dir(dir.path()).unwrap().count();
+
+        let output = run_dolos(
+            dir.path(),
+            &["--config", path.to_str().unwrap(), "config", "check"],
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        let accepted = !name.contains('/');
+        assert_eq!(
+            output.status.success(),
+            accepted,
+            "{name}: {stdout}{stderr}"
+        );
+
+        if accepted {
+            assert!(stdout.starts_with("valid: "), "{name}: {stdout}");
+        }
+
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            before,
+            "{name}: check created a file"
+        );
+    }
+}
+
+/// What `config check` resolves a known network's fjall stores to.
+#[test]
+fn config_check_prints_the_network_and_stores() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture("ordinary.toml"), dir.path().join("dolos.toml")).unwrap();
+
+    let output = run_dolos(dir.path(), &["config", "check"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "{stdout}");
+    for line in [
+        "valid: dolos.toml",
+        "network: mainnet (magic 764824073, mainnet)",
+        "state: fjall (standard) at data/state",
+        "wal: data/wal",
+        "archive: fjall (standard) at data/archive",
+    ] {
+        assert!(stdout.contains(line), "{line}: {stdout}");
+    }
+
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+/// `init --config` checks the file it names: an alpha.0 file there is
+/// reported and kept, and no `./dolos.toml` appears.
+#[test]
+fn init_refuses_an_older_file_at_the_selected_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("other.toml");
+    std::fs::copy(fixture("legacy/v2.0.0-alpha.0-sync-mainnet.toml"), &path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let output = run_dolos(
+        dir.path(),
+        &[
+            "--config",
+            path.to_str().unwrap(),
+            "init",
+            "--known-network",
+            "preview",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains(MIGRATION_GUIDE_URL), "{stderr}");
+    assert!(stderr.contains("untouched"), "{stderr}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!dir.path().join("dolos.toml").exists());
+}
+
 /// `run` with `variables` set, and unset again whatever it returns.
 fn with_env<T>(variables: &[(&str, &std::ffi::OsStr)], run: impl FnOnce() -> T) -> T {
     for (name, value) in variables {

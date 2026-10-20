@@ -1,5 +1,7 @@
 use dolos_cardano::networks::ResolvedNetwork;
-use dolos_core::config::{ConfigError, LoggingConfig, RootConfig, TelemetryConfig};
+use dolos_core::config::{
+    ConfigError, LoggingConfig, RootConfig, TelemetryConfig, DEFAULT_CONFIG_FILE,
+};
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
 use opentelemetry::trace::TracerProvider as _;
@@ -44,6 +46,12 @@ pub fn open_state_store(config: &RootConfig) -> Result<storage::StateStoreBacken
 
 pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
     storage::open_data_stores(config)
+}
+
+/// The configuration file a command reads and `init` writes: `--config`, else
+/// `./dolos.toml`.
+pub fn config_file(explicit: Option<&Path>) -> &Path {
+    explicit.unwrap_or(Path::new(DEFAULT_CONFIG_FILE))
 }
 
 /// Load the configuration, resolve its network against the catalog and parse
