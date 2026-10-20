@@ -103,7 +103,7 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 
 A state row under a log-only namespace (`—` in the state key column) is never written; one that arrives is held to the log's key kind.
 
-`state-gov` carries the one `GovState` value. Field 9, `dissolved_committee`, is the last seated committee while a no-confidence keeps the committee dissolved, as `[committee, auths, action, epoch, seated_by]`: the members and threshold, each member's authorization history as it stood, the enacted `NoConfidence` action id, the first epoch without a seated committee, and the action id that seated the committee (null for the Conway-genesis committee). It is absent while a committee is seated.
+`state-gov` carries the one `GovState` value. Field 9, `dissolved_committee`, is the last seated committee while a no-confidence keeps the committee dissolved, as `[committee, auths, action, epoch, seated_by]`: the members and threshold, each member's authorization history as it stood, the enacted `NoConfidence` action id, the first epoch without a seated committee, and the action id that seated the committee, absent for the Conway-genesis committee, which leaves a four-element array. It is absent while a committee is seated.
 
 `state-metadata-labels` carries `MetadataLabelState` values as CBOR `[tx_count: uint]`, with `tx_count` at field 0. Its key is the metadata label in big-endian byte order. Revision 2 uses the exact 8-byte u64 key; the value encoding is unchanged.
 

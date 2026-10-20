@@ -7482,6 +7482,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn governance_committee_dissolved_genesis_has_no_seating_action() {
+        // A NoConfidence that dissolves the Conway-genesis committee keeps no
+        // seating action. The endpoint serves null action fields, not the
+        // NoConfidence the committee root now holds.
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                let action = GovActionId {
+                    transaction_id: Hash::from([9u8; 32]),
+                    action_index: 1,
+                };
+
+                let committee = dolos_cardano::model::gov::Committee {
+                    members: BTreeMap::from([(cc_cold_key(1), 100)]),
+                    threshold: RationalNumber {
+                        numerator: 2,
+                        denominator: 3,
+                    },
+                };
+
+                seed_gov(
+                    domain,
+                    GovState {
+                        prev_gov_action_ids: dolos_cardano::model::gov::GovRoots {
+                            committee: Some(action.clone()),
+                            ..Default::default()
+                        },
+                        active_since: Some(0),
+                        dissolved_committee: Some(dolos_cardano::model::gov::DissolvedCommittee {
+                            committee,
+                            auths: BTreeMap::new(),
+                            action,
+                            epoch: 5,
+                            seated_by: None,
+                        }),
+                        ..Default::default()
+                    },
+                );
+            });
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        assert!(model.is_dissolved);
+        assert_eq!(model.members.len(), 1);
+        assert!(model.gov_action_id.is_none());
+        assert!(model.proposal_tx_hash.is_none());
+        assert!(model.proposal_index.is_none());
+    }
+
+    #[tokio::test]
     async fn governance_committee_pre_conway_returns_not_found() {
         // Before governance activates, the singleton exists but `active_since`
         // is unset. No committee exists, so the endpoint returns 404 instead of
