@@ -347,3 +347,21 @@ impl CoreStateStore for StateStore {
         Ok(utxos::UtxosIterator::new(&snapshot, &self.utxos))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preset::assert_fjall_holds;
+
+    #[test]
+    fn a_reopened_store_holds_its_preset() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let store = StateStore::open(dir.path(), Preset::Standard).unwrap();
+        store.shutdown().unwrap();
+        drop(store);
+
+        let store = StateStore::open(dir.path(), Preset::Standard).unwrap();
+        assert_fjall_holds(store.database(), &store.tuning());
+    }
+}

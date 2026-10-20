@@ -1545,6 +1545,20 @@ mod tests {
     }
 
     #[test]
+    fn a_reopened_store_holds_its_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        let open =
+            || ArchiveStore::open(StateSchema::default(), dir.path(), None, Preset::Standard);
+
+        let store = open().unwrap();
+        store.shutdown().unwrap();
+        drop(store);
+
+        let store = open().unwrap();
+        crate::preset::assert_fjall_holds(store.database(), &store.tuning());
+    }
+
+    #[test]
     fn reopen_finishes_index_cleanup_without_new_blocks() {
         let dir = tempfile::tempdir().unwrap();
         let mut deltas = vec![

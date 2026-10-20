@@ -131,3 +131,51 @@ fn fjall_section(
         "keyspaces": serde_json::Value::Object(keyspaces),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dolos_fjall::archive::ArchiveStore;
+    use dolos_fjall::{Preset, StateStore};
+
+    fn assert_reports(section: &serde_json::Value, tuning: &dolos_fjall::preset::Tuning) {
+        assert_eq!(
+            section["tuning"],
+            json!({
+                "preset": "standard",
+                "cache_mb": 500,
+                "journal_mb": 512,
+                "workers": tuning.workers,
+                "flush_on_commit": false,
+            })
+        );
+
+        for (name, row) in &tuning.keyspaces {
+            assert_eq!(
+                section["keyspaces"][name]["tuning"],
+                json!({
+                    "memtable_mb": row.memtable_mb,
+                    "compaction": {
+                        "strategy": "leveled",
+                        "l0_threshold": row.l0_threshold,
+                        "table_mb": row.table_mb,
+                        "level_ratio": row.level_ratio,
+                    },
+                }),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn fjall_stores_report_their_tuning() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(dir.path(), Preset::Standard).unwrap();
+        let tuning = state.tuning();
+        assert_reports(&fjall_section(state.disk_usage(), &tuning), &tuning);
+
+        let archive = ArchiveStore::for_tempdir(Default::default()).unwrap();
+        let tuning = archive.tuning();
+        assert_reports(&fjall_section(archive.disk_usage(), &tuning), &tuning);
+    }
+}

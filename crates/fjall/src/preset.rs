@@ -1,8 +1,11 @@
 //! The tuning a Fjall store opens with.
 //!
 //! Tuning is chosen by name, never field by field: a preset is one table per
-//! store that sets every value Dolos relies on, Fjall's own defaults included,
-//! so that upgrading Fjall cannot change them silently.
+//! store that sets its cache, journal size, workers, flush-on-commit, and each
+//! keyspace's memtable size and leveled compaction. Those values reach Fjall
+//! explicitly, Fjall's own defaults among them, so upgrading Fjall cannot move
+//! them. Block size, compression, filters and journal compression are not
+//! set, and follow Fjall's defaults.
 //!
 //! Fjall records a keyspace's memtable size and compaction strategy when it
 //! creates the keyspace and keeps them for its lifetime, so a preset's keyspace
@@ -236,6 +239,49 @@ impl Display for Tuning {
     }
 }
 
+/// Asserts that Fjall holds `tuning` for `db`: its cache, the store's
+/// keyspaces and each one's leveled compaction, read back from what Fjall
+/// persisted. Fjall keeps the memtable size, journal size and worker count
+/// private, so those are not read back.
+#[cfg(test)]
+pub(crate) fn assert_fjall_holds(db: &Database, tuning: &Tuning) {
+    assert_eq!(db.cache_capacity(), tuning.cache_mb * MIB, "cache");
+
+    let mut reported: Vec<&str> = tuning.keyspaces.iter().map(|(name, _)| *name).collect();
+    reported.sort_unstable();
+    let mut held: Vec<String> = db
+        .list_keyspace_names()
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    held.sort_unstable();
+    assert_eq!(held, reported, "keyspaces");
+
+    for (name, row) in &tuning.keyspaces {
+        let keyspace = db.keyspace(name, KeyspaceCreateOptions::default).unwrap();
+        let strategy = &keyspace.config.compaction_strategy;
+
+        let held: Vec<(String, Vec<u8>)> = strategy
+            .get_config()
+            .into_iter()
+            .map(|(key, value)| (String::from_utf8(key.to_vec()).unwrap(), value.to_vec()))
+            .collect();
+
+        let ratio = [&[1u8][..], &f32::from(row.level_ratio).to_le_bytes()].concat();
+        let expected = vec![
+            ("leveled_l0_threshold".to_string(), vec![row.l0_threshold]),
+            (
+                "leveled_target_size".to_string(),
+                (row.table_mb * MIB).to_le_bytes().to_vec(),
+            ),
+            ("leveled_level_ratio_policy".to_string(), ratio),
+        ];
+
+        assert_eq!(strategy.get_name(), "LeveledCompaction", "{name}");
+        assert_eq!(held, expected, "{name}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,9 +289,8 @@ mod tests {
     /// The values the pre-preset code applied to a default-configured store:
     /// its own cache and index constants, and Fjall 3.1.0's defaults where it
     /// set nothing (`Config::new`, `CreateOptions::default`,
-    /// `Leveled::default`). Written out rather than read from Fjall, so a
-    /// Fjall upgrade that moves a default fails here instead of retuning
-    /// stores.
+    /// `Leveled::default`). Written out rather than built from the preset's
+    /// own constants, so an edit to a `STANDARD` row fails here.
     const PRIMARY: KeyspaceTuning = KeyspaceTuning {
         memtable_mb: 64,
         l0_threshold: 4,

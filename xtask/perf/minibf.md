@@ -101,3 +101,7 @@ These are provisional experiment budgets, not a production SLO; use more samples
 for p99. Optional `--p95-budget-ms`/`--p99-budget-ms` apply to
 both arms. Missing, duplicate, incompatible, failed or undersampled evidence cannot
 pass. Confirm synthetic findings with [real-node calibration](http.md).
+
+Arms pair only when their records carry the same `settings`. A baseline from
+before Fjall presets records `cache_mib_per_store` where newer ones record
+`preset`, so every row of such a comparison reads `UNPAIRED` and the check fails.

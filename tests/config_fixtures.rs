@@ -352,6 +352,10 @@ fn each_rule_refuses_its_fixture() {
             "store-tuning-field",
             "in `[storage.state]`, tuning is set by `preset`; remove `cache`",
         ),
+        (
+            "archive-tuning-field",
+            "in `[storage.archive]`, tuning is set by `preset`; remove `worker_threads`",
+        ),
         ("unknown-field", "unknown field `version`"),
         ("moved-section", "[mithril] moved to"),
     ] {
