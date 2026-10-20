@@ -206,6 +206,12 @@ impl BoundaryWork {
         let start_of_epoch = self.chain_summary.epoch_start(self.ending_state().number);
         archive_writer.write_log_typed(start_of_epoch, &(), self.ending_state())?;
 
+        let drep_epoch_slot = self.drep_epoch_slot();
+        debug!(log_count = self.drep_logs.len(), "writing drep-epochs logs");
+        for (drep, log) in self.drep_logs.drain(..) {
+            archive_writer.write_log_typed(drep_epoch_slot, &drep, &log)?;
+        }
+
         if !self.deltas.entities.is_empty() {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted ewrap deltas");
         }

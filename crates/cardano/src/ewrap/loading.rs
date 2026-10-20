@@ -9,7 +9,7 @@
 //! incentives) is built by `new_empty`.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 
@@ -24,8 +24,8 @@ use crate::{
     load_era_summary, load_gov, pallas_extras,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
-    AccountKey, AccountState, ChainSummary, DRepKey, DRepSnapshotEntry, DRepState, EraKey,
-    PendingMirState, PendingRewardState, PoolHash, PoolKey, PoolState, ProposalAction,
+    AccountKey, AccountState, ChainSummary, DRepEpochLog, DRepKey, DRepSnapshotEntry, DRepState,
+    EraKey, PendingMirState, PendingRewardState, PoolHash, PoolKey, PoolState, ProposalAction,
     ProposalOutcome, ProposalState,
 };
 
@@ -131,6 +131,7 @@ impl BoundaryWork {
             dropping_proposals: Default::default(),
             deltas: WorkDeltas::default(),
             logs: Default::default(),
+            drep_logs: Default::default(),
             applied_reward_credentials: Default::default(),
             applied_rewards: Default::default(),
             deliverable_withdrawal_targets: Default::default(),
@@ -1647,6 +1648,9 @@ impl BoundaryWork {
             distr
         });
 
+        let boundary_slot = self.chain_summary.epoch_start(self.ending_state.number + 1);
+        let mut registered_dreps = BTreeSet::new();
+
         let dreps = state.iter_entities_typed::<DRepState>(None)?;
         for record in dreps {
             let (drep_id, drep) = record?;
@@ -1658,6 +1662,31 @@ impl BoundaryWork {
             if let Some(distr) = drep_power.as_ref() {
                 self.emit_drep_power_update(distr, &drep_id, &drep);
             }
+
+            if Self::is_drep_registered_at_boundary(&drep, boundary_slot) {
+                registered_dreps.insert(drep.identifier);
+            }
+        }
+
+        // One `drep-epochs` row per distribution entry, at its full value.
+        if let Some(distr) = drep_power {
+            self.drep_logs = distr
+                .into_iter()
+                .map(|(drep, voting_power)| {
+                    let registered = match &drep {
+                        DRep::Abstain | DRep::NoConfidence => true,
+                        _ => registered_dreps.contains(&drep),
+                    };
+
+                    (
+                        DRepKey::from(drep),
+                        DRepEpochLog {
+                            voting_power,
+                            registered,
+                        },
+                    )
+                })
+                .collect();
         }
 
         // Active proposals + enacting + dropping.
@@ -1716,7 +1745,9 @@ impl BoundaryWork {
 mod tests {
     use std::collections::BTreeMap;
 
-    use dolos_core::{Domain as _, EntityDelta as _, StateStore as _, StateWriter as _};
+    use dolos_core::{
+        ArchiveStore as _, Domain as _, EntityDelta as _, StateStore as _, StateWriter as _,
+    };
     use dolos_testing::toy_domain::ToyDomain;
     use pallas::ledger::primitives::StakeCredential;
 
@@ -2091,6 +2122,110 @@ mod tests {
         assert_eq!(read_drep_power(&domain, &reg_drep()), 147);
         assert_eq!(read_drep_power(&domain, &fresh_drep()), 0);
         assert_eq!(read_drep_power(&domain, &unreg_drep()), 0);
+    }
+
+    fn script_drep() -> DRep {
+        DRep::Script([4u8; 28].into())
+    }
+
+    fn drep_epochs(domain: &ToyDomain) -> Vec<(BlockSlot, DRepKey, DRepEpochLog)> {
+        domain
+            .archive()
+            .iter_logs_typed::<DRepEpochLog>(None)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// Finalize archives one `drep-epochs` row per entry of the completed
+    /// distribution, at its full value and under the epoch the distribution
+    /// is labelled with: the registered DReps and the unregistered one in it,
+    /// and both pseudo-DReps, which count as registered. The DRep registered
+    /// after the boundary is outside the distribution and has no row.
+    #[test]
+    fn finalize_archives_one_drep_epoch_row_per_distribution_entry() {
+        let domain = seed_domain();
+        let state = domain.state();
+        let boundary_slot = load_era_summary::<ToyDomain>(state)
+            .unwrap()
+            .epoch_start(CLOSING_EPOCH + 1);
+
+        let second = drep_row(script_drep(), Some(boundary_slot - 10), None, 0);
+        let writer = state.start_writer().unwrap();
+        writer
+            .write_entity_typed(&DRepKey::from(&second.identifier), &second)
+            .unwrap();
+        writer.commit().unwrap();
+
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+
+        // entries the seeded delegations don't produce: the second registered
+        // DRep, the one unregistered before the boundary, and NoConfidence
+        let mut gov = crate::load_gov::<ToyDomain>(state).unwrap();
+        let distr = gov.distr.as_mut().expect("accumulator present");
+        distr.drep_distr.insert(script_drep(), 30);
+        distr.drep_distr.insert(unreg_drep(), 20);
+        distr.drep_distr.insert(DRep::NoConfidence, 9);
+
+        let writer = state.start_writer().unwrap();
+        writer.write_entity_typed(&(), &gov).unwrap();
+        writer.commit().unwrap();
+
+        let mut boundary =
+            BoundaryWork::load_finalize::<ToyDomain>(state, domain.genesis()).unwrap();
+
+        let row = |voting_power, registered| DRepEpochLog {
+            voting_power,
+            registered,
+        };
+
+        let expected = BTreeMap::from([
+            (reg_drep(), row(147, true)),
+            (script_drep(), row(30, true)),
+            (unreg_drep(), row(20, false)),
+            (DRep::Abstain, row(61, true)),
+            (DRep::NoConfidence, row(9, true)),
+        ]);
+
+        let rows: BTreeMap<_, _> = boundary
+            .drep_logs
+            .iter()
+            .map(|(key, log)| (key.0.clone(), log.clone()))
+            .collect();
+        assert_eq!(rows, expected);
+
+        boundary
+            .commit_finalize::<ToyDomain>(state, domain.archive())
+            .unwrap();
+
+        let archived = drep_epochs(&domain);
+        assert!(archived.iter().all(|(slot, ..)| *slot == boundary_slot));
+
+        let archived: BTreeMap<_, _> = archived
+            .into_iter()
+            .map(|(_, key, log)| (key.0, log))
+            .collect();
+        assert_eq!(archived, expected);
+    }
+
+    /// An incomplete distribution has nothing sound to archive.
+    #[test]
+    fn an_incomplete_distribution_archives_no_drep_epoch_rows() {
+        let domain = seed_domain();
+
+        run_shard(&domain, 0);
+        assert!(!read_distr(&domain).is_complete_for(CLOSING_EPOCH));
+
+        let mut boundary =
+            BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+        assert!(boundary.drep_logs.is_empty());
+
+        boundary
+            .commit_finalize::<ToyDomain>(domain.state(), domain.archive())
+            .unwrap();
+        assert!(drep_epochs(&domain).is_empty());
     }
 
     /// Deposit weight follows the ledger's live forest, not the drop-pass
