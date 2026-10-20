@@ -1092,8 +1092,8 @@ fn a_variable_repeating_the_file_is_not_named() {
     assert!(message.ends_with("lots.toml"), "{message}");
     assert!(!message.contains("environment"), "{message}");
 
-    // A number in the file is not the same as its text in a variable: this
-    // one stands in for a fraction the file has, and is read.
+    // A fraction in the file is not repeated by the whole number config
+    // renders it as: this variable stands in for it, and is read.
     let fraction = dir.path().join("fraction.toml");
     std::fs::write(
         &fraction,
