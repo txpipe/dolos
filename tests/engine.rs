@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use dolos::core::{ChainPoint, Domain as _, RawBlock, StateStore, StateWriter as _};
 use dolos::engine::{
-    BulkReplayRunError, BulkReplaySession, DomainBuilder, ReplayProgress, ReplayWorkspace,
+    BulkReplayRunError, BulkReplaySession, DomainBuildError, DomainBuilder, ReplayProgress,
+    ReplayWorkspace,
 };
 use dolos_snapshot::source::SnapshotSource as _;
 use dolos_testing::blocks::make_conway_block_with_prev;
@@ -29,6 +30,45 @@ fn public_builder_cleanly_initializes_configured_stores() {
     let domain = DomainBuilder::new(&node.config, genesis).build().unwrap();
     assert_eq!(domain.state().read_cursor().unwrap(), None);
     domain.shutdown().unwrap();
+}
+
+#[test]
+fn the_builder_sizes_the_query_limiter_from_the_configuration() {
+    let (mut node, genesis, _) = fixture();
+    node.config.serve.max_concurrent_queries = 4;
+
+    let domain = DomainBuilder::new(&node.config, genesis).build().unwrap();
+
+    assert_eq!(domain.query_limiter().cap(), 4);
+    domain.shutdown().unwrap();
+}
+
+/// Neither the builder nor a replay workspace opens a store for a
+/// configuration it refuses, or for a custom magic its genesis does not match.
+#[test]
+fn a_refused_configuration_opens_no_store() {
+    let (node, genesis, _) = fixture();
+
+    let mut invalid = node.config.clone();
+    invalid.serve.max_concurrent_queries = 0;
+
+    let mut mismatched = node.config.clone();
+    mismatched.chain = node.custom_chain(43, vec![]);
+
+    assert!(matches!(
+        DomainBuilder::new(&invalid, genesis.clone()).build(),
+        Err(DomainBuildError::Config(_))
+    ));
+    assert!(matches!(
+        DomainBuilder::new(&mismatched, genesis.clone()).build(),
+        Err(DomainBuildError::Chain(_))
+    ));
+
+    for config in [&invalid, &mismatched] {
+        assert!(ReplayWorkspace::open(config, genesis.clone()).is_err());
+    }
+
+    assert!(!node.config.storage.path.exists());
 }
 
 #[test]

@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use dolos_cardano::networks::KnownNetwork;
-use dolos_core::config::RootConfig;
+use dolos_core::config::{GenesisConfig, RootConfig};
 use miette::{Context as _, IntoDiagnostic as _};
 
 use crate::init::parse_known_network;
@@ -20,6 +20,16 @@ fn infer_network(config: &RootConfig) -> Option<&'static KnownNetwork> {
     }
 }
 
+/// A custom network's configured genesis files, which resolve against the
+/// configuration file's directory; a known network reads none, so its files
+/// go to the working directory.
+fn target(config: &RootConfig) -> GenesisConfig {
+    match &config.chain.cardano {
+        Some(cardano) => cardano.genesis.clone(),
+        None => GenesisConfig::in_dir(Path::new("./")),
+    }
+}
+
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let network = match (args.network, infer_network(config)) {
         (Some(network), _) => network,
@@ -32,7 +42,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     };
 
     network
-        .save_genesis(&PathBuf::from("./"))
+        .save_genesis_to(&target(config))
         .into_diagnostic()
         .context("saving genesis")?;
 

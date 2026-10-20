@@ -2,8 +2,8 @@
 //! examples parse to their values, each validation rule refuses its fixture,
 //! and `compatibility` and older files get their diagnostics.
 //!
-//! Every test that loads is `#[serial]`: one of them sets `DOLOS_` variables,
-//! which every load reads.
+//! Every test that loads in-process is `#[serial]`: some set `DOLOS_`
+//! variables, which every load reads. The binary runs without them.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -401,14 +401,129 @@ fn older_files_point_to_the_migration_guide() {
     }
 }
 
-/// `data summary` opens every store, so a refused file shows that none was.
+/// The binary in `cwd`, without the `DOLOS_` variables the in-process tests
+/// set. `data summary` opens every store, so a refused file shows that none
+/// was.
 fn run_dolos(cwd: &Path, args: &[&str]) -> std::process::Output {
+    let inherited =
+        std::env::vars_os().filter(|(key, _)| !key.to_string_lossy().starts_with("DOLOS_"));
+
     Command::new(env!("CARGO_BIN_EXE_dolos"))
         .current_dir(cwd)
         .args(args)
-        .env_remove("DOLOS_UPSTREAM__PEER_ADDRESS")
+        .env_clear()
+        .envs(inherited)
         .output()
         .unwrap()
+}
+
+/// A file in each store directory under `dir/data`, for checking that a
+/// refused command removed nothing.
+fn plant_store_markers(dir: &Path) -> Vec<PathBuf> {
+    ["state", "archive", "wal"]
+        .iter()
+        .map(|store| {
+            let marker = dir.join("data").join(store).join("marker");
+            std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+            std::fs::write(&marker, "kept").unwrap();
+            marker
+        })
+        .collect()
+}
+
+/// Commands that clear or rewrite storage before they need genesis, and one
+/// that only reads.
+const STORE_COMMANDS: [&[&str]; 4] = [
+    &["bootstrap", "relay", "--force"],
+    &["doctor", "rebuild-state", "--force"],
+    &["doctor", "reset-wal"],
+    &["data", "summary"],
+];
+
+fn assert_refused_with_stores_intact(dir: &Path, markers: &[PathBuf], message: &str) {
+    for args in STORE_COMMANDS {
+        let output = run_dolos(dir, args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(!output.status.success(), "{args:?}: {stderr}");
+        assert!(stderr.contains(message), "{args:?}: {stderr}");
+
+        for marker in markers {
+            assert!(marker.exists(), "{args:?} removed {}", marker.display());
+        }
+    }
+}
+
+#[test]
+fn a_mismatched_custom_magic_stops_every_command_before_its_stores() {
+    let (dir, _) = beside_genesis("reject/magic-mismatch.toml", 42);
+    let markers = plant_store_markers(dir.path());
+
+    assert_refused_with_stores_intact(dir.path(), &markers, "network magic 43");
+}
+
+#[test]
+fn an_invalid_log_filter_stops_every_command_before_its_stores() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = std::fs::read_to_string(fixture("minimal.toml")).unwrap()
+        + "\n[logging]\nfilter = \"dolos=loud\"\n";
+    std::fs::write(dir.path().join("dolos.toml"), config).unwrap();
+    let markers = plant_store_markers(dir.path());
+
+    assert_refused_with_stores_intact(dir.path(), &markers, "logging.filter");
+
+    let output = run_dolos(dir.path(), &["doctor", "check"]);
+    assert!(!output.status.success());
+}
+
+/// The genesis files land where the configuration reads them, whatever the
+/// working directory.
+#[test]
+fn reset_genesis_writes_the_configured_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+
+    let path = dir.path().join("dolos.toml");
+    let config = std::fs::read_to_string(fixture("custom.toml"))
+        .unwrap()
+        .replace("magic = 42", "magic = 2");
+    std::fs::write(&path, config).unwrap();
+
+    let output = run_dolos(
+        elsewhere.path(),
+        &[
+            "--config",
+            path.to_str().unwrap(),
+            "doctor",
+            "reset-genesis",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for era in ["byron", "shelley", "alonzo", "conway"] {
+        assert!(dir.path().join(format!("genesis/{era}.json")).is_file());
+    }
+    assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+
+    let config = check(&path).unwrap();
+    assert_eq!(config.chain.cardano.unwrap().magic, 2);
+}
+
+#[test]
+#[serial]
+fn a_missing_genesis_file_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dolos.toml");
+    std::fs::copy(fixture("custom.toml"), &path).unwrap();
+
+    let found = rejection(&path);
+
+    let shelley = dir.path().join("./genesis/shelley.json");
+    assert!(found.contains(&shelley.display().to_string()), "{found}");
 }
 
 #[test]
@@ -458,6 +573,54 @@ fn only_the_selected_file_is_read() {
     assert!(stderr.contains("elsewhere.toml"), "{stderr}");
 }
 
+/// `--config` is read alone: a `./dolos.toml` beside it that would be refused
+/// if it were merged underneath is not read.
+#[test]
+fn the_given_file_is_not_merged_with_the_default_one() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let default = std::fs::read_to_string(fixture("minimal.toml")).unwrap()
+        + "\n[serve]\nmax_concurrent_queries = 0\n";
+    std::fs::write(dir.path().join("dolos.toml"), default).unwrap();
+
+    let given = dir.path().join("given.toml");
+    std::fs::copy(fixture("ephemeral.toml"), &given).unwrap();
+
+    let output = run_dolos(dir.path(), &["data", "summary"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("max_concurrent_queries"), "{stderr}");
+
+    let output = run_dolos(
+        dir.path(),
+        &["--config", given.to_str().unwrap(), "data", "summary"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `path` loaded with `variables` set, and unset again whatever happens.
+fn load_with_env(
+    path: &Path,
+    variables: &[(&str, &std::ffi::OsStr)],
+) -> Result<RootConfig, ConfigError> {
+    for (name, value) in variables {
+        std::env::set_var(name, value);
+    }
+
+    let loaded = load(Some(path));
+
+    for (name, _) in variables {
+        std::env::remove_var(name);
+    }
+
+    loaded
+}
+
+/// Every overridden key is one `full.toml` sets, so the file losing shows.
 #[test]
 #[serial]
 fn nested_environment_variables_override_the_file() {
@@ -467,19 +630,10 @@ fn nested_environment_variables_override_the_file() {
         ("DOLOS_SERVE__MAX_CONCURRENT_QUERIES", "8"),
         ("DOLOS_MITHRIL_AGGREGATOR", "https://aggregator.example"),
         ("DOLOS_COMPATIBILITY", "v2-alpha.0"),
-    ];
+    ]
+    .map(|(name, value)| (name, std::ffi::OsStr::new(value)));
 
-    for (name, value) in overrides {
-        std::env::set_var(name, value);
-    }
-
-    let loaded = load(Some(&fixture("minimal.toml")));
-
-    for (name, _) in overrides {
-        std::env::remove_var(name);
-    }
-
-    let config = loaded.unwrap();
+    let config = load_with_env(&fixture("full.toml"), &overrides).unwrap();
 
     assert_eq!(
         config.upstream,
@@ -491,4 +645,102 @@ fn nested_environment_variables_override_the_file() {
     );
     assert_eq!(config.serve.max_concurrent_queries, 8);
     assert_eq!(config.compatibility().as_str(), "v2-alpha.1");
+}
+
+#[test]
+#[serial]
+fn an_error_an_override_causes_names_the_override() {
+    let typo = [(
+        "DOLOS_SERVE__MINIBF__LISTEN_ADRESS",
+        std::ffi::OsStr::new("127.0.0.1:4000"),
+    )];
+
+    let error = load_with_env(&fixture("full.toml"), &typo).unwrap_err();
+
+    assert!(matches!(error, ConfigError::Environment { .. }), "{error}");
+    let message = error.to_string();
+    assert!(
+        message.contains("DOLOS_SERVE__MINIBF__LISTEN_ADRESS"),
+        "{message}"
+    );
+    assert!(
+        message.contains("unknown field `listen_adress`"),
+        "{message}"
+    );
+
+    let error = load_with_env(&fixture("reject/unknown-field.toml"), &typo).unwrap_err();
+    assert!(matches!(error, ConfigError::Read { .. }), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn an_override_that_is_not_utf8_is_refused() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let value = std::ffi::OsStr::from_bytes(b"relay\xff.example:3001");
+
+    let error = load_with_env(
+        &fixture("full.toml"),
+        &[("DOLOS_UPSTREAM__PEER_ADDRESS", value)],
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(&error, ConfigError::NonUnicodeOverride(name) if name == "DOLOS_UPSTREAM__PEER_ADDRESS"),
+        "{error}"
+    );
+}
+
+/// Keys an older file had, removed or renamed since, in each table that had
+/// them.
+#[test]
+#[serial]
+fn removed_and_renamed_keys_are_refused() {
+    let minimal = std::fs::read_to_string(fixture("minimal.toml")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dolos.toml");
+
+    for (table, lines, key) in [
+        // `minimal.toml` ends inside `[chain]`.
+        ("", "magic = 1", "magic"),
+        ("[upstream]", "network_magic = 1", "network_magic"),
+        ("[sync]", "max_history = 1000", "max_history"),
+        ("[sync]", "max_rollback = 1000", "max_rollback"),
+        ("[sync]", "sync_limit = \"until_tip\"", "sync_limit"),
+        ("[sync.retry]", "backoff_unit_sec = 2", "backoff_unit_sec"),
+        ("[storage]", "wal = {}", "wal"),
+        ("[storage.state]", "backend = \"fjall\"", "backend"),
+        ("[storage.archive]", "max_history = 1000", "max_history"),
+        (
+            "[storage.cache]",
+            "memory_budget_bytes = 1",
+            "memory_budget_bytes",
+        ),
+        ("[mempool]", "prune_height = 200", "prune_height"),
+        (
+            "[serve.minibf]",
+            "listen_address = \"[::]:3000\"\nurl = \"https://api.example.com\"",
+            "url",
+        ),
+        (
+            "[serve.trp]",
+            "listen_address = \"[::]:8164\"\nextra_fees = 1",
+            "extra_fees",
+        ),
+        ("[logging]", "max_level = \"info\"", "max_level"),
+        ("[logging]", "include_grpc = true", "include_grpc"),
+        ("[telemetry]", "enabled = true", "enabled"),
+        ("[submit]", "prune_height = 200", "submit"),
+        ("[retries]", "max_retries = 20", "retries"),
+    ] {
+        std::fs::write(&path, format!("{minimal}\n{table}\n{lines}\n")).unwrap();
+
+        let found = rejection(&path);
+
+        assert!(
+            found.contains(&format!("unknown field `{key}`")),
+            "{table} {lines}: {found}"
+        );
+    }
 }

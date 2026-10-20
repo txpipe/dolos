@@ -46,18 +46,32 @@ pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
     storage::open_data_stores(config)
 }
 
-/// Load the configuration and resolve its network against the catalog.
+/// Load the configuration, resolve its network against the catalog and parse
+/// its log filter.
 pub fn load_config(explicit_file: Option<&Path>) -> Result<RootConfig, ConfigError> {
     let config = dolos_core::config::load(explicit_file)?;
 
     ResolvedNetwork::resolve(&config.chain)
         .map_err(|error| ConfigError::Invalid(error.to_string()))?;
 
+    log_filter(&config.logging)?;
+
     Ok(config)
 }
 
 pub fn resolve_network(config: &RootConfig) -> miette::Result<ResolvedNetwork<'_>> {
     ResolvedNetwork::resolve(&config.chain).into_diagnostic()
+}
+
+/// Reads a custom network's genesis files and checks them against its magic,
+/// so that a command stops before it touches a store. A known network's
+/// genesis is built in.
+pub fn check_network(config: &RootConfig) -> miette::Result<()> {
+    if resolve_network(config)?.known().is_none() {
+        open_genesis(config)?;
+    }
+
+    Ok(())
 }
 
 /// The network's genesis: embedded for a known network, read from the
@@ -180,16 +194,15 @@ pub fn setup_tracing_warnings() -> miette::Result<()> {
 }
 
 /// Dolos's own targets at `level`, then the `filter` directives over them.
-fn log_filter(config: &LoggingConfig) -> miette::Result<Targets> {
+fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     let mut filter = Targets::new()
         .with_target("dolos", config.level)
         .with_target("gasket", config.level);
 
     if let Some(directives) = &config.filter {
-        let extra: Targets = directives
-            .parse()
-            .into_diagnostic()
-            .context("parsing `logging.filter`")?;
+        let extra: Targets = directives.parse().map_err(|error| {
+            ConfigError::Invalid(format!("`logging.filter = \"{directives}\"`: {error}"))
+        })?;
 
         if let Some(default) = extra.default_level() {
             filter = filter.with_default(default);
@@ -207,7 +220,7 @@ pub fn setup_tracing(
     config: &LoggingConfig,
     telemetry: Option<&TelemetryConfig>,
 ) -> miette::Result<()> {
-    let filter = log_filter(config)?;
+    let filter = log_filter(config).into_diagnostic()?;
 
     let otel_layer = if let Some(telemetry) = telemetry {
         let exporter = opentelemetry_otlp::SpanExporter::builder()

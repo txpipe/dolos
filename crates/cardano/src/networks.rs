@@ -3,7 +3,7 @@
 use std::{fmt::Display, path::Path};
 
 use dolos_core::{
-    config::{CardanoConfig, ChainConfig, CustomUtxo},
+    config::{CardanoConfig, ChainConfig, CustomUtxo, GenesisConfig},
     ChainError, Genesis,
 };
 
@@ -45,7 +45,8 @@ pub struct KnownNetwork {
     pub mithril: Mithril,
     pub stelae: Stelae,
     load_genesis: fn() -> Genesis,
-    save_genesis: fn(&Path) -> std::io::Result<()>,
+    /// The embedded Byron, Shelley, Alonzo and Conway files.
+    genesis_files: [&'static [u8]; 4],
 }
 
 const OFFICIAL_STELAE_USER: &str = "stelae";
@@ -83,7 +84,12 @@ pub static MAINNET: KnownNetwork = KnownNetwork {
         user: OFFICIAL_STELAE_USER,
     },
     load_genesis: include::mainnet::load,
-    save_genesis: include::mainnet::save,
+    genesis_files: [
+        include::mainnet::BYRON,
+        include::mainnet::SHELLEY,
+        include::mainnet::ALONZO,
+        include::mainnet::CONWAY,
+    ],
 };
 
 pub static PREPROD: KnownNetwork = KnownNetwork {
@@ -112,7 +118,12 @@ pub static PREPROD: KnownNetwork = KnownNetwork {
         user: OFFICIAL_STELAE_USER,
     },
     load_genesis: include::preprod::load,
-    save_genesis: include::preprod::save,
+    genesis_files: [
+        include::preprod::BYRON,
+        include::preprod::SHELLEY,
+        include::preprod::ALONZO,
+        include::preprod::CONWAY,
+    ],
 };
 
 pub static PREVIEW: KnownNetwork = KnownNetwork {
@@ -141,7 +152,12 @@ pub static PREVIEW: KnownNetwork = KnownNetwork {
         user: OFFICIAL_STELAE_USER,
     },
     load_genesis: include::preview::load,
-    save_genesis: include::preview::save,
+    genesis_files: [
+        include::preview::BYRON,
+        include::preview::SHELLEY,
+        include::preview::ALONZO,
+        include::preview::CONWAY,
+    ],
 };
 
 static ALL: [&KnownNetwork; 3] = [&MAINNET, &PREPROD, &PREVIEW];
@@ -171,7 +187,30 @@ impl KnownNetwork {
 
     /// Writes the embedded genesis files into `root`.
     pub fn save_genesis(&self, root: &Path) -> std::io::Result<()> {
-        (self.save_genesis)(root)
+        self.save_genesis_to(&GenesisConfig::in_dir(root))
+    }
+
+    /// Writes the embedded genesis files to `files`' paths, creating their
+    /// directories.
+    pub fn save_genesis_to(&self, files: &GenesisConfig) -> std::io::Result<()> {
+        let paths = [
+            &files.byron_path,
+            &files.shelley_path,
+            &files.alonzo_path,
+            &files.conway_path,
+        ];
+
+        for (path, bytes) in paths.into_iter().zip(self.genesis_files) {
+            if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir)?;
+            }
+
+            std::fs::write(path, bytes).map_err(|error| {
+                std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+            })?;
+        }
+
+        Ok(())
     }
 }
 

@@ -416,15 +416,33 @@ impl Genesis {
         conway: impl AsRef<Path>,
         force_protocol: Option<usize>,
     ) -> Result<Self, std::io::Error> {
-        let shelley_bytes = std::fs::read(shelley.as_ref())?;
+        use pallas::interop::hardano::configs;
+
+        let (byron, shelley, alonzo, conway) = (
+            byron.as_ref(),
+            shelley.as_ref(),
+            alonzo.as_ref(),
+            conway.as_ref(),
+        );
+
+        // An error names its file: the paths are resolved, so the operator
+        // cannot tell which one was meant otherwise.
+        let named = |path: &Path| {
+            let path = path.display().to_string();
+            move |error: std::io::Error| {
+                std::io::Error::new(error.kind(), format!("{path}: {error}"))
+            }
+        };
+
+        let shelley_bytes = std::fs::read(shelley).map_err(named(shelley))?;
         let mut hasher = Hasher::<256>::new();
         hasher.input(&shelley_bytes);
         let shelley_hash = hasher.finalize();
 
-        let byron = pallas::interop::hardano::configs::byron::from_file(byron.as_ref())?;
-        let shelley = pallas::interop::hardano::configs::shelley::from_file(shelley.as_ref())?;
-        let alonzo = pallas::interop::hardano::configs::alonzo::from_file(alonzo.as_ref())?;
-        let conway = pallas::interop::hardano::configs::conway::from_file(conway.as_ref())?;
+        let byron = configs::byron::from_file(byron).map_err(named(byron))?;
+        let shelley = configs::shelley::from_file(shelley).map_err(named(shelley))?;
+        let alonzo = configs::alonzo::from_file(alonzo).map_err(named(alonzo))?;
+        let conway = configs::conway::from_file(conway).map_err(named(conway))?;
 
         Ok(Self {
             byron,

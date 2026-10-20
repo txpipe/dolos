@@ -10,7 +10,10 @@ mod checkpoint;
 use std::fmt;
 use std::sync::Arc;
 
-use dolos_cardano::{networks::ResolvedNetwork, CardanoLogicConfig};
+use dolos_cardano::{
+    networks::{validate_custom, ResolvedNetwork},
+    CardanoLogicConfig,
+};
 use dolos_core::config::{ConfigError, RootConfig};
 pub use dolos_core::ReplayProgress;
 use dolos_core::{
@@ -45,8 +48,9 @@ pub enum DomainBuildError {
 ///
 /// The builder never loads files or environment variables. An embedding
 /// application decides how configuration and genesis are obtained, then hands
-/// the resolved values here. The configuration is validated before any store
-/// opens. Stopping at an epoch is set here, never in configuration.
+/// the resolved values here. The configuration, its network and a custom
+/// network's magic against the genesis are checked before any store opens.
+/// Stopping at an epoch is set here, never in configuration.
 pub struct DomainBuilder<'a> {
     config: &'a RootConfig,
     genesis: Arc<Genesis>,
@@ -72,9 +76,24 @@ impl<'a> DomainBuilder<'a> {
     /// Construct a normal node domain, including initialization and integrity
     /// checks.
     pub fn build(&self) -> Result<DomainAdapter, DomainBuildError> {
-        self.config.validate().map_err(DomainBuildError::Config)?;
+        self.check()?;
         let stores = storage::open_data_stores(self.config).map_err(DomainBuildError::Storage)?;
         self.build_with_stores(&stores)
+    }
+
+    /// What can be refused without a store: the configuration's rules, its
+    /// network, and a custom network's magic against the genesis given.
+    fn check(&self) -> Result<(), DomainBuildError> {
+        self.config.validate().map_err(DomainBuildError::Config)?;
+
+        let network =
+            ResolvedNetwork::resolve(&self.config.chain).map_err(DomainBuildError::Chain)?;
+
+        if let ResolvedNetwork::Custom(cardano) = network {
+            validate_custom(cardano.magic, &self.genesis).map_err(DomainBuildError::Chain)?;
+        }
+
+        Ok(())
     }
 
     fn build_with_stores(&self, stores: &Stores) -> Result<DomainAdapter, DomainBuildError> {
@@ -196,8 +215,8 @@ impl<'a> ReplayWorkspace<'a> {
     /// Open the configured dataset without running ledger initialization,
     /// replaying blocks, or pruning history.
     pub fn open(config: &'a RootConfig, genesis: Arc<Genesis>) -> Result<Self, BulkReplayError> {
-        config
-            .validate()
+        DomainBuilder::new(config, genesis.clone())
+            .check()
             .map_err(|error| BulkReplayError::new("opening replay workspace", error))?;
         let stores = storage::open_data_stores(config)
             .map_err(|error| BulkReplayError::new("opening replay workspace", error))?;

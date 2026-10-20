@@ -1210,6 +1210,16 @@ pub enum ConfigError {
     )]
     MovedSections(Vec<String>),
 
+    #[error("applying the environment overrides {}: {source}", .variables.join(", "))]
+    Environment {
+        variables: Vec<String>,
+        #[source]
+        source: ::config::ConfigError,
+    },
+
+    #[error("the environment variable {0} is not valid UTF-8")]
+    NonUnicodeOverride(String),
+
     #[error("invalid configuration: {0}")]
     Invalid(String),
 }
@@ -1243,7 +1253,8 @@ const ENV_NESTING: &str = "__";
 ///
 /// A variable names its key with `__` between levels, as in
 /// `DOLOS_UPSTREAM__PEER_ADDRESS`; one without `__` is not an override, which
-/// leaves the command inputs such as `DOLOS_MITHRIL_AGGREGATOR` alone.
+/// leaves the command inputs such as `DOLOS_MITHRIL_AGGREGATOR` alone. An
+/// error the overrides cause names them rather than the file.
 /// `compatibility` is read from the file alone. Genesis paths resolve against
 /// the file's directory.
 pub fn load(path: Option<&Path>) -> Result<RootConfig, ConfigError> {
@@ -1267,12 +1278,24 @@ pub fn load(path: Option<&Path>) -> Result<RootConfig, ConfigError> {
     check_compatibility(&document)?;
     reject_moved_sections(&document)?;
 
-    let mut config: RootConfig = ::config::Config::builder()
-        .add_source(file())
-        .add_source(environment())
-        .build()
-        .and_then(::config::Config::try_deserialize)
-        .map_err(read)?;
+    let overrides = environment_overrides()?;
+    let deserialize = |overrides: ::config::Map<String, String>| {
+        ::config::Config::builder()
+            .add_source(file())
+            .add_source(environment(overrides))
+            .build()
+            .and_then(::config::Config::try_deserialize::<RootConfig>)
+    };
+
+    let mut config = match deserialize(overrides.clone()) {
+        Ok(config) => config,
+        Err(source) if !overrides.is_empty() && deserialize(Default::default()).is_ok() => {
+            let mut variables: Vec<String> = overrides.into_keys().collect();
+            variables.sort();
+            return Err(ConfigError::Environment { variables, source });
+        }
+        Err(source) => return Err(read(source)),
+    };
 
     config.resolve_paths(path.parent().unwrap_or(Path::new("")));
     config.validate()?;
@@ -1315,17 +1338,35 @@ fn reject_moved_sections(document: &::config::Config) -> Result<(), ConfigError>
     }
 }
 
-fn environment() -> ::config::Environment {
+/// The `DOLOS_` variables with `__` in their name. One that is not valid
+/// UTF-8 is refused rather than skipped, which would leave the file's value
+/// in place unnoticed.
+fn environment_overrides() -> Result<::config::Map<String, String>, ConfigError> {
     let prefix = format!("{ENV_PREFIX}_");
+    let mut overrides = ::config::Map::new();
 
-    let overrides = std::env::vars_os()
-        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
-        .filter(|(key, _)| {
-            key.strip_prefix(&prefix)
-                .is_some_and(|key| key.contains(ENV_NESTING))
-        })
-        .collect();
+    for (key, value) in std::env::vars_os() {
+        let name = key.to_string_lossy().into_owned();
 
+        if !name
+            .strip_prefix(&prefix)
+            .is_some_and(|key| key.contains(ENV_NESTING))
+        {
+            continue;
+        }
+
+        match (key.into_string(), value.into_string()) {
+            (Ok(key), Ok(value)) => {
+                overrides.insert(key, value);
+            }
+            _ => return Err(ConfigError::NonUnicodeOverride(name)),
+        }
+    }
+
+    Ok(overrides)
+}
+
+fn environment(overrides: ::config::Map<String, String>) -> ::config::Environment {
     ::config::Environment::with_prefix(ENV_PREFIX)
         .prefix_separator("_")
         .separator(ENV_NESTING)
