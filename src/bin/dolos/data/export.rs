@@ -126,6 +126,42 @@ fn append_dir_filtered(
     Ok(())
 }
 
+/// The archive under `archive/` in the default layout, its segment files beside
+/// `index/`, wherever this node keeps them: a snapshot restores the same way
+/// whatever `blocks_path` the node it came from had.
+fn append_archive(
+    archive: &mut Builder<GzEncoder<File>>,
+    archive_dir: &Path,
+    segments_dir: Option<&Path>,
+) -> miette::Result<()> {
+    let Some(segments_dir) = segments_dir else {
+        return append_path_filtered(archive, archive_dir, Path::new("archive"));
+    };
+
+    let name = Path::new("archive");
+    let header = deterministic_header(archive_dir)?;
+    archive
+        .append_data(&mut header.clone(), name, &[] as &[u8])
+        .into_diagnostic()?;
+
+    let mut segments: Vec<_> = std::fs::read_dir(segments_dir)
+        .into_diagnostic()?
+        .collect::<Result<Vec<_>, _>>()
+        .into_diagnostic()?;
+
+    segments.retain(|entry| {
+        let path = entry.path();
+        path.extension() == Some(OsStr::new("segment")) && !is_macos_metadata(&path)
+    });
+    segments.sort_by_key(|entry| entry.file_name());
+
+    for entry in segments {
+        append_path_filtered(archive, &entry.path(), &name.join(entry.file_name()))?;
+    }
+
+    append_path_filtered(archive, &archive_dir.join("index"), &name.join("index"))
+}
+
 fn ensure_state_exportable(state: &StateStoreBackend, include_state: bool) -> miette::Result<()> {
     if matches!(state, StateStoreBackend::Memory(_)) && include_state {
         bail!("the in-memory state keeps nothing on disk to export");
@@ -190,8 +226,9 @@ pub fn run(
 
     if args.include_archive {
         let path = root.join("archive");
+        let segments = config.storage.blocks_path();
 
-        append_path_filtered(&mut archive, &path, Path::new("archive"))?;
+        append_archive(&mut archive, &path, segments.as_deref())?;
 
         pb.set_message("creating archive");
     }

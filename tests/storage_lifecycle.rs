@@ -109,11 +109,22 @@ fn with_each_mempool(tables: &str) -> [(String, Vec<TxHash>); 2] {
 }
 
 /// A state on `fjall` resumes at its cursor with the archive at the same tip,
-/// rolls back within the WAL it kept, and syncs on.
-fn assert_resumes(tables: &str) {
+/// rolls back within the WAL it kept, and syncs on. Between the stop and the
+/// restart, the archive on disk holds the synced tip when it is `kept`, and is
+/// not there at all otherwise.
+fn assert_resumes(tables: &str, archive_kept: bool) {
     for (tables, kept) in with_each_mempool(tables) {
         let (node, genesis, blocks) = fixture(&tables);
         sync_and_stop(&node, &genesis, &blocks);
+
+        let (_, _, archive) = store_positions(&node);
+        let synced = point(&blocks[2]).slot();
+        assert_eq!(archive, archive_kept.then_some(synced), "{tables}");
+        assert_eq!(
+            node.config.storage.path.join("archive").exists(),
+            archive_kept,
+            "{tables}"
+        );
 
         let domain = start(&node, &genesis);
 
@@ -134,14 +145,14 @@ fn assert_resumes(tables: &str) {
 
 #[test]
 fn fjall_stores_resume_where_they_stopped() {
-    assert_resumes("");
+    assert_resumes("", true);
 }
 
 /// The archive restarts empty and refills from the WAL, which still holds the
 /// blocks it synced.
 #[test]
 fn an_ephemeral_archive_refills_from_the_wal() {
-    assert_resumes(EPHEMERAL_ARCHIVE);
+    assert_resumes(EPHEMERAL_ARCHIVE, false);
 }
 
 /// Nothing but a persistent mempool survives: the node starts over from
@@ -290,4 +301,52 @@ fn an_absolute_blocks_path_is_used_as_written() {
 
     assert!(has_segments(elsewhere.path()));
     assert!(!has_segments(&node.config.storage.archive_path().unwrap()));
+}
+
+/// The synced tip's slot and body, read from the archive the node keeps.
+fn kept_tip(node: &Node) -> Option<(u64, Vec<u8>)> {
+    let stores =
+        dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+    let tip = stores.archive.get_tip().unwrap();
+
+    stores.state.shutdown().unwrap();
+    stores.archive.shutdown().unwrap();
+
+    tip.map(|(slot, body)| (slot, body.to_vec()))
+}
+
+/// A snapshot carries the segments from `blocks_path` in the default layout:
+/// a forced restore puts them back under the storage root it cleared, and a
+/// node keeping its segments in the archive directory restores them there.
+#[test]
+fn a_snapshot_carries_the_segments_at_blocks_path() {
+    let (node, genesis, blocks) = fixture("[storage.archive]\nblocks_path = \"segments\"\n");
+    sync_and_stop(&node, &genesis, &blocks);
+
+    let synced = Some((point(&blocks[2]).slot(), blocks[2].to_vec()));
+    assert_eq!(kept_tip(&node), synced);
+
+    let snapshot = node.root.path().join("snapshot.tar.gz");
+    let snapshot = snapshot.to_str().unwrap();
+    assert_ok(&node.run(&[
+        "data",
+        "export",
+        "-o",
+        snapshot,
+        "--include-state",
+        "--include-archive",
+    ]));
+
+    assert_ok(&node.run(&["bootstrap", "snapshot", "--force", "--file", snapshot]));
+
+    let storage = &node.config.storage.path;
+    assert!(has_segments(&storage.join("segments")));
+    assert!(!has_segments(&storage.join("archive")));
+    assert_eq!(kept_tip(&node), synced);
+
+    let (other, _, _) = fixture("");
+    assert_ok(&other.run(&["bootstrap", "snapshot", "--file", snapshot]));
+
+    assert!(has_segments(&other.config.storage.path.join("archive")));
+    assert_eq!(kept_tip(&other), synced);
 }
