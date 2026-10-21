@@ -285,7 +285,8 @@ pub(crate) fn assert_fjall_holds(db: &Database, tuning: &Tuning) {
 
 /// Asserts that each keyspace rotates its memtable at the size `tuning`
 /// sets: it holds just under that size without rotating, and rotates once
-/// written past it. An insert past the limit only requests the rotation and a
+/// one more entry takes it past the size, which a limit 1 MiB higher would
+/// still hold. An insert past the limit only requests the rotation and a
 /// worker runs it, so the rotation is polled for; a limit below the row is
 /// caught when a worker runs its rotation within the pause under the row.
 #[cfg(test)]
@@ -317,7 +318,7 @@ pub(crate) fn assert_memtables_hold(db: &Database, tuning: &Tuning) {
             "{name}"
         );
 
-        insert(2);
+        insert(1);
         let deadline = Instant::now() + Duration::from_secs(30);
         while !rotated() {
             assert!(

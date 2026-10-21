@@ -1814,9 +1814,9 @@ fn check_tables(document: &::config::Config) -> Result<(), ConfigError> {
 /// Refuses the per-store tuning fields of earlier files by name, where
 /// deserializing would call them unknown: a Fjall store's preset sets all of
 /// it, and an ephemeral store takes none of it, nor any other field the table
-/// sets (its `fields` first, unknown ones last). A `type` or `preset` that
-/// names nothing is refused first, since deserializing could otherwise report
-/// either error.
+/// sets (its `fields` first, unknown ones last). A `type`, or a Fjall store's
+/// `preset`, that names nothing is refused first, since deserializing could
+/// otherwise report either error.
 fn refuse_retired_tuning(
     document: &::config::Config,
     table: &str,
@@ -2186,15 +2186,19 @@ mod tests {
                  `cache`",
             ),
             (
-                "[storage.state]\ntype = \"ephemeral\"\nwal = 1\nbackend = \"x\"\ncache = 1\n",
+                "[storage.state]\ntype = \"ephemeral\"\nwal = 1\nmode = 1\nbackend = \"x\"\n\
+                 size = 1\ncompression = 1\ncache = 1\n",
                 &[
                     "storage.state.type",
                     "storage.state.cache",
                     "storage.state.backend",
+                    "storage.state.compression",
+                    "storage.state.mode",
+                    "storage.state.size",
                     "storage.state.wal",
                 ],
                 "in `[storage.state]`, an ephemeral store takes no other field; remove `cache`, \
-                 `backend`, `wal`",
+                 `backend`, `compression`, `mode`, `size`, `wal`",
             ),
         ];
 
