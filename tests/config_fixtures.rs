@@ -356,6 +356,14 @@ fn each_rule_refuses_its_fixture() {
             "archive-tuning-field",
             "in `[storage.archive]`, tuning is set by `preset`; remove `worker_threads`",
         ),
+        (
+            "ephemeral-state-over-fjall-archive",
+            "an ephemeral state needs an ephemeral archive",
+        ),
+        (
+            "ephemeral-state-with-a-wal-path",
+            "with an ephemeral state the WAL is kept in memory; remove `sync.wal_path`",
+        ),
         ("unknown-field", "unknown field `version`"),
         ("moved-section", "[mithril] moved to"),
     ] {
@@ -671,6 +679,205 @@ fn the_given_file_is_not_merged_with_the_default_one() {
     );
 }
 
+/// Every fixture, as a path under `tests/fixtures/config/`.
+fn every_fixture(dir: &Path, prefix: &str, found: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = format!("{prefix}{}", path.file_name().unwrap().to_string_lossy());
+
+        if path.is_dir() {
+            every_fixture(&path, &format!("{name}/"), found);
+        } else {
+            found.push(name);
+        }
+    }
+}
+
+/// The reference examples at the top of `tests/fixtures/config/` pass; every
+/// fixture in a subdirectory is refused. Neither creates anything, though no
+/// store directory exists.
+#[test]
+fn config_check_exits_by_each_fixtures_verdict() {
+    let mut fixtures = Vec::new();
+    every_fixture(&fixture(""), "", &mut fixtures);
+    assert!(fixtures.len() > 20, "{fixtures:?}");
+
+    for name in fixtures {
+        let (dir, path) = beside_genesis(&name, 42);
+        let before = std::fs::read_dir(dir.path()).unwrap().count();
+
+        let output = run_dolos(
+            dir.path(),
+            &["--config", path.to_str().unwrap(), "config", "check"],
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        let accepted = !name.contains('/');
+        assert_eq!(
+            output.status.success(),
+            accepted,
+            "{name}: {stdout}{stderr}"
+        );
+
+        if accepted {
+            let valid = format!("valid: {}\n", path.display());
+            assert!(stdout.starts_with(&valid), "{name}: {stdout}");
+        }
+
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            before,
+            "{name}: check created a file"
+        );
+    }
+}
+
+/// `config check` in `dir`, which must pass, with each of `lines` printed.
+fn assert_check_prints(dir: &Path, args: &[&str], lines: &[&str]) {
+    let output = run_dolos(dir, args);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "{stdout}{stderr}");
+    for line in lines {
+        assert!(stdout.lines().any(|x| x == *line), "{line}: {stdout}");
+    }
+}
+
+/// `line` followed by `path` in the platform's spelling, as the binary joins
+/// and prints store paths.
+fn with_path(line: &str, path: &str) -> String {
+    let path: PathBuf = path.split('/').collect();
+    format!("{line}{}", path.display())
+}
+
+/// What `config check` resolves each reference example's network and stores
+/// to.
+#[test]
+fn config_check_prints_the_network_and_stores() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture("ordinary.toml"), dir.path().join("dolos.toml")).unwrap();
+
+    assert_check_prints(
+        dir.path(),
+        &["config", "check"],
+        &[
+            "valid: dolos.toml",
+            "network: mainnet (magic 764824073, mainnet)",
+            &with_path("state: fjall (standard) at ", "data/state"),
+            &with_path("wal: ", "data/wal"),
+            &with_path("archive: fjall (standard) at ", "data/archive"),
+            &with_path("cache: ", "data/cache"),
+            "mempool: in memory",
+        ],
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+    let (dir, _) = beside_genesis("custom.toml", 42);
+    assert_check_prints(
+        dir.path(),
+        &["config", "check"],
+        &["network: custom (magic 42, testnet)"],
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture("ephemeral.toml"), dir.path().join("dolos.toml")).unwrap();
+    assert_check_prints(
+        dir.path(),
+        &["config", "check"],
+        &[
+            "network: preview (magic 2, testnet)",
+            "state: ephemeral",
+            "wal: in memory",
+            "archive: ephemeral",
+        ],
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture("full.toml"), dir.path().join("dolos.toml")).unwrap();
+    assert_check_prints(
+        dir.path(),
+        &["config", "check"],
+        &["blocks: blocks", &with_path("mempool: ", "data/mempool")],
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("dolos.toml"),
+        "compatibility = \"v2-alpha.1\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"PreView\"\n\n[storage.cache]\nenabled = false\n",
+    )
+    .unwrap();
+    assert_check_prints(
+        dir.path(),
+        &["config", "check"],
+        &["network: preview (magic 2, testnet)", "cache: off"],
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("other.toml"),
+        "compatibility = \"v2-alpha.1\"\n\n[chain]\nprotocol = \"cardano\"\nnetwork = \"preview\"\n\n[history]\nmode = \"none\"\n",
+    )
+    .unwrap();
+    assert_check_prints(
+        dir.path(),
+        &["--config", "other.toml", "config", "check"],
+        &[
+            "valid: other.toml",
+            "archive: none (history.mode = \"none\")",
+        ],
+    );
+    assert!(!dir.path().join("dolos.toml").exists());
+}
+
+/// `init` reads a custom network's genesis like any other command, so a
+/// custom config whose genesis files are missing is refused and kept.
+#[test]
+fn init_refuses_a_custom_config_without_its_genesis() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dolos.toml");
+    std::fs::copy(fixture("custom.toml"), &path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let output = run_dolos(dir.path(), &["init", "--known-network", "preview"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("loading genesis"), "{stderr}");
+    assert!(stderr.contains("untouched"), "{stderr}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+/// `init --config` checks the file it names: an alpha.0 file there is
+/// reported and kept, and no `./dolos.toml` appears.
+#[test]
+fn init_refuses_an_older_file_at_the_selected_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("other.toml");
+    std::fs::copy(fixture("legacy/v2.0.0-alpha.0-sync-mainnet.toml"), &path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let output = run_dolos(
+        dir.path(),
+        &[
+            "--config",
+            path.to_str().unwrap(),
+            "init",
+            "--known-network",
+            "preview",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains(MIGRATION_GUIDE_URL), "{stderr}");
+    assert!(stderr.contains("untouched"), "{stderr}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!dir.path().join("dolos.toml").exists());
+}
+
 /// `run` with `variables` set, and unset again whatever it returns.
 fn with_env<T>(variables: &[(&str, &std::ffi::OsStr)], run: impl FnOnce() -> T) -> T {
     for (name, value) in variables {
@@ -843,8 +1050,8 @@ fn an_override_the_file_needs_does_not_hide_a_wrong_one() {
 #[serial]
 fn clashing_overrides_are_named_together() {
     let clash = [
-        ("DOLOS_STORAGE__STATE__TYPE", "ephemeral"),
-        ("DOLOS_STORAGE__STATE__PATH", "state"),
+        ("DOLOS_STORAGE__ARCHIVE__TYPE", "ephemeral"),
+        ("DOLOS_STORAGE__ARCHIVE__PATH", "archive"),
     ];
 
     for single in &clash {
@@ -855,7 +1062,7 @@ fn clashing_overrides_are_named_together() {
 
     assert!(
         matches!(&error, ConfigError::Environment { variables, .. }
-            if *variables == ["DOLOS_STORAGE__STATE__PATH", "DOLOS_STORAGE__STATE__TYPE"]),
+            if *variables == ["DOLOS_STORAGE__ARCHIVE__PATH", "DOLOS_STORAGE__ARCHIVE__TYPE"]),
         "{error}"
     );
     assert!(error.to_string().contains("an ephemeral store"), "{error}");
