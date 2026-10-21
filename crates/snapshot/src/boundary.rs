@@ -523,17 +523,34 @@ mod tests {
     }
 
     /// An archive that ran on past a boundary state holds the rows later
-    /// blocks wrote inside the stele's windows, and is refused up to its tip.
+    /// blocks wrote inside the stele's windows, and is refused up to its tip
+    /// with the store to publish from instead.
     #[test]
     fn an_archive_past_the_cursor_is_refused() {
         let summary = summary(100);
         let blocks = chain(&[180, 205, 210, 320]);
 
+        let refusal = reason(judge(&summary, &blocks, &blocks[1].0));
+
         assert_eq!(
-            reason(judge(&summary, &blocks, &blocks[1].0)),
+            refusal,
             Ineligible::ArchivePastCursor {
                 tip: blocks[3].0.clone()
             }
+        );
+
+        let message = refusal.to_string();
+
+        assert!(
+            message.contains(&format!("runs on past the cursor to {}", blocks[3].0)),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "publish from a node whose archive ends at the cursor, as dolos sync \
+                 --stop-epoch leaves it"
+            ),
+            "{message}"
         );
     }
 }
