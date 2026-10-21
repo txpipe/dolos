@@ -459,7 +459,7 @@ pub async fn pool_offchain_metadata(
 pub(crate) async fn pool_offchain_body(url: &str) -> Result<Vec<u8>, OffchainFetchError> {
     let client = offchain_http_client().map_err(|_| OffchainFetchError::Client)?;
 
-    fetch_offchain_body(client, url, Duration::from_secs(5)).await
+    fetch_offchain_body(client, url, Duration::from_secs(5), MAX_POOL_METADATA_BYTES).await
 }
 
 #[derive(Debug)]
@@ -493,7 +493,8 @@ pub struct AnchorMetadata {
     pub bytes: String,
 }
 
-const MAX_OFFCHAIN_METADATA_BYTES: usize = 3_000_000;
+pub(crate) const MAX_POOL_METADATA_BYTES: usize = 512;
+const MAX_ANCHOR_METADATA_BYTES: usize = 3_000_000;
 const MAX_OFFCHAIN_REDIRECTS: usize = 3;
 
 /// This is the total timeout for one governance-anchor request. It is more than
@@ -597,7 +598,7 @@ fn offchain_http_client_builder() -> reqwest::ClientBuilder {
         .no_proxy()
         .dns_resolver(Arc::new(PublicDnsResolver))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= MAX_OFFCHAIN_REDIRECTS {
+            if attempt.previous().len() > MAX_OFFCHAIN_REDIRECTS {
                 attempt.error("The number of redirects is more than the limit.")
             } else if is_public_http_url(attempt.url()) {
                 attempt.follow()
@@ -624,6 +625,7 @@ async fn fetch_offchain_body(
     client: &reqwest::Client,
     url: &str,
     timeout: Duration,
+    max_bytes: usize,
 ) -> Result<Vec<u8>, OffchainFetchError> {
     let url = match reqwest::Url::parse(url) {
         Ok(url) if is_public_http_url(&url) => url,
@@ -641,7 +643,7 @@ async fn fetch_offchain_body(
         return Err(OffchainFetchError::HttpResponse(response.status()));
     }
 
-    read_offchain_body(response).await
+    read_offchain_body(response, max_bytes).await
 }
 
 pub(crate) fn offchain_hash_mismatch_error(
@@ -685,10 +687,10 @@ fn offchain_decode_error(url: &str) -> DrepsInnerMetadataError {
     )
 }
 
-pub(crate) fn offchain_size_error(url: &str) -> DrepsInnerMetadataError {
+fn offchain_size_error(url: &str) -> DrepsInnerMetadataError {
     DrepsInnerMetadataError::new(
         Code::SizeExceeded,
-        format!("The response from {url} is larger than {MAX_OFFCHAIN_METADATA_BYTES} bytes."),
+        format!("The response from {url} is larger than {MAX_ANCHOR_METADATA_BYTES} bytes."),
     )
 }
 
@@ -708,10 +710,11 @@ fn offchain_no_gateway_error(url: &str) -> DrepsInnerMetadataError {
 
 async fn read_offchain_body(
     mut response: reqwest::Response,
+    max_bytes: usize,
 ) -> Result<Vec<u8>, OffchainFetchError> {
     if response
         .content_length()
-        .is_some_and(|size| size > MAX_OFFCHAIN_METADATA_BYTES as u64)
+        .is_some_and(|size| size > max_bytes as u64)
     {
         return Err(OffchainFetchError::SizeExceeded);
     }
@@ -719,7 +722,7 @@ async fn read_offchain_body(
     let capacity = response
         .content_length()
         .unwrap_or_default()
-        .min(MAX_OFFCHAIN_METADATA_BYTES as u64) as usize;
+        .min(max_bytes as u64) as usize;
     let mut body = Vec::with_capacity(capacity);
 
     loop {
@@ -732,7 +735,7 @@ async fn read_offchain_body(
             break;
         };
 
-        if chunk.len() > MAX_OFFCHAIN_METADATA_BYTES - body.len() {
+        if chunk.len() > max_bytes - body.len() {
             return Err(OffchainFetchError::SizeExceeded);
         }
 
@@ -859,9 +862,14 @@ async fn fetch_anchor_candidate(
     original_url: &str,
     expected_hash: &[u8],
 ) -> Result<Vec<u8>, DrepsInnerMetadataError> {
-    let body = fetch_offchain_body(client, request_url, ANCHOR_FETCH_TIMEOUT)
-        .await
-        .map_err(|error| error.into_metadata_error(original_url))?;
+    let body = fetch_offchain_body(
+        client,
+        request_url,
+        ANCHOR_FETCH_TIMEOUT,
+        MAX_ANCHOR_METADATA_BYTES,
+    )
+    .await
+    .map_err(|error| error.into_metadata_error(original_url))?;
 
     let actual_hash = Hasher::<256>::hash(body.as_ref());
 
@@ -913,6 +921,12 @@ mod offchain_tests {
 
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("Cannot accept the test request.");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let mut request = [0; 1024];
             let _ = stream.read(&mut request);
 
@@ -970,44 +984,53 @@ mod offchain_tests {
 
     #[tokio::test]
     async fn offchain_fetch_rejects_oversized_content_length() {
-        let (url, server) = serve_body(Vec::new(), Some(MAX_OFFCHAIN_METADATA_BYTES + 1));
-        let (client, request_url) = local_candidate_client(&url);
+        for max_bytes in [MAX_POOL_METADATA_BYTES, MAX_ANCHOR_METADATA_BYTES] {
+            let (url, server) = serve_body(Vec::new(), Some(max_bytes + 1));
+            let (client, request_url) = local_candidate_client(&url);
 
-        let error = fetch_offchain_body(&client, &request_url, Duration::from_secs(5))
-            .await
-            .expect_err("The oversized response was accepted.");
+            let error =
+                fetch_offchain_body(&client, &request_url, Duration::from_secs(5), max_bytes)
+                    .await
+                    .expect_err("The client accepted a response with more bytes than the limit.");
 
-        server.join().expect("The test server did not stop.");
-        assert!(matches!(error, OffchainFetchError::SizeExceeded));
+            server.join().expect("The test server did not stop.");
+            assert!(matches!(error, OffchainFetchError::SizeExceeded));
+        }
     }
 
     #[tokio::test]
     async fn offchain_fetch_rejects_oversized_stream() {
-        let body = vec![b'x'; MAX_OFFCHAIN_METADATA_BYTES + 1];
-        let (url, server) = serve_body(body, None);
-        let (client, request_url) = local_candidate_client(&url);
+        for max_bytes in [MAX_POOL_METADATA_BYTES, MAX_ANCHOR_METADATA_BYTES] {
+            let body = vec![b'x'; max_bytes + 1];
+            let (url, server) = serve_body(body, None);
+            let (client, request_url) = local_candidate_client(&url);
 
-        let error = fetch_offchain_body(&client, &request_url, Duration::from_secs(5))
-            .await
-            .expect_err("The oversized response was accepted.");
+            let error =
+                fetch_offchain_body(&client, &request_url, Duration::from_secs(5), max_bytes)
+                    .await
+                    .expect_err("The client accepted a response with more bytes than the limit.");
 
-        server.join().expect("The test server did not stop.");
-        assert!(matches!(error, OffchainFetchError::SizeExceeded));
+            server.join().expect("The test server did not stop.");
+            assert!(matches!(error, OffchainFetchError::SizeExceeded));
+        }
     }
 
     #[tokio::test]
     async fn offchain_fetch_accepts_size_limit() {
-        for content_length in [Some(MAX_OFFCHAIN_METADATA_BYTES), None] {
-            let body = vec![b'x'; MAX_OFFCHAIN_METADATA_BYTES];
-            let (url, server) = serve_body(body, content_length);
-            let (client, request_url) = local_candidate_client(&url);
+        for max_bytes in [MAX_POOL_METADATA_BYTES, MAX_ANCHOR_METADATA_BYTES] {
+            for content_length in [Some(max_bytes), None] {
+                let body = vec![b'x'; max_bytes];
+                let (url, server) = serve_body(body, content_length);
+                let (client, request_url) = local_candidate_client(&url);
 
-            let body = fetch_offchain_body(&client, &request_url, Duration::from_secs(5))
-                .await
-                .expect("The client did not accept the response at the size limit.");
+                let body =
+                    fetch_offchain_body(&client, &request_url, Duration::from_secs(5), max_bytes)
+                        .await
+                        .expect("The client did not accept the response at the size limit.");
 
-            server.join().expect("The test server did not stop.");
-            assert_eq!(body.len(), MAX_OFFCHAIN_METADATA_BYTES);
+                server.join().expect("The test server did not stop.");
+                assert_eq!(body.len(), max_bytes);
+            }
         }
     }
 
@@ -1045,9 +1068,14 @@ mod offchain_tests {
         let (url, server) = serve_response(Vec::new(), "302 Found", &headers);
         let (client, request_url) = local_candidate_client(&url);
 
-        let error = fetch_offchain_body(&client, &request_url, Duration::from_secs(5))
-            .await
-            .expect_err("The client accepted a redirect to a private address.");
+        let error = fetch_offchain_body(
+            &client,
+            &request_url,
+            Duration::from_secs(5),
+            MAX_POOL_METADATA_BYTES,
+        )
+        .await
+        .expect_err("The client accepted a redirect to a private address.");
 
         server.join().unwrap();
         assert!(matches!(error, OffchainFetchError::Connection));
@@ -1058,27 +1086,95 @@ mod offchain_tests {
     }
 
     #[tokio::test]
-    async fn offchain_fetch_rejects_oversized_chunked_body() {
-        let chunk = "x".repeat(MAX_OFFCHAIN_METADATA_BYTES + 1);
-        let body = format!("{:x}\r\n{chunk}\r\n0\r\n\r\n", chunk.len()).into_bytes();
-        let (url, server) = serve_response(body, "200 OK", "Transfer-Encoding: chunked\r\n");
-        let (client, request_url) = local_candidate_client(&url);
+    async fn offchain_fetch_enforces_chunked_body_limit() {
+        for max_bytes in [MAX_POOL_METADATA_BYTES, MAX_ANCHOR_METADATA_BYTES] {
+            for extra in [0, 1] {
+                let first = "x".repeat(max_bytes / 2);
+                let second = "x".repeat(max_bytes - first.len() + extra);
+                let body = format!(
+                    "{:x}\r\n{first}\r\n{:x}\r\n{second}\r\n0\r\n\r\n",
+                    first.len(),
+                    second.len(),
+                )
+                .into_bytes();
+                let (url, server) =
+                    serve_response(body, "200 OK", "Transfer-Encoding: chunked\r\n");
+                let (client, request_url) = local_candidate_client(&url);
 
-        let error = fetch_offchain_body(&client, &request_url, Duration::from_secs(5))
-            .await
-            .expect_err("The client accepted a chunked response with more bytes than the limit.");
+                let result =
+                    fetch_offchain_body(&client, &request_url, Duration::from_secs(5), max_bytes)
+                        .await;
 
-        server.join().unwrap();
-        assert!(matches!(error, OffchainFetchError::SizeExceeded));
+                server.join().unwrap();
+                if extra == 0 {
+                    assert_eq!(result.unwrap().len(), max_bytes);
+                } else {
+                    assert!(matches!(result, Err(OffchainFetchError::SizeExceeded)));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn offchain_fetch_allows_three_redirects_and_rejects_four() {
+        use axum::response::IntoResponse;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for redirects in [3, 4] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/metadata", listener.local_addr().unwrap());
+            let requests = Arc::new(AtomicUsize::new(0));
+            let calls = requests.clone();
+            let app = axum::Router::new().fallback(move || {
+                let index = calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if index < redirects {
+                        (
+                            StatusCode::FOUND,
+                            [(
+                                axum::http::header::LOCATION,
+                                format!("/metadata/{}", index + 1),
+                            )],
+                        )
+                            .into_response()
+                    } else {
+                        "metadata".into_response()
+                    }
+                }
+            });
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (client, request_url) = local_candidate_client(&url);
+
+            let result = fetch_offchain_body(
+                &client,
+                &request_url,
+                Duration::from_secs(5),
+                MAX_POOL_METADATA_BYTES,
+            )
+            .await;
+
+            server.abort();
+            if redirects == 3 {
+                assert_eq!(result.unwrap(), b"metadata");
+            } else {
+                assert!(matches!(result, Err(OffchainFetchError::Connection)));
+            }
+            assert_eq!(requests.load(Ordering::SeqCst), 4);
+        }
     }
 
     #[tokio::test]
     async fn offchain_fetch_preserves_http_and_body_errors() {
         let (url, server) = serve_response(Vec::new(), "404 Not Found", "");
         let (client, request_url) = local_candidate_client(&url);
-        let error = fetch_offchain_body(&client, &request_url, Duration::from_secs(5))
-            .await
-            .unwrap_err();
+        let error = fetch_offchain_body(
+            &client,
+            &request_url,
+            Duration::from_secs(5),
+            MAX_POOL_METADATA_BYTES,
+        )
+        .await
+        .unwrap_err();
         server.join().unwrap();
         assert!(matches!(
             error,
@@ -1087,22 +1183,33 @@ mod offchain_tests {
 
         let (url, server) = serve_body(Vec::new(), Some(1));
         let (client, request_url) = local_candidate_client(&url);
-        let error = fetch_offchain_body(&client, &request_url, Duration::from_secs(5))
-            .await
-            .unwrap_err();
+        let error = fetch_offchain_body(
+            &client,
+            &request_url,
+            Duration::from_secs(5),
+            MAX_POOL_METADATA_BYTES,
+        )
+        .await
+        .unwrap_err();
         server.join().unwrap();
         assert!(matches!(error, OffchainFetchError::Body));
     }
 
     #[tokio::test]
     async fn pool_metadata_accepts_valid_body_and_checks_optional_hash() {
-        let body = br#"{"name":"Dolos","description":"Pool","ticker":"DLS","homepage":"https://example.com"}"#.to_vec();
+        let mut body = br#"{"name":"Dolos","description":"Pool","ticker":"DLS","homepage":"https://example.com"}"#.to_vec();
+        body.resize(MAX_POOL_METADATA_BYTES, b' ');
         let hash = Hasher::<256>::hash(&body);
         let (url, server) = serve_body(body, None);
         let (client, request_url) = local_candidate_client(&url);
-        let body = fetch_offchain_body(&client, &request_url, Duration::from_secs(5))
-            .await
-            .unwrap();
+        let body = fetch_offchain_body(
+            &client,
+            &request_url,
+            Duration::from_secs(5),
+            MAX_POOL_METADATA_BYTES,
+        )
+        .await
+        .unwrap();
         server.join().unwrap();
 
         for expected_hash in [None, Some(hash.as_ref())] {
@@ -1112,6 +1219,46 @@ mod offchain_tests {
         }
         assert!(parse_pool_offchain_metadata(&body, Some(&[0; 32])).is_none());
         assert!(parse_pool_offchain_metadata(b"not JSON", None).is_none());
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_keeps_governance_size_limit() {
+        assert_eq!(MAX_POOL_METADATA_BYTES, 512);
+        assert_eq!(MAX_ANCHOR_METADATA_BYTES, 3_000_000);
+        let original_url = "ipfs://bafy-size-limit";
+
+        for size in [
+            MAX_POOL_METADATA_BYTES + 1,
+            MAX_ANCHOR_METADATA_BYTES,
+            MAX_ANCHOR_METADATA_BYTES + 1,
+        ] {
+            let mut expected = b"{}".to_vec();
+            expected.resize(size, b' ');
+            let hash = Hasher::<256>::hash(&expected);
+            let response_body = if size <= MAX_ANCHOR_METADATA_BYTES {
+                expected.clone()
+            } else {
+                Vec::new()
+            };
+            let (url, server) = serve_body(response_body, Some(size));
+            let (client, request_url) = local_candidate_client(&url);
+
+            let result =
+                fetch_anchor_candidate(&client, &request_url, original_url, hash.as_ref()).await;
+
+            server.join().unwrap();
+            if size <= MAX_ANCHOR_METADATA_BYTES {
+                assert_eq!(result.unwrap(), expected);
+            } else {
+                assert_eq!(
+                    result.err().unwrap(),
+                    DrepsInnerMetadataError::new(
+                        Code::SizeExceeded,
+                        format!("The response from {original_url} is larger than 3000000 bytes."),
+                    ),
+                );
+            }
+        }
     }
 
     #[tokio::test]

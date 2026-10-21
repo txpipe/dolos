@@ -49,7 +49,7 @@ use crate::{
     mapping::{
         bech32_calidus, bech32_pool, i32_or_500, pool_offchain_body, pool_offchain_metadata,
         rational_to_f64, stake_cred_to_address, vkey_to_stake_address, IntoModel,
-        OffchainFetchError,
+        OffchainFetchError, MAX_POOL_METADATA_BYTES,
     },
     pagination::{Pagination, PaginationParameters},
     routes::governance::voter_casts,
@@ -780,12 +780,21 @@ fn connection_error(url: &str) -> DrepsInnerMetadataError {
     )
 }
 
+fn size_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::SizeExceeded,
+        format!(
+            "Error Offchain Pool: Size error, fetching metadata from {url} exceeded {MAX_POOL_METADATA_BYTES} bytes."
+        ),
+    )
+}
+
 fn pool_fetch_error(url: &str, error: OffchainFetchError) -> Option<DrepsInnerMetadataError> {
     match error {
         OffchainFetchError::Client | OffchainFetchError::Body => None,
         OffchainFetchError::Connection => Some(connection_error(url)),
         OffchainFetchError::HttpResponse(status) => Some(http_response_error(url, status)),
-        OffchainFetchError::SizeExceeded => Some(crate::mapping::offchain_size_error(url)),
+        OffchainFetchError::SizeExceeded => Some(size_error(url)),
     }
 }
 
@@ -2984,7 +2993,7 @@ mod tests {
         assert_eq!(error.code, Code::SizeExceeded);
         assert_eq!(
             error.message,
-            "The response from https://example.com/pool.json is larger than 3000000 bytes."
+            "Error Offchain Pool: Size error, fetching metadata from https://example.com/pool.json exceeded 512 bytes."
         );
     }
 
