@@ -316,13 +316,15 @@ fn read_at_stable_cursor<T, E: From<StatusCode>>(
 /// The `counted` flags compare the archive rows with the proposal row and
 /// with the DRep rows, so the whole page is read between two reads of the
 /// state cursor and read again if the cursor moved: one response describes
-/// one chain state, never the rows of one and the flags of another.
+/// one chain state, never the rows of one and the flags of another. The
+/// budget spans the attempts, so a request reads at most `budget` blocks
+/// however often it repeats.
 fn read_votes<D: Domain>(
     domain: &D,
     tx: Hash<32>,
     idx: u32,
     pagination: &Pagination,
-    budget: usize,
+    mut budget: usize,
 ) -> Result<Vec<ProposalVotesInner>, Error> {
     let (_, page) = read_at_stable_cursor(
         || {
@@ -332,20 +334,20 @@ fn read_votes<D: Domain>(
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
         },
-        |cursor| read_votes_at(domain, tx, idx, pagination, budget, cursor.slot()),
+        |cursor| read_votes_at(domain, tx, idx, pagination, &mut budget, cursor.slot()),
     )?;
 
     Ok(page)
 }
 
-/// The page of [`read_votes`] as the state at `cursor` describes it. Every
-/// attempt starts from the full `budget`.
+/// The page of [`read_votes`] as the state at `cursor` describes it, drawing
+/// on what is left of `budget`.
 fn read_votes_at<D: Domain>(
     domain: &D,
     tx: Hash<32>,
     idx: u32,
     pagination: &Pagination,
-    mut budget: usize,
+    budget: &mut usize,
     cursor: BlockSlot,
 ) -> Result<Vec<ProposalVotesInner>, Error> {
     let key = ProposalKey::new(tx, idx);
@@ -401,7 +403,7 @@ fn read_votes_at<D: Domain>(
         |slot| archive.get_block_by_slot(&slot),
         descending,
         pagination.to(),
-        &mut budget,
+        budget,
         |block| Ok(proposal_votes_in_block(block, &action)),
     )?;
 
@@ -443,7 +445,7 @@ fn read_votes_at<D: Domain>(
         if row.counted {
             if let Some(cred) = drep {
                 row.counted =
-                    drep_vote_counts(domain, &cred, (row.slot, row.tx_order), end, &mut budget)?;
+                    drep_vote_counts(domain, &cred, (row.slot, row.tx_order), end, budget)?;
             }
         }
 
@@ -1391,6 +1393,39 @@ mod tests {
                 STABLE_CURSOR_ATTEMPTS
             )
         );
+    }
+
+    /// A read repeated by a moving cursor keeps drawing on the same budget.
+    #[test]
+    fn stable_cursor_read_shares_the_budget_across_attempts() {
+        use std::cell::Cell;
+
+        let point = |slot: u64, hash: u8| ChainPoint::Specific(slot, Hash::from([hash; 32]));
+        let cursors = [point(10, 1), point(11, 2), point(11, 2), point(11, 2)];
+        let next_cursor = Cell::new(0);
+        let mut budget = 3usize;
+
+        let result = read_at_stable_cursor(
+            || {
+                let i = next_cursor.get();
+                next_cursor.set(i + 1);
+                Ok(cursors[i].clone())
+            },
+            |_| {
+                // a page that reads two blocks
+                for _ in 0..2 {
+                    if budget == 0 {
+                        return Err(Error::ScanBudgetExceeded);
+                    }
+                    budget -= 1;
+                }
+                Ok(())
+            },
+        );
+
+        // the second attempt finds one block of budget left, not three
+        assert!(matches!(result, Err(Error::ScanBudgetExceeded)));
+        assert_eq!(budget, 0);
     }
 
     /// A chain where the DRep's newest deregistration sits past the visible
