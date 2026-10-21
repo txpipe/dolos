@@ -1190,6 +1190,17 @@ where
     }
 }
 
+/// Gives a stable key order to DTOs with `HashMap` fields.
+///
+/// A `HashMap` serializes its keys in a random order for each instance.
+/// `serde_json::Value` sorts object keys while serde_json's `preserve_order`
+/// feature stays off.
+pub fn sorted_json<T: Serialize>(model: T) -> Result<Json<serde_json::Value>, StatusCode> {
+    serde_json::to_value(model)
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 #[derive(Default)]
 pub struct AssetTotals {
     lovelace: u128,
