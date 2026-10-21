@@ -102,7 +102,8 @@ fn scan_drep_deregistration<D: Domain>(
     drep_id: &[u8],
     vote_at: (BlockSlot, TxOrder),
     end: BlockSlot,
-) -> Result<bool, StatusCode> {
+    budget: &mut usize,
+) -> Result<bool, Error> {
     let slots = domain
         .archive()
         .slots_by_drep_certs(drep_id, vote_at.0, end)
@@ -111,12 +112,20 @@ fn scan_drep_deregistration<D: Domain>(
     for slot in slots {
         let slot = slot.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+        // The same budget the listing draws on: a page pays for every block
+        // it reads, the certificate blocks of its DReps included.
+        if *budget == 0 {
+            return Err(Error::ScanBudgetExceeded);
+        }
+
+        *budget -= 1;
+
         let Some(body) = domain
             .archive()
             .get_block_by_slot(&slot)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         else {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
         };
 
         let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -163,7 +172,8 @@ fn drep_vote_counts<D: Domain>(
     cred: &StakeCredential,
     vote_at: (BlockSlot, TxOrder),
     end: BlockSlot,
-) -> Result<bool, StatusCode> {
+    budget: &mut usize,
+) -> Result<bool, Error> {
     if end < vote_at.0 {
         return Ok(true);
     }
@@ -180,9 +190,13 @@ fn drep_vote_counts<D: Domain>(
         None => Ok(true),
         Some(dereg) if dereg < vote_at => Ok(true),
         Some((slot, _)) if slot <= end => Ok(false),
-        Some(_) => {
-            scan_drep_deregistration(domain, &pallas_extras::drep_id_bytes(cred), vote_at, end)
-        }
+        Some(_) => scan_drep_deregistration(
+            domain,
+            &pallas_extras::drep_id_bytes(cred),
+            vote_at,
+            end,
+            budget,
+        ),
     }
 }
 
@@ -397,7 +411,8 @@ fn read_votes<D: Domain>(
         // Only the DRep rows on the page pay for the deregistration check.
         if row.counted {
             if let Some(cred) = drep {
-                row.counted = drep_vote_counts(domain, &cred, (row.slot, row.tx_order), end)?;
+                row.counted =
+                    drep_vote_counts(domain, &cred, (row.slot, row.tx_order), end, &mut budget)?;
             }
         }
 
@@ -483,13 +498,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestDomainBuilder;
     use crate::{
         mapping::{bech32, bech32_gov_action},
         routes::governance::testing::*,
         test_support::{TestApp, TestFault},
     };
     use dolos_core::StateWriter as _;
-    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
+    use dolos_testing::{
+        synthetic::{SyntheticBlockConfig, SyntheticVectors},
+        toy_domain::ToyDomain,
+    };
     use itertools::Itertools;
     use pallas::ledger::primitives::{conway::GovAction, Epoch};
 
@@ -1324,5 +1343,116 @@ mod tests {
                 STABLE_CURSOR_ATTEMPTS
             )
         );
+    }
+
+    /// A chain where the DRep's newest deregistration sits past the visible
+    /// tip while `tagged` of its certificate blocks sit between its vote and
+    /// the tip, so the `counted` check of its row scans every one of them.
+    fn drep_scan_domain(tagged: usize) -> (ToyDomain, SyntheticVectors) {
+        use dolos_cardano::indexes::archive_dimensions::DREP_CERTS;
+        use dolos_core::{ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _, Tag};
+        use pallas::ledger::primitives::conway::Certificate;
+
+        let cred = StakeCredential::AddrKeyhash([0x66u8; 28].into());
+        let mut extra_certs_by_block = vec![vec![vec![]]; 2];
+        extra_certs_by_block[0][0].push(Certificate::RegDRepCert(cred.clone(), 500, None));
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 2,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![]],
+            votes_by_block: vec![
+                vec![],
+                vec![vec![
+                    synthetic_vote(cc_key_voter(), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(drep_key_voter(), 0, 0, 0, Vote::Yes),
+                ]],
+            ],
+            extra_certs_by_block,
+            ..Default::default()
+        };
+
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        let vote_slot = vectors.blocks[1].slot;
+
+        // the voting block carries no certificate, so a copy of it is a
+        // certificate block the scan reads through without a verdict
+        let body = domain
+            .archive()
+            .get_block_by_slot(&vote_slot)
+            .expect("failed to read the voting block")
+            .expect("the voting block is missing");
+
+        let mut top = None;
+        let writer = domain
+            .archive()
+            .start_writer()
+            .expect("failed to start writer");
+        for i in 1..=tagged {
+            let slot = vote_slot + i as u64;
+            let hash = Hash::<32>::from([0xE0 + i as u8; 32]);
+            writer
+                .apply(
+                    &ChainPoint::Specific(slot, hash),
+                    &std::sync::Arc::new(body.clone()),
+                )
+                .expect("failed to write the block");
+            writer
+                .apply_index(&[ArchiveIndexDelta {
+                    slot,
+                    block_hash: hash.to_vec(),
+                    block_number: None,
+                    tx_hashes: vec![],
+                    tags: vec![Tag::new(DREP_CERTS, pallas_extras::drep_id_bytes(&cred))],
+                }])
+                .expect("failed to tag the block");
+            top = Some(ChainPoint::Specific(slot, hash));
+        }
+        writer.commit().expect("failed to commit the blocks");
+
+        let top = top.expect("at least one tagged block");
+        let writer = domain
+            .state()
+            .start_writer()
+            .expect("failed to start writer");
+        writer
+            .set_cursor(top.clone())
+            .expect("failed to move the cursor");
+        writer.commit().expect("failed to commit the cursor");
+
+        edit_drep_state(&domain, &cred, |state| {
+            state.unregistered_at = Some((top.slot() + 100, 0));
+        });
+
+        (domain, vectors)
+    }
+
+    #[test]
+    fn governance_proposal_votes_deregistration_scan_draws_on_the_budget() {
+        let (domain, vectors) = drep_scan_domain(2);
+        let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
+            .parse()
+            .expect("failed to parse the proposal tx");
+        let page = |count| Pagination {
+            count,
+            ..Default::default()
+        };
+
+        // one block for the listing, two for the DRep's certificate blocks
+        let rows = read_votes(&domain, tx, 0, &page(2), 3).expect("the page fits the budget");
+        assert_eq!(
+            rows.iter().map(|row| row.counted).collect_vec(),
+            [true, true]
+        );
+
+        // the listing fits, the certificate scan does not
+        assert!(matches!(
+            read_votes(&domain, tx, 0, &page(2), 2),
+            Err(Error::ScanBudgetExceeded)
+        ));
+
+        // the committee row alone reads no certificate block
+        let rows = read_votes(&domain, tx, 0, &page(1), 1).expect("the page fits the budget");
+        assert_eq!(rows.len(), 1);
     }
 }
