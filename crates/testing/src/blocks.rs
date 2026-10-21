@@ -320,9 +320,9 @@ pub fn make_byron_block(
         },
         consensus_data: BlockCons(
             pallas::ledger::primitives::byron::SlotId { epoch, slot },
-            Bytes::from(vec![0u8; 64]),
+            vec![0u8; 64].into(),
             MaybeIndefArray::Def(vec![number]),
-            BlockSig::Signature(Bytes::from(vec![0u8; 64])),
+            BlockSig::Signature(vec![0u8; 64].into()),
         ),
         extra_data: BlockHeadEx {
             block_version: (1, 0, 0),
