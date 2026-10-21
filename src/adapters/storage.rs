@@ -165,7 +165,9 @@ fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
             Ok(state) => {
                 found.node = state.read_cursor()?.is_some();
 
-                if state.holds_data()? {
+                // A read that fails counts as data, as the archive's does, and
+                // is left to the command that uses the state.
+                if state.holds_data().unwrap_or(true) {
                     found.held.push(path);
                 }
             }
@@ -300,9 +302,9 @@ pub fn inspect_existing_data(
 
 /// The decision on storage holding a store this release refuses. `--force` on
 /// its own clears it, unless clearing the storage root would leave part of
-/// the stores it replaces: a state that fails to open, as one in use does, or
+/// the stores it replaces: a state that fails to open for another reason, or
 /// a directory outside the root that holds data. Those are named for removal
-/// by hand.
+/// by hand, after the refusal.
 fn clear_refused(
     config: &RootConfig,
     policy: ExistingDataPolicy,
@@ -325,7 +327,7 @@ fn clear_refused(
     if let Some(error) = found.unreadable {
         let state = config.storage.state_path().unwrap_or_default();
         left.push(format!(
-            "  {}: a state store that fails to open: {error}",
+            "  {}: a state store that fails to open, which `--force` never clears: {error}",
             state.display()
         ));
     }
@@ -342,10 +344,8 @@ fn clear_refused(
     }
 
     Err(Error::message(format!(
-        "storage holds a store this release refuses, but `--force` clears only the storage \
-         root {}, and never a state store that fails to open, as one in use does. It \
-         would leave:\n{}\nStop anything using them, remove them by hand, then run the bootstrap \
-         again",
+        "{refusal}\n`--force` clears only the storage root {}, so it would leave:\n{}\nStop \
+         anything using them, remove them by hand, then run the bootstrap again",
         config.storage.path.display(),
         left.join("\n"),
     )))
@@ -1800,6 +1800,14 @@ mod tests {
 
     /// The archive counterpart of [`written_state`], holding an index entry.
     fn written_archive(config: &RootConfig, identity: Option<&str>) {
+        opened_archive(config, identity).shutdown().unwrap();
+    }
+
+    /// [`written_archive`]'s store, left open.
+    fn opened_archive(
+        config: &RootConfig,
+        identity: Option<&str>,
+    ) -> dolos_fjall::archive::ArchiveStore {
         let path = config.storage.archive_path().unwrap();
         let store = dolos_fjall::archive::ArchiveStore::open(
             StateSchema::default(),
@@ -1824,7 +1832,50 @@ mod tests {
             }])
             .unwrap();
         writer.commit().unwrap();
+        store
+    }
+
+    /// Flip the first data byte of each table under `keyspace`, so its store
+    /// still opens and reading its rows fails the block checksum.
+    fn corrupt_tables(keyspace: &Path) {
+        // A table starts with its first data block, after a 33-byte header.
+        for table in std::fs::read_dir(keyspace.join("tables")).unwrap() {
+            let table = table.unwrap().path();
+            let mut bytes = std::fs::read(&table).unwrap();
+            bytes[33] ^= 0xff;
+            std::fs::write(&table, bytes).unwrap();
+        }
+    }
+
+    /// A state this release wrote, holding a UTxO and no cursor, whose rows
+    /// fail to read.
+    fn written_unreadable_state(config: &RootConfig) {
+        let store = opened_state_without_cursor(config);
+        let utxos = store
+            .database()
+            .keyspace("state-utxos", Default::default)
+            .unwrap();
+        utxos.rotate_memtable_and_wait().unwrap();
+        let keyspace = utxos.path().to_path_buf();
         store.shutdown().unwrap();
+        drop((utxos, store));
+
+        corrupt_tables(&keyspace);
+    }
+
+    /// An archive this release wrote, holding a tag, whose rows fail to read.
+    fn written_unreadable_archive(config: &RootConfig) {
+        let store = opened_archive(config, current().as_deref());
+        let tags = store
+            .database()
+            .keyspace("archive-tags", Default::default)
+            .unwrap();
+        tags.rotate_memtable_and_wait().unwrap();
+        let keyspace = tags.path().to_path_buf();
+        store.shutdown().unwrap();
+        drop((tags, store));
+
+        corrupt_tables(&keyspace);
     }
 
     /// The refusal an open came to, or `None` when the store opened.
@@ -1985,7 +2036,17 @@ mod tests {
     /// A state this release opens holding a UTxO but no cursor, as a restore
     /// stopped before its last step leaves it.
     fn written_state_without_cursor(config: &RootConfig) {
-        let state = open_state_store(config).unwrap();
+        opened_state_without_cursor(config).shutdown().unwrap();
+    }
+
+    /// [`written_state_without_cursor`]'s store, left open.
+    fn opened_state_without_cursor(config: &RootConfig) -> dolos_fjall::StateStore {
+        let path = config.storage.state_path().unwrap();
+        let state = dolos_fjall::StateStore::open(path, &FjallStateConfig::default()).unwrap();
+        state
+            .record_identity(Compatibility::current().as_str())
+            .unwrap();
+
         let utxo = (
             TxoRef(TxHash::from([1u8; 32]), 0),
             std::sync::Arc::new(EraCbor(0, vec![0x80])),
@@ -1999,7 +2060,7 @@ mod tests {
             })
             .unwrap();
         writer.commit().unwrap();
-        state.shutdown().unwrap();
+        state
     }
 
     /// Over stores this release opens, `--continue` proceeds whatever storage
@@ -2189,6 +2250,8 @@ mod tests {
                     "{message}"
                 );
                 assert!(message.contains("by hand"), "{message}");
+                assert!(message.contains("no compatibility identity"), "{message}");
+                assert!(!message.contains("fails to open"), "{message}");
 
                 if outside.is_dir() {
                     std::fs::remove_dir_all(&outside).unwrap();
@@ -2292,9 +2355,139 @@ mod tests {
         }
     }
 
+    /// Every directory outside the root holding data is named in the one
+    /// message, so removing the first named doesn't let `--force` clear over
+    /// the rest.
+    #[test]
+    fn force_names_every_outside_directory_holding_data_at_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config_over(&temp.path().join("data"));
+        let archive = temp.path().join("archive");
+        let segments = temp.path().join("segments");
+        config.storage.archive.path = Some(archive.clone());
+        config.storage.archive.blocks_path = Some(segments.clone());
+
+        written_state(&config, current().as_deref());
+        written_archive(&config, None);
+        written_segment(&segments);
+
+        let message = match inspect_existing_data(&config, force()) {
+            Err(Error::Message(message)) => message,
+            other => panic!("not refused naming the outside directories: {other:?}"),
+        };
+
+        for outside in [&archive, &segments] {
+            assert!(
+                message.contains(&format!("{}: data outside", outside.display())),
+                "{message}"
+            );
+        }
+    }
+
+    /// What can't be read counts as data, so beside a refused store `--force`
+    /// names a directory outside the root it can't look into: an archive that
+    /// fails to open, as one in use does, a store whose rows fail to read, or
+    /// a `blocks_path` it can't list.
+    #[test]
+    fn force_names_outside_data_it_cannot_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let elsewhere = temp.path();
+
+        // An archive held open, as a running node holds it, beside a refused
+        // state.
+        let mut held = config_over(&elsewhere.join("held/data"));
+        held.storage.archive.path = Some(elsewhere.join("held/archive"));
+        written_state(&held, None);
+        let _running = open_archive_store(&held).unwrap();
+
+        let mut unreadable_archive = config_over(&elsewhere.join("archive/data"));
+        unreadable_archive.storage.archive.path = Some(elsewhere.join("archive/archive"));
+        written_state(&unreadable_archive, None);
+        written_unreadable_archive(&unreadable_archive);
+
+        let mut unreadable_state = config_over(&elsewhere.join("state/data"));
+        unreadable_state.storage.state.path = Some(elsewhere.join("state/state"));
+        written_unreadable_state(&unreadable_state);
+        written_archive(&unreadable_state, None);
+
+        for (config, outside) in [
+            (&held, held.storage.archive_path()),
+            (
+                &unreadable_archive,
+                unreadable_archive.storage.archive_path(),
+            ),
+            (&unreadable_state, unreadable_state.storage.state_path()),
+        ] {
+            let outside = outside.unwrap();
+            assert!(!holds_segments(&outside), "{}", outside.display());
+
+            let message = match inspect_existing_data(config, force()) {
+                Err(Error::Message(message)) => message,
+                other => panic!("{} not named: {other:?}", outside.display()),
+            };
+
+            assert!(
+                message.contains(&format!("{}: data outside", outside.display())),
+                "{message}"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut config = config_over(&elsewhere.join("unlisted/data"));
+            let segments = elsewhere.join("unlisted/segments");
+            config.storage.archive.blocks_path = Some(segments.clone());
+            written_state(&config, None);
+            written_segment(&segments);
+
+            let mode =
+                |mode| std::fs::set_permissions(&segments, std::fs::Permissions::from_mode(mode));
+            mode(0o000).unwrap();
+
+            // Permissions don't bind a superuser, who lists it anyway.
+            if std::fs::read_dir(&segments).is_err() {
+                let inspected = inspect_existing_data(&config, force());
+                mode(0o755).unwrap();
+
+                let message = match inspected {
+                    Err(Error::Message(message)) => message,
+                    other => panic!("{} not named: {other:?}", segments.display()),
+                };
+
+                assert!(
+                    message.contains(&format!("{}: data outside", segments.display())),
+                    "{message}"
+                );
+            } else {
+                mode(0o755).unwrap();
+            }
+        }
+    }
+
+    /// A state that opens but whose rows fail to read is no node without a
+    /// cursor, so every flag goes ahead and leaves the failure to the command
+    /// that uses the state.
+    #[test]
+    fn a_state_whose_rows_fail_to_read_is_left_to_the_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_unreadable_state(&config);
+        assert!(open_state_store(&config).unwrap().holds_data().is_err());
+
+        for policy in every_policy() {
+            assert_eq!(
+                inspect_existing_data(&config, policy).unwrap(),
+                Existing::Proceed,
+                "{policy:?}"
+            );
+        }
+    }
+
     /// With history off the archive plays no part: a leftover one, refused
-    /// or outside the root, changes no decision about a node or a refused
-    /// state.
+    /// or outside the root, or segments at a `blocks_path` outside it, change
+    /// no decision about a node or a refused state.
     #[test]
     fn inspecting_storage_without_history_passes_over_the_archive() {
         let temp = tempfile::tempdir().unwrap();
@@ -2323,8 +2516,10 @@ mod tests {
         let mut config = config_over(&temp.path().join("data"));
         config.history = HistoryConfig::none();
         config.storage.archive.path = Some(temp.path().join("archive"));
+        config.storage.archive.blocks_path = Some(temp.path().join("segments"));
         written_state(&config, None);
         written_archive(&config, None);
+        written_segment(&temp.path().join("segments"));
 
         assert_eq!(
             inspect_existing_data(&config, force()).unwrap(),
@@ -2388,6 +2583,7 @@ mod tests {
                 assert!(!message.contains("fails to open"), "{message}");
             } else {
                 for named in [
+                    "the archive store".to_string(),
                     format!("{}: a state store that fails to open", state.display()),
                     format!("{}: data outside", segments.display()),
                 ] {
