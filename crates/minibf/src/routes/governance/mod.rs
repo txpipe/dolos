@@ -1,5 +1,3 @@
-mod metadata;
-
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     future::Future,
@@ -45,10 +43,6 @@ use dolos_core::{
 };
 use futures::{stream, FutureExt as _, StreamExt as _};
 use itertools::Itertools;
-use metadata::{cached_drep_metadata, fetch_drep_metadata, unfetched, OnOverload};
-
-pub use metadata::register as register_caches;
-pub(crate) use metadata::remove_legacy_dir;
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -80,6 +74,7 @@ use crate::{
         rational_to_f64_unrounded, sorted_json, stake_cred_to_address, AnchorMetadata, CommitteeCredentialRole,
         IntoModel, Unrounded,
     },
+    offchain::{cached_drep_metadata, fetch_drep_metadata, unfetched, OnOverload},
     pagination::{Order, Pagination, PaginationParameters},
     scan::{EntityScan, ENTITY_CHUNK},
     Facade,
@@ -89,7 +84,7 @@ use crate::{
 /// and every miss costs a round trip capped at the fetch timeout, so the bound
 /// keeps a slow page from queueing all of them at once while a cached row
 /// still costs nothing. Outbound requests have their own process-wide bound
-/// (`metadata::MAX_CONCURRENT_FETCHES`), shared by every page.
+/// (`offchain::MAX_CONCURRENT_FETCHES`), shared by every page.
 const MAX_CONCURRENT_METADATA_FETCHES: usize = 8;
 
 /// How long a page waits for the anchors it misses. A cold page of 100 rows
@@ -3288,7 +3283,7 @@ mod tests {
             }
         });
 
-        metadata::cache_verified_body(app.facade().inner.cache(), &anchor, body).await;
+        crate::offchain::cache_verified_body(app.facade().inner.cache(), &anchor, body).await;
 
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}/metadata");
