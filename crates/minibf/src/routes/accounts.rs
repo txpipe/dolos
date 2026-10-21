@@ -1613,6 +1613,7 @@ mod tests {
             register_slot: 0,
             retiring_epoch: None,
             deposit: 0,
+            calidus: None,
         }
     }
 

@@ -208,6 +208,17 @@ pub fn make_conway_block_with_metadata(
     metadata: Vec<(u64, alonzo::Metadatum)>,
     valid: bool,
 ) -> (ChainPoint, RawBlock) {
+    make_conway_block_with_metadata_at(slot, 1, Some(Hash::from([9u8; 32])), metadata, valid)
+}
+
+/// [`make_conway_block_with_metadata`] at a given height, after `prev_hash`.
+pub fn make_conway_block_with_metadata_at(
+    slot: BlockSlot,
+    block_number: u64,
+    prev_hash: Option<Hash<32>>,
+    metadata: Vec<(u64, alonzo::Metadatum)>,
+    valid: bool,
+) -> (ChainPoint, RawBlock) {
     let body = pallas::ledger::primitives::conway::TransactionBody {
         inputs: pallas::codec::utils::Set::from(vec![]),
         outputs: vec![],
@@ -236,7 +247,13 @@ pub fn make_conway_block_with_metadata(
         auxiliary_scripts: None,
     });
 
-    make_conway_block_with_tx(slot, body, Some(aux), valid)
+    make_conway_block_with_txs_at(
+        slot,
+        block_number,
+        prev_hash,
+        vec![(body, valid)],
+        Some(aux),
+    )
 }
 
 /// Number of slots in a Byron epoch on the default genesis values pallas uses
