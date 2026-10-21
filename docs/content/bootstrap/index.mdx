@@ -30,7 +30,7 @@ These flags apply to all bootstrap methods:
 
 By default, `dolos bootstrap` will error if it detects existing data in storage. Use one of the flags above to control this behavior.
 
-A state or archive store this release can't open (see [store identity](../architecture/data-layer#store-identity)) is refused under every flag but `--force`, which clears it. `--force` clears only the storage root, so a refused store the configuration keeps outside it is refused there too, naming the directories to remove by hand.
+A state or archive store this release can't open (see [store identity](../architecture/data-layer#store-identity)) is refused under every flag but `--force` on its own, which clears it. Given with `--skip-if-data` or `--continue`, which leave storage as it is, `--force` is refused too. `--force` clears only the storage root, so a refused store the configuration keeps outside it is refused there too, naming the directories to remove by hand.
 
 ## Bootstrap Methods
 

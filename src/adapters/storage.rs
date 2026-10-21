@@ -79,26 +79,24 @@ pub fn outside_storage_root(
     config: &RootConfig,
     paths: impl IntoIterator<Item = Option<PathBuf>>,
 ) -> std::io::Result<Vec<PathBuf>> {
-    let cwd = std::env::current_dir()?;
-    let root = normalize(&cwd, &config.storage.path);
+    let root = normalize(&config.storage.path)?;
+    let mut outside = Vec::new();
 
-    Ok(paths
-        .into_iter()
-        .flatten()
-        .filter(|path| !normalize(&cwd, path).starts_with(&root))
-        .collect())
+    for path in paths.into_iter().flatten() {
+        if !normalize(&path)?.starts_with(&root) {
+            outside.push(path);
+        }
+    }
+
+    Ok(outside)
 }
 
-fn normalize(cwd: &Path, path: &Path) -> PathBuf {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-
+/// `path` made absolute with `..` resolved lexically. Only a relative path
+/// reads the working directory, so absolute ones survive a deleted one.
+fn normalize(path: &Path) -> std::io::Result<PathBuf> {
     let mut normalized = PathBuf::new();
 
-    for component in absolute.components() {
+    for component in std::path::absolute(path)?.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
@@ -108,7 +106,7 @@ fn normalize(cwd: &Path, path: &Path) -> PathBuf {
         }
     }
 
-    normalized
+    Ok(normalized)
 }
 
 /// What to do about data already in storage.
@@ -142,71 +140,83 @@ pub struct ExistingDataPolicy {
 }
 
 /// What storage holds, as a bootstrap decides about it.
-enum Found {
-    Nothing,
-    Node,
-    /// A store this release refuses to open: the refusal, and the store's
-    /// directories that clearing the storage root does not reach.
-    Incompatible {
-        refusal: Error,
-        outside: Vec<PathBuf>,
-    },
+#[derive(Default)]
+struct Found {
+    /// The state holds a cursor.
+    node: bool,
+    /// The state failed to open for a reason other than its identity.
+    unreadable: Option<Error>,
+    /// The first identity refusal, and the directories of every refused store.
+    refused: Option<(Error, Vec<Option<PathBuf>>)>,
 }
 
 impl Found {
-    fn incompatible<const N: usize>(
-        config: &RootConfig,
-        refusal: Error,
-        paths: [Option<PathBuf>; N],
-    ) -> Result<Self, Error> {
-        let mut outside = outside_storage_root(config, paths)?;
-        outside.retain(|path| path.exists());
-
-        Ok(Self::Incompatible { refusal, outside })
+    fn refuse(&mut self, refusal: Error, paths: impl IntoIterator<Item = Option<PathBuf>>) {
+        let (_, dirs) = self.refused.get_or_insert_with(|| (refusal, Vec::new()));
+        dirs.extend(paths);
     }
 }
 
 /// Open the stores already on disk, creating none: a state cursor is a node,
-/// and a store failing its identity check is reported rather than raised.
+/// and failures to open are reported rather than raised. Both stores are
+/// checked, so a refused state doesn't hide a refused archive.
 fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
     let on_disk = |path: Option<PathBuf>| path.is_some_and(|path| path.exists());
 
-    let mut node = false;
+    let mut found = Found::default();
 
     if on_disk(config.storage.state_path()) {
         match open_state_store(config) {
-            Ok(state) => node = state.read_cursor()?.is_some(),
+            Ok(state) => found.node = state.read_cursor()?.is_some(),
             Err(error @ Error::StateError(StateError::IncompatibleStore(_))) => {
-                return Found::incompatible(config, error, [config.storage.state_path()]);
+                found.refuse(error, [config.storage.state_path()]);
             }
-            Err(error) => return Err(error),
+            Err(error) => found.unreadable = Some(error),
         }
     }
 
-    // The archive is opened for its identity alone. Any other failure is the
-    // command's to report when it uses the archive, so a damaged archive
-    // doesn't stand in the way of the `--force` that clears it.
     if config.keeps_archive() && on_disk(config.storage.archive_path()) {
-        if let Err(error @ Error::ArchiveError(ArchiveError::IncompatibleStore(_))) =
-            open_archive_store(config)
-        {
+        if let Some(refusal) = archive_refusal(config) {
             let paths = [config.storage.archive_path(), config.storage.blocks_path()];
-
-            return Found::incompatible(config, error, paths);
+            found.refuse(refusal, paths);
         }
     }
 
-    Ok(if node { Found::Node } else { Found::Nothing })
+    Ok(found)
+}
+
+/// The archive's identity refusal, if it has one. Only the index is read, so
+/// the archive opens with its segments in its own directory, and a
+/// `blocks_path` that is gone isn't created. Any other failure is left to the
+/// command that uses the archive, as before stores recorded identities.
+fn archive_refusal(config: &RootConfig) -> Option<Error> {
+    let opened = ArchiveStoreBackend::open(
+        config.storage.archive_path().unwrap_or_default(),
+        None,
+        dolos_cardano::model::build_log_schema(),
+        config.storage.archive.kind,
+    );
+
+    match opened {
+        Err(refusal @ ArchiveError::IncompatibleStore(_)) => Some(refusal.into()),
+        _ => None,
+    }
 }
 
 /// Whether storage already holds a node: a state cursor is the whole test. A
 /// store this release refuses to open is refused here too.
 pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
-    match found_in_storage(config)? {
-        Found::Nothing => Ok(false),
-        Found::Node => Ok(true),
-        Found::Incompatible { refusal, .. } => Err(refusal),
+    let found = found_in_storage(config)?;
+
+    if let Some((refusal, _)) = found.refused {
+        return Err(refusal);
     }
+
+    if let Some(error) = found.unreadable {
+        return Err(error);
+    }
+
+    Ok(found.node)
 }
 
 /// Read what is in storage and decide, without touching any of it.
@@ -216,40 +226,30 @@ pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
 /// operator whose answer is then thrown away.
 ///
 /// A store this release refuses to open is data in the way that only `--force`
-/// clears. Every other flag, `--continue` included, gets its refusal, and so
-/// does `--force` when the store lies outside the storage root it clears.
+/// on its own clears. Every other flag, `--continue` included, gets its
+/// refusal, and so does `--force` when a refused store keeps directories
+/// outside the storage root it clears. A state that fails to open for another
+/// reason is left to `--continue`, and stops every other flag, `--force`
+/// included, since a running node holds its stores that way.
 pub fn inspect_existing_data(
     config: &RootConfig,
     policy: ExistingDataPolicy,
 ) -> Result<Existing, Error> {
-    let node = match found_in_storage(config)? {
-        Found::Nothing => false,
-        Found::Node => true,
-        Found::Incompatible { refusal, outside } => {
-            if !policy.force || policy.skip_if_data || policy.r#continue {
-                return Err(refusal);
-            }
+    let found = found_in_storage(config)?;
 
-            if !outside.is_empty() {
-                let listed = outside
-                    .iter()
-                    .map(|path| format!("  {}", path.display()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
+    if let Some((refusal, dirs)) = found.refused {
+        return clear_refused(config, policy, refusal, dirs, found.unreadable);
+    }
 
-                return Err(Error::message(format!(
-                    "a store this release refuses keeps directories outside the storage root \
-                     {}, and `--force` clears only the root:\n{listed}\nRemove those \
-                     directories by hand, then run the bootstrap again",
-                    config.storage.path.display(),
-                )));
-            }
+    if policy.r#continue {
+        return Ok(Existing::Proceed);
+    }
 
-            return Ok(Existing::Clear);
-        }
-    };
+    if let Some(error) = found.unreadable {
+        return Err(error);
+    }
 
-    if policy.r#continue || !node {
+    if !found.node {
         return Ok(Existing::Proceed);
     }
 
@@ -265,6 +265,52 @@ pub fn inspect_existing_data(
         "existing data detected in storage. Use --force to clear and re-bootstrap, \
          --skip-if-data to skip, or --continue to resume",
     ))
+}
+
+/// The decision on storage holding a store this release refuses: `--force`
+/// on its own clears it when clearing the storage root reaches every refused
+/// directory and the state isn't held by something else.
+fn clear_refused(
+    config: &RootConfig,
+    policy: ExistingDataPolicy,
+    refusal: Error,
+    dirs: Vec<Option<PathBuf>>,
+    unreadable: Option<Error>,
+) -> Result<Existing, Error> {
+    if !policy.force {
+        return Err(refusal);
+    }
+
+    if policy.skip_if_data || policy.r#continue {
+        return Err(Error::message(format!(
+            "{refusal}\n`--force` clears a refused store only on its own: `--skip-if-data` \
+             and `--continue` leave storage as it is"
+        )));
+    }
+
+    if let Some(error) = unreadable {
+        return Err(error);
+    }
+
+    let mut outside = outside_storage_root(config, dirs)?;
+    outside.retain(|path| path.exists());
+
+    if !outside.is_empty() {
+        let listed = outside
+            .iter()
+            .map(|path| format!("  {}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        return Err(Error::message(format!(
+            "a store this release refuses keeps directories outside the storage root {}, \
+             and `--force` clears only the root:\n{listed}\nRemove those directories by \
+             hand, then run the bootstrap again",
+            config.storage.path.display(),
+        )));
+    }
+
+    Ok(Existing::Clear)
 }
 
 /// The data format this binary reads, as snapshot download URLs name it.
@@ -1869,9 +1915,50 @@ mod tests {
         }
     }
 
-    /// Bootstrap's look at storage opens nothing absent, lets a plain
-    /// `--force` clear a refused store, and refuses it under every other
-    /// policy, resuming and skipping included.
+    /// Every combination of `--force`, `--skip-if-data` and `--continue`.
+    fn every_policy() -> impl Iterator<Item = ExistingDataPolicy> {
+        (0..8u8).map(|bits| ExistingDataPolicy {
+            force: bits & 1 != 0,
+            skip_if_data: bits & 2 != 0,
+            r#continue: bits & 4 != 0,
+        })
+    }
+
+    /// Over stores this release opens, `--continue` proceeds whatever storage
+    /// holds, and the other flags decide only about a node: empty storage
+    /// proceeds under every one.
+    #[test]
+    fn inspecting_storage_follows_the_flags_over_stores_this_release_opens() {
+        for node in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let config = config_over(&temp.path().join("data"));
+
+            if node {
+                written_state(&config, current().as_deref());
+            }
+
+            for policy in every_policy() {
+                let inspected = inspect_existing_data(&config, policy);
+
+                if policy.r#continue || !node {
+                    assert_eq!(inspected.unwrap(), Existing::Proceed, "{policy:?}");
+                } else if policy.skip_if_data {
+                    assert_eq!(inspected.unwrap(), Existing::Skip, "{policy:?}");
+                } else if policy.force {
+                    assert_eq!(inspected.unwrap(), Existing::Clear, "{policy:?}");
+                } else {
+                    assert!(inspected.is_err(), "{policy:?}");
+                }
+            }
+
+            assert_eq!(has_existing_data(&config).unwrap(), node);
+        }
+    }
+
+    /// Bootstrap's look at storage opens nothing absent, lets `--force` on
+    /// its own clear a refused store, and refuses it under every other
+    /// policy, resuming and skipping included. `--force` given with one of
+    /// those is told it clears only on its own.
     #[test]
     fn inspecting_storage_reports_a_refused_store_as_data_in_the_way() {
         let temp = tempfile::tempdir().unwrap();
@@ -1886,22 +1973,21 @@ mod tests {
 
         written_archive(&config, None);
 
-        for force in [false, true] {
-            for skip_if_data in [false, true] {
-                for r#continue in [false, true] {
-                    let policy = ExistingDataPolicy {
-                        force,
-                        skip_if_data,
-                        r#continue,
-                    };
-                    let inspected = inspect_existing_data(&config, policy);
+        for policy in every_policy() {
+            let inspected = inspect_existing_data(&config, policy);
 
-                    if force && !skip_if_data && !r#continue {
-                        assert_eq!(inspected.unwrap(), Existing::Clear);
-                    } else {
-                        assert!(refusal(inspected).is_some(), "{policy:?}");
-                    }
-                }
+            if !policy.force {
+                assert!(refusal(inspected).is_some(), "{policy:?}");
+            } else if policy.skip_if_data || policy.r#continue {
+                let message = match inspected {
+                    Err(Error::Message(message)) => message,
+                    other => panic!("not refused as a conflict: {other:?}"),
+                };
+
+                assert!(message.contains("no compatibility identity"), "{message}");
+                assert!(message.contains("only on its own"), "{message}");
+            } else {
+                assert_eq!(inspected.unwrap(), Existing::Clear);
             }
         }
 
@@ -1909,7 +1995,10 @@ mod tests {
     }
 
     /// `--force` clears the storage root alone, so it refuses a refused store
-    /// that keeps a directory outside the root, naming that directory.
+    /// that keeps a directory outside the root, naming that directory, even
+    /// behind a refused state, as in an upgrade where both stores are refused.
+    /// Looking doesn't recreate a directory the operator removed, so once
+    /// they are gone, `--force` clears the rest.
     #[test]
     fn force_names_what_it_cannot_clear_of_a_refused_store() {
         type Edit = fn(&mut RootConfig, &Path);
@@ -1938,25 +2027,88 @@ mod tests {
         };
 
         for (edit, outside) in cases {
-            let temp = tempfile::tempdir().unwrap();
-            let mut config = config_over(&temp.path().join("data"));
-            edit(&mut config, &temp.path().join("elsewhere"));
-            std::fs::create_dir_all(&config.storage.path).unwrap();
-            written_archive(&config, None);
+            for refused_state in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let mut config = config_over(&temp.path().join("data"));
+                edit(&mut config, &temp.path().join("elsewhere"));
+                std::fs::create_dir_all(&config.storage.path).unwrap();
 
-            let outside = outside(&config).unwrap();
-            std::fs::create_dir_all(&outside).unwrap();
+                if refused_state {
+                    written_state(&config, None);
+                }
 
-            let message = match inspect_existing_data(&config, force) {
-                Err(Error::Message(message)) => message,
-                other => panic!("not refused as outside the root: {other:?}"),
-            };
+                written_archive(&config, None);
 
-            assert!(
-                message.contains(&outside.display().to_string()),
-                "{message}"
-            );
-            assert!(message.contains("by hand"), "{message}");
+                let outside = outside(&config).unwrap();
+                std::fs::create_dir_all(&outside).unwrap();
+
+                let message = match inspect_existing_data(&config, force) {
+                    Err(Error::Message(message)) => message,
+                    other => panic!("not refused as outside the root: {other:?}"),
+                };
+
+                assert!(
+                    message.contains(&outside.display().to_string()),
+                    "{message}"
+                );
+                assert!(message.contains("by hand"), "{message}");
+
+                std::fs::remove_dir_all(&outside).unwrap();
+                let inspected = inspect_existing_data(&config, force).unwrap();
+                assert!(!outside.exists(), "{}", outside.display());
+
+                if refused_state {
+                    assert_eq!(inspected, Existing::Clear);
+                }
+            }
+        }
+    }
+
+    /// A state that fails to open for a reason other than its identity — an
+    /// interrupted unpack, or a store a running node holds — is left to a
+    /// resumed run, as before bootstrap read identities, and stops every
+    /// other flag, `--force` included, a refused archive beside it or not.
+    #[test]
+    fn a_state_that_fails_to_open_is_left_to_a_resumed_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        std::fs::create_dir_all(&config.storage.path).unwrap();
+        std::fs::write(config.storage.state_path().unwrap(), b"not a store").unwrap();
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        let held = config_over(&elsewhere.path().join("data"));
+        written_state(&held, current().as_deref());
+        let _running = open_state_store(&held).unwrap();
+
+        for config in [&config, &held] {
+            assert!(open_state_store(config).is_err());
+
+            for policy in every_policy() {
+                let inspected = inspect_existing_data(config, policy);
+
+                if policy.r#continue {
+                    assert_eq!(inspected.unwrap(), Existing::Proceed, "{policy:?}");
+                } else {
+                    assert!(inspected.is_err(), "{policy:?}");
+                }
+            }
+        }
+
+        written_archive(&config, None);
+
+        for policy in every_policy() {
+            let inspected = inspect_existing_data(&config, policy);
+
+            if policy.force && !policy.skip_if_data && !policy.r#continue {
+                assert!(
+                    matches!(inspected, Err(Error::StateError(_))),
+                    "{inspected:?}"
+                );
+            } else if !policy.force {
+                assert!(refusal(inspected).is_some(), "{policy:?}");
+            } else {
+                assert!(inspected.is_err(), "{policy:?}");
+            }
         }
     }
 

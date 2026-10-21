@@ -24,7 +24,9 @@ To move a node to v2, replace its stores with ones v2 writes:
 - **Restore from a stele** (minutes): `dolos bootstrap stelae --force`. The restore writes through v2's own stores, so they record its identity whatever release published the stele.
 - **Re-sync** (hours to days): `dolos bootstrap mithril --force`, or `dolos bootstrap relay --force` and then `dolos daemon` to sync from the relay.
 
-`--force` is what clears the refused stores. Without it, `dolos bootstrap` refuses with the same error, `--skip-if-data` and `--continue` included, rather than leave the node a store it cannot open. `--force` clears only the storage root: a refused store the configuration keeps outside it is refused again, naming the directories to remove by hand before bootstrapping.
+`--force` on its own is what clears the refused stores. Without it, `dolos bootstrap` refuses with the same error, `--skip-if-data` and `--continue` included, rather than leave the node a store it cannot open. `--force` clears only the storage root: a refused store the configuration keeps outside it is refused again, naming the directories to remove by hand before bootstrapping.
+
+The check covers the fjall stores. A v1 store kept in redb (a `redb` state backend, or the archive, which v1 keeps in redb by default) is not one v2 can open at all, so there is no identity to check. Inside the storage root, `--force` clears a redb archive along with the refused state beside it. A redb state, or a redb store outside the storage root, makes the bootstrap fail with the error opening it whatever the flags, so remove it by hand first.
 
 <Aside type="caution">
 A Dolos snapshot (`dolos bootstrap snapshot`) unpacks the stores of the node that exported it as they were. One exported before stores recorded an identity is refused once unpacked; bootstrap from a stele or re-sync instead.
