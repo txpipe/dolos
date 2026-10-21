@@ -1590,8 +1590,11 @@ where
 /// to the nearest double.
 ///
 /// Two operands up to 2^53 convert exactly, so their quotient is that nearest
-/// double. Larger ones go through a long decimal expansion, which `parse`
-/// rounds correctly.
+/// double. Larger ones go through a decimal expansion, which `parse` rounds
+/// correctly as long as the cut leaves the quotient on its side of every
+/// midpoint between doubles. 64 decimals do: a quotient that is a midpoint
+/// has a power-of-two denominator below 2^64 and ends within 63 decimals, and
+/// one that is not lies more than 2^-181 from any midpoint.
 fn margin_f64(numerator: u64, denominator: u64) -> f64 {
     const EXACT: u64 = 1 << 53;
 
@@ -1607,7 +1610,7 @@ fn margin_f64(numerator: u64, denominator: u64) -> f64 {
     let mut remainder = numerator as u128 % divisor;
     let mut text = format!("{}.", numerator as u128 / divisor);
 
-    for _ in 0..60 {
+    for _ in 0..64 {
         remainder *= 10;
         text.push(char::from(b'0' + (remainder / divisor) as u8));
         remainder %= divisor;
@@ -3955,6 +3958,29 @@ mod tests {
 
         assert_eq!(margin_f64(u64::MAX / 4, u64::MAX - 1), 0.25);
         assert_eq!(margin_f64(1, 0), 0.0);
+    }
+
+    /// Margins past 2^53 go through the decimal expansion. The first sits
+    /// exactly on a midpoint between two doubles, which a 60-decimal cut
+    /// rounded down, one lovelace short in `fees`. The second is a double
+    /// away from the plain `f64` division of its operands.
+    #[test]
+    fn bf_fees_round_wide_margins_to_the_nearest_double() {
+        let midpoint = (12_777_994_273_690_747, 1 << 63);
+
+        assert_eq!(
+            margin_f64(midpoint.0, midpoint.1),
+            12777994273690747f64 / 9223372036854775808f64
+        );
+        assert_eq!(
+            bf_compatible_fees(&fee_log(446_511_071_931, 340_000_000, Some(midpoint))),
+            958_122_242
+        );
+
+        let (numerator, denominator) = (3_071_691_459_605_072_764, 15_394_439_036_360_229_302);
+
+        assert_eq!(margin_f64(numerator, denominator), 0.19953253589494388);
+        assert_ne!(numerator as f64 / denominator as f64, 0.19953253589494388);
     }
 
     #[tokio::test]
