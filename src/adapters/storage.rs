@@ -19,9 +19,10 @@ use dolos_core::{
         MemoryStateWriter, NoDiskTier, NoOpArchiveStore, NoOpArchiveWriter,
     },
     cache::Cost,
+    compat::{reads_store_identity, IncompatibleStore},
     config::{
-        FjallArchiveConfig, FjallStateConfig, RedbMempoolConfig, RedbStateConfig, RedbWalConfig,
-        RootConfig, StateStoreConfig, StoreType,
+        Compatibility, FjallArchiveConfig, FjallStateConfig, RedbMempoolConfig, RedbStateConfig,
+        RedbWalConfig, RootConfig, StateStoreConfig, StoreType,
     },
     ArchiveIndexDelta, BlockBody, BlockSlot, CacheDiskTier, CacheEntry, CacheError, ChainPoint,
     EntityDelta, EntityKey, EntityValue, ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey,
@@ -98,11 +99,52 @@ pub struct ExistingDataPolicy {
     pub r#continue: bool,
 }
 
-/// Whether storage already holds a node: a state cursor is the whole test.
-pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
-    let state = open_state_store(config)?;
+/// What storage holds, as a bootstrap decides about it.
+enum Found {
+    Nothing,
+    Node,
+    /// A store this release refuses to open, with the refusal.
+    Incompatible(Error),
+}
 
-    Ok(state.read_cursor()?.is_some())
+/// Open the stores already on disk, creating none: a state cursor is a node,
+/// and a store failing its identity check is reported rather than raised.
+fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
+    let on_disk = |path: Option<PathBuf>| path.is_some_and(|path| path.exists());
+
+    let mut node = false;
+
+    if on_disk(config.storage.state_path()) {
+        match open_state_store(config) {
+            Ok(state) => node = state.read_cursor()?.is_some(),
+            Err(error @ Error::StateError(StateError::IncompatibleStore(_))) => {
+                return Ok(Found::Incompatible(error))
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    if config.keeps_archive() && on_disk(config.storage.archive_path()) {
+        match open_archive_store(config) {
+            Ok(_) => {}
+            Err(error @ Error::ArchiveError(ArchiveError::IncompatibleStore(_))) => {
+                return Ok(Found::Incompatible(error))
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(if node { Found::Node } else { Found::Nothing })
+}
+
+/// Whether storage already holds a node: a state cursor is the whole test. A
+/// store this release refuses to open is refused here too.
+pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
+    match found_in_storage(config)? {
+        Found::Nothing => Ok(false),
+        Found::Node => Ok(true),
+        Found::Incompatible(error) => Err(error),
+    }
 }
 
 /// Read what is in storage and decide, without touching any of it.
@@ -110,6 +152,10 @@ pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
 /// The refusals happen here — a skip, and the refusal for existing data with no
 /// flag saying what to do about it — so neither is a question asked of an
 /// operator whose answer is then thrown away.
+///
+/// A store this release refuses to open is data in the way: `--force` clears
+/// it, and every other flag gets its refusal. `--continue` is left to the
+/// subcommand, whose own open refuses it.
 pub fn inspect_existing_data(
     config: &RootConfig,
     policy: ExistingDataPolicy,
@@ -118,16 +164,25 @@ pub fn inspect_existing_data(
         return Ok(Existing::Proceed);
     }
 
-    if !has_existing_data(config)? {
-        return Ok(Existing::Proceed);
-    }
+    let incompatible = match found_in_storage(config)? {
+        Found::Nothing => return Ok(Existing::Proceed),
+        Found::Node => None,
+        Found::Incompatible(error) => Some(error),
+    };
 
     if policy.skip_if_data {
-        return Ok(Existing::Skip);
+        return match incompatible {
+            Some(error) => Err(error),
+            None => Ok(Existing::Skip),
+        };
     }
 
     if policy.force {
         return Ok(Existing::Clear);
+    }
+
+    if let Some(error) = incompatible {
+        return Err(error);
     }
 
     Err(Error::message(
@@ -228,6 +283,46 @@ where
         archive: open_archive_store(config)?,
         mempool: open_mempool_store(config)?,
     })
+}
+
+/// Open the state and archive stores through their identity check, then
+/// close them, for a writer that filled storage without opening them.
+pub fn check_store_identities(config: &RootConfig) -> Result<(), Error> {
+    open_state_store(config)?.shutdown()?;
+    open_archive_store(config)?.shutdown()?;
+
+    Ok(())
+}
+
+/// Admit a persistent store only if it records an identity this release
+/// reads, recording the current one on a new store before its first write.
+///
+/// A store without an identity is new while it holds nothing; holding data, a
+/// release that predates store identities wrote it. The configuration plays
+/// no part.
+fn admit<E>(
+    store: &'static str,
+    path: &Path,
+    identity: Option<String>,
+    holds_data: impl FnOnce() -> Result<bool, dolos_fjall::Error>,
+    record: impl FnOnce(&str) -> Result<(), dolos_fjall::Error>,
+) -> Result<(), E>
+where
+    E: From<IncompatibleStore> + From<dolos_fjall::Error>,
+{
+    let found = match identity {
+        Some(found) if reads_store_identity(&found) => return Ok(()),
+        Some(found) => Some(found),
+        None if holds_data()? => None,
+        None => return Ok(record(Compatibility::current().as_str())?),
+    };
+
+    Err(IncompatibleStore {
+        store,
+        path: path.to_path_buf(),
+        found,
+    }
+    .into())
 }
 
 pub type CacheBackend = TieredCache<CacheDiskBackend>;
@@ -517,12 +612,24 @@ impl StateStoreBackend {
         )?))
     }
 
-    /// Open a state store with the Fjall backend.
+    /// Open a state store with the Fjall backend, refusing one this release
+    /// did not write (see [`admit`]).
     pub fn open_fjall(
         path: impl AsRef<Path>,
         config: &FjallStateConfig,
     ) -> Result<Self, StateError> {
-        Ok(Self::Fjall(dolos_fjall::StateStore::open(path, config)?))
+        let path = path.as_ref();
+        let store = dolos_fjall::StateStore::open(path, config)?;
+
+        admit::<StateError>(
+            "state",
+            path,
+            store.identity()?,
+            || store.holds_data(),
+            |identity| store.record_identity(identity),
+        )?;
+
+        Ok(Self::Fjall(store))
     }
 
     /// Create an in-memory state store.
@@ -545,6 +652,15 @@ impl StateStoreBackend {
         match config.kind {
             StoreType::Fjall { .. } => Self::open_fjall(path, &FjallStateConfig::default()),
             StoreType::Ephemeral => Self::in_memory(),
+        }
+    }
+
+    /// The compatibility identity the store recorded at creation; `None` for
+    /// the stores that do not record one.
+    pub fn identity(&self) -> Result<Option<String>, StateError> {
+        match self {
+            Self::Fjall(s) => Ok(s.identity()?),
+            Self::Redb(_) | Self::Memory(_) => Ok(None),
         }
     }
 
@@ -806,16 +922,25 @@ pub enum ArchiveStoreBackend {
 }
 
 impl ArchiveStoreBackend {
-    /// Open an archive store with the Fjall backend.
+    /// Open an archive store with the Fjall backend, refusing one this release
+    /// did not write (see [`admit`]).
     pub fn open_fjall(
         path: impl AsRef<Path>,
         schema: StateSchema,
         config: &dolos_core::config::FjallArchiveConfig,
     ) -> Result<Self, ArchiveError> {
-        Ok(Self::Fjall(
-            dolos_fjall::archive::ArchiveStore::open(schema, path, config)
-                .map_err(ArchiveError::from)?,
-        ))
+        let path = path.as_ref();
+        let store = dolos_fjall::archive::ArchiveStore::open(schema, path, config)?;
+
+        admit::<ArchiveError>(
+            "archive",
+            path,
+            store.identity()?,
+            || store.holds_data(),
+            |identity| store.record_identity(identity),
+        )?;
+
+        Ok(Self::Fjall(store))
     }
 
     /// Create a no-op archive store that discards all writes.
@@ -867,6 +992,16 @@ impl ArchiveStoreBackend {
                 Self::open_fjall(path, schema, &options)
             }
             StoreType::Ephemeral => Self::in_memory(schema),
+        }
+    }
+
+    /// The compatibility identity the store recorded at creation; `None` for
+    /// the stores that do not record one.
+    pub fn identity(&self) -> Result<Option<String>, ArchiveError> {
+        match self {
+            Self::Fjall(s) => Ok(s.identity()?),
+            Self::LogsOnly(inner) => inner.identity(),
+            Self::Memory(_) | Self::NoOp(_) => Ok(None),
         }
     }
 
@@ -1450,7 +1585,10 @@ impl MempoolStore for MempoolBackend {
 
 #[cfg(test)]
 mod tests {
-    use dolos_core::config::{ArchiveStoreConfig, ChainConfig, HistoryConfig};
+    use dolos_core::{
+        config::{ArchiveStoreConfig, ChainConfig, HistoryConfig, HistoryWindow},
+        Tag,
+    };
 
     use super::*;
 
@@ -1458,6 +1596,234 @@ mod tests {
         let mut config = RootConfig::new(ChainConfig::known("preview"));
         config.storage.path = root.to_path_buf();
         config
+    }
+
+    fn current() -> Option<String> {
+        Some(Compatibility::current().as_str().to_string())
+    }
+
+    /// A state store with a cursor, written by a release that recorded
+    /// `identity`, or by one that predates store identities.
+    fn written_state(config: &RootConfig, identity: Option<&str>) {
+        let path = config.storage.state_path().unwrap();
+        let store = dolos_fjall::StateStore::open(path, &FjallStateConfig::default()).unwrap();
+
+        if let Some(identity) = identity {
+            store.record_identity(identity).unwrap();
+        }
+
+        let writer = store.start_writer().unwrap();
+        writer.set_cursor(ChainPoint::Origin).unwrap();
+        writer.commit().unwrap();
+        store.shutdown().unwrap();
+    }
+
+    /// The archive counterpart of [`written_state`], holding an index entry.
+    fn written_archive(config: &RootConfig, identity: Option<&str>) {
+        let path = config.storage.archive_path().unwrap();
+        let store = dolos_fjall::archive::ArchiveStore::open(
+            StateSchema::default(),
+            path,
+            &FjallArchiveConfig::default(),
+        )
+        .unwrap();
+
+        if let Some(identity) = identity {
+            store.record_identity(identity).unwrap();
+        }
+
+        let writer = store.start_writer().unwrap();
+        writer
+            .apply_index(&[ArchiveIndexDelta {
+                slot: 1,
+                tags: vec![Tag::new(
+                    dolos_cardano::indexes::archive_dimensions::SCRIPT,
+                    vec![1u8; 28],
+                )],
+                ..Default::default()
+            }])
+            .unwrap();
+        writer.commit().unwrap();
+        store.shutdown().unwrap();
+    }
+
+    /// The refusal an open came to, or `None` when the store opened.
+    fn refusal<T>(opened: Result<T, Error>) -> Option<IncompatibleStore> {
+        match opened {
+            Ok(_) => None,
+            Err(Error::StateError(StateError::IncompatibleStore(refusal)))
+            | Err(Error::ArchiveError(ArchiveError::IncompatibleStore(refusal))) => Some(refusal),
+            Err(error) => panic!("not an identity refusal: {error}"),
+        }
+    }
+
+    #[test]
+    fn a_new_store_records_the_identity_and_reopens() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+
+        let stores = open_data_stores::<dolos_cardano::CardanoDelta>(&config).unwrap();
+        assert_eq!(stores.state.identity().unwrap(), current());
+        assert_eq!(stores.archive.identity().unwrap(), current());
+
+        let writer = stores.state.start_writer().unwrap();
+        writer.set_cursor(ChainPoint::Origin).unwrap();
+        writer.commit().unwrap();
+        stores.state.shutdown().unwrap();
+        stores.archive.shutdown().unwrap();
+        drop(stores);
+
+        let stores = open_data_stores::<dolos_cardano::CardanoDelta>(&config).unwrap();
+        assert_eq!(
+            stores.state.read_cursor().unwrap(),
+            Some(ChainPoint::Origin)
+        );
+        assert_eq!(stores.state.identity().unwrap(), current());
+        assert_eq!(stores.archive.identity().unwrap(), current());
+    }
+
+    /// A store left empty by a release that recorded nothing is a new store.
+    #[test]
+    fn an_empty_store_without_an_identity_is_initialised() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+
+        let state = config.storage.state_path().unwrap();
+        dolos_fjall::StateStore::open(&state, &FjallStateConfig::default())
+            .unwrap()
+            .shutdown()
+            .unwrap();
+
+        assert_eq!(
+            open_state_store(&config).unwrap().identity().unwrap(),
+            current()
+        );
+    }
+
+    #[test]
+    fn a_store_with_data_and_no_identity_is_refused_with_the_remedy() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_state(&config, None);
+        written_archive(&config, None);
+
+        let state = refusal(open_state_store(&config)).expect("the state store opened");
+        assert_eq!(
+            (state.store, &state.path, &state.found),
+            ("state", &config.storage.state_path().unwrap(), &None)
+        );
+
+        let archive = refusal(open_archive_store(&config)).expect("the archive store opened");
+        assert_eq!(
+            (archive.store, &archive.path, &archive.found),
+            ("archive", &config.storage.archive_path().unwrap(), &None)
+        );
+
+        let message = open_data_stores::<dolos_cardano::CardanoDelta>(&config)
+            .err()
+            .expect("the stores opened")
+            .to_string();
+        for remedy in [
+            "dolos bootstrap relay --force",
+            "dolos bootstrap stelae --force",
+        ] {
+            assert!(message.contains(remedy), "{message}");
+        }
+
+        // A refusal records nothing.
+        assert!(refusal(open_state_store(&config)).is_some());
+        assert!(refusal(open_archive_store(&config)).is_some());
+    }
+
+    #[test]
+    fn an_unsupported_identity_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_state(&config, Some("v1"));
+        written_archive(&config, Some("v1"));
+
+        let message = open_state_store(&config).err().unwrap().to_string();
+        assert!(message.contains("`v1`"), "{message}");
+
+        for refused in [
+            refusal(open_state_store(&config)),
+            refusal(open_archive_store(&config)),
+        ] {
+            assert_eq!(refused.unwrap().found.as_deref(), Some("v1"));
+        }
+    }
+
+    /// The identity is the only input: every configuration a node could be
+    /// given over the same stores opens what this release wrote and refuses
+    /// the rest.
+    #[test]
+    fn editing_the_config_changes_no_outcome() {
+        let edits: [fn(&mut RootConfig); 5] = [
+            |_| {},
+            |config| config.mempool.persistent = true,
+            |config| config.history = HistoryConfig::rolling(HistoryWindow::slots(1_000)),
+            |config| config.storage.archive.blocks_path = Some("segments".into()),
+            |config| config.sync.wal_path = Some("journal".into()),
+        ];
+
+        for recorded in [None, Some("v1"), current().as_deref()] {
+            let expected = match recorded {
+                Some(identity) if reads_store_identity(identity) => None,
+                _ => Some(recorded.map(str::to_string)),
+            };
+
+            for edit in edits {
+                let temp = tempfile::tempdir().unwrap();
+                let mut config = config_over(&temp.path().join("data"));
+                edit(&mut config);
+                written_state(&config, recorded);
+                written_archive(&config, recorded);
+
+                let outcomes = [
+                    refusal(open_state_store(&config)).map(|refusal| refusal.found),
+                    refusal(open_archive_store(&config)).map(|refusal| refusal.found),
+                ];
+
+                assert_eq!(
+                    outcomes,
+                    [expected.clone(), expected.clone()],
+                    "{recorded:?}"
+                );
+            }
+        }
+    }
+
+    /// Bootstrap's look at storage opens nothing absent, lets `--force` clear
+    /// a refused store, and refuses it under every other policy.
+    #[test]
+    fn inspecting_storage_reports_a_refused_store_as_data_in_the_way() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+
+        let none = ExistingDataPolicy::default();
+        assert_eq!(
+            inspect_existing_data(&config, none).unwrap(),
+            Existing::Proceed
+        );
+        assert!(!config.storage.path.exists());
+
+        written_archive(&config, None);
+
+        let force = ExistingDataPolicy {
+            force: true,
+            ..none
+        };
+        let skip = ExistingDataPolicy {
+            skip_if_data: true,
+            ..none
+        };
+        assert_eq!(
+            inspect_existing_data(&config, force).unwrap(),
+            Existing::Clear
+        );
+        assert!(refusal(inspect_existing_data(&config, skip)).is_some());
+        assert!(refusal(inspect_existing_data(&config, none)).is_some());
+        assert!(refusal(has_existing_data(&config)).is_some());
     }
 
     #[test]

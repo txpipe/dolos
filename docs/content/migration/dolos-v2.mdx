@@ -1,0 +1,33 @@
+---
+title: Migrating to Dolos v2
+sidebar:
+  label: Dolos v2
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+What changes for a node moving to Dolos v2, and what to do about each change.
+
+## Stores
+
+Dolos v2 opens only the state and archive stores it wrote itself. Each store records, when it is created, the compatibility identifier of the contract the binary that created it writes (`v2-alpha.1`), and every command checks it before it reads or writes anything. Stores written by Dolos v1, or by a v2 alpha that predates store identities, record none, so v2 refuses them:
+
+```
+the state store at /var/lib/dolos/data/state holds data but records no compatibility identity; this dolos opens stores that record `v2-alpha.1`. Clear it and re-sync (`dolos bootstrap relay --force`), or restore it from a stele (`dolos bootstrap stelae --force`); see https://docs.txpipe.io/dolos/migration/dolos-v2
+```
+
+A store recording an identifier the release does not read is refused the same way, and the error names that identifier. The check reads only the stores: no configuration edit gets a refused store past it.
+
+To move a node to v2, replace its stores with ones v2 writes:
+
+- **Restore from a stele** (minutes): `dolos bootstrap stelae --force`. The restore writes through v2's own stores, so they record its identity whatever release published the stele.
+- **Re-sync** (hours to days): `dolos bootstrap mithril --force`, or `dolos bootstrap relay --force` and then `dolos daemon` to sync from the relay.
+
+`--force` is what clears the refused stores. Without it, `dolos bootstrap` refuses with the same error, `--skip-if-data` included, rather than leave the node a store it cannot open.
+
+<Aside type="caution">
+A Dolos snapshot (`dolos bootstrap snapshot`) unpacks the stores of the node that exported it as they were. One exported before stores recorded an identity is refused once unpacked; bootstrap from a stele or re-sync instead.
+</Aside>
+
+The WAL keeps its own format version: one written by an older release is wiped, and one from a newer release is refused. The mempool and the cache are outside the check. See the [data layer](../architecture/data-layer#store-identity) for where each store keeps its identity.

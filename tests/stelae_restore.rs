@@ -62,6 +62,21 @@ impl Contents {
     }
 }
 
+/// The compatibility identity the node's state and archive record.
+fn identities(node: &Node) -> [Option<String>; 2] {
+    let stores =
+        dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+
+    [
+        stores.state.identity().unwrap(),
+        stores.archive.identity().unwrap(),
+    ]
+}
+
+fn current_identity() -> Option<String> {
+    Some(dolos_core::config::Compatibility::current().to_string())
+}
+
 /// The WAL tip of a node, which `Contents` deliberately leaves out.
 fn wal_tip(node: &Node) -> Option<dolos_core::ChainPoint> {
     let stores =
@@ -93,6 +108,57 @@ fn a_directory_stele_restores_the_node_that_encoded_it() {
     assert!(stdout.contains("restored:"), "{stdout}");
 
     assert_eq!(Contents::read(&node), before);
+
+    // The stores are the restoring binary's, whatever wrote the stele.
+    assert_eq!(identities(&node), [current_identity(), current_identity()]);
+}
+
+/// The remedy a refused store names: commands that open it refuse it, and a
+/// forced restore replaces it with stores recording this release's identity.
+#[test]
+fn a_forced_restore_replaces_a_store_this_release_refuses() {
+    use dolos_core::StateWriter as _;
+
+    let node = Node::new();
+    node.sync();
+
+    let before = Contents::read(&node);
+
+    let stele = node.root.path().join("stele");
+    node.write_stele(&stele);
+
+    // A state store as a release that predates store identities left it.
+    let state = node.config.storage.state_path().unwrap();
+    std::fs::remove_dir_all(&state).unwrap();
+
+    let unmarked =
+        dolos_fjall::StateStore::open(&state, &dolos_core::config::FjallStateConfig::default())
+            .unwrap();
+    let writer = unmarked.start_writer().unwrap();
+    writer.set_cursor(dolos_core::ChainPoint::Origin).unwrap();
+    writer.commit().unwrap();
+    unmarked.shutdown().unwrap();
+    drop(unmarked);
+
+    for refused in [
+        node.run(&["data", "summary"]),
+        node.bootstrap_headless(&["--skip-if-data"]),
+        node.bootstrap_headless(&[]),
+    ] {
+        assert!(!refused.status.success());
+
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(stderr.contains("no compatibility identity"), "{stderr}");
+        assert!(
+            stderr.contains("dolos bootstrap stelae --force"),
+            "{stderr}"
+        );
+    }
+
+    assert_ok(&node.bootstrap_stelae(&format!("file://{}", stele.display())));
+
+    assert_eq!(Contents::read(&node), before);
+    assert_eq!(identities(&node), [current_identity(), current_identity()]);
 }
 
 /// The restore is a wipe followed by a rebuild, so a node whose storage
