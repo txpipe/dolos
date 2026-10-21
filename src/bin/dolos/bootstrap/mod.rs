@@ -84,7 +84,7 @@ pub struct Args {
     force: bool,
 
     /// Skip bootstrap if data already exists (exit 0); a store this release
-    /// can't open is refused instead
+    /// refuses is an error instead
     #[arg(long, alias = "skip-if-not-empty", global = true)]
     skip_if_data: bool,
 

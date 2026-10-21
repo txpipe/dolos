@@ -148,48 +148,90 @@ struct Found {
     unreadable: Option<Error>,
     /// The first identity refusal.
     refused: Option<Error>,
+    /// The state, archive and segment directories holding data: a store with
+    /// data or one this release refuses, an archive that fails to open, or
+    /// block segments.
+    held: Vec<PathBuf>,
 }
 
-/// Open the stores already on disk, creating none: a state cursor is a node,
-/// and failures to open are reported rather than raised. The archive is
-/// checked unless the state is refused already.
+/// Open the stores whose directories exist, creating no store directory: a
+/// state cursor is a node, and failures to open are reported rather than
+/// raised.
 fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
-    let on_disk = |path: Option<PathBuf>| path.is_some_and(|path| path.exists());
-
     let mut found = Found::default();
 
-    if on_disk(config.storage.state_path()) {
+    if let Some(path) = config.storage.state_path().filter(|path| path.exists()) {
         match open_state_store(config) {
-            Ok(state) => found.node = state.read_cursor()?.is_some(),
+            Ok(state) => {
+                found.node = state.read_cursor()?.is_some();
+
+                if state.holds_data()? {
+                    found.held.push(path);
+                }
+            }
             Err(error @ Error::StateError(StateError::IncompatibleStore(_))) => {
                 found.refused = Some(error);
+                found.held.push(path);
             }
             Err(error) => found.unreadable = Some(error),
         }
     }
 
-    if found.refused.is_none() && config.keeps_archive() && on_disk(config.storage.archive_path()) {
-        found.refused = archive_refusal(config);
+    if !config.keeps_archive() {
+        return Ok(found);
+    }
+
+    if let Some(path) = config.storage.archive_path().filter(|path| path.exists()) {
+        // Any failure but the identity's is left to the command that uses the
+        // archive, as before stores recorded identities, and counts as data.
+        let holds_data = match open_archive_index(config) {
+            Ok(archive) => archive.holds_data().unwrap_or(true),
+            Err(refusal @ ArchiveError::IncompatibleStore(_)) => {
+                found.refused.get_or_insert(refusal.into());
+                true
+            }
+            Err(_) => true,
+        };
+
+        if holds_data || holds_segments(&path) {
+            found.held.push(path);
+        }
+    }
+
+    if let Some(path) = config
+        .storage
+        .blocks_path()
+        .filter(|path| holds_segments(path))
+    {
+        found.held.push(path);
     }
 
     Ok(found)
 }
 
-/// The archive's identity refusal, if it has one. Only the index is read, so
-/// the archive opens with its segments in its own directory, and a
-/// `blocks_path` that is gone isn't created. Any other failure is left to the
-/// command that uses the archive, as before stores recorded identities.
-fn archive_refusal(config: &RootConfig) -> Option<Error> {
-    let opened = ArchiveStoreBackend::open(
+/// The archive opened to read its index alone, with its segments in its own
+/// directory, so a `blocks_path` that is gone isn't created.
+fn open_archive_index(config: &RootConfig) -> Result<ArchiveStoreBackend, ArchiveError> {
+    ArchiveStoreBackend::open(
         config.storage.archive_path().unwrap_or_default(),
         None,
         dolos_cardano::model::build_log_schema(),
         config.storage.archive.kind,
-    );
+    )
+}
 
-    match opened {
-        Err(refusal @ ArchiveError::IncompatibleStore(_)) => Some(refusal.into()),
-        _ => None,
+/// Whether `dir` holds a block segment file. Something there that can't be
+/// listed counts, since what it holds can't be told.
+fn holds_segments(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(dolos_fjall::flatfiles::parse_segment_filename)
+                .is_some()
+        }),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
     }
 }
 
@@ -224,10 +266,10 @@ pub fn inspect_existing_data(
     config: &RootConfig,
     policy: ExistingDataPolicy,
 ) -> Result<Existing, Error> {
-    let found = found_in_storage(config)?;
+    let mut found = found_in_storage(config)?;
 
-    if let Some(refusal) = found.refused {
-        return clear_refused(config, policy, refusal, found.unreadable);
+    if let Some(refusal) = found.refused.take() {
+        return clear_refused(config, policy, refusal, found);
     }
 
     if policy.r#continue {
@@ -258,14 +300,14 @@ pub fn inspect_existing_data(
 
 /// The decision on storage holding a store this release refuses. `--force` on
 /// its own clears it, unless clearing the storage root would leave part of
-/// the stores it replaces: a state that fails to open, which a running node's
-/// would, or a state or archive directory outside the root. Those are named
-/// for removal by hand.
+/// the stores it replaces: a state that fails to open, as one in use does, or
+/// a directory outside the root that holds data. Those are named for removal
+/// by hand.
 fn clear_refused(
     config: &RootConfig,
     policy: ExistingDataPolicy,
     refusal: Error,
-    unreadable: Option<Error>,
+    found: Found,
 ) -> Result<Existing, Error> {
     if !policy.force {
         return Err(refusal);
@@ -278,44 +320,35 @@ fn clear_refused(
         )));
     }
 
-    if let Some(error) = unreadable {
+    let mut left = Vec::new();
+
+    if let Some(error) = found.unreadable {
         let state = config.storage.state_path().unwrap_or_default();
-
-        return Err(Error::message(format!(
-            "storage holds a store this release refuses, beside a state store at {} that \
-             fails to open: {error}\n`--force` clears no store it can't open, since a running \
-             node holds its stores that way. Stop any node using this storage, remove {} by \
-             hand, then run the bootstrap again",
-            state.display(),
-            state.display(),
-        )));
+        left.push(format!(
+            "  {}: a state store that fails to open: {error}",
+            state.display()
+        ));
     }
 
-    let mut dirs = vec![config.storage.state_path()];
-
-    if config.keeps_archive() {
-        dirs.extend([config.storage.archive_path(), config.storage.blocks_path()]);
+    for path in outside_storage_root(config, found.held.into_iter().map(Some))? {
+        left.push(format!(
+            "  {}: data outside the storage root",
+            path.display()
+        ));
     }
 
-    let mut outside = outside_storage_root(config, dirs)?;
-    outside.retain(|path| path.exists());
-
-    if !outside.is_empty() {
-        let listed = outside
-            .iter()
-            .map(|path| format!("  {}", path.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        return Err(Error::message(format!(
-            "storage holds a store this release refuses, and `--force` clears only the \
-             storage root {}, which leaves these state and archive directories outside \
-             it:\n{listed}\nRemove them by hand, then run the bootstrap again",
-            config.storage.path.display(),
-        )));
+    if left.is_empty() {
+        return Ok(Existing::Clear);
     }
 
-    Ok(Existing::Clear)
+    Err(Error::message(format!(
+        "storage holds a store this release refuses, but `--force` clears only the storage \
+         root {}, and never a state store that fails to open, as one in use does. It \
+         would leave:\n{}\nStop anything using them, remove them by hand, then run the bootstrap \
+         again",
+        config.storage.path.display(),
+        left.join("\n"),
+    )))
 }
 
 /// The data format this binary reads, as snapshot download URLs name it.
@@ -791,6 +824,15 @@ impl StateStoreBackend {
         }
     }
 
+    /// Whether the store holds a cursor or any row, as its identity check
+    /// reads it; `false` for the stores that do not record an identity.
+    pub fn holds_data(&self) -> Result<bool, StateError> {
+        match self {
+            Self::Fjall(s) => Ok(s.holds_data()?),
+            Self::Redb(_) | Self::Memory(_) => Ok(false),
+        }
+    }
+
     pub fn shutdown(&self) -> Result<(), StateError> {
         match self {
             Self::Redb(s) => s
@@ -1129,6 +1171,17 @@ impl ArchiveStoreBackend {
             Self::Fjall(s) => Ok(s.identity()?),
             Self::LogsOnly(inner) => inner.identity(),
             Self::Memory(_) | Self::NoOp(_) => Ok(None),
+        }
+    }
+
+    /// Whether the index holds any block location, log row or index entry,
+    /// as the identity check reads it; `false` for the stores that do not
+    /// record an identity.
+    pub fn holds_data(&self) -> Result<bool, ArchiveError> {
+        match self {
+            Self::Fjall(s) => Ok(s.holds_data()?),
+            Self::LogsOnly(inner) => inner.holds_data(),
+            Self::Memory(_) | Self::NoOp(_) => Ok(false),
         }
     }
 
@@ -2052,18 +2105,19 @@ mod tests {
         }
     }
 
-    /// `--force` clears the storage root alone, so beside a refused store it
-    /// refuses while a state or archive directory lies outside the root,
-    /// naming it: whichever store is refused, and whatever the archive's
-    /// directory holds, a store this release opens or none at all. Looking
-    /// doesn't recreate a directory the operator removed, so once they are
-    /// gone, `--force` clears the rest.
-    #[test]
-    fn force_names_every_store_directory_outside_the_root() {
-        type Edit = fn(&mut RootConfig, &Path);
-        type Outside = fn(&RootConfig) -> Option<PathBuf>;
+    /// A block segment file in `dir`, as an archive of any release leaves one.
+    fn written_segment(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("000000.segment"), b"frames").unwrap();
+    }
 
-        let cases: [(Edit, Outside); 4] = [
+    type Edit = fn(&mut RootConfig, &Path);
+    type Outside = fn(&RootConfig) -> Option<PathBuf>;
+
+    /// Each way the configuration puts a store directory outside the root,
+    /// and the directory it puts there.
+    fn outside_layouts() -> [(Edit, Outside); 4] {
+        [
             (
                 |config, elsewhere| config.storage.state.path = Some(elsewhere.join("state")),
                 |config| config.storage.state_path(),
@@ -2082,8 +2136,25 @@ mod tests {
                 },
                 |config| config.storage.blocks_path(),
             ),
-        ];
+        ]
+    }
 
+    fn force() -> ExistingDataPolicy {
+        ExistingDataPolicy {
+            force: true,
+            ..Default::default()
+        }
+    }
+
+    /// `--force` clears the storage root alone, so beside a refused store it
+    /// refuses while a directory outside the root holds data, naming it: a
+    /// state or archive with data, refused or current, an archive it can't
+    /// open, or block segments. Looking doesn't recreate a directory the
+    /// operator removed. Once it is gone, `--force` clears a store still
+    /// refused, and with a refused state removed nothing is left refused, so
+    /// it clears nothing.
+    #[test]
+    fn force_names_data_outside_the_root() {
         let stores = [
             (Kept::Refused, Kept::Refused),
             (Kept::Refused, Kept::Current),
@@ -2091,12 +2162,7 @@ mod tests {
             (Kept::Current, Kept::Refused),
         ];
 
-        let force = ExistingDataPolicy {
-            force: true,
-            ..Default::default()
-        };
-
-        for (edit, outside) in cases {
+        for (edit, outside) in outside_layouts() {
             for (state, archive) in stores {
                 let temp = tempfile::tempdir().unwrap();
                 let mut config = config_over(&temp.path().join("data"));
@@ -2107,19 +2173,19 @@ mod tests {
                 keep_state(&config, state);
                 keep_archive(&config, archive);
 
-                let outside = outside(&config).unwrap();
-
-                if !outside.exists() {
-                    std::fs::create_dir_all(&outside).unwrap();
+                if let Some(blocks) = config.storage.blocks_path() {
+                    written_segment(&blocks);
                 }
 
-                let message = match inspect_existing_data(&config, force) {
+                let outside = outside(&config).unwrap();
+
+                let message = match inspect_existing_data(&config, force()) {
                     Err(Error::Message(message)) => message,
                     other => panic!("{state:?} {archive:?} not refused: {other:?}"),
                 };
 
                 assert!(
-                    message.contains(&outside.display().to_string()),
+                    message.contains(&format!("{}: data outside", outside.display())),
                     "{message}"
                 );
                 assert!(message.contains("by hand"), "{message}");
@@ -2130,11 +2196,9 @@ mod tests {
                     std::fs::remove_file(&outside).unwrap();
                 }
 
-                let inspected = inspect_existing_data(&config, force).unwrap();
+                let inspected = inspect_existing_data(&config, force()).unwrap();
                 assert!(!outside.exists(), "{}", outside.display());
 
-                // A state still there, refused or a node, is cleared, and so
-                // is a refused archive; a removed state leaves the rest new.
                 let state_kept = config.storage.state_path().unwrap().exists();
                 let expected = if state_kept || archive == Kept::Refused {
                     Existing::Clear
@@ -2147,11 +2211,134 @@ mod tests {
         }
     }
 
+    /// Beside a refused store, a directory outside the root that holds no
+    /// data doesn't stop `--force`: an empty one, a mount point's, or one
+    /// holding an empty store this release opens.
+    #[test]
+    fn force_passes_over_outside_directories_without_data() {
+        for (edit, outside) in outside_layouts() {
+            for fill in ["empty", "mount point", "empty store"] {
+                let temp = tempfile::tempdir().unwrap();
+                let mut config = config_over(&temp.path().join("data"));
+                edit(&mut config, &temp.path().join("elsewhere"));
+
+                let outside = outside(&config).unwrap();
+                let state_outside = config.storage.state_path() == Some(outside.clone());
+                std::fs::create_dir_all(&outside).unwrap();
+
+                match fill {
+                    "mount point" => std::fs::create_dir(outside.join("lost+found")).unwrap(),
+                    "empty store" if state_outside => {
+                        open_state_store(&config).unwrap().shutdown().unwrap()
+                    }
+                    "empty store" => open_archive_store(&config).unwrap().shutdown().unwrap(),
+                    _ => {}
+                }
+
+                if state_outside {
+                    written_archive(&config, None);
+                } else {
+                    written_state(&config, None);
+                }
+
+                assert_eq!(
+                    inspect_existing_data(&config, force()).unwrap(),
+                    Existing::Clear,
+                    "{fill} {}",
+                    outside.display()
+                );
+            }
+        }
+    }
+
+    /// Block segments outside the root are named on their own, without the
+    /// index that located them: at a `blocks_path` whose archive directory is
+    /// gone, or in an archive directory holding no index. So a new archive
+    /// isn't appended to an old one's segments.
+    #[test]
+    fn force_names_segments_outside_the_root_without_their_index() {
+        let layouts: [Edit; 2] = [
+            |config, segments| config.storage.archive.blocks_path = Some(segments.into()),
+            |config, segments| config.storage.archive.path = Some(segments.into()),
+        ];
+
+        for edit in layouts {
+            let temp = tempfile::tempdir().unwrap();
+            let mut config = config_over(&temp.path().join("data"));
+            let segments = temp.path().join("segments");
+            edit(&mut config, &segments);
+
+            written_state(&config, None);
+            written_segment(&segments);
+            assert!(!config.storage.path.join("archive").exists());
+            assert!(!segments.join("index").exists());
+
+            let message = match inspect_existing_data(&config, force()) {
+                Err(Error::Message(message)) => message,
+                other => panic!("not refused naming the segments: {other:?}"),
+            };
+
+            assert!(
+                message.contains(&format!("{}: data outside", segments.display())),
+                "{message}"
+            );
+
+            std::fs::remove_file(segments.join("000000.segment")).unwrap();
+
+            assert_eq!(
+                inspect_existing_data(&config, force()).unwrap(),
+                Existing::Clear
+            );
+        }
+    }
+
+    /// With history off the archive plays no part: a leftover one, refused
+    /// or outside the root, changes no decision about a node or a refused
+    /// state.
+    #[test]
+    fn inspecting_storage_without_history_passes_over_the_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config_over(&temp.path().join("data"));
+        config.history = HistoryConfig::none();
+        written_state(&config, current().as_deref());
+        written_archive(&config, None);
+
+        for policy in every_policy() {
+            let inspected = inspect_existing_data(&config, policy);
+
+            if policy.r#continue {
+                assert_eq!(inspected.unwrap(), Existing::Proceed, "{policy:?}");
+            } else if policy.skip_if_data {
+                assert_eq!(inspected.unwrap(), Existing::Skip, "{policy:?}");
+            } else if policy.force {
+                assert_eq!(inspected.unwrap(), Existing::Clear, "{policy:?}");
+            } else {
+                assert!(matches!(inspected, Err(Error::Message(_))), "{policy:?}");
+            }
+        }
+
+        assert!(has_existing_data(&config).unwrap());
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config_over(&temp.path().join("data"));
+        config.history = HistoryConfig::none();
+        config.storage.archive.path = Some(temp.path().join("archive"));
+        written_state(&config, None);
+        written_archive(&config, None);
+
+        assert_eq!(
+            inspect_existing_data(&config, force()).unwrap(),
+            Existing::Clear
+        );
+    }
+
     /// A state that fails to open for a reason other than its identity — an
     /// interrupted unpack, or a store a running node holds — is left to a
     /// resumed run, as before bootstrap read identities, and stops every
     /// other flag, `--force` included. Beside a refused archive, `--force`
-    /// names the state for removal by hand, and clears once it is gone.
+    /// with another flag is told it clears only on its own, and `--force` on
+    /// its own names the state for removal by hand, with any data outside the
+    /// root, then clears once they are gone.
     #[test]
     fn a_state_that_fails_to_open_is_left_to_a_resumed_run() {
         let temp = tempfile::tempdir().unwrap();
@@ -2178,36 +2365,42 @@ mod tests {
             }
         }
 
+        let mut config = config;
+        let segments = elsewhere.path().join("segments");
+        config.storage.archive.blocks_path = Some(segments.clone());
         written_archive(&config, None);
+        written_segment(&segments);
 
         let state = config.storage.state_path().unwrap();
 
         for policy in every_policy() {
-            let inspected = inspect_existing_data(&config, policy);
+            let message = match inspect_existing_data(&config, policy) {
+                Err(Error::Message(message)) => message,
+                inspected => {
+                    assert!(!policy.force, "{policy:?}");
+                    assert!(refusal(inspected).is_some(), "{policy:?}");
+                    continue;
+                }
+            };
 
-            if policy.force && !policy.skip_if_data && !policy.r#continue {
-                let message = match inspected {
-                    Err(Error::Message(message)) => message,
-                    other => panic!("not refused naming the state: {other:?}"),
-                };
-
-                assert!(message.contains(&state.display().to_string()), "{message}");
-                assert!(message.contains("by hand"), "{message}");
-            } else if !policy.force {
-                assert!(refusal(inspected).is_some(), "{policy:?}");
+            if policy.skip_if_data || policy.r#continue {
+                assert!(message.contains("only on its own"), "{message}");
+                assert!(!message.contains("fails to open"), "{message}");
             } else {
-                assert!(inspected.is_err(), "{policy:?}");
+                for named in [
+                    format!("{}: a state store that fails to open", state.display()),
+                    format!("{}: data outside", segments.display()),
+                ] {
+                    assert!(message.contains(&named), "{message}");
+                }
             }
         }
 
         std::fs::remove_file(&state).unwrap();
+        std::fs::remove_dir_all(&segments).unwrap();
 
-        let force = ExistingDataPolicy {
-            force: true,
-            ..Default::default()
-        };
         assert_eq!(
-            inspect_existing_data(&config, force).unwrap(),
+            inspect_existing_data(&config, force()).unwrap(),
             Existing::Clear
         );
     }
