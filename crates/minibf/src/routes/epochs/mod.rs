@@ -83,16 +83,13 @@ fn build_epoch_content<D: Domain>(
     let start_time = chain.slot_time(chain.epoch_start(epoch));
     let end_time = chain.slot_time(chain.epoch_start(epoch + 1));
 
-    // Block aggregates come precomputed on `RollingStats`; a zero slot means
-    // no block. Byron EBBs skip the roll pipeline, so for Byron epochs this is
-    // the first regular block, not the EBB Blockfrost reports.
     let rolling = state.rolling.live().cloned().unwrap_or_default();
-    let first_block_time = if rolling.first_block_slot == 0 {
+    let first_block_time = if rolling.blocks_minted == 0 {
         0
     } else {
         chain.slot_time(rolling.first_block_slot)
     };
-    let last_block_time = if rolling.last_block_slot == 0 {
+    let last_block_time = if rolling.blocks_minted == 0 {
         0
     } else {
         chain.slot_time(rolling.last_block_slot)
@@ -360,36 +357,110 @@ mod testing {
 mod tests {
     use super::*;
     use crate::test_support::{pool_id_cases, PoolIdCase, TestApp, TestFault, REG_POOL_ID};
-    use dolos_testing::synthetic::SyntheticBlockConfig;
+    use dolos_core::config::{CardanoConfig, MinibfConfig};
+    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
+    use std::sync::Arc;
 
     const MAX_EPOCH_NUMBER: Epoch = i32::MAX as Epoch;
 
-    /// The builder nulls a passed active stake inside the preprod gap, only on
-    /// preprod. `next` and `previous` build their items through it too.
-    #[test]
-    fn build_epoch_content_nulls_active_stake_across_the_preprod_gap() {
-        use std::sync::Arc;
+    // ToyDomain sets the genesis state during construction.
+    // The era summary and the initial epoch state are available without a block import.
+    fn facade_for(genesis: dolos_core::Genesis) -> Facade<ToyDomain> {
+        let domain = ToyDomain::new_with_genesis_and_config(
+            Arc::new(genesis),
+            CardanoConfig::default(),
+            None,
+            None,
+        );
+        Facade {
+            inner: domain,
+            config: MinibfConfig::new("[::]:0".parse().expect("The listen address is not valid.")),
+            cache: crate::cache::CacheService::default(),
+        }
+    }
 
-        use dolos_core::config::{CardanoConfig, MinibfConfig};
-        use dolos_testing::toy_domain::ToyDomain;
+    #[test]
+    fn build_epoch_content_block_times_include_slot_zero() {
+        use dolos_cardano::model::RollingStats;
 
         use crate::mapping::IntoModel as _;
 
-        // Genesis runs on construction, so the era summary and the base epoch
-        // load without an imported block.
-        fn facade_for(genesis: dolos_core::Genesis) -> Facade<ToyDomain> {
-            let domain = ToyDomain::new_with_genesis_and_config(
-                Arc::new(genesis),
-                CardanoConfig::default(),
-                None,
-                None,
-            );
-            Facade {
-                inner: domain,
-                config: MinibfConfig::new("[::]:0".parse().expect("valid listen address")),
-                cache: crate::cache::CacheService::default(),
+        for (genesis, start_time, end_time, last_slot, last_time) in [
+            (
+                dolos_cardano::include::preprod::load(),
+                1_654_041_600,
+                1_654_473_600,
+                2,
+                1_654_041_640,
+            ),
+            (
+                dolos_cardano::include::preview::load(),
+                1_666_656_000,
+                1_666_742_400,
+                20,
+                1_666_656_020,
+            ),
+        ] {
+            let facade = facade_for(genesis);
+            let chain = facade
+                .get_chain_summary()
+                .expect("The test cannot get the era summary.");
+
+            for (stats, block_count, first_block_time, last_block_time) in [
+                (None, 0, 0, 0),
+                (Some(RollingStats::default()), 0, 0, 0),
+                (
+                    Some(RollingStats {
+                        blocks_minted: 1,
+                        ..Default::default()
+                    }),
+                    1,
+                    start_time,
+                    start_time,
+                ),
+                (
+                    Some(RollingStats {
+                        blocks_minted: 2,
+                        last_block_slot: last_slot,
+                        ..Default::default()
+                    }),
+                    2,
+                    start_time,
+                    last_time,
+                ),
+            ] {
+                let mut state = EpochState::default();
+                state.rolling.reset(stats);
+                let content = build_epoch_content(&facade, &chain, 0, state, Some(0))
+                    .expect("The test cannot make the epoch content.")
+                    .into_model()
+                    .expect("The test cannot convert the epoch content to an API response.");
+
+                assert_eq!(
+                    content,
+                    EpochContent {
+                        epoch: 0,
+                        start_time,
+                        end_time,
+                        first_block_time,
+                        last_block_time,
+                        block_count,
+                        tx_count: 0,
+                        output: "0".to_string(),
+                        fees: "0".to_string(),
+                        active_stake: Some("0".to_string()),
+                    }
+                );
             }
         }
+    }
+
+    /// For Preprod epochs 13 through 28, the builder sets `active_stake` to null.
+    /// This rule applies only to Preprod.
+    /// `next` and `previous` also use this builder for their responses.
+    #[test]
+    fn build_epoch_content_nulls_active_stake_across_the_preprod_gap() {
+        use crate::mapping::IntoModel as _;
 
         // Preprod's genesis stake sum.
         const ACTIVE_STAKE: u64 = 300_000_000_000_000;
