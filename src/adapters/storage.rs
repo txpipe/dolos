@@ -144,7 +144,8 @@ pub struct ExistingDataPolicy {
 struct Found {
     /// The state holds a cursor.
     node: bool,
-    /// The state failed to open for a reason other than its identity.
+    /// The state failed to open for a reason other than its identity, or its
+    /// cursor failed to read.
     unreadable: Option<Error>,
     /// The first identity refusal.
     refused: Option<Error>,
@@ -155,22 +156,26 @@ struct Found {
 }
 
 /// Open the stores whose directories exist, creating no store directory: a
-/// state cursor is a node, and failures to open are reported rather than
-/// raised.
+/// state cursor is a node, and failures to open or to read the cursor are
+/// reported rather than raised.
 fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
     let mut found = Found::default();
 
     if let Some(path) = config.storage.state_path().filter(|path| path.exists()) {
         match open_state_store(config) {
-            Ok(state) => {
-                found.node = state.read_cursor()?.is_some();
+            Ok(state) => match state.read_cursor() {
+                Ok(cursor) => {
+                    found.node = cursor.is_some();
 
-                // A read that fails counts as data, as the archive's does, and
-                // is left to the command that uses the state.
-                if state.holds_data().unwrap_or(true) {
-                    found.held.push(path);
+                    // Rows that fail to read count as data, as the archive's
+                    // do, and are left to the command that uses the state.
+                    if state.holds_data().unwrap_or(true) {
+                        found.held.push(path);
+                    }
                 }
-            }
+                // A cursor that fails to read can't tell a node from none.
+                Err(error) => found.unreadable = Some(error.into()),
+            },
             Err(error @ Error::StateError(StateError::IncompatibleStore(_))) => {
                 found.refused = Some(error);
                 found.held.push(path);
@@ -261,9 +266,10 @@ pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
 ///
 /// A store this release refuses to open is data in the way that only `--force`
 /// on its own clears; every other flag, `--continue` included, gets its
-/// refusal. A state that fails to open for another reason is left to
-/// `--continue`, and stops every other flag, `--force` included, since a
-/// running node holds its stores that way.
+/// refusal. A state that fails to open for another reason, or whose cursor
+/// fails to read, is left to `--continue`, and stops every other flag,
+/// `--force` included: whether it holds a node can't be told, and a running
+/// node holds its stores that way.
 pub fn inspect_existing_data(
     config: &RootConfig,
     policy: ExistingDataPolicy,
@@ -302,9 +308,10 @@ pub fn inspect_existing_data(
 
 /// The decision on storage holding a store this release refuses. `--force` on
 /// its own clears it, unless clearing the storage root would leave part of
-/// the stores it replaces: a state that fails to open for another reason, or
-/// a directory outside the root that holds data. Those are named for removal
-/// by hand, after the refusal.
+/// the stores it replaces: a state that fails to open for another reason or
+/// whose cursor fails to read, or a directory outside the root that holds
+/// data. Those are named for removal by hand, after the refusal, each with
+/// the reason `--force` leaves it.
 fn clear_refused(
     config: &RootConfig,
     policy: ExistingDataPolicy,
@@ -327,15 +334,17 @@ fn clear_refused(
     if let Some(error) = found.unreadable {
         let state = config.storage.state_path().unwrap_or_default();
         left.push(format!(
-            "  {}: a state store that fails to open, which `--force` never clears: {error}",
+            "  {}: a state store that fails to open or to read its cursor, which `--force` \
+             never clears: {error}",
             state.display()
         ));
     }
 
     for path in outside_storage_root(config, found.held.into_iter().map(Some))? {
         left.push(format!(
-            "  {}: data outside the storage root",
-            path.display()
+            "  {}: data outside {}, the storage root `--force` clears",
+            path.display(),
+            config.storage.path.display(),
         ));
     }
 
@@ -344,9 +353,8 @@ fn clear_refused(
     }
 
     Err(Error::message(format!(
-        "{refusal}\n`--force` clears only the storage root {}, so it would leave:\n{}\nStop \
-         anything using them, remove them by hand, then run the bootstrap again",
-        config.storage.path.display(),
+        "{refusal}\n`--force` would leave:\n{}\nStop anything using them, remove them by \
+         hand, then run the bootstrap again",
         left.join("\n"),
     )))
 }
@@ -1835,16 +1843,55 @@ mod tests {
         store
     }
 
-    /// Flip the first data byte of each table under `keyspace`, so its store
-    /// still opens and reading its rows fails the block checksum.
-    fn corrupt_tables(keyspace: &Path) {
+    /// Flip the first data byte of each table under `keyspace` but those in
+    /// `kept`, so its store still opens and reading its rows fails the block
+    /// checksum.
+    fn corrupt_tables(keyspace: &Path, kept: &[PathBuf]) {
         // A table starts with its first data block, after a 33-byte header.
-        for table in std::fs::read_dir(keyspace.join("tables")).unwrap() {
-            let table = table.unwrap().path();
+        for table in tables(keyspace) {
+            if kept.contains(&table) {
+                continue;
+            }
+
             let mut bytes = std::fs::read(&table).unwrap();
             bytes[33] ^= 0xff;
             std::fs::write(&table, bytes).unwrap();
         }
+    }
+
+    fn tables(keyspace: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(keyspace.join("tables"))
+            .unwrap()
+            .map(|table| table.unwrap().path())
+            .collect()
+    }
+
+    /// A state this release wrote, holding a cursor that fails to read beside
+    /// an identity that reads: each is flushed to a table of its own, and only
+    /// the cursor's is corrupt.
+    fn written_state_with_unreadable_cursor(config: &RootConfig) {
+        let path = config.storage.state_path().unwrap();
+        let store = dolos_fjall::StateStore::open(path, &FjallStateConfig::default()).unwrap();
+        let cursor = store
+            .database()
+            .keyspace("state-cursor", Default::default)
+            .unwrap();
+
+        store
+            .record_identity(current().as_deref().unwrap())
+            .unwrap();
+        cursor.rotate_memtable_and_wait().unwrap();
+        let keyspace = cursor.path().to_path_buf();
+        let identity = tables(&keyspace);
+
+        let writer = store.start_writer().unwrap();
+        writer.set_cursor(ChainPoint::Origin).unwrap();
+        writer.commit().unwrap();
+        cursor.rotate_memtable_and_wait().unwrap();
+        store.shutdown().unwrap();
+        drop((cursor, store));
+
+        corrupt_tables(&keyspace, &identity);
     }
 
     /// A state this release wrote, holding a UTxO and no cursor, whose rows
@@ -1860,7 +1907,7 @@ mod tests {
         store.shutdown().unwrap();
         drop((utxos, store));
 
-        corrupt_tables(&keyspace);
+        corrupt_tables(&keyspace, &[]);
     }
 
     /// An archive this release wrote, holding a tag, whose rows fail to read.
@@ -1875,7 +1922,7 @@ mod tests {
         store.shutdown().unwrap();
         drop((tags, store));
 
-        corrupt_tables(&keyspace);
+        corrupt_tables(&keyspace, &[]);
     }
 
     /// The refusal an open came to, or `None` when the store opened.
@@ -2246,7 +2293,11 @@ mod tests {
                 };
 
                 assert!(
-                    message.contains(&format!("{}: data outside", outside.display())),
+                    message.contains(&format!(
+                        "{}: data outside {}, the storage root `--force` clears",
+                        outside.display(),
+                        config.storage.path.display()
+                    )),
                     "{message}"
                 );
                 assert!(message.contains("by hand"), "{message}");
@@ -2404,6 +2455,10 @@ mod tests {
         unreadable_archive.storage.archive.path = Some(elsewhere.join("archive/archive"));
         written_state(&unreadable_archive, None);
         written_unreadable_archive(&unreadable_archive);
+        assert!(open_archive_index(&unreadable_archive)
+            .unwrap()
+            .holds_data()
+            .is_err());
 
         let mut unreadable_state = config_over(&elsewhere.join("state/data"));
         unreadable_state.storage.state.path = Some(elsewhere.join("state/state"));
@@ -2483,6 +2538,47 @@ mod tests {
                 "{policy:?}"
             );
         }
+    }
+
+    /// A state whose cursor fails to read can't be told from a node, so it is
+    /// taken as one that fails to open: left to `--continue`, it stops every
+    /// other flag, and beside a refused archive `--force` names it for removal
+    /// by hand.
+    #[test]
+    fn a_state_whose_cursor_fails_to_read_is_left_to_a_resumed_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_state_with_unreadable_cursor(&config);
+        assert!(open_state_store(&config).unwrap().read_cursor().is_err());
+
+        for policy in every_policy() {
+            let inspected = inspect_existing_data(&config, policy);
+
+            if policy.r#continue {
+                assert_eq!(inspected.unwrap(), Existing::Proceed, "{policy:?}");
+            } else {
+                assert!(inspected.is_err(), "{policy:?}");
+            }
+        }
+
+        assert!(has_existing_data(&config).is_err());
+
+        written_archive(&config, None);
+
+        let message = match inspect_existing_data(&config, force()) {
+            Err(Error::Message(message)) => message,
+            other => panic!("the state not named: {other:?}"),
+        };
+
+        assert!(message.contains("the archive store"), "{message}");
+        assert!(
+            message.contains(&format!(
+                "{}: a state store that fails to open or to read its cursor, which `--force` \
+                 never clears: ",
+                config.storage.state_path().unwrap().display()
+            )),
+            "{message}"
+        );
     }
 
     /// With history off the archive plays no part: a leftover one, refused
@@ -2584,7 +2680,11 @@ mod tests {
             } else {
                 for named in [
                     "the archive store".to_string(),
-                    format!("{}: a state store that fails to open", state.display()),
+                    format!(
+                        "{}: a state store that fails to open or to read its cursor, which \
+                         `--force` never clears: ",
+                        state.display()
+                    ),
                     format!("{}: data outside", segments.display()),
                 ] {
                     assert!(message.contains(&named), "{message}");
