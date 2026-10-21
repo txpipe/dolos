@@ -614,7 +614,7 @@ mod tests {
     fn a_hashed_signature_over_the_digest_hash_is_signed() {
         let cold_key = signer::cold_key(1);
         let witness = Witness {
-            hashed: true,
+            hashed: 1,
             signs_digest_hash: true,
             ..Witness::by(&cold_key)
         };
@@ -626,7 +626,7 @@ mod tests {
     fn a_hashed_signature_over_the_bare_digest_is_not_signed() {
         let cold_key = signer::cold_key(1);
         let witness = Witness {
-            hashed: true,
+            hashed: 1,
             ..Witness::by(&cold_key)
         };
 
@@ -634,14 +634,28 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_declaring_another_validation_method_is_not_signed() {
+    fn a_hashed_flag_other_than_zero_or_one_is_not_signed() {
         let cold_key = signer::cold_key(1);
-        let witness = Witness {
-            validation_method: 0,
+        let flagged = |signs_digest_hash| Witness {
+            hashed: 2,
+            signs_digest_hash,
             ..Witness::by(&cold_key)
         };
 
-        assert!(!is_signed_with(&witness));
+        assert!(!is_signed_with(&flagged(false)));
+        assert!(!is_signed_with(&flagged(true)));
+    }
+
+    #[test]
+    fn a_payload_declaring_another_validation_method_is_not_signed() {
+        let cold_key = signer::cold_key(1);
+        let method = |validation_method| Witness {
+            validation_method,
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(!is_signed_with(&method(0)));
+        assert!(!is_signed_with(&method(1)));
     }
 
     #[test]
@@ -654,6 +668,7 @@ mod tests {
 
         assert!(is_signed_with(&typed(0)));
         assert!(!is_signed_with(&typed(1)));
+        assert!(!is_signed_with(&typed(2)));
     }
 
     #[test]

@@ -62,7 +62,7 @@ pub struct Witness<'a> {
     /// The protected header's `address`, if any.
     pub address: Option<Vec<u8>>,
     /// The COSE_Sign1 `hashed` flag.
-    pub hashed: bool,
+    pub hashed: i64,
     /// Sign the blake2b-224 of the payload digest rather than the digest.
     pub signs_digest_hash: bool,
     /// The witness type entry (key 0), if any.
@@ -76,7 +76,7 @@ impl<'a> Witness<'a> {
         Self {
             signer,
             address: Some(pool_id(signer).to_vec()),
-            hashed: false,
+            hashed: 0,
             signs_digest_hash: false,
             kind: None,
             validation_method: 2,
@@ -151,7 +151,7 @@ pub fn registration_with(
         int(2),
         Metadatum::Array(vec![
             bytes(&protected),
-            int(witness.hashed as i64),
+            int(witness.hashed),
             bytes(&signed),
             bytes(signature.as_ref()),
         ]),
