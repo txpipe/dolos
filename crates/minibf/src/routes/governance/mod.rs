@@ -74,8 +74,8 @@ use crate::{
         anchor_offchain_metadata, bech32_committee_cold, bech32_committee_hot, bech32_drep,
         bech32_gov_action, bech32_pool, cost_models::map_cost_models_raw, i32_or_500,
         parse_committee_id, parse_gov_action_id, protocol_params::protocol_params_model,
-        rational_to_f64_unrounded, stake_cred_to_address, AnchorMetadata, CommitteeCredentialRole,
-        IntoModel, Unrounded,
+        rational_to_f64_unrounded, sorted_json, stake_cred_to_address, AnchorMetadata,
+        CommitteeCredentialRole, IntoModel, Unrounded,
     },
     pagination::{Order, Pagination, PaginationParameters},
     scan::{EntityScan, ENTITY_CHUNK},
@@ -2269,7 +2269,7 @@ fn read_parameters<D: Domain>(
 pub async fn proposal_parameters<D>(
     Path((tx_hash, cert_index)): Path<(String, String)>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<ProposalParameters>, Error>
+) -> Result<Json<serde_json::Value>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -2283,7 +2283,7 @@ where
         .parse::<Hash<32>>()
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    Ok(Json(read_parameters(&domain, tx, cert_index)?))
+    Ok(sorted_json(read_parameters(&domain, tx, cert_index)?)?)
 }
 
 /// `GET /governance/proposals/{gov_action_id}/parameters`: the same change,
@@ -2291,13 +2291,13 @@ where
 pub async fn proposal_parameters_by_gov_action<D>(
     Path(gov_action_id): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<ProposalParameters>, Error>
+) -> Result<Json<serde_json::Value>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let (tx, idx) = parse_gov_action_id(&gov_action_id).map_err(|_| Error::InvalidGovActionId)?;
 
-    Ok(Json(read_parameters(&domain, tx, idx)?))
+    Ok(sorted_json(read_parameters(&domain, tx, idx)?)?)
 }
 
 struct ProposalVoteRow {
@@ -6213,8 +6213,8 @@ mod tests {
     fn cost_models_update() -> ProtocolParamUpdate {
         ProtocolParamUpdate {
             cost_models_for_script_languages: Some(CostModels {
-                plutus_v1: None,
-                plutus_v2: None,
+                plutus_v1: Some(vec![1, -2, 3]),
+                plutus_v2: Some(vec![4, 5, -6]),
                 plutus_v3: Some(vec![100_788, 420, 1, 1]),
                 unknown: Default::default(),
             }),
@@ -6393,11 +6393,38 @@ mod tests {
         let model = get_parameters(&app, &format!("/governance/proposals/{tx}/2/parameters")).await;
 
         let cost_models = model.parameters.cost_models.expect("cost models are set");
-        assert_eq!(cost_models.keys().collect_vec(), vec!["PlutusV3"]);
+        assert_eq!(cost_models.len(), 3);
+        assert_eq!(cost_models["PlutusV1"], serde_json::json!([1, -2, 3]));
+        assert_eq!(cost_models["PlutusV2"], serde_json::json!([4, 5, -6]));
         assert_eq!(
             cost_models["PlutusV3"],
             serde_json::json!([100_788, 420, 1, 1])
         );
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_parameters_have_stable_bytes() {
+        let app = parameters_app();
+        let tx = tx_hash_of_block(&app, 0);
+        let id = bech32_gov_action(&tx.parse().unwrap(), 2).unwrap();
+        let paths = [
+            format!("/governance/proposals/{tx}/2/parameters"),
+            format!("/governance/proposals/{id}/parameters"),
+        ];
+        let (status, expected) = app.get_bytes(&paths[0]).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let body = std::str::from_utf8(&expected).unwrap();
+        assert!(body.find("\"PlutusV1\"").unwrap() < body.find("\"PlutusV2\"").unwrap());
+        assert!(body.find("\"PlutusV2\"").unwrap() < body.find("\"PlutusV3\"").unwrap());
+
+        for path in paths {
+            for _ in 0..16 {
+                let (status, actual) = app.get_bytes(&path).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(actual, expected, "response changed for {path}");
+            }
+        }
     }
 
     /// Ratios keep the precision the chain gave them.
