@@ -1370,8 +1370,8 @@ fn restore_logs<R: SteleReader, A: ArchiveStore>(
 /// One epoch's index records, appended in the stored key form they travel in.
 ///
 /// `append_prehashed` takes the records as they came off the wire: there is no
-/// logical key to recover, and recomputing one is not merely wasteful but
-/// impossible for the dimension whose stored form is a verbatim label. Chunking
+/// logical key to recover, and recomputing the stored form from it would need
+/// the logical keys the store never kept. Chunking
 /// is this caller's, which is what the trait says, and the sort order the
 /// backends want holds across the whole layer because that is what the codec's
 /// `OrderCheck` made the exporter prove.

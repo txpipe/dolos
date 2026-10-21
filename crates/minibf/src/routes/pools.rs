@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Duration,
 };
 
 use axum::{
@@ -48,8 +47,9 @@ use crate::{
     error::Error,
     log_and_500,
     mapping::{
-        bech32_calidus, bech32_pool, i32_or_500, pool_offchain_metadata, rational_to_f64,
-        stake_cred_to_address, vkey_to_stake_address, IntoModel,
+        bech32_calidus, bech32_pool, i32_or_500, pool_offchain_body, pool_offchain_metadata,
+        rational_to_f64, stake_cred_to_address, vkey_to_stake_address, IntoModel,
+        OffchainFetchError, MAX_POOL_METADATA_BYTES,
     },
     pagination::{Pagination, PaginationParameters},
     routes::governance::voter_casts,
@@ -780,6 +780,24 @@ fn connection_error(url: &str) -> DrepsInnerMetadataError {
     )
 }
 
+fn size_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::SizeExceeded,
+        format!(
+            "Error Offchain Pool: Size error, fetching metadata from {url} exceeded {MAX_POOL_METADATA_BYTES} bytes."
+        ),
+    )
+}
+
+fn pool_fetch_error(url: &str, error: OffchainFetchError) -> Option<DrepsInnerMetadataError> {
+    match error {
+        OffchainFetchError::Client | OffchainFetchError::Body => None,
+        OffchainFetchError::Connection => Some(connection_error(url)),
+        OffchainFetchError::HttpResponse(status) => Some(http_response_error(url, status)),
+        OffchainFetchError::SizeExceeded => Some(size_error(url)),
+    }
+}
+
 async fn fetch_pool_offchain_metadata(
     pool: &PoolState,
 ) -> Option<crate::mapping::PoolOffchainMetadata> {
@@ -810,31 +828,9 @@ async fn fetch_pool_metadata_with_error(
         return (None, None);
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .user_agent("Dolos MiniBF")
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return (None, None),
-    };
-
-    let response = match client.get(&metadata.url).send().await {
-        Ok(response) => response,
-        Err(_) => return (None, Some(connection_error(&metadata.url))),
-    };
-
-    if response.status() != StatusCode::OK {
-        return (
-            None,
-            Some(http_response_error(&metadata.url, response.status())),
-        );
-    }
-
-    let body = match response.bytes().await {
+    let body = match pool_offchain_body(&metadata.url).await {
         Ok(body) => body,
-        Err(_) => return (None, None),
+        Err(error) => return (None, pool_fetch_error(&metadata.url, error)),
     };
 
     let actual_hash = Hasher::<256>::hash(body.as_ref());
@@ -1847,6 +1843,7 @@ mod tests {
         },
     };
     use serde_json::Value;
+    use std::{io::ErrorKind, net::TcpListener};
 
     fn md_int(value: i64) -> alonzo::Metadatum {
         alonzo::Metadatum::Int(Int::from(value))
@@ -2938,6 +2935,83 @@ mod tests {
         assert_eq!(
             error.message,
             "Error Offchain Pool: Connection failure error when fetching metadata from http://localhost:23009/p/pool_clai_registration_metadata.json."
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_metadata_fetches_reject_loopback_without_connecting() {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("The test cannot bind the TCP listener.");
+        listener
+            .set_nonblocking(true)
+            .expect("The test cannot set the TCP listener to nonblocking mode.");
+        let url = format!(
+            "http://{}/pool.json",
+            listener
+                .local_addr()
+                .expect("The test cannot read the local address.")
+        );
+        let mut pool = retiring_pool([1u8; 28], 10, None);
+        pool.snapshot.unwrap_live_mut().params.pool_metadata = Some(PoolMetadata {
+            url: url.clone(),
+            hash: vec![2u8; 32].into(),
+        });
+
+        let (metadata, error) = fetch_pool_metadata_with_error(&pool).await;
+
+        assert!(metadata.is_none());
+        assert_eq!(
+            error,
+            Some(DrepsInnerMetadataError::new(
+                Code::ConnectionError,
+                format!("Error Offchain Pool: Connection failure error when fetching metadata from {url}."),
+            ))
+        );
+        assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+
+        assert!(fetch_pool_offchain_metadata(&pool).await.is_none());
+        assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn pool_fetch_error_preserves_connection_and_http_errors() {
+        let url = "https://example.com/pool.json";
+        let connection = pool_fetch_error(url, OffchainFetchError::Connection)
+            .expect("The connection error is missing.");
+        assert_eq!(connection.code, Code::ConnectionError);
+        assert_eq!(
+            connection.message,
+            "Error Offchain Pool: Connection failure error when fetching metadata from https://example.com/pool.json."
+        );
+
+        let http = pool_fetch_error(url, OffchainFetchError::HttpResponse(StatusCode::NOT_FOUND))
+            .expect("The HTTP response error is missing.");
+        assert_eq!(http.code, Code::HttpResponseError);
+        assert_eq!(
+            http.message,
+            "Error Offchain Pool: HTTP Response error from https://example.com/pool.json resulted in HTTP status code : 404 \"Not Found\""
+        );
+    }
+
+    #[test]
+    fn pool_fetch_error_suppresses_client_and_body_errors() {
+        for error in [OffchainFetchError::Client, OffchainFetchError::Body] {
+            assert!(pool_fetch_error("https://example.com/pool.json", error).is_none());
+        }
+    }
+
+    #[test]
+    fn pool_fetch_error_maps_size_exceeded() {
+        let error = pool_fetch_error(
+            "https://example.com/pool.json",
+            OffchainFetchError::SizeExceeded,
+        )
+        .expect("The size limit error is missing.");
+
+        assert_eq!(error.code, Code::SizeExceeded);
+        assert_eq!(
+            error.message,
+            "Error Offchain Pool: Size error, fetching metadata from https://example.com/pool.json exceeded 512 bytes."
         );
     }
 

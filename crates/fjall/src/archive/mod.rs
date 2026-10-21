@@ -60,7 +60,7 @@ use dolos_core::{
     config::FjallArchiveConfig, key_hash, ArchiveError, ArchiveIndexDelta,
     ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot,
     ChainPoint, EntityValue, ExactKind, IndexRecord, KeyRange, LogKey, Namespace, RawBlock,
-    StateSchema, TagDimension, KEY_HASH_SIZE,
+    StateSchema, TagDimension,
 };
 use fjall::{
     compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
@@ -1284,16 +1284,8 @@ impl CoreArchiveStore for ArchiveStore {
     ) -> Result<Self::SlotIter, ArchiveError> {
         // The stored key form is the write path's, not this method's: the same
         // `key_hash` an insert used, so a query cannot look under bytes an
-        // insert would not have written. `None` is a key with no valid stored
-        // form — today only a `metadata` label that is not eight bytes wide —
-        // which is a malformed query rather than an empty result.
-        let Some(hash) = key_hash(dimension, key) else {
-            return Err(Error::Codec(format!(
-                "{dimension} key must be {KEY_HASH_SIZE} bytes, got {}",
-                key.len(),
-            ))
-            .into());
-        };
+        // insert would not have written.
+        let hash = key_hash(key);
 
         let snapshot = self.db.snapshot();
 

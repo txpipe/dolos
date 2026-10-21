@@ -1,10 +1,9 @@
 use axum::{extract::State, http::StatusCode, Json};
-use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 use dolos_core::Domain;
 
 use crate::{
     error::Error,
-    mapping::{epochs::ParametersModelBuilder, IntoModel as _},
+    mapping::{epochs::ParametersModelBuilder, sorted_json, IntoModel as _},
     Facade,
 };
 
@@ -12,7 +11,7 @@ use super::current_epoch;
 
 pub async fn latest_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
-) -> Result<Json<EpochParamContent>, Error> {
+) -> Result<Json<serde_json::Value>, Error> {
     let (_, epoch) = current_epoch(&domain)?;
 
     let state = dolos_cardano::load_epoch::<D>(domain.state())
@@ -25,7 +24,7 @@ pub async fn latest_parameters<D: Domain>(
         nonce: state.nonces.map(|x| x.active.to_string()),
     };
 
-    Ok(model.into_response()?)
+    Ok(sorted_json(model.into_model()?)?)
 }
 
 #[cfg(test)]
@@ -33,6 +32,7 @@ mod tests {
     use super::*;
     use crate::routes::epochs::testing::*;
     use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 
     #[tokio::test]
     async fn epochs_latest_parameters_happy_path() {
