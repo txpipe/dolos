@@ -236,8 +236,10 @@ fn protocol_of_snapshot(domain: &ToyDomain, stake_epoch: Epoch) -> EraKey {
 /// The test oracle: the distribution of `stake_epoch` from a scan of every
 /// account, with the rules of the reward calculation. A pool counts when it
 /// has a snapshot of the stake epoch and is not retired there; every pool
-/// with a snapshot gets a row, zeros included. The live pledge is the stake
-/// of the accounts that own, in that snapshot, the pool they delegate to.
+/// with a snapshot gets a row, zeros included. A delegator counts when its
+/// stake is above zero, as db-sync's `epoch_stake` does. The live pledge is
+/// the stake of the accounts that own, in that snapshot, the pool they
+/// delegate to.
 fn scanned(domain: &ToyDomain, stake_epoch: Epoch) -> BTreeMap<PoolHash, PoolTally> {
     let protocol = protocol_of_snapshot(domain, stake_epoch);
     let mut out = BTreeMap::new();
@@ -271,7 +273,10 @@ fn scanned(domain: &ToyDomain, stake_epoch: Epoch) -> BTreeMap<PoolHash, PoolTal
 
         let tally = out.get_mut(pool).unwrap();
         tally.stake += stake;
-        tally.delegators += 1;
+
+        if stake > 0 {
+            tally.delegators += 1;
+        }
 
         let owns = match &account.credential {
             StakeCredential::AddrKeyhash(hash) => snapshot.params.pool_owners.contains(hash),
@@ -573,6 +578,53 @@ fn scheduled_pool_changes_wait_for_the_next_distribution() {
         PoolTally::default()
     );
     assert_eq!(frozen_tally(&domain, epoch + 1, OWNED).live_pledge, 35);
+}
+
+/// A delegator with no stake adds no stake and no delegator: db-sync leaves
+/// it out of `epoch_stake`, which is what Blockfrost's `delegators_count`
+/// counts. A pool whose only delegator has no stake freezes zeros.
+#[test]
+fn zero_stake_delegators_are_not_counted() {
+    const STAKED: u8 = 0xa6;
+    const UNSTAKED: u8 = 0xa7;
+
+    let domain = seeded(devnet());
+
+    write(&domain, |writer| {
+        for operator in [STAKED, UNSTAKED] {
+            let pool = pool(operator, &[], false, 0);
+            writer
+                .write_entity_typed(&PoolKey(pool.operator), &pool)
+                .unwrap();
+        }
+
+        for (credential, pool, utxo_sum) in [
+            (key(0x50), STAKED, 300),
+            (key(0x51), STAKED, 400),
+            (key(0x52), STAKED, 0),
+            (key(0x53), UNSTAKED, 0),
+        ] {
+            let mut state = account(credential.clone(), Some(pool), utxo_sum, 0, 0);
+            state.stake.unwrap_live_mut().rewards_sum = 0;
+
+            writer
+                .write_entity_typed(&AccountKey::from(&credential), &state)
+                .unwrap();
+        }
+    });
+
+    open_next_epoch(&domain).unwrap();
+    assert_frozen_matches_the_scan(&domain, 0);
+
+    assert_eq!(
+        frozen_tally(&domain, 0, STAKED),
+        PoolTally {
+            stake: 700,
+            delegators: 2,
+            live_pledge: 0,
+        }
+    );
+    assert_eq!(frozen_tally(&domain, 0, UNSTAKED), PoolTally::default());
 }
 
 /// RUPD refuses a stake epoch whose pool snapshot ESTART never froze, rather
