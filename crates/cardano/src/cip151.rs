@@ -336,6 +336,7 @@ fn as_bytes<'a>(value: &'a Metadatum, field: &'static str) -> Result<&'a [u8], C
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dolos_testing::cip151::{self as signer, Witness};
     use pallas::{
         codec::utils::{Bytes, KeyValuePairs},
         ledger::primitives::Int,
@@ -543,31 +544,116 @@ mod tests {
 
     #[test]
     fn verifies_the_testing_signer() {
-        let cold_key = dolos_testing::cip151::cold_key(1);
-        let (_, metadata) =
-            dolos_testing::cip151::signed_registration(&cold_key, 7, [0x57; 32]).remove(0);
+        let cold_key = signer::cold_key(1);
+        let (_, metadata) = signer::signed_registration(&cold_key, 7, [0x57; 32]).remove(0);
 
         assert!(is_signed(&metadata));
     }
 
     #[test]
     fn a_signature_by_another_key_is_not_the_pools() {
-        let cold_key = dolos_testing::cip151::cold_key(1);
-        let pool = dolos_testing::cip151::pool_id(&cold_key);
-        let other = dolos_testing::cip151::cold_key(2);
-        let (_, metadata) =
-            dolos_testing::cip151::registration_signed_by(pool, &other, 7, [0x57; 32]).remove(0);
+        let cold_key = signer::cold_key(1);
+        let pool = signer::pool_id(&cold_key);
+        let other = signer::cold_key(2);
+        let (_, metadata) = signer::registration_signed_by(pool, &other, 7, [0x57; 32]).remove(0);
 
         assert!(!is_signed(&metadata));
     }
 
     #[test]
     fn an_unsigned_registration_is_not_signed() {
-        let pool = dolos_testing::cip151::pool_id(&dolos_testing::cip151::cold_key(1));
-        let (_, metadata) =
-            dolos_testing::cip151::unsigned_registration(pool, 7, [0x57; 32]).remove(0);
+        let pool = signer::pool_id(&signer::cold_key(1));
+        let (_, metadata) = signer::unsigned_registration(pool, 7, [0x57; 32]).remove(0);
 
         assert!(!is_signed(&metadata));
+    }
+
+    fn is_signed_with(witness: &Witness) -> bool {
+        let pool = signer::pool_id(&signer::cold_key(1));
+        let (_, metadata) = signer::registration_with(pool, 7, [0x57; 32], witness).remove(0);
+
+        is_signed(&metadata)
+    }
+
+    #[test]
+    fn another_key_naming_the_pool_as_address_is_not_the_pools() {
+        let cold_key = signer::cold_key(1);
+        let other = signer::cold_key(2);
+        let witness = Witness {
+            address: Some(signer::pool_id(&cold_key).to_vec()),
+            ..Witness::by(&other)
+        };
+
+        assert!(!is_signed_with(&witness));
+    }
+
+    #[test]
+    fn a_cold_key_signature_without_an_address_is_not_signed() {
+        let cold_key = signer::cold_key(1);
+        let witness = Witness {
+            address: None,
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(!is_signed_with(&witness));
+    }
+
+    #[test]
+    fn a_cold_key_signature_naming_another_address_is_not_signed() {
+        let cold_key = signer::cold_key(1);
+        let other = signer::cold_key(2);
+        let witness = Witness {
+            address: Some(signer::pool_id(&other).to_vec()),
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(!is_signed_with(&witness));
+    }
+
+    #[test]
+    fn a_hashed_signature_over_the_digest_hash_is_signed() {
+        let cold_key = signer::cold_key(1);
+        let witness = Witness {
+            hashed: true,
+            signs_digest_hash: true,
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(is_signed_with(&witness));
+    }
+
+    #[test]
+    fn a_hashed_signature_over_the_bare_digest_is_not_signed() {
+        let cold_key = signer::cold_key(1);
+        let witness = Witness {
+            hashed: true,
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(!is_signed_with(&witness));
+    }
+
+    #[test]
+    fn a_payload_declaring_another_validation_method_is_not_signed() {
+        let cold_key = signer::cold_key(1);
+        let witness = Witness {
+            validation_method: 0,
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(!is_signed_with(&witness));
+    }
+
+    #[test]
+    fn only_a_cose_witness_type_is_signed() {
+        let cold_key = signer::cold_key(1);
+        let typed = |kind| Witness {
+            kind: Some(kind),
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(is_signed_with(&typed(0)));
+        assert!(!is_signed_with(&typed(1)));
     }
 
     #[test]
