@@ -54,7 +54,7 @@ dolos-trp = { path = "crates/trp", optional = true }
 gasket = { version = "^0.9", features = ["derive"] }
 # gasket = { path = "../../construkts/gasket-rs/gasket", features = ["derive"] }
 
-clap = { version = "4.5.37", features = ["derive"] }
+clap = { version = "4.5.37", features = ["derive", "env"] }
 log = "0.4.18"
 config = { version = "0.15.19", default-features = false, features = [
     "toml",
@@ -118,6 +118,7 @@ tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 stats_alloc = "0.1"
 serial_test = "3"
 dolos-redb3 = { path = "crates/redb3" }
+memmap2 = "0.9"
 
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.30.1", features = ["signal", "resource"] }
@@ -191,6 +192,14 @@ jemalloc = ["dep:tikv-jemallocator"]
 
 # Default features - includes all services
 default = ["mithril", "utils", "grpc", "minibf", "minikupo", "trp", "jemalloc"]
+
+# Line tables keep file:line in backtraces and panics while cutting the dev and
+# test targets by ~40%; set CARGO_PROFILE_DEV_DEBUG=full for a debugger session
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

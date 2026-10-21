@@ -93,22 +93,21 @@ pub struct StakeSnapshot {
     pub registered_accounts: HashSet<StakeCredential>,
     pub pools: HashMap<PoolHash, EpochValue<PoolSnapshot>>,
     pub pool_stake: HashMap<PoolHash, u64>,
-    /// Per-pool delegator count over the *whole* snapshot, filled by
-    /// `load_globals` alongside `pool_stake`.
+    /// Per-pool delegator count over the *whole* snapshot, read by
+    /// `load_globals` alongside `pool_stake` from what ESTART froze.
     ///
-    /// Counted globally rather than summed from each shard's
+    /// Read globally rather than summed from each shard's
     /// `accounts_by_pool`, so it survives a mid-RUPD restart: `initialize`
     /// rebuilds it, whereas a per-shard accumulator would only cover the
     /// shards that actually ran after the resume cursor.
     pub pool_delegator_counts: HashMap<PoolHash, u64>,
     /// Per-pool live pledge: sum of stake delegated to the pool by its
-    /// declared owners, computed in `load_globals` over every account.
-    /// Owner credentials can land in any shard, so a per-shard
-    /// `account_stake`-based sum (the trait default for `live_pledge`)
-    /// would silently return 0 in shards that don't contain the
-    /// owners — causing `pool_rewards` to short-circuit to 0 via the
-    /// `live_pledge < declared_pledge` guard. The live pledge depends
-    /// only on global stake, so we precompute it once.
+    /// declared owners, frozen by ESTART over every account and read by
+    /// `load_globals`. Owner credentials can land in any shard, so a
+    /// per-shard `account_stake`-based sum (the trait default for
+    /// `live_pledge`) would silently return 0 in shards that don't contain
+    /// the owners — causing `pool_rewards` to short-circuit to 0 via the
+    /// `live_pledge < declared_pledge` guard.
     pub pool_live_pledges: HashMap<PoolHash, u64>,
     /// Total blocks minted by ALL pools in the performance epoch (mark
     /// snapshot). This includes blocks from pools created after the stake
@@ -129,6 +128,10 @@ impl StakeSnapshot {
 
     pub fn get_pool_delegator_count(&self, pool: &PoolHash) -> u64 {
         *self.pool_delegator_counts.get(pool).unwrap_or(&0)
+    }
+
+    pub fn get_pool_live_pledge(&self, pool: &PoolHash) -> u64 {
+        *self.pool_live_pledges.get(pool).unwrap_or(&0)
     }
 }
 

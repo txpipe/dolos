@@ -6,8 +6,11 @@
 
 use std::ops::Range;
 
+use bytes::Bytes;
+
 use crate::{
     archive::{ArchiveError, ArchiveStore, ArchiveWriter, EmptyExactIter, EmptyTagIter},
+    cache::{CacheDiskTier, CacheEntry, CacheError, Cost},
     indexes::{ArchiveIndexDelta, IndexRecord},
     BlockBody, BlockSlot, ChainPoint, EntityValue, KeyRange, LogKey, Namespace, RawBlock,
     TagDimension,
@@ -241,5 +244,53 @@ impl ArchiveStore for NoOpArchiveStore {
         _slots: Range<BlockSlot>,
     ) -> Result<Self::ExactIter, ArchiveError> {
         Err(ArchiveError::Unsupported("iter_exact_records"))
+    }
+}
+
+/// A disk tier that keeps nothing: the cache holds its entries in memory only.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoDiskTier;
+
+impl CacheDiskTier for NoDiskTier {
+    fn open_namespace(&self, _namespace: &str, _version: u32) -> Result<(), CacheError> {
+        Ok(())
+    }
+
+    fn get(&self, _namespace: &str, _key: &[u8]) -> Result<Option<CacheEntry>, CacheError> {
+        Ok(None)
+    }
+
+    fn put(
+        &self,
+        _namespace: &str,
+        _key: &[u8],
+        _value: &[u8],
+        _cost: Cost,
+    ) -> Result<(), CacheError> {
+        Ok(())
+    }
+
+    fn remove(&self, _namespace: &str, _key: &[u8]) -> Result<(), CacheError> {
+        Ok(())
+    }
+
+    fn wipe(&self, _namespace: &str) -> Result<(), CacheError> {
+        Ok(())
+    }
+
+    fn previous_keys(&self, _namespace: &str) -> Result<Vec<Bytes>, CacheError> {
+        Ok(Vec::new())
+    }
+
+    fn keys(&self, _namespace: &str) -> Result<Vec<Bytes>, CacheError> {
+        Ok(Vec::new())
+    }
+
+    fn bytes(&self, _namespace: &str) -> Result<u64, CacheError> {
+        Ok(0)
+    }
+
+    fn flush(&self) -> Result<(), CacheError> {
+        Ok(())
     }
 }

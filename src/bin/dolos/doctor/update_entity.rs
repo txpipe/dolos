@@ -1,4 +1,7 @@
-use dolos_cardano::{model::AccountState, EpochState, PoolState};
+use dolos_cardano::{
+    model::{AccountState, DRepState},
+    EpochState, PoolState,
+};
 use dolos_core::{config::RootConfig, KeyCodec as _, StateEntity};
 use miette::IntoDiagnostic;
 
@@ -25,7 +28,7 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
 
     let state = crate::common::open_state_store(config)?;
 
@@ -33,6 +36,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         "epochs" => typed_key::<EpochState>(args.key.as_deref())?,
         "accounts" => typed_key::<AccountState>(args.key.as_deref())?,
         "pools" => typed_key::<PoolState>(args.key.as_deref())?,
+        "dreps" => typed_key::<DRepState>(args.key.as_deref())?,
         _ => return Err(miette::Error::msg("invalid namespace")),
     };
 

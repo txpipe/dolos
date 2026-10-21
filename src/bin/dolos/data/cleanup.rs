@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use dolos_core::config::{ArchiveStoreConfig, RootConfig, StorageConfig};
+use dolos_core::config::RootConfig;
 use miette::{bail, IntoDiagnostic};
 use tracing::info;
 
@@ -12,7 +12,7 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
 
     if !args.force {
         bail!("refusing to clear all managed data without --force");
@@ -28,7 +28,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 /// widens deletion to a separately configured path.
 pub fn clear(config: &RootConfig) -> miette::Result<()> {
     let root = &config.storage.path;
-    let outside = stores_outside_root(&config.storage).into_diagnostic()?;
+    let outside = stores_outside_root(config).into_diagnostic()?;
 
     if !outside.is_empty() {
         let listed = format_paths(&outside);
@@ -70,21 +70,17 @@ fn format_paths(paths: &[PathBuf]) -> String {
         .join("\n")
 }
 
-fn stores_outside_root(storage: &StorageConfig) -> std::io::Result<Vec<PathBuf>> {
+fn stores_outside_root(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
     let cwd = std::env::current_dir()?;
+    let storage = &config.storage;
     let root = normalize(&cwd, &storage.path);
 
-    let blocks_path = match &storage.archive {
-        ArchiveStoreConfig::Fjall(config) => config.blocks_path.clone(),
-        ArchiveStoreConfig::InMemory | ArchiveStoreConfig::NoOp => None,
-    };
-
     Ok([
-        storage.wal_path(),
+        config.wal_path(),
         storage.state_path(),
         storage.archive_path(),
-        blocks_path,
-        storage.mempool_path(),
+        storage.blocks_path(),
+        config.mempool_path(),
     ]
     .into_iter()
     .flatten()
@@ -155,33 +151,10 @@ mod tests {
     use super::*;
 
     fn config_over(root: &Path) -> RootConfig {
-        let toml = format!(
-            r#"
-            [upstream]
-            peer_address = "unused.example:3001"
-
-            [storage]
-            version = "v4"
-            path = {path}
-
-            [storage.mempool]
-            backend = "redb"
-
-            [genesis]
-            byron_path = "byron.json"
-            shelley_path = "shelley.json"
-            alonzo_path = "alonzo.json"
-            conway_path = "conway.json"
-
-            [chain]
-            type = "cardano"
-            magic = 2
-            is_testnet = true
-            "#,
-            path = toml::Value::String(root.display().to_string()),
-        );
-
-        toml::from_str(&toml).unwrap()
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = root.to_path_buf();
+        config.mempool.persistent = true;
+        config
     }
 
     fn old_store_under(root: &Path) -> Vec<PathBuf> {
@@ -229,28 +202,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("data");
         let elsewhere = dir.path().join("elsewhere");
-        let mut storage = config_over(&root).storage;
+        let mut config = config_over(&root);
 
-        assert!(stores_outside_root(&storage).unwrap().is_empty());
+        assert!(stores_outside_root(&config).unwrap().is_empty());
 
-        let dolos_core::config::StateStoreConfig::Fjall(state) = &mut storage.state else {
-            panic!("the default state backend is fjall");
-        };
-        state.path = Some(PathBuf::from("inner/state"));
-        assert!(stores_outside_root(&storage).unwrap().is_empty());
+        config.storage.state.path = Some(PathBuf::from("inner/state"));
+        config.storage.archive.blocks_path = Some(PathBuf::from("blocks"));
+        assert!(stores_outside_root(&config).unwrap().is_empty());
 
-        let dolos_core::config::StateStoreConfig::Fjall(state) = &mut storage.state else {
-            panic!("the default state backend is fjall");
-        };
-        state.path = Some(elsewhere.join("state"));
-        let ArchiveStoreConfig::Fjall(archive) = &mut storage.archive else {
-            panic!("the default archive backend is fjall");
-        };
-        archive.path = Some(PathBuf::from("../sibling/archive"));
-        archive.blocks_path = Some(elsewhere.join("blocks"));
+        config.storage.state.path = Some(elsewhere.join("state"));
+        config.storage.archive.path = Some(PathBuf::from("../sibling/archive"));
+        config.storage.archive.blocks_path = Some(elsewhere.join("blocks"));
 
         assert_eq!(
-            stores_outside_root(&storage).unwrap(),
+            stores_outside_root(&config).unwrap(),
             vec![
                 elsewhere.join("state"),
                 root.join("../sibling/archive"),
@@ -270,10 +235,7 @@ mod tests {
         std::fs::write(blocks.join("000000.segment"), b"a store built by v1.6").unwrap();
 
         let mut config = config_over(&root);
-        let ArchiveStoreConfig::Fjall(archive) = &mut config.storage.archive else {
-            panic!("the default archive backend is fjall");
-        };
-        archive.blocks_path = Some(blocks.clone());
+        config.storage.archive.blocks_path = Some(blocks.clone());
 
         let error = clear(&config).expect_err("an outside store refuses cleanup");
         let message = error.to_string();

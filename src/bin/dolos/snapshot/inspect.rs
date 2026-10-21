@@ -28,6 +28,8 @@ use dolos_snapshot::{
 };
 use miette::{Context as _, IntoDiagnostic as _};
 
+use crate::registry::CredentialArgs;
+
 #[derive(Debug, Parser)]
 pub struct Args {
     /// OCI repository holding the stele, e.g.
@@ -52,10 +54,13 @@ pub struct Args {
     /// signatures arrive with phase 5
     #[arg(long, action)]
     json: bool,
+
+    #[command(flatten)]
+    credentials: CredentialArgs,
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    let auth = node::registry_auth(&config.stelae).into_diagnostic()?;
+    let auth = args.credentials.auth_for_chain(&args.repo, &config.chain)?;
 
     // An inspection reads two small blobs into memory, so nothing is staged
     // and this directory is never created here.

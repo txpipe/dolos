@@ -32,7 +32,7 @@ pub struct Args {
 
 #[tokio::main]
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
 
     let domain = crate::common::setup_domain(config)?;
 
@@ -94,7 +94,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let context = ValidationContext {
         block_slot: args.block_slot,
-        prot_magic: config.chain.magic() as u32,
+        prot_magic: crate::common::resolve_network(config)?.magic() as u32,
         network_id: args.network_id,
         prot_params: pparams,
         acnt: None,

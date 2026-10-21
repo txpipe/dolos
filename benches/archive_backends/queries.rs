@@ -139,7 +139,7 @@ fn logs_only_scale(bencher: divan::Bencher, rows: u64) {
     };
     let directory = tempfile::tempdir().unwrap();
     let store = dolos_fjall::archive::ArchiveStore::open(
-        dolos_cardano::model::build_schema(),
+        dolos_cardano::model::build_log_schema(),
         directory.path(),
         &Default::default(),
     )
@@ -167,7 +167,7 @@ fn compressed_real_alonzo_block(bencher: divan::Bencher) {
     let point = ChainPoint::Specific(block.slot(), block.hash());
     let directory = tempfile::tempdir().unwrap();
     let store = dolos_fjall::archive::ArchiveStore::open(
-        dolos_cardano::model::build_schema(),
+        dolos_cardano::model::build_log_schema(),
         directory.path(),
         &Default::default(),
     )

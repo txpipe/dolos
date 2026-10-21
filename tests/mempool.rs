@@ -1,16 +1,18 @@
 //! Integration tests for mempool confirm/drop policies.
 //!
-//! Exercises `MempoolStore::confirm()` against the production finalize and drop
-//! thresholds for both `EphemeralMempool` and `RedbMempool`.
+//! Exercises `MempoolStore::confirm()` against the default finalize threshold
+//! and the drop threshold for both `EphemeralMempool` and `RedbMempool`.
 
 use dolos_core::builtin::EphemeralMempool;
+use dolos_core::config::MempoolConfig;
 use dolos_core::{ChainPoint, MempoolStore, MempoolTx, MempoolTxStage, TxHash};
 use dolos_redb3::mempool::RedbMempool;
 use dolos_testing::mempool::make_test_mempool_tx;
 use dolos_testing::{slot_to_chainpoint, tx_sequence_to_hash};
 
-// Production thresholds from crates/core/src/sync.rs
-const FINALIZE_THRESHOLD: u32 = 6;
+// The default `mempool.retain_confirmed_blocks`, and the drop threshold from
+// crates/core/src/sync.rs.
+const FINALIZE_THRESHOLD: u32 = MempoolConfig::DEFAULT_RETAIN_CONFIRMED_BLOCKS;
 const DROP_THRESHOLD: u32 = 2;
 
 fn test_hash(n: u8) -> TxHash {

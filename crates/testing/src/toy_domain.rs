@@ -2,10 +2,11 @@ use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
-    config::{CardanoConfig, StorageConfig, SyncConfig},
+    config::{CacheConfig, HistoryConfig, MempoolConfig, StorageConfig},
     sync::execute_work_unit,
     BootstrapExt, *,
 };
+use dolos_redb3::cache::RedbCacheTier;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -177,7 +178,7 @@ impl ToyStores for MemoryStores {
     fn open() -> Self {
         Self {
             state: MemoryStateStore::new(),
-            archive: MemoryArchiveStore::new(dolos_cardano::model::build_schema()),
+            archive: MemoryArchiveStore::new(dolos_cardano::model::build_log_schema()),
         }
     }
 
@@ -215,7 +216,7 @@ impl FjallStores {
         let dir = tempfile::tempdir_in(parent)?;
         let state = dolos_fjall::StateStore::open(dir.path().join("state"), state_config)?;
         let archive = dolos_fjall::archive::ArchiveStore::open(
-            dolos_cardano::model::build_schema(),
+            dolos_cardano::model::build_log_schema(),
             dir.path().join("archive"),
             archive_config,
         )?;
@@ -246,7 +247,7 @@ impl ToyStores for FjallStores {
         .expect("opening the fjall state store");
 
         let archive = dolos_fjall::archive::ArchiveStore::open(
-            dolos_cardano::model::build_schema(),
+            dolos_cardano::model::build_log_schema(),
             dir.path().join("archive"),
             &dolos_core::config::FjallArchiveConfig::default(),
         )
@@ -280,10 +281,12 @@ pub struct ToyDomain<B: ToyStores = MemoryStores> {
     stores: B,
     mempool: Mempool,
     storage_config: StorageConfig,
-    sync_config: SyncConfig,
+    history_config: HistoryConfig,
+    mempool_config: MempoolConfig,
     genesis: Arc<dolos_core::Genesis>,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
     query_limiter: QueryLimiter,
+    cache: TieredCache<RedbCacheTier>,
 }
 
 impl ToyDomain<MemoryStores> {
@@ -300,7 +303,7 @@ impl ToyDomain<MemoryStores> {
     ) -> Self {
         Self::new_with_genesis_and_config(
             genesis,
-            CardanoConfig::default(),
+            dolos_cardano::CardanoLogicConfig::default(),
             initial_delta,
             storage_config,
         )
@@ -308,7 +311,7 @@ impl ToyDomain<MemoryStores> {
 
     pub fn new_with_genesis_and_config(
         genesis: Arc<dolos_core::Genesis>,
-        config: CardanoConfig,
+        config: dolos_cardano::CardanoLogicConfig,
         initial_delta: Option<UtxoSetDelta>,
         storage_config: Option<StorageConfig>,
     ) -> Self {
@@ -337,7 +340,7 @@ impl<B: ToyStores> ToyDomain<B> {
     /// caller reaches for when it wants a different backend.
     pub fn with_backend(
         genesis: Arc<dolos_core::Genesis>,
-        config: CardanoConfig,
+        config: dolos_cardano::CardanoLogicConfig,
         initial_delta: Option<UtxoSetDelta>,
         storage_config: Option<StorageConfig>,
     ) -> Self {
@@ -347,12 +350,16 @@ impl<B: ToyStores> ToyDomain<B> {
 
     pub fn with_stores(
         genesis: Arc<dolos_core::Genesis>,
-        config: CardanoConfig,
+        config: dolos_cardano::CardanoLogicConfig,
         initial_delta: Option<UtxoSetDelta>,
         storage_config: Option<StorageConfig>,
         stores: B,
     ) -> Self {
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
+        let storage_config = storage_config.unwrap_or_default();
+        let query_limiter = QueryLimiter::default();
+        let disk = RedbCacheTier::memory(storage_config.cache.disk_bytes()).unwrap();
+        let cache = TieredCache::new(&storage_config.cache, disk, query_limiter.clone());
 
         let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
             config.clone(),
@@ -369,11 +376,13 @@ impl<B: ToyStores> ToyDomain<B> {
             mempool: Mempool {
                 pending: Arc::new(RwLock::new(Vec::new())),
             },
-            storage_config: storage_config.unwrap_or_default(),
-            sync_config: SyncConfig::default(),
+            storage_config,
+            history_config: HistoryConfig::default(),
+            mempool_config: MempoolConfig::default(),
             genesis: genesis.clone(),
             tip_broadcast,
-            query_limiter: QueryLimiter::default(),
+            query_limiter,
+            cache,
         };
 
         // Apply genesis state using the work unit pattern.
@@ -414,18 +423,51 @@ impl<B: ToyStores> ToyDomain<B> {
         domain
     }
 
-    /// Override the sync config so tests can exercise pruning windows
-    /// (`max_rollback` / `max_history`); default leaves both `None`.
-    pub fn with_sync_config(mut self, sync_config: SyncConfig) -> Self {
-        self.sync_config = sync_config;
+    /// Override the history policy so tests can exercise archive pruning;
+    /// the default keeps everything.
+    pub fn with_history_config(mut self, history_config: HistoryConfig) -> Self {
+        self.history_config = history_config;
         self
     }
 
     /// Override the query limiter so tests can bound blocking query work;
-    /// clones of the domain share it.
+    /// clones of the domain share it. The cache is rebuilt to fill under it.
     pub fn with_query_limiter(mut self, query_limiter: QueryLimiter) -> Self {
+        let disk = self.cache.disk().clone();
+        self.cache = TieredCache::new(&self.storage_config.cache, disk, query_limiter.clone());
         self.query_limiter = query_limiter;
         self
+    }
+
+    /// Override the cache config, admission thresholds included. The cache is
+    /// rebuilt under it, empty and with no namespace registered.
+    pub fn with_cache_config(mut self, cache: CacheConfig) -> Self {
+        self.storage_config.cache = cache;
+        let disk = RedbCacheTier::memory(self.storage_config.cache.disk_bytes()).unwrap();
+        self.cache = TieredCache::new(&self.storage_config.cache, disk, self.query_limiter.clone());
+        self
+    }
+
+    /// Keeps the cache's disk tier in `dir`, as a node does, in place of
+    /// memory. Reopening the directory is a restart of the cache.
+    pub fn with_persistent_cache(
+        self,
+        dir: impl AsRef<std::path::Path>,
+    ) -> Result<Self, CacheError> {
+        let disk_bytes = self.storage_config.cache.disk_bytes();
+        self.with_persistent_cache_within(dir, disk_bytes)
+    }
+
+    /// [`Self::with_persistent_cache`] within `disk_bytes`, a budget finer than
+    /// the configuration's MiB.
+    pub fn with_persistent_cache_within(
+        mut self,
+        dir: impl AsRef<std::path::Path>,
+        disk_bytes: u64,
+    ) -> Result<Self, CacheError> {
+        let disk = RedbCacheTier::open(dir, disk_bytes)?;
+        self.cache = TieredCache::new(&self.storage_config.cache, disk, self.query_limiter.clone());
+        Ok(self)
     }
 }
 
@@ -465,13 +507,18 @@ impl<B: ToyStores> dolos_core::Domain for ToyDomain<B> {
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
     type Mempool = Mempool;
+    type Cache = TieredCache<RedbCacheTier>;
 
     fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
     }
 
-    fn sync_config(&self) -> &SyncConfig {
-        &self.sync_config
+    fn history_config(&self) -> &HistoryConfig {
+        &self.history_config
+    }
+
+    fn mempool_config(&self) -> &MempoolConfig {
+        &self.mempool_config
     }
 
     fn genesis(&self) -> Arc<dolos_core::Genesis> {
@@ -504,6 +551,10 @@ impl<B: ToyStores> dolos_core::Domain for ToyDomain<B> {
 
     fn mempool(&self) -> &Self::Mempool {
         &self.mempool
+    }
+
+    fn cache(&self) -> &Self::Cache {
+        &self.cache
     }
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {

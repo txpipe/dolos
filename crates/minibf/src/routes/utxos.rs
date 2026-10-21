@@ -110,7 +110,7 @@ where
     let mut rows: Vec<_> = utxos
         .into_iter()
         // The window cut the page by its slot, so sort by that slot first. A
-        // block that `sync.max_history` pruned keeps its index slot until the
+        // block that rolling history pruned keeps its index slot until the
         // sweep but has no block data, and `page_sort_key` alone would move its
         // rows out of their slot and cut the page in a different place.
         .map(|(txo_ref, cbor)| {
@@ -311,7 +311,7 @@ where
 /// first, `TxoRef` second.
 ///
 /// Chain position is `None` for an output whose creation block was pruned by
-/// `sync.max_history` — the block that carries its slot no longer exists, so
+/// rolling history — the block that carries its slot no longer exists, so
 /// true chain order is unrecoverable for it. The `TxoRef` tie-breaker keeps
 /// those rows in a deterministic order across requests; without it their
 /// order came from `HashMap` iteration, and two page requests could slice two
@@ -541,7 +541,7 @@ mod tests {
         }
     }
 
-    /// On a `sync.max_history` node the archive index keeps a pruned block's
+    /// On a rolling-history node the archive index keeps a pruned block's
     /// slot until the sweep, but the block's rows have no block data. Pages
     /// must still slice the same sequence as the single full page.
     #[tokio::test]
@@ -601,7 +601,6 @@ mod tests {
         let facade = Facade {
             inner: domain,
             config: MinibfConfig::new("[::]:0".parse().unwrap()),
-            cache: Default::default(),
         };
 
         let count = 2;
@@ -649,7 +648,6 @@ mod tests {
         let facade = Facade {
             inner: domain,
             config: MinibfConfig::new("[::]:0".parse().unwrap()),
-            cache: Default::default(),
         };
         let rows = page_rows(&facade, refs.clone(), &pagination(Order::Asc, 100, 1))
             .await

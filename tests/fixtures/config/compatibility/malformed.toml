@@ -1,0 +1,5 @@
+compatibility = 2
+
+[chain]
+protocol = "cardano"
+network = "preview"

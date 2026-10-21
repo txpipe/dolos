@@ -1,10 +1,7 @@
 use gasket::{framework::*, runtime::Policy};
 use tracing::{debug, info};
 
-use dolos_core::{
-    config::{PeerConfig, SyncConfig},
-    PullEvent,
-};
+use dolos_core::{config::SyncConfig, PullEvent};
 
 use crate::adapters::storage::WalStoreBackend;
 
@@ -60,11 +57,13 @@ fn test_mainnet_upstream() {
     let (send, receive) = gasket::messaging::tokio::mpsc_channel(200);
 
     let mut upstream = crate::sync::pull::Stage::new(
-        &SyncConfig::default().with_pull_batch_size(20),
-        &PeerConfig {
-            peer_address: "relays-new.cardano-mainnet.iohk.io:3001".into(),
+        &SyncConfig {
+            pull_batch_size: 20,
+            ..Default::default()
         },
+        "relays-new.cardano-mainnet.iohk.io:3001".into(),
         764824073,
+        crate::sync::SyncLimit::default(),
         wal,
     );
 

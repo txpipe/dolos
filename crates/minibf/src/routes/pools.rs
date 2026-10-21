@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Duration,
 };
 
 use axum::{
@@ -26,7 +25,7 @@ use dolos_cardano::{
     cip151,
     indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
     model::{AccountState, PoolState},
-    pallas_extras, AccountKey, PoolDelegation, PoolEpochLog, PoolHash, PoolKey,
+    pallas_extras, AccountKey, PoolEpochLog, PoolHash, PoolKey,
 };
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use futures::{future::join_all, StreamExt};
@@ -48,8 +47,9 @@ use crate::{
     error::Error,
     log_and_500,
     mapping::{
-        bech32_calidus, bech32_pool, i32_or_500, pool_offchain_metadata, rational_to_f64,
-        stake_cred_to_address, vkey_to_stake_address, IntoModel,
+        bech32_calidus, bech32_pool, i32_or_500, pool_offchain_body, pool_offchain_metadata,
+        rational_to_f64, stake_cred_to_address, vkey_to_stake_address, IntoModel,
+        OffchainFetchError, MAX_POOL_METADATA_BYTES,
     },
     pagination::{Pagination, PaginationParameters},
     routes::governance::voter_casts,
@@ -62,20 +62,16 @@ type ActivePools = HashSet<PoolHash>;
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 struct PoolMetrics {
     live_stake: u64,
-    active_stake: u64,
     live_delegators: u64,
     total_live_stake: u64,
-    total_active_stake: u64,
     live_pledge: u64,
 }
 
 impl PoolMetrics {
     fn merge(mut self, other: Self) -> Self {
         self.live_stake += other.live_stake;
-        self.active_stake += other.active_stake;
         self.live_delegators += other.live_delegators;
         self.total_live_stake += other.total_live_stake;
-        self.total_active_stake += other.total_active_stake;
         self.live_pledge += other.live_pledge;
         self
     }
@@ -113,13 +109,6 @@ fn live_stake_denominator_pool(
     active_pools.contains(pool).then_some(*pool)
 }
 
-fn active_stake_pool(account: &AccountState) -> Option<PoolHash> {
-    match account.pool.set() {
-        Some(PoolDelegation::Pool(hash)) => Some(*hash),
-        _ => None,
-    }
-}
-
 fn reduce_account_chunk(
     accounts: &[AccountState],
     target_pool: PoolHash,
@@ -140,15 +129,6 @@ fn reduce_account_chunk(
 
             if live_stake_pool(account).is_some_and(|hash| hash == target_pool) {
                 metrics.live_delegators += 1;
-            }
-
-            if let Some(hash) = active_stake_pool(account) {
-                let active_stake = account.active_stake();
-                metrics.total_active_stake += active_stake;
-
-                if hash == target_pool {
-                    metrics.active_stake += active_stake;
-                }
             }
 
             metrics
@@ -205,8 +185,8 @@ where
     })
 }
 
-/// The stake metrics of `target_pool`, from a scan of every account, `chunk`
-/// accounts per blocking task.
+/// The live stake metrics of `target_pool`, from a scan of every account,
+/// `chunk` accounts per blocking task.
 async fn compute_pool_metrics<D>(
     domain: &Facade<D>,
     target_pool: PoolHash,
@@ -634,14 +614,22 @@ where
     let params = &snapshot.params;
 
     let network = domain.get_network_id()?;
-    let circulating_supply = dolos_cardano::load_epoch::<D>(domain.state())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .initial_pots
-        .circulating();
+    let epoch = dolos_cardano::load_epoch::<D>(domain.state())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let circulating_supply = epoch.initial_pots.circulating();
     let optimal = domain
         .get_current_effective_pparams()?
         .ensure_k()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // The active stake is the distribution ESTART froze two epochs back,
+    // which `set` holds, against the epoch's total of it.
+    let active_stake = pool
+        .snapshot
+        .set()
+        .and_then(|x| x.stake)
+        .unwrap_or_default();
+    let total_active_stake = epoch.active_stake.unwrap_or_default();
 
     let active_pools = load_active_pools(&domain, ENTITY_CHUNK).await?;
     let owners = params.pool_owners.clone();
@@ -683,8 +671,8 @@ where
             metrics.live_stake as f64 * optimal as f64 / circulating_supply as f64
         },
         live_delegators: metrics.live_delegators as f64,
-        active_stake: metrics.active_stake.to_string(),
-        active_size: safe_ratio(metrics.active_stake, metrics.total_active_stake),
+        active_stake: active_stake.to_string(),
+        active_size: safe_ratio(active_stake, total_active_stake),
         declared_pledge: params.pledge.to_string(),
         live_pledge: metrics.live_pledge.to_string(),
         margin_cost: rational_to_f64::<6>(&params.margin),
@@ -792,6 +780,24 @@ fn connection_error(url: &str) -> DrepsInnerMetadataError {
     )
 }
 
+fn size_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::SizeExceeded,
+        format!(
+            "Error Offchain Pool: Size error, fetching metadata from {url} exceeded {MAX_POOL_METADATA_BYTES} bytes."
+        ),
+    )
+}
+
+fn pool_fetch_error(url: &str, error: OffchainFetchError) -> Option<DrepsInnerMetadataError> {
+    match error {
+        OffchainFetchError::Client | OffchainFetchError::Body => None,
+        OffchainFetchError::Connection => Some(connection_error(url)),
+        OffchainFetchError::HttpResponse(status) => Some(http_response_error(url, status)),
+        OffchainFetchError::SizeExceeded => Some(size_error(url)),
+    }
+}
+
 async fn fetch_pool_offchain_metadata(
     pool: &PoolState,
 ) -> Option<crate::mapping::PoolOffchainMetadata> {
@@ -822,31 +828,9 @@ async fn fetch_pool_metadata_with_error(
         return (None, None);
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .user_agent("Dolos MiniBF")
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return (None, None),
-    };
-
-    let response = match client.get(&metadata.url).send().await {
-        Ok(response) => response,
-        Err(_) => return (None, Some(connection_error(&metadata.url))),
-    };
-
-    if response.status() != StatusCode::OK {
-        return (
-            None,
-            Some(http_response_error(&metadata.url, response.status())),
-        );
-    }
-
-    let body = match response.bytes().await {
+    let body = match pool_offchain_body(&metadata.url).await {
         Ok(body) => body,
-        Err(_) => return (None, None),
+        Err(error) => return (None, pool_fetch_error(&metadata.url, error)),
     };
 
     let actual_hash = Hasher::<256>::hash(body.as_ref());
@@ -920,37 +904,22 @@ where
     Ok(Json(out))
 }
 
-/// Live and active stake per pool.
-#[derive(Debug, Default, PartialEq)]
-struct PoolStakes {
-    live: HashMap<PoolHash, u64>,
-    active: HashMap<PoolHash, u64>,
-}
-
-impl PoolStakes {
-    fn add_account(&mut self, state: &AccountState) {
-        if let Some(hash) = live_stake_pool(state) {
-            *self.live.entry(hash).or_default() += state.live_stake();
-        }
-
-        if let Some(hash) = active_stake_pool(state) {
-            *self.active.entry(hash).or_default() +=
-                state.stake.set().map(|x| x.total()).unwrap_or(0);
-        }
-    }
-}
-
-/// The stakes of every pool, from a scan of every account, `chunk` accounts
-/// per blocking task.
-async fn load_pool_stakes<D>(domain: &Facade<D>, chunk: usize) -> Result<PoolStakes, StatusCode>
+/// The live stake of every pool, from a scan of every account, `chunk`
+/// accounts per blocking task.
+async fn load_live_stakes<D>(
+    domain: &Facade<D>,
+    chunk: usize,
+) -> Result<HashMap<PoolHash, u64>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
 {
     EntityScan::<AccountState>::all(chunk)
-        .fold(domain, PoolStakes::default(), |mut stakes, accounts| {
+        .fold(domain, HashMap::new(), |mut stakes, accounts| {
             for (_, state) in &accounts {
-                stakes.add_account(state);
+                if let Some(hash) = live_stake_pool(state) {
+                    *stakes.entry(hash).or_default() += state.live_stake();
+                }
             }
             Ok(stakes)
         })
@@ -988,10 +957,7 @@ where
 {
     let pagination = Pagination::try_from(params)?;
 
-    let PoolStakes {
-        live: live_stake_map,
-        active: active_stake_map,
-    } = load_pool_stakes(&domain, ENTITY_CHUNK).await?;
+    let live_stake_map = load_live_stakes(&domain, ENTITY_CHUNK).await?;
 
     let circulating_supply = dolos_cardano::load_epoch::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -1035,7 +1001,7 @@ where
             .and_then(|x| build_pool_extended_metadata(x.pool_metadata.as_ref(), fetched_metadata));
 
         let live = live_stake_map.get(&pool.operator).copied();
-        let active = active_stake_map.get(&pool.operator).copied();
+        let active = pool.snapshot.set().and_then(|x| x.stake);
 
         out.push(PoolListExtendedInner {
             pool_id,
@@ -1846,7 +1812,9 @@ mod tests {
         pool_list_retire_inner::PoolListRetireInner,
     };
     use dolos_cardano::cip151;
-    use dolos_cardano::model::{DRepDelegation, EpochValue, PoolParams, PoolSnapshot, Stake};
+    use dolos_cardano::model::{
+        DRepDelegation, EpochValue, PoolDelegation, PoolParams, PoolSnapshot, Stake,
+    };
     use dolos_core::{StateStore as _, StateWriter as _};
     use dolos_testing::synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote};
     use pallas::{
@@ -1857,6 +1825,7 @@ mod tests {
         },
     };
     use serde_json::Value;
+    use std::{io::ErrorKind, net::TcpListener};
 
     fn md_int(value: i64) -> alonzo::Metadatum {
         alonzo::Metadatum::Int(Int::from(value))
@@ -2083,7 +2052,6 @@ mod tests {
         assert_eq!(metrics.live_pledge, 0);
         assert_eq!(metrics.live_delegators, 0);
         assert_eq!(metrics.total_live_stake, 0);
-        assert_eq!(metrics.active_stake, 0);
     }
 
     #[test]
@@ -2182,8 +2150,6 @@ mod tests {
         assert_eq!(metrics.live_pledge, 0);
         assert_eq!(metrics.live_delegators, 1);
         assert_eq!(metrics.total_live_stake, 30);
-        assert_eq!(metrics.active_stake, 0);
-        assert_eq!(metrics.total_active_stake, 0);
     }
 
     #[test]
@@ -2211,6 +2177,75 @@ mod tests {
         assert_eq!(metrics.live_stake, 42);
         assert_eq!(metrics.total_live_stake, 0);
         assert_eq!(metrics.live_delegators, 1);
+    }
+
+    /// `/pools/{id}` and `/pools/extended` read the active stake ESTART froze
+    /// two epochs back: delegation and amount both from the pool's `set`
+    /// snapshot, sized against the epoch's stored total. That is the
+    /// distribution Blockfrost reads from `epoch_stake` for the current
+    /// epoch.
+    #[tokio::test]
+    async fn pool_routes_read_the_frozen_active_stake() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let operator = parse_pool_id_bounded(&vectors.pool_id)
+                .expect("pool id")
+                .expect("pool hash");
+            let mut pool = domain
+                .state()
+                .read_entity_typed::<PoolState>(&PoolKey(operator))
+                .expect("pool read")
+                .expect("pool state");
+
+            // the live snapshot, frozen and rotated twice: `set` holds the
+            // tally, `mark` and `live` hold none
+            let mut frozen = pool.snapshot.live().expect("live snapshot").clone();
+            frozen.stake = Some(300);
+            frozen.delegators = Some(2);
+            frozen.live_pledge = Some(0);
+
+            let epoch = pool.snapshot.epoch().expect("pool epoch");
+            let mut snapshot = EpochValue::with_live(epoch, frozen);
+            snapshot.default_transition(epoch + 1);
+            snapshot.default_transition(epoch + 2);
+            pool.snapshot = snapshot;
+
+            let mut state =
+                dolos_cardano::load_epoch::<dolos_testing::toy_domain::ToyDomain>(domain.state())
+                    .expect("epoch state");
+            state.active_stake = Some(1_200);
+
+            let writer = domain.state().start_writer().expect("state writer");
+            writer
+                .write_entity_typed(&PoolKey(operator), &pool)
+                .expect("pool write");
+            writer.write_entity_typed(&(), &state).expect("epoch write");
+            writer.commit().expect("state commit");
+        });
+
+        let pool_id = app.vectors().pool_id.clone();
+        let (status, bytes) = app.get_bytes(&format!("/pools/{pool_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let pool: Pool = serde_json::from_slice(&bytes).expect("pool response");
+        assert_eq!(pool.active_stake, "300");
+        assert_eq!(pool.active_size, 0.25);
+
+        let (status, bytes) = app.get_bytes("/pools/extended?count=100").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let extended: Vec<PoolListExtendedInner> =
+            serde_json::from_slice(&bytes).expect("extended response");
+        let listed = extended
+            .into_iter()
+            .find(|x| x.pool_id == pool_id)
+            .expect("pool listed");
+        assert_eq!(listed.active_stake, "300");
     }
 
     #[tokio::test]
@@ -2432,6 +2467,9 @@ mod tests {
             blocks_minted: 0,
             params,
             is_new: false,
+            stake: None,
+            delegators: None,
+            live_pledge: None,
         };
         PoolState {
             operator: Hash::from(operator),
@@ -2879,6 +2917,83 @@ mod tests {
         assert_eq!(
             error.message,
             "Error Offchain Pool: Connection failure error when fetching metadata from http://localhost:23009/p/pool_clai_registration_metadata.json."
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_metadata_fetches_reject_loopback_without_connecting() {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("The test cannot bind the TCP listener.");
+        listener
+            .set_nonblocking(true)
+            .expect("The test cannot set the TCP listener to nonblocking mode.");
+        let url = format!(
+            "http://{}/pool.json",
+            listener
+                .local_addr()
+                .expect("The test cannot read the local address.")
+        );
+        let mut pool = retiring_pool([1u8; 28], 10, None);
+        pool.snapshot.unwrap_live_mut().params.pool_metadata = Some(PoolMetadata {
+            url: url.clone(),
+            hash: vec![2u8; 32].into(),
+        });
+
+        let (metadata, error) = fetch_pool_metadata_with_error(&pool).await;
+
+        assert!(metadata.is_none());
+        assert_eq!(
+            error,
+            Some(DrepsInnerMetadataError::new(
+                Code::ConnectionError,
+                format!("Error Offchain Pool: Connection failure error when fetching metadata from {url}."),
+            ))
+        );
+        assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+
+        assert!(fetch_pool_offchain_metadata(&pool).await.is_none());
+        assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn pool_fetch_error_preserves_connection_and_http_errors() {
+        let url = "https://example.com/pool.json";
+        let connection = pool_fetch_error(url, OffchainFetchError::Connection)
+            .expect("The connection error is missing.");
+        assert_eq!(connection.code, Code::ConnectionError);
+        assert_eq!(
+            connection.message,
+            "Error Offchain Pool: Connection failure error when fetching metadata from https://example.com/pool.json."
+        );
+
+        let http = pool_fetch_error(url, OffchainFetchError::HttpResponse(StatusCode::NOT_FOUND))
+            .expect("The HTTP response error is missing.");
+        assert_eq!(http.code, Code::HttpResponseError);
+        assert_eq!(
+            http.message,
+            "Error Offchain Pool: HTTP Response error from https://example.com/pool.json resulted in HTTP status code : 404 \"Not Found\""
+        );
+    }
+
+    #[test]
+    fn pool_fetch_error_suppresses_client_and_body_errors() {
+        for error in [OffchainFetchError::Client, OffchainFetchError::Body] {
+            assert!(pool_fetch_error("https://example.com/pool.json", error).is_none());
+        }
+    }
+
+    #[test]
+    fn pool_fetch_error_maps_size_exceeded() {
+        let error = pool_fetch_error(
+            "https://example.com/pool.json",
+            OffchainFetchError::SizeExceeded,
+        )
+        .expect("The size limit error is missing.");
+
+        assert_eq!(error.code, Code::SizeExceeded);
+        assert_eq!(
+            error.message,
+            "Error Offchain Pool: Size error, fetching metadata from https://example.com/pool.json exceeded 512 bytes."
         );
     }
 
@@ -3426,6 +3541,7 @@ mod tests {
             voter: voter.clone(),
             proposal: SyntheticProposalRef { block, tx, action },
             vote,
+            anchor: None,
         }
     }
 
@@ -3918,7 +4034,7 @@ mod tests {
             "too few accounts to split into chunks"
         );
 
-        let stakes = load_pool_stakes(&facade, usize::MAX).await.expect("stakes");
+        let stakes = load_live_stakes(&facade, usize::MAX).await.expect("stakes");
         let listed: Vec<_> = load_listed_pools(&facade, usize::MAX)
             .await
             .expect("pools")
@@ -3938,7 +4054,7 @@ mod tests {
                 metrics
             );
             assert_eq!(
-                load_pool_stakes(&facade, chunk).await.expect("stakes"),
+                load_live_stakes(&facade, chunk).await.expect("stakes"),
                 stakes
             );
 

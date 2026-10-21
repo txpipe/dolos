@@ -4,8 +4,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
-use dolos_cardano::include;
-use dolos_core::config::{ChainConfig, RootConfig};
+use dolos_core::config::RootConfig;
 use xshell::{cmd, Shell};
 
 use crate::config::{load_xtask_config, Network};
@@ -91,22 +90,6 @@ pub fn run(sh: &Shell, args: &BootstrapArgs) -> Result<()> {
 
     config.storage.path = data_dir.clone();
 
-    let ChainConfig::Cardano(mut chain_config) = config.chain;
-
-    chain_config.stop_epoch = Some(args.stop_epoch as _);
-    config.chain = ChainConfig::Cardano(chain_config);
-
-    match args.network {
-        Network::Mainnet => include::mainnet::save(&instance_dir)?,
-        Network::Preview => include::preview::save(&instance_dir)?,
-        Network::Preprod => include::preprod::save(&instance_dir)?,
-    }
-
-    config.genesis.byron_path = instance_dir.join("byron.json");
-    config.genesis.shelley_path = instance_dir.join("shelley.json");
-    config.genesis.alonzo_path = instance_dir.join("alonzo.json");
-    config.genesis.conway_path = instance_dir.join("conway.json");
-
     if let Some(ref mut ouroboros) = config.serve.ouroboros {
         ouroboros.listen_path = instance_dir.join("dolos.socket");
     }
@@ -144,10 +127,11 @@ pub fn run(sh: &Shell, args: &BootstrapArgs) -> Result<()> {
     let _dir_guard = sh.push_dir(&repo_root);
 
     let verbose_flag: &[&str] = if args.verbose { &["--verbose"] } else { &[] };
+    let stop_epoch = args.stop_epoch.to_string();
 
     cmd!(
         sh,
-        "cargo run --release --bin dolos -- --config {config_path} bootstrap {verbose_flag...} mithril --skip-download --skip-validation --retain-snapshot --download-dir {snapshot_dir}"
+        "cargo run --release --bin dolos -- --config {config_path} bootstrap {verbose_flag...} mithril --skip-download --skip-validation --retain-snapshot --download-dir {snapshot_dir} --stop-epoch {stop_epoch}"
     )
     .run()?;
 

@@ -11,23 +11,26 @@
 
 use std::{ops::Range, path::Path, path::PathBuf};
 
+use bytes::Bytes;
 use dolos_core::{
     archive::{ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter},
     builtin::{
         EmptyBlockIter, EmptyLogIter, EmptySlotIter, MemoryArchiveStore, MemoryStateStore,
-        MemoryStateWriter, NoOpArchiveStore, NoOpArchiveWriter,
+        MemoryStateWriter, NoDiskTier, NoOpArchiveStore, NoOpArchiveWriter,
     },
+    cache::Cost,
     config::{
-        ArchiveStoreConfig, FjallStateConfig, MempoolStoreConfig, RedbStateConfig, RedbWalConfig,
-        RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
+        FjallArchiveConfig, FjallStateConfig, RedbMempoolConfig, RedbStateConfig, RedbWalConfig,
+        RootConfig, StateStoreConfig, StoreType,
     },
-    ArchiveIndexDelta, BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
-    ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey, LogValue, MempoolError, MempoolEvent,
-    MempoolStore, MempoolTx, Namespace, RawBlock, StateError, StateSchema,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TagRecord, TxHash,
-    TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError,
-    WalStore,
+    ArchiveIndexDelta, BlockBody, BlockSlot, CacheDiskTier, CacheEntry, CacheError, ChainPoint,
+    EntityDelta, EntityKey, EntityValue, ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey,
+    LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace, QueryLimiter,
+    RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
+    StateWriter as CoreStateWriter, TagDimension, TagRecord, TieredCache, TxHash, TxStatus, TxoRef,
+    UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
 };
+use dolos_redb3::cache::RedbCacheTier;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::prelude::Error;
@@ -111,8 +114,6 @@ pub fn inspect_existing_data(
     config: &RootConfig,
     policy: ExistingDataPolicy,
 ) -> Result<Existing, Error> {
-    check_storage_version(&config.storage.version)?;
-
     if policy.r#continue {
         return Ok(Existing::Proceed);
     }
@@ -135,30 +136,8 @@ pub fn inspect_existing_data(
     ))
 }
 
-/// The only storage version this binary reads. Data in another format must be
-/// cleared and bootstrapped again.
-pub const CURRENT_STORAGE_VERSION: StorageVersion = StorageVersion::V4;
-
-/// The bootstrap guide the refusal points an operator at.
-pub const BOOTSTRAP_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/bootstrap";
-
-/// Refuse a configuration at any storage version but the current one.
-///
-/// The comparison is the whole compatibility policy: the version the config
-/// declares against the one the binary carries, and nothing on disk. Every
-/// store opener runs it before touching its path, so a refused configuration
-/// has had no directory created and no store opened on its behalf — which is
-/// what lets `dolos init` remain the one deliberate way past it.
-fn check_storage_version(version: &StorageVersion) -> Result<(), Error> {
-    if *version != CURRENT_STORAGE_VERSION {
-        return Err(Error::StorageError(format!(
-            "unsupported storage version `{version}`, this dolos only supports \
-             `{CURRENT_STORAGE_VERSION}`; run `dolos init` to upgrade the configuration and \
-              re-bootstrap the data — see the bootstrap guide at {BOOTSTRAP_GUIDE_URL}"
-        )));
-    }
-    Ok(())
-}
+/// The data format this binary reads, as snapshot download URLs name it.
+pub const CURRENT_STORAGE_VERSION: &str = "v4";
 
 /// Ensure directory exists for a store path.
 fn ensure_store_path(path: &Path) -> Result<(), Error> {
@@ -168,32 +147,40 @@ fn ensure_store_path(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// On disk at `sync.wal_path` exactly when the state is.
 pub fn open_wal_store<D>(config: &RootConfig) -> Result<WalStoreBackend<D>, Error>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    check_storage_version(&config.storage.version)?;
-
-    let path = config.storage.wal_path().unwrap_or_default();
-    ensure_store_path(&path)?;
-    Ok(WalStoreBackend::open(&path, &config.storage.wal)?)
+    match config.wal_path() {
+        Some(path) => {
+            ensure_store_path(&path)?;
+            Ok(WalStoreBackend::open_redb(
+                &path,
+                &RedbWalConfig::default(),
+            )?)
+        }
+        None => Ok(WalStoreBackend::in_memory()?),
+    }
 }
 
+/// A no-op archive when `history.mode` is `none`.
 pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Error> {
-    check_storage_version(&config.storage.version)?;
+    if !config.keeps_archive() {
+        return Ok(ArchiveStoreBackend::noop());
+    }
 
     let path = config.storage.archive_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(ArchiveStoreBackend::open(
         &path,
-        dolos_cardano::model::build_schema(),
-        &config.storage.archive,
+        config.storage.blocks_path(),
+        dolos_cardano::model::build_log_schema(),
+        config.storage.archive.kind,
     )?)
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
-    check_storage_version(&config.storage.version)?;
-
     let path = config.storage.state_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(StateStoreBackend::open(
@@ -204,34 +191,127 @@ pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error>
 }
 
 pub fn open_mempool_store(config: &RootConfig) -> Result<MempoolBackend, Error> {
-    check_storage_version(&config.storage.version)?;
-
-    match &config.storage.mempool {
-        MempoolStoreConfig::InMemory => Ok(MempoolBackend::Ephemeral(
+    match config.mempool_path() {
+        None => Ok(MempoolBackend::Ephemeral(
             dolos_core::builtin::EphemeralMempool::new(),
         )),
-        MempoolStoreConfig::Redb(cfg) => {
-            let path = config.storage.mempool_path().unwrap_or_default();
+        Some(path) => {
             ensure_store_path(&path)?;
             Ok(MempoolBackend::Redb(
-                dolos_redb3::mempool::RedbMempool::open(path, cfg)?,
+                dolos_redb3::mempool::RedbMempool::open(path, &RedbMempoolConfig::default())?,
             ))
         }
     }
+}
+
+/// The cache store, filling under `limiter`, the domain's query limiter. An
+/// enabled cache keeps its immutable entries in the redb disk tier too.
+pub fn open_cache_store(config: &RootConfig, limiter: QueryLimiter) -> Result<CacheBackend, Error> {
+    let disk = match config.storage.cache_path() {
+        Some(path) => CacheDiskBackend::Redb(
+            RedbCacheTier::open(path, config.storage.cache.disk_bytes())
+                .map_err(|error| Error::StorageError(error.to_string()))?,
+        ),
+        None => CacheDiskBackend::Off(NoDiskTier),
+    };
+
+    Ok(TieredCache::new(&config.storage.cache, disk, limiter))
 }
 
 pub fn open_data_stores<D>(config: &RootConfig) -> Result<Stores<D>, Error>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    check_storage_version(&config.storage.version)?;
-
     Ok(Stores {
         wal: open_wal_store(config)?,
         state: open_state_store(config)?,
         archive: open_archive_store(config)?,
         mempool: open_mempool_store(config)?,
     })
+}
+
+pub type CacheBackend = TieredCache<CacheDiskBackend>;
+
+// ============================================================================
+// Cache Disk Tier Backend
+// ============================================================================
+
+/// The cache's disk tier: none while the cache is disabled.
+pub enum CacheDiskBackend {
+    Off(NoDiskTier),
+    Redb(RedbCacheTier),
+}
+
+impl CacheDiskTier for CacheDiskBackend {
+    fn open_namespace(&self, namespace: &str, version: u32) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.open_namespace(namespace, version),
+            Self::Redb(tier) => tier.open_namespace(namespace, version),
+        }
+    }
+
+    fn get(&self, namespace: &str, key: &[u8]) -> Result<Option<CacheEntry>, CacheError> {
+        match self {
+            Self::Off(tier) => tier.get(namespace, key),
+            Self::Redb(tier) => tier.get(namespace, key),
+        }
+    }
+
+    fn put(&self, namespace: &str, key: &[u8], value: &[u8], cost: Cost) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.put(namespace, key, value, cost),
+            Self::Redb(tier) => tier.put(namespace, key, value, cost),
+        }
+    }
+
+    fn remove(&self, namespace: &str, key: &[u8]) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.remove(namespace, key),
+            Self::Redb(tier) => tier.remove(namespace, key),
+        }
+    }
+
+    fn wipe(&self, namespace: &str) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.wipe(namespace),
+            Self::Redb(tier) => tier.wipe(namespace),
+        }
+    }
+
+    fn previous_keys(&self, namespace: &str) -> Result<Vec<Bytes>, CacheError> {
+        match self {
+            Self::Off(tier) => tier.previous_keys(namespace),
+            Self::Redb(tier) => tier.previous_keys(namespace),
+        }
+    }
+
+    fn keys(&self, namespace: &str) -> Result<Vec<Bytes>, CacheError> {
+        match self {
+            Self::Off(tier) => tier.keys(namespace),
+            Self::Redb(tier) => tier.keys(namespace),
+        }
+    }
+
+    fn bytes(&self, namespace: &str) -> Result<u64, CacheError> {
+        match self {
+            Self::Off(tier) => tier.bytes(namespace),
+            Self::Redb(tier) => tier.bytes(namespace),
+        }
+    }
+
+    fn entries(&self, namespace: &str) -> Result<u64, CacheError> {
+        match self {
+            Self::Off(tier) => tier.entries(namespace),
+            Self::Redb(tier) => tier.entries(namespace),
+        }
+    }
+
+    fn flush(&self) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.flush(),
+            Self::Redb(tier) => tier.flush(),
+        }
+    }
 }
 
 // ============================================================================
@@ -261,17 +341,6 @@ where
     /// Create an in-memory WAL store.
     pub fn in_memory() -> Result<Self, WalError> {
         Ok(Self::Redb(dolos_redb3::wal::RedbWalStore::memory()?))
-    }
-
-    /// Open a WAL store based on the config variant.
-    ///
-    /// For `Redb`, the caller must provide the resolved path.
-    /// For `InMemory`, the path is ignored and an in-memory store is created.
-    pub fn open(path: impl AsRef<Path>, config: &WalStoreConfig) -> Result<Self, WalError> {
-        match config {
-            WalStoreConfig::Redb(cfg) => Self::open_redb(path, cfg),
-            WalStoreConfig::InMemory => Self::in_memory(),
-        }
     }
 
     pub fn is_empty(&self) -> Result<bool, WalError> {
@@ -464,18 +533,18 @@ impl StateStoreBackend {
         Ok(Self::Memory(MemoryStateStore::new()))
     }
 
-    /// Open a state store based on the config variant.
+    /// Open a state store of the configured type.
     ///
-    /// For persistent backends, the caller must provide the resolved path.
-    /// For `InMemory`, the path is ignored and an in-memory store is created.
+    /// For `fjall`, the caller must provide the resolved path. For
+    /// `ephemeral`, the path is ignored and an in-memory store is created.
     pub fn open(
         path: impl AsRef<Path>,
         _schema: StateSchema,
         config: &StateStoreConfig,
     ) -> Result<Self, StateError> {
-        match config {
-            StateStoreConfig::Fjall(cfg) => Self::open_fjall(path, cfg),
-            StateStoreConfig::InMemory => Self::in_memory(),
+        match config.kind {
+            StoreType::Fjall { .. } => Self::open_fjall(path, &FjallStateConfig::default()),
+            StoreType::Ephemeral => Self::in_memory(),
         }
     }
 
@@ -715,15 +784,19 @@ impl CoreStateStore for StateStoreBackend {
 #[derive(Clone)]
 pub enum ArchiveStoreBackend {
     Memory(MemoryArchiveStore),
-    /// Write-gated view over an already-open archive: reads and derived-log
-    /// writes pass through, block appends and undos are discarded.
+    /// Write-gated view over an already-open archive: reads, derived-log
+    /// writes and index applies pass through, block appends and undos are
+    /// discarded.
     ///
     /// This exists for replays over an archive that already holds the chain
     /// (`dolos doctor rebuild-state --rewrite-logs`): block appends are not
     /// idempotent — replaying them would double every shared segment file,
     /// whichever backend owns the index — while boundary log keys are
     /// slot-derived and identical under replay, so re-written log rows
-    /// overwrite the originals in place.
+    /// overwrite the originals in place. Index entries are keyed by what they
+    /// project and the slot, so a replay re-writes the ones the archive holds
+    /// and adds the ones an older indexer never emitted (the auxiliary-data
+    /// script tags `script_by_hash` falls back on).
     ///
     /// [`Self::logs_only`] is the sole constructor, and it never nests one
     /// gate inside another.
@@ -774,20 +847,26 @@ impl ArchiveStoreBackend {
         Ok(Self::Memory(MemoryArchiveStore::new(schema)))
     }
 
-    /// Open an archive store based on the config variant.
+    /// Open an archive store of the configured type.
     ///
-    /// For persistent backends, the caller must provide the resolved path.
-    /// For `InMemory`, the path is ignored and an in-memory store is created.
-    /// For `NoOp`, the path and schema are ignored.
+    /// For `fjall`, the caller must provide the resolved paths: the archive
+    /// directory and, when they live elsewhere, the block segments'. For
+    /// `ephemeral`, both are ignored and an in-memory store is created.
     pub fn open(
         path: impl AsRef<Path>,
+        blocks_path: Option<PathBuf>,
         schema: StateSchema,
-        config: &ArchiveStoreConfig,
+        kind: StoreType,
     ) -> Result<Self, ArchiveError> {
-        match config {
-            ArchiveStoreConfig::Fjall(cfg) => Self::open_fjall(path, schema, cfg),
-            ArchiveStoreConfig::InMemory => Self::in_memory(schema),
-            ArchiveStoreConfig::NoOp => Ok(Self::noop()),
+        match kind {
+            StoreType::Fjall { .. } => {
+                let options = FjallArchiveConfig {
+                    blocks_path,
+                    ..Default::default()
+                };
+                Self::open_fjall(path, schema, &options)
+            }
+            StoreType::Ephemeral => Self::in_memory(schema),
         }
     }
 
@@ -803,8 +882,9 @@ impl ArchiveStoreBackend {
 
 pub enum ArchiveWriterBackend {
     Memory(Box<<MemoryArchiveStore as CoreArchiveStore>::Writer>),
-    /// Delegates `write_log` and `commit`; discards `apply`, `undo` and the
-    /// index writes, which project the blocks the gate refuses.
+    /// Delegates `write_log`, `apply_index` and `commit`; discards `apply`,
+    /// `undo`, `undo_index` and `append_prehashed`. See
+    /// [`ArchiveStoreBackend::LogsOnly`].
     LogsOnly(Box<ArchiveWriterBackend>),
     Fjall(Box<<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::Writer>),
     NoOp(NoOpArchiveWriter),
@@ -846,7 +926,7 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
     fn apply_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
         match self {
             Self::Memory(w) => w.apply_index(deltas),
-            Self::LogsOnly(_) => Ok(()),
+            Self::LogsOnly(w) => w.apply_index(deltas),
             Self::Fjall(w) => w.apply_index(deltas),
             Self::NoOp(w) => w.apply_index(deltas),
         }
@@ -1370,146 +1450,80 @@ impl MempoolStore for MempoolBackend {
 
 #[cfg(test)]
 mod tests {
+    use dolos_core::config::{ArchiveStoreConfig, ChainConfig, HistoryConfig};
+
     use super::*;
 
-    fn refusal<T>(result: Result<T, Error>) -> String {
-        result.err().expect("expected a refusal").to_string()
+    fn config_over(root: &Path) -> RootConfig {
+        let mut config = RootConfig::new(ChainConfig::known("preview"));
+        config.storage.path = root.to_path_buf();
+        config
     }
 
-    /// A node configuration over `root`, with every store on its disk backend
-    /// at its default path so that the root is all the data there is.
-    fn config_over(root: &Path, version: &str) -> RootConfig {
-        let toml = format!(
-            r#"
-            [upstream]
-            peer_address = "unused.example:3001"
-
-            [storage]
-            version = "{version}"
-            path = {path}
-
-            [storage.mempool]
-            backend = "redb"
-
-            [genesis]
-            byron_path = "byron.json"
-            shelley_path = "shelley.json"
-            alonzo_path = "alonzo.json"
-            conway_path = "conway.json"
-
-            [chain]
-            type = "cardano"
-            magic = 2
-            is_testnet = true
-            "#,
-            path = toml::Value::String(root.display().to_string()),
-        );
-
-        toml::from_str(&toml).unwrap()
-    }
-
-    /// An unsupported configuration is refused, and the refusal names both
-    /// the tool that prepares it and the bootstrap guide.
     #[test]
-    fn older_storage_versions_are_refused_with_the_remedy() {
-        for stale in [
-            StorageVersion::V0,
-            StorageVersion::V1,
-            StorageVersion::V2,
-            StorageVersion::V3,
-        ] {
-            let message = refusal(check_storage_version(&stale));
-
-            assert!(
-                message.contains(&stale.to_string()),
-                "refusal must name the version found: {message}"
-            );
-            assert!(
-                message.contains("v4"),
-                "refusal must name the supported version: {message}"
-            );
-            assert!(
-                message.contains("dolos init"),
-                "refusal must name the remedy: {message}"
-            );
-            assert!(
-                message.contains(BOOTSTRAP_GUIDE_URL),
-                "refusal must point at the bootstrap guide: {message}"
-            );
-        }
-
-        check_storage_version(&CURRENT_STORAGE_VERSION).unwrap();
-    }
-
-    /// Every path that opens a store on its own — the per-store openers the
-    /// dump, doctor and bootstrap commands use, and bootstrap's look at
-    /// existing data — refuses a stale configuration before it creates or
-    /// opens anything, the same way the daemon's `open_data_stores` does.
-    #[test]
-    fn a_stale_config_is_refused_before_any_store_is_opened() {
+    fn fjall_stores_open_under_the_storage_root() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
-        let stale = config_over(&root, "v3");
+        let mut config = config_over(&root);
+        config.mempool.persistent = true;
 
-        let refusals = [
-            refusal(open_data_stores::<dolos_cardano::CardanoDelta>(&stale)),
-            refusal(open_wal_store::<dolos_cardano::CardanoDelta>(&stale)),
-            refusal(open_state_store(&stale)),
-            refusal(open_archive_store(&stale)),
-            refusal(open_mempool_store(&stale)),
-            refusal(has_existing_data(&stale)),
-            refusal(inspect_existing_data(
-                &stale,
-                ExistingDataPolicy {
-                    force: true,
-                    ..Default::default()
-                },
-            )),
-            refusal(inspect_existing_data(
-                &stale,
-                ExistingDataPolicy {
-                    r#continue: true,
-                    ..Default::default()
-                },
-            )),
-        ];
+        let stores = open_data_stores::<dolos_cardano::CardanoDelta>(&config).unwrap();
 
-        for message in refusals {
-            assert!(
-                message.contains("dolos init"),
-                "every entry point refuses with the same remedy: {message}"
-            );
+        assert!(matches!(stores.state, StateStoreBackend::Fjall(_)));
+        assert!(matches!(stores.archive, ArchiveStoreBackend::Fjall(_)));
+        assert!(matches!(stores.mempool, MempoolBackend::Redb(_)));
+        for store in ["wal", "state", "archive", "mempool"] {
+            assert!(root.join(store).exists(), "{store}");
         }
-
-        assert!(
-            !root.exists(),
-            "a refused configuration must not have had its storage created"
-        );
-
-        let current = config_over(&root, "v4");
-
-        open_data_stores::<dolos_cardano::CardanoDelta>(&current)
-            .expect("the current version opens");
-
-        assert!(root.is_dir());
     }
 
-    /// `in_memory` has to reach the builtin stores, not a memory-mode disk
-    /// backend: that was the old wiring, and it was the reason the variant
-    /// could not serve the snapshot export seam.
     #[test]
-    fn in_memory_selects_the_builtin_stores() {
+    fn ephemeral_state_keeps_the_wal_in_memory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let mut config = config_over(&root);
+        config.storage.state = StateStoreConfig::ephemeral();
+        config.storage.archive = ArchiveStoreConfig::ephemeral();
+
+        let stores = open_data_stores::<dolos_cardano::CardanoDelta>(&config).unwrap();
+
+        assert!(matches!(stores.state, StateStoreBackend::Memory(_)));
+        assert!(matches!(stores.archive, ArchiveStoreBackend::Memory(_)));
+        assert!(matches!(stores.mempool, MempoolBackend::Ephemeral(_)));
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn no_history_opens_no_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config_over(&temp.path().join("data"));
+        config.history = HistoryConfig::none();
+
+        let archive = open_archive_store(&config).unwrap();
+
+        assert!(matches!(archive, ArchiveStoreBackend::NoOp(_)));
+        assert!(!temp.path().join("data").join("archive").exists());
+    }
+
+    /// `ephemeral` has to reach the builtin stores, not a memory-mode disk
+    /// backend, which could not serve the snapshot export seam.
+    #[test]
+    fn ephemeral_selects_the_builtin_stores() {
         let path = std::path::Path::new("/nonexistent");
 
         let state =
-            StateStoreBackend::open(path, StateSchema::default(), &StateStoreConfig::InMemory)
-                .expect("in_memory state store should open without touching the path");
+            StateStoreBackend::open(path, StateSchema::default(), &StateStoreConfig::ephemeral())
+                .expect("ephemeral state store should open without touching the path");
 
         assert!(matches!(state, StateStoreBackend::Memory(_)));
 
-        let archive =
-            ArchiveStoreBackend::open(path, StateSchema::default(), &ArchiveStoreConfig::InMemory)
-                .expect("in_memory archive store should open without touching the path");
+        let archive = ArchiveStoreBackend::open(
+            path,
+            None,
+            StateSchema::default(),
+            ArchiveStoreConfig::ephemeral().kind,
+        )
+        .expect("ephemeral archive store should open without touching the path");
 
         assert!(matches!(archive, ArchiveStoreBackend::Memory(_)));
 

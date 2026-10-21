@@ -10,7 +10,11 @@ mod checkpoint;
 use std::fmt;
 use std::sync::Arc;
 
-use dolos_core::config::{ChainConfig, RootConfig};
+use dolos_cardano::{
+    networks::{validate_custom, ResolvedNetwork},
+    CardanoLogicConfig,
+};
+use dolos_core::config::{ConfigError, RootConfig};
 pub use dolos_core::ReplayProgress;
 use dolos_core::{
     BootstrapExt as _, ChainLogic as _, ChainPoint, Domain as _, DomainError, Genesis,
@@ -27,6 +31,9 @@ type Cause = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// A failure while assembling and bootstrapping a Dolos domain.
 #[derive(Debug, thiserror::Error)]
 pub enum DomainBuildError {
+    #[error(transparent)]
+    Config(ConfigError),
+
     #[error("opening configured Dolos stores: {0}")]
     Storage(#[source] crate::prelude::Error),
 
@@ -41,9 +48,9 @@ pub enum DomainBuildError {
 ///
 /// The builder never loads files or environment variables. An embedding
 /// application decides how configuration and genesis are obtained, then hands
-/// the resolved values here. `stop_epoch` overrides only the cloned chain
-/// configuration used by this domain; the caller's [`RootConfig`] is not
-/// mutated.
+/// the resolved values here. The configuration, its network and a custom
+/// network's magic against the genesis are checked before any store opens.
+/// Stopping at an epoch is set here, never in configuration.
 pub struct DomainBuilder<'a> {
     config: &'a RootConfig,
     genesis: Arc<Genesis>,
@@ -51,7 +58,7 @@ pub struct DomainBuilder<'a> {
 }
 
 impl<'a> DomainBuilder<'a> {
-    /// Start a domain build with no stopping-epoch override.
+    /// Start a domain build with no stopping epoch.
     pub fn new(config: &'a RootConfig, genesis: Arc<Genesis>) -> Self {
         Self {
             config,
@@ -60,7 +67,7 @@ impl<'a> DomainBuilder<'a> {
         }
     }
 
-    /// Override the configured Cardano stopping epoch for this domain.
+    /// Stop the domain's ledger once it reaches this epoch.
     pub fn stop_epoch(mut self, stop_epoch: Option<u64>) -> Self {
         self.stop_epoch = stop_epoch;
         self
@@ -69,16 +76,34 @@ impl<'a> DomainBuilder<'a> {
     /// Construct a normal node domain, including initialization and integrity
     /// checks.
     pub fn build(&self) -> Result<DomainAdapter, DomainBuildError> {
+        self.check()?;
         let stores = storage::open_data_stores(self.config).map_err(DomainBuildError::Storage)?;
         self.build_with_stores(&stores)
     }
 
-    fn build_with_stores(&self, stores: &Stores) -> Result<DomainAdapter, DomainBuildError> {
-        let ChainConfig::Cardano(mut chain_config) = self.config.chain.clone();
+    /// What can be refused without a store: the configuration's rules, its
+    /// network, and a custom network's magic against the genesis given.
+    fn check(&self) -> Result<(), DomainBuildError> {
+        self.config.validate().map_err(DomainBuildError::Config)?;
 
-        if let Some(stop_epoch) = self.stop_epoch {
-            chain_config.stop_epoch = Some(stop_epoch);
+        let network =
+            ResolvedNetwork::resolve(&self.config.chain).map_err(DomainBuildError::Chain)?;
+
+        if let ResolvedNetwork::Custom(cardano) = network {
+            validate_custom(cardano.magic, &self.genesis).map_err(DomainBuildError::Chain)?;
         }
+
+        Ok(())
+    }
+
+    fn build_with_stores(&self, stores: &Stores) -> Result<DomainAdapter, DomainBuildError> {
+        let network =
+            ResolvedNetwork::resolve(&self.config.chain).map_err(DomainBuildError::Chain)?;
+
+        let chain_config = CardanoLogicConfig {
+            stop_epoch: self.stop_epoch,
+            custom_utxos: network.custom_utxos().to_vec(),
+        };
 
         let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
             chain_config,
@@ -88,18 +113,24 @@ impl<'a> DomainBuilder<'a> {
         .map_err(DomainBuildError::Chain)?;
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
+        let query_limiter = QueryLimiter::new(self.config.serve.max_concurrent_queries);
+        let cache = storage::open_cache_store(self.config, query_limiter.clone())
+            .map_err(DomainBuildError::Storage)?;
 
         let domain = DomainAdapter {
+            compatibility: self.config.compatibility(),
             storage_config: Arc::new(self.config.storage.clone()),
-            sync_config: Arc::new(self.config.sync.clone()),
+            history_config: self.config.history,
+            mempool_config: self.config.mempool.clone(),
             genesis: self.genesis.clone(),
             chain: Arc::new(std::sync::RwLock::new(chain)),
             wal: stores.wal.clone(),
             state: stores.state.clone(),
             archive: stores.archive.clone(),
             mempool: stores.mempool.clone(),
+            cache,
             tip_broadcast,
-            query_limiter: QueryLimiter::default(),
+            query_limiter,
         };
 
         domain.bootstrap().map_err(DomainBuildError::Bootstrap)?;
@@ -185,6 +216,9 @@ impl<'a> ReplayWorkspace<'a> {
     /// Open the configured dataset without running ledger initialization,
     /// replaying blocks, or pruning history.
     pub fn open(config: &'a RootConfig, genesis: Arc<Genesis>) -> Result<Self, BulkReplayError> {
+        DomainBuilder::new(config, genesis.clone())
+            .check()
+            .map_err(|error| BulkReplayError::new("opening replay workspace", error))?;
         let stores = storage::open_data_stores(config)
             .map_err(|error| BulkReplayError::new("opening replay workspace", error))?;
         Ok(Self {
@@ -201,8 +235,8 @@ impl<'a> ReplayWorkspace<'a> {
 
     /// Begin processing, including any pending ledger initialization.
     ///
-    /// Call only after publishing any pending boundary. The optional stopping
-    /// epoch overrides the configured value; `None` retains that configuration.
+    /// Call only after publishing any pending boundary. `stop_epoch` stops the
+    /// replay once the ledger reaches that epoch.
     pub fn start(self, stop_epoch: Option<u64>) -> Result<BulkReplaySession, BulkReplayError> {
         let result = checkpoint::reconcile(&self.stores.state, &self.stores.wal)
             .map_err(|error| BulkReplayError::new("preparing replay", error))

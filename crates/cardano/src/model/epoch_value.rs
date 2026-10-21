@@ -212,6 +212,12 @@ where
         self.mark.as_ref()
     }
 
+    /// The `mark` value, for completing a snapshot in the transition that
+    /// freezes it. Frozen values change nowhere else.
+    pub fn mark_mut(&mut self) -> Option<&mut T> {
+        self.mark.as_mut()
+    }
+
     pub fn next(&self) -> Option<&T> {
         self.next.as_ref()
     }

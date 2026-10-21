@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -85,6 +85,11 @@ impl FaultyToyDomain {
             wal,
         }
     }
+
+    /// How many entity scans the state store has started.
+    pub fn entity_scans(&self) -> usize {
+        self.state.scans.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Clone)]
@@ -92,6 +97,7 @@ pub struct FaultyStateStore {
     inner: MemoryStateStore,
     fault: TestFault,
     commits: Arc<AtomicU32>,
+    scans: Arc<AtomicUsize>,
 }
 
 impl FaultyStateStore {
@@ -104,6 +110,7 @@ impl FaultyStateStore {
             inner,
             fault,
             commits,
+            scans: Default::default(),
         }
     }
 
@@ -175,6 +182,7 @@ impl StateStore for FaultyStateStore {
         if self.should_fault_ns(ns) {
             return Err(self.fault_err());
         }
+        self.scans.fetch_add(1, Ordering::SeqCst);
         self.slow_state_scan();
         self.inner.iter_entities(ns, range)
     }
@@ -620,13 +628,18 @@ impl Domain for FaultyToyDomain {
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
     type Mempool = Mempool;
+    type Cache = <ToyDomain as Domain>::Cache;
 
     fn storage_config(&self) -> &dolos_core::config::StorageConfig {
         self.inner.storage_config()
     }
 
-    fn sync_config(&self) -> &dolos_core::config::SyncConfig {
-        self.inner.sync_config()
+    fn history_config(&self) -> &dolos_core::config::HistoryConfig {
+        self.inner.history_config()
+    }
+
+    fn mempool_config(&self) -> &dolos_core::config::MempoolConfig {
+        self.inner.mempool_config()
     }
 
     fn genesis(&self) -> Arc<dolos_core::Genesis> {
@@ -662,6 +675,10 @@ impl Domain for FaultyToyDomain {
 
     fn mempool(&self) -> &Self::Mempool {
         self.inner.mempool()
+    }
+
+    fn cache(&self) -> &Self::Cache {
+        self.inner.cache()
     }
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {

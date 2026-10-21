@@ -1,11 +1,12 @@
 use clap::Parser;
 use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
 use dolos_core::config::RootConfig;
+use dolos_fjall::flatfiles::parse_segment_filename;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use miette::{bail, IntoDiagnostic as _};
 use std::ffi::OsStr;
-use std::fs::File;
+use std::fs::{DirEntry, File};
 use std::path::{Path, PathBuf};
 use tar::Builder;
 
@@ -67,13 +68,34 @@ fn deterministic_header(source: &Path) -> miette::Result<tar::Header> {
     Ok(header)
 }
 
+/// A segment file in the store's own naming.
+fn is_segment(entry: &DirEntry) -> bool {
+    entry
+        .file_name()
+        .to_str()
+        .and_then(parse_segment_filename)
+        .is_some()
+}
+
+/// `path` as the filesystem resolves it, so that every spelling of a directory
+/// compares equal; made absolute where the filesystem cannot resolve it (some
+/// Windows volumes) rather than matching nothing.
+fn resolved(path: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .ok()
+}
+
+/// `source` under `name`, leaving out the segment files kept in `segments`, a
+/// [`resolved`] path, when that directory is `source` or lies inside it.
 fn append_path_filtered(
     archive: &mut Builder<GzEncoder<File>>,
     source: &Path,
     name: &Path,
+    segments: Option<&Path>,
 ) -> miette::Result<()> {
     if source.is_dir() {
-        append_dir_filtered(archive, source, name)?;
+        append_dir_filtered(archive, source, name, segments)?;
         return Ok(());
     }
 
@@ -90,6 +112,7 @@ fn append_dir_filtered(
     archive: &mut Builder<GzEncoder<File>>,
     source: &Path,
     name: &Path,
+    segments: Option<&Path>,
 ) -> miette::Result<()> {
     let header = deterministic_header(source)?;
     archive
@@ -103,17 +126,20 @@ fn append_dir_filtered(
 
     entries.sort_by_key(|e| e.file_name());
 
+    let holds_segments =
+        segments.is_some_and(|segments| resolved(source).is_some_and(|dir| dir == segments));
+
     for entry in entries {
         let path = entry.path();
 
-        if is_macos_metadata(&path) {
+        if is_macos_metadata(&path) || holds_segments && is_segment(&entry) {
             continue;
         }
 
         let entry_name = name.join(entry.file_name());
 
         if path.is_dir() {
-            append_dir_filtered(archive, &path, &entry_name)?;
+            append_dir_filtered(archive, &path, &entry_name, segments)?;
         } else {
             let header = deterministic_header(&path)?;
             let file = File::open(&path).into_diagnostic()?;
@@ -124,6 +150,46 @@ fn append_dir_filtered(
     }
 
     Ok(())
+}
+
+/// The archive directory under `archive/`; for a node keeping its segment
+/// files at `segments_dir`, its `index/` with those segments beside it, and
+/// left out of `index/` where `segments_dir` lies inside it. That is the
+/// default layout, so a snapshot restores the same way whatever `blocks_path`
+/// the node it came from had.
+fn append_archive(
+    archive: &mut Builder<GzEncoder<File>>,
+    archive_dir: &Path,
+    segments_dir: Option<&Path>,
+) -> miette::Result<()> {
+    let Some(segments_dir) = segments_dir else {
+        return append_path_filtered(archive, archive_dir, Path::new("archive"), None);
+    };
+
+    let name = Path::new("archive");
+    let header = deterministic_header(archive_dir)?;
+    archive
+        .append_data(&mut header.clone(), name, &[] as &[u8])
+        .into_diagnostic()?;
+
+    let mut segments: Vec<_> = std::fs::read_dir(segments_dir)
+        .into_diagnostic()?
+        .collect::<Result<Vec<_>, _>>()
+        .into_diagnostic()?;
+
+    segments.retain(is_segment);
+    segments.sort_by_key(|entry| entry.file_name());
+
+    for entry in segments {
+        append_path_filtered(archive, &entry.path(), &name.join(entry.file_name()), None)?;
+    }
+
+    append_path_filtered(
+        archive,
+        &archive_dir.join("index"),
+        &name.join("index"),
+        resolved(segments_dir).as_deref(),
+    )
 }
 
 fn ensure_state_exportable(state: &StateStoreBackend, include_state: bool) -> miette::Result<()> {
@@ -177,7 +243,7 @@ pub fn run(
         | ArchiveStoreBackend::LogsOnly(_)
         | ArchiveStoreBackend::Fjall(_) => {}
         ArchiveStoreBackend::NoOp(_) => {
-            bail!("export command is not available for noop archive backend")
+            bail!("`history.mode = \"none\"` keeps no archive to export")
         }
     }
 
@@ -188,10 +254,12 @@ pub fn run(
     stores.archive.shutdown().into_diagnostic()?;
     drop(stores);
 
+    let segments = config.storage.blocks_path();
+
     if args.include_archive {
         let path = root.join("archive");
 
-        append_path_filtered(&mut archive, &path, Path::new("archive"))?;
+        append_archive(&mut archive, &path, segments.as_deref())?;
 
         pb.set_message("creating archive");
     }
@@ -199,7 +267,11 @@ pub fn run(
     if args.include_state {
         let path = root.join("state");
 
-        append_path_filtered(&mut archive, &path, Path::new("state"))?;
+        // A `blocks_path` at or under the state directory holds the archive's
+        // segments, which travel with the archive.
+        let segments = segments.as_deref().and_then(resolved);
+
+        append_path_filtered(&mut archive, &path, Path::new("state"), segments.as_deref())?;
 
         pb.set_message("creating archive");
     }
@@ -225,5 +297,15 @@ mod tests {
         let error = create_export_file(&output, &state, true).unwrap_err();
         assert!(error.to_string().contains("nothing on disk to export"));
         assert_eq!(std::fs::read(output).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn a_path_the_filesystem_cannot_resolve_is_still_compared() {
+        let missing = Path::new("no/such/dir");
+
+        assert_eq!(
+            resolved(missing),
+            Some(std::path::absolute(missing).unwrap())
+        );
     }
 }
