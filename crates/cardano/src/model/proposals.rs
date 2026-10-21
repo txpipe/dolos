@@ -254,17 +254,18 @@ pub struct ProposalState {
     pub spo_votes: BTreeMap<PoolHash, VoteEntry>,
 }
 
-/// A governance proposal: its index, then its transaction, `idx ‖ tx`, 36 B.
+/// A governance proposal: its transaction, then its index, `tx ‖ idx`, 36 B —
+/// the order of a CIP-129 governance action id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProposalKey {
     pub tx: Hash<32>,
     pub idx: u32,
 }
 
-/// Orders as the stored bytes do: index first, then transaction.
+/// Orders as the stored bytes do: transaction first, then index.
 impl Ord for ProposalKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.idx, self.tx).cmp(&(other.idx, other.tx))
+        (self.tx, self.idx).cmp(&(other.tx, other.idx))
     }
 }
 
@@ -282,11 +283,11 @@ impl ProposalKey {
 
 impl KeyCodec for ProposalKey {
     fn encode_key(&self, out: &mut KeyBytes) {
-        (self.idx, *self.tx).encode_key(out);
+        (*self.tx, self.idx).encode_key(out);
     }
 
     fn decode_key(bytes: &[u8]) -> Result<Self, KeyError> {
-        let (idx, tx) = <(u32, [u8; 32])>::decode_key(bytes)?;
+        let (tx, idx) = <([u8; 32], u32)>::decode_key(bytes)?;
         Ok(Self::new(tx.into(), idx))
     }
 }
@@ -1685,7 +1686,7 @@ mod key_tests {
                 Hash::new([0x16; 32]),
                 0x0102_0304
             ))),
-            format!("01020304{}", "16".repeat(32))
+            format!("{}01020304", "16".repeat(32))
         );
     }
 
@@ -1696,14 +1697,49 @@ mod key_tests {
 
     proptest! {
         #[test]
-        fn keys_round_trip_in_idx_then_tx_order(
+        fn keys_round_trip_in_tx_then_idx_order(
             a in (any::<[u8; 32]>(), any::<u32>()),
             b in (any::<[u8; 32]>(), any::<u32>()),
         ) {
             let a = ProposalKey::new(a.0.into(), a.1);
             let b = ProposalKey::new(b.0.into(), b.1);
             prop_assert_eq!(ProposalKey::decode_key(&encode(&a)), Ok(a));
-            prop_assert_eq!(encode(&a).cmp(&encode(&b)), (a.idx, a.tx).cmp(&(b.idx, b.tx)));
+            prop_assert_eq!(encode(&a).cmp(&encode(&b)), (a.tx, a.idx).cmp(&(b.tx, b.idx)));
+        }
+    }
+
+    /// A CIP-129 action id is the tx hash with the index trailing it in
+    /// minimal big-endian bytes; the key holds the same parts in the same
+    /// order, with the index widened to four bytes.
+    #[test]
+    fn cip129_action_id_reads_in_key_order() {
+        let vectors = [
+            (
+                "gov_action1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpzklpgpf",
+                [0u8; 32],
+                17u32,
+            ),
+            (
+                "gov_action1k2jertppnnndejjcglszfqq4yzw8evzrd2nt66rr6rqlz54xp0zsq05ecsn",
+                hex::decode("b2a591ac219ce6dcca5847e0248015209c7cb0436aa6bd6863d0c1f152a60bc5")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                0u32,
+            ),
+        ];
+
+        for (id, tx, idx) in vectors {
+            let (hrp, payload) = bech32::decode(id).unwrap();
+            assert_eq!(hrp.as_str(), "gov_action");
+
+            let (id_tx, id_idx) = payload.split_at(32);
+            let mut widened = [0u8; 4];
+            widened[4 - id_idx.len()..].copy_from_slice(id_idx);
+
+            let key = encode(&ProposalKey::new(Hash::new(tx), idx));
+            assert_eq!(&key[..32], id_tx);
+            assert_eq!(&key[32..], widened);
         }
     }
 }
