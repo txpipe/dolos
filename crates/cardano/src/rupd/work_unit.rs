@@ -656,6 +656,21 @@ mod tests {
         assert_eq!(numeric_ratio(u64::MAX, u64::MAX), 1.0);
     }
 
+    /// The quotient 0.00323897880448927272|72… is cut at 20 decimals, and the
+    /// next digit rounds the cut up to a different double than the truncated
+    /// decimal gives.
+    #[test]
+    fn numeric_ratio_rounds_half_up_at_the_scale() {
+        assert_eq!(
+            numeric_ratio(71_257_533_698_764, 22_000_000_000_000_000),
+            0.003238978804489273
+        );
+        assert_ne!(
+            "0.00323897880448927272".parse::<f64>().unwrap(),
+            0.003238978804489273
+        );
+    }
+
     // --- per-pool PoolEpochLog figures survive a mid-RUPD restart ---
 
     fn pool_params(pledge: u64, cost: u64) -> crate::PoolParams {
@@ -743,12 +758,14 @@ mod tests {
         // Exactly what `initialize()` leaves behind before any `load()`:
         // pool-level globals, and an empty per-account map because no shard
         // ran in this process.
+        // Mainnet epoch 212's stakes, where a plain `f64` division misses
+        // Blockfrost's `active_size`.
         let mut snapshot = StakeSnapshot::empty();
         snapshot.pools.insert(pool, pool_snapshot(100, 20, 3));
-        snapshot.pool_stake.insert(pool, 1_000);
+        snapshot.pool_stake.insert(pool, 76_778_927_458_702);
         snapshot.pool_delegator_counts.insert(pool, 2);
         snapshot.pool_live_pledges.insert(pool, 400);
-        snapshot.active_stake_sum = 1_000;
+        snapshot.active_stake_sum = 12_106_602_864_871_837;
         assert_eq!(snapshot.iter_accounts().count(), 0);
 
         // Rewards as the shards left them in state: one leader, one delegator.
@@ -765,7 +782,8 @@ mod tests {
         let log = read_stake_log(&domain, chain.epoch_start(CURRENT_EPOCH - 1), pool)
             .expect("missing pool epoch log");
 
-        assert_eq!(log.total_stake, 1_000);
+        assert_eq!(log.total_stake, 76_778_927_458_702);
+        assert_eq!(log.relative_size, 0.006341905183119658);
         assert_eq!(log.delegators_count, 2);
         assert_eq!(log.live_pledge, 400);
         assert_eq!(log.total_rewards, 100);

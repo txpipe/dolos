@@ -22,9 +22,9 @@ use dolos_testing::{
 use pallas::ledger::primitives::StakeCredential;
 
 use dolos_cardano::{
-    ewrap::EwrapWorkUnit, AccountEpochLog, AccountKey, AccountState, CardanoWorkUnit,
-    DRepDelegation, EpochState, EpochValue, PendingRewardState, PoolDelegation, PoolEpochLog,
-    PoolHash, PoolKey, Stake,
+    ewrap::EwrapWorkUnit, pallas_extras, AccountEpochLog, AccountKey, AccountState,
+    CardanoWorkUnit, DRepDelegation, EpochState, EpochValue, PendingRewardState, PoolDelegation,
+    PoolEpochLog, PoolHash, PoolKey, PoolParams, PoolSnapshot, PoolState, Stake,
 };
 
 const CLOSING_EPOCH: u64 = 5;
@@ -43,14 +43,21 @@ const FORFEITED: u64 = 7;
 /// A pool RUPD logged rewards for that the boundary paid to no account.
 const UNPAID: u8 = 0x01;
 
+/// A pool retiring at the boundary. Finalize refunds its deposit to the
+/// account at [`REFUNDED`] in [`ACCOUNTS`], once per run.
+const RETIRING: u8 = 0x02;
+
+const REFUNDED: usize = 1;
+
 fn credential(byte: u8) -> StakeCredential {
     StakeCredential::AddrKeyhash([byte; 28].into())
 }
 
 /// A devnet store closing [`CLOSING_EPOCH`], where every account in
 /// [`ACCOUNTS`] is registered and has a pending reward for EWRAP to apply —
-/// which is what gives each of them an `account-epochs` row — and where RUPD
-/// logged each pool's rewards with the [`FORFEITED`] share still in them.
+/// which is what gives each of them an `account-epochs` row — where RUPD
+/// logged each pool's rewards with the [`FORFEITED`] share still in them, and
+/// where the [`RETIRING`] pool leaves.
 fn seeded() -> ToyDomain {
     let domain = ToyDomain::new(None, None);
     let state = domain.state();
@@ -87,6 +94,42 @@ fn seeded() -> ToyDomain {
         writer.write_entity_typed(&key, &account).unwrap();
         writer.write_entity_typed(&key, &reward).unwrap();
     }
+
+    let params = PoolParams {
+        vrf_keyhash: [0; 32].into(),
+        pledge: 0,
+        cost: 0,
+        margin: pallas_extras::default_rational_number(),
+        reward_account: [&[0xe0][..], &[ACCOUNTS[REFUNDED]; 28][..]].concat(),
+        pool_owners: vec![],
+        relays: vec![],
+        pool_metadata: None,
+    };
+
+    let retiring = PoolState {
+        operator: [RETIRING; 28].into(),
+        snapshot: EpochValue::with_live(
+            CLOSING_EPOCH,
+            PoolSnapshot {
+                is_retired: false,
+                blocks_minted: 0,
+                params,
+                is_new: false,
+                stake: None,
+                delegators: None,
+                live_pledge: None,
+            },
+        ),
+        blocks_minted_total: 0,
+        register_slot: 0,
+        retiring_epoch: Some(CLOSING_EPOCH + 1),
+        deposit: 0,
+        calidus: None,
+    };
+
+    writer
+        .write_entity_typed(&PoolKey(retiring.operator), &retiring)
+        .unwrap();
 
     writer.commit().unwrap();
 
@@ -143,6 +186,7 @@ struct Outcome {
     pool_epochs: Vec<(BlockSlot, PoolKey, PoolEpochLog)>,
     closed_epochs: Vec<(BlockSlot, EpochState)>,
     accounts: Vec<AccountState>,
+    pools: Vec<PoolState>,
     epoch: EpochState,
 }
 
@@ -179,6 +223,12 @@ fn outcome(domain: &ToyDomain) -> Outcome {
             .map(|x| x.map(|(slot, (), epoch)| (slot, epoch)).unwrap())
             .collect(),
         accounts,
+        pools: domain
+            .state()
+            .iter_entities_typed::<PoolState>(None)
+            .unwrap()
+            .map(|x| x.unwrap().1)
+            .collect(),
         epoch: epoch_state(domain),
     }
 }
@@ -199,6 +249,21 @@ fn clean_run() -> Outcome {
         "the closed epoch is archived"
     );
     assert!(expected.epoch.ewrap_finalized);
+
+    let deposit = expected
+        .epoch
+        .pparams
+        .unwrap_live()
+        .ensure_pool_deposit()
+        .unwrap();
+    let refunded = &expected.accounts[REFUNDED].stake;
+
+    assert!(deposit > 0);
+    assert_eq!(
+        refunded.next().map(|stake| stake.rewards_sum),
+        Some(refunded.unwrap_live().rewards_sum + deposit),
+        "the retiring pool's deposit is refunded"
+    );
 
     let settled: Vec<_> = expected
         .pool_epochs
@@ -261,7 +326,8 @@ fn a_crash_at_any_commit_ends_like_a_clean_run() {
 /// archive half. The restart runs no shard, runs finalize, and ends as a run
 /// that never crashed, pool logs settled. Finalize runs once: the boundary
 /// triggered again afterwards, as it is until ESTART moves the cursor,
-/// changes nothing.
+/// changes nothing, where a second finalize would refund the retiring pool's
+/// deposit twice.
 #[test]
 fn a_crash_before_finalize_commits_resumes_into_finalize() {
     let expected = clean_run();
