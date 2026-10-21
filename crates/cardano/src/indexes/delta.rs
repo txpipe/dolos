@@ -1400,26 +1400,32 @@ mod tests {
     }
 
     /// An EBB reports the previous main block's number, so it must not claim
-    /// that number in the `block_num` index; a main block keeps its own.
+    /// that number in the `block_num` index; main blocks of every era,
+    /// Byron's included, keep their own.
     #[test]
     fn index_block_gives_ebb_no_block_number() {
         use pallas::ledger::traverse::MultiEraBlock;
+
+        let (_, raw) = dolos_testing::blocks::make_byron_block(0, 21_599, 6, Hash::new([0x00; 32]));
+        let byron = MultiEraBlock::decode(&raw).unwrap();
 
         let (_, raw) = dolos_testing::blocks::make_byron_ebb(1, Hash::new([0x00; 32]));
         let ebb = MultiEraBlock::decode(&raw).unwrap();
 
         let (_, raw) = dolos_testing::blocks::make_conway_block_with_prev(30_000, None, 7);
-        let main = MultiEraBlock::decode(&raw).unwrap();
+        let conway = MultiEraBlock::decode(&raw).unwrap();
 
         let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.index_block(&byron, &std::collections::HashMap::new());
         builder.index_block(&ebb, &std::collections::HashMap::new());
-        builder.index_block(&main, &std::collections::HashMap::new());
+        builder.index_block(&conway, &std::collections::HashMap::new());
 
         let archive = builder.build();
-        assert_eq!(archive.len(), 2);
+        assert_eq!(archive.len(), 3);
 
-        assert_eq!(archive[0].block_number, None);
-        assert_eq!(archive[0].block_hash, ebb.hash().to_vec());
-        assert_eq!(archive[1].block_number, Some(7));
+        assert_eq!(archive[0].block_number, Some(6));
+        assert_eq!(archive[1].block_number, None);
+        assert_eq!(archive[1].block_hash, ebb.hash().to_vec());
+        assert_eq!(archive[2].block_number, Some(7));
     }
 }

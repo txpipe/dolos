@@ -1388,15 +1388,19 @@ fn malformed_exact_queries_miss<B: Backend>() {
 /// `block_num` entry nor delete it when the EBB is rolled back.
 fn ebb_leaves_the_previous_block_number_alone<B: Backend>() {
     use dolos_cardano::indexes::CardanoIndexDeltaBuilder;
-    use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
+    use dolos_testing::blocks::{
+        byron_ebb_slot, make_byron_block, make_byron_ebb, BYRON_EPOCH_LENGTH,
+    };
+    use pallas::crypto::hash::Hash;
     use pallas::ledger::traverse::MultiEraBlock;
 
     const N: u64 = 3;
 
+    // The fixture EBB's number is its epoch, so it opens epoch N.
     let ebb_slot = byron_ebb_slot(N);
-    let (_, main_n) = make_conway_block_with_prev(ebb_slot - 20, None, N);
-    let (_, ebb) = make_byron_ebb(N, pallas::crypto::hash::Hash::new([0x00; 32]));
-    let (_, main_next) = make_conway_block_with_prev(ebb_slot + 20, None, N + 1);
+    let (_, main_n) = make_byron_block(N - 1, BYRON_EPOCH_LENGTH - 20, N, Hash::new([0x00; 32]));
+    let (_, ebb) = make_byron_ebb(N, Hash::new([0x00; 32]));
+    let (_, main_next) = make_byron_block(N, 20, N + 1, Hash::new([0x00; 32]));
 
     let index = |raw: &[u8]| {
         let block = MultiEraBlock::decode(raw).expect("decode block");

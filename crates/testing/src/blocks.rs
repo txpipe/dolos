@@ -291,6 +291,74 @@ pub fn make_byron_ebb(epoch: u64, prev_hash: Hash<32>) -> (ChainPoint, RawBlock)
     (point, Arc::new(raw_bytes))
 }
 
+/// Build a Byron main block numbered `number` at `slot` within `epoch`,
+/// chained onto `prev_hash`.
+///
+/// The body is empty and the signature a placeholder: what the tests need is
+/// the era probe, the header hash and the number Byron headers carry in their
+/// difficulty field.
+pub fn make_byron_block(
+    epoch: u64,
+    slot: u64,
+    number: u64,
+    prev_hash: Hash<32>,
+) -> (ChainPoint, RawBlock) {
+    use pallas::codec::utils::{MaybeIndefArray, TagWrap};
+    use pallas::ledger::primitives::byron::{
+        Block, BlockBody, BlockCons, BlockHead, BlockHeadEx, BlockProof, BlockSig, Ssc, SscProof,
+        Up,
+    };
+
+    let header = KeepRaw::from(BlockHead {
+        protocol_magic: 764_824_073,
+        prev_block: prev_hash,
+        body_proof: BlockProof {
+            tx_proof: (0, Hash::new([0u8; 32]), Hash::new([0u8; 32])),
+            ssc_proof: SscProof::Variant3(Hash::new([0u8; 32])),
+            dlg_proof: Hash::new([0u8; 32]),
+            upd_proof: Hash::new([0u8; 32]),
+        },
+        consensus_data: BlockCons(
+            pallas::ledger::primitives::byron::SlotId { epoch, slot },
+            Bytes::from(vec![0u8; 64]),
+            MaybeIndefArray::Def(vec![number]),
+            BlockSig::Signature(Bytes::from(vec![0u8; 64])),
+        ),
+        extra_data: BlockHeadEx {
+            block_version: (1, 0, 0),
+            software_version: ("cardano-sl".into(), 1),
+            attributes: None,
+            extra_proof: Hash::new([0u8; 32]),
+        },
+    });
+
+    // `Up`'s proposal slot has no public constructor; an update payload with
+    // no proposal and no votes is `[[], []]`.
+    let upd_payload: Up = pallas::codec::minicbor::decode(&[0x82, 0x80, 0x80]).unwrap();
+
+    let block = Block {
+        header,
+        body: BlockBody {
+            tx_payload: MaybeIndefArray::Def(vec![]),
+            ssc_payload: Ssc::Variant3(TagWrap::new(MaybeIndefArray::Def(vec![]))),
+            dlg_payload: MaybeIndefArray::Def(vec![]),
+            upd_payload,
+        },
+        extra: MaybeIndefArray::Def(vec![]),
+    };
+
+    let wrapper = (1u16, block);
+    let raw_bytes = pallas::codec::minicbor::to_vec(&wrapper).unwrap();
+
+    let decoded = pallas::ledger::traverse::MultiEraBlock::decode(&raw_bytes).unwrap();
+    let point = ChainPoint::Specific(decoded.slot(), decoded.hash());
+
+    debug_assert_eq!(decoded.slot(), epoch * BYRON_EPOCH_LENGTH + slot);
+    debug_assert_eq!(decoded.number(), number);
+
+    (point, Arc::new(raw_bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use pallas::ledger::traverse::MultiEraBlock;

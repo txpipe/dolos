@@ -1705,6 +1705,16 @@ mod key_tests {
             let b = ProposalKey::new(b.0.into(), b.1);
             prop_assert_eq!(ProposalKey::decode_key(&encode(&a)), Ok(a));
             prop_assert_eq!(encode(&a).cmp(&encode(&b)), (a.tx, a.idx).cmp(&(b.tx, b.idx)));
+            prop_assert_eq!(a.cmp(&b), encode(&a).cmp(&encode(&b)));
+        }
+
+        /// Keys of one transaction order by index, in `Ord` and in bytes alike.
+        #[test]
+        fn keys_of_one_tx_order_by_idx(tx in any::<[u8; 32]>(), a in any::<u32>(), b in any::<u32>()) {
+            let a = ProposalKey::new(tx.into(), a);
+            let b = ProposalKey::new(tx.into(), b);
+            prop_assert_eq!(a.cmp(&b), a.idx.cmp(&b.idx));
+            prop_assert_eq!(a.cmp(&b), encode(&a).cmp(&encode(&b)));
         }
     }
 
