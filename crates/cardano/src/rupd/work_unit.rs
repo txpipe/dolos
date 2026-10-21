@@ -658,7 +658,9 @@ mod tests {
 
     /// The quotient 0.00323897880448927272|72… is cut at 20 decimals, and the
     /// next digit rounds the cut up to a different double than the truncated
-    /// decimal gives.
+    /// decimal gives. 1273 / 10485760 is 0.00012140274047851562|5, an exact
+    /// half at the cut, which rounds up where half down or half to even would
+    /// keep a different double.
     #[test]
     fn numeric_ratio_rounds_half_up_at_the_scale() {
         assert_eq!(
@@ -668,6 +670,28 @@ mod tests {
         assert_ne!(
             "0.00323897880448927272".parse::<f64>().unwrap(),
             0.003238978804489273
+        );
+
+        assert_eq!(numeric_ratio(1273, 10_485_760), 0.00012140274047851564);
+        assert_ne!(
+            "0.00012140274047851562".parse::<f64>().unwrap(),
+            0.00012140274047851564
+        );
+    }
+
+    /// Both stakes lead with the base-10000 digit 1, so the quotient's weight
+    /// drops by one and the scale is 24 decimals, not 20:
+    /// 0.000093332914661520271677 against 0.00009333291466152027, which is a
+    /// different double.
+    #[test]
+    fn numeric_ratio_scales_past_equal_leading_digits() {
+        assert_eq!(
+            numeric_ratio(1_129_944_532_028, 12_106_602_864_871_837),
+            9.333291466152028e-5
+        );
+        assert_ne!(
+            "0.00009333291466152027".parse::<f64>().unwrap(),
+            9.333291466152028e-5
         );
     }
 
@@ -758,14 +782,14 @@ mod tests {
         // Exactly what `initialize()` leaves behind before any `load()`:
         // pool-level globals, and an empty per-account map because no shard
         // ran in this process.
-        // Mainnet epoch 212's stakes, where a plain `f64` division misses
-        // Blockfrost's `active_size`.
+        // Preview epoch 42's stakes, where both a plain `f64` division and the
+        // exactly rounded ratio miss Blockfrost's `active_size`.
         let mut snapshot = StakeSnapshot::empty();
         snapshot.pools.insert(pool, pool_snapshot(100, 20, 3));
-        snapshot.pool_stake.insert(pool, 76_778_927_458_702);
+        snapshot.pool_stake.insert(pool, 2_663_056_412_603);
         snapshot.pool_delegator_counts.insert(pool, 2);
         snapshot.pool_live_pledges.insert(pool, 400);
-        snapshot.active_stake_sum = 12_106_602_864_871_837;
+        snapshot.active_stake_sum = 375_970_644_528_781;
         assert_eq!(snapshot.iter_accounts().count(), 0);
 
         // Rewards as the shards left them in state: one leader, one delegator.
@@ -782,8 +806,8 @@ mod tests {
         let log = read_stake_log(&domain, chain.epoch_start(CURRENT_EPOCH - 1), pool)
             .expect("missing pool epoch log");
 
-        assert_eq!(log.total_stake, 76_778_927_458_702);
-        assert_eq!(log.relative_size, 0.006341905183119658);
+        assert_eq!(log.total_stake, 2_663_056_412_603);
+        assert_eq!(log.relative_size, 0.0070831498452245244);
         assert_eq!(log.delegators_count, 2);
         assert_eq!(log.live_pledge, 400);
         assert_eq!(log.total_rewards, 100);
