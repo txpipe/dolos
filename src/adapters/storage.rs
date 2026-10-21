@@ -20,8 +20,8 @@ use dolos_core::{
     },
     cache::Cost,
     config::{
-        ArchiveStoreConfig, FjallArchiveConfig, FjallStateConfig, RedbMempoolConfig,
-        RedbStateConfig, RedbWalConfig, RootConfig, StateStoreConfig, StoreType,
+        FjallArchiveConfig, FjallStateConfig, RedbMempoolConfig, RedbStateConfig, RedbWalConfig,
+        RootConfig, StateStoreConfig, StoreType,
     },
     ArchiveIndexDelta, BlockBody, BlockSlot, CacheDiskTier, CacheEntry, CacheError, ChainPoint,
     EntityDelta, EntityKey, EntityValue, ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey,
@@ -174,8 +174,9 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
     ensure_store_path(&path)?;
     Ok(ArchiveStoreBackend::open(
         &path,
+        config.storage.blocks_path(),
         dolos_cardano::model::build_log_schema(),
-        &config.storage.archive,
+        config.storage.archive.kind,
     )?)
 }
 
@@ -848,17 +849,19 @@ impl ArchiveStoreBackend {
 
     /// Open an archive store of the configured type.
     ///
-    /// For `fjall`, the caller must provide the resolved path. For
-    /// `ephemeral`, the path is ignored and an in-memory store is created.
+    /// For `fjall`, the caller must provide the resolved paths: the archive
+    /// directory and, when they live elsewhere, the block segments'. For
+    /// `ephemeral`, both are ignored and an in-memory store is created.
     pub fn open(
         path: impl AsRef<Path>,
+        blocks_path: Option<PathBuf>,
         schema: StateSchema,
-        config: &ArchiveStoreConfig,
+        kind: StoreType,
     ) -> Result<Self, ArchiveError> {
-        match config.kind {
+        match kind {
             StoreType::Fjall { .. } => {
                 let options = FjallArchiveConfig {
-                    blocks_path: config.blocks_path.clone(),
+                    blocks_path,
                     ..Default::default()
                 };
                 Self::open_fjall(path, schema, &options)
@@ -1447,7 +1450,7 @@ impl MempoolStore for MempoolBackend {
 
 #[cfg(test)]
 mod tests {
-    use dolos_core::config::{ChainConfig, HistoryConfig};
+    use dolos_core::config::{ArchiveStoreConfig, ChainConfig, HistoryConfig};
 
     use super::*;
 
@@ -1516,8 +1519,9 @@ mod tests {
 
         let archive = ArchiveStoreBackend::open(
             path,
+            None,
             StateSchema::default(),
-            &ArchiveStoreConfig::ephemeral(),
+            ArchiveStoreConfig::ephemeral().kind,
         )
         .expect("ephemeral archive store should open without touching the path");
 

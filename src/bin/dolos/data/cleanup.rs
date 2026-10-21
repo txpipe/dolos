@@ -79,7 +79,7 @@ fn stores_outside_root(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
         config.wal_path(),
         storage.state_path(),
         storage.archive_path(),
-        storage.archive.blocks_path.clone(),
+        storage.blocks_path(),
         config.mempool_path(),
     ]
     .into_iter()
@@ -207,6 +207,7 @@ mod tests {
         assert!(stores_outside_root(&config).unwrap().is_empty());
 
         config.storage.state.path = Some(PathBuf::from("inner/state"));
+        config.storage.archive.blocks_path = Some(PathBuf::from("blocks"));
         assert!(stores_outside_root(&config).unwrap().is_empty());
 
         config.storage.state.path = Some(elsewhere.join("state"));

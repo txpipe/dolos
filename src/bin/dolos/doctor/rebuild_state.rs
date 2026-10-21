@@ -118,10 +118,8 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
         others.push(("mempool", path));
     }
 
-    // Segment files can live outside the archive directory; the backend takes
-    // `blocks_path` verbatim, so this check does too.
-    if let Some(path) = &config.storage.archive.blocks_path {
-        others.push(("archive segments", path.clone()));
+    if let Some(path) = config.storage.blocks_path() {
+        others.push(("archive segments", path));
     }
 
     for (what, path) in others {
@@ -630,5 +628,19 @@ mod tests {
                 "chunk size {chunk_size}"
             );
         }
+    }
+
+    #[test]
+    fn segments_under_the_state_path_refuse_the_wipe() {
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = PathBuf::from("/data");
+        let state_path = config.storage.state_path().unwrap();
+
+        config.storage.archive.blocks_path = Some(PathBuf::from("blocks"));
+        assert!(check_wipe_scope(&config, &state_path).is_ok());
+
+        config.storage.archive.blocks_path = Some(PathBuf::from("state/blocks"));
+        let error = check_wipe_scope(&config, &state_path).unwrap_err();
+        assert!(error.to_string().contains("archive segments"), "{error}");
     }
 }
