@@ -21,7 +21,7 @@ use tracing::{debug, instrument, trace, warn};
 use crate::{
     ewrap::BoundaryWork, model::PoolHash, AccountEpochLog, AccountKey, AccountState, CardanoEntity,
     DRepState, EpochState, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
-    StakeLog,
+    PoolEpochLog,
 };
 
 /// What each pool paid out at the boundary, summed from the merged account
@@ -49,7 +49,7 @@ impl PaidRewards {
     }
 }
 
-/// Settle the epoch's `StakeLog` rewards on what the boundary paid.
+/// Settle the epoch's `PoolEpochLog` rewards on what the boundary paid.
 ///
 /// RUPD writes each log with the rewards it computed, but not all of them
 /// reach an account: a delegator that deregistered before this boundary
@@ -69,7 +69,7 @@ fn settle_stake_logs<A: ArchiveStore>(
         paid.add(&row);
     }
 
-    for entry in archive.iter_logs_typed::<StakeLog>(Some(LogRangeOf::slot(slot)))? {
+    for entry in archive.iter_logs_typed::<PoolEpochLog>(Some(LogRangeOf::slot(slot)))? {
         let (_, pool, mut log) = entry?;
         let (total, operator) = paid.of(&pool.0);
 
@@ -307,8 +307,8 @@ mod tests {
         AccountKey(StakeCredential::AddrKeyhash([byte; 28].into()))
     }
 
-    fn stake_log(total_rewards: u64, operator_share: u64) -> StakeLog {
-        StakeLog {
+    fn stake_log(total_rewards: u64, operator_share: u64) -> PoolEpochLog {
+        PoolEpochLog {
             total_rewards,
             operator_share,
             ..Default::default()
@@ -329,10 +329,10 @@ mod tests {
         }
     }
 
-    fn read(domain: &ToyDomain, slot: BlockSlot, pool: PoolHash) -> StakeLog {
+    fn read(domain: &ToyDomain, slot: BlockSlot, pool: PoolHash) -> PoolEpochLog {
         domain
             .archive()
-            .read_log_typed::<StakeLog>(slot, &PoolKey(pool))
+            .read_log_typed::<PoolEpochLog>(slot, &PoolKey(pool))
             .unwrap()
             .expect("missing stake log")
     }

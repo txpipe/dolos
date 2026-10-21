@@ -43,7 +43,7 @@ impl PendingRewardState {
 
 entity_boilerplate!(
     PendingRewardState,
-    "pending_rewards",
+    "pending-rewards",
     state = super::AccountKey
 );
 
@@ -75,7 +75,7 @@ impl PendingMirState {
     }
 }
 
-entity_boilerplate!(PendingMirState, "pending_mirs", state = super::AccountKey);
+entity_boilerplate!(PendingMirState, "pending-mirs", state = super::AccountKey);
 
 #[cfg(test)]
 pub(crate) mod testing {

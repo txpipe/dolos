@@ -16,16 +16,16 @@ use dolos_core::{
 use tracing::{debug, instrument, trace, warn};
 
 use crate::{
-    forks, AccountKey, AccountState, CardanoEntity, DRepState, EpochState, EraProtocol, EraSummary,
+    forks, AccountKey, AccountState, CardanoEntity, DRepState, EpochState, EraKey, EraState,
     GovState, PoolState, ProposalState,
 };
 
 /// Era transition data collected from state.
 struct EraTransitionData {
-    prev_key: EraProtocol,
-    prev_summary: EraSummary,
-    new_key: EraProtocol,
-    new_summary: EraSummary,
+    prev_key: EraKey,
+    prev_summary: EraState,
+    new_key: EraKey,
+    new_summary: EraState,
 }
 
 impl super::WorkContext {
@@ -43,7 +43,7 @@ impl super::WorkContext {
 
         tracing::info!(from=%transition.prev_version, to=%transition.new_version, "era transition detected");
 
-        let previous = state.read_entity_typed::<EraSummary>(&transition.prev_version)?;
+        let previous = state.read_entity_typed::<EraState>(&transition.prev_version)?;
 
         let Some(mut previous) = previous else {
             return Err(BrokenInvariant::BadBootstrap.into());
@@ -53,7 +53,7 @@ impl super::WorkContext {
 
         let consts = forks::protocol_constants(transition.new_version.into(), &self.genesis);
 
-        let new = EraSummary {
+        let new = EraState {
             start: previous.end.clone().unwrap(),
             end: None,
             epoch_length: consts.epoch_length,
@@ -229,9 +229,8 @@ impl super::WorkContext {
         // Write era transition if needed (only 2 entities)
         if let Some(transition) = era_transition {
             writer
-                .write_entity_typed::<EraSummary>(&transition.prev_key, &transition.prev_summary)?;
-            writer
-                .write_entity_typed::<EraSummary>(&transition.new_key, &transition.new_summary)?;
+                .write_entity_typed::<EraState>(&transition.prev_key, &transition.prev_summary)?;
+            writer.write_entity_typed::<EraState>(&transition.new_key, &transition.new_summary)?;
         }
 
         // Verify all deltas were processed
@@ -255,18 +254,21 @@ mod tests {
     use dolos_core::{Domain as _, StateStore as _};
     use dolos_testing::toy_domain::ToyDomain;
 
-    use crate::{gov_from_conway_genesis, ChainSummary, EraProtocol, GovGenesisInit};
+    use crate::{gov_from_conway_genesis, ChainSummary, EraKey, GovGenesisInit};
 
     use super::*;
 
     fn empty_context(domain: &ToyDomain) -> super::super::WorkContext {
         super::super::WorkContext {
             ended_state: Default::default(),
-            active_protocol: EraProtocol::from(9),
+            active_protocol: EraKey::from(9),
             chain_summary: ChainSummary::default(),
             genesis: domain.genesis(),
             avvm_reclamation: Default::default(),
+            owners: Default::default(),
+            tally_protocol: EraKey::from(9),
             deltas: Default::default(),
+            active_stake: None,
         }
     }
 

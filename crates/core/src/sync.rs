@@ -17,7 +17,6 @@ use crate::{
     EntityMap, MempoolStore, RawBlock, StateStore, StateWriter as _, TipEvent, WalStore, WorkUnit,
 };
 
-const MEMPOOL_FINALIZE_THRESHOLD: u32 = 6;
 const MEMPOOL_DROP_THRESHOLD: u32 = 2;
 
 /// Extension trait for live block synchronization.
@@ -144,7 +143,7 @@ impl<D: Domain> SyncExt for D {
                 &point,
                 &[],
                 &undo_data.tx_hashes,
-                MEMPOOL_FINALIZE_THRESHOLD,
+                self.mempool_config().retain_confirmed_blocks,
                 MEMPOOL_DROP_THRESHOLD,
             ) {
                 warn!(?e, %point, "mempool rollback confirm failed");
@@ -263,7 +262,7 @@ fn update_mempool<D: Domain>(domain: &D, work: &D::WorkUnit) {
             &update.point,
             &update.seen_txs,
             &[],
-            MEMPOOL_FINALIZE_THRESHOLD,
+            domain.mempool_config().retain_confirmed_blocks,
             MEMPOOL_DROP_THRESHOLD,
         ) {
             warn!(?e, point = %update.point, "mempool confirm failed");

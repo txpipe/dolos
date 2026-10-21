@@ -3,6 +3,7 @@ use redb::{MultimapTableDefinition, ReadTransaction, TableDefinition, WriteTrans
 use std::{collections::HashMap, ops::Bound};
 use tracing::trace;
 
+pub mod cache;
 pub mod mempool;
 pub mod state;
 pub mod wal;
@@ -184,7 +185,7 @@ impl Table {
 
         let table = rx.open_multimap_table(*table)?;
 
-        let all_values = table.get(key.as_ref())?;
+        let all_values = table.get(key)?;
 
         Ok(all_values)
     }

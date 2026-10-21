@@ -5,7 +5,7 @@ use dolos_cardano::{
     eras::load_chain_summary_from_state,
     eras::log_epoch_range_to_key_range,
     model::{AccountEpochLog, AccountKey, PParamKind, PoolKey},
-    ChainSummary, EpochState, StakeLog,
+    ChainSummary, EpochState, PoolEpochLog,
 };
 use dolos_core::{config::RootConfig, LogEntity, LogRangeOf};
 use miette::{IntoDiagnostic, WrapErr};
@@ -232,8 +232,8 @@ fn epoch_of(slot: BlockSlot, ctx: &RowContext) -> String {
 
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 
-impl TableRow for StakeLog {
-    type Log = StakeLog;
+impl TableRow for PoolEpochLog {
+    type Log = PoolEpochLog;
 
     fn view(log: Self::Log) -> Self {
         log
@@ -617,7 +617,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     setup_tracing_for_format(config, args.format)?;
 
     let archive = crate::common::open_archive_store(config)?;
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = crate::common::open_genesis(config)?;
     let network = dolos_cardano::network_from_genesis(&genesis);
 
     let use_epoch_filter = args.epoch_start.is_some() || args.epoch_end.is_some();
@@ -627,7 +627,10 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // every format.
     let need_summary = use_epoch_filter
         || matches!(args.format, OutputFormat::Dbsync)
-        || matches!(args.namespace.as_str(), "stakes" | "account-epochs/rewards");
+        || matches!(
+            args.namespace.as_str(),
+            "pool-epochs" | "account-epochs/rewards"
+        );
     let summary = if need_summary {
         let state = crate::common::open_state_store(config)?;
         Some(load_chain_summary_from_state(&state).map_err(|err| miette::miette!("{err:?}"))?)
@@ -654,7 +657,9 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let (skip, take) = (args.skip, args.take);
 
     match args.namespace.as_str() {
-        "stakes" => dump_logs::<StakeLog>(&archive, skip, take, &ctx, start_slot, end_slot, range)?,
+        "pool-epochs" => {
+            dump_logs::<PoolEpochLog>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
+        }
         "account-epochs" => {
             dump_logs::<AccountEpochLog>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
         }
@@ -687,5 +692,5 @@ fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette
         return Ok(());
     }
 
-    crate::common::setup_tracing(&config.logging, &config.telemetry)
+    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())
 }

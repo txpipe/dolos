@@ -2,10 +2,9 @@ use axum::{http::StatusCode, Json};
 use blockfrost_openapi::models::epoch_content::EpochContent;
 use dolos_cardano::{
     model::{AccountEpochLog, EpochState},
-    rupd::StakeSnapshot,
-    AccountKey, ChainSummary, EraProtocol, PoolHash,
+    AccountKey, ChainSummary, PoolHash,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, LogRangeOf};
+use dolos_core::{BlockSlot, Domain, KeyRange, LogRangeOf};
 use pallas::ledger::primitives::Epoch;
 
 use crate::{
@@ -14,6 +13,7 @@ use crate::{
     mapping::{epochs::EpochContentModelBuilder, stake_cred_to_address, IntoModel as _},
     pagination::Pagination,
     routes::parse_path_number,
+    scan::{LogScan, ENTITY_CHUNK},
     Facade,
 };
 
@@ -73,7 +73,6 @@ fn build_epoch_content<D: Domain>(
     chain: &ChainSummary,
     epoch: Epoch,
     mut state: EpochState,
-    active_stake: Option<u64>,
 ) -> Result<EpochContentModelBuilder, StatusCode> {
     // The live state of the current epoch can carry another number than the
     // one the tip resolves to, so the caller's epoch wins.
@@ -97,16 +96,12 @@ fn build_epoch_content<D: Domain>(
         chain.slot_time(rolling.last_block_slot)
     };
 
-    // Blockfrost reads `null` for the epochs this hack lists, wherever the
-    // value came from.
+    // Blockfrost reads `null` for the epochs this hack lists.
     let active_stake =
         if crate::hacks::null_active_stake::contains(domain.genesis().network_magic(), epoch) {
             None
         } else {
-            match active_stake {
-                Some(active_stake) => Some(active_stake),
-                None => domain.sum_active_stake_for_epoch(epoch, chain)?,
-            }
+            state.active_stake
         };
 
     Ok(EpochContentModelBuilder {
@@ -119,26 +114,6 @@ fn build_epoch_content<D: Domain>(
         output: rolling.output,
         active_stake,
     })
-}
-
-async fn derive_current_active_stake<D: Domain>(
-    domain: &Facade<D>,
-    chain: &ChainSummary,
-    current: Epoch,
-) -> Result<u64, StatusCode> {
-    // A distribution goes live -> mark -> set -> go, so the active stake of
-    // epoch E is the stake live at E-2.
-    let stake_epoch = current.saturating_sub(2);
-    let protocol = EraProtocol::from(chain.era_for_epoch(stake_epoch.saturating_add(1)).protocol);
-    let domain = domain.clone();
-
-    tokio::task::spawn_blocking(move || {
-        StakeSnapshot::load_globals::<D>(domain.state(), current, stake_epoch, protocol)
-            .map(|snapshot| snapshot.active_stake_sum)
-    })
-    .await
-    .map_err(log_and_500("failed to join current active stake scan"))?
-    .map_err(log_and_500("failed to derive current active stake"))
 }
 
 fn load_epoch_state<D: Domain>(
@@ -169,12 +144,6 @@ async fn collect_epoch_contents<D: Domain>(
 where
     Option<EpochState>: From<D::Entity>,
 {
-    let current_active_stake = if epochs.contains(&current) {
-        Some(derive_current_active_stake(domain, chain, current).await?)
-    } else {
-        None
-    };
-
     let mut out = Vec::with_capacity(epochs.len());
     for epoch in epochs {
         let state = if epoch == current {
@@ -187,16 +156,56 @@ where
             }
         };
 
-        let active_stake = if epoch == current {
-            current_active_stake
-        } else {
-            None
-        };
-        let model = build_epoch_content(domain, chain, epoch, state, active_stake)?;
+        let model = build_epoch_content(domain, chain, epoch, state)?;
         out.push(model.into_model()?);
     }
 
     Ok(Json(out))
+}
+
+/// One page of the stake rows in `range`, `chunk` rows per blocking task. The
+/// scan stops once the page is full.
+async fn stake_rows_page<D: Domain>(
+    domain: &Facade<D>,
+    range: KeyRange,
+    pool: Option<PoolHash>,
+    skip: usize,
+    count: usize,
+    chunk: usize,
+) -> Result<Vec<(AccountKey, AccountEpochLog)>, StatusCode> {
+    let mut rows = LogScan::<AccountEpochLog>::new(range, chunk);
+    let mut seen = 0usize;
+    let mut page = Vec::new();
+
+    while page.len() < count {
+        // Reward-only rows and zero-stake delegators are not in Blockfrost's
+        // epoch_stake, so they go before the page is cut. The pool sits in
+        // the value, not the key, so one pool is a filtered scan of the whole
+        // epoch.
+        let Some(kept) = rows
+            .next(domain, move |rows| {
+                rows.into_iter()
+                    .filter(|(_, _, log)| {
+                        log.active_stake.unwrap_or(0) > 0
+                            && pool.is_none_or(|pool| log.pool_id == Some(pool))
+                    })
+                    .map(|(_, account, log)| (account, log))
+                    .collect::<Vec<_>>()
+            })
+            .await?
+        else {
+            break;
+        };
+
+        for row in kept {
+            if seen >= skip && page.len() < count {
+                page.push(row);
+            }
+            seen += 1;
+        }
+    }
+
+    Ok(page)
 }
 
 /// One page of the stake distribution of `epoch`, as stake address and log
@@ -212,39 +221,17 @@ async fn stake_distribution_page<D: Domain>(
 
     // Every row of an epoch's distribution sits at the epoch-start slot, so
     // the scan range is exactly that slot.
-    let range = LogRangeOf::slot(chain.epoch_start(epoch));
+    let range = LogRangeOf::<AccountKey>::slot(chain.epoch_start(epoch)).into_raw();
 
-    let inner = domain.inner.clone();
-    let skip = pagination.skip();
-    let count = pagination.count;
-
-    let page = tokio::task::spawn_blocking(
-        move || -> Result<Vec<(AccountKey, AccountEpochLog)>, StatusCode> {
-            let iter = inner
-                .archive()
-                .iter_logs_typed::<AccountEpochLog>(Some(range))
-                .map_err(log_and_500("failed to iterate account epoch logs"))?;
-
-            // Reward-only rows and zero-stake delegators are not in
-            // Blockfrost's epoch_stake, so they go before the page is cut. The
-            // pool sits in the value, not the key, so one pool is a filtered
-            // scan of the whole epoch.
-            iter.filter(|entry| match entry {
-                Ok((_, _, log)) => {
-                    log.active_stake.unwrap_or(0) > 0
-                        && pool.is_none_or(|pool| log.pool_id == Some(pool))
-                }
-                Err(_) => true,
-            })
-            .skip(skip)
-            .take(count)
-            .map(|entry| entry.map(|(_, account, log)| (account, log)))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(log_and_500("failed to read account epoch log"))
-        },
+    let page = stake_rows_page(
+        domain,
+        range,
+        pool,
+        pagination.skip(),
+        pagination.count,
+        ENTITY_CHUNK,
     )
-    .await
-    .map_err(log_and_500("account epoch scan task failed"))??;
+    .await?;
 
     page.into_iter()
         .map(|(account, log)| {
@@ -260,7 +247,11 @@ async fn stake_distribution_page<D: Domain>(
 #[cfg(test)]
 mod testing {
     use axum::http::StatusCode;
-    use pallas::crypto::hash::Hasher;
+    use dolos_core::{
+        ArchiveStore as _, ArchiveWriter as _, Domain as _, StateStore as _, StateWriter as _,
+    };
+    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
+    use pallas::{crypto::hash::Hasher, ledger::primitives::Epoch};
 
     use crate::{mapping::bech32_pool, test_support::TestApp};
 
@@ -301,23 +292,63 @@ mod testing {
     pub fn toy_issuer_pool() -> String {
         bech32_pool(Hasher::<224>::hash(&[0x10, 0x11])).unwrap()
     }
+
+    /// The app of `TestApp::new`, whose live `EpochState` carries `current` as
+    /// its active stake and whose sealed epoch logs carry `sealed`, as ESTART
+    /// and EWRAP leave them. The synthetic chain crosses no boundary, so it
+    /// stores none itself. Its tip is in epoch 2, and no `PoolEpochLog` row
+    /// exists: no RUPD ran.
+    pub fn app_with_active_stake(current: u64, sealed: &[(Epoch, u64)]) -> TestApp {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+
+        TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
+            let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+                .expect("era summary");
+            let mut state =
+                dolos_cardano::load_epoch::<ToyDomain>(domain.state()).expect("epoch state");
+
+            state.active_stake = Some(current);
+
+            let writer = domain.state().start_writer().expect("state writer");
+            writer.write_entity_typed(&(), &state).expect("epoch write");
+            writer.commit().expect("state commit");
+
+            let writer = domain.archive().start_writer().expect("archive writer");
+
+            for (epoch, active_stake) in sealed {
+                let slot = summary.epoch_start(*epoch);
+                let mut log = state.clone();
+                log.number = *epoch;
+                log.active_stake = Some(*active_stake);
+                writer
+                    .write_log_typed(slot, &(), &log)
+                    .expect("epoch log write");
+            }
+
+            writer.commit().expect("archive commit");
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{pool_id_cases, PoolIdCase, TestApp, TestFault, REG_POOL_ID};
+    use crate::test_support::{pool_id_cases, PoolIdCase, TestApp, REG_POOL_ID};
     use dolos_testing::synthetic::SyntheticBlockConfig;
 
     const MAX_EPOCH_NUMBER: Epoch = i32::MAX as Epoch;
 
-    /// The builder nulls a passed active stake inside the preprod gap, only on
-    /// preprod. `next` and `previous` build their items through it too.
+    /// The builder nulls the stored active stake inside the preprod gap, only
+    /// on preprod. `next` and `previous` build their items through it too.
     #[test]
     fn build_epoch_content_nulls_active_stake_across_the_preprod_gap() {
         use std::sync::Arc;
 
-        use dolos_core::config::{CardanoConfig, MinibfConfig};
+        use dolos_core::config::MinibfConfig;
         use dolos_testing::toy_domain::ToyDomain;
 
         use crate::mapping::IntoModel as _;
@@ -327,14 +358,13 @@ mod tests {
         fn facade_for(genesis: dolos_core::Genesis) -> Facade<ToyDomain> {
             let domain = ToyDomain::new_with_genesis_and_config(
                 Arc::new(genesis),
-                CardanoConfig::default(),
+                dolos_cardano::CardanoLogicConfig::default(),
                 None,
                 None,
             );
             Facade {
                 inner: domain,
                 config: MinibfConfig::new("[::]:0".parse().expect("valid listen address")),
-                cache: crate::cache::CacheService::default(),
             }
         }
 
@@ -344,9 +374,10 @@ mod tests {
         // `active_stake` as a handler would serialize it.
         fn active_stake_for(facade: &Facade<ToyDomain>, epoch: Epoch) -> Option<String> {
             let chain = facade.get_chain_summary().expect("era summary");
-            let state =
+            let mut state =
                 dolos_cardano::load_epoch::<ToyDomain>(facade.state()).expect("base epoch state");
-            build_epoch_content(facade, &chain, epoch, state, Some(ACTIVE_STAKE))
+            state.active_stake = Some(ACTIVE_STAKE);
+            build_epoch_content(facade, &chain, epoch, state)
                 .expect("build epoch content")
                 .into_model()
                 .expect("map epoch content")
@@ -372,27 +403,6 @@ mod tests {
 
         let mainnet = facade_for(dolos_cardano::include::mainnet::load());
         assert_eq!(active_stake_for(&mainnet, 20), with_value());
-
-        // With no value passed, a gap epoch is null without reading the
-        // StakeLogs (the archive fault would 500).
-        let faulty_preprod = Facade {
-            inner: dolos_testing::faults::FaultyToyDomain::new(
-                preprod.inner.clone(),
-                TestFault::ArchiveStoreError,
-            ),
-            config: preprod.config.clone(),
-            cache: preprod.cache.clone(),
-        };
-        let chain = faulty_preprod.get_chain_summary().expect("era summary");
-        let state = dolos_cardano::load_epoch::<dolos_testing::faults::FaultyToyDomain>(
-            faulty_preprod.state(),
-        )
-        .expect("base epoch state");
-        let content = build_epoch_content(&faulty_preprod, &chain, 20, state, None)
-            .expect("build epoch content")
-            .into_model()
-            .expect("map epoch content");
-        assert_eq!(content.active_stake, None);
     }
 
     /// Gives a text for each difference from the Blockfrost error body.
@@ -570,5 +580,49 @@ mod tests {
         }
 
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn chunked_stake_rows_match_unchunked() {
+        let app = TestApp::new();
+        let facade = app.facade();
+        let chain = facade.get_chain_summary().expect("chain summary");
+        let epoch = app.tip_epoch() - 1;
+        let range = LogRangeOf::<AccountKey>::slot(chain.epoch_start(epoch)).into_raw();
+        let pool = crate::routes::pools::parse_pool_id_bounded(&app.vectors().pool_id)
+            .expect("pool id")
+            .expect("pool hash");
+
+        let rows = |pool, skip, count, chunk| {
+            let facade = facade.clone();
+            let range = range.clone();
+            async move {
+                stake_rows_page(&facade, range, pool, skip, count, chunk)
+                    .await
+                    .expect("stake rows")
+                    .into_iter()
+                    .map(|(account, _)| account)
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        assert!(
+            rows(None, 0, 100, usize::MAX).await.len() > 1,
+            "too few rows to split into chunks"
+        );
+
+        for pool in [None, Some(pool)] {
+            for (skip, count) in [(0, 100), (1, 1), (0, 1), (5, 5)] {
+                let whole = rows(pool, skip, count, usize::MAX).await;
+
+                for chunk in [1, 2] {
+                    assert_eq!(
+                        rows(pool, skip, count, chunk).await,
+                        whole,
+                        "skip {skip}, count {count}"
+                    );
+                }
+            }
+        }
     }
 }

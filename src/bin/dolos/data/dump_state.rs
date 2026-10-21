@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use comfy_table::Table;
 use dolos_cardano::{
-    model::AccountState, DRepState, DatumState, EpochState, EpochValue, EraSummary,
+    model::AccountState, DRepState, DatumState, EpochState, EpochValue, EraState,
     PendingRewardState, PoolSnapshot, PoolState, ProposalAction, ProposalState,
 };
 use miette::{Context, IntoDiagnostic};
@@ -157,7 +157,7 @@ impl TableRow for EpochState {
     }
 }
 
-impl TableRow for EraSummary {
+impl TableRow for EraState {
     fn header(format: OutputFormat) -> Vec<&'static str> {
         if matches!(format, OutputFormat::Dbsync) {
             return vec!["protocol", "start_epoch", "epoch_length", "slot_length"];
@@ -516,11 +516,11 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     setup_tracing_for_format(config, args.format)?;
 
     let state = crate::common::open_state_store(config)?;
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = crate::common::open_genesis(config)?;
     let network = network_from_genesis(&genesis);
 
     match args.namespace.as_str() {
-        "eras" => dump_state::<EraSummary>(&state, args.count, network, args.format)?,
+        "eras" => dump_state::<EraState>(&state, args.count, network, args.format)?,
         "epochs" => dump_state::<EpochState>(&state, args.count, network, args.format)?,
         "accounts" => dump_state::<AccountState>(&state, args.count, network, args.format)?,
         "pools" => dump_state::<PoolState>(&state, args.count, network, args.format)?,
@@ -550,5 +550,5 @@ fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette
         return Ok(());
     }
 
-    crate::common::setup_tracing(&config.logging, &config.telemetry)
+    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())
 }

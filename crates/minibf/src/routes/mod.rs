@@ -36,7 +36,7 @@ impl From<&MinibfConfig> for RootResponse {
     fn from(value: &MinibfConfig) -> Self {
         Self {
             url: value
-                .url
+                .public_url
                 .clone()
                 .unwrap_or(value.listen_address.to_string()),
             version: env!("CARGO_PKG_VERSION").to_string(),

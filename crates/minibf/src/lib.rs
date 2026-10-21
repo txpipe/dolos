@@ -6,9 +6,10 @@ use axum::{
 };
 use dolos_cardano::{
     model::{
-        gov::GovState, AccountState, AssetState, DRepState, EpochState, PoolState, ProposalState,
+        gov::GovState, AccountState, AssetState, DRepState, EpochState, MetadataLabelState,
+        PoolState, ProposalState,
     },
-    ChainSummary, PParamsSet, StakeLog,
+    ChainSummary, PParamsSet,
 };
 use pallas::{
     crypto::hash::Hash,
@@ -24,19 +25,27 @@ use tracing::Level;
 
 use dolos_core::{
     config::MinibfConfig, ArchiveStore as _, AsyncQueryFacade, BlockSlot, CancelToken, Domain,
-    EraCbor, LogEntity, LogRangeOf, RangeOf, ServeError, StateEntity, StateError, StateStore as _,
-    SubmitExt, TxOrder,
+    EraCbor, LogEntity, RangeOf, ServeError, StateEntity, StateError, StateStore as _, SubmitExt,
+    TxOrder,
 };
 
-mod cache;
 mod error;
 pub(crate) mod hacks;
 pub(crate) mod inputs;
 pub(crate) mod mapping;
 mod pagination;
 mod routes;
+pub(crate) mod scan;
 #[cfg(test)]
 mod test_support;
+
+/// Registers the `/network` namespace, as the router does, for tools that
+/// work on the cache without serving.
+pub use routes::network::register_cache as register_network_cache;
+
+/// Registers the off-chain metadata namespaces, as the router does, for tools
+/// that work on the cache without serving.
+pub use routes::governance::register_caches as register_governance_caches;
 
 pub(crate) fn log_and_500<E: std::fmt::Debug>(context: &str) -> impl Fn(E) -> StatusCode + '_ {
     move |err| {
@@ -49,7 +58,6 @@ pub(crate) fn log_and_500<E: std::fmt::Debug>(context: &str) -> impl Fn(E) -> St
 pub struct Facade<D: Domain> {
     pub inner: D,
     pub config: MinibfConfig,
-    pub cache: cache::CacheService,
 }
 
 impl<D: Domain> Deref for Facade<D> {
@@ -185,13 +193,13 @@ impl<D: Domain> Facade<D> {
     where
         D: Clone + Send + Sync + 'static,
     {
-        let mut out = TxMap::new();
-        for hash in hashes.into_iter() {
-            let tx = self.get_tx(hash).await?;
-            out.insert(hash, tx);
-        }
+        let txs = self
+            .query()
+            .tx_cbor_batch(hashes)
+            .await
+            .map_err(log_and_500("failed to fetch tx cbor batch"))?;
 
-        Ok(out)
+        Ok(txs.into_iter().collect())
     }
 
     pub async fn get_block_with_tx_batch(
@@ -256,58 +264,6 @@ impl<D: Domain> Facade<D> {
         Ok(out)
     }
 
-    /// The log key is `slot ‖ pool`: every pool's row at the start slot of
-    /// this epoch, and none of the next epoch's. Returns `None` when no log
-    /// exists.
-    fn stake_logs_sum_at_epoch(
-        &self,
-        epoch: Epoch,
-        chain_summary: &ChainSummary,
-    ) -> Result<Option<u64>, StatusCode> {
-        let slot = chain_summary.epoch_start(epoch);
-
-        let iter = self
-            .archive()
-            .iter_logs_typed::<StakeLog>(Some(LogRangeOf::slot(slot)))
-            .map_err(log_and_500("failed to iterate stake logs for epoch"))?;
-
-        let mut total = 0u64;
-        let mut found = false;
-        for entry in iter {
-            let (_, _, log) = entry.map_err(log_and_500("failed to read stake log for epoch"))?;
-            total += log.total_stake;
-            found = true;
-        }
-
-        Ok(found.then_some(total))
-    }
-
-    // Dolos starts to write `StakeLog`s only after the stake-snapshot pipeline
-    // is ready. So the first snapshot epoch has logs, but the epoch just before
-    // it has none. Both epochs share the same genesis stake distribution, and
-    // the reference implementation reports the same value for both. For that one
-    // epoch, this function reads the logs of the next epoch instead. Each
-    // earlier epoch has no active stake and stays `None`.
-    pub fn sum_active_stake_for_epoch(
-        &self,
-        epoch: Epoch,
-        chain_summary: &ChainSummary,
-    ) -> Result<Option<u64>, StatusCode> {
-        if let Some(total) = self.stake_logs_sum_at_epoch(epoch, chain_summary)? {
-            return Ok(Some(total));
-        }
-
-        // This epoch has no logs. The next epoch can be the earliest one with
-        // logs: this epoch has none, but `epoch + 1` has them. Then this epoch
-        // shares the genesis stake of that first snapshot. An earlier epoch,
-        // where neither it nor its successor has logs, has no active stake.
-        if let Some(next_total) = self.stake_logs_sum_at_epoch(epoch + 1, chain_summary)? {
-            return Ok(Some(next_total));
-        }
-
-        Ok(None)
-    }
-
     pub fn read_cardano_entity<T>(&self, key: &T::Key) -> Result<Option<T>, StatusCode>
     where
         T: StateEntity,
@@ -337,11 +293,11 @@ where
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
     Option<GovState>: From<D::Entity>,
+    Option<MetadataLabelState>: From<D::Entity>,
 {
     build_router_with_facade(Facade::<D> {
         inner: domain,
         config: cfg,
-        cache: cache::CacheService::default(),
     })
 }
 
@@ -355,7 +311,20 @@ where
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
     Option<GovState>: From<D::Entity>,
+    Option<MetadataLabelState>: From<D::Entity>,
 {
+    // tip-scoped, so it opens no disk tier and cannot fail in practice
+    if let Err(error) = routes::network::register_cache(facade.cache()) {
+        tracing::error!(%error, "failed to register the /network cache namespace");
+    }
+
+    routes::governance::register_caches(facade.cache());
+
+    // disposable: without the namespace the totals routes fold uncached
+    if let Err(error) = dolos_cardano::periods::stats::register_totals_cache(&facade.inner) {
+        tracing::warn!(%error, "totals cache not registered");
+    }
+
     let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
         .route("/", get(routes::root::<D>))
@@ -514,6 +483,7 @@ where
             "/epochs/latest/parameters",
             get(routes::epochs::latest_parameters::<D>),
         )
+        .route("/scripts", get(routes::scripts::all::<D>))
         .route("/scripts/{script_hash}", get(routes::scripts::by_hash::<D>))
         .route(
             "/scripts/{script_hash}/json",
@@ -591,6 +561,10 @@ where
             get(routes::assets::by_subject_addresses::<D>),
         )
         .route(
+            "/assets/{subject}/history",
+            get(routes::assets::by_subject_history::<D>),
+        )
+        .route(
             "/assets/{subject}/transactions",
             get(routes::assets::by_subject_transactions::<D>),
         )
@@ -598,6 +572,7 @@ where
             "/assets/{subject}/txs",
             get(routes::assets::by_subject_txs::<D>),
         )
+        .route("/metadata/txs/labels", get(routes::metadata::labels::<D>))
         .route(
             "/metadata/txs/labels/{label}",
             get(routes::metadata::by_label_json::<D>),
@@ -630,9 +605,18 @@ where
         .route("/pools/retired", get(routes::pools::all_retired::<D>))
         .route("/pools", get(routes::pools::all::<D>))
         .route("/pools/{id}", get(routes::pools::by_id::<D>))
+        .route("/governance/dreps", get(routes::governance::all_dreps::<D>))
         .route(
             "/governance/committee",
             get(routes::governance::committee::<D>),
+        )
+        .route(
+            "/governance/committee/votes",
+            get(routes::governance::committee_votes::<D>),
+        )
+        .route(
+            "/governance/committee/{cc_id}/votes",
+            get(routes::governance::committee_votes_by_id::<D>),
         )
         .route(
             "/governance/dreps/{drep_id}",
@@ -750,10 +734,17 @@ where
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
     Option<GovState>: From<D::Entity>,
+    Option<MetadataLabelState>: From<D::Entity>,
 {
     type Config = MinibfConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
+        let storage_path = domain.storage_config().path.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            routes::governance::remove_legacy_dir(&storage_path)
+        })
+        .await;
+
         let app = build_router(cfg.clone(), domain);
 
         let listener = tokio::net::TcpListener::bind(cfg.listen_address)
@@ -833,5 +824,75 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let body: Value = serde_json::from_slice(&bytes).expect("json body for /blocks/slot/");
         assert_eq!(body["message"], json!("Missing or malformed block hash."));
+    }
+
+    #[tokio::test]
+    async fn get_tx_batch_reads_each_body_once_however_many_of_its_txs_are_asked() {
+        use std::sync::atomic::Ordering;
+
+        use dolos_core::{
+            config::MinibfConfig, indexes::ArchiveIndexDelta, ArchiveStore as _,
+            ArchiveWriter as _, ChainPoint, Domain as _,
+        };
+        use dolos_testing::{
+            measured::MeasuredStores,
+            synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+            toy_domain::{MemoryStores, ToyDomain, ToyStores as _},
+        };
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        use crate::Facade;
+
+        let domain = ToyDomain::with_stores(
+            ToyDomain::new(None, None).genesis(),
+            dolos_cardano::CardanoLogicConfig::default(),
+            None,
+            None,
+            MeasuredStores::new(MemoryStores::open()),
+        );
+        let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 4,
+            ..Default::default()
+        });
+        let writer = domain.archive().start_writer().unwrap();
+        let mut hashes = Vec::new();
+        let mut indexes = Vec::new();
+        for raw in &blocks {
+            let block = MultiEraBlock::decode(raw).unwrap();
+            let tx_hashes: Vec<_> = block.txs().iter().map(|tx| tx.hash()).collect();
+            writer
+                .apply(&ChainPoint::Specific(block.slot(), block.hash()), raw)
+                .unwrap();
+            indexes.push(ArchiveIndexDelta {
+                slot: block.slot(),
+                block_hash: block.hash().to_vec(),
+                block_number: Some(block.number()),
+                tx_hashes: tx_hashes.iter().map(|hash| hash.to_vec()).collect(),
+                tags: Vec::new(),
+            });
+            hashes.extend(tx_hashes);
+        }
+        writer.apply_index(&indexes).unwrap();
+        writer.commit().unwrap();
+
+        let reads = || {
+            domain
+                .archive()
+                .counters
+                .block_reads
+                .load(Ordering::Relaxed)
+        };
+        let facade = Facade {
+            inner: domain.clone(),
+            config: MinibfConfig::new("[::]:0".parse().expect("invalid listen address")),
+        };
+
+        let before = reads();
+        let txs = facade.get_tx_batch(hashes.iter().copied()).await.unwrap();
+
+        assert_eq!(txs.len(), 12);
+        assert!(txs.values().all(Option::is_some));
+        assert_eq!(reads() - before, 3);
     }
 }

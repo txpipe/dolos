@@ -5,16 +5,18 @@
 //!
 //! ```text
 //! cargo run --no-default-features --example headless_snapshot -- \
-//!   ./dolos.toml ./stele
+//!   ./dolos.toml ./stele [208,236,290]
 //! ```
 //!
-//! The destination must not already contain a stele. Configuration precedence,
-//! progress rendering and destination cleanup remain host responsibilities.
+//! The optional third argument is the publisher's retained state-dump epochs;
+//! omitted, the stele retains the tip alone. The destination must not already
+//! contain a stele. Progress rendering and destination cleanup remain host
+//! responsibilities.
 
 use std::{error::Error, path::Path, sync::Arc};
 
-use dolos::core::Genesis;
 use dolos::engine::ReplayWorkspace;
+use dolos_cardano::networks::ResolvedNetwork;
 use dolos_snapshot::{
     export::First,
     facade::{Selection, SnapshotSource as _},
@@ -27,19 +29,18 @@ fn main() -> Result<(), AnyError> {
     let mut args = std::env::args_os().skip(1);
     let config_path = args.next().ok_or("missing path to dolos.toml")?;
     let destination = args.next().ok_or("missing output directory")?;
+    let state_epochs: Vec<u64> = match args.next() {
+        Some(list) => list
+            .to_str()
+            .ok_or("state epochs are not valid UTF-8")?
+            .split(',')
+            .map(str::parse)
+            .collect::<Result<_, _>>()?,
+        None => Vec::new(),
+    };
 
-    let config: dolos::core::config::RootConfig = config::Config::builder()
-        .add_source(config::File::from(Path::new(&config_path)))
-        .build()?
-        .try_deserialize()?;
-
-    let genesis = Arc::new(Genesis::from_file_paths(
-        &config.genesis.byron_path,
-        &config.genesis.shelley_path,
-        &config.genesis.alonzo_path,
-        &config.genesis.conway_path,
-        config.genesis.force_protocol,
-    )?);
+    let config = dolos::core::config::load(Some(Path::new(&config_path)))?;
+    let genesis = Arc::new(ResolvedNetwork::resolve(&config.chain)?.genesis()?);
 
     // Opening a workspace does not initialize or advance the ledger. It gives
     // the host an exclusive read-only snapshot view over the committed stores.
@@ -47,7 +48,7 @@ fn main() -> Result<(), AnyError> {
 
     let snapshot_result = (|| -> Result<(), AnyError> {
         let snapshot = workspace.snapshot();
-        let retained = dolos_snapshot::planning::retained_epochs(&config)?;
+        let retained = dolos_snapshot::planning::retained_epochs(&state_epochs)?;
         let plan = snapshot.selected_plan(
             u64::from(genesis.network_magic()),
             retained,

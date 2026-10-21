@@ -1,4 +1,9 @@
-use std::{collections::HashMap, ops::Deref, sync::OnceLock, time::Duration};
+use std::{
+    collections::HashMap,
+    ops::Deref,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use axum::{
     extract::{Path, Query, State},
@@ -23,7 +28,9 @@ use dolos_cardano::{
     periods::first_mints,
     ChainSummary,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, DomainError, EraCbor, StateStore as _};
+use dolos_core::{
+    ArchiveStore as _, BlockBody, BlockSlot, Domain, DomainError, EraCbor, StateStore as _, TxoRef,
+};
 use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
@@ -31,7 +38,7 @@ use pallas::{
     crypto::hash::Hash,
     ledger::{
         primitives::{BigInt, Metadatum, PlutusData},
-        traverse::{MultiEraBlock, MultiEraOutput, MultiEraTx},
+        traverse::{MultiEraOutput, MultiEraTx},
         validate::phase2::to_plutus_data::ToPlutusData,
     },
 };
@@ -39,14 +46,16 @@ use serde::Deserialize;
 
 use crate::{
     error::Error,
-    inputs::{tx_touches_output, InputDeps, InputResolver},
+    inputs::{match_block_txs, tx_touches_output, InputDeps, InputResolver},
     mapping::{asset_fingerprint, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
 
 mod all;
+mod history;
 pub use all::all;
+pub use history::by_subject_history;
 
 struct OnchainMetadata {
     version: Option<OnchainMetadataStandard>,
@@ -672,6 +681,15 @@ where
     Ok(Json(model.into_model(&domain).await?))
 }
 
+/// UTxOs of an asset read, decoded and located per blocking task. Each one
+/// also costs an archive index lookup, so one chunk holds its permit for a
+/// few milliseconds.
+const ASSET_ADDRESS_CHUNK: usize = 256;
+
+/// Per address: the earliest chain position of a UTxO holding the asset, and
+/// the quantity held.
+type AssetHoldings = HashMap<String, ((BlockSlot, u32), u128)>;
+
 pub async fn by_subject_addresses<D>(
     Path(subject): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -684,57 +702,7 @@ where
     let pagination = Pagination::try_from(params)?;
     let (asset, _) = resolve_asset_state(&domain, &subject)?;
 
-    let utxoset = domain
-        .state()
-        .utxos_by_asset(&asset)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .into_iter()
-        .collect_vec();
-
-    let utxos = domain
-        .state()
-        .get_utxos(utxoset)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut addresses: HashMap<String, ((BlockSlot, u32), u128)> = HashMap::new();
-    for (txoref, eracbor) in utxos {
-        let sort = (
-            domain
-                .archive()
-                .slot_by_tx_hash(txoref.0.as_slice())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
-            txoref.1,
-        );
-
-        let utxo = MultiEraOutput::decode(eracbor.0.try_into().unwrap(), &eracbor.1)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let amount = utxo
-            .value()
-            .assets()
-            .iter()
-            .flat_map(|x| {
-                let subject = x.policy().to_vec();
-                x.assets()
-                    .iter()
-                    .find(|x| [subject.as_slice(), x.name()].concat() == asset.as_slice())
-                    .map(|x| x.any_coin() as u128)
-            })
-            .sum();
-
-        addresses
-            .entry(
-                utxo.address()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                    .to_string(),
-            )
-            .and_modify(|entry| {
-                entry.0 = entry.0.min(sort);
-                entry.1 += amount;
-            })
-            .or_insert((sort, amount));
-    }
+    let addresses = asset_holdings(&domain, asset, ASSET_ADDRESS_CHUNK).await?;
 
     let mut items = addresses
         .into_iter()
@@ -756,6 +724,113 @@ where
         .collect_vec();
 
     Ok(Json(sorted))
+}
+
+/// The holdings of every address with a UTxO that holds `asset`, `chunk`
+/// UTxOs per blocking task.
+async fn asset_holdings<D>(
+    domain: &Facade<D>,
+    asset: Vec<u8>,
+    chunk: usize,
+) -> Result<AssetHoldings, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let asset = Arc::new(asset);
+
+    let utxoset = {
+        let asset = asset.clone();
+        domain
+            .blocking(move |domain| {
+                domain
+                    .state()
+                    .utxos_by_asset(&asset)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            })
+            .await?
+    };
+
+    let mut refs = utxoset.into_iter().collect_vec();
+    refs.sort();
+
+    let mut addresses = AssetHoldings::new();
+
+    for refs in refs.chunks(chunk.max(1)) {
+        let refs = refs.to_vec();
+        let asset = asset.clone();
+
+        let holdings = domain
+            .blocking(move |domain| chunk_holdings(&domain, refs, &asset))
+            .await?;
+
+        for (address, (sort, amount)) in holdings {
+            addresses
+                .entry(address)
+                .and_modify(|entry| {
+                    entry.0 = entry.0.min(sort);
+                    entry.1 += amount;
+                })
+                .or_insert((sort, amount));
+        }
+    }
+
+    Ok(addresses)
+}
+
+fn chunk_holdings<D>(
+    domain: &Facade<D>,
+    refs: Vec<TxoRef>,
+    asset: &[u8],
+) -> Result<AssetHoldings, StatusCode>
+where
+    D: Domain,
+{
+    let utxos = domain
+        .state()
+        .get_utxos(refs)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut addresses = AssetHoldings::new();
+    for (txoref, eracbor) in utxos {
+        let sort = (
+            domain
+                .archive()
+                .slot_by_tx_hash(txoref.0.as_slice())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+            txoref.1,
+        );
+
+        let utxo = MultiEraOutput::decode(eracbor.0.try_into().unwrap(), &eracbor.1)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let amount = utxo
+            .value()
+            .assets()
+            .iter()
+            .flat_map(|x| {
+                let subject = x.policy().to_vec();
+                x.assets()
+                    .iter()
+                    .find(|x| [subject.as_slice(), x.name()].concat() == asset)
+                    .map(|x| x.any_coin() as u128)
+            })
+            .sum();
+
+        addresses
+            .entry(
+                utxo.address()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    .to_string(),
+            )
+            .and_modify(|entry| {
+                entry.0 = entry.0.min(sort);
+                entry.1 += amount;
+            })
+            .or_insert((sort, amount));
+    }
+
+    Ok(addresses)
 }
 
 fn subject_matches(subject: &[u8], policy: &[u8], name: &[u8]) -> bool {
@@ -789,40 +864,26 @@ async fn find_txs<D>(
     subject: &[u8],
     chain: &ChainSummary,
     pagination: &Pagination,
-    block: &[u8],
+    block: BlockBody,
 ) -> Result<Vec<AssetTransactionsInner>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let subject = subject.to_vec();
+    let matched = match_block_txs(domain, deps, pagination, block, move |resolver, tx| {
+        tx_has_subject(resolver, &subject, tx)
+    })
+    .await?;
 
-    let txs = block.txs();
-
-    // only the txs that will actually be scanned contribute dependencies
-    let scanned = txs
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| !pagination.should_skip(block.number(), *idx))
-        .map(|(_, tx)| tx);
-
-    let mut resolver = deps.prepare(domain, scanned).await?;
-
-    let mut matches = vec![];
-
-    for (idx, tx) in txs.iter().enumerate() {
-        if !pagination.should_skip(block.number(), idx)
-            && tx_has_subject(&mut resolver, subject, tx)?
-        {
-            let model = AssetTransactionsInner {
-                tx_hash: hex::encode(tx.hash().as_slice()),
-                tx_index: idx as i32,
-                block_height: block.number() as i32,
-                block_time: chain.slot_time(block.slot()) as i32,
-            };
-
-            matches.push(model);
-        }
-    }
+    let mut matches: Vec<_> = matched
+        .into_iter()
+        .map(|tx| AssetTransactionsInner {
+            tx_hash: hex::encode(tx.hash.as_slice()),
+            tx_index: tx.index as i32,
+            block_height: tx.block_number as i32,
+            block_time: chain.slot_time(tx.block_slot) as i32,
+        })
+        .collect();
 
     if matches!(pagination.order, Order::Desc) {
         matches = matches.into_iter().rev().collect();
@@ -868,7 +929,7 @@ where
             continue;
         };
 
-        let mut txs = find_txs(&domain, &mut deps, &subject, &chain, &pagination, &block)
+        let mut txs = find_txs(&domain, &mut deps, &subject, &chain, &pagination, block)
             .await
             .map_err(Error::Code)?;
         matches.append(&mut txs);
@@ -980,11 +1041,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{first_mint_chain, first_mint_policies, TestApp, TestFault};
+    use crate::test_support::{
+        first_mint_chain, first_mint_policies, health_beside, TestApp, TestFault, SLOW_READ,
+    };
     use blockfrost_openapi::models::asset::Asset;
     use dolos_cardano::model::PolicyMintChunk;
     use dolos_core::AsyncQueryFacade;
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
+    use pallas::ledger::traverse::MultiEraBlock;
 
     /// The scan the period logs replaced: the policy's tagged blocks from
     /// genesis, each name kept at its first appearance in a mint.
@@ -1524,5 +1588,34 @@ mod tests {
         let policy = app.vectors().policy_id.clone();
         let path = format!("/assets/policy/{policy}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_asset_addresses_do_not_stall_health() {
+        let app = TestApp::new_with_fault(Some(TestFault::SlowUtxoReads(SLOW_READ)));
+        let path = format!("/assets/{}/addresses", app.vectors().asset_unit);
+
+        assert_eq!(health_beside(&app, &path).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chunked_asset_holdings_match_unchunked() {
+        let app = TestApp::new();
+        let facade = app.facade();
+        let asset = decode_asset_subject(&app.vectors().asset_unit).expect("asset subject");
+
+        let utxos = facade.state().utxos_by_asset(&asset).expect("asset refs");
+        assert!(utxos.len() > 2, "too few utxos to split into chunks");
+
+        let whole = asset_holdings(&facade, asset.clone(), usize::MAX)
+            .await
+            .expect("holdings");
+
+        for chunk in [1, 2] {
+            let chunked = asset_holdings(&facade, asset.clone(), chunk)
+                .await
+                .expect("holdings");
+            assert_eq!(chunked, whole);
+        }
     }
 }

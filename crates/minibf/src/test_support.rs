@@ -1,14 +1,18 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     body::Body,
     http::{HeaderMap, Method, Request, StatusCode},
     Router,
 };
+use dolos_cardano::periods::stats::TOTALS;
 use dolos_core::{
-    config::{CardanoConfig, MinibfConfig},
+    config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig},
     import::ImportExt as _,
-    Domain, StateStore,
+    CacheStore as _, Domain, StateStore,
 };
 use dolos_testing::{
     synthetic::{
@@ -220,7 +224,7 @@ pub mod first_mint_policies {
 /// what first-mint order has to get right: several mints in one tx, several
 /// policies in one block and in one tx, re-mints within and across epochs, a
 /// full burn minted again, a repeat across the txs of one block, a policy
-/// sharing another's staged-key prefix, and an epoch with more first mints than
+/// sharing another's group-key prefix, and an epoch with more first mints than
 /// a sealed chunk holds. The tip's epoch seals epochs 2 to 5 and leaves 6 and 7
 /// staged.
 pub fn first_mint_chain() -> SyntheticBlockConfig {
@@ -402,12 +406,23 @@ pub struct TestDomainBuilder {
 }
 
 impl TestDomainBuilder {
-    pub fn new_with_synthetic(mut cfg: SyntheticBlockConfig) -> Self {
-        let genesis = Arc::new(dolos_cardano::include::preview::load());
+    pub fn new_with_synthetic(cfg: SyntheticBlockConfig) -> Self {
+        Self::new_with_synthetic_and_protocol(cfg, None)
+    }
+
+    pub fn new_with_synthetic_and_protocol(
+        mut cfg: SyntheticBlockConfig,
+        force_protocol: Option<usize>,
+    ) -> Self {
+        let mut genesis = dolos_cardano::include::preview::load();
+        if let Some(protocol) = force_protocol {
+            genesis.force_protocol = Some(protocol);
+        }
+        let genesis = Arc::new(genesis);
         let min_slot = {
             let temp = ToyDomain::new_with_genesis_and_config(
                 genesis.clone(),
-                CardanoConfig::default(),
+                dolos_cardano::CardanoLogicConfig::default(),
                 None,
                 None,
             );
@@ -467,7 +482,7 @@ impl TestDomainBuilder {
 
 pub struct TestApp {
     router: Router,
-    _domain: dolos_testing::faults::FaultyToyDomain,
+    facade: Facade<dolos_testing::faults::FaultyToyDomain>,
     vectors: SyntheticVectors,
 }
 
@@ -489,6 +504,19 @@ impl TestApp {
         Self::new_with_cfg_and_fault(cfg, None)
     }
 
+    /// Customize the app beyond what the `new_*` constructors cover (e.g.
+    /// forcing the bootstrap protocol version). Defaults match [`Self::new`].
+    pub fn builder() -> TestAppBuilder {
+        TestAppBuilder {
+            cfg: SyntheticBlockConfig {
+                block_count: 5,
+                txs_per_block: 3,
+                ..Default::default()
+            },
+            force_protocol: None,
+        }
+    }
+
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         Self::from_domain(domain, vectors, fault, None)
@@ -501,6 +529,16 @@ impl TestApp {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         setup(&domain, &vectors);
         Self::from_domain(domain, vectors, None, None)
+    }
+
+    /// App over `cfg`'s chain on the domain `adjust` returns, for a domain
+    /// configured otherwise than the default.
+    pub fn new_with_cfg_and_domain(
+        cfg: SyntheticBlockConfig,
+        adjust: impl FnOnce(ToyDomain) -> ToyDomain,
+    ) -> Self {
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        Self::from_domain(adjust(domain), vectors, None, None)
     }
 
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
@@ -528,16 +566,15 @@ impl TestApp {
         };
 
         let facade = Facade {
-            inner: domain.clone(),
+            inner: domain,
             config: cfg,
-            cache: crate::cache::CacheService::default(),
         };
 
-        let router = build_router_with_facade(facade);
+        let router = build_router_with_facade(facade.clone());
 
         Self {
             router,
-            _domain: domain,
+            facade,
             vectors,
         }
     }
@@ -602,8 +639,23 @@ impl TestApp {
         (status, bytes.to_vec())
     }
 
+    pub fn facade(&self) -> Facade<dolos_testing::faults::FaultyToyDomain> {
+        self.facade.clone()
+    }
+
     pub fn vectors(&self) -> &SyntheticVectors {
         &self.vectors
+    }
+
+    /// The entries the totals cache holds in memory, if it is registered.
+    pub fn cache_entries(&self) -> Option<u64> {
+        let stats = self.facade.inner.cache().stats().expect("cache stats");
+
+        stats
+            .namespaces
+            .iter()
+            .find(|ns| ns.name == TOTALS.name)
+            .map(|ns| ns.memory.entries)
     }
 
     /// Epoch at the domain's tip. Only usable on fault-free apps — fault
@@ -611,12 +663,12 @@ impl TestApp {
     pub fn tip_epoch(&self) -> u64 {
         let summary =
             dolos_cardano::eras::load_era_summary::<dolos_testing::faults::FaultyToyDomain>(
-                self._domain.state(),
+                self.facade.state(),
             )
             .expect("era summary");
 
         let tip = self
-            ._domain
+            .facade
             .state()
             .read_cursor()
             .expect("cursor read failed")
@@ -631,10 +683,177 @@ impl TestApp {
     pub fn epoch_start(&self, epoch: u64) -> u64 {
         let summary =
             dolos_cardano::eras::load_era_summary::<dolos_testing::faults::FaultyToyDomain>(
-                self._domain.state(),
+                self.facade.state(),
             )
             .expect("era summary");
 
         summary.epoch_start(epoch)
+    }
+}
+
+/// The delay of a slow-read fault in a stall test.
+pub const SLOW_READ: Duration = Duration::from_secs(1);
+
+/// How long `/health` may take beside a slow request.
+pub const HEALTH_BUDGET: Duration = Duration::from_millis(300);
+
+/// Sends `path` and `/health` together and checks that `/health` answers
+/// within [`HEALTH_BUDGET`]. Returns the status of `path`.
+pub async fn health_beside(app: &TestApp, path: &str) -> StatusCode {
+    let started = Instant::now();
+    let heavy = app.get_bytes(path);
+    let health = async {
+        let (status, _) = app.get_bytes("/health").await;
+        (status, started.elapsed())
+    };
+
+    let ((status, _), (health_status, health_took)) = tokio::join!(heavy, health);
+
+    assert_eq!(health_status, StatusCode::OK);
+    assert!(
+        health_took < HEALTH_BUDGET,
+        "/health took {health_took:?} behind {path}"
+    );
+
+    status
+}
+
+/// Writes `copies` copies of every account and every pool under new keys, so
+/// that a scan of either reads several chunks. The account copies keep the
+/// delegations of the originals.
+pub fn replicate_accounts_and_pools<D: Domain>(domain: &D, copies: u8) {
+    use dolos_cardano::{
+        model::{AccountState, PoolState},
+        AccountKey, PoolKey,
+    };
+    use dolos_core::StateWriter as _;
+    use pallas::{crypto::hash::Hash, ledger::primitives::StakeCredential};
+
+    let accounts: Vec<_> = domain
+        .state()
+        .iter_entities_typed::<AccountState>(None)
+        .expect("account scan")
+        .collect::<Result<_, _>>()
+        .expect("account read");
+    let pools: Vec<_> = domain
+        .state()
+        .iter_entities_typed::<PoolState>(None)
+        .expect("pool scan")
+        .collect::<Result<_, _>>()
+        .expect("pool read");
+
+    let writer = domain.state().start_writer().expect("state writer");
+
+    for copy in 1..=copies {
+        for (_, account) in &accounts {
+            let mut account = account.clone();
+            account.credential = StakeCredential::AddrKeyhash(Hash::from([copy; 28]));
+            writer
+                .write_entity_typed(&AccountKey::from(&account.credential), &account)
+                .expect("account write");
+        }
+
+        for (_, pool) in &pools {
+            let mut pool = pool.clone();
+            pool.operator = Hash::from([copy; 28]);
+            writer
+                .write_entity_typed(&PoolKey(pool.operator), &pool)
+                .expect("pool write");
+        }
+    }
+
+    writer.commit().expect("state commit");
+}
+
+/// An app whose accounts and pools span several chunks of two.
+pub fn replicated_app() -> TestApp {
+    replicated_app_with_fault(None)
+}
+
+pub fn replicated_app_with_fault(fault: Option<TestFault>) -> TestApp {
+    let cfg = SyntheticBlockConfig {
+        block_count: 5,
+        txs_per_block: 3,
+        ..Default::default()
+    };
+
+    let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+    replicate_accounts_and_pools(&domain, 4);
+
+    TestApp::from_domain(domain, vectors, fault, None)
+}
+
+/// The body of a totals route with the totals cache off, then on and keeping
+/// every entry, missed and hit, over [`stake_address_chain`], whose first
+/// epochs are sealed and last staged. The miss must keep its entry.
+pub async fn totals_bodies(path: impl Fn(&SyntheticVectors) -> String) -> [Vec<u8>; 3] {
+    let history = HistoryConfig::rolling(HistoryWindow::slots(1_000));
+
+    let off = TestApp::new_with_cfg_and_domain(stake_address_chain(), |domain| {
+        domain.with_history_config(history)
+    });
+
+    let cache = CacheConfig {
+        admission: [(TOTALS.name.to_string(), 0)].into(),
+        ..CacheConfig::default()
+    };
+
+    let on = TestApp::new_with_cfg_and_domain(stake_address_chain(), |domain| {
+        domain.with_cache_config(cache)
+    });
+
+    let off_body = ok_body(&off, &path(off.vectors())).await;
+    assert!(off.cache_entries().is_none(), "the totals cache is on");
+
+    let path = path(on.vectors());
+
+    let miss = ok_body(&on, &path).await;
+    assert_eq!(
+        on.cache_entries(),
+        Some(1),
+        "{path}: the miss kept no entry"
+    );
+
+    let hit = ok_body(&on, &path).await;
+    assert_eq!(on.cache_entries(), Some(1), "{path}");
+
+    [off_body, miss, hit]
+}
+
+async fn ok_body(app: &TestApp, path: &str) -> Vec<u8> {
+    let (status, bytes) = app.get_bytes(path).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{path}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    bytes
+}
+
+pub struct TestAppBuilder {
+    cfg: SyntheticBlockConfig,
+    force_protocol: Option<usize>,
+}
+
+impl TestAppBuilder {
+    pub fn with_cfg(mut self, cfg: SyntheticBlockConfig) -> Self {
+        self.cfg = cfg;
+        self
+    }
+
+    pub fn with_protocol(mut self, protocol: usize) -> Self {
+        self.force_protocol = Some(protocol);
+        self
+    }
+
+    pub fn build(self) -> TestApp {
+        let (domain, vectors) =
+            TestDomainBuilder::new_with_synthetic_and_protocol(self.cfg, self.force_protocol)
+                .finish();
+
+        TestApp::from_domain(domain, vectors, None, None)
     }
 }

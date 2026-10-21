@@ -8,8 +8,6 @@ use axum::{
 use blockfrost_openapi::models::{
     account_addresses_assets_inner::AccountAddressesAssetsInner,
     account_addresses_content_inner::AccountAddressesContentInner,
-    account_addresses_total::AccountAddressesTotal,
-    account_addresses_total_received_sum_inner::AccountAddressesTotalReceivedSumInner,
     account_content::AccountContent,
     account_delegation_content_inner::AccountDelegationContentInner,
     account_history_content_inner::AccountHistoryContentInner,
@@ -25,7 +23,7 @@ use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::{AccountState, DRepState, PoolState},
     pallas_extras,
-    periods::stake_addresses,
+    periods::{account_addresses, stats},
     AccountEpochLog, AccountKey, ChainSummary, PoolHash,
 };
 use dolos_core::async_query::BlockMetaResolver;
@@ -46,7 +44,10 @@ use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 use crate::{
     error::Error,
     inputs::{for_each_touched_output, InputDeps, InputResolver},
-    mapping::{self, bech32_drep, bech32_pool, AssetTotals, IntoModel},
+    mapping::{
+        self, address_stats::AccountAddressesTotalBody, bech32_drep, bech32_pool,
+        direct_json::DirectJson, IntoModel,
+    },
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -336,7 +337,7 @@ where
     let addresses = domain
         .query()
         .run_blocking(move |domain| {
-            stake_addresses::page(&domain, &chain, epochs, &account, order, skip, count)
+            account_addresses::page(&domain, &chain, epochs, &account, order, skip, count)
                 .map_err(DomainError::from)
         })
         .await
@@ -356,95 +357,17 @@ where
     Ok(Json(items))
 }
 
-/// Fold one block's txs into an account's lifetime totals.
-///
-/// Produced outputs are received and resolved inputs are sent, the same split
-/// `/addresses/{address}/total` makes for a single address; a tx counts once
-/// however many of the account's addresses it touches.
-async fn sum_account_block_txs<D>(
-    domain: &Facade<D>,
-    deps: &mut InputDeps,
-    account: &[u8],
-    block: &[u8],
-    received: &mut AssetTotals,
-    sent: &mut AssetTotals,
-    tx_count: &mut usize,
-) -> Result<(), StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let txs = block.txs();
-
-    let mut resolver = deps.prepare(domain, txs.iter()).await?;
-
-    for tx in txs.iter() {
-        let mut matched = false;
-
-        for (_, output) in tx.produces() {
-            let address = output
-                .address()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if address_belongs_to_account(&address, account) {
-                received.add_output(&output);
-                matched = true;
-            }
-        }
-
-        for input in tx.consumes() {
-            if let Some(output) = resolver.resolve(&input)? {
-                let address = output
-                    .address()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                if address_belongs_to_account(&address, account) {
-                    sent.add_output(&output);
-                    matched = true;
-                }
-            }
-        }
-
-        if matched {
-            *tx_count += 1;
-        }
-    }
-
-    Ok(())
-}
-
-fn account_amounts(totals: AssetTotals) -> Vec<AccountAddressesTotalReceivedSumInner> {
-    totals
-        .into_amounts()
-        .into_iter()
-        .map(|amount| AccountAddressesTotalReceivedSumInner {
-            unit: amount.unit,
-            quantity: amount.quantity,
-        })
-        .collect()
-}
-
 /// `GET /accounts/{stake_address}/addresses/total`: lifetime sums and tx count
-/// across every address of an account.
+/// across every address of an account, from the Stats period logs through the
+/// totals cache.
 ///
-/// The totals are folded from the archive on each request rather than kept as
-/// state: a per-account asset breakdown is unbounded — one row grows with every
-/// distinct asset the account ever touched — and it would ride along in every
-/// stele and every state rebuild. The account therefore pays the same full
-/// scan `/addresses/{address}/total` already pays for a single address, which
-/// also means the answer only covers the history the archive still holds.
-///
-/// Pointer-delegated addresses are out of scope. The archive's stake tag and
-/// this fold both resolve an output's account through
-/// `pallas_extras::shelley_address_to_stake_address`, which has no answer for
-/// a pointer, so those blocks are never tagged and so never scanned. Every
-/// other account endpoint reads that same tag, so the blind spot is the
-/// family's, not this endpoint's.
+/// Pointer addresses are out of scope: an output's account is resolved
+/// through `pallas_extras::address_account`, which has no answer for a
+/// pointer, as for every other account endpoint.
 pub async fn by_stake_addresses_total<D>(
     Path(stake_address): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<AccountAddressesTotal>, Error>
+) -> Result<DirectJson, Error>
 where
     Option<AccountState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
@@ -456,55 +379,36 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    let account = account_key.address.to_vec();
-    let end_slot = domain.get_tip_slot()?;
-
-    let stream = domain
-        .query()
-        .blocks_by_stake_stream(&account, 0, end_slot, SlotOrder::Asc);
-
-    let mut received = AssetTotals::default();
-    let mut sent = AssetTotals::default();
-    let mut tx_count: usize = 0;
-    let mut deps = InputDeps::default();
-
-    let mut stream = Box::pin(stream);
-
-    while let Some(res) = stream.next().await {
-        let (_slot, block) = res.map_err(|err| {
-            tracing::error!(?err);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-        let Some(block) = block else {
-            continue;
-        };
-
-        sum_account_block_txs(
-            &domain,
-            &mut deps,
-            &account,
-            &block,
-            &mut received,
-            &mut sent,
-            &mut tx_count,
-        )
-        .await?;
-    }
+    let chain = domain.get_chain_summary()?;
+    let (tip_epoch, _) = chain.slot_epoch(domain.get_tip_slot()?);
+    let epochs = chain.first_shelley_epoch()..=tip_epoch;
+    let account = account_key.account.clone();
 
     let stake_address = account_key
         .address
         .to_bech32()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let model = AccountAddressesTotal {
-        stake_address,
-        received_sum: account_amounts(received),
-        sent_sum: account_amounts(sent),
-        tx_count: tx_count as i32,
-    };
+    let body = async {
+        let totals = stats::cached_account_totals(&domain.inner, &chain, epochs, &account).await?;
 
-    Ok(Json(model))
+        domain
+            .query()
+            .run_blocking(move |_| {
+                Ok(DirectJson::encode(&AccountAddressesTotalBody {
+                    stake_address,
+                    totals,
+                }))
+            })
+            .await
+    }
+    .await
+    .map_err(|err| {
+        tracing::error!(?err);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(body)
 }
 
 pub async fn by_stake_utxos<D>(
@@ -520,10 +424,15 @@ where
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&address, network)?;
 
+    let stake = account_key.address.to_vec();
     let refs = domain
-        .state()
-        .utxos_by_stake(&account_key.address.to_vec())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .blocking(move |domain| {
+            domain
+                .state()
+                .utxos_by_stake(&stake)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        })
+        .await?;
 
     let utxos =
         super::utxos::load_utxo_models(&domain, refs, pagination, super::utxos::UtxoFilter::All)
@@ -1462,11 +1371,14 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::test_support::{TestApp, TestFault};
+    use crate::test_support::{totals_bodies, TestApp, TestFault};
+    use axum::http::header;
     use blockfrost_openapi::models::{
         account_addresses_assets_inner::AccountAddressesAssetsInner,
         account_addresses_content_inner::AccountAddressesContentInner,
-        account_addresses_total::AccountAddressesTotal, account_content::AccountContent,
+        account_addresses_total::AccountAddressesTotal,
+        account_addresses_total_received_sum_inner::AccountAddressesTotalReceivedSumInner,
+        account_content::AccountContent,
         account_delegation_content_inner::AccountDelegationContentInner,
         account_history_content_inner::AccountHistoryContentInner,
         account_registration_content_inner::AccountRegistrationContentInner,
@@ -1690,6 +1602,9 @@ mod tests {
             blocks_minted: 0,
             params,
             is_new: false,
+            stake: None,
+            delegators: None,
+            live_pledge: None,
         };
         PoolState {
             operator: Hash::from(operator),
@@ -2131,12 +2046,12 @@ mod tests {
 
         let sealed = domain
             .archive()
-            .iter_logs_typed::<dolos_cardano::StakeAddressesRow>(None)
+            .iter_logs_typed::<dolos_cardano::AccountAddressChunk>(None)
             .unwrap()
             .count();
         let staged = domain
             .state()
-            .iter_entities_typed::<dolos_cardano::StagedStakeAddress>(None)
+            .iter_entities_typed::<dolos_cardano::AccountAddressSet>(None)
             .unwrap()
             .count();
         assert!(
@@ -2208,12 +2123,21 @@ mod tests {
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
+    /// The written body is byte for byte what the serde path encodes.
+    fn assert_serde_bytes(item: &AccountAddressesTotal, bytes: &[u8]) {
+        let expected = serde_json::to_vec(item).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(bytes),
+            String::from_utf8_lossy(&expected)
+        );
+    }
+
     #[tokio::test]
     async fn accounts_by_stake_addresses_total_happy_path() {
         let app = TestApp::new();
         let stake_address = app.vectors().stake_address.as_str();
         let path = format!("/accounts/{stake_address}/addresses/total");
-        let (status, bytes) = app.get_bytes(&path).await;
+        let (status, headers, bytes) = app.get_with_headers(&path).await;
 
         assert_eq!(
             status,
@@ -2225,7 +2149,10 @@ mod tests {
         let item: AccountAddressesTotal =
             serde_json::from_slice(&bytes).expect("failed to parse account addresses total");
 
+        assert_serde_bytes(&item, &bytes);
+
         assert_eq!(item.stake_address, stake_address);
+        assert_eq!(headers[header::CONTENT_TYPE], "application/json");
 
         // every synthetic tx produces a single output to one of the account
         // addresses, so the account totals cover all txs in all blocks
@@ -2280,6 +2207,8 @@ mod tests {
         let item: AccountAddressesTotal =
             serde_json::from_slice(&bytes).expect("failed to parse account addresses total");
 
+        assert_serde_bytes(&item, &bytes);
+
         let quantity = |sums: &[AccountAddressesTotalReceivedSumInner], unit: &str| {
             sums.iter()
                 .find(|x| x.unit == unit)
@@ -2318,6 +2247,24 @@ mod tests {
         let app = TestApp::new();
         let path = format!("/accounts/{}/addresses/total", missing_stake_address());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    /// An account's body is the same bytes with the totals cache off, missed
+    /// and hit.
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_total_bodies_match_with_the_cache_off_missed_and_hit() {
+        let [off, miss, hit] =
+            totals_bodies(|vectors| format!("/accounts/{}/addresses/total", vectors.stake_address))
+                .await;
+
+        let item: AccountAddressesTotal = serde_json::from_slice(&off).unwrap();
+        assert!(item.tx_count > 0);
+
+        assert_eq!(
+            String::from_utf8_lossy(&miss),
+            String::from_utf8_lossy(&off)
+        );
+        assert_eq!(String::from_utf8_lossy(&hit), String::from_utf8_lossy(&off));
     }
 
     #[tokio::test]
@@ -3202,12 +3149,13 @@ mod tests {
                 index: 0,
             };
 
-            let (raw, block_hash, tx_hash) = dolos_testing::synthetic::sample_alonzo_cert_block(
+            let (raw, block_hash, tx_hash) = dolos_testing::synthetic::sample_alonzo_block(
                 number,
                 slot,
                 Some(prev),
                 input,
                 certs,
+                None,
             );
 
             prev = block_hash;

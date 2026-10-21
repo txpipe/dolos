@@ -43,7 +43,7 @@ pub fn run_typed<E: StateEntity + std::fmt::Debug, S: StateStore>(
 use dolos_core::config::RootConfig;
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
 
     let state = crate::common::open_state_store(config)?;
 

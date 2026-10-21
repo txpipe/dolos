@@ -56,9 +56,12 @@ pub mod enums;
 pub mod ground_rules;
 
 use dolos_cardano::model::{
-    AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FirstMintChunk, FixedNamespace, GovState, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolState, ProposalState, StagedFirstMint, StagedStakeAddress, StakeAddressesRow, StakeLog,
+    AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
+    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepSightingState, DRepState,
+    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
+    PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
+    PoolEpochLog, PoolState, ProposalState, ScriptState,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -174,6 +177,15 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
+            enc_drep_sightings,
+            DRepSightingState,
+            canaries::drep_sighting_state,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/drep-sightings.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
             enc_dreps,
             DRepState,
             canaries::drep_state,
@@ -194,16 +206,16 @@ pub fn registry() -> Vec<Entry> {
             enc_epochs,
             EpochState,
             canaries::epoch_state,
-            // The one namespace whose history has moved. Revision 1 is
-            // retained as a decode witness and nothing more: it is *one* of
-            // the orderings pre-fix code could emit for
+            // Revision 1 is retained as a decode witness and nothing more: it
+            // is *one* of the orderings pre-fix code could emit for
             // `RollingStats::registered_pools`, which was a hash container and
             // therefore had no single encoding. Stores synced before the fix
             // hold rows of this shape, so today's reader must still accept
             // them — which is exactly what a retained canary asserts, and all
             // it asserts.
             // Revision 3 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
+            // the value is unchanged. Revision 4 appends the epoch's active
+            // stake and the ESTART shards' carried tally.
             &[
                 Pinned {
                     rev: 1,
@@ -217,11 +229,15 @@ pub fn registry() -> Vec<Entry> {
                     rev: 3,
                     hex: include_str!("goldens/epochs.rev3.hex"),
                 },
+                Pinned {
+                    rev: 4,
+                    hex: include_str!("goldens/epochs.rev4.hex"),
+                },
             ]
         ),
         entity_entry!(
             enc_eras,
-            EraSummary,
+            EraState,
             canaries::era_summary,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged.
@@ -237,7 +253,7 @@ pub fn registry() -> Vec<Entry> {
             ]
         ),
         entity_entry!(
-            enc_first_mints,
+            enc_first_mint_chunks,
             FirstMintChunk,
             canaries::first_mint_chunk,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
@@ -245,11 +261,11 @@ pub fn registry() -> Vec<Entry> {
             &[
                 Pinned {
                     rev: 1,
-                    hex: include_str!("goldens/first-mints.rev1.hex"),
+                    hex: include_str!("goldens/first-mint-chunks.rev1.hex"),
                 },
                 Pinned {
                     rev: 2,
-                    hex: include_str!("goldens/first-mints.rev2.hex"),
+                    hex: include_str!("goldens/first-mint-chunks.rev2.hex"),
                 },
             ]
         ),
@@ -259,7 +275,8 @@ pub fn registry() -> Vec<Entry> {
             canaries::gov_state,
             // Revision 3 appends each snapshot DRep's newest deregistration.
             // Revision 4 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
+            // the value is unchanged. Field 9, the dissolved committee, joins
+            // revision 4 in place: the v2 freeze resets every revision to 1.
             &[
                 Pinned {
                     rev: 1,
@@ -280,12 +297,27 @@ pub fn registry() -> Vec<Entry> {
             ]
         ),
         entity_entry!(
+            enc_metadata_labels,
+            MetadataLabelState,
+            canaries::metadata_label_state,
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/metadata-labels.rev1.hex"),
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/metadata-labels.rev2.hex"),
+                },
+            ]
+        ),
+        entity_entry!(
             enc_pending_mirs,
             PendingMirState,
             canaries::pending_mir_state,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/pending_mirs.rev1.hex"),
+                hex: include_str!("goldens/pending-mirs.rev1.hex"),
             }]
         ),
         entity_entry!(
@@ -294,16 +326,16 @@ pub fn registry() -> Vec<Entry> {
             canaries::pending_reward_state,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/pending_rewards.rev1.hex"),
+                hex: include_str!("goldens/pending-rewards.rev1.hex"),
             }]
         ),
         entity_entry!(
-            enc_policy_first_mints,
+            enc_policy_mint_chunks,
             PolicyMintChunk,
             canaries::policy_mint_chunk,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/policy-first-mints.rev1.hex"),
+                hex: include_str!("goldens/policy-mint-chunks.rev1.hex"),
             }]
         ),
         entity_entry!(
@@ -311,7 +343,8 @@ pub fn registry() -> Vec<Entry> {
             PoolState,
             canaries::pool_state,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
+            // the value is unchanged. Revision 3 appends the stake,
+            // delegators and live pledge each snapshot freezes with.
             &[
                 Pinned {
                     rev: 1,
@@ -320,6 +353,10 @@ pub fn registry() -> Vec<Entry> {
                 Pinned {
                     rev: 2,
                     hex: include_str!("goldens/pools.rev2.hex"),
+                },
+                Pinned {
+                    rev: 3,
+                    hex: include_str!("goldens/pools.rev3.hex"),
                 },
             ]
         ),
@@ -353,54 +390,144 @@ pub fn registry() -> Vec<Entry> {
             ]
         ),
         entity_entry!(
-            enc_staged_first_mints,
-            StagedFirstMint,
-            canaries::staged_first_mint,
+            enc_first_mints,
+            FirstMintSet,
+            canaries::first_mint_set,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged.
             &[
                 Pinned {
                     rev: 1,
-                    hex: include_str!("goldens/staged-first-mints.rev1.hex"),
+                    hex: include_str!("goldens/first-mints.rev1.hex"),
                 },
                 Pinned {
                     rev: 2,
-                    hex: include_str!("goldens/staged-first-mints.rev2.hex"),
+                    hex: include_str!("goldens/first-mints.rev2.hex"),
                 },
             ]
         ),
         entity_entry!(
-            enc_staged_stake_addresses,
-            StagedStakeAddress,
-            canaries::staged_stake_address,
+            enc_account_stats,
+            AccountStats,
+            canaries::account_stats,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/staged-stake-addresses.rev1.hex"),
+                hex: include_str!("goldens/account-stats.rev1.hex"),
             }]
         ),
         entity_entry!(
-            enc_stake_addresses,
-            StakeAddressesRow,
-            canaries::stake_addresses_row,
+            enc_address_stats,
+            AddressStats,
+            canaries::address_stats,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/stake-addresses.rev1.hex"),
+                hex: include_str!("goldens/address-stats.rev1.hex"),
             }]
         ),
         entity_entry!(
-            enc_stakes,
-            StakeLog,
-            canaries::stake_log,
+            enc_payment_address_chunks,
+            PaymentAddressChunk,
+            canaries::payment_address_chunk,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/payment-address-chunks.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_payment_addresses,
+            PaymentAddressSet,
+            canaries::payment_address_set,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/payment-addresses.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_asset_mint_chunks,
+            AssetMintChunk,
+            canaries::asset_mint_chunk,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/asset-mint-chunks.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_asset_mints,
+            AssetMintSet,
+            canaries::asset_mint_set,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/asset-mints.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_payment_stats,
+            PaymentStats,
+            canaries::payment_stats,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/payment-stats.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_account_addresses,
+            AccountAddressSet,
+            canaries::account_address_set,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/account-addresses.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_account_address_chunks,
+            AccountAddressChunk,
+            canaries::account_address_chunk,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/account-address-chunks.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_first_scripts,
+            FirstScriptSet,
+            canaries::first_script_set,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/first-scripts.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_first_script_chunks,
+            FirstScriptChunk,
+            canaries::first_script_chunk,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/first-script-chunks.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_scripts,
+            ScriptState,
+            canaries::script_state,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/scripts.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
+            enc_pool_epochs,
+            PoolEpochLog,
+            canaries::pool_epoch_log,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged.
             &[
                 Pinned {
                     rev: 1,
-                    hex: include_str!("goldens/stakes.rev1.hex"),
+                    hex: include_str!("goldens/pool-epochs.rev1.hex"),
                 },
                 Pinned {
                     rev: 2,
-                    hex: include_str!("goldens/stakes.rev2.hex"),
+                    hex: include_str!("goldens/pool-epochs.rev2.hex"),
                 },
             ]
         ),

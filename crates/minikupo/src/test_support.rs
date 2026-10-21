@@ -5,11 +5,7 @@ use axum::{
     http::{header, HeaderMap, Method, Request, StatusCode},
     Router,
 };
-use dolos_core::{
-    config::{CardanoConfig, MinikupoConfig},
-    import::ImportExt as _,
-    Domain,
-};
+use dolos_core::{config::MinikupoConfig, import::ImportExt as _, Domain};
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig, SyntheticVectors},
     toy_domain::ToyDomain,
@@ -32,7 +28,7 @@ impl TestDomainBuilder {
         let min_slot = {
             let temp = ToyDomain::new_with_genesis_and_config(
                 genesis.clone(),
-                CardanoConfig::default(),
+                dolos_cardano::CardanoLogicConfig::default(),
                 None,
                 None,
             );
@@ -61,7 +57,7 @@ impl TestDomainBuilder {
 
 pub struct TestApp {
     router: Router,
-    _domain: dolos_testing::faults::FaultyToyDomain,
+    domain: dolos_testing::faults::FaultyToyDomain,
     vectors: SyntheticVectors,
 }
 
@@ -87,8 +83,12 @@ impl TestApp {
 
     pub fn new_empty() -> Self {
         let genesis = Arc::new(dolos_cardano::include::preview::load());
-        let domain =
-            ToyDomain::new_with_genesis_and_config(genesis, CardanoConfig::default(), None, None);
+        let domain = ToyDomain::new_with_genesis_and_config(
+            genesis,
+            dolos_cardano::CardanoLogicConfig::default(),
+            None,
+            None,
+        );
 
         let domain = dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None);
         let router = build_router_with_facade(Facade {
@@ -98,7 +98,7 @@ impl TestApp {
 
         Self {
             router,
-            _domain: domain,
+            domain,
             vectors: SyntheticVectors {
                 address: String::new(),
                 stake_address: String::new(),
@@ -141,7 +141,7 @@ impl TestApp {
 
         Self {
             router,
-            _domain: domain,
+            domain,
             vectors,
         }
     }
@@ -188,6 +188,10 @@ impl TestApp {
 
     pub fn vectors(&self) -> &SyntheticVectors {
         &self.vectors
+    }
+
+    pub fn domain(&self) -> &dolos_testing::faults::FaultyToyDomain {
+        &self.domain
     }
 }
 

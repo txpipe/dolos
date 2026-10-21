@@ -15,8 +15,8 @@ use pallas::{crypto::hash::Hash, ledger::primitives::Epoch};
 
 use super::{Period, Segment};
 use crate::{
-    indexes::SlotOrder, AssetKey, AssetState, ChainSummary, FirstMintChunk, FixedNamespace as _,
-    PolicyKey, PolicyMintChunk, StagedFirstMint,
+    indexes::SlotOrder, AssetKey, AssetState, ChainSummary, FirstMintChunk, FirstMintSet,
+    FixedNamespace as _, PolicyKey, PolicyMintChunk,
 };
 
 /// Asset states read per state call when telling first mints from re-mints.
@@ -30,9 +30,9 @@ fn policy_key(policy: &Hash<28>, chunk: u32) -> (PolicyKey, u32) {
 /// `initial_slot` is the row's slot.
 fn first_mint_flags<'a, S: StateStore>(
     state: &S,
-    rows: impl IntoIterator<Item = &'a StagedFirstMint>,
+    rows: impl IntoIterator<Item = &'a FirstMintSet>,
 ) -> Result<Vec<bool>, ChainError> {
-    let rows: Vec<&StagedFirstMint> = rows.into_iter().collect();
+    let rows: Vec<&FirstMintSet> = rows.into_iter().collect();
     let mut flags = Vec::with_capacity(rows.len());
 
     for batch in rows.chunks(LOOKUP_BATCH) {
@@ -62,7 +62,7 @@ pub(crate) fn seal<D: Domain>(
 ) -> Result<(), ChainError> {
     let mut rows = Vec::new();
 
-    for row in state.iter_entities_typed::<StagedFirstMint>(None)? {
+    for row in state.iter_entities_typed::<FirstMintSet>(None)? {
         let (key, row) = row?;
 
         if sealable(row.epoch) {
@@ -76,7 +76,7 @@ pub(crate) fn seal<D: Domain>(
 
     let flags = first_mint_flags(state, rows.iter().map(|(_, row)| row))?;
 
-    let mut epochs: BTreeMap<Epoch, Vec<&StagedFirstMint>> = BTreeMap::new();
+    let mut epochs: BTreeMap<Epoch, Vec<&FirstMintSet>> = BTreeMap::new();
 
     for ((_, row), first) in rows.iter().zip(&flags) {
         if *first {
@@ -93,7 +93,7 @@ pub(crate) fn seal<D: Domain>(
         }
 
         mints.sort_by_key(|row| row.mint_order());
-        let subjects = mints.into_iter().map(StagedFirstMint::subject).collect();
+        let subjects = mints.into_iter().map(FirstMintSet::subject).collect();
 
         let writer = archive.start_writer()?;
 
@@ -112,44 +112,38 @@ pub(crate) fn seal<D: Domain>(
         .zip(flags)
         .map(|((key, row), first)| Ok((key, (row, first))));
 
-    super::seal_groups::<D, StagedFirstMint, _, _, _>(
-        state,
-        archive,
-        rows,
-        batch,
-        |chunk, writer| {
-            let mut groups: BTreeMap<(Epoch, Hash<28>), Vec<&StagedFirstMint>> = BTreeMap::new();
+    super::seal_groups::<D, FirstMintSet, _, _, _>(state, archive, rows, batch, |chunk, writer| {
+        let mut groups: BTreeMap<(Epoch, Hash<28>), Vec<&FirstMintSet>> = BTreeMap::new();
 
-            for (_, (row, first)) in chunk {
-                if *first {
-                    groups.entry((row.epoch, row.policy)).or_default().push(row);
-                }
+        for (_, (row, first)) in chunk {
+            if *first {
+                groups.entry((row.epoch, row.policy)).or_default().push(row);
             }
+        }
 
-            for ((epoch, policy), mut mints) in groups {
-                mints.sort_by_key(|row| row.mint_order());
-                let names = mints.into_iter().map(|row| row.name.clone()).collect();
+        for ((epoch, policy), mut mints) in groups {
+            mints.sort_by_key(|row| row.mint_order());
+            let names = mints.into_iter().map(|row| row.name.clone()).collect();
 
-                for (i, chunk) in super::chunk::<PolicyMintChunk>(names)
-                    .into_iter()
-                    .enumerate()
-                {
-                    let slot = chain.epoch_start(epoch);
-                    writer.write_log_typed(slot, &policy_key(&policy, i as u32), &chunk)?;
-                }
+            for (i, chunk) in super::chunk::<PolicyMintChunk>(names)
+                .into_iter()
+                .enumerate()
+            {
+                let slot = chain.epoch_start(epoch);
+                writer.write_log_typed(slot, &policy_key(&policy, i as u32), &chunk)?;
             }
+        }
 
-            Ok(())
-        },
-    )
+        Ok(())
+    })
 }
 
 /// Per-epoch segments of one list: staged epochs keep their first mints in
 /// mint order, sealed ones their count.
 fn segments<S: StateStore>(
     state: &S,
-    periods: BTreeMap<Epoch, Period<StagedFirstMint, EntityValue>>,
-    item: impl Fn(StagedFirstMint) -> Vec<u8>,
+    periods: BTreeMap<Epoch, Period<FirstMintSet, EntityValue>>,
+    item: impl Fn(FirstMintSet) -> Vec<u8>,
 ) -> Result<Vec<Segment<Vec<u8>>>, ChainError> {
     let mut out = Vec::with_capacity(periods.len());
 
@@ -158,7 +152,7 @@ fn segments<S: StateStore>(
             Period::Staged(rows) => {
                 let flags = first_mint_flags(state, &rows)?;
 
-                let mut mints: Vec<StagedFirstMint> = rows
+                let mut mints: Vec<FirstMintSet> = rows
                     .into_iter()
                     .zip(flags)
                     .filter_map(|(row, first)| first.then_some(row))
@@ -192,7 +186,7 @@ pub fn all_page<D: Domain>(
 ) -> Result<Vec<Vec<u8>>, ChainError> {
     let (state, archive) = (domain.state(), domain.archive());
 
-    let mut staged = super::read_staged::<_, StagedFirstMint>(state, RangeOf::all())?;
+    let mut staged = super::read_staged::<_, FirstMintSet>(state, RangeOf::all())?;
     staged.retain(|epoch, _| epochs.contains(epoch));
 
     let sealed = super::read_sealed::<_, FirstMintChunk>(archive, chain, epochs, |_| 0)?;
@@ -218,7 +212,7 @@ pub fn policy_page<D: Domain>(
     let (state, archive) = (domain.state(), domain.archive());
 
     let mut staged =
-        super::read_staged::<_, StagedFirstMint>(state, RangeOf::prefix(&PolicyKey(*policy)))?;
+        super::read_staged::<_, FirstMintSet>(state, RangeOf::prefix(&PolicyKey(*policy)))?;
 
     staged.retain(|epoch, _| epochs.contains(epoch));
 
@@ -255,7 +249,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::periods::{is_sealable, StagedKey, StagedRow as _};
+    use crate::periods::{is_sealable, GroupKey, GroupRow as _};
 
     /// The epoch the sealing boundary opens: 5 and 6 are immutable at it, 7 is
     /// not.
@@ -285,7 +279,7 @@ mod tests {
 
         let mut rows = Vec::new();
         let mut row = |policy: [u8; 28], name: String, epoch: Epoch, offset: u64, tx: u32| {
-            rows.push(StagedFirstMint {
+            rows.push(FirstMintSet {
                 policy: policy.into(),
                 name: name.into_bytes(),
                 epoch,
@@ -320,7 +314,7 @@ mod tests {
         }
 
         // P's "A" again in epoch 6: staged, but its asset was first minted in 5
-        let remint = StagedFirstMint {
+        let remint = FirstMintSet {
             policy: P.into(),
             name: b"A".to_vec(),
             epoch: 6,
@@ -372,10 +366,10 @@ mod tests {
         (all, policies)
     }
 
-    fn staged(domain: &ToyDomain) -> Vec<(StagedKey<PolicyKey, AssetKey>, StagedFirstMint)> {
+    fn staged(domain: &ToyDomain) -> Vec<(GroupKey<PolicyKey, AssetKey>, FirstMintSet)> {
         domain
             .state()
-            .iter_entities_typed::<StagedFirstMint>(None)
+            .iter_entities_typed::<FirstMintSet>(None)
             .unwrap()
             .map(Result::unwrap)
             .collect()
@@ -535,8 +529,8 @@ mod tests {
         let (state, archive) = (domain.state(), domain.archive());
 
         let staged_all =
-            crate::periods::read_staged::<_, StagedFirstMint>(state, RangeOf::all()).unwrap();
-        let staged_q = crate::periods::read_staged::<_, StagedFirstMint>(
+            crate::periods::read_staged::<_, FirstMintSet>(state, RangeOf::all()).unwrap();
+        let staged_q = crate::periods::read_staged::<_, FirstMintSet>(
             state,
             RangeOf::prefix(&PolicyKey(Q.into())),
         )

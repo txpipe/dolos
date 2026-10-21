@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicU32, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicU32, AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use dolos_core::{
@@ -34,6 +37,12 @@ pub enum TestFault {
     /// stop a work unit between the two commits of a phase, whichever store
     /// that phase commits first.
     CrashAfterCommits(u32),
+    /// [`StateStore::utxos_by_tag`] and [`StateStore::get_utxos`] sleep this
+    /// long before answering, as a heavy lookup on a large store would.
+    SlowUtxoReads(Duration),
+    /// [`StateStore::iter_entities`] sleeps this long before answering, as a
+    /// scan of a large store would.
+    SlowStateScans(Duration),
 }
 
 /// Whether a commit under `fault` comes after the crash, counting it if not.
@@ -76,6 +85,11 @@ impl FaultyToyDomain {
             wal,
         }
     }
+
+    /// How many entity scans the state store has started.
+    pub fn entity_scans(&self) -> usize {
+        self.state.scans.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Clone)]
@@ -83,6 +97,7 @@ pub struct FaultyStateStore {
     inner: MemoryStateStore,
     fault: TestFault,
     commits: Arc<AtomicU32>,
+    scans: Arc<AtomicUsize>,
 }
 
 impl FaultyStateStore {
@@ -95,6 +110,7 @@ impl FaultyStateStore {
             inner,
             fault,
             commits,
+            scans: Default::default(),
         }
     }
 
@@ -108,6 +124,18 @@ impl FaultyStateStore {
 
     fn fault_err(&self) -> StateError {
         StateError::InternalStoreError("fault injection: state store".into())
+    }
+
+    fn slow_utxo_read(&self) {
+        if let TestFault::SlowUtxoReads(delay) = self.fault {
+            std::thread::sleep(delay);
+        }
+    }
+
+    fn slow_state_scan(&self) {
+        if let TestFault::SlowStateScans(delay) = self.fault {
+            std::thread::sleep(delay);
+        }
     }
 }
 
@@ -154,6 +182,8 @@ impl StateStore for FaultyStateStore {
         if self.should_fault_ns(ns) {
             return Err(self.fault_err());
         }
+        self.scans.fetch_add(1, Ordering::SeqCst);
+        self.slow_state_scan();
         self.inner.iter_entities(ns, range)
     }
 
@@ -172,6 +202,7 @@ impl StateStore for FaultyStateStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
+        self.slow_utxo_read();
         self.inner.get_utxos(refs)
     }
 
@@ -183,6 +214,7 @@ impl StateStore for FaultyStateStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
+        self.slow_utxo_read();
         self.inner.utxos_by_tag(dimension, key)
     }
 
@@ -596,13 +628,18 @@ impl Domain for FaultyToyDomain {
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
     type Mempool = Mempool;
+    type Cache = <ToyDomain as Domain>::Cache;
 
     fn storage_config(&self) -> &dolos_core::config::StorageConfig {
         self.inner.storage_config()
     }
 
-    fn sync_config(&self) -> &dolos_core::config::SyncConfig {
-        self.inner.sync_config()
+    fn history_config(&self) -> &dolos_core::config::HistoryConfig {
+        self.inner.history_config()
+    }
+
+    fn mempool_config(&self) -> &dolos_core::config::MempoolConfig {
+        self.inner.mempool_config()
     }
 
     fn genesis(&self) -> Arc<dolos_core::Genesis> {
@@ -610,6 +647,10 @@ impl Domain for FaultyToyDomain {
             .as_ref()
             .cloned()
             .unwrap_or_else(|| self.inner.genesis())
+    }
+
+    fn query_limiter(&self) -> &dolos_core::QueryLimiter {
+        self.inner.query_limiter()
     }
 
     fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain> {
@@ -634,6 +675,10 @@ impl Domain for FaultyToyDomain {
 
     fn mempool(&self) -> &Self::Mempool {
         self.inner.mempool()
+    }
+
+    fn cache(&self) -> &Self::Cache {
+        self.inner.cache()
     }
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {

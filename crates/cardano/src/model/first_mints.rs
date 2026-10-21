@@ -6,16 +6,17 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use super::AssetKey;
-use crate::periods::{ChunkRow, StageIfAbsent, StagedKey, StagedRow};
+use crate::periods::{ChunkRow, GroupKey, GroupRow, StageIfAbsent};
 
-/// The first mint of an asset within one epoch, staged until the epoch seals.
+/// The first mint of an asset within one epoch, held in state until the epoch
+/// seals into a [`FirstMintChunk`] and a [`PolicyMintChunk`].
 ///
-/// Keyed `policy ‖ epoch ‖ asset key`, so one prefix scan returns every staged
-/// epoch of a policy, and nothing else. Re-mints of an asset
+/// Keyed `policy ‖ epoch ‖ asset key`, so one prefix scan returns every
+/// unsealed epoch of a policy, and nothing else. Re-mints of an asset
 /// first minted in an earlier epoch are staged too; readers and the seal keep
 /// only the rows whose slot is the asset's `initial_slot`.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
-pub struct StagedFirstMint {
+pub struct FirstMintSet {
     #[n(0)]
     pub policy: Hash<28>,
 
@@ -43,12 +44,12 @@ hash_key!(
 display_as_stored!(PolicyKey);
 
 entity_boilerplate!(
-    StagedFirstMint,
-    "staged-first-mints",
-    state = StagedKey<PolicyKey, AssetKey>
+    FirstMintSet,
+    "first-mints",
+    state = GroupKey<PolicyKey, AssetKey>
 );
 
-impl StagedFirstMint {
+impl FirstMintSet {
     pub fn subject(&self) -> Vec<u8> {
         [self.policy.as_slice(), self.name.as_slice()].concat()
     }
@@ -65,21 +66,17 @@ impl StagedFirstMint {
     }
 }
 
-impl StagedRow for StagedFirstMint {
-    fn key(&self) -> StagedKey<PolicyKey, AssetKey> {
-        StagedKey {
+impl GroupRow for FirstMintSet {
+    fn key(&self) -> GroupKey<PolicyKey, AssetKey> {
+        GroupKey {
             group: PolicyKey(self.policy),
             epoch: self.epoch,
             member: self.asset_key(),
         }
     }
-
-    fn epoch(&self) -> Epoch {
-        self.epoch
-    }
 }
 
-pub type StageFirstMint = StageIfAbsent<StagedFirstMint>;
+pub type StageFirstMint = StageIfAbsent<FirstMintSet>;
 
 /// One chunk of the subjects first minted in an epoch, in mint order.
 ///
@@ -95,7 +92,7 @@ pub struct FirstMintChunk {
     pub subjects: Vec<ByteVec>,
 }
 
-entity_boilerplate!(FirstMintChunk, "first-mints", log = u32);
+entity_boilerplate!(FirstMintChunk, "first-mint-chunks", log = u32);
 
 impl ChunkRow for FirstMintChunk {
     type Item = Vec<u8>;
@@ -128,7 +125,7 @@ pub struct PolicyMintChunk {
 
 entity_boilerplate!(
     PolicyMintChunk,
-    "policy-first-mints",
+    "policy-mint-chunks",
     log = (PolicyKey, u32)
 );
 
@@ -154,21 +151,21 @@ pub(crate) mod testing {
     use proptest::prelude::*;
 
     prop_compose! {
-        pub fn any_staged_first_mint()(
+        pub fn any_first_mint_set()(
             policy in root::any_hash_28(),
             name in prop::collection::vec(any::<u8>(), 0..32),
             epoch in 0u64..1000,
             slot in root::any_slot(),
             tx_index in 0u32..500,
-        ) -> StagedFirstMint {
-            StagedFirstMint { policy, name, epoch, slot, tx_index }
+        ) -> FirstMintSet {
+            FirstMintSet { policy, name, epoch, slot, tx_index }
         }
     }
 }
 
 #[cfg(test)]
 mod prop_tests {
-    use super::testing::any_staged_first_mint;
+    use super::testing::any_first_mint_set;
     use super::*;
     use crate::model::testing::{assert_delta_roundtrip, assert_delta_serde_roundtrip};
     use proptest::prelude::*;
@@ -176,8 +173,8 @@ mod prop_tests {
     proptest! {
         #[test]
         fn stage_first_mint_roundtrip(
-            entity in prop::option::of(any_staged_first_mint()),
-            row in any_staged_first_mint(),
+            entity in prop::option::of(any_first_mint_set()),
+            row in any_first_mint_set(),
         ) {
             assert_delta_roundtrip(entity.clone(), StageFirstMint::new(row.clone()));
             assert_delta_serde_roundtrip(entity, StageFirstMint::new(row));
@@ -186,14 +183,14 @@ mod prop_tests {
 
     #[test]
     fn staging_keeps_the_first_row() {
-        let first = StagedFirstMint {
+        let first = FirstMintSet {
             policy: [1u8; 28].into(),
             name: b"A".to_vec(),
             epoch: 7,
             slot: 100,
             tx_index: 0,
         };
-        let later = StagedFirstMint {
+        let later = FirstMintSet {
             slot: 200,
             ..first.clone()
         };

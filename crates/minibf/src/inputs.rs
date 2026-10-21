@@ -2,9 +2,9 @@
 //!
 //! Several endpoints scan a range of blocks and, for every tx in them, need the
 //! output each input consumes (`/addresses/{address}/transactions`,
-//! `/addresses/{address}/txs`, `/addresses/{address}/total`,
-//! `/assets/{subject}/transactions`). Resolving an input means fetching the
-//! CBOR of the tx that produced it and reading the output at the input's index.
+//! `/addresses/{address}/txs`, `/assets/{subject}/transactions`). Resolving an
+//! input means fetching the CBOR of the tx that produced it and reading the
+//! output at the input's index.
 //!
 //! Done naively that is one fetch plus one full decode per input, so a
 //! dependency tx referenced by N inputs is paid for N times. This module keeps
@@ -26,15 +26,15 @@
 //! still needed are fetched again. That caps what a full-history scan of a
 //! high-activity address carries between blocks.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::http::StatusCode;
 use itertools::Itertools as _;
-use pallas::ledger::traverse::{MultiEraInput, MultiEraOutput, MultiEraTx};
+use pallas::ledger::traverse::{MultiEraBlock, MultiEraInput, MultiEraOutput, MultiEraTx};
 
-use dolos_core::{Domain, EraCbor, TxHash};
+use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, TxHash};
 
-use crate::{Facade, TxMap};
+use crate::{pagination::Pagination, Facade, TxMap};
 
 /// How many dependency txs an [`InputDeps`] carries from one prepared batch to
 /// the next.
@@ -98,6 +98,21 @@ impl InputDeps {
             .unique()
             .collect();
 
+        self.fetch(domain, required).await?;
+
+        Ok(InputResolver::new(&self.txs))
+    }
+
+    /// Fetch whichever of the distinct hashes in `required` the store does not
+    /// hold yet.
+    pub async fn fetch<D>(
+        &mut self,
+        domain: &Facade<D>,
+        required: Vec<TxHash>,
+    ) -> Result<(), StatusCode>
+    where
+        D: Domain + Clone + Send + Sync + 'static,
+    {
         let required_len = required.len();
 
         let mut missing: Vec<TxHash> = required
@@ -126,7 +141,16 @@ impl InputDeps {
             "prepared input dependencies"
         );
 
-        Ok(InputResolver::new(&self.txs))
+        Ok(())
+    }
+
+    /// An owned copy of the held txs among `hashes`, for a resolver that runs
+    /// away from the store.
+    pub fn held(&self, hashes: &[TxHash]) -> TxMap {
+        hashes
+            .iter()
+            .filter_map(|hash| Some((*hash, self.txs.get(hash)?.clone())))
+            .collect()
     }
 }
 
@@ -138,7 +162,7 @@ pub struct InputResolver<'a> {
 }
 
 impl<'a> InputResolver<'a> {
-    fn new(txs: &'a TxMap) -> Self {
+    pub fn new(txs: &'a TxMap) -> Self {
         Self {
             txs,
             decoded: HashMap::new(),
@@ -257,6 +281,85 @@ where
     for_each_touched_output(resolver, tx, matches)
 }
 
+/// A tx that a block scan matched.
+pub struct MatchedTx {
+    pub hash: TxHash,
+    pub index: usize,
+    pub block_number: u64,
+    pub block_slot: BlockSlot,
+}
+
+/// The txs of `block` that `matches`, in block order, leaving out those that
+/// `pagination` skips.
+///
+/// The decode and the matching run on the blocking pool under the query
+/// limiter. The txs whose outputs the inputs consume are fetched into `deps`
+/// between the two blocking tasks, so no permit waits on a fetch.
+pub async fn match_block_txs<D, F>(
+    domain: &Facade<D>,
+    deps: &mut InputDeps,
+    pagination: &Pagination,
+    block: BlockBody,
+    matches: F,
+) -> Result<Vec<MatchedTx>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    F: Fn(&mut InputResolver<'_>, &MultiEraTx<'_>) -> Result<bool, StatusCode> + Send + 'static,
+{
+    let block = Arc::new(block);
+
+    let required = {
+        let block = block.clone();
+        let pagination = pagination.clone();
+
+        domain
+            .blocking(move |_| {
+                let block =
+                    MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                // only the txs that will actually be scanned contribute
+                // dependencies
+                let required: Vec<TxHash> = block
+                    .txs()
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| !pagination.should_skip(block.number(), *idx))
+                    .flat_map(|(_, tx)| tx.consumes().into_iter().map(|input| *input.hash()))
+                    .unique()
+                    .collect();
+
+                Ok(required)
+            })
+            .await?
+    };
+
+    deps.fetch(domain, required.clone()).await?;
+    let held = deps.held(&required);
+    let pagination = pagination.clone();
+
+    domain
+        .blocking(move |_| {
+            let block =
+                MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let mut resolver = InputResolver::new(&held);
+            let mut matched = vec![];
+
+            for (idx, tx) in block.txs().iter().enumerate() {
+                if !pagination.should_skip(block.number(), idx) && matches(&mut resolver, tx)? {
+                    matched.push(MatchedTx {
+                        hash: tx.hash(),
+                        index: idx,
+                        block_number: block.number(),
+                        block_slot: block.slot(),
+                    });
+                }
+            }
+
+            Ok(matched)
+        })
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use dolos_core::config::MinibfConfig;
@@ -289,7 +392,6 @@ mod tests {
         let facade = Facade {
             inner: domain,
             config: MinibfConfig::new("[::]:0".parse().expect("invalid listen address")),
-            cache: crate::cache::CacheService::default(),
         };
 
         (facade, vectors)

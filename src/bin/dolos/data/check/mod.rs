@@ -171,7 +171,7 @@ pub fn run(
     feedback: &crate::feedback::Feedback,
 ) -> miette::Result<()> {
     let stores = crate::common::open_data_stores(config)?;
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = crate::common::open_genesis(config)?;
 
     let mut issues: Vec<Issue> = Vec::new();
     let mut timings: Vec<Timing> = Vec::new();
@@ -503,6 +503,9 @@ mod tests {
                 pool_metadata: None,
             },
             is_new: false,
+            stake: None,
+            delegators: None,
+            live_pledge: None,
         };
 
         let pool = PoolState {

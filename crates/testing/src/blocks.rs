@@ -115,10 +115,24 @@ pub fn make_conway_block_with_txs(
     )>,
     auxiliary_data: Option<alonzo::AuxiliaryData>,
 ) -> (ChainPoint, RawBlock) {
+    make_conway_block_with_txs_at(slot, 1, Some(Hash::from([9u8; 32])), txs, auxiliary_data)
+}
+
+/// [`make_conway_block_with_txs`] at a given height, after `prev_hash`.
+pub fn make_conway_block_with_txs_at(
+    slot: BlockSlot,
+    block_number: u64,
+    prev_hash: Option<Hash<32>>,
+    txs: Vec<(
+        pallas::ledger::primitives::conway::TransactionBody<'static>,
+        bool,
+    )>,
+    auxiliary_data: Option<alonzo::AuxiliaryData>,
+) -> (ChainPoint, RawBlock) {
     let header_body = HeaderBody {
-        block_number: 1,
+        block_number,
         slot,
-        prev_hash: Some(Hash::from([9u8; 32])),
+        prev_hash,
         issuer_vkey: Bytes::from(vec![0x10, 0x11]),
         vrf_vkey: Bytes::from(vec![0x12, 0x13]),
         vrf_result: VrfCert(Bytes::from(vec![0x14]), Bytes::from(vec![0x15])),
@@ -182,6 +196,47 @@ pub fn make_conway_block_with_txs(
     let chain_point = ChainPoint::Specific(slot, hash);
 
     (chain_point, Arc::new(raw_bytes))
+}
+
+/// Makes a Conway block at `slot` with one transaction. The transaction has
+/// no inputs and no outputs, and it contains `metadata`.
+///
+/// If `valid` is `true`, the transaction passes phase 2. If `valid` is
+/// `false`, the transaction fails phase 2.
+pub fn make_conway_block_with_metadata(
+    slot: BlockSlot,
+    metadata: Vec<(u64, alonzo::Metadatum)>,
+    valid: bool,
+) -> (ChainPoint, RawBlock) {
+    let body = pallas::ledger::primitives::conway::TransactionBody {
+        inputs: pallas::codec::utils::Set::from(vec![]),
+        outputs: vec![],
+        fee: 170_000,
+        ttl: None,
+        certificates: None,
+        withdrawals: None,
+        auxiliary_data_hash: None,
+        validity_interval_start: None,
+        mint: None,
+        script_data_hash: None,
+        collateral: None,
+        required_signers: None,
+        network_id: None,
+        collateral_return: None,
+        total_collateral: None,
+        reference_inputs: None,
+        voting_procedures: None,
+        proposal_procedures: None,
+        treasury_value: None,
+        donation: None,
+    };
+
+    let aux = alonzo::AuxiliaryData::ShelleyMa(alonzo::ShelleyMaAuxiliaryData {
+        transaction_metadata: metadata.into_iter().collect(),
+        auxiliary_scripts: None,
+    });
+
+    make_conway_block_with_tx(slot, body, Some(aux), valid)
 }
 
 /// Number of slots in a Byron epoch on the default genesis values pallas uses

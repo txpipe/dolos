@@ -24,7 +24,7 @@ use std::ops::Range;
 use dolos_core::{
     key_hash, ArchiveError, ArchiveIndexDelta, BlockSlot, KeyHash, Tag, TagDimension, TagRecord,
 };
-use fjall::{Keyspace, OwnedWriteBatch, Readable, Snapshot};
+use fjall::{Iter, Keyspace, OwnedWriteBatch, Readable, Snapshot};
 
 use crate::archive::scan::{DimensionScan, ScanTarget};
 use crate::keys::{
@@ -61,18 +61,6 @@ fn build_block_tag_key_for_dim(
 fn build_block_tag_key(dimension: &str, key_hash: KeyHash, slot: u64) -> [u8; BLOCK_TAG_KEY_SIZE] {
     let dim_hash = hash_dimension(dim_prefix::BLOCK, dimension);
     build_block_tag_key_for_dim(dim_hash, key_hash, slot)
-}
-
-/// Build prefix for block tag queries: `[dim_hash:8][key_hash:8]`
-fn build_block_tag_prefix(
-    dimension: &str,
-    key_hash: KeyHash,
-) -> [u8; DIM_HASH_SIZE + HASH_KEY_SIZE] {
-    let dim_hash = hash_dimension(dim_prefix::BLOCK, dimension);
-    let mut prefix = [0u8; DIM_HASH_SIZE + HASH_KEY_SIZE];
-    prefix[..DIM_HASH_SIZE].copy_from_slice(&dim_hash);
-    prefix[DIM_HASH_SIZE..].copy_from_slice(&key_hash);
-    prefix
 }
 
 /// Decode slot from block tag key (last 8 bytes)
@@ -216,18 +204,15 @@ pub fn undo(
 // ============================================================================
 
 /// Slot iterator for block tag queries.
-/// Wraps a fjall prefix iterator and filters by slot range.
+/// Wraps a bounded fjall range iterator and decodes slots on demand.
 pub struct SlotIterator {
-    /// Collected slots from prefix scan
-    slots: Vec<BlockSlot>,
-    /// Current position for forward iteration
-    front: usize,
-    /// Current position for backward iteration
-    back: usize,
+    inner: Option<Iter>,
 }
 
 impl SlotIterator {
-    /// Create a new slot iterator from an archive-tags keyspace prefix scan.
+    /// Create a slot iterator over the inclusive `[start_slot, end_slot]`
+    /// range of one tag. A reversed interval yields nothing. Read errors
+    /// surface while iterating, not here.
     ///
     /// The dimension string is passed directly (chain-agnostic), and the key
     /// arrives already in its stored form: the caller derives it with
@@ -241,29 +226,15 @@ impl SlotIterator {
         start_slot: BlockSlot,
         end_slot: BlockSlot,
     ) -> Result<Self, Error> {
-        let prefix = build_block_tag_prefix(dimension, key_hash);
-        let mut slots = Vec::new();
-
-        // Using Readable::prefix() enables snapshot-based iteration
-        for guard in readable.prefix(keyspace, prefix) {
-            let key = guard.key()?;
-
-            if key.len() >= BLOCK_TAG_KEY_SIZE {
-                let slot = decode_block_tag_slot(&key);
-
-                if slot >= start_slot && slot <= end_slot {
-                    slots.push(slot);
-                }
-            }
+        if start_slot > end_slot {
+            return Ok(Self { inner: None });
         }
 
-        // Slots are already sorted because keys are sorted lexicographically
-        // and we use big-endian encoding
-        let len = slots.len();
+        let lower = build_block_tag_key(dimension, key_hash, start_slot);
+        let upper = build_block_tag_key(dimension, key_hash, end_slot);
+
         Ok(Self {
-            slots,
-            front: 0,
-            back: len,
+            inner: Some(readable.range(keyspace, lower..=upper)),
         })
     }
 }
@@ -272,24 +243,34 @@ impl Iterator for SlotIterator {
     type Item = Result<BlockSlot, ArchiveError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.front < self.back {
-            let slot = self.slots[self.front];
-            self.front += 1;
-            Some(Ok(slot))
-        } else {
-            None
+        let inner = self.inner.as_mut()?;
+
+        loop {
+            let guard = inner.next()?;
+            match guard.key() {
+                Ok(key) if key.len() >= BLOCK_TAG_KEY_SIZE => {
+                    return Some(Ok(decode_block_tag_slot(&key)))
+                }
+                Ok(_) => continue,
+                Err(error) => return Some(Err(Error::Fjall(error).into())),
+            }
         }
     }
 }
 
 impl DoubleEndedIterator for SlotIterator {
     fn next_back(&mut self) -> Option<Self::Item> {
-        if self.front < self.back {
-            self.back -= 1;
-            let slot = self.slots[self.back];
-            Some(Ok(slot))
-        } else {
-            None
+        let inner = self.inner.as_mut()?;
+
+        loop {
+            let guard = inner.next_back()?;
+            match guard.key() {
+                Ok(key) if key.len() >= BLOCK_TAG_KEY_SIZE => {
+                    return Some(Ok(decode_block_tag_slot(&key)))
+                }
+                Ok(_) => continue,
+                Err(error) => return Some(Err(Error::Fjall(error).into())),
+            }
         }
     }
 }
@@ -445,16 +426,6 @@ mod tests {
     }
 
     #[test]
-    fn test_block_tag_prefix() {
-        let tag_key = stored("address", b"test_address");
-        let key = build_block_tag_key("address", tag_key, 12345);
-        let prefix = build_block_tag_prefix("address", tag_key);
-
-        // Key should start with prefix
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
     fn test_utxo_block_separation() {
         // UTxO and block tags with same dimension name should have different prefixes
         let utxo_dim_hash = hash_dimension(dim_prefix::UTXO, "address");
@@ -528,5 +499,245 @@ mod tests {
 
         // Every other dimension takes a key of any width.
         assert!(key_hash("address", b"seven!!").is_some());
+    }
+}
+
+#[cfg(test)]
+mod slot_iterator_tests {
+    use fjall::{Database, KeyspaceCreateOptions, PersistMode};
+
+    use super::*;
+
+    const DIM: &str = "address";
+    const TAG: KeyHash = [0x44; 8];
+    const ORACLE: [u64; 8] = [0, 1, 2, 10, 11, 42, u64::MAX - 1, u64::MAX];
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        db: Database,
+        keyspace: Keyspace,
+    }
+
+    impl Fixture {
+        fn insert(&self, dimension: &str, key_hash: KeyHash, slots: &[u64]) {
+            let mut batch = self.db.batch();
+            for slot in slots {
+                batch.insert(
+                    &self.keyspace,
+                    build_block_tag_key(dimension, key_hash, *slot),
+                    [],
+                );
+            }
+            batch.commit().unwrap();
+        }
+
+        fn iter(&self, key_hash: KeyHash, start: u64, end: u64) -> SlotIterator {
+            SlotIterator::new(
+                &self.db.snapshot(),
+                &self.keyspace,
+                DIM,
+                key_hash,
+                start,
+                end,
+            )
+            .unwrap()
+        }
+
+        fn forward(&self, key_hash: KeyHash, start: u64, end: u64) -> Vec<u64> {
+            self.iter(key_hash, start, end)
+                .collect::<Result<_, _>>()
+                .unwrap()
+        }
+
+        fn reverse(&self, key_hash: KeyHash, start: u64, end: u64) -> Vec<u64> {
+            self.iter(key_hash, start, end)
+                .rev()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        }
+    }
+
+    /// The oracle tag, inserted twice, between neighbours on every side: the
+    /// tag hashes just below and above it at the extreme slots, and the same
+    /// tag bytes under another dimension.
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::builder(dir.path()).open().unwrap();
+        let keyspace = db
+            .keyspace("archive-tags", KeyspaceCreateOptions::default)
+            .unwrap();
+        let fixture = Fixture {
+            _dir: dir,
+            db,
+            keyspace,
+        };
+
+        fixture.insert(DIM, TAG, &ORACLE);
+        fixture.insert(DIM, TAG, &ORACLE);
+
+        let mut below = TAG;
+        below[7] -= 1;
+        let mut above = TAG;
+        above[7] += 1;
+        fixture.insert(DIM, below, &[10, u64::MAX]);
+        fixture.insert(DIM, above, &[0, 10]);
+        fixture.insert("other-dimension", TAG, &[0, 10, 12, u64::MAX]);
+
+        fixture
+    }
+
+    #[test]
+    fn full_range_reads_only_the_tag() {
+        let fixture = fixture();
+        let mut reversed = ORACLE;
+        reversed.reverse();
+
+        assert_eq!(fixture.forward(TAG, 0, u64::MAX), ORACLE);
+        assert_eq!(fixture.reverse(TAG, 0, u64::MAX), reversed);
+    }
+
+    #[test]
+    fn bounds_are_inclusive() {
+        let fixture = fixture();
+
+        assert_eq!(fixture.forward(TAG, 1, 42), [1, 2, 10, 11, 42]);
+        assert_eq!(fixture.reverse(TAG, 1, 42), [42, 11, 10, 2, 1]);
+        assert_eq!(fixture.forward(TAG, 3, 41), [10, 11]);
+        assert_eq!(fixture.forward(TAG, 10, 10), [10]);
+        assert!(fixture.forward(TAG, 12, 41).is_empty());
+    }
+
+    #[test]
+    fn reversed_interval_is_empty() {
+        let fixture = fixture();
+
+        assert!(fixture.forward(TAG, 43, 41).is_empty());
+        assert!(fixture.reverse(TAG, 43, 41).is_empty());
+        assert!(fixture.forward(TAG, u64::MAX, 0).is_empty());
+    }
+
+    #[test]
+    fn slot_zero_and_max_are_reachable() {
+        let fixture = fixture();
+
+        assert_eq!(fixture.forward(TAG, 0, 0), [0]);
+        assert_eq!(fixture.reverse(TAG, 0, 0), [0]);
+        assert_eq!(fixture.forward(TAG, u64::MAX, u64::MAX), [u64::MAX]);
+        assert_eq!(fixture.reverse(TAG, u64::MAX, u64::MAX), [u64::MAX]);
+        assert_eq!(
+            fixture.forward(TAG, u64::MAX - 1, u64::MAX),
+            [u64::MAX - 1, u64::MAX]
+        );
+    }
+
+    #[test]
+    fn neighbouring_tags_stay_separate() {
+        let fixture = fixture();
+        let mut above = TAG;
+        above[7] += 1;
+
+        assert_eq!(fixture.forward(above, 0, u64::MAX), [0, 10]);
+        assert!(fixture.forward([0x66; 8], 0, u64::MAX).is_empty());
+
+        let other = SlotIterator::new(
+            &fixture.db.snapshot(),
+            &fixture.keyspace,
+            "other-dimension",
+            TAG,
+            1,
+            u64::MAX - 1,
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        assert_eq!(other, [10, 12]);
+    }
+
+    #[test]
+    fn interleaved_ends_meet_once() {
+        let fixture = fixture();
+        let mut iter = fixture.iter(TAG, 0, u64::MAX);
+        let mut seen = Vec::new();
+
+        while let Some(front) = iter.next() {
+            seen.push(front.unwrap());
+            match iter.next_back() {
+                Some(back) => seen.push(back.unwrap()),
+                None => break,
+            }
+        }
+
+        assert_eq!(seen, [0, u64::MAX, 1, u64::MAX - 1, 2, 42, 10, 11]);
+        assert!(iter.next().is_none());
+        assert!(iter.next_back().is_none());
+    }
+
+    /// Dropped half-read iterators hold no snapshot that stops later writes,
+    /// compaction or reads.
+    #[test]
+    fn early_drop_releases_the_read() {
+        let fixture = fixture();
+
+        for _ in 0..2_000 {
+            let mut iter = fixture.iter(TAG, 0, u64::MAX);
+            assert_eq!(iter.next().unwrap().unwrap(), 0);
+            assert_eq!(iter.next_back().unwrap().unwrap(), u64::MAX);
+        }
+
+        fixture.insert(DIM, TAG, &[100]);
+        fixture.keyspace.major_compact().unwrap();
+        fixture.db.persist(PersistMode::SyncAll).unwrap();
+
+        assert!(fixture.forward(TAG, 0, u64::MAX).contains(&100));
+    }
+
+    #[test]
+    fn snapshot_holds_across_a_write() {
+        let fixture = fixture();
+        let held = fixture.iter(TAG, 0, u64::MAX);
+
+        fixture.insert(DIM, TAG, &[100]);
+
+        let values = held.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(values, ORACLE);
+        assert!(fixture.forward(TAG, 0, u64::MAX).contains(&100));
+    }
+
+    /// Successive pages, each from a fresh snapshot and resumed past the last
+    /// slot read, cover the tag exactly once in either direction.
+    #[test]
+    fn pages_resume_without_gaps_or_repeats() {
+        let fixture = fixture();
+        let mut reversed = ORACLE;
+        reversed.reverse();
+
+        for (newest_first, expected) in [(false, ORACLE), (true, reversed)] {
+            let (mut start, mut end) = (0, u64::MAX);
+            let mut all = Vec::new();
+
+            loop {
+                let mut iter = fixture.iter(TAG, start, end);
+                let page = (0..3)
+                    .map_while(|_| {
+                        if newest_first {
+                            iter.next_back()
+                        } else {
+                            iter.next()
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let Some(&cursor) = page.last() else { break };
+                all.extend(page);
+
+                match (newest_first, cursor) {
+                    (false, u64::MAX) | (true, 0) => break,
+                    (false, _) => start = cursor + 1,
+                    (true, _) => end = cursor - 1,
+                }
+            }
+
+            assert_eq!(all, expected);
+        }
     }
 }

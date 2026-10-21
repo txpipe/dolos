@@ -1,5 +1,6 @@
+use dolos_cardano::networks::ResolvedNetwork;
 use dolos_core::config::{
-    ChainConfig, EmulatorConfig, PeerConfig, RetryConfig, SyncConfig, UpstreamConfig,
+    EmulatorConfig, PeerConfig, RetryConfig, RootConfig, SyncConfig, UpstreamConfig,
 };
 use std::time::Duration;
 
@@ -13,15 +14,22 @@ pub mod submit;
 
 const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
-fn define_gasket_policy(config: &Option<RetryConfig>) -> gasket::runtime::Policy {
-    let retries = config.clone().unwrap_or_default();
+/// When a sync stops pulling: an invocation input, never configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SyncLimit {
+    #[default]
+    NoLimit,
+    UntilTip,
+    MaxBlocks(u64),
+}
 
+fn define_gasket_policy(config: &RetryConfig) -> gasket::runtime::Policy {
     let retries = gasket::retries::Policy {
-        max_retries: retries.max_retries(),
-        backoff_unit: Duration::from_secs(retries.backoff_unit_sec()),
-        backoff_factor: retries.backoff_factor(),
-        max_backoff: Duration::from_secs(retries.max_backoff_sec()),
-        dismissible: retries.dismissible(),
+        max_retries: config.max_retries,
+        backoff_unit: Duration::from_secs(config.backoff_unit_seconds),
+        backoff_factor: config.backoff_factor,
+        max_backoff: Duration::from_secs(config.max_backoff_seconds),
+        dismissible: config.dismissible,
     };
 
     gasket::runtime::Policy {
@@ -34,37 +42,56 @@ fn define_gasket_policy(config: &Option<RetryConfig>) -> gasket::runtime::Policy
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The configured peer, or the network's default one.
+pub fn peer_address(config: &RootConfig, network: &ResolvedNetwork) -> Result<String, Error> {
+    let configured = match &config.upstream {
+        Some(UpstreamConfig::Peer(PeerConfig { peer_address })) => peer_address.clone(),
+        _ => None,
+    };
+
+    configured
+        .or_else(|| network.default_peer().map(str::to_string))
+        .ok_or_else(|| Error::ConfigError("`upstream.peer_address` is not set".into()))
+}
+
 pub fn pipeline(
-    config: &SyncConfig,
-    chain: &ChainConfig,
-    upstream: &UpstreamConfig,
+    config: &RootConfig,
+    limit: SyncLimit,
     domain: DomainAdapter,
-    retries: &Option<RetryConfig>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
-    match upstream {
-        UpstreamConfig::Peer(cfg) => sync(config, chain.magic(), cfg, domain.clone(), retries),
-        UpstreamConfig::Emulator(cfg) => devnet(cfg, domain.clone(), retries),
+    let network = ResolvedNetwork::resolve(&config.chain)
+        .map_err(|error| Error::ConfigError(error.to_string()))?;
+
+    match &config.upstream {
+        Some(UpstreamConfig::Emulator(cfg)) => devnet(cfg, domain, &config.sync.retry),
+        _ => sync(
+            &config.sync,
+            network.magic(),
+            peer_address(config, &network)?,
+            limit,
+            domain,
+        ),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn sync(
     config: &SyncConfig,
     network_magic: u64,
-    upstream: &PeerConfig,
+    peer_address: String,
+    limit: SyncLimit,
     domain: DomainAdapter,
-    retries: &Option<RetryConfig>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
-    let mut pull = pull::Stage::new(config, upstream, network_magic, domain.wal().clone());
+    let mut pull = pull::Stage::new(
+        config,
+        peer_address.clone(),
+        network_magic,
+        limit,
+        domain.wal().clone(),
+    );
 
     let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL);
 
-    let submit = submit::Stage::new(
-        upstream.peer_address.clone(),
-        network_magic,
-        domain.mempool().clone(),
-    );
+    let submit = submit::Stage::new(peer_address, network_magic, domain.mempool().clone());
 
     let (to_apply, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     pull.downstream.connect(to_apply);
@@ -73,7 +100,7 @@ pub fn sync(
     // output to outside of out pipeline
     // apply.downstream.connect(output);
 
-    let policy = define_gasket_policy(retries);
+    let policy = define_gasket_policy(&config.retry);
 
     let pull = gasket::runtime::spawn_stage(pull, policy.clone());
     let apply = gasket::runtime::spawn_stage(apply, policy.clone());
@@ -82,11 +109,10 @@ pub fn sync(
     Ok(vec![pull, apply, submit])
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn devnet(
     emulator_cfg: &EmulatorConfig,
     domain: DomainAdapter,
-    retries: &Option<RetryConfig>,
+    retries: &RetryConfig,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let mut emulator = emulator::Stage::new(
         domain.wal().clone(),

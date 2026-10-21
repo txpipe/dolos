@@ -31,7 +31,7 @@ use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dolos_core::config::{ChainConfig, RootConfig, StateStoreConfig};
+use dolos_core::config::RootConfig;
 use dolos_core::ImportExt as _;
 use indicatif::ProgressBar;
 use miette::{bail, Context as _, IntoDiagnostic as _};
@@ -56,8 +56,10 @@ pub struct Args {
     #[arg(long)]
     ephemeral: bool,
 
-    /// Also re-write the derived log records the archive carries (StakeLog,
-    /// reward logs, EpochState, period logs); in-place mode only
+    /// Also re-write what the archive derives from its blocks: the log
+    /// records (PoolEpochLog, reward logs, EpochState, period logs) and the
+    /// index entries, filling in any an older version did not index; in-place
+    /// mode only
     #[arg(long, conflicts_with_all = ["target", "ephemeral"])]
     rewrite_logs: bool,
 
@@ -106,24 +108,18 @@ fn open_store<T>(what: &str, result: Result<T, Error>) -> miette::Result<T> {
 fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette::Result<()> {
     let mut others: Vec<(&str, PathBuf)> = vec![("storage root", config.storage.path.clone())];
 
-    if let Some(path) = config.storage.wal_path() {
+    if let Some(path) = config.wal_path() {
         others.push(("wal", path));
     }
     if let Some(path) = config.storage.archive_path() {
         others.push(("archive", path));
     }
-    if let Some(path) = config.storage.mempool_path() {
+    if let Some(path) = config.mempool_path() {
         others.push(("mempool", path));
     }
 
-    // Segment files can live outside the archive directory; the backend takes
-    // `blocks_path` verbatim, so this check does too.
-    let blocks_path = match &config.storage.archive {
-        dolos_core::config::ArchiveStoreConfig::Fjall(cfg) => cfg.blocks_path.as_ref(),
-        _ => None,
-    };
-    if let Some(path) = blocks_path {
-        others.push(("archive segments", path.clone()));
+    if let Some(path) = config.storage.blocks_path() {
+        others.push(("archive segments", path));
     }
 
     for (what, path) in others {
@@ -173,7 +169,7 @@ fn confirm_wipe(state_path: &std::path::Path, force: bool) -> miette::Result<()>
 /// Check the archive is usable as a replay source and return its tip point.
 ///
 /// Two gates: the first block must sit at the start of the chain (an archive
-/// pruned by `max_history` cannot rebuild state from origin, by design), and
+/// pruned by rolling history cannot rebuild state from origin, by design), and
 /// the tip must decode. Deliberately *not* a strict prev-hash walk from
 /// origin: Byron EBBs are overwritten in the slot-keyed blocks table, so that
 /// walk reports broken continuity at essentially every Byron epoch on a
@@ -197,7 +193,7 @@ fn preflight(archive: &ArchiveStoreBackend) -> miette::Result<ChainPoint> {
 
     if first.number() > 1 {
         bail!(
-            help = "instances running a `max_history` window cannot use this command; the replay \
+            help = "instances keeping rolling history cannot use this command; the replay \
                     always starts from origin",
             "the archive does not start at the beginning of the chain (first block is #{} at \
              slot {first_slot}); it looks pruned",
@@ -232,13 +228,14 @@ fn build_domain(
     archive: ArchiveStoreBackend,
     stop_epoch: Option<u64>,
 ) -> miette::Result<DomainAdapter> {
-    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
+    let genesis = Arc::new(crate::common::open_genesis(config)?);
 
-    let ChainConfig::Cardano(mut chain_config) = config.chain.clone();
-
-    if stop_epoch.is_some() {
-        chain_config.stop_epoch = stop_epoch;
-    }
+    let chain_config = dolos_cardano::CardanoLogicConfig {
+        stop_epoch,
+        custom_utxos: crate::common::resolve_network(config)?
+            .custom_utxos()
+            .to_vec(),
+    };
 
     let chain =
         dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(chain_config, &state, &genesis)
@@ -250,17 +247,26 @@ fn build_domain(
         .context("creating the in-memory WAL")?;
 
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
+    let query_limiter = QueryLimiter::new(config.serve.max_concurrent_queries);
+    let cache = open_store(
+        "cache",
+        dolos::storage::open_cache_store(config, query_limiter.clone()),
+    )?;
 
     Ok(DomainAdapter {
+        compatibility: config.compatibility(),
         storage_config: Arc::new(config.storage.clone()),
-        sync_config: Arc::new(config.sync.clone()),
+        history_config: config.history,
+        mempool_config: config.mempool.clone(),
         genesis,
         chain: Arc::new(std::sync::RwLock::new(chain)),
         wal,
         state,
         archive,
         mempool: MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
+        cache,
         tip_broadcast,
+        query_limiter,
     })
 }
 
@@ -406,8 +412,9 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         Mode::InPlace => {
             let Some(state_path) = config.storage.state_path() else {
                 bail!(
-                    "the configured state backend is in_memory, so there is no on-disk state \
-                     store to rebuild in place; use --ephemeral or --target"
+                    "the configured state store is `storage.state.type = \"ephemeral\"`, so \
+                     there is no on-disk state store to rebuild in place; use --ephemeral or \
+                     --target"
                 );
             };
 
@@ -440,13 +447,10 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 );
             }
 
-            let state = match &config.storage.state {
-                StateStoreConfig::Fjall(cfg) => StateStoreBackend::open_fjall(path, cfg),
-                _ => StateStoreBackend::open_fjall(
-                    path,
-                    &dolos_core::config::FjallStateConfig::default(),
-                ),
-            }
+            let state = StateStoreBackend::open_fjall(
+                path,
+                &dolos_core::config::FjallStateConfig::default(),
+            )
             .into_diagnostic()
             .with_context(|| format!("opening the target state store at {}", path.display()))?;
 
@@ -624,5 +628,19 @@ mod tests {
                 "chunk size {chunk_size}"
             );
         }
+    }
+
+    #[test]
+    fn segments_under_the_state_path_refuse_the_wipe() {
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = PathBuf::from("/data");
+        let state_path = config.storage.state_path().unwrap();
+
+        config.storage.archive.blocks_path = Some(PathBuf::from("blocks"));
+        assert!(check_wipe_scope(&config, &state_path).is_ok());
+
+        config.storage.archive.blocks_path = Some(PathBuf::from("state/blocks"));
+        let error = check_wipe_scope(&config, &state_path).unwrap_err();
+        assert!(error.to_string().contains("archive segments"), "{error}");
     }
 }

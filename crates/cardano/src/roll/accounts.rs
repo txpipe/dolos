@@ -14,8 +14,8 @@ use pallas::ledger::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    pallas_extras, roll::BlockVisitor, ControlledAmountDec, ControlledAmountInc, EnqueueMir,
-    PParamsSet, StageStakeAddress, StagedStakeAddress, StakeDelegation, StakeDeregistration,
+    pallas_extras, roll::BlockVisitor, AccountAddressSet, ControlledAmountDec, ControlledAmountInc,
+    EnqueueMir, PParamsSet, StageAccountAddress, StakeDelegation, StakeDeregistration,
     StakeRegistration, VoteDelegation, WithdrawalInc,
 };
 
@@ -48,18 +48,6 @@ pub struct AccountVisitor {
     /// Account addresses already staged by this block: a repeat changes no
     /// staged row but would still cost a WAL delta.
     staged: HashSet<(StakeCredential, Vec<u8>)>,
-}
-
-/// The stake credential an output address lists under in the stake-address
-/// period log: a base address's key or script stake part, or a stake address.
-/// Pointer and Byron addresses list under none.
-fn listed_account(address: &Address) -> Option<StakeCredential> {
-    match address {
-        Address::Shelley(shelley) => pallas_extras::shelley_address_to_stake_address(shelley)
-            .map(|stake| pallas_extras::stake_address_to_cred(&stake)),
-        Address::Stake(stake) => Some(pallas_extras::stake_address_to_cred(stake)),
-        Address::Byron(_) => None,
-    }
 }
 
 impl BlockVisitor for AccountVisitor {
@@ -114,11 +102,11 @@ impl BlockVisitor for AccountVisitor {
         let address = output.address().expect("valid address");
         let epoch = self.epoch.expect("value set in root");
 
-        if let Some(account) = listed_account(&address) {
+        if let Some(account) = pallas_extras::address_account(&address) {
             let bytes = address.to_vec();
 
             if self.staged.insert((account.clone(), bytes.clone())) {
-                deltas.add_for_entity(StageStakeAddress::new(StagedStakeAddress {
+                deltas.add_for_entity(StageAccountAddress::new(AccountAddressSet {
                     account,
                     address: bytes,
                     epoch,
@@ -154,7 +142,9 @@ impl BlockVisitor for AccountVisitor {
         let epoch = self.epoch.expect("value set in root");
 
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
-            let deposit = self.deposit.expect("value set in root");
+            let deposit = self
+                .deposit
+                .ok_or(ChainError::StartingPParamMissing("key_deposit"))?;
             let epoch = self.epoch.expect("value set in root");
             deltas.add_for_entity(StakeRegistration::new(cred, block.slot(), epoch, deposit));
         }
@@ -226,5 +216,48 @@ impl BlockVisitor for AccountVisitor {
         deltas.add_for_entity(WithdrawalInc::new(cred, amount));
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+
+    use super::*;
+
+    /// A chain that opens on Byron's pparams carries no key deposit, so a
+    /// stake registration reached before the Shelley fork is a typed error
+    /// rather than a panic.
+    #[test]
+    fn stake_registration_without_key_deposit_is_a_typed_error() {
+        let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 1,
+            ..Default::default()
+        });
+        let block = MultiEraBlock::decode(&blocks[0]).unwrap();
+
+        let genesis = crate::include::devnet::load();
+        let pparams = crate::forks::from_byron_genesis(&genesis.byron);
+
+        let mut visitor = AccountVisitor::default();
+        let mut deltas = WorkDeltas::default();
+
+        visitor
+            .visit_root(&mut deltas, &block, &genesis, &pparams, 0, 0, 0)
+            .unwrap();
+
+        let txs = block.txs();
+        let cert = txs[0].certs().into_iter().next().unwrap();
+        assert!(pallas_extras::cert_as_stake_registration(&cert).is_some());
+
+        let err = visitor
+            .visit_cert(&mut deltas, &block, &txs[0], &0, &cert)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ChainError::StartingPParamMissing("key_deposit")
+        ));
     }
 }

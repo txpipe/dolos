@@ -1,7 +1,9 @@
+use std::borrow::Cow;
 use std::ops::Deref as _;
 
 use dolos_core::BlockSlot;
-use pallas::crypto::hash::Hash;
+use pallas::codec::{minicbor, utils::Nullable};
+use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::addresses::{
     Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart, StakeAddress,
     StakePayload,
@@ -347,6 +349,19 @@ pub fn shelley_address_to_stake_address(address: &ShelleyAddress) -> Option<Stak
     }
 }
 
+/// The account an address belongs to in the period logs: a base address's
+/// key or script stake part, or a stake address. Pointer and Byron addresses
+/// belong to none.
+pub fn address_account(address: &Address) -> Option<StakeCredential> {
+    match address {
+        Address::Shelley(shelley) => {
+            shelley_address_to_stake_address(shelley).map(|stake| stake_address_to_cred(&stake))
+        }
+        Address::Stake(stake) => Some(stake_address_to_cred(stake)),
+        Address::Byron(_) => None,
+    }
+}
+
 pub type IsPointer = bool;
 
 pub fn address_as_stake_cred(address: &Address) -> Option<(StakeCredential, IsPointer)> {
@@ -596,6 +611,119 @@ pub fn script_ref_hash(script_ref: &ScriptRef) -> Hash<28> {
     }
 }
 
+/// The auxiliary data of `tx` as written, if it carries any.
+fn aux_data_cbor<'a>(tx: &'a MultiEraTx<'_>) -> Option<&'a [u8]> {
+    let aux = if let Some(x) = tx.as_conway() {
+        &x.auxiliary_data
+    } else if let Some(x) = tx.as_babbage() {
+        &x.auxiliary_data
+    } else if let Some(x) = tx.as_alonzo() {
+        &x.auxiliary_data
+    } else {
+        return None;
+    };
+
+    match aux {
+        Nullable::Some(x) => Some(x.raw_cbor()),
+        _ => None,
+    }
+}
+
+/// Each item of the CBOR array `decoder` stands at, as written in `raw`.
+fn array_items<'a>(
+    decoder: &mut minicbor::Decoder<'a>,
+    raw: &'a [u8],
+) -> Result<Vec<&'a [u8]>, minicbor::decode::Error> {
+    let len = decoder.array()?;
+    let mut items = Vec::new();
+
+    let mut next = |decoder: &mut minicbor::Decoder<'a>| {
+        let start = decoder.position();
+        decoder.skip()?;
+        items.push(&raw[start..decoder.position()]);
+        Ok::<_, minicbor::decode::Error>(())
+    };
+
+    match len {
+        Some(len) => {
+            for _ in 0..len {
+                next(decoder)?;
+            }
+        }
+        None => {
+            while decoder.datatype()? != minicbor::data::Type::Break {
+                next(decoder)?;
+            }
+
+            decoder.set_position(decoder.position() + 1);
+        }
+    }
+
+    Ok(items)
+}
+
+/// The native scripts of a raw auxiliary data, each as written: none in the
+/// Shelley map, the second item of the Allegra array, and key 1 of the
+/// tagged Alonzo map.
+fn native_scripts_as_written(raw: &[u8]) -> Result<Vec<&[u8]>, minicbor::decode::Error> {
+    use minicbor::data::Type;
+
+    let mut decoder = minicbor::Decoder::new(raw);
+
+    match decoder.datatype()? {
+        Type::Array | Type::ArrayIndef => {
+            decoder.array()?;
+            decoder.skip()?;
+            array_items(&mut decoder, raw)
+        }
+        Type::Tag => {
+            decoder.tag()?;
+            let len = decoder.map()?;
+            let mut read = 0;
+
+            loop {
+                match len {
+                    Some(len) if read == len => return Ok(vec![]),
+                    None if decoder.datatype()? == Type::Break => return Ok(vec![]),
+                    _ => read += 1,
+                }
+
+                if decoder.u64()? == 1 {
+                    return array_items(&mut decoder, raw);
+                }
+
+                decoder.skip()?;
+            }
+        }
+        _ => Ok(vec![]),
+    }
+}
+
+/// The native scripts `tx` carries in its auxiliary data, each as written.
+///
+/// A native script hashes over its bytes as written, and pallas decodes the
+/// auxiliary ones without keeping theirs, so they are read off the auxiliary
+/// data's own bytes. Those are what pallas decoded, so reading them does not
+/// fail; were it to, the re-encoded scripts stand in.
+pub fn aux_native_scripts<'a>(tx: &'a MultiEraTx<'_>) -> Vec<Cow<'a, [u8]>> {
+    let written = aux_data_cbor(tx).map(native_scripts_as_written);
+
+    match written {
+        None => vec![],
+        Some(Ok(scripts)) => scripts.into_iter().map(Cow::Borrowed).collect(),
+        Some(Err(_)) => tx
+            .aux_native_scripts()
+            .iter()
+            .map(|x| Cow::Owned(minicbor::to_vec(x).expect("encoding a native script cannot fail")))
+            .collect(),
+    }
+}
+
+/// The hash of a native script given as written.
+pub fn native_script_hash(cbor: &[u8]) -> Hash<28> {
+    Hasher::<224>::hash_tagged(cbor, 0)
+}
+
 pub const DREP_KEY_PREFIX: u8 = 0b00100010;
 pub const DREP_SCRIPT_PREFIX: u8 = 0b00100011;
 
@@ -612,6 +740,18 @@ pub fn drep_id_bytes(cred: &StakeCredential) -> Vec<u8> {
     match cred {
         StakeCredential::AddrKeyhash(hash) => [&[DREP_KEY_PREFIX][..], hash.as_slice()].concat(),
         StakeCredential::ScriptHash(hash) => [&[DREP_SCRIPT_PREFIX][..], hash.as_slice()].concat(),
+    }
+}
+
+pub const CC_COLD_KEY_PREFIX: u8 = 0b00010010;
+pub const CC_COLD_SCRIPT_PREFIX: u8 = 0b00010011;
+
+pub fn committee_cold_id_bytes(cred: &StakeCredential) -> Vec<u8> {
+    match cred {
+        StakeCredential::AddrKeyhash(hash) => [&[CC_COLD_KEY_PREFIX][..], hash.as_slice()].concat(),
+        StakeCredential::ScriptHash(hash) => {
+            [&[CC_COLD_SCRIPT_PREFIX][..], hash.as_slice()].concat()
+        }
     }
 }
 
@@ -728,6 +868,19 @@ mod tests {
         224, 185, 111, 206, 243, 185, 53, 26, 246, 131, 75, 216, 80, 227, 169, 120, 89, 215, 189,
         91, 114, 157, 36, 191, 54, 70, 174, 172, 207,
     ];
+
+    #[test]
+    fn committee_cold_id_bytes_pins_cip129_key_and_script_headers() {
+        let hash = Hash::new([0x99; 28]);
+        let key = committee_cold_id_bytes(&StakeCredential::AddrKeyhash(hash));
+        let script = committee_cold_id_bytes(&StakeCredential::ScriptHash(hash));
+
+        assert_eq!(key, [&[0x12u8][..], hash.as_slice()].concat());
+        assert_eq!(script, [&[0x13u8][..], hash.as_slice()].concat());
+        assert_eq!(key.len(), 29);
+        assert_eq!(script.len(), 29);
+        assert_ne!(key, script);
+    }
 
     #[test]
     fn test_pool_reward_account() {

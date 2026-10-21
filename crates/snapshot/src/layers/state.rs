@@ -6,17 +6,17 @@
 //!
 //! The namespace is not in the record: it is the layer's *kind*, one per state
 //! namespace (`crate::STATE_KINDS`), so a shape change to one namespace's
-//! records costs that namespace's kind a media-type move and leaves the other
-//! sixteen alone — and a namespace a reader does not know is skippable at the
+//! records costs that namespace's kind a media-type move and leaves the others
+//! alone — and a namespace a reader does not know is skippable at the
 //! transport instead of poisoning one shared layer. Which is also why this
-//! module has one codec rather than seventeen — the kinds differ in what they
-//! carry, never in how a record is written — and why its refusals name the
-//! record shape, `state`, rather than a layer.
+//! module has one codec for every kind — the kinds differ in what they carry,
+//! never in how a record is written — and why its refusals name the record
+//! shape, `state`, rather than a layer.
 //!
 //! ## One record shape, including for UTxOs
 //!
-//! ADR-004 treats the UTxO set as namespace [`crate::UTXOS`] beside the
-//! thirteen entity namespaces, rather than as a special layer kind. That is
+//! ADR-004 treats the UTxO set as namespace [`crate::UTXOS`] beside the entity
+//! namespaces, rather than as a special layer kind. That is
 //! what keeps the format's state vocabulary to a single record, and it makes
 //! the planned refactor folding UTxOs into the entity system (#1042) invisible
 //! from outside: the day `utxos` becomes an ordinary namespace, nothing in this
@@ -45,7 +45,7 @@
 //!
 //! ## Sharding
 //!
-//! The four chain-scale namespaces (`utxos`, `accounts`, `assets`, `datums`)
+//! The chain-scale namespaces (`utxos`, `accounts`, `assets`, `datums`)
 //! split sixteen ways by the first nibble of the first key byte. Keys are
 //! hash-derived (transaction hashes, credentials, script hashes), so the split
 //! is uniform without a hash of its own; shards can be fetched in parallel and
@@ -64,8 +64,8 @@ pub use crate::namespaces::UTXO_KEY_LEN;
 
 /// The name this codec refuses under.
 ///
-/// One record shape serves all seventeen `state-{ns}` kinds, so an error names
-/// the shape rather than a layer — the layer is already in the message the
+/// One record shape serves every `state-{ns}` kind, so an error names the
+/// shape rather than a layer — the layer is already in the message the
 /// caller wraps it in.
 const STATE: &str = "state";
 
@@ -265,9 +265,10 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountEpochLog, AccountState, AssetKey, AssetState, DRepState, EpochState, EraSummary,
-        FixedNamespace, GovState, PoolState, ProposalState, StagedFirstMint, StagedStakeAddress,
-        StakeAddressesRow,
+        AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
+        AddressStats, AssetKey, AssetMintChunk, AssetMintSet, AssetState, DRepState, EpochState,
+        EraState, FirstMintSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressSet,
+        PaymentStats, PoolState, ProposalState,
     };
 
     use super::*;
@@ -313,11 +314,13 @@ mod tests {
         for (ns, len) in [
             (EpochState::NS, 0),
             (GovState::NS, 0),
-            (EraSummary::NS, 2),
+            (EraState::NS, 2),
+            (MetadataLabelState::NS, 8),
             (DRepState::NS, 1),
             (PoolState::NS, 28),
             (ProposalState::NS, 36),
-            (StagedFirstMint::NS, 68),
+            (FirstMintSet::NS, 68),
+            (AssetMintSet::NS, 52),
         ] {
             keyed(ns, &vec![1; len]).unwrap_or_else(|err| panic!("{ns}/{len}: {err:?}"));
         }
@@ -325,24 +328,65 @@ mod tests {
         keyed(AccountState::NS, &credential).unwrap();
         keyed(DRepState::NS, &[[0x22].as_slice(), &[7; 28]].concat()).unwrap();
 
-        // a staged stake address: the account, the epoch, then the address,
-        // which takes whatever width is left
+        // an address: an account and a base address's header and payment
+        // hash, or a tag and the address whole
+        let staked = [credential.as_slice(), &[0x01], &[1; 28]].concat();
+        let unstaked = [[0x00].as_slice(), &[1; 29]].concat();
+
+        // an account address: the account, the epoch, then the address's key,
+        // last
         let staged = |address: &[u8]| [credential.as_slice(), &[0; 8], address].concat();
-        keyed(StagedStakeAddress::NS, &staged(&[1; 57])).unwrap();
-        keyed(StagedStakeAddress::NS, &staged(&[1; 29])).unwrap();
-        keyed(StakeAddressesRow::NS, &credential).unwrap();
+        keyed(AccountAddressSet::NS, &staged(&staked)).unwrap();
+        keyed(AccountAddressSet::NS, &staged(&unstaked)).unwrap();
+
+        // unsealed stats: an address's and an account's are keyed epoch
+        // first, a payment credential's set and stats group first
+        let epoch = [0u8; 8];
+        let address = [epoch.as_slice(), &staked].concat();
+        keyed(AddressStats::NS, &address).unwrap();
+        keyed(AddressStats::NS, &[epoch.as_slice(), &unstaked].concat()).unwrap();
+        keyed(
+            PaymentAddressSet::NS,
+            &[[1; 28].as_slice(), &epoch, &[1; 29]].concat(),
+        )
+        .unwrap();
+        keyed(PaymentStats::NS, &[[1; 28].as_slice(), &epoch].concat()).unwrap();
+        keyed(AccountStats::NS, &[epoch.as_slice(), &credential].concat()).unwrap();
 
         for (ns, key) in [
             (EpochState::NS, vec![0x30]),
             (EpochState::NS, [0x30].into_iter().chain([0; 31]).collect()),
             (PoolState::NS, vec![1; 32]),
             (ProposalState::NS, vec![1; 32]),
+            (MetadataLabelState::NS, vec![1; 7]),
+            (MetadataLabelState::NS, vec![1; 9]),
+            (MetadataLabelState::NS, vec![1; 32]),
             (DRepState::NS, vec![0x22; 32]),
             (AccountState::NS, vec![1; 32]),
             (AccountEpochLog::NS, vec![1; 32]),
-            (StagedStakeAddress::NS, staged(&[])),
-            (StagedStakeAddress::NS, credential.clone()),
-            (StakeAddressesRow::NS, vec![1; 32]),
+            (AccountAddressSet::NS, staged(&[])),
+            (AccountAddressSet::NS, staged(&[1; 57])),
+            (AccountAddressSet::NS, credential.clone()),
+            (AccountAddressChunk::NS, vec![1; 32]),
+            (AssetMintSet::NS, vec![1; 48]),
+            (AssetMintChunk::NS, vec![1; 36]),
+            // an archive-only log holds no state, even under its log key
+            (AccountAddressChunk::NS, credential.clone()),
+            (AddressStats::NS, [epoch.as_slice(), &credential].concat()),
+            (AddressStats::NS, [epoch.as_slice(), &staked, &[1]].concat()),
+            (
+                AddressStats::NS,
+                [epoch.as_slice(), &[0x02], &[1; 29]].concat(),
+            ),
+            // a sealed row's key, without the epoch
+            (AddressStats::NS, staked.clone()),
+            (PaymentAddressSet::NS, [[1; 28].as_slice(), &epoch].concat()),
+            (
+                PaymentStats::NS,
+                [[1; 28].as_slice(), &epoch, &[1]].concat(),
+            ),
+            (AccountStats::NS, credential.clone()),
+            (AccountStats::NS, [credential.as_slice(), &epoch].concat()),
         ] {
             let err = keyed(ns, &key).unwrap_err();
             assert!(

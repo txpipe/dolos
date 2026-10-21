@@ -20,8 +20,10 @@ use crate::codec::{frame_bound, oversized, Decoder, Encoder, MAX_BODY_BYTES};
 use crate::BlockLocation;
 
 /// Decoders kept idle for the next read. Each holds one zstd context and
-/// at most a megabyte of buffers.
-const MAX_IDLE_DECODERS: usize = 8;
+/// at most a megabyte of buffers. The pool only keeps decoders that concurrent
+/// reads created, so this covers the query limiter's permits plus the readers
+/// outside it without a new zstd context per read.
+const MAX_IDLE_DECODERS: usize = 64;
 
 /// Encoded output a parallel window may hold before its frames are written,
 /// as the sum of its bodies' frame bounds. A window always admits its first
