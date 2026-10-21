@@ -346,7 +346,9 @@ pub fn registry() -> Vec<Entry> {
             canaries::pool_state,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged. Revision 3 appends the stake,
-            // delegators and live pledge each snapshot freezes with.
+            // delegators and live pledge each snapshot freezes with. Field
+            // 17, the calidus key, joins revision 3 in place: the v2 freeze
+            // resets every revision to 1.
             &[
                 Pinned {
                     rev: 1,

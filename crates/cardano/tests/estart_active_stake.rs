@@ -89,6 +89,7 @@ fn pool(operator: u8, owners: &[u8], is_retired: bool, epoch: Epoch) -> PoolStat
         register_slot: 0,
         retiring_epoch: None,
         deposit: 0,
+        calidus: None,
     }
 }
 
