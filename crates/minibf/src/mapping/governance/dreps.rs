@@ -1,12 +1,15 @@
-use crate::mapping::{bech32, bech32_drep, IntoModel, DREP_HRP};
+use crate::mapping::{bech32, bech32_drep, stake_cred_to_address, IntoModel, DREP_HRP};
 use axum::http::StatusCode;
-use blockfrost_openapi::models::{Drep, DrepsInner};
+use blockfrost_openapi::models::{drep_delegators_inner::DrepDelegatorsInner, Drep, DrepsInner};
 use dolos_cardano::{
     model::{DRepKey, DRepState},
     pallas_extras, ChainSummary, PParamsSet,
 };
 use dolos_core::BlockSlot;
-use pallas::ledger::primitives::{conway::DRep, Epoch};
+use pallas::ledger::{
+    addresses::Network,
+    primitives::{conway::DRep, Epoch, StakeCredential},
+};
 
 pub const DREP_ALWAYS_ABSTAIN: &str = "drep_always_abstain";
 pub const DREP_ALWAYS_NO_CONFIDENCE: &str = "drep_always_no_confidence";
@@ -291,6 +294,27 @@ pub fn drep_list_item(
     };
 
     builder.into_model()
+}
+
+pub struct DrepDelegatorModelBuilder {
+    pub delegator: StakeCredential,
+    pub live_stake: u64,
+    pub network: Network,
+}
+
+impl IntoModel<DrepDelegatorsInner> for DrepDelegatorModelBuilder {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<DrepDelegatorsInner, StatusCode> {
+        let address = stake_cred_to_address(&self.delegator, self.network)
+            .to_bech32()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(DrepDelegatorsInner {
+            address,
+            amount: self.live_stake.to_string(),
+        })
+    }
 }
 
 #[cfg(test)]

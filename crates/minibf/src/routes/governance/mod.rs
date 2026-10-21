@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap},
     future::Future,
     time::Duration,
 };
@@ -11,18 +11,16 @@ use axum::{
 };
 use blockfrost_openapi::models::{
     committee::Committee,
-    committee_members_inner::{CommitteeMembersInner, Status},
     committee_quorum::CommitteeQuorum,
     committee_votes_inner::{self, CommitteeVotesInner},
     drep_delegators_inner::DrepDelegatorsInner,
     drep_metadata::DrepMetadata,
     drep_updates_inner::{self, DrepUpdatesInner},
     drep_votes_inner::{self, DrepVotesInner},
-    proposal::{self, Proposal},
+    proposal::Proposal,
     proposal_metadata::ProposalMetadata,
     proposal_metadata_v2::ProposalMetadataV2,
     proposal_parameters::ProposalParameters,
-    proposal_parameters_parameters::ProposalParametersParameters,
     proposal_votes_inner::{self, ProposalVotesInner},
     proposal_withdrawals_inner::ProposalWithdrawalsInner,
     proposals_inner::{GovernanceType, ProposalsInner},
@@ -31,9 +29,8 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     indexes::CardanoArchiveIndexExt as _,
     model::{
-        gov::{CommitteeAuthorization, GovState},
-        AccountState, CertPosition, DRepKey, DRepSightingState, DRepState, ProposalAction,
-        ProposalKey, ProposalState,
+        gov::GovState, AccountState, CertPosition, DRepKey, DRepSightingState, DRepState,
+        ProposalAction, ProposalKey, ProposalState,
     },
     pallas_extras, ChainSummary, PParamsSet,
 };
@@ -49,7 +46,7 @@ use pallas::{
         addresses::Network,
         primitives::{
             conway::{Anchor, DRep, GovAction, GovActionId, Vote, Voter},
-            Coin, Epoch, RationalNumber, StakeCredential,
+            Coin, RationalNumber, StakeCredential,
         },
         traverse::{MultiEraBlock, MultiEraTx},
     },
@@ -59,20 +56,22 @@ use serde::Deserialize;
 use crate::{
     error::Error,
     log_and_500,
-    mapping::{
-        anchor_offchain_metadata, bech32_committee_cold, bech32_committee_hot, bech32_drep,
-        bech32_gov_action, bech32_pool,
-        cost_models::map_cost_models_raw,
+    mapping::{sorted_json, 
+        anchor_offchain_metadata, bech32_committee_hot, bech32_drep, bech32_gov_action,
+        bech32_pool,
         governance::{
-            description::description_json,
+            committee::committee_members,
             dreps::{
-                drep_is_expired, drep_is_retired, drep_list_item, parse_drep_id, DrepModelBuilder,
+                drep_is_expired, drep_is_retired, drep_list_item, parse_drep_id,
+                DrepDelegatorModelBuilder, DrepModelBuilder,
+            },
+            proposals::{
+                governance_type, proposal_closed_epoch, ProposalModelBuilder,
+                ProposalParametersBuilder,
             },
         },
-        i32_or_500, parse_committee_id, parse_gov_action_id,
-        protocol_params::protocol_params_model,
-        rational_to_f64_unrounded, sorted_json, stake_cred_to_address, AnchorMetadata, CommitteeCredentialRole,
-        IntoModel, Unrounded,
+        i32_or_500, parse_committee_id, parse_gov_action_id, stake_cred_to_address, AnchorMetadata,
+        CommitteeCredentialRole, IntoModel,
     },
     offchain::{cached_drep_metadata, fetch_drep_metadata, unfetched, OnOverload},
     pagination::{Order, Pagination, PaginationParameters},
@@ -564,27 +563,6 @@ where
     }))
 }
 
-struct DrepDelegatorModelBuilder {
-    delegator: StakeCredential,
-    live_stake: u64,
-    network: Network,
-}
-
-impl IntoModel<DrepDelegatorsInner> for DrepDelegatorModelBuilder {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<DrepDelegatorsInner, StatusCode> {
-        let address = stake_cred_to_address(&self.delegator, self.network)
-            .to_bech32()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        Ok(DrepDelegatorsInner {
-            address,
-            amount: self.live_stake.to_string(),
-        })
-    }
-}
-
 /// One account that delegates its vote to the requested DRep.
 struct DrepDelegatorRow {
     delegated_at: Option<(BlockSlot, TxOrder)>,
@@ -694,79 +672,6 @@ where
         .collect::<Result<Vec<_>, StatusCode>>()?;
 
     Ok(Json(page))
-}
-
-/// This function returns the 28-byte credential hash as hex and a script flag.
-/// Blockfrost serves this pair (`cc_*_hex` and `cc_*_has_script`) beside each
-/// CIP-129 committee ID.
-fn committee_credential_parts(cred: &StakeCredential) -> (String, bool) {
-    match cred {
-        StakeCredential::AddrKeyhash(key) => (hex::encode(key), false),
-        StakeCredential::ScriptHash(key) => (hex::encode(key), true),
-    }
-}
-
-/// This function resolves one committee member against its hot-key
-/// authorization history.
-///
-/// The code uses the last event in the authorization history to select the
-/// status. There are three possible events:
-///
-/// - No event: the member never authorized a hot key (`not_authorized`).
-/// - A resignation: the hot key is gone (`resigned`).
-/// - A hot credential: the member can vote now (`authorized`).
-///
-/// The `cc_hot_*` fields carry the hot credential only for the `authorized`
-/// status. For the other two statuses, these fields are null. This behavior is
-/// the same as Blockfrost.
-fn committee_member(
-    cold: &StakeCredential,
-    expiry: Epoch,
-    auth: Option<&CommitteeAuthorization>,
-) -> Result<CommitteeMembersInner, StatusCode> {
-    let (cc_cold_hex, cc_cold_has_script) = committee_credential_parts(cold);
-
-    let (status, hot) = match auth {
-        None => (Status::NotAuthorized, None),
-        Some(CommitteeAuthorization::Resigned(_)) => (Status::Resigned, None),
-        Some(CommitteeAuthorization::HotCredential(hot)) => (Status::Authorized, Some(hot)),
-    };
-
-    let (cc_hot_id, cc_hot_hex, cc_hot_has_script) = match hot {
-        Some(hot) => {
-            let (hex, is_script) = committee_credential_parts(hot);
-            (Some(bech32_committee_hot(hot)?), Some(hex), Some(is_script))
-        }
-        None => (None, None, None),
-    };
-
-    Ok(CommitteeMembersInner {
-        cc_cold_id: bech32_committee_cold(cold)?,
-        cc_cold_hex,
-        cc_cold_has_script,
-        cc_hot_id,
-        cc_hot_hex,
-        cc_hot_has_script,
-        status,
-        expiration_epoch: i32_or_500(expiry)?,
-    })
-}
-
-/// This function resolves all committee members against their authorization
-/// history, read through `auth`. It orders the members by the raw cold-hash
-/// hex, as Blockfrost does.
-fn committee_members<'a>(
-    members: &BTreeMap<StakeCredential, Epoch>,
-    auth: impl Fn(&StakeCredential) -> Option<&'a CommitteeAuthorization>,
-) -> Result<Vec<CommitteeMembersInner>, StatusCode> {
-    let mut rows = members
-        .iter()
-        .map(|(cold, expiry)| committee_member(cold, *expiry, auth(cold)))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    rows.sort_by(|a, b| a.cc_cold_hex.cmp(&b.cc_cold_hex));
-
-    Ok(rows)
 }
 
 /// The `GET /governance/committee` endpoint returns the constitutional
@@ -1306,19 +1211,6 @@ struct ProposalRow {
     tx: Hash<32>,
     idx: u32,
     governance_type: GovernanceType,
-}
-
-fn governance_type(action: &ProposalAction) -> Option<GovernanceType> {
-    match action {
-        ProposalAction::ParamChange(_) => Some(GovernanceType::ParameterChange),
-        ProposalAction::HardFork(_) => Some(GovernanceType::HardForkInitiation),
-        ProposalAction::TreasuryWithdrawal(_) => Some(GovernanceType::TreasuryWithdrawals),
-        ProposalAction::NoConfidence => Some(GovernanceType::NoConfidence),
-        ProposalAction::UpdateCommittee { .. } => Some(GovernanceType::NewCommittee),
-        ProposalAction::NewConstitution { .. } => Some(GovernanceType::NewConstitution),
-        ProposalAction::Info => Some(GovernanceType::InfoAction),
-        ProposalAction::Other => None,
-    }
 }
 
 /// Whether the row is a Conway governance action rather than a pre-Conway
@@ -2152,84 +2044,6 @@ where
     Ok(Json(page))
 }
 
-/// The parameter change one proposal asks for, as the nullable delta
-/// Blockfrost returns.
-///
-/// Every field is a change the proposal names, so an untouched parameter is
-/// `null` rather than the value in force — the opposite of
-/// `/epochs/{n}/parameters`, which reports the parameters actually effective
-/// and shares its field mapping with this through `protocol_params_model!`.
-/// Ratios come back [`Unrounded`]: Blockfrost serves this endpoint from
-/// db-sync's `param_proposal` columns at full `double precision`, so a
-/// proposal setting tau to 1/6 reads 0.16666666666666666, not the 0.167 the
-/// epoch endpoint would say.
-struct ProposalParametersBuilder {
-    tx: Hash<32>,
-    idx: u32,
-    params: PParamsSet,
-}
-
-impl IntoModel<ProposalParameters> for ProposalParametersBuilder {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<ProposalParameters, StatusCode> {
-        let Self { tx, idx, params } = self;
-
-        let parameters = protocol_params_model!(
-            params,
-            Unrounded,
-            ProposalParametersParameters {
-                // A Conway proposal names no epoch: db-sync fills the column
-                // only for the pre-Conway update proposals it keeps in the
-                // same table.
-                epoch: Some(None),
-                // The model types fees, sizes and counts as `i32` while a
-                // proposal can set them anywhere in the chain's range, so a
-                // value past `i32::MAX` is a 500, not a negative parameter.
-                min_fee_a: params.min_fee_a().map(i32_or_500).transpose()?,
-                min_fee_b: params.min_fee_b().map(i32_or_500).transpose()?,
-                max_block_size: params.max_block_body_size().map(i32_or_500).transpose()?,
-                max_tx_size: params.max_transaction_size().map(i32_or_500).transpose()?,
-                max_block_header_size: params
-                    .max_block_header_size()
-                    .map(i32_or_500)
-                    .transpose()?,
-                key_deposit: params.key_deposit().map(|x| x.to_string()),
-                pool_deposit: params.pool_deposit().map(|x| x.to_string()),
-                e_max: params.maximum_epoch().map(i32_or_500).transpose()?,
-                n_opt: params
-                    .desired_number_of_stake_pools()
-                    .map(i32_or_500)
-                    .transpose()?,
-                a0: params.a0().map(|x| rational_to_f64_unrounded(&x)),
-                rho: params.rho().map(|x| rational_to_f64_unrounded(&x)),
-                tau: params.tau().map(|x| rational_to_f64_unrounded(&x)),
-                // A pre-Conway knob that a Conway proposal cannot name.
-                decentralisation_param: None,
-                // A version bump is a hard fork, never a parameter change.
-                protocol_major_ver: None,
-                protocol_minor_ver: None,
-                min_utxo: params.ada_per_utxo_byte().map(|x| x.to_string()),
-                min_pool_cost: params.min_pool_cost().map(|x| x.to_string()),
-                // Blockfrost tells "set to the empty map" (`{}`) apart from
-                // "not named at all" (`null`) because db-sync keys a row per
-                // cost model. `PParamsSet` records a language at a time, so a
-                // change naming no language leaves nothing behind to tell the
-                // two apart and both read as `null` here.
-                cost_models: map_cost_models_raw(&params.cost_models_for_script_languages())
-                    .flatten(),
-            }
-        );
-
-        Ok(ProposalParameters {
-            id: bech32_gov_action(&tx, idx)?,
-            tx_hash: hex::encode(tx),
-            cert_index: idx.try_into().map_err(|_| StatusCode::BAD_REQUEST)?,
-            parameters: Box::new(parameters),
-        })
-    }
-}
-
 /// The parameter change proposed by `tx` at action index `idx`.
 ///
 /// Blockfrost joins the proposal against db-sync's `param_proposal` table, so
@@ -2745,155 +2559,6 @@ where
     Ok(Json(page))
 }
 
-// The helpers below reconstruct the `governance_description` JSON that
-// Blockfrost copies from db-sync. db-sync stores the cardano-ledger Aeson
-// encoding of the submitted `GovAction`, so field names follow the ledger
-// JSON instances.
-
-fn governance_type_from_action(action: &GovAction) -> proposal::GovernanceType {
-    match action {
-        GovAction::ParameterChange(..) => proposal::GovernanceType::ParameterChange,
-        GovAction::HardForkInitiation(..) => proposal::GovernanceType::HardForkInitiation,
-        GovAction::TreasuryWithdrawals(..) => proposal::GovernanceType::TreasuryWithdrawals,
-        GovAction::NoConfidence(..) => proposal::GovernanceType::NoConfidence,
-        GovAction::UpdateCommittee(..) => proposal::GovernanceType::NewCommittee,
-        GovAction::NewConstitution(..) => proposal::GovernanceType::NewConstitution,
-        GovAction::Information => proposal::GovernanceType::InfoAction,
-    }
-}
-
-pub struct ProposalModelBuilder {
-    state: ProposalState,
-    gov_action: Option<GovAction>,
-    network: Network,
-    current_epoch: Epoch,
-}
-
-impl ProposalModelBuilder {
-    fn governance_type(&self) -> proposal::GovernanceType {
-        if let Some(action) = &self.gov_action {
-            return governance_type_from_action(action);
-        }
-
-        match &self.state.action {
-            ProposalAction::ParamChange(_) => proposal::GovernanceType::ParameterChange,
-            ProposalAction::HardFork(_) => proposal::GovernanceType::HardForkInitiation,
-            ProposalAction::TreasuryWithdrawal(_) => proposal::GovernanceType::TreasuryWithdrawals,
-            ProposalAction::NoConfidence => proposal::GovernanceType::NoConfidence,
-            ProposalAction::UpdateCommittee { .. } => proposal::GovernanceType::NewCommittee,
-            ProposalAction::NewConstitution { .. } => proposal::GovernanceType::NewConstitution,
-            ProposalAction::Info => proposal::GovernanceType::InfoAction,
-            // read_proposal rejects a legacy row that the archive cannot
-            // resolve, so this arm never renders.
-            ProposalAction::Other => proposal::GovernanceType::InfoAction,
-        }
-    }
-
-    fn enactment_epoch(&self) -> Option<Epoch> {
-        enactment_epoch(&self.state, self.current_epoch)
-    }
-
-    fn expired_epoch(&self) -> Option<Epoch> {
-        expired_epoch(&self.state, self.current_epoch)
-    }
-
-    fn dropped_epoch(&self) -> Option<Epoch> {
-        dropped_epoch(&self.state, self.current_epoch)
-    }
-}
-
-/// Dolos stamps `ratified_epoch` with the epoch the ratifying boundary
-/// closes. db-sync reports that same epoch as `ratified_epoch` and the
-/// enactment lands one boundary later, so `enacted_epoch` is one more.
-fn enactment_epoch(state: &ProposalState, current_epoch: Epoch) -> Option<Epoch> {
-    let boundary = state.ratified_epoch? + 1;
-
-    (current_epoch >= boundary).then_some(boundary)
-}
-
-/// An unratified proposal counts as expired from its `expires_at` epoch
-/// on, before any boundary stamp. The expiry drop later stamps
-/// `canceled_epoch`, one epoch past `expires_at`. A `canceled_epoch` at
-/// or before `expires_at` is a sibling pruned by a competing enactment
-/// instead: db-sync reports that as dropped, never as expired.
-fn expired_epoch(state: &ProposalState, current_epoch: Epoch) -> Option<Epoch> {
-    if state.ratified_epoch.is_some() {
-        return None;
-    }
-
-    let expires = state.expires_at()?;
-
-    if state.canceled_epoch.is_some_and(|x| x <= expires) {
-        return None;
-    }
-
-    (current_epoch >= expires).then_some(expires)
-}
-
-/// db-sync marks a proposal as dropped when a competing action gets
-/// enacted (canceled in dolos terms) or one epoch after it marks the
-/// proposal as expired.
-fn dropped_epoch(state: &ProposalState, current_epoch: Epoch) -> Option<Epoch> {
-    if let Some(canceled) = state.canceled_epoch {
-        return (current_epoch >= canceled).then_some(canceled);
-    }
-
-    let dropped = expired_epoch(state, current_epoch)? + 1;
-
-    (current_epoch >= dropped).then_some(dropped)
-}
-
-/// The epoch the proposal left the active set and its tally froze — the
-/// earliest boundary outcome Blockfrost reports. `None` while the proposal
-/// is still live.
-fn proposal_closed_epoch(state: &ProposalState, current_epoch: Epoch) -> Option<Epoch> {
-    [
-        state.ratified_epoch,
-        enactment_epoch(state, current_epoch),
-        dropped_epoch(state, current_epoch),
-        expired_epoch(state, current_epoch),
-    ]
-    .into_iter()
-    .flatten()
-    .min()
-}
-
-impl IntoModel<Proposal> for ProposalModelBuilder {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<Proposal, StatusCode> {
-        let return_address = self
-            .state
-            .reward_account
-            .as_ref()
-            .map(|cred| stake_cred_to_address(cred, self.network).to_bech32())
-            .transpose()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .unwrap_or_default();
-
-        let enactment = self.enactment_epoch();
-
-        let governance_description = self.gov_action.as_ref().map(description_json).transpose()?;
-
-        let out = Proposal {
-            id: bech32_gov_action(&self.state.tx, self.state.idx)?,
-            tx_hash: hex::encode(self.state.tx),
-            cert_index: self.state.idx as i32,
-            governance_type: self.governance_type(),
-            governance_description,
-            deposit: self.state.deposit.unwrap_or_default().to_string(),
-            return_address,
-            ratified_epoch: self.state.ratified_epoch.map(|x| x as i32),
-            enacted_epoch: enactment.map(|x| x as i32),
-            dropped_epoch: self.dropped_epoch().map(|x| x as i32),
-            expired_epoch: self.expired_epoch().map(|x| x as i32),
-            expiration: self.state.expires_at().unwrap_or_default() as i32,
-        };
-
-        Ok(out)
-    }
-}
-
 /// Recover the submitted `GovAction` from the archived proposal tx. Returns
 /// `None` when the tx is absent (pruned archive), pre-Conway, or carries no
 /// procedure at the index.
@@ -3015,11 +2680,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mapping::bech32;
-    use crate::mapping::bech32_drep;
+    use crate::mapping::{bech32, bech32_committee_cold, bech32_committee_hot, bech32_drep};
     use crate::test_support::{TestApp, TestDomainBuilder, TestFault};
     use bech32::{Bech32, Hrp};
     use blockfrost_openapi::models::drep::Drep as DrepModel;
+    use blockfrost_openapi::models::{committee_members_inner::Status, proposal};
+    use dolos_cardano::model::gov::CommitteeAuthorization;
     use dolos_cardano::model::{DRepDelegation, DRepExpiry, EpochValue, GovPurpose, Stake};
     use dolos_core::StateWriter as _;
     use dolos_testing::{
@@ -3028,6 +2694,7 @@ mod tests {
     };
     use itertools::Itertools;
     use pallas::ledger::primitives::conway::DRep;
+    use pallas::ledger::primitives::Epoch;
     use pallas::{
         codec::utils::Bytes,
         crypto::hash::Hasher,
@@ -6041,56 +5708,6 @@ mod tests {
         .await;
     }
 
-    #[test]
-    fn governance_type_names_every_action() {
-        let cases = [
-            (
-                ProposalAction::ParamChange(PParamsSet::default()),
-                Some(GovernanceType::ParameterChange),
-            ),
-            (
-                ProposalAction::HardFork((10, 0)),
-                Some(GovernanceType::HardForkInitiation),
-            ),
-            (
-                ProposalAction::TreasuryWithdrawal(vec![]),
-                Some(GovernanceType::TreasuryWithdrawals),
-            ),
-            (
-                ProposalAction::NoConfidence,
-                Some(GovernanceType::NoConfidence),
-            ),
-            (
-                ProposalAction::UpdateCommittee {
-                    to_remove: vec![],
-                    to_add: vec![],
-                    threshold: pallas::ledger::primitives::RationalNumber {
-                        numerator: 1,
-                        denominator: 2,
-                    },
-                },
-                Some(GovernanceType::NewCommittee),
-            ),
-            (
-                ProposalAction::NewConstitution {
-                    anchor: pallas::ledger::primitives::conway::Anchor {
-                        url: "https://dolos.test".to_string(),
-                        content_hash: Hash::from([1u8; 32]),
-                    },
-                    guardrail_script: None,
-                },
-                Some(GovernanceType::NewConstitution),
-            ),
-            (ProposalAction::Info, Some(GovernanceType::InfoAction)),
-            // the legacy catch-all carries no action to name
-            (ProposalAction::Other, None),
-        ];
-
-        for (action, expected) in cases {
-            assert_eq!(governance_type(&action), expected, "{action:?}");
-        }
-    }
-
     fn ratio(numerator: u64, denominator: u64) -> RationalNumber {
         RationalNumber {
             numerator,
@@ -6869,76 +6486,6 @@ mod tests {
 
     fn proposal_tx() -> Hash<32> {
         [7u8; 32].into()
-    }
-
-    /// A proposal that expires after epoch 646 (`expires_at` = 647), with
-    /// the boundary outcome stamps given by the caller.
-    fn lifecycle_state(ratified: Option<Epoch>, canceled: Option<Epoch>) -> ProposalState {
-        ProposalState {
-            slot: 1,
-            tx: proposal_tx(),
-            idx: 0,
-            action: ProposalAction::Info,
-            max_epoch: Some(646),
-            ratified_epoch: ratified,
-            canceled_epoch: canceled,
-            deposit: Some(100_000_000),
-            reward_account: Some(StakeCredential::AddrKeyhash([7u8; 28].into())),
-            proposed_in: Some(640),
-            parent: None,
-            purpose: None,
-            anchor: None,
-            cc_votes: Default::default(),
-            drep_votes: Default::default(),
-            spo_votes: Default::default(),
-        }
-    }
-
-    fn lifecycle_model(state: ProposalState, current_epoch: Epoch) -> Proposal {
-        ProposalModelBuilder {
-            state,
-            gov_action: None,
-            network: Network::Testnet,
-            current_epoch,
-        }
-        .into_model()
-        .expect("failed to build proposal model")
-    }
-
-    /// The expected values mirror the Blockfrost mainnet responses for
-    /// b2a591ac… (enacted), dfd81f8d… (expired), and 729daaf2… (pending
-    /// through its expiration epoch).
-    #[test]
-    fn proposal_lifecycle_epochs_match_db_sync() {
-        // ratified at the boundary closing 525: enacted one epoch later
-        let enacted = lifecycle_model(lifecycle_state(Some(525), None), 653);
-        assert_eq!(enacted.ratified_epoch, Some(525));
-        assert_eq!(enacted.enacted_epoch, Some(526));
-        assert_eq!(enacted.expired_epoch, None);
-        assert_eq!(enacted.dropped_epoch, None);
-
-        // expired at 647: the drop stamps canceled one epoch past expiry
-        let expired = lifecycle_model(lifecycle_state(None, Some(648)), 653);
-        assert_eq!(expired.ratified_epoch, None);
-        assert_eq!(expired.enacted_epoch, None);
-        assert_eq!(expired.expired_epoch, Some(647));
-        assert_eq!(expired.dropped_epoch, Some(648));
-
-        // canceled before expiry: a pruned sibling drops but never expires
-        let pruned = lifecycle_model(lifecycle_state(None, Some(645)), 653);
-        assert_eq!(pruned.expired_epoch, None);
-        assert_eq!(pruned.dropped_epoch, Some(645));
-
-        // in its expiration epoch without a boundary stamp: already expired,
-        // the drop follows one epoch later (mirrors mainnet ab474223…)
-        let expiring = lifecycle_model(lifecycle_state(None, None), 647);
-        assert_eq!(expiring.expired_epoch, Some(647));
-        assert_eq!(expiring.dropped_epoch, None);
-
-        // still votable before its expiration epoch: no outcome yet
-        let pending = lifecycle_model(lifecycle_state(None, None), 646);
-        assert_eq!(pending.expired_epoch, None);
-        assert_eq!(pending.dropped_epoch, None);
     }
 
     fn seed_proposal(domain: &ToyDomain) {
