@@ -215,7 +215,9 @@ pub fn registry() -> Vec<Entry> {
             // it asserts.
             // Revision 3 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged. Revision 4 appends the epoch's active
-            // stake and the ESTART shards' carried tally.
+            // stake and the ESTART shards' carried tally. Field 20, the EWRAP
+            // finalize mark, joins revision 4 in place: the v2 freeze resets
+            // every revision to 1.
             &[
                 Pinned {
                     rev: 1,

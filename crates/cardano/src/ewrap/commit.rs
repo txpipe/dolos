@@ -20,8 +20,8 @@ use tracing::{debug, instrument, trace, warn};
 
 use crate::{
     ewrap::BoundaryWork, model::PoolHash, AccountEpochLog, AccountKey, AccountState, CardanoEntity,
-    DRepState, EpochState, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
-    PoolEpochLog,
+    DRepState, EpochState, GovState, PendingMirState, PendingRewardState, PoolEpochLog, PoolState,
+    ProposalState,
 };
 
 /// What each pool paid out at the boundary, summed from the merged account
@@ -206,9 +206,13 @@ impl BoundaryWork {
     /// wrapup-global deltas for pools, dreps, proposals, plus the
     /// `EpochWrapUp` delta on `EpochState` that closes the boundary
     /// (overwrites `entity.end` with the final stats, rotates
-    /// rolling/pparams snapshots, clears `ewrap_progress`). Also writes the
-    /// completed `EpochState` snapshot to the archive, at the start of its
-    /// epoch.
+    /// rolling/pparams snapshots, sets `ewrap_finalized`). Also settles the
+    /// epoch's `PoolEpochLog` rewards and writes the completed `EpochState`
+    /// snapshot to the archive, at the start of its epoch.
+    ///
+    /// The state commit is what marks finalize done, so a crash before it
+    /// re-runs finalize on restart; the archive writes it repeats are
+    /// overwrites of the same keys with the same values.
     #[instrument(skip_all)]
     pub fn commit_finalize<D: Domain>(
         &mut self,
