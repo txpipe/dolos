@@ -481,7 +481,6 @@ pub enum CardanoDelta {
     DRepSighting(Box<DRepSighting>),
     CommitteeDissolve(Box<CommitteeDissolve>),
     CommitteeReseat(Box<CommitteeReseat>),
-    AccountSeen(Box<AccountSeen>),
 }
 
 impl CardanoDelta {
@@ -600,7 +599,6 @@ delta_from!(MetadataLabelTxInc);
 delta_from!(StageAssetMint);
 delta_from!(CommitteeDissolve);
 delta_from!(CommitteeReseat);
-delta_from!(AccountSeen);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -608,7 +606,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
 
     fn key(&self) -> NsKey {
         match self {
-            Self::AccountSeen(x) => x.key(),
             Self::ControlledAmountInc(x) => x.key(),
             Self::ControlledAmountDec(x) => x.key(),
             Self::StakeRegistration(x) => x.key(),
@@ -692,7 +689,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         match self {
-            Self::AccountSeen(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::ControlledAmountInc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::ControlledAmountDec(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::StakeRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -776,7 +772,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
         match self {
-            Self::AccountSeen(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::ControlledAmountInc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::ControlledAmountDec(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::StakeRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
