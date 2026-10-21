@@ -259,24 +259,25 @@ fn proposal_votes_in_block(block: &MultiEraBlock, action: &GovActionId) -> Vec<P
 const STABLE_CURSOR_ATTEMPTS: usize = 3;
 
 /// Runs `read` between two reads of the state cursor, and repeats it while
-/// the cursor moves. Returns the cursor that `read` saw.
+/// the cursor moves. `read` gets the cursor it runs at; the result is that
+/// cursor and what `read` returned.
 ///
 /// The state commits the cursor and its entities in one batch, so an
 /// unchanged cursor shows that `read` saw the state at that cursor.
-fn read_at_stable_cursor<T>(
+fn read_at_stable_cursor<T, E: From<StatusCode>>(
     mut read_cursor: impl FnMut() -> Result<ChainPoint, StatusCode>,
-    mut read: impl FnMut() -> Result<T, StatusCode>,
-) -> Result<(ChainPoint, T), StatusCode> {
+    mut read: impl FnMut(&ChainPoint) -> Result<T, E>,
+) -> Result<(ChainPoint, T), E> {
     for _ in 0..STABLE_CURSOR_ATTEMPTS {
         let before = read_cursor()?;
-        let value = read()?;
+        let value = read(&before)?;
 
         if read_cursor()? == before {
             return Ok((before, value));
         }
     }
 
-    Err(StatusCode::INTERNAL_SERVER_ERROR)
+    Err(StatusCode::INTERNAL_SERVER_ERROR.into())
 }
 
 /// One page of a proposal's votes.
@@ -295,18 +296,19 @@ fn read_at_stable_cursor<T>(
 /// Only the newest vote of a voter can count, and the proposal's state row
 /// holds that vote's position (`VoteEntry`), so only the rows on the page pay
 /// for the `counted` check.
+///
+/// The `counted` flags compare the archive rows with the proposal row and
+/// with the DRep rows, so the whole page is read between two reads of the
+/// state cursor and read again if the cursor moved: one response describes
+/// one chain state, never the rows of one and the flags of another.
 fn read_votes<D: Domain>(
     domain: &D,
     tx: Hash<32>,
     idx: u32,
     pagination: &Pagination,
-    mut budget: usize,
+    budget: usize,
 ) -> Result<Vec<ProposalVotesInner>, Error> {
-    let key = ProposalKey::new(tx, idx);
-
-    // The `counted` flags compare the archive rows with the proposal row, so
-    // the row must belong to the state at the cursor that bounds the listing.
-    let (cursor, state) = read_at_stable_cursor(
+    let (_, page) = read_at_stable_cursor(
         || {
             domain
                 .state()
@@ -314,15 +316,28 @@ fn read_votes<D: Domain>(
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
         },
-        || {
-            domain
-                .state()
-                .read_entity_typed::<ProposalState>(&key)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-        },
+        |cursor| read_votes_at(domain, tx, idx, pagination, budget, cursor.slot()),
     )?;
 
-    let cursor = cursor.slot();
+    Ok(page)
+}
+
+/// The page of [`read_votes`] as the state at `cursor` describes it. Every
+/// attempt starts from the full `budget`.
+fn read_votes_at<D: Domain>(
+    domain: &D,
+    tx: Hash<32>,
+    idx: u32,
+    pagination: &Pagination,
+    mut budget: usize,
+    cursor: BlockSlot,
+) -> Result<Vec<ProposalVotesInner>, Error> {
+    let key = ProposalKey::new(tx, idx);
+
+    let state = domain
+        .state()
+        .read_entity_typed::<ProposalState>(&key)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Blockfrost joins against db-sync and sends whatever rows come back, so
     // an unknown proposal is an empty listing rather than a 404.
@@ -1298,9 +1313,14 @@ mod tests {
                 next_cursor.set(i + 1);
                 Ok(cursors[i].clone())
             },
-            || {
+            |cursor| {
                 reads.set(reads.get() + 1);
-                Ok(reads.get())
+                assert_eq!(
+                    cursor,
+                    &cursors[next_cursor.get() - 1],
+                    "read sees its cursor"
+                );
+                Ok::<_, StatusCode>(reads.get())
             },
         );
 
