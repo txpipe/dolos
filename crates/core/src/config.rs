@@ -2139,7 +2139,11 @@ mod tests {
         match table_check("[storage.archive]\ntype = \"Ephemeral\"\ncache = 64\n") {
             Err(ConfigError::Invalid { keys, message }) => {
                 assert_eq!(keys, ["storage.archive.type"]);
-                assert!(message.contains("unknown variant `Ephemeral`"), "{message}");
+                assert!(
+                    message.contains("variant constructor Ephemeral"),
+                    "{message}"
+                );
+                assert!(!message.contains("cache"), "{message}");
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
