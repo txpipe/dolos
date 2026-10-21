@@ -283,33 +283,50 @@ pub(crate) fn assert_fjall_holds(db: &Database, tuning: &Tuning) {
     }
 }
 
-/// Asserts that each keyspace whose memtable `tuning` sets above Fjall's
-/// default takes more than the default without rotating it.
+/// Asserts that each keyspace rotates its memtable at the size `tuning`
+/// sets: it holds just under that size without rotating, and rotates once
+/// written past it. An insert past the limit only requests the rotation and a
+/// worker runs it, so the rotation is polled for; a limit below the row is
+/// caught when a worker runs its rotation within the pause under the row.
 #[cfg(test)]
 pub(crate) fn assert_memtables_hold(db: &Database, tuning: &Tuning) {
     use fjall::AbstractTree;
+    use std::time::{Duration, Instant};
 
-    let default = KeyspaceTuning::FJALL_DEFAULT.memtable_mb;
     let value = vec![0u8; MIB as usize];
-    let larger = tuning
-        .keyspaces
-        .iter()
-        .filter(|(_, row)| row.memtable_mb > default);
 
-    for (name, row) in larger {
+    for (name, row) in &tuning.keyspaces {
         let keyspace = db.keyspace(name, KeyspaceCreateOptions::default).unwrap();
-
-        for key in 0..(default + row.memtable_mb) / 2 {
-            keyspace.insert(key.to_be_bytes(), &value).unwrap();
-        }
-
-        // An insert past the limit only requests the rotation; a worker runs it.
-        std::thread::sleep(std::time::Duration::from_millis(250));
-
         let tree = &keyspace.tree;
-        assert!(tree.active_memtable().size() > default * MIB, "{name}");
-        assert_eq!(tree.sealed_memtable_count(), 0, "{name}");
-        assert_eq!(tree.table_count(), 0, "{name}");
+        let rotated = || tree.sealed_memtable_count() + tree.table_count() > 0;
+        assert!(!rotated(), "{name}: keyspace not empty");
+
+        let mut key = 0u64;
+        let mut insert = |count: u64| {
+            for _ in 0..count {
+                keyspace.insert(key.to_be_bytes(), &value).unwrap();
+                key += 1;
+            }
+        };
+
+        insert(row.memtable_mb - 1);
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(!rotated(), "{name}: rotated under {} MiB", row.memtable_mb);
+        assert!(
+            tree.active_memtable().size() > (row.memtable_mb - 1) * MIB,
+            "{name}"
+        );
+
+        insert(2);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !rotated() {
+            assert!(
+                Instant::now() < deadline,
+                "{name}: did not rotate past {} MiB",
+                row.memtable_mb
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
