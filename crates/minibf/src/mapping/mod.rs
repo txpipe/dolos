@@ -41,8 +41,10 @@ use blockfrost_openapi::models::{
 use dolos_cardano::pallas_extras;
 use dolos_core::{async_query::BlockRefMeta, EraCbor, TxHash, TxoIdx, TxoRef};
 
+pub mod address_stats;
 pub mod blocks;
 pub mod cost_models;
+pub mod direct_json;
 pub mod epochs;
 pub mod network;
 pub mod protocol_params;
@@ -642,7 +644,7 @@ async fn fetch_offchain_body(
     read_offchain_body(response).await
 }
 
-fn offchain_hash_mismatch_error(
+pub(crate) fn offchain_hash_mismatch_error(
     url: &str,
     expected_hash: &[u8],
     actual_hash: &[u8],
@@ -1345,41 +1347,6 @@ impl AssetTotals {
 
         std::iter::once(lovelace).chain(assets).collect()
     }
-}
-
-/// The received and sent amounts of a Stats total, each lovelace first, then
-/// every asset with a nonzero sum on that side, by unit.
-pub fn stats_amounts(
-    stats: &dolos_cardano::AddressStats,
-) -> (
-    Vec<TxContentOutputAmountInner>,
-    Vec<TxContentOutputAmountInner>,
-) {
-    let side = |pick: fn(&dolos_cardano::UnitSums) -> u128| {
-        let lovelace = stats
-            .units
-            .get(&Vec::new().into())
-            .map(pick)
-            .unwrap_or_default();
-
-        let assets = stats
-            .units
-            .iter()
-            .filter(|(unit, sums)| !unit.is_empty() && pick(sums) > 0)
-            .map(|(unit, sums)| TxContentOutputAmountInner {
-                unit: hex::encode(unit.as_slice()),
-                quantity: pick(sums).to_string(),
-            });
-
-        std::iter::once(TxContentOutputAmountInner {
-            unit: "lovelace".to_string(),
-            quantity: lovelace.to_string(),
-        })
-        .chain(assets)
-        .collect()
-    };
-
-    (side(|sums| sums.received.0), side(|sums| sums.sent.0))
 }
 
 pub fn aggregate_assets<'a>(

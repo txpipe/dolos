@@ -5,10 +5,12 @@
 //!
 //! ```text
 //! cargo run --no-default-features --example headless_snapshot -- \
-//!   ./dolos.toml ./stele
+//!   ./dolos.toml ./stele [208,236,290]
 //! ```
 //!
-//! The destination must not already contain a stele. Configuration precedence,
+//! The optional third argument is the publisher's retained state-dump epochs;
+//! omitted, the stele retains the tip alone. The destination must not already
+//! contain a stele. Configuration precedence,
 //! progress rendering and destination cleanup remain host responsibilities.
 
 use std::{error::Error, path::Path, sync::Arc};
@@ -27,6 +29,15 @@ fn main() -> Result<(), AnyError> {
     let mut args = std::env::args_os().skip(1);
     let config_path = args.next().ok_or("missing path to dolos.toml")?;
     let destination = args.next().ok_or("missing output directory")?;
+    let state_epochs: Vec<u64> = match args.next() {
+        Some(list) => list
+            .to_str()
+            .ok_or("state epochs are not valid UTF-8")?
+            .split(',')
+            .map(str::parse)
+            .collect::<Result<_, _>>()?,
+        None => Vec::new(),
+    };
 
     let config: dolos::core::config::RootConfig = config::Config::builder()
         .add_source(config::File::from(Path::new(&config_path)))
@@ -47,7 +58,7 @@ fn main() -> Result<(), AnyError> {
 
     let snapshot_result = (|| -> Result<(), AnyError> {
         let snapshot = workspace.snapshot();
-        let retained = dolos_snapshot::planning::retained_epochs(&config)?;
+        let retained = dolos_snapshot::planning::retained_epochs(&state_epochs)?;
         let plan = snapshot.selected_plan(
             u64::from(genesis.network_magic()),
             retained,

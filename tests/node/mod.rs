@@ -132,6 +132,8 @@ impl Node {
         .unwrap();
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
+        let query_limiter = QueryLimiter::default();
+        let cache = dolos::storage::open_cache_store(&self.config, query_limiter.clone()).unwrap();
 
         let domain = DomainAdapter {
             storage_config: Arc::new(self.config.storage.clone()),
@@ -142,8 +144,9 @@ impl Node {
             state: stores.state,
             archive: stores.archive,
             mempool: stores.mempool,
+            cache,
             tip_broadcast,
-            query_limiter: QueryLimiter::default(),
+            query_limiter,
         };
 
         domain.bootstrap().unwrap();
@@ -166,7 +169,7 @@ impl Node {
         let stores =
             dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
         let genesis = dolos_cardano::include::preview::load();
-        let retained = dolos_snapshot::planning::retained_epochs(&self.config).unwrap();
+        let retained = dolos_snapshot::planning::retained_epochs(&[]).unwrap();
         let snapshot = StoreSnapshot::new(&stores.archive, &stores.state);
         let plan = snapshot
             .selected_plan(

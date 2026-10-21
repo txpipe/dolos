@@ -52,6 +52,9 @@ fn parse_pool(dto: &ConfigPool) -> PoolState {
             relays: vec![],
             pool_metadata: None,
         },
+        stake: None,
+        delegators: None,
+        live_pledge: None,
     };
 
     let operator = dto.public_key.parse().unwrap();

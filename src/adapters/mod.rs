@@ -11,7 +11,9 @@ use dolos_core::{
 };
 use pallas::ledger::traverse::MultiEraBlock;
 
-pub use storage::{ArchiveStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend};
+pub use storage::{
+    ArchiveStoreBackend, CacheBackend, MempoolBackend, StateStoreBackend, WalStoreBackend,
+};
 
 /// Type alias for the WAL store specialized for Cardano.
 pub type WalAdapter = WalStoreBackend<dolos_cardano::CardanoDelta>;
@@ -42,6 +44,7 @@ pub struct DomainAdapter {
     pub state: StateStoreBackend,
     pub archive: ArchiveStoreBackend,
     pub mempool: MempoolBackend,
+    pub cache: CacheBackend,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
     pub query_limiter: QueryLimiter,
 }
@@ -60,6 +63,11 @@ impl DomainAdapter {
         self.state.shutdown().map_err(DomainError::StateError)?;
         self.archive.shutdown().map_err(DomainError::ArchiveError)?;
 
+        // disposable: a failed flush only loses the entries since the last one
+        if let Err(error) = self.cache.flush() {
+            tracing::warn!(%error, "domain adapter: cache flush failed");
+        }
+
         tracing::info!("domain adapter: graceful shutdown complete");
         Ok(())
     }
@@ -74,6 +82,7 @@ impl Domain for DomainAdapter {
     type State = StateStoreBackend;
     type Archive = ArchiveStoreBackend;
     type Mempool = MempoolBackend;
+    type Cache = CacheBackend;
     type TipSubscription = TipSubscription;
 
     fn genesis(&self) -> Arc<Genesis> {
@@ -106,6 +115,10 @@ impl Domain for DomainAdapter {
 
     fn mempool(&self) -> &Self::Mempool {
         &self.mempool
+    }
+
+    fn cache(&self) -> &Self::Cache {
+        &self.cache
     }
 
     fn storage_config(&self) -> &StorageConfig {

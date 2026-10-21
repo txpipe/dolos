@@ -47,21 +47,33 @@ fn bootstrap_pots(pparams: &PParamsSet, genesis: &Genesis) -> Result<Pots, Chain
     })
 }
 
+/// The pparams the chain opens with: Byron's, fast-forwarded to the
+/// genesis's starting protocol when it has one.
+fn starting_pparams(genesis: &Genesis) -> Result<PParamsSet, ChainError> {
+    let pparams = crate::forks::from_byron_genesis(&genesis.byron);
+
+    match genesis.starting_protocol()? {
+        Some(protocol) if protocol > crate::forks::LATEST_PROTOCOL => {
+            Err(ChainError::UnsupportedStartingProtocol(protocol.into()))
+        }
+        Some(protocol) => Ok(crate::forks::force_pparams_version(
+            &pparams, genesis, 0, protocol,
+        )?),
+        None => Ok(pparams),
+    }
+}
+
 pub fn bootstrap_epoch<D: Domain>(
     state: &D::State,
     genesis: &Genesis,
 ) -> Result<EpochState, ChainError> {
-    let mut pparams = crate::forks::from_byron_genesis(&genesis.byron);
-    let mut nonces = None;
+    let pparams = starting_pparams(genesis)?;
 
-    if let Some(force_protocol) = genesis.force_protocol {
-        pparams = crate::forks::force_pparams_version(&pparams, genesis, 0, force_protocol as u16)?;
-
-        if force_protocol >= 2 {
-            // When we start on Shelley or beyond, we need to bootstrap the nonces.
-            nonces = Some(Nonces::bootstrap(genesis.shelley_hash));
-        }
-    }
+    // When we start on Shelley or beyond, we need to bootstrap the nonces.
+    let nonces = genesis
+        .starting_protocol()?
+        .is_some_and(|protocol| protocol >= 2)
+        .then(|| Nonces::bootstrap(genesis.shelley_hash));
 
     let pots = bootstrap_pots(&pparams, genesis)?;
     let protocol = pparams.ensure_protocol_major()?;
@@ -86,6 +98,8 @@ pub fn bootstrap_epoch<D: Domain>(
         ewrap_progress: None,
         estart_progress: None,
         rupd_progress: None,
+        active_stake: None,
+        estart_tally: None,
     };
 
     let writer = state.start_writer()?;
@@ -124,13 +138,16 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
 
 /// Create the governance singleton. Its existence is an invariant that
 /// starts here: every store carries the row regardless of era. Networks
-/// that force-start at Conway (protocol >= 9, e.g. devnets) get it
+/// that start at Conway (protocol >= 9, e.g. devnets) get it
 /// activated with the genesis enact-state; everyone else gets the
 /// inactive row, activated later at the Chang boundary (`GovGenesisInit`).
 pub fn bootstrap_gov<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
     let mut gov = GovState::default();
 
-    if genesis.force_protocol.is_some_and(|protocol| protocol >= 9) {
+    if genesis
+        .starting_protocol()?
+        .is_some_and(|protocol| protocol >= 9)
+    {
         let (constitution, committee) = gov_from_conway_genesis(&genesis.conway)?;
         gov.seed_genesis(constitution, committee, 0);
     }
@@ -218,6 +235,115 @@ mod tests {
         assert_eq!(gov.committee, Some(committee));
         assert_eq!(gov.num_dormant_epochs, 0);
         assert_eq!(gov.active_since, Some(0));
+    }
+
+    /// The pparams a start opened with before it was derived: Byron's,
+    /// forced only by an explicit protocol.
+    fn forced_only(genesis: &Genesis, forced: Option<u16>) -> PParamsSet {
+        let byron = crate::forks::from_byron_genesis(&genesis.byron);
+
+        match forced {
+            Some(to) => crate::forks::force_pparams_version(&byron, genesis, 0, to).unwrap(),
+            None => byron,
+        }
+    }
+
+    #[test]
+    fn starting_pparams_match_the_forced_ladder() {
+        use crate::include::{devnet, mainnet, preprod, preview};
+        use pallas::codec::minicbor;
+
+        // preview carried `force_protocol = 6` before the start was derived
+        let cases = [
+            ("mainnet", mainnet::load(), None),
+            ("preprod", preprod::load(), None),
+            ("devnet", devnet::load(), Some(9)),
+            ("preview", preview::load(), Some(6)),
+        ];
+
+        for (name, genesis, forced) in cases {
+            let derived = minicbor::to_vec(starting_pparams(&genesis).unwrap()).unwrap();
+            let expected = minicbor::to_vec(forced_only(&genesis, forced)).unwrap();
+
+            assert_eq!(derived, expected, "{name}");
+        }
+
+        assert_eq!(
+            starting_pparams(&preview::load()).unwrap().protocol_major(),
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn derived_preview_start_bootstraps_nonces() {
+        let genesis = crate::include::preview::load();
+        let shelley_hash = genesis.shelley_hash;
+
+        let domain = ToyDomain::new_with_genesis(Arc::new(genesis), None, None);
+
+        let epoch = domain
+            .state()
+            .read_entity_typed::<EpochState>(&())
+            .unwrap()
+            .expect("epoch state written at bootstrap");
+
+        assert_eq!(epoch.nonces, Some(Nonces::bootstrap(shelley_hash)));
+    }
+
+    #[test]
+    fn byron_start_bootstraps_without_nonces() {
+        let genesis = crate::include::preprod::load();
+
+        let domain = ToyDomain::new_with_genesis(Arc::new(genesis), None, None);
+
+        let epoch = domain
+            .state()
+            .read_entity_typed::<EpochState>(&())
+            .unwrap()
+            .expect("epoch state written at bootstrap");
+
+        assert_eq!(epoch.nonces, None);
+    }
+
+    #[test]
+    fn derived_conway_start_activates_gov() {
+        let mut genesis = crate::include::devnet::load();
+        genesis.force_protocol = None;
+        genesis.shelley.protocol_params.protocol_version.major = 9;
+
+        let domain = ToyDomain::new_with_genesis(Arc::new(genesis), None, None);
+
+        let gov = read_gov(&domain).expect("gov singleton seeded at bootstrap");
+        assert_eq!(gov.active_since, Some(0));
+    }
+
+    #[test]
+    fn start_past_the_ladder_is_a_typed_error() {
+        let mut genesis = crate::include::preview::load();
+        genesis.shelley.protocol_params.protocol_version.major =
+            (crate::forks::LATEST_PROTOCOL + 1).into();
+
+        let err = starting_pparams(&genesis).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ChainError::UnsupportedStartingProtocol(major)
+                if major == u64::from(crate::forks::LATEST_PROTOCOL) + 1
+        ));
+    }
+
+    #[test]
+    fn start_at_the_top_of_the_ladder_is_supported() {
+        let mut genesis = crate::include::preview::load();
+        genesis.shelley.protocol_params.protocol_version.major =
+            crate::forks::LATEST_PROTOCOL.into();
+
+        let pparams = starting_pparams(&genesis).unwrap();
+
+        assert_eq!(
+            pparams.protocol_major(),
+            Some(crate::forks::LATEST_PROTOCOL)
+        );
     }
 
     #[test]

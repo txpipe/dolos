@@ -252,6 +252,11 @@ fn build_domain(
         .context("creating the in-memory WAL")?;
 
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
+    let query_limiter = QueryLimiter::default();
+    let cache = open_store(
+        "cache",
+        dolos::storage::open_cache_store(config, query_limiter.clone()),
+    )?;
 
     Ok(DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
@@ -262,8 +267,9 @@ fn build_domain(
         state,
         archive,
         mempool: MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
+        cache,
         tip_broadcast,
-        query_limiter: QueryLimiter::default(),
+        query_limiter,
     })
 }
 

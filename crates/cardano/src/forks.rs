@@ -210,6 +210,9 @@ pub fn intra_era_hardfork(current: &PParamsSet, target: u16) -> PParamsSet {
         .with(PParamValue::ProtocolVersion((target as u64, 0)))
 }
 
+/// The highest protocol major `migrate_pparams_version` can reach.
+pub const LATEST_PROTOCOL: u16 = 11;
+
 // Source: https://github.com/cardano-foundation/CIPs/blob/master/CIP-0059/feature-table.md
 pub fn migrate_pparams_version(
     from: u16,
@@ -301,8 +304,8 @@ mod tests {
 
         let genesis = load_genesis(&path);
         let initial = from_byron_genesis(&genesis.byron);
-        let result = force_pparams_version(&initial, &genesis, 0, 11).unwrap();
+        let result = force_pparams_version(&initial, &genesis, 0, LATEST_PROTOCOL).unwrap();
 
-        assert_eq!(result.protocol_major(), Some(11));
+        assert_eq!(result.protocol_major(), Some(LATEST_PROTOCOL));
     }
 }

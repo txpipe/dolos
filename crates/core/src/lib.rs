@@ -31,6 +31,7 @@ pub mod archive;
 pub mod async_query;
 pub mod bootstrap;
 pub mod builtin;
+pub mod cache;
 pub mod cbor;
 pub mod config;
 pub mod crawl;
@@ -113,6 +114,9 @@ pub type LogSeq = u64;
 
 pub use archive::*;
 pub use async_query::*;
+pub use cache::{
+    CacheDiskTier, CacheEntry, CacheError, CacheNamespace, CacheStore, FillError, TieredCache,
+};
 pub use indexes::*;
 pub use keys::{
     EntityKey, FixedKey, KeyBytes, KeyCodec, KeyError, KeyPrefix, KeyRange, LogKey, LogRangeOf,
@@ -270,6 +274,9 @@ pub enum BrokenInvariant {
     #[error("missing pool {}", hex::encode(.0))]
     MissingPool(Vec<u8>),
 
+    #[error("pool {pool} has no frozen stake for epoch {epoch}")]
+    UnfrozenPoolStake { pool: String, epoch: Epoch },
+
     #[error(
         "CARDANO-002: epoch boundary {epoch} incomplete (estart shards {committed:?}/{total:?})"
     )]
@@ -377,6 +384,30 @@ impl Genesis {
         self.shelley.network_magic.unwrap_or_default()
     }
 
+    /// The protocol major the chain opens at, when it opens past Byron.
+    ///
+    /// An explicit `force_protocol` wins. Otherwise a Shelley genesis major
+    /// above 2 means a fast-forwarded start, since Shelley's own band is
+    /// `[2, 2]`. `None` is a Byron start that climbs the hard-fork ladder.
+    pub fn starting_protocol(&self) -> Result<Option<u16>, ChainError> {
+        let major = match self.force_protocol {
+            Some(forced) => forced as u64,
+            None => {
+                let major = self.shelley.protocol_params.protocol_version.major;
+
+                if major <= 2 {
+                    return Ok(None);
+                }
+
+                major
+            }
+        };
+
+        u16::try_from(major)
+            .map(Some)
+            .map_err(|_| ChainError::UnsupportedStartingProtocol(major))
+    }
+
     pub fn from_file_paths(
         byron: impl AsRef<Path>,
         shelley: impl AsRef<Path>,
@@ -452,8 +483,17 @@ pub enum ChainError {
     #[error("invalid chain config: {0}")]
     InvalidConfig(String),
 
+    #[error("network magic {magic} does not match the Shelley genesis networkMagic {genesis}")]
+    NetworkMagicMismatch { magic: u32, genesis: u32 },
+
     #[error("protocol params not found: {0}")]
     PParamsNotFound(String),
+
+    #[error("protocol parameter `{0}` is not set at this point of the chain; the genesis probably starts past Byron: set `genesis.force_protocol` to its starting protocol version, then wipe the store and bootstrap it again, since the setting is read only when the genesis is first applied")]
+    StartingPParamMissing(&'static str),
+
+    #[error("the genesis starts at protocol version {0}, which this dolos can't fast-forward to")]
+    UnsupportedStartingProtocol(u64),
 
     #[error("no active epoch")]
     NoActiveEpoch,
@@ -665,6 +705,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type State: StateStore;
     type Archive: ArchiveStore;
     type Mempool: MempoolStore;
+    type Cache: CacheStore;
     type TipSubscription: TipSubscription;
 
     fn storage_config(&self) -> &config::StorageConfig;
@@ -682,6 +723,9 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
     fn mempool(&self) -> &Self::Mempool;
+
+    /// The disposable cache for derived reads.
+    fn cache(&self) -> &Self::Cache;
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError>;
     fn notify_tip(&self, tip: TipEvent);

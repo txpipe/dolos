@@ -50,7 +50,10 @@ use dolos_core::{
 use dreps::{drep_is_expired, drep_is_retired, drep_list_item, parse_drep_id, DrepModelBuilder};
 use futures::{stream, FutureExt as _, StreamExt as _};
 use itertools::Itertools;
-use metadata::{cached_drep_metadata, fetch_drep_metadata, unfetched, OffchainStore, OnOverload};
+use metadata::{cached_drep_metadata, fetch_drep_metadata, unfetched, OnOverload};
+
+pub use metadata::register as register_caches;
+pub(crate) use metadata::remove_legacy_dir;
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -167,15 +170,6 @@ fn chain_context<D: Domain>(
     let pparams = domain.get_current_effective_pparams()?;
 
     Ok((chain, tip, pparams))
-}
-
-/// The DRep metadata store under the node's storage path.
-async fn offchain_store<D: Domain>(domain: &Facade<D>) -> OffchainStore {
-    OffchainStore::open(
-        &domain.storage_config().path,
-        domain.config.max_offchain_cache_bytes(),
-    )
-    .await
 }
 
 /// Query parameters of `/governance/dreps`: the shared pagination set plus
@@ -439,7 +433,7 @@ where
         pparams,
     } = drep_page(&domain, retired, expired, order_by_amount, &pagination).await?;
 
-    let store = offchain_store(&domain).await;
+    let cache = domain.inner.cache();
     let gateways = domain.config.ipfs_gateways();
 
     // the latest anchor a registration or update carried, as db-sync serves
@@ -454,12 +448,8 @@ where
 
     let metadata = page_metadata(
         &anchors,
-        |anchor| cached_drep_metadata(&store, anchor),
-        |anchor| {
-            let (store, gateways, anchor) = (store.clone(), gateways.clone(), anchor.clone());
-
-            async move { fetch_drep_metadata(&store, &gateways, &anchor, on_overload).await }
-        },
+        |anchor| cached_drep_metadata(cache, anchor),
+        |anchor| fetch_drep_metadata(cache, &gateways, anchor, on_overload),
         PAGE_METADATA_DEADLINE,
     )
     .await;
@@ -558,12 +548,12 @@ where
         hex::encode(&parsed.encoded)
     };
 
-    let store = offchain_store(&domain).await;
     let gateways = domain.config.ipfs_gateways();
 
     // the cache the list fills, so one anchor reads alike on both endpoints
     // and a verified body is fetched once
-    let metadata = fetch_drep_metadata(&store, &gateways, anchor, OnOverload::Inline).await;
+    let metadata =
+        fetch_drep_metadata(domain.inner.cache(), &gateways, anchor, OnOverload::Inline).await;
 
     Ok(Json(DrepMetadata {
         drep_id: parsed.drep_id,
@@ -3268,8 +3258,6 @@ mod tests {
             content_hash: Hasher::<256>::hash(body),
         };
 
-        metadata::cache_verified_body(&anchor, body);
-
         let app = TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), {
             let anchor = anchor.clone();
 
@@ -3278,6 +3266,8 @@ mod tests {
                 seed_drep_with_anchor(domain, parsed.encoded, anchor);
             }
         });
+
+        metadata::cache_verified_body(app.facade().inner.cache(), &anchor, body).await;
 
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}/metadata");

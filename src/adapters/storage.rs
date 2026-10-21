@@ -11,23 +11,26 @@
 
 use std::{ops::Range, path::Path, path::PathBuf};
 
+use bytes::Bytes;
 use dolos_core::{
     archive::{ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter},
     builtin::{
         EmptyBlockIter, EmptyLogIter, EmptySlotIter, MemoryArchiveStore, MemoryStateStore,
-        MemoryStateWriter, NoOpArchiveStore, NoOpArchiveWriter,
+        MemoryStateWriter, NoDiskTier, NoOpArchiveStore, NoOpArchiveWriter,
     },
+    cache::Cost,
     config::{
         ArchiveStoreConfig, FjallStateConfig, MempoolStoreConfig, RedbStateConfig, RedbWalConfig,
         RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
     },
-    ArchiveIndexDelta, BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
-    ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey, LogValue, MempoolError, MempoolEvent,
-    MempoolStore, MempoolTx, Namespace, RawBlock, StateError, StateSchema,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TagRecord, TxHash,
-    TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError,
-    WalStore,
+    ArchiveIndexDelta, BlockBody, BlockSlot, CacheDiskTier, CacheEntry, CacheError, ChainPoint,
+    EntityDelta, EntityKey, EntityValue, ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey,
+    LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace, QueryLimiter,
+    RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
+    StateWriter as CoreStateWriter, TagDimension, TagRecord, TieredCache, TxHash, TxStatus, TxoRef,
+    UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
 };
+use dolos_redb3::cache::RedbCacheTier;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::prelude::Error;
@@ -220,6 +223,20 @@ pub fn open_mempool_store(config: &RootConfig) -> Result<MempoolBackend, Error> 
     }
 }
 
+/// The cache store, filling under `limiter`, the domain's query limiter. An
+/// enabled cache keeps its immutable entries in the redb disk tier too.
+pub fn open_cache_store(config: &RootConfig, limiter: QueryLimiter) -> Result<CacheBackend, Error> {
+    let disk = match config.storage.cache_path() {
+        Some(path) => CacheDiskBackend::Redb(
+            RedbCacheTier::open(path, config.storage.cache.disk_budget_bytes)
+                .map_err(|error| Error::StorageError(error.to_string()))?,
+        ),
+        None => CacheDiskBackend::Off(NoDiskTier),
+    };
+
+    Ok(TieredCache::new(&config.storage.cache, disk, limiter))
+}
+
 pub fn open_data_stores<D>(config: &RootConfig) -> Result<Stores<D>, Error>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
@@ -232,6 +249,90 @@ where
         archive: open_archive_store(config)?,
         mempool: open_mempool_store(config)?,
     })
+}
+
+pub type CacheBackend = TieredCache<CacheDiskBackend>;
+
+// ============================================================================
+// Cache Disk Tier Backend
+// ============================================================================
+
+/// The cache's disk tier: none while the cache is disabled.
+pub enum CacheDiskBackend {
+    Off(NoDiskTier),
+    Redb(RedbCacheTier),
+}
+
+impl CacheDiskTier for CacheDiskBackend {
+    fn open_namespace(&self, namespace: &str, version: u32) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.open_namespace(namespace, version),
+            Self::Redb(tier) => tier.open_namespace(namespace, version),
+        }
+    }
+
+    fn get(&self, namespace: &str, key: &[u8]) -> Result<Option<CacheEntry>, CacheError> {
+        match self {
+            Self::Off(tier) => tier.get(namespace, key),
+            Self::Redb(tier) => tier.get(namespace, key),
+        }
+    }
+
+    fn put(&self, namespace: &str, key: &[u8], value: &[u8], cost: Cost) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.put(namespace, key, value, cost),
+            Self::Redb(tier) => tier.put(namespace, key, value, cost),
+        }
+    }
+
+    fn remove(&self, namespace: &str, key: &[u8]) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.remove(namespace, key),
+            Self::Redb(tier) => tier.remove(namespace, key),
+        }
+    }
+
+    fn wipe(&self, namespace: &str) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.wipe(namespace),
+            Self::Redb(tier) => tier.wipe(namespace),
+        }
+    }
+
+    fn previous_keys(&self, namespace: &str) -> Result<Vec<Bytes>, CacheError> {
+        match self {
+            Self::Off(tier) => tier.previous_keys(namespace),
+            Self::Redb(tier) => tier.previous_keys(namespace),
+        }
+    }
+
+    fn keys(&self, namespace: &str) -> Result<Vec<Bytes>, CacheError> {
+        match self {
+            Self::Off(tier) => tier.keys(namespace),
+            Self::Redb(tier) => tier.keys(namespace),
+        }
+    }
+
+    fn bytes(&self, namespace: &str) -> Result<u64, CacheError> {
+        match self {
+            Self::Off(tier) => tier.bytes(namespace),
+            Self::Redb(tier) => tier.bytes(namespace),
+        }
+    }
+
+    fn entries(&self, namespace: &str) -> Result<u64, CacheError> {
+        match self {
+            Self::Off(tier) => tier.entries(namespace),
+            Self::Redb(tier) => tier.entries(namespace),
+        }
+    }
+
+    fn flush(&self) -> Result<(), CacheError> {
+        match self {
+            Self::Off(tier) => tier.flush(),
+            Self::Redb(tier) => tier.flush(),
+        }
+    }
 }
 
 // ============================================================================
