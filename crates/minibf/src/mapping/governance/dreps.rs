@@ -434,4 +434,32 @@ mod tests {
         assert!(parse_drep_id(&encode_id("drep", &[7u8; 30])).is_err());
         assert!(parse_drep_id(&encode_id("drep_script", &[7u8; 29])).is_err());
     }
+
+    #[test]
+    fn parse_drep_id_rejects_hex_id() {
+        // Blockfrost decodes a DRep id as bech32 and does no other check.
+        // As a result, both the CIP-129 and the legacy hex forms are a 400,
+        // never a lookup.
+        let cip129 = [vec![pallas_extras::DREP_KEY_PREFIX], vec![7u8; 28]].concat();
+        assert_eq!(
+            parse_drep_id(&hex::encode(&cip129)),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            parse_drep_id(&hex::encode([7u8; 28])),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn parse_drep_id_rejects_invalid_cip129_header() {
+        // 0x20 has the DRep high nibble. 0x20 is not a DRep key or script header.
+        let mut payload = vec![0x20u8];
+        payload.extend_from_slice(&[7u8; 28]);
+
+        let bech32_id = bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
+            .expect("failed to encode drep id");
+
+        assert_eq!(parse_drep_id(&bech32_id), Err(StatusCode::BAD_REQUEST));
+    }
 }
