@@ -1,5 +1,3 @@
-mod dreps;
-mod mapping;
 mod metadata;
 
 use std::{
@@ -7,8 +5,6 @@ use std::{
     future::Future,
     time::Duration,
 };
-
-use self::mapping::description_json;
 
 use axum::{
     extract::{Path, Query, State},
@@ -47,7 +43,6 @@ use dolos_core::{
     ArchiveError, ArchiveStore as _, BlockBody, BlockSlot, ChainPoint, Domain, EntityKey,
     KeyCodec as _, StateStore as _, TxOrder,
 };
-use dreps::{drep_is_expired, drep_is_retired, drep_list_item, parse_drep_id, DrepModelBuilder};
 use futures::{stream, FutureExt as _, StreamExt as _};
 use itertools::Itertools;
 use metadata::{cached_drep_metadata, fetch_drep_metadata, unfetched, OnOverload};
@@ -72,10 +67,18 @@ use crate::{
     log_and_500,
     mapping::{
         anchor_offchain_metadata, bech32_committee_cold, bech32_committee_hot, bech32_drep,
-        bech32_gov_action, bech32_pool, cost_models::map_cost_models_raw, i32_or_500,
-        parse_committee_id, parse_gov_action_id, protocol_params::protocol_params_model,
-        rational_to_f64_unrounded, sorted_json, stake_cred_to_address, AnchorMetadata,
-        CommitteeCredentialRole, IntoModel, Unrounded,
+        bech32_gov_action, bech32_pool,
+        cost_models::map_cost_models_raw,
+        governance::{
+            description::description_json,
+            dreps::{
+                drep_is_expired, drep_is_retired, drep_list_item, parse_drep_id, DrepModelBuilder,
+            },
+        },
+        i32_or_500, parse_committee_id, parse_gov_action_id,
+        protocol_params::protocol_params_model,
+        rational_to_f64_unrounded, sorted_json, stake_cred_to_address, AnchorMetadata, CommitteeCredentialRole,
+        IntoModel, Unrounded,
     },
     pagination::{Order, Pagination, PaginationParameters},
     scan::{EntityScan, ENTITY_CHUNK},

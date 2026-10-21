@@ -281,7 +281,7 @@ fn pparams_update_json(update: &ProtocolParamUpdate) -> Value {
 /// Build the `governance_description` object from the submitted action.
 /// db-sync stores the cardano-ledger Aeson encoding of the `GovAction`, so
 /// tags and field names follow the ledger JSON instances.
-pub(super) fn description_json(action: &GovAction) -> Result<HashMap<String, Value>, StatusCode> {
+pub fn description_json(action: &GovAction) -> Result<HashMap<String, Value>, StatusCode> {
     fn parent_json(parent: &Option<GovActionId>) -> Value {
         parent
             .as_ref()
