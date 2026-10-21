@@ -2754,22 +2754,25 @@ mod tests {
     }
 
     /// A delegation in the certificate's own transaction compares equal to
-    /// it, since positions record no certificate index. The ledger cleared the
-    /// listed mainnet accounts of that shape, so a `Clear` entry drops it; its
-    /// unlisted twin falls to the strict positional rule and is kept.
+    /// it, since positions record no certificate index. On mainnet the
+    /// account moved from X to Y in the transaction that deregisters X, and
+    /// the ledger cleared it, so a `Clear` entry drops it and it counts toward
+    /// no DRep. An unlisted delegation to X in that transaction falls to the
+    /// strict positional rule and is kept.
     #[test]
     fn a_listed_same_transaction_delegation_is_cleared() {
         let domain = ToyDomain::new(None, None);
         let at = |offset| closing_epoch_slot(&domain, offset);
 
         let x = DRep::Key([0x21; 28].into());
+        let y = DRep::Key([0x22; 28].into());
 
-        let dreps = [replay_drep_certs(
-            x.clone(),
-            &[Cert::Reg(at(10), 0), Cert::UnReg(at(100), 0)],
-        )];
+        let dreps = [
+            replay_drep_certs(x.clone(), &[Cert::Reg(at(10), 0), Cert::UnReg(at(100), 0)]),
+            replay_drep_certs(y.clone(), &[Cert::Reg(at(10), 0)]),
+        ];
 
-        let same_tx = weighted_delegator(0xa3, 1, x.clone(), (at(100), 0));
+        let same_tx = weighted_delegator(0xa3, 1, y.clone(), (at(100), 0));
         let unlisted = weighted_delegator(0xb3, 4, x.clone(), (at(100), 0));
 
         let table = pv9_table(&x, (at(100), 0), &[(&same_tx, Pv9Action::Clear)]);
@@ -2784,6 +2787,10 @@ mod tests {
 
         assert!(delegation_dropped(&domain, same_tx));
         assert!(!delegation_dropped(&domain, unlisted));
+
+        let distr = read_distr(&domain);
+        assert!(distr.is_complete_for(CLOSING_EPOCH));
+        assert!(!distr.drep_distr.contains_key(&y));
     }
 
     /// Without its entry the same stale delegation keeps today's positional
