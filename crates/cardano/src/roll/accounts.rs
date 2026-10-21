@@ -9,14 +9,16 @@ use pallas::ledger::primitives::alonzo::{
 use pallas::ledger::primitives::{Epoch, StakeCredential};
 use pallas::ledger::{
     addresses::Address,
-    traverse::{MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx},
+    traverse::{
+        MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraProposal, MultiEraTx,
+    },
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    pallas_extras, roll::BlockVisitor, AccountAddressSet, ControlledAmountDec, ControlledAmountInc,
-    EnqueueMir, PParamsSet, StageAccountAddress, StakeDelegation, StakeDeregistration,
-    StakeRegistration, VoteDelegation, WithdrawalInc,
+    pallas_extras, roll::BlockVisitor, AccountAddressSet, AccountSeen, ControlledAmountDec,
+    ControlledAmountInc, EnqueueMir, PParamsSet, StageAccountAddress, StakeDelegation,
+    StakeDeregistration, StakeRegistration, VoteDelegation, WithdrawalInc,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +143,16 @@ impl BlockVisitor for AccountVisitor {
     ) -> Result<(), ChainError> {
         let epoch = self.epoch.expect("value set in root");
 
+        if let Some(cert) = pallas_extras::cert_as_pool_registration(cert) {
+            let cred = pallas_extras::parse_reward_account(&cert.reward_account)
+                .ok_or(ChainError::InvalidPoolParams)?;
+            deltas.add_for_entity(AccountSeen::new(cred, epoch));
+
+            for owner in cert.pool_owners {
+                deltas.add_for_entity(AccountSeen::new(StakeCredential::AddrKeyhash(owner), epoch));
+            }
+        }
+
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
             let deposit = self
                 .deposit
@@ -196,6 +208,24 @@ impl BlockVisitor for AccountVisitor {
             }
         }
 
+        Ok(())
+    }
+
+    fn visit_proposal(
+        &mut self,
+        deltas: &mut WorkDeltas,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        proposal: &MultiEraProposal,
+        _: usize,
+    ) -> Result<(), ChainError> {
+        let Some(proposal) = proposal.as_conway() else {
+            return Ok(());
+        };
+        let cred = pallas_extras::parse_reward_account(&proposal.reward_account)
+            .ok_or(ChainError::InvalidProposalParams)?;
+        let epoch = self.epoch.expect("value set in root");
+        deltas.add_for_entity(AccountSeen::new(cred, epoch));
         Ok(())
     }
 

@@ -231,23 +231,7 @@ where
     Ok(Json(model))
 }
 
-/// Whether a pool registration the pool state still holds names the
-/// credential, as reward account or owner.
-///
-/// db-sync registers a credential the moment a certificate names it, so
-/// Blockfrost answers `200 []` for a credential seen only as a pool reward
-/// account or owner. Dolos writes no `AccountState` for those, so the bare
-/// existence guard would 404. This scan runs only on the would-be-404 path,
-/// so the hot path pays nothing.
-///
-/// Known gap: `PoolState` keeps only the `next`, `live`, `mark`, `set` and
-/// `go` parameter versions. A second registration in the same epoch
-/// overwrites `next`, and each epoch transition rotates the oldest version
-/// out of `go`. A credential named only by such a replaced registration is
-/// gone from every version, so it still 404s. db-sync remembers it forever.
-/// Closing the gap needs the state layer to record the credential when the
-/// certificate names it. That is the same fix #1325 needs for proposal return
-/// addresses.
+/// Finds pool reward accounts and owners in stores that predate `AccountSeen`.
 fn account_appears_in_pool_registrations<D>(
     domain: &Facade<D>,
     account: &StakeAddress,
@@ -1561,10 +1545,7 @@ mod tests {
     async fn accounts_by_stake_addresses_pool_only_account_returns_empty_list() {
         let app = TestApp::new();
 
-        // The synthetic chain registers a pool owned by key hash [2u8; 28].
-        // That credential never appears in an address or certificate, so no
-        // account state exists for it. Blockfrost still answers with an empty
-        // list because the credential is known through the pool.
+        // The synthetic chain names this credential only as a pool owner.
         let owner = StakeAddress::new(Network::Testnet, StakePayload::Stake(Hash::from([2u8; 28])));
         let owner = owner.to_bech32().expect("failed to encode owner address");
 
@@ -1669,6 +1650,205 @@ mod tests {
                 serde_json::from_slice(&bytes).expect("failed to parse account addresses");
             assert!(addresses.is_empty(), "{account}");
         }
+    }
+
+    fn known_accounts_block(
+        slot: u64,
+        block_number: u64,
+        prev_hash: Hash<32>,
+        valid: bool,
+    ) -> dolos_core::RawBlock {
+        use pallas::codec::utils::{NonEmptySet, Set};
+        use pallas::ledger::primitives::conway::{
+            Anchor, Certificate, GovAction, ProposalProcedure, TransactionBody,
+        };
+
+        let account = |payload| StakeAddress::new(Network::Testnet, payload).to_vec();
+        let pool = Certificate::PoolRegistration {
+            operator: Hash::from([0x90; 28]),
+            vrf_keyhash: Hash::from([0; 32]),
+            pledge: 0,
+            cost: 0,
+            margin: pallas::ledger::primitives::UnitInterval {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account: account(StakePayload::Stake(Hash::from([0x92; 28]))).into(),
+            pool_owners: Set::from(vec![Hash::from([0x91; 28])]),
+            relays: vec![],
+            pool_metadata: None,
+        };
+        let mut replacement = pool.clone();
+        if let Certificate::PoolRegistration {
+            reward_account,
+            pool_owners,
+            ..
+        } = &mut replacement
+        {
+            *reward_account = account(StakePayload::Script(Hash::from([0x95; 28]))).into();
+            *pool_owners = Set::from(vec![]);
+        }
+
+        let proposals = [
+            StakePayload::Stake(Hash::from([0x93; 28])),
+            StakePayload::Script(Hash::from([0x93; 28])),
+        ]
+        .into_iter()
+        .map(|payload| ProposalProcedure {
+            deposit: 100_000_000,
+            reward_account: account(payload).into(),
+            gov_action: GovAction::Information,
+            anchor: Anchor {
+                url: "https://example.invalid/proposal".to_string(),
+                content_hash: Hash::from([0; 32]),
+            },
+        })
+        .collect::<Vec<_>>();
+
+        let body = TransactionBody {
+            inputs: Set::from(vec![]),
+            outputs: vec![],
+            fee: 0,
+            ttl: None,
+            certificates: Some(NonEmptySet::try_from(vec![pool, replacement]).unwrap()),
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: None,
+            proposal_procedures: Some(NonEmptySet::try_from(proposals).unwrap()),
+            treasury_value: None,
+            donation: None,
+        };
+
+        let (_, raw) = dolos_testing::blocks::make_conway_block_with_txs_at(
+            slot,
+            block_number,
+            Some(prev_hash),
+            vec![(body, valid)],
+            None,
+        );
+        raw
+    }
+
+    async fn assert_known_account_endpoints(valid: bool) {
+        use dolos_core::import::ImportExt as _;
+
+        let app = TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+            let tip = domain.state().read_cursor().unwrap().unwrap();
+            let block = domain
+                .archive()
+                .get_block_by_slot(&tip.slot())
+                .unwrap()
+                .unwrap();
+            let number = MultiEraBlock::decode(&block).unwrap().number();
+            domain
+                .import_blocks(vec![known_accounts_block(
+                    tip.slot() + 1,
+                    number + 1,
+                    tip.hash().unwrap(),
+                    valid,
+                )])
+                .expect("import pool and proposal block");
+
+            if valid {
+                let key = dolos_cardano::PoolKey(Hash::from([0x90; 28]));
+                let mut pool = domain
+                    .state()
+                    .read_entity_typed::<PoolState>(&key)
+                    .unwrap()
+                    .unwrap();
+                let epoch = pool.snapshot.epoch().unwrap();
+                for next_epoch in epoch + 1..=epoch + 6 {
+                    pool.snapshot.default_transition(next_epoch);
+                }
+                for snapshot in [
+                    pool.snapshot.live(),
+                    pool.snapshot.next(),
+                    pool.snapshot.mark(),
+                    pool.snapshot.set(),
+                    pool.snapshot.go(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    assert!(snapshot.params.pool_owners.is_empty());
+                    assert_eq!(snapshot.params.reward_account[1..], [0x95; 28]);
+                }
+                let writer = domain.state().start_writer().unwrap();
+                writer.write_entity_typed(&key, &pool).unwrap();
+                writer.commit().unwrap();
+            }
+        });
+
+        for payload in [
+            StakePayload::Stake(Hash::from([0x93; 28])),
+            StakePayload::Script(Hash::from([0x93; 28])),
+            StakePayload::Stake(Hash::from([0x91; 28])),
+            StakePayload::Stake(Hash::from([0x92; 28])),
+            StakePayload::Script(Hash::from([0x95; 28])),
+        ] {
+            let account = StakeAddress::new(Network::Testnet, payload)
+                .to_bech32()
+                .unwrap();
+            for suffix in [
+                "registrations",
+                "delegations",
+                "withdrawals",
+                "mirs",
+                "rewards",
+                "history",
+                "addresses",
+                "addresses/assets",
+                "transactions",
+            ] {
+                let path = format!("/accounts/{account}/{suffix}");
+                let (status, bytes) = app.get_bytes(&path).await;
+                if valid {
+                    assert_eq!(
+                        status,
+                        StatusCode::OK,
+                        "{path}: {}",
+                        String::from_utf8_lossy(&bytes)
+                    );
+                    let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+                    assert!(rows.is_empty(), "{path}: {rows:?}");
+                } else {
+                    assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+                }
+            }
+            let path = format!("/accounts/{account}");
+            let (status, bytes) = app.get_bytes(&path).await;
+            if valid {
+                assert_eq!(status, StatusCode::OK, "{path}");
+                let content: AccountContent = serde_json::from_slice(&bytes).unwrap();
+                assert!(!content.registered);
+                assert!(!content.active);
+                assert_eq!(content.controlled_amount, "0");
+                assert_eq!(content.withdrawable_amount, "0");
+                assert!(content.pool_id.is_none());
+                assert!(content.drep_id.is_none());
+            } else {
+                assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn accounts_named_only_by_proposals_or_replaced_pool_params_return_empty_lists() {
+        assert_known_account_endpoints(true).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_named_only_by_invalid_transactions_remain_unknown() {
+        assert_known_account_endpoints(false).await;
     }
 
     #[tokio::test]

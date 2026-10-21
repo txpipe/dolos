@@ -443,6 +443,42 @@ impl AccountState {
 // --- Deltas ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountSeen {
+    pub(crate) cred: StakeCredential,
+    pub(crate) epoch: Epoch,
+    pub(crate) was_new: bool,
+}
+
+impl AccountSeen {
+    pub fn new(cred: StakeCredential, epoch: Epoch) -> Self {
+        Self {
+            cred,
+            epoch,
+            was_new: false,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for AccountSeen {
+    type Entity = AccountState;
+
+    fn key(&self) -> NsKey {
+        NsKey::of::<AccountState>(&AccountKey::from(&self.cred))
+    }
+
+    fn apply(&mut self, entity: &mut Option<AccountState>) {
+        self.was_new = entity.is_none();
+        entity.get_or_insert_with(|| AccountState::new(self.epoch, self.cred.clone()));
+    }
+
+    fn undo(&self, entity: &mut Option<AccountState>) {
+        if self.was_new {
+            *entity = None;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlledAmountInc {
     pub(crate) cred: StakeCredential,
     pub(crate) is_pointer: bool,
@@ -1343,6 +1379,16 @@ mod prop_tests {
     }
 
     proptest! {
+        #[test]
+        fn account_seen_roundtrip(
+            entity in prop::option::of(any_account_state()),
+            cred in root::any_stake_credential(),
+            epoch in root::any_epoch(),
+        ) {
+            assert_delta_roundtrip(entity.clone(), AccountSeen::new(cred.clone(), epoch));
+            assert_delta_serde_roundtrip(entity, AccountSeen::new(cred, epoch));
+        }
+
         #[test]
         fn controlled_amount_inc_roundtrip(
             entity in prop::option::of(any_account_state()),
