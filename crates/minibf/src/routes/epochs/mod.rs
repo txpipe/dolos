@@ -342,7 +342,8 @@ mod tests {
     const MAX_EPOCH_NUMBER: Epoch = i32::MAX as Epoch;
 
     // ToyDomain sets the genesis state during construction.
-    // The era summary and the initial epoch state are available without a block import.
+    // The era summary and the initial epoch state are available without a block
+    // import.
     fn facade_for(genesis: dolos_core::Genesis) -> Facade<ToyDomain> {
         let domain = ToyDomain::new_with_genesis_and_config(
             Arc::new(genesis),
@@ -435,9 +436,9 @@ mod tests {
         }
     }
 
-    /// For Preprod epochs 13 through 28, the builder sets `active_stake` to null.
-    /// This rule applies only to Preprod.
-    /// `next` and `previous` also use this builder for their responses.
+    /// For Preprod epochs 13 through 28, the builder sets `active_stake` to
+    /// null. This rule applies only to Preprod. `next` and `previous` also use
+    /// this builder for their responses.
     #[test]
     fn build_epoch_content_nulls_active_stake_across_the_preprod_gap() {
         use crate::mapping::IntoModel as _;
