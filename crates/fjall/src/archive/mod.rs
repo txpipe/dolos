@@ -1768,4 +1768,48 @@ mod tests {
         assert_eq!(store.get_block_by_slot(&3).unwrap().unwrap(), *body(3, 1));
         assert_eq!(store.get_block_by_slot(&2).unwrap().unwrap(), *body(2, 0));
     }
+
+    /// Any one keyspace of history counts as data: a block location, a log
+    /// row, a tag or an exact lookup, each alone.
+    #[test]
+    fn every_history_keyspace_holds_data() {
+        let mut schema = StateSchema::default();
+        schema.insert("logs", dolos_core::NamespaceType::KeyValue);
+
+        let empty = ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        assert!(!empty.holds_data().unwrap());
+
+        let blocks = ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        write(&blocks, &[(10, body(10, 0))]);
+
+        let logs = ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        let writer = logs.start_writer().unwrap();
+        writer
+            .write_log("logs", &LogKey::of(10, &1u32), &vec![1])
+            .unwrap();
+        writer.commit().unwrap();
+
+        let tags = ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        write_indexes(
+            &tags,
+            &[ArchiveIndexDelta {
+                slot: 10,
+                tags: vec![dolos_core::Tag::new("address", vec![1; 28])],
+                ..Default::default()
+            }],
+        );
+
+        let exact = ArchiveStore::for_tempdir(schema).unwrap();
+        write_indexes(&exact, &[number_delta(10, 1)]);
+
+        for (only, store) in [&blocks, &logs, &tags, &exact].into_iter().enumerate() {
+            let filled = [&store.blocks, &store.logs, &store.tags, &store.exact]
+                .map(|keyspace| !keyspace.is_empty().unwrap());
+            let mut expected = [false; 4];
+            expected[only] = true;
+
+            assert_eq!(filled, expected, "keyspace {only}");
+            assert!(store.holds_data().unwrap(), "keyspace {only}");
+        }
+    }
 }

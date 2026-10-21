@@ -24,7 +24,7 @@ To move a node to v2, replace its stores with ones v2 writes:
 - **Restore from a stele** (minutes): `dolos bootstrap stelae --force`. The restore writes through v2's own stores, so they record its identity whatever release published the stele.
 - **Re-sync** (hours to days): `dolos bootstrap mithril --force`, or `dolos bootstrap relay --force` and then `dolos daemon` to sync from the relay.
 
-`--force` is what clears the refused stores. Without it, `dolos bootstrap` refuses with the same error, `--skip-if-data` included, rather than leave the node a store it cannot open.
+`--force` is what clears the refused stores. Without it, `dolos bootstrap` refuses with the same error, `--skip-if-data` and `--continue` included, rather than leave the node a store it cannot open. `--force` clears only the storage root: a refused store the configuration keeps outside it is refused again, naming the directories to remove by hand before bootstrapping.
 
 <Aside type="caution">
 A Dolos snapshot (`dolos bootstrap snapshot`) unpacks the stores of the node that exported it as they were. One exported before stores recorded an identity is refused once unpacked; bootstrap from a stele or re-sync instead.

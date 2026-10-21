@@ -357,6 +357,79 @@ fn a_snapshot_carries_the_segments_at_blocks_path() {
     assert_eq!(store_positions(&other), restored);
 }
 
+/// A snapshot holding `store` as a release that predates store identities
+/// left it, with data and no identity.
+fn unmarked_snapshot(dir: &Path, store: &str) -> PathBuf {
+    use dolos_core::{ArchiveIndexDelta, ArchiveWriter as _, StateWriter as _};
+
+    let path = dir.join("stores").join(store);
+
+    match store {
+        "state" => {
+            let state = dolos_fjall::StateStore::open(
+                &path,
+                &dolos_core::config::FjallStateConfig::default(),
+            )
+            .unwrap();
+            let writer = state.start_writer().unwrap();
+            writer.set_cursor(ChainPoint::Origin).unwrap();
+            writer.commit().unwrap();
+            state.shutdown().unwrap();
+        }
+        _ => {
+            let archive = dolos_fjall::archive::ArchiveStore::open(
+                dolos_core::StateSchema::default(),
+                &path,
+                &dolos_core::config::FjallArchiveConfig::default(),
+            )
+            .unwrap();
+            let writer = archive.start_writer().unwrap();
+            writer
+                .apply_index(&[ArchiveIndexDelta {
+                    slot: 1,
+                    block_number: Some(1),
+                    ..Default::default()
+                }])
+                .unwrap();
+            writer.commit().unwrap();
+            archive.shutdown().unwrap();
+        }
+    }
+
+    let snapshot = dir.join(format!("unmarked-{store}.tar.gz"));
+    let file = std::fs::File::create(&snapshot).unwrap();
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+        file,
+        flate2::Compression::fast(),
+    ));
+    tar.append_dir_all(store, &path).unwrap();
+    tar.into_inner().unwrap().finish().unwrap();
+
+    snapshot
+}
+
+/// The stores a snapshot unpacks pass the identity check like any other: one
+/// exported before stores recorded an identity is refused.
+#[test]
+fn a_snapshot_of_unmarked_stores_is_refused() {
+    for store in ["state", "archive"] {
+        let (node, _, _) = fixture("");
+        let snapshot = unmarked_snapshot(node.root.path(), store);
+
+        let output = node.run(&[
+            "bootstrap",
+            "snapshot",
+            "--file",
+            snapshot.to_str().unwrap(),
+        ]);
+        assert!(!output.status.success(), "{store}");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&format!("the {store} store")), "{stderr}");
+        assert!(stderr.contains("no compatibility identity"), "{stderr}");
+    }
+}
+
 /// A full export of `node`, run from its directory, and the segment files in
 /// it.
 fn export(node: &Node) -> (PathBuf, Vec<PathBuf>) {

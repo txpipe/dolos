@@ -9,7 +9,10 @@
 //! implementations, passing through the backend-specific config struct. All
 //! path resolution and directory creation is handled by the caller.
 
-use std::{ops::Range, path::Path, path::PathBuf};
+use std::{
+    ops::Range,
+    path::{Component, Path, PathBuf},
+};
 
 use bytes::Bytes;
 use dolos_core::{
@@ -70,6 +73,44 @@ pub fn clear_storage(storage_path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// Those of `paths` that clearing the storage root does not reach. Paths are
+/// compared as written, with `..` resolved lexically and links not followed.
+pub fn outside_storage_root(
+    config: &RootConfig,
+    paths: impl IntoIterator<Item = Option<PathBuf>>,
+) -> std::io::Result<Vec<PathBuf>> {
+    let cwd = std::env::current_dir()?;
+    let root = normalize(&cwd, &config.storage.path);
+
+    Ok(paths
+        .into_iter()
+        .flatten()
+        .filter(|path| !normalize(&cwd, path).starts_with(&root))
+        .collect())
+}
+
+fn normalize(cwd: &Path, path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+
+    let mut normalized = PathBuf::new();
+
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+
+    normalized
+}
+
 /// What to do about data already in storage.
 ///
 /// Deciding is separated from doing because only one of the outcomes is
@@ -93,7 +134,8 @@ pub enum Existing {
 pub struct ExistingDataPolicy {
     /// `--force`: clear storage and re-bootstrap.
     pub force: bool,
-    /// `--skip-if-data`: leave it alone and exit zero.
+    /// `--skip-if-data`: leave a node alone and exit zero. A store this
+    /// release refuses is not skipped.
     pub skip_if_data: bool,
     /// `--continue`: go ahead, trusting the run to resume.
     pub r#continue: bool,
@@ -103,8 +145,25 @@ pub struct ExistingDataPolicy {
 enum Found {
     Nothing,
     Node,
-    /// A store this release refuses to open, with the refusal.
-    Incompatible(Error),
+    /// A store this release refuses to open: the refusal, and the store's
+    /// directories that clearing the storage root does not reach.
+    Incompatible {
+        refusal: Error,
+        outside: Vec<PathBuf>,
+    },
+}
+
+impl Found {
+    fn incompatible<const N: usize>(
+        config: &RootConfig,
+        refusal: Error,
+        paths: [Option<PathBuf>; N],
+    ) -> Result<Self, Error> {
+        let mut outside = outside_storage_root(config, paths)?;
+        outside.retain(|path| path.exists());
+
+        Ok(Self::Incompatible { refusal, outside })
+    }
 }
 
 /// Open the stores already on disk, creating none: a state cursor is a node,
@@ -118,19 +177,22 @@ fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
         match open_state_store(config) {
             Ok(state) => node = state.read_cursor()?.is_some(),
             Err(error @ Error::StateError(StateError::IncompatibleStore(_))) => {
-                return Ok(Found::Incompatible(error))
+                return Found::incompatible(config, error, [config.storage.state_path()]);
             }
             Err(error) => return Err(error),
         }
     }
 
+    // The archive is opened for its identity alone. Any other failure is the
+    // command's to report when it uses the archive, so a damaged archive
+    // doesn't stand in the way of the `--force` that clears it.
     if config.keeps_archive() && on_disk(config.storage.archive_path()) {
-        match open_archive_store(config) {
-            Ok(_) => {}
-            Err(error @ Error::ArchiveError(ArchiveError::IncompatibleStore(_))) => {
-                return Ok(Found::Incompatible(error))
-            }
-            Err(error) => return Err(error),
+        if let Err(error @ Error::ArchiveError(ArchiveError::IncompatibleStore(_))) =
+            open_archive_store(config)
+        {
+            let paths = [config.storage.archive_path(), config.storage.blocks_path()];
+
+            return Found::incompatible(config, error, paths);
         }
     }
 
@@ -143,7 +205,7 @@ pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
     match found_in_storage(config)? {
         Found::Nothing => Ok(false),
         Found::Node => Ok(true),
-        Found::Incompatible(error) => Err(error),
+        Found::Incompatible { refusal, .. } => Err(refusal),
     }
 }
 
@@ -153,36 +215,50 @@ pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
 /// flag saying what to do about it — so neither is a question asked of an
 /// operator whose answer is then thrown away.
 ///
-/// A store this release refuses to open is data in the way: `--force` clears
-/// it, and every other flag gets its refusal. `--continue` is left to the
-/// subcommand, whose own open refuses it.
+/// A store this release refuses to open is data in the way that only `--force`
+/// clears. Every other flag, `--continue` included, gets its refusal, and so
+/// does `--force` when the store lies outside the storage root it clears.
 pub fn inspect_existing_data(
     config: &RootConfig,
     policy: ExistingDataPolicy,
 ) -> Result<Existing, Error> {
-    if policy.r#continue {
+    let node = match found_in_storage(config)? {
+        Found::Nothing => false,
+        Found::Node => true,
+        Found::Incompatible { refusal, outside } => {
+            if !policy.force || policy.skip_if_data || policy.r#continue {
+                return Err(refusal);
+            }
+
+            if !outside.is_empty() {
+                let listed = outside
+                    .iter()
+                    .map(|path| format!("  {}", path.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                return Err(Error::message(format!(
+                    "a store this release refuses keeps directories outside the storage root \
+                     {}, and `--force` clears only the root:\n{listed}\nRemove those \
+                     directories by hand, then run the bootstrap again",
+                    config.storage.path.display(),
+                )));
+            }
+
+            return Ok(Existing::Clear);
+        }
+    };
+
+    if policy.r#continue || !node {
         return Ok(Existing::Proceed);
     }
 
-    let incompatible = match found_in_storage(config)? {
-        Found::Nothing => return Ok(Existing::Proceed),
-        Found::Node => None,
-        Found::Incompatible(error) => Some(error),
-    };
-
     if policy.skip_if_data {
-        return match incompatible {
-            Some(error) => Err(error),
-            None => Ok(Existing::Skip),
-        };
+        return Ok(Existing::Skip);
     }
 
     if policy.force {
         return Ok(Existing::Clear);
-    }
-
-    if let Some(error) = incompatible {
-        return Err(error);
     }
 
     Err(Error::message(
@@ -1793,8 +1869,9 @@ mod tests {
         }
     }
 
-    /// Bootstrap's look at storage opens nothing absent, lets `--force` clear
-    /// a refused store, and refuses it under every other policy.
+    /// Bootstrap's look at storage opens nothing absent, lets a plain
+    /// `--force` clear a refused store, and refuses it under every other
+    /// policy, resuming and skipping included.
     #[test]
     fn inspecting_storage_reports_a_refused_store_as_data_in_the_way() {
         let temp = tempfile::tempdir().unwrap();
@@ -1809,21 +1886,107 @@ mod tests {
 
         written_archive(&config, None);
 
+        for force in [false, true] {
+            for skip_if_data in [false, true] {
+                for r#continue in [false, true] {
+                    let policy = ExistingDataPolicy {
+                        force,
+                        skip_if_data,
+                        r#continue,
+                    };
+                    let inspected = inspect_existing_data(&config, policy);
+
+                    if force && !skip_if_data && !r#continue {
+                        assert_eq!(inspected.unwrap(), Existing::Clear);
+                    } else {
+                        assert!(refusal(inspected).is_some(), "{policy:?}");
+                    }
+                }
+            }
+        }
+
+        assert!(refusal(has_existing_data(&config)).is_some());
+    }
+
+    /// `--force` clears the storage root alone, so it refuses a refused store
+    /// that keeps a directory outside the root, naming that directory.
+    #[test]
+    fn force_names_what_it_cannot_clear_of_a_refused_store() {
+        type Edit = fn(&mut RootConfig, &Path);
+        type Outside = fn(&RootConfig) -> Option<PathBuf>;
+
+        let cases: [(Edit, Outside); 3] = [
+            (
+                |config, elsewhere| config.storage.archive.path = Some(elsewhere.join("archive")),
+                |config| config.storage.archive_path(),
+            ),
+            (
+                |config, _| config.storage.archive.path = Some("../archive".into()),
+                |config| config.storage.archive_path(),
+            ),
+            (
+                |config, elsewhere| {
+                    config.storage.archive.blocks_path = Some(elsewhere.join("segments"))
+                },
+                |config| config.storage.blocks_path(),
+            ),
+        ];
+
         let force = ExistingDataPolicy {
             force: true,
-            ..none
+            ..Default::default()
+        };
+
+        for (edit, outside) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let mut config = config_over(&temp.path().join("data"));
+            edit(&mut config, &temp.path().join("elsewhere"));
+            std::fs::create_dir_all(&config.storage.path).unwrap();
+            written_archive(&config, None);
+
+            let outside = outside(&config).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+
+            let message = match inspect_existing_data(&config, force) {
+                Err(Error::Message(message)) => message,
+                other => panic!("not refused as outside the root: {other:?}"),
+            };
+
+            assert!(
+                message.contains(&outside.display().to_string()),
+                "{message}"
+            );
+            assert!(message.contains("by hand"), "{message}");
+        }
+    }
+
+    /// The archive is opened for its identity alone: one that fails to open
+    /// for any other reason is the command's to report, as before bootstrap
+    /// looked at it, and doesn't stand in the way of `--force` or a skip.
+    #[test]
+    fn an_archive_that_fails_to_open_is_left_to_the_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_state(&config, current().as_deref());
+        std::fs::write(config.storage.archive_path().unwrap(), b"not a store").unwrap();
+        assert!(open_archive_store(&config).is_err());
+
+        let force = ExistingDataPolicy {
+            force: true,
+            ..Default::default()
         };
         let skip = ExistingDataPolicy {
             skip_if_data: true,
-            ..none
+            ..Default::default()
         };
         assert_eq!(
             inspect_existing_data(&config, force).unwrap(),
             Existing::Clear
         );
-        assert!(refusal(inspect_existing_data(&config, skip)).is_some());
-        assert!(refusal(inspect_existing_data(&config, none)).is_some());
-        assert!(refusal(has_existing_data(&config)).is_some());
+        assert_eq!(
+            inspect_existing_data(&config, skip).unwrap(),
+            Existing::Skip
+        );
     }
 
     #[test]
