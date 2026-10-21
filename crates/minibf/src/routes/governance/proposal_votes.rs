@@ -258,6 +258,22 @@ fn proposal_votes_in_block(block: &MultiEraBlock, action: &GovActionId) -> Vec<P
 
 const STABLE_CURSOR_ATTEMPTS: usize = 3;
 
+/// Whether two cursors are the same commit: same variant, slot and hash.
+///
+/// `ChainPoint`'s own equality lets `Specific(slot, hash)` match `Slot(slot)`,
+/// and the epoch-start commit writes a `Slot` cursor at the slot of the block
+/// before it, so that equality would miss a state change at the same slot.
+fn same_cursor(a: &ChainPoint, b: &ChainPoint) -> bool {
+    match (a, b) {
+        (ChainPoint::Origin, ChainPoint::Origin) => true,
+        (ChainPoint::Slot(a), ChainPoint::Slot(b)) => a == b,
+        (ChainPoint::Specific(a, hash_a), ChainPoint::Specific(b, hash_b)) => {
+            a == b && hash_a == hash_b
+        }
+        _ => false,
+    }
+}
+
 /// Runs `read` between two reads of the state cursor, and repeats it while
 /// the cursor moves. `read` gets the cursor it runs at; the result is that
 /// cursor and what `read` returned.
@@ -272,7 +288,7 @@ fn read_at_stable_cursor<T, E: From<StatusCode>>(
         let before = read_cursor()?;
         let value = read(&before)?;
 
-        if read_cursor()? == before {
+        if same_cursor(&read_cursor()?, &before) {
             return Ok((before, value));
         }
     }
@@ -1352,6 +1368,18 @@ mod tests {
         let (cursor, reads) =
             stable_cursor_read(&[point(11, 2), point(11, 3), point(11, 3), point(11, 3)]);
         assert_eq!((cursor, reads), (Ok(point(11, 3)), 2));
+
+        // an epoch-start commit at the slot of the block before it: the
+        // `Slot` cursor it writes is a new state, though `ChainPoint` calls
+        // it equal to the block's `Specific` cursor
+        let boundary = ChainPoint::Slot(11);
+        let (cursor, reads) = stable_cursor_read(&[
+            point(11, 2),
+            boundary.clone(),
+            boundary.clone(),
+            boundary.clone(),
+        ]);
+        assert_eq!((cursor, reads), (Ok(boundary), 2));
 
         // a cursor that never holds still fails the request
         let moving = (0..6).map(|slot| point(slot, slot as u8)).collect_vec();
