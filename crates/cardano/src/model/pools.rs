@@ -59,8 +59,8 @@ pub struct PoolState {
     #[n(16)]
     pub deposit: u64,
 
-    /// The pool's highest-nonce CIP-151 registration in a valid transaction.
-    /// `None` before any registration.
+    /// The pool's highest-nonce CIP-151 registration signed by its cold key
+    /// in a valid transaction. `None` before any registration.
     #[n(17)]
     #[cbor(default)]
     pub calidus: Option<CalidusRegistration>,
