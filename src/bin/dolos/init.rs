@@ -6,24 +6,13 @@ use dolos_core::config::{
 };
 use inquire::{Confirm, MultiSelect, Select, Text};
 use miette::{Context as _, IntoDiagnostic};
-use std::{
-    fmt::Display,
-    path::{Path, PathBuf},
-};
+use std::{fmt::Display, path::Path};
 
 use crate::feedback::Feedback;
-
-/// The config file `dolos init` writes, and the one whose failure to load
-/// tells us an older setup is present.
-const CONFIG_FILE: &str = "dolos.toml";
 
 /// Parses `--known-network` / `--network` against the catalog.
 pub fn parse_known_network(name: &str) -> Result<&'static KnownNetwork, String> {
     KnownNetwork::by_name(name).ok_or_else(|| format!("unknown network {name}"))
-}
-
-fn upstream_config(network: &KnownNetwork) -> UpstreamConfig {
-    UpstreamConfig::peer(network.default_peer)
 }
 
 fn chain_config(network: &KnownNetwork) -> ChainConfig {
@@ -178,16 +167,11 @@ pub struct Args {
     enable_relay: Option<bool>,
 }
 
-type IncludeGenesisFiles = Option<&'static KnownNetwork>;
-
-struct ConfigEditor(RootConfig, IncludeGenesisFiles);
+struct ConfigEditor(RootConfig);
 
 impl Default for ConfigEditor {
     fn default() -> Self {
-        let mut config = RootConfig::new(chain_config(&networks::MAINNET));
-        config.upstream = Some(upstream_config(&networks::MAINNET));
-
-        let editor = Self(config, None);
+        let editor = Self(RootConfig::new(chain_config(&networks::MAINNET)));
 
         let editor = editor
             .apply_serve_grpc(Some(true))
@@ -203,25 +187,31 @@ impl Default for ConfigEditor {
 }
 
 impl ConfigEditor {
+    /// Switching networks drops the peer chosen for the previous one. Names
+    /// resolve without regard to case, so `Preview` is not a switch to
+    /// `preview`.
     fn apply_known_network(mut self, network: Option<&'static KnownNetwork>) -> Self {
         if let Some(network) = network {
-            self.0.upstream = Some(upstream_config(network));
+            let current = KnownNetwork::by_name(&self.0.chain.network);
+
+            if !current.is_some_and(|current| std::ptr::eq(current, network)) {
+                self.0.upstream = None;
+            }
+
             self.0.chain = chain_config(network);
-            self.1 = Some(network);
         }
 
         self
     }
 
+    /// `[upstream]` is written only for a peer other than the network's
+    /// default, which the node uses without it.
     fn apply_remote_peer(mut self, value: Option<&String>) -> Self {
         if let Some(remote_peer) = value {
-            match &mut self.0.upstream {
-                Some(UpstreamConfig::Peer(config)) => {
-                    config.peer_address = Some(remote_peer.clone())
-                }
-                Some(UpstreamConfig::Emulator(_)) => (),
-                None => self.0.upstream = Some(UpstreamConfig::peer(remote_peer)),
-            }
+            let default = KnownNetwork::by_name(&self.0.chain.network).map(|x| x.default_peer);
+
+            self.0.upstream =
+                (default != Some(remote_peer.as_str())).then(|| UpstreamConfig::peer(remote_peer));
         }
 
         self
@@ -350,20 +340,6 @@ impl ConfigEditor {
         Ok(self.apply_known_network(Some(value)))
     }
 
-    fn prompt_include_genesis(mut self) -> miette::Result<Self> {
-        if let Some(network) = self.1 {
-            let value = Confirm::new("Do you want us to provide the genesis files?")
-                .with_default(true)
-                .prompt()
-                .into_diagnostic()
-                .context("asking for including genesis")?;
-
-            self.1 = value.then_some(network);
-        }
-
-        Ok(self)
-    }
-
     fn prompt_remote_peer(self) -> miette::Result<Self> {
         let network = KnownNetwork::by_name(&self.0.chain.network);
 
@@ -487,7 +463,6 @@ impl ConfigEditor {
     fn confirm_values(mut self) -> miette::Result<ConfigEditor> {
         self = self
             .prompt_known_network()?
-            .prompt_include_genesis()?
             .prompt_remote_peer()?
             .prompt_history_pruning()?
             .prompt_serve_apis()?
@@ -496,18 +471,12 @@ impl ConfigEditor {
         Ok(self)
     }
 
-    fn include_genesis_files(self) -> miette::Result<Self> {
-        if let Some(network) = self.1 {
-            network
-                .save_genesis(&PathBuf::from("./"))
-                .into_diagnostic()
-                .context("saving genesis")?;
-        }
-
-        Ok(self)
-    }
-
     fn save(self, path: &Path) -> miette::Result<()> {
+        self.0
+            .validate()
+            .into_diagnostic()
+            .context("validating the generated config")?;
+
         let config = toml::to_string_pretty(&self.0)
             .into_diagnostic()
             .context("serializing config toml")?;
@@ -537,28 +506,46 @@ fn refuse_unreadable(
     }
 }
 
+/// Writes `config_file` from the configuration already there, `args`, and
+/// what `confirm` settles on, and loads it back from the same file.
+fn write_config(
+    config: miette::Result<RootConfig>,
+    config_file: &Path,
+    args: &Args,
+    confirm: impl FnOnce(ConfigEditor) -> miette::Result<ConfigEditor>,
+) -> miette::Result<RootConfig> {
+    let editor = refuse_unreadable(config, config_file)?
+        .map(ConfigEditor)
+        .unwrap_or_default()
+        .fill_values_from_args(args);
+
+    confirm(editor)?.save(config_file)?;
+
+    println!("config saved to {}", config_file.display());
+
+    crate::common::load_config(Some(config_file))
+        .into_diagnostic()
+        .context("loading configuration")
+}
+
+/// The command that starts the node on `config_file`.
+fn daemon_command(config_file: &Path) -> String {
+    if config_file == crate::common::config_file(None) {
+        "dolos daemon".into()
+    } else {
+        format!("dolos --config {} daemon", config_file.display())
+    }
+}
+
 pub fn run(
     config: miette::Result<RootConfig>,
+    config_file: &Path,
     args: &Args,
     feedback: &Feedback,
 ) -> miette::Result<()> {
     crate::banner::print_init_banner();
 
-    let config = refuse_unreadable(config, Path::new(CONFIG_FILE))?;
-
-    config
-        .map(|x| ConfigEditor(x, None))
-        .unwrap_or_default()
-        .fill_values_from_args(args)
-        .confirm_values()?
-        .include_genesis_files()?
-        .save(&PathBuf::from(CONFIG_FILE))?;
-
-    println!("config saved to {CONFIG_FILE}");
-
-    let config = crate::common::load_config(None)
-        .into_diagnostic()
-        .context("loading configuration")?;
+    let config = write_config(config, config_file, args, ConfigEditor::confirm_values)?;
 
     if !config
         .upstream
@@ -569,7 +556,7 @@ pub fn run(
     }
 
     println!("\nDolos is ready!");
-    println!("- run `dolos daemon` to start the node");
+    println!("- run `{}` to start the node", daemon_command(config_file));
 
     Ok(())
 }
@@ -577,6 +564,19 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dolos_core::config::MIGRATION_GUIDE_URL;
+    use std::path::PathBuf;
+
+    fn init_args(flags: &[&str]) -> Args {
+        Args::parse_from(std::iter::once("init").chain(flags.iter().copied()))
+    }
+
+    /// `init` over `config_file` with nothing asked beyond its arguments.
+    fn write_unprompted(config_file: &Path, args: &Args) -> miette::Result<RootConfig> {
+        let config = dolos_core::config::load(Some(config_file)).map_err(miette::Report::from_err);
+
+        write_config(config, config_file, args, Ok)
+    }
 
     /// The setup a fresh init writes works: the saved config loads, the
     /// stores open, and the first block appended lands in a segment file as a
@@ -588,7 +588,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
-        let config_file = dir.path().join(CONFIG_FILE);
+        let config_file = dir.path().join("dolos.toml");
 
         let mut editor = ConfigEditor::default();
         editor.0.storage.path = data.clone();
@@ -690,6 +690,204 @@ mod tests {
         let config = dolos_core::config::load(Some(&path)).map_err(miette::Report::from_err);
 
         assert!(refuse_unreadable(config, &path).unwrap().is_none());
+    }
+
+    /// The selected file is the only one written, and init reloads it as the
+    /// configuration it was written from.
+    #[test]
+    fn init_writes_and_reloads_the_selected_file() {
+        let _guard = crate::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.toml");
+        let args = init_args(&[
+            "--known-network",
+            "preview",
+            "--remote-peer",
+            "relay.example:3001",
+        ]);
+
+        let reloaded = write_unprompted(&path, &args).unwrap();
+
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(files, ["other.toml"]);
+
+        let expected = ConfigEditor::default().fill_values_from_args(&args).0;
+        assert_eq!(expected.chain, ChainConfig::known("preview"));
+        assert_eq!(reloaded, expected);
+        assert_eq!(dolos_core::config::load(Some(&path)).unwrap(), expected);
+    }
+
+    /// Without `--config`, init writes `dolos.toml` and nothing else.
+    #[test]
+    fn without_a_path_init_writes_the_default_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(crate::common::config_file(None));
+
+        let reloaded =
+            write_unprompted(&path, &init_args(&["--known-network", "preprod"])).unwrap();
+        assert_eq!(reloaded.chain, ChainConfig::known("preprod"));
+
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(files, ["dolos.toml"]);
+    }
+
+    /// What init returns is read back from the file: a fresh init under a
+    /// `DOLOS_` override carries the override, which the file does not hold.
+    #[test]
+    fn init_returns_the_config_read_back_from_the_file() {
+        let _guard = crate::common::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dolos.toml");
+        let args = init_args(&["--known-network", "preview"]);
+
+        std::env::set_var("DOLOS_SERVE__MAX_CONCURRENT_QUERIES", "7");
+        let reloaded = write_config(Err(miette::miette!("no file yet")), &path, &args, Ok);
+        std::env::remove_var("DOLOS_SERVE__MAX_CONCURRENT_QUERIES");
+
+        assert_eq!(reloaded.unwrap().serve.max_concurrent_queries, 7);
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("max_concurrent_queries = 7"), "{written}");
+    }
+
+    /// The hint names the file init wrote.
+    #[test]
+    fn the_daemon_hint_names_a_selected_file() {
+        assert_eq!(daemon_command(Path::new("dolos.toml")), "dolos daemon");
+        assert_eq!(
+            daemon_command(Path::new("conf/other.toml")),
+            "dolos --config conf/other.toml daemon"
+        );
+    }
+
+    fn with_peer(chain: ChainConfig) -> ConfigEditor {
+        let mut config = RootConfig::new(chain);
+        config.upstream = Some(UpstreamConfig::peer("my-relay:3001"));
+        ConfigEditor(config)
+    }
+
+    /// A re-run on the same network keeps a custom peer, whatever the case
+    /// of the network's name; a switch, from a known or a custom network,
+    /// drops it.
+    #[test]
+    fn only_a_network_switch_drops_the_peer() {
+        let peer = Some(UpstreamConfig::peer("my-relay:3001"));
+
+        for network in ["preview", "Preview"] {
+            let editor = with_peer(ChainConfig::known(network))
+                .apply_known_network(Some(&networks::PREVIEW));
+            assert_eq!(editor.0.upstream, peer, "{network}");
+            assert_eq!(editor.0.chain, ChainConfig::known("preview"));
+        }
+
+        let editor =
+            with_peer(ChainConfig::known("preview")).apply_known_network(Some(&networks::PREPROD));
+        assert_eq!(editor.0.upstream, None);
+        assert_eq!(editor.0.chain, ChainConfig::known("preprod"));
+
+        let custom = ChainConfig::custom(dolos_core::config::CardanoConfig {
+            magic: 42,
+            is_testnet: true,
+            genesis: dolos_core::config::GenesisConfig::in_dir(Path::new("genesis")),
+            custom_utxos: vec![],
+        });
+        let editor = with_peer(custom).apply_known_network(Some(&networks::PREVIEW));
+        assert_eq!(editor.0.upstream, None);
+        assert_eq!(editor.0.chain, ChainConfig::known("preview"));
+
+        let editor = with_peer(ChainConfig::known("preview")).apply_known_network(None);
+        assert_eq!(editor.0.upstream, peer);
+    }
+
+    /// A known network carries its genesis, peer, rollback window and store
+    /// tuning, so the written file names none of them.
+    #[test]
+    fn a_known_network_config_writes_no_derived_fields() {
+        for network in KnownNetwork::all() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("dolos.toml");
+
+            write_unprompted(&path, &init_args(&["--known-network", network.name])).unwrap();
+
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                written.starts_with("compatibility = \"v2-alpha.1\""),
+                "{written}"
+            );
+
+            for absent in [
+                "upstream",
+                "genesis",
+                "rollback",
+                "wal",
+                "[sync",
+                "preset",
+                "bootstrap",
+            ] {
+                assert!(
+                    !written.contains(absent),
+                    "{}: {absent} in {written}",
+                    network.name
+                );
+            }
+
+            let files = std::fs::read_dir(dir.path()).unwrap().count();
+            assert_eq!(files, 1, "{}: only the config is written", network.name);
+        }
+    }
+
+    /// `[upstream]` names a peer only when it is not the network's default.
+    #[test]
+    fn upstream_is_written_only_for_another_peer() {
+        let peer = |remote_peer: &str| {
+            let args = init_args(&["--known-network", "preview", "--remote-peer", remote_peer]);
+            ConfigEditor::default()
+                .fill_values_from_args(&args)
+                .0
+                .upstream
+        };
+
+        assert_eq!(peer(networks::PREVIEW.default_peer), None);
+        assert_eq!(
+            peer("relay.example:3001"),
+            Some(UpstreamConfig::peer("relay.example:3001"))
+        );
+    }
+
+    /// An alpha.0 file at the selected path is reported with the schema's
+    /// diagnostic and kept byte for byte.
+    #[test]
+    fn an_alpha_config_is_reported_and_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.toml");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/config/legacy/v2.0.0-alpha.0-sync-mainnet.toml"),
+            &path,
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let report = write_unprompted(&path, &init_args(&["--known-network", "preview"]))
+            .err()
+            .unwrap();
+        let message = format!("{report:?}");
+
+        assert!(message.contains(MIGRATION_GUIDE_URL), "{message}");
+        assert!(message.contains("untouched"), "{message}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
