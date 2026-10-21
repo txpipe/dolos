@@ -2,8 +2,9 @@
 //! operator's node takes — `data import-archive` over a node immutable
 //! directory for ingestion, and `serve` with minibf for reads — so two
 //! revisions can be measured on the same host, corpus, durability and
-//! concurrency. The binaries are given as `LABEL=PATH[:STORAGE_VERSION]`
-//! and every repeat runs each of them in turn on a fresh, disposable
+//! concurrency. The binaries are given as `LABEL=PATH[:STORAGE_VERSION]`,
+//! the version only for a binary that predates v2 configuration, and every
+//! repeat runs each of them in turn on a fresh, disposable
 //! instance; records carry the label, the run name and the binary's
 //! identity so the report pairs `baseline` against every other label.
 //!
@@ -48,8 +49,9 @@ use super::workloads::{apply_regime, EvictOptions, Mix, Regime};
 /// Options of the `node` subcommand.
 #[derive(clap::Args)]
 pub struct NodeArgs {
-    /// a dolos binary to measure, as `LABEL=PATH[:STORAGE_VERSION]`
-    /// (version defaults to v4); repeatable, run in this order every repeat
+    /// a dolos binary to measure, as `LABEL=PATH[:STORAGE_VERSION]`, the
+    /// version naming a binary that reads the older configuration file;
+    /// repeatable, run in this order every repeat
     #[arg(long = "bin", required = true)]
     bins: Vec<String>,
 
@@ -66,8 +68,9 @@ pub struct NodeArgs {
     #[arg(long)]
     genesis: PathBuf,
 
-    #[arg(long, default_value_t = 764_824_073)]
-    magic: u64,
+    /// network magic; default the `networkMagic` of the Shelley genesis
+    #[arg(long)]
+    magic: Option<u64>,
 
     #[arg(long)]
     testnet: bool,
@@ -139,6 +142,8 @@ pub struct Bin {
     pub label: String,
     pub path: PathBuf,
     pub storage_version: String,
+    /// The binary reads the configuration file of before v2.
+    pub legacy_config: bool,
 }
 
 impl Bin {
@@ -147,11 +152,11 @@ impl Bin {
         let (label, rest) = spec
             .split_once('=')
             .ok_or_else(|| format!("{spec:?} is not LABEL=PATH[:VERSION]"))?;
-        let (path, version) = match rest.rsplit_once(':') {
+        let (path, version, legacy_config) = match rest.rsplit_once(':') {
             Some((path, version)) if version.starts_with('v') && !path.is_empty() => {
-                (path, version)
+                (path, version, true)
             }
-            _ => (rest, "v4"),
+            _ => (rest, "v4", false),
         };
         if label.is_empty() || path.is_empty() {
             return Err(format!("{spec:?} is not LABEL=PATH[:VERSION]"));
@@ -160,6 +165,7 @@ impl Bin {
             label: label.to_string(),
             path: PathBuf::from(path),
             storage_version: version.to_string(),
+            legacy_config,
         })
     }
 
@@ -294,26 +300,52 @@ fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
+/// The `networkMagic` of a Shelley genesis file.
+fn genesis_magic(shelley: &Path) -> anyhow::Result<u64> {
+    let genesis: Value = serde_json::from_slice(&std::fs::read(shelley)?)?;
+    genesis["networkMagic"]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("{} has no networkMagic", shelley.display()))
+}
+
 /// The instance configuration the binary runs under: one archive on the
-/// default backend, the UTxO RPC service as the only one.
+/// default backend, the UTxO RPC service as the only one, and the genesis
+/// files in `genesis` as a custom network.
 pub fn config_toml(
-    storage_version: &str,
+    bin: &Bin,
     genesis: &Path,
     magic: u64,
     testnet: bool,
     grpc: SocketAddr,
 ) -> String {
     let g = |name: &str| genesis.join(name).display().to_string();
-    format!(
-        "[upstream]\npeer_address = \"127.0.0.1:1\"\n\n\
-         [storage]\nversion = \"{storage_version}\"\npath = \"data\"\n\n\
-         [genesis]\nbyron_path = {:?}\nshelley_path = {:?}\nalonzo_path = {:?}\nconway_path = {:?}\n\n\
-         [serve.grpc]\nlisten_address = \"{grpc}\"\n\n\
-         [chain]\ntype = \"cardano\"\nmagic = {magic}\nis_testnet = {testnet}\n",
+    let (byron, shelley, alonzo, conway) = (
         g("byron.json"),
         g("shelley.json"),
         g("alonzo.json"),
         g("conway.json"),
+    );
+
+    if bin.legacy_config {
+        let version = &bin.storage_version;
+        return format!(
+            "[upstream]\npeer_address = \"127.0.0.1:1\"\n\n\
+             [storage]\nversion = \"{version}\"\npath = \"data\"\n\n\
+             [genesis]\nbyron_path = {byron:?}\nshelley_path = {shelley:?}\nalonzo_path = {alonzo:?}\nconway_path = {conway:?}\n\n\
+             [serve.grpc]\nlisten_address = \"{grpc}\"\n\n\
+             [chain]\ntype = \"cardano\"\nmagic = {magic}\nis_testnet = {testnet}\n",
+        );
+    }
+
+    let compatibility = dolos_core::compat::SUPPORTED_CONTRACTS[0];
+    format!(
+        "compatibility = \"{compatibility}\"\n\n\
+         [chain]\nprotocol = \"cardano\"\nnetwork = \"custom\"\n\n\
+         [chain.cardano]\nmagic = {magic}\nis_testnet = {testnet}\n\n\
+         [chain.cardano.genesis]\nbyron_path = {byron:?}\nshelley_path = {shelley:?}\nalonzo_path = {alonzo:?}\nconway_path = {conway:?}\n\n\
+         [upstream]\npeer_address = \"127.0.0.1:1\"\n\n\
+         [storage]\npath = \"data\"\n\n\
+         [serve.grpc]\nlisten_address = \"{grpc}\"\n",
     )
 }
 
@@ -1194,6 +1226,10 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
             name
         );
     }
+    let magic = match args.magic {
+        Some(magic) => magic,
+        None => genesis_magic(&genesis.join("shelley.json"))?,
+    };
     let immutable = args.immutable.canonicalize()?;
     std::fs::create_dir_all(&args.work)?;
 
@@ -1240,13 +1276,7 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
 
     for repeat in 0..args.repeat.max(1) {
         for (bin, node) in bins.iter().zip(&identities) {
-            let toml = config_toml(
-                &bin.storage_version,
-                &genesis,
-                args.magic,
-                args.testnet,
-                addr,
-            );
+            let toml = config_toml(bin, &genesis, magic, args.testnet, addr);
 
             if selection.import || selection.read || selection.mixed {
                 let instance = Instance::create(&args.work.join(&bin.label), &toml)?;
@@ -1413,8 +1443,10 @@ mod tests {
         assert_eq!(b.label, "baseline");
         assert_eq!(b.path, PathBuf::from("/tmp/dolos-old"));
         assert_eq!(b.storage_version, "v3");
+        assert!(b.legacy_config);
         let b = Bin::parse("candidate=target/release/dolos").unwrap();
         assert_eq!(b.storage_version, "v4");
+        assert!(!b.legacy_config);
         assert!(Bin::parse("nolabel").is_err());
         assert!(Bin::parse("=path").is_err());
     }
@@ -1444,20 +1476,41 @@ mod tests {
     }
 
     #[test]
-    fn the_instance_config_selects_the_version_and_only_the_grpc_service() {
-        let toml = config_toml(
-            "v3",
-            Path::new("/g"),
-            42,
-            true,
-            "127.0.0.1:3900".parse().unwrap(),
-        );
-        assert!(toml.contains("version = \"v3\""));
+    fn the_instance_config_selects_the_dialect_and_only_the_grpc_service() {
+        let grpc = "127.0.0.1:3900".parse().unwrap();
         let byron = Path::new("/g").join("byron.json");
+
+        let legacy = Bin::parse("baseline=/tmp/dolos-old:v3").unwrap();
+        let toml = config_toml(&legacy, Path::new("/g"), 42, true, grpc);
+        assert!(toml.contains("version = \"v3\""));
         assert!(toml.contains(&format!("byron_path = {:?}", byron.display().to_string())));
         assert!(toml.contains("[serve.grpc]\nlisten_address = \"127.0.0.1:3900\""));
         assert!(toml.contains("magic = 42\nis_testnet = true"));
         assert!(!toml.contains("minibf"));
+
+        let current = Bin::parse("candidate=target/release/dolos").unwrap();
+        let toml = config_toml(&current, Path::new("/g"), 42, true, grpc);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dolos.toml");
+        std::fs::write(&path, &toml).unwrap();
+        let config = dolos_core::config::load(Some(&path)).unwrap();
+        let cardano = config.chain.cardano.unwrap();
+        assert_eq!((cardano.magic, cardano.is_testnet), (42, true));
+        assert_eq!(cardano.genesis.byron_path, byron);
+        assert_eq!(config.serve.grpc.unwrap().listen_address, "127.0.0.1:3900");
+        assert!(config.serve.minibf.is_none());
+    }
+
+    #[test]
+    fn the_magic_defaults_to_the_genesis_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let shelley = dir.path().join("shelley.json");
+        std::fs::write(&shelley, r#"{ "networkMagic": 1, "networkId": "Testnet" }"#).unwrap();
+
+        assert_eq!(genesis_magic(&shelley).unwrap(), 1);
+
+        std::fs::write(&shelley, "{}").unwrap();
+        assert!(genesis_magic(&shelley).is_err());
     }
 
     #[test]

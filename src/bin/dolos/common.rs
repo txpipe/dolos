@@ -1,10 +1,16 @@
-use dolos_core::config::{GenesisConfig, LoggingConfig, RootConfig, TelemetryConfig};
+use dolos_cardano::networks::ResolvedNetwork;
+use dolos_core::config::{
+    ConfigError, LoggingConfig, RootConfig, TelemetryConfig, DEFAULT_CONFIG_FILE,
+};
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig as _;
 use std::sync::Arc;
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
@@ -15,6 +21,7 @@ use dolos::core::Genesis;
 use dolos::engine::{DomainBuildError, DomainBuilder};
 use dolos::prelude::*;
 use dolos::storage;
+use dolos::sync::SyncLimit;
 
 pub type Stores = storage::Stores<dolos_cardano::CardanoDelta>;
 
@@ -41,43 +48,84 @@ pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
     storage::open_data_stores(config)
 }
 
-pub fn load_config(
-    explicit_file: &Option<std::path::PathBuf>,
-) -> Result<RootConfig, ::config::ConfigError> {
-    let mut s = ::config::Config::builder();
+/// The configuration file a command reads and `init` writes: `--config`, else
+/// `./dolos.toml`.
+pub fn config_file(explicit: Option<&Path>) -> &Path {
+    explicit.unwrap_or(Path::new(DEFAULT_CONFIG_FILE))
+}
 
-    // our base config will always be in /etc/dolos
-    s = s.add_source(::config::File::with_name("/etc/dolos/daemon.toml").required(false));
+/// Load the configuration, resolve its network against the catalog and parse
+/// its log filter.
+pub fn load_config(explicit_file: Option<&Path>) -> Result<RootConfig, ConfigError> {
+    dolos_core::config::load_checked(explicit_file, |config| {
+        ResolvedNetwork::resolve(&config.chain)
+            .map_err(|error| ConfigError::invalid(["chain.network"], error.to_string()))?;
 
-    // but we can override it by having a file in the working dir
-    s = s.add_source(::config::File::with_name("dolos.toml").required(false));
+        log_filter(&config.logging).map(|_| ())
+    })
+}
 
-    // if an explicit file was passed, then we load it as mandatory
-    if let Some(explicit) = explicit_file.as_ref().and_then(|x| x.to_str()) {
-        s = s.add_source(::config::File::with_name(explicit).required(true));
+pub fn resolve_network(config: &RootConfig) -> miette::Result<ResolvedNetwork<'_>> {
+    ResolvedNetwork::resolve(&config.chain).into_diagnostic()
+}
+
+/// Reads a custom network's genesis files and checks them against its magic,
+/// so that a command stops before it touches a store. A known network's
+/// genesis is built in.
+pub fn check_network(config: &RootConfig) -> miette::Result<()> {
+    if resolve_network(config)?.known().is_none() {
+        open_genesis(config)?;
     }
 
-    // finally, we use env vars to make some last-step overrides
-    s = s.add_source(::config::Environment::with_prefix("DOLOS").separator("_"));
+    Ok(())
+}
 
-    s.build()?.try_deserialize()
+/// The network's genesis: embedded for a known network, read from the
+/// configured files for a custom one.
+pub fn open_genesis(config: &RootConfig) -> miette::Result<Genesis> {
+    resolve_network(config)?
+        .genesis()
+        .into_diagnostic()
+        .context("loading genesis")
+}
+
+/// When `daemon` and `sync` stop.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct StopArgs {
+    /// Stop once the ledger reaches this epoch
+    #[arg(long, value_name = "N")]
+    pub stop_epoch: Option<u64>,
+
+    /// Stop pulling once the upstream tip is reached
+    #[arg(long, conflicts_with = "max_blocks")]
+    pub until_tip: bool,
+
+    /// Stop pulling after this many blocks
+    #[arg(long, value_name = "N")]
+    pub max_blocks: Option<u64>,
+}
+
+impl StopArgs {
+    pub fn sync_limit(&self) -> SyncLimit {
+        match (self.until_tip, self.max_blocks) {
+            (true, _) => SyncLimit::UntilTip,
+            (false, Some(blocks)) => SyncLimit::MaxBlocks(blocks),
+            (false, None) => SyncLimit::NoLimit,
+        }
+    }
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     setup_domain_with_stop_epoch(config, None)
 }
 
-/// The same domain [`setup_domain`] assembles, with `chain.stop_epoch` forced.
-///
-/// For embedding callers that replay to a chosen epoch boundary over the live
-/// stores, the way `doctor rebuild-state` forces it on the domain it
-/// hand-builds. A `Some` here overrides whatever the configuration says;
-/// `None` leaves it alone.
+/// The same domain [`setup_domain`] assembles, stopping once the ledger
+/// reaches `stop_epoch`.
 pub fn setup_domain_with_stop_epoch(
     config: &RootConfig,
     stop_epoch: Option<u64>,
 ) -> miette::Result<DomainAdapter> {
-    let genesis = Arc::new(open_genesis_files(&config.genesis)?);
+    let genesis = Arc::new(open_genesis(config)?);
 
     DomainBuilder::new(config, genesis)
         .stop_epoch(stop_epoch)
@@ -137,50 +185,53 @@ pub fn setup_tracing_error_only() -> miette::Result<()> {
     Ok(())
 }
 
-pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> miette::Result<()> {
-    let level = config.max_level;
+/// Warnings and errors only, on stderr, apart from a command's own output.
+pub fn setup_tracing_warnings() -> miette::Result<()> {
+    let filter = Targets::new().with_default(tracing::Level::WARN);
 
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(filter)
+        .init();
+
+    tracing_log::LogTracer::init().ok();
+
+    Ok(())
+}
+
+/// Dolos's own targets at `level`, then the `filter` directives over them.
+fn log_filter(config: &LoggingConfig) -> Result<Targets, ConfigError> {
     let mut filter = Targets::new()
-        .with_target("dolos", level)
-        .with_target("gasket", level);
+        .with_target("dolos", config.level)
+        .with_target("gasket", config.level);
 
-    if config.include_tokio {
-        filter = filter
-            .with_target("tokio", level)
-            .with_target("runtime", level);
+    if let Some(directives) = &config.filter {
+        let extra: Targets = directives.parse().map_err(|error| {
+            ConfigError::invalid(
+                ["logging.filter"],
+                format!("`logging.filter = \"{directives}\"`: {error}"),
+            )
+        })?;
+
+        if let Some(default) = extra.default_level() {
+            filter = filter.with_default(default);
+        }
+
+        for (target, level) in extra.iter() {
+            filter = filter.with_target(target, level);
+        }
     }
 
-    if config.include_pallas {
-        filter = filter.with_target("pallas", level);
-    }
+    Ok(filter)
+}
 
-    if config.include_grpc {
-        filter = filter.with_target("tonic", level);
-    }
+pub fn setup_tracing(
+    config: &LoggingConfig,
+    telemetry: Option<&TelemetryConfig>,
+) -> miette::Result<()> {
+    let filter = log_filter(config).into_diagnostic()?;
 
-    if config.include_trp {
-        filter = filter.with_target("jsonrpsee-server", level);
-    }
-
-    if config.include_minibf {
-        filter = filter.with_target("minibf", level);
-    }
-
-    if config.include_minikupo {
-        filter = filter.with_target("minikupo", level);
-    }
-
-    if config.include_fjall {
-        filter = filter
-            .with_target("fjall", level)
-            .with_target("lsm_tree", level);
-    }
-
-    if config.include_otlp {
-        filter = filter.with_target("opentelemetry", level);
-    }
-
-    let otel_layer = if telemetry.enabled {
+    let otel_layer = if let Some(telemetry) = telemetry {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
             .with_endpoint(&telemetry.otlp_endpoint)
@@ -230,18 +281,6 @@ pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> mie
     tracing_log::LogTracer::init().ok();
 
     Ok(())
-}
-
-pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {
-    Genesis::from_file_paths(
-        &config.byron_path,
-        &config.shelley_path,
-        &config.alonzo_path,
-        &config.conway_path,
-        config.force_protocol,
-    )
-    .into_diagnostic()
-    .context("loading genesis files")
 }
 
 #[inline]
@@ -336,79 +375,38 @@ pub async fn monitor_drivers(
     first_failure.map_or(Ok(()), Err)
 }
 
+/// Serializes the tests that set process environment variables.
+#[cfg(test)]
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
-    use dolos_core::config::StelaeConfig;
-    use dolos_snapshot::{node::registry_auth, registry::Auth};
     use futures_util::stream::FuturesUnordered;
     use std::io;
     use tokio::task::JoinHandle;
 
     use super::*;
 
-    /// The environment reaches `[stelae.registry]` by the same route as every
-    /// other setting, and *this* is the assertion that says so.
-    ///
-    /// It stays here, beside [`load_config`], while the credential policy it
-    /// feeds is [`dolos_snapshot::node::registry_auth`]'s: what is being pinned
-    /// is this binary's configuration sources, not what the profile crate makes
-    /// of them. It is the whole of Dolos's registry-credential environment
-    /// story — a publisher exports `DOLOS_STELAE_REGISTRY_USER` and
-    /// `DOLOS_STELAE_REGISTRY_PASSWORD` and nothing in this binary reads them —
-    /// so it is worth pinning rather than trusting. The source is built exactly
-    /// as [`load_config`] builds it; only the file layers are left off, because
-    /// those would make the test depend on the working directory.
-    ///
-    /// What would break it is a rename of either field or a change to the
-    /// prefix or separator, and all three are silent failures at run time: the
-    /// override would simply stop applying, and a publisher would authenticate
-    /// as the read-only user.
     #[test]
-    fn the_dolos_environment_prefix_reaches_the_registry_section() {
-        #[derive(serde::Deserialize)]
-        struct Root {
-            stelae: StelaeConfig,
-        }
+    fn the_log_filter_adds_targets_over_the_level() {
+        let config = LoggingConfig {
+            level: tracing::Level::WARN,
+            filter: Some("dolos=debug,fjall=info".into()),
+        };
 
-        // Process-wide, so this test owns these three names for its duration.
-        // Nothing else in this binary reads them.
-        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let filter = log_filter(&config).unwrap();
 
-        let names = [
-            "DOLOS_STELAE_REGISTRY_USER",
-            "DOLOS_STELAE_REGISTRY_PASSWORD",
-            "DOLOS_STELAE_REGISTRY_TOKEN",
-        ];
+        assert!(filter.would_enable("dolos", &tracing::Level::DEBUG));
+        assert!(filter.would_enable("gasket", &tracing::Level::WARN));
+        assert!(!filter.would_enable("gasket", &tracing::Level::INFO));
+        assert!(filter.would_enable("fjall", &tracing::Level::INFO));
+        assert!(!filter.would_enable("tonic", &tracing::Level::ERROR));
 
-        let previous: Vec<Option<String>> = names.iter().map(|n| std::env::var(n).ok()).collect();
-
-        std::env::set_var("DOLOS_STELAE_REGISTRY_USER", "publisher");
-        std::env::set_var("DOLOS_STELAE_REGISTRY_PASSWORD", "full-access");
-        std::env::remove_var("DOLOS_STELAE_REGISTRY_TOKEN");
-
-        let built: Root = ::config::Config::builder()
-            .add_source(::config::Environment::with_prefix("DOLOS").separator("_"))
-            .build()
-            .expect("the environment source builds")
-            .try_deserialize()
-            .expect("DOLOS_STELAE_REGISTRY_* deserializes into [stelae.registry]");
-
-        for (name, value) in names.iter().zip(previous) {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
-
-        assert_eq!(
-            registry_auth(&built.stelae).unwrap(),
-            Auth::Basic {
-                user: "publisher".to_owned(),
-                password: "full-access".to_owned(),
-            },
-            "the DOLOS_ prefix no longer reaches [stelae.registry]",
-        );
+        let config = LoggingConfig {
+            filter: Some("dolos=loud".into()),
+            ..Default::default()
+        };
+        assert!(log_filter(&config).is_err());
     }
 
     #[tokio::test]

@@ -56,11 +56,25 @@ impl Command {
         match cmd.index {
             0 => Ok(Command::Snapshot(snapshot::Args::inquire()?)),
             1 => Ok(Command::Stelae(stelae::Args::inquire()?)),
-            2 => Ok(Command::Mithril(mithril::Args::default())),
+            2 => Ok(Command::Mithril(from_environment()?)),
             3 => Ok(Command::Relay(relay::Args::default())),
             _ => unreachable!(),
         }
     }
+}
+
+/// A subcommand's arguments as an invocation naming none parses them, so
+/// that the prompted path still reads the environment inputs.
+fn from_environment<T: clap::Args>() -> miette::Result<T> {
+    #[derive(Parser)]
+    struct Environment<T: clap::Args> {
+        #[command(flatten)]
+        args: T,
+    }
+
+    Environment::<T>::try_parse_from(["dolos"])
+        .map(|parsed| parsed.args)
+        .into_diagnostic()
 }
 
 #[derive(Debug, Parser, Default)]
@@ -103,23 +117,49 @@ fn inspect_existing_data(config: &RootConfig, args: &Args) -> miette::Result<Exi
     dolos::storage::inspect_existing_data(config, policy).into_diagnostic()
 }
 
+/// A command with its inputs resolved: what it defaults from the network, and
+/// the credentials it reads with.
+///
+/// Resolved once, before `--force` clears anything, so that a missing or bad
+/// input is refused with the node intact and the run uses exactly what was
+/// checked. A credentials file can be a pipe that reads only once.
+enum Resolved<'a> {
+    Relay(&'a relay::Args),
+    Mithril(&'a mithril::Args, dolos_mithril::MithrilSource),
+    Snapshot(&'a snapshot::Args),
+    Stelae(&'a stelae::Args, stelae::Inputs),
+}
+
+fn resolve<'a>(config: &RootConfig, command: &'a Command) -> miette::Result<Resolved<'a>> {
+    let network = dolos_cardano::networks::KnownNetwork::by_name(&config.chain.network);
+
+    let resolved = match command {
+        Command::Relay(args) => Resolved::Relay(args),
+        Command::Mithril(args) => Resolved::Mithril(args, mithril::mithril_source(args, network)?),
+        Command::Snapshot(args) => Resolved::Snapshot(args),
+        Command::Stelae(args) => Resolved::Stelae(args, stelae::resolve(args, network)?),
+    };
+
+    Ok(resolved)
+}
+
 fn dispatch(
     config: &RootConfig,
-    command: &Command,
+    resolved: Resolved<'_>,
     feedback: &Feedback,
     resume: bool,
 ) -> miette::Result<()> {
-    match command {
-        Command::Relay(args) => relay::run(config, args, feedback),
-        Command::Mithril(args) => mithril::run(config, args, feedback),
-        Command::Snapshot(args) => snapshot::run(config, args, feedback),
+    match resolved {
+        Resolved::Relay(args) => relay::run(config, args, feedback),
+        Resolved::Mithril(args, source) => mithril::run(config, args, &source, feedback),
+        Resolved::Snapshot(args) => snapshot::run(config, args, feedback),
         // `resume` is `--continue`, and this is the only subcommand that does
         // anything with it. For the others it has always meant no more than
         // "proceed even though there is data here"; for a stele restore it is
         // also the instruction to read the progress file an interrupted attempt
         // left behind. Passing it rather than re-reading `args` keeps that one
         // flag with one meaning per subcommand instead of two spellings.
-        Command::Stelae(args) => stelae::run(config, args, feedback, resume),
+        Resolved::Stelae(args, inputs) => stelae::run(config, args, inputs, feedback, resume),
     }
 }
 
@@ -143,7 +183,7 @@ fn seed_wal(config: &RootConfig) -> miette::Result<()> {
 
 fn setup_tracing(config: &RootConfig, verbose: bool) -> miette::Result<()> {
     if verbose {
-        crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+        crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
     } else {
         crate::common::setup_tracing_error_only()?;
     }
@@ -166,6 +206,8 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         None => Command::inquire()?,
     };
 
+    let resolved = resolve(config, &command)?;
+
     // The first destructive step, and deliberately the last one before the run:
     // everything that could still refuse — the flags, the prompts, the source a
     // stele restore was given — has already had its say.
@@ -175,7 +217,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         dolos::storage::clear_storage(&config.storage.path).into_diagnostic()?;
     }
 
-    dispatch(config, &command, feedback, args.r#continue)?;
+    dispatch(config, resolved, feedback, args.r#continue)?;
 
     // Reset WAL after any successful bootstrap so that `find_intersect` works.
     // Some bootstrap mechanisms skip WAL commits for performance, leaving it empty

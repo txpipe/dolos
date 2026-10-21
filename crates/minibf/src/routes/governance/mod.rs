@@ -50,14 +50,17 @@ use dolos_core::{
 use dreps::{drep_is_expired, drep_is_retired, drep_list_item, parse_drep_id, DrepModelBuilder};
 use futures::{stream, FutureExt as _, StreamExt as _};
 use itertools::Itertools;
-use metadata::{cached_drep_metadata, fetch_drep_metadata, unfetched, OffchainStore, OnOverload};
+use metadata::{cached_drep_metadata, fetch_drep_metadata, unfetched, OnOverload};
+
+pub use metadata::register as register_caches;
+pub(crate) use metadata::remove_legacy_dir;
 use pallas::{
     crypto::hash::Hash,
     ledger::{
         addresses::Network,
         primitives::{
             conway::{Anchor, DRep, GovAction, GovActionId, Vote, Voter},
-            Coin, Epoch, StakeCredential,
+            Coin, Epoch, RationalNumber, StakeCredential,
         },
         traverse::{MultiEraBlock, MultiEraTx},
     },
@@ -167,15 +170,6 @@ fn chain_context<D: Domain>(
     let pparams = domain.get_current_effective_pparams()?;
 
     Ok((chain, tip, pparams))
-}
-
-/// The DRep metadata store under the node's storage path.
-async fn offchain_store<D: Domain>(domain: &Facade<D>) -> OffchainStore {
-    OffchainStore::open(
-        &domain.storage_config().path,
-        domain.config.max_offchain_cache_bytes(),
-    )
-    .await
 }
 
 /// Query parameters of `/governance/dreps`: the shared pagination set plus
@@ -439,7 +433,7 @@ where
         pparams,
     } = drep_page(&domain, retired, expired, order_by_amount, &pagination).await?;
 
-    let store = offchain_store(&domain).await;
+    let cache = domain.inner.cache();
     let gateways = domain.config.ipfs_gateways();
 
     // the latest anchor a registration or update carried, as db-sync serves
@@ -454,12 +448,8 @@ where
 
     let metadata = page_metadata(
         &anchors,
-        |anchor| cached_drep_metadata(&store, anchor),
-        |anchor| {
-            let (store, gateways, anchor) = (store.clone(), gateways.clone(), anchor.clone());
-
-            async move { fetch_drep_metadata(&store, &gateways, &anchor, on_overload).await }
-        },
+        |anchor| cached_drep_metadata(cache, anchor),
+        |anchor| fetch_drep_metadata(cache, &gateways, anchor, on_overload),
         PAGE_METADATA_DEADLINE,
     )
     .await;
@@ -558,12 +548,12 @@ where
         hex::encode(&parsed.encoded)
     };
 
-    let store = offchain_store(&domain).await;
     let gateways = domain.config.ipfs_gateways();
 
     // the cache the list fills, so one anchor reads alike on both endpoints
     // and a verified body is fetched once
-    let metadata = fetch_drep_metadata(&store, &gateways, anchor, OnOverload::Inline).await;
+    let metadata =
+        fetch_drep_metadata(domain.inner.cache(), &gateways, anchor, OnOverload::Inline).await;
 
     Ok(Json(DrepMetadata {
         drep_id: parsed.drep_id,
@@ -732,13 +722,13 @@ fn committee_credential_parts(cred: &StakeCredential) -> (String, bool) {
 /// status. For the other two statuses, these fields are null. This behavior is
 /// the same as Blockfrost.
 fn committee_member(
-    gov: &GovState,
     cold: &StakeCredential,
     expiry: Epoch,
+    auth: Option<&CommitteeAuthorization>,
 ) -> Result<CommitteeMembersInner, StatusCode> {
     let (cc_cold_hex, cc_cold_has_script) = committee_credential_parts(cold);
 
-    let (status, hot) = match gov.committee_auth(cold) {
+    let (status, hot) = match auth {
         None => (Status::NotAuthorized, None),
         Some(CommitteeAuthorization::Resigned(_)) => (Status::Resigned, None),
         Some(CommitteeAuthorization::HotCredential(hot)) => (Status::Authorized, Some(hot)),
@@ -765,14 +755,15 @@ fn committee_member(
 }
 
 /// This function resolves all committee members against their authorization
-/// history. It orders the members by the raw cold-hash hex, as Blockfrost does.
-fn committee_members(
-    gov: &GovState,
+/// history, read through `auth`. It orders the members by the raw cold-hash
+/// hex, as Blockfrost does.
+fn committee_members<'a>(
     members: &BTreeMap<StakeCredential, Epoch>,
+    auth: impl Fn(&StakeCredential) -> Option<&'a CommitteeAuthorization>,
 ) -> Result<Vec<CommitteeMembersInner>, StatusCode> {
     let mut rows = members
         .iter()
-        .map(|(cold, expiry)| committee_member(gov, cold, *expiry))
+        .map(|(cold, expiry)| committee_member(cold, *expiry, auth(cold)))
         .collect::<Result<Vec<_>, _>>()?;
 
     rows.sort_by(|a, b| a.cc_cold_hex.cmp(&b.cc_cold_hex));
@@ -793,11 +784,14 @@ fn committee_members(
 /// committee has no seating action. Its `gov_action_id`, `proposal_tx_hash`,
 /// and `proposal_index` are null.
 ///
-/// A `NoConfidence` enactment dissolves the committee. Dolos does not keep the
-/// last-seated members. It sets the committee value to null. As a result, a
-/// dissolved committee has `is_dissolved` true, an empty member list, and a
-/// zero quorum. Blockfrost is different. It still returns the historical
-/// members.
+/// A `NoConfidence` enactment dissolves the committee. Dolos sets the
+/// committee value to null and keeps the last-seated committee as a snapshot,
+/// with each member's authorization history as it stood and the action that
+/// seated it. A dissolved committee has `is_dissolved` true and returns the
+/// snapshot's members, quorum and seating action, as Blockfrost returns the
+/// historical committee; the committee root then holds the `NoConfidence`,
+/// which never seated anyone. A dissolved store without a snapshot returns an
+/// empty member list and a zero quorum.
 ///
 /// The `is_dissolved` flag depends on evidence of a committee lineage action,
 /// not on governance activation. A previous committee action on record makes a
@@ -819,25 +813,39 @@ where
         .filter(|gov| gov.active_since.is_some())
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let (gov_action_id, proposal_tx_hash, proposal_index) =
-        match gov.prev_gov_action_ids.committee.as_ref() {
-            Some(id) => (
-                Some(bech32_gov_action(&id.transaction_id, id.action_index)?),
-                Some(hex::encode(id.transaction_id)),
-                Some(i32_or_500(id.action_index)?),
-            ),
-            None => (None, None, None),
-        };
+    let seating = match (gov.committee.as_ref(), gov.dissolved_committee.as_ref()) {
+        (None, Some(dissolved)) => dissolved.seated_by.as_ref(),
+        _ => gov.prev_gov_action_ids.committee.as_ref(),
+    };
 
-    let (quorum, members) = match gov.committee.as_ref() {
-        Some(committee) => (
-            CommitteeQuorum {
-                numerator: i32_or_500(committee.threshold.numerator)?,
-                denominator: i32_or_500(committee.threshold.denominator)?,
-            },
-            committee_members(&gov, &committee.members)?,
+    let (gov_action_id, proposal_tx_hash, proposal_index) = match seating {
+        Some(id) => (
+            Some(bech32_gov_action(&id.transaction_id, id.action_index)?),
+            Some(hex::encode(id.transaction_id)),
+            Some(i32_or_500(id.action_index)?),
         ),
-        None => (CommitteeQuorum::default(), Vec::new()),
+        None => (None, None, None),
+    };
+
+    let quorum = |threshold: &RationalNumber| -> Result<CommitteeQuorum, StatusCode> {
+        Ok(CommitteeQuorum {
+            numerator: i32_or_500(threshold.numerator)?,
+            denominator: i32_or_500(threshold.denominator)?,
+        })
+    };
+
+    let (quorum, members) = match (gov.committee.as_ref(), gov.dissolved_committee.as_ref()) {
+        (Some(committee), _) => (
+            quorum(&committee.threshold)?,
+            committee_members(&committee.members, |cold| gov.committee_auth(cold))?,
+        ),
+        (None, Some(dissolved)) => (
+            quorum(&dissolved.committee.threshold)?,
+            committee_members(&dissolved.committee.members, |cold| {
+                dissolved.committee_auth(cold)
+            })?,
+        ),
+        (None, None) => (CommitteeQuorum::default(), Vec::new()),
     };
 
     Ok(Json(Committee {
@@ -1118,7 +1126,7 @@ fn committee_hot_credentials<D: Domain>(
 /// The certificate scan and the vote scan share one limit for reads of block
 /// bodies. Both scans use the same state tip.
 /// The function omits votes from missing block bodies under
-/// `sync.max_history`.
+/// rolling history.
 fn committee_vote_rows<D: Domain>(
     domain: &D,
     query: &CommitteeVoteQuery,
@@ -1629,7 +1637,7 @@ fn voter_casts_in_block(block: &MultiEraBlock, voter: &Voter) -> Vec<CastVote> {
 ///
 /// A block that the archive no longer holds leaves the list, and the votes
 /// after it move up. The other history endpoints do the same under
-/// `sync.max_history`.
+/// rolling history.
 pub(crate) fn voter_casts<D: Domain>(
     domain: &D,
     voter: &Voter,
@@ -1811,7 +1819,7 @@ fn collect_block_rows<T>(
         let body = fetch(slot);
 
         // A block that the archive no longer has leaves the list. The other
-        // history endpoints do the same under `sync.max_history`.
+        // history endpoints do the same under rolling history.
         let Some(body) = body.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? else {
             continue;
         };
@@ -2535,7 +2543,7 @@ fn read_at_stable_cursor<T>(
 /// the proposal. The function reads blocks only until the page is full, and
 /// at most `budget` of them. A block that the archive no longer holds leaves
 /// the list, and the votes after it move up, like the other history endpoints
-/// under `sync.max_history`.
+/// under rolling history.
 ///
 /// Only the newest vote of a voter can count, and the proposal's state row
 /// holds that vote's position (`VoteEntry`), so only the rows on the page pay
@@ -3268,8 +3276,6 @@ mod tests {
             content_hash: Hasher::<256>::hash(body),
         };
 
-        metadata::cache_verified_body(&anchor, body);
-
         let app = TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), {
             let anchor = anchor.clone();
 
@@ -3278,6 +3284,8 @@ mod tests {
                 seed_drep_with_anchor(domain, parsed.encoded, anchor);
             }
         });
+
+        metadata::cache_verified_body(app.facade().inner.cache(), &anchor, body).await;
 
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}/metadata");
@@ -4434,7 +4442,7 @@ mod tests {
 
     /// A pruned block takes its votes out of the listing, and the retained
     /// votes move up to fill the pages. The other history endpoints return
-    /// the same under `sync.max_history`.
+    /// the same under rolling history.
     ///
     /// The test prunes the archive to one slot. Only the last block remains.
     /// The three votes of block 1 are gone. The one vote of block 2 is the
@@ -5650,7 +5658,7 @@ mod tests {
 
     /// A pruned block takes its votes out of the listing, and the retained
     /// votes move up to fill the pages. The other history endpoints return
-    /// the same under `sync.max_history`.
+    /// the same under rolling history.
     ///
     /// The test prunes the archive to one slot. Only the last block remains.
     /// The three votes of the first three vote blocks are gone. The one vote
@@ -7392,6 +7400,138 @@ mod tests {
 
         assert!(model.is_dissolved);
         assert!(model.members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_committee_dissolved_serves_last_members() {
+        // A NoConfidence enactment keeps the last-seated committee. While the
+        // committee is dissolved, the endpoint serves the kept members, each
+        // with the hot key it had, the kept quorum and the action that seated
+        // them, not the NoConfidence the committee root now holds.
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                let action = GovActionId {
+                    transaction_id: Hash::from([9u8; 32]),
+                    action_index: 1,
+                };
+
+                let seating = GovActionId {
+                    transaction_id: Hash::from([8u8; 32]),
+                    action_index: 0,
+                };
+
+                let committee = dolos_cardano::model::gov::Committee {
+                    members: BTreeMap::from([(cc_cold_key(1), 100), (cc_cold_key(2), 200)]),
+                    threshold: RationalNumber {
+                        numerator: 2,
+                        denominator: 3,
+                    },
+                };
+
+                seed_gov(
+                    domain,
+                    GovState {
+                        prev_gov_action_ids: dolos_cardano::model::gov::GovRoots {
+                            committee: Some(action.clone()),
+                            ..Default::default()
+                        },
+                        active_since: Some(0),
+                        dissolved_committee: Some(dolos_cardano::model::gov::DissolvedCommittee {
+                            committee,
+                            auths: BTreeMap::from([(
+                                cc_cold_key(1),
+                                vec![(10, CommitteeAuthorization::HotCredential(cc_cold_key(11)))],
+                            )]),
+                            action,
+                            epoch: 5,
+                            seated_by: Some(seating),
+                        }),
+                        ..Default::default()
+                    },
+                );
+            });
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        assert!(model.is_dissolved);
+        assert_eq!(
+            model.gov_action_id,
+            Some(bech32_gov_action(&Hash::from([8u8; 32]), 0).unwrap())
+        );
+        assert_eq!(model.proposal_tx_hash, Some(hex::encode([8u8; 32])));
+        assert_eq!(model.proposal_index, Some(0));
+        assert_eq!(model.quorum.numerator, 2);
+        assert_eq!(model.quorum.denominator, 3);
+        assert_eq!(model.members.len(), 2);
+
+        let authorized = &model.members[0];
+        assert_eq!(authorized.cc_cold_hex, hex::encode([1u8; 28]));
+        assert_eq!(authorized.status, Status::Authorized);
+        assert_eq!(authorized.cc_hot_hex, Some(hex::encode([11u8; 28])));
+        assert_eq!(authorized.expiration_epoch, 100);
+
+        let unauthorized = &model.members[1];
+        assert_eq!(unauthorized.cc_cold_hex, hex::encode([2u8; 28]));
+        assert_eq!(unauthorized.status, Status::NotAuthorized);
+        assert!(unauthorized.cc_hot_hex.is_none());
+        assert_eq!(unauthorized.expiration_epoch, 200);
+    }
+
+    #[tokio::test]
+    async fn governance_committee_dissolved_genesis_has_no_seating_action() {
+        // A NoConfidence that dissolves the Conway-genesis committee keeps no
+        // seating action. The endpoint serves null action fields, not the
+        // NoConfidence the committee root now holds.
+        let app =
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _vectors| {
+                let action = GovActionId {
+                    transaction_id: Hash::from([9u8; 32]),
+                    action_index: 1,
+                };
+
+                let committee = dolos_cardano::model::gov::Committee {
+                    members: BTreeMap::from([(cc_cold_key(1), 100)]),
+                    threshold: RationalNumber {
+                        numerator: 2,
+                        denominator: 3,
+                    },
+                };
+
+                seed_gov(
+                    domain,
+                    GovState {
+                        prev_gov_action_ids: dolos_cardano::model::gov::GovRoots {
+                            committee: Some(action.clone()),
+                            ..Default::default()
+                        },
+                        active_since: Some(0),
+                        dissolved_committee: Some(dolos_cardano::model::gov::DissolvedCommittee {
+                            committee,
+                            auths: BTreeMap::new(),
+                            action,
+                            epoch: 5,
+                            seated_by: None,
+                        }),
+                        ..Default::default()
+                    },
+                );
+            });
+
+        let (status, body) = app.get_bytes("/governance/committee").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: Committee = serde_json::from_slice(&body)
+            .expect("The JSON parser cannot parse the committee response.");
+
+        assert!(model.is_dissolved);
+        assert_eq!(model.members.len(), 1);
+        assert!(model.gov_action_id.is_none());
+        assert!(model.proposal_tx_hash.is_none());
+        assert!(model.proposal_index.is_none());
     }
 
     #[tokio::test]

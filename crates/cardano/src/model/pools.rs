@@ -74,6 +74,39 @@ pub struct PoolSnapshot {
 
     #[n(4)]
     pub is_new: bool,
+
+    /// The active stake delegated to the pool in this snapshot's epoch.
+    /// `None` while the snapshot is live; ESTART fills it when the snapshot
+    /// freezes into `mark`.
+    #[n(5)]
+    pub stake: Option<u64>,
+
+    /// The accounts delegated to the pool in this snapshot's epoch, frozen
+    /// with `stake`.
+    #[n(6)]
+    pub delegators: Option<u64>,
+
+    /// The part of `stake` delegated by the pool's own owners, frozen with
+    /// `stake`.
+    #[n(7)]
+    pub live_pledge: Option<u64>,
+}
+
+impl PoolSnapshot {
+    /// The frozen tally of this snapshot, once ESTART has filled it.
+    pub fn tally(&self) -> Option<PoolTally> {
+        Some(PoolTally {
+            stake: self.stake?,
+            delegators: self.delegators?,
+            live_pledge: self.live_pledge?,
+        })
+    }
+
+    fn freeze(&mut self, tally: PoolTally) {
+        self.stake = Some(tally.stake);
+        self.delegators = Some(tally.delegators);
+        self.live_pledge = Some(tally.live_pledge);
+    }
 }
 
 impl TransitionDefault for PoolSnapshot {
@@ -85,7 +118,32 @@ impl TransitionDefault for PoolSnapshot {
             params: current.params.clone(),
             blocks_minted: 0,
             is_new: false,
+            stake: None,
+            delegators: None,
+            live_pledge: None,
         })
+    }
+}
+
+/// One pool's share of a stake distribution: the stake delegated to it, its
+/// delegators, and the part of the stake its owners delegate.
+#[derive(Debug, Encode, Decode, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PoolTally {
+    #[n(0)]
+    pub stake: u64,
+
+    #[n(1)]
+    pub delegators: u64,
+
+    #[n(2)]
+    pub live_pledge: u64,
+}
+
+impl PoolTally {
+    pub fn add(&mut self, other: &PoolTally) {
+        self.stake += other.stake;
+        self.delegators += other.delegators;
+        self.live_pledge += other.live_pledge;
     }
 }
 
@@ -167,8 +225,27 @@ pub(crate) mod testing {
             blocks_minted in 0u32..1000u32,
             params in any_pool_params(),
             is_new in any::<bool>(),
+            tally in prop::option::of(any_pool_tally()),
         ) -> PoolSnapshot {
-            PoolSnapshot { is_retired, blocks_minted, params, is_new }
+            PoolSnapshot {
+                is_retired,
+                blocks_minted,
+                params,
+                is_new,
+                stake: tally.map(|x| x.stake),
+                delegators: tally.map(|x| x.delegators),
+                live_pledge: tally.map(|x| x.live_pledge),
+            }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_pool_tally()(
+            stake in root::any_lovelace(),
+            delegators in 0u64..10_000u64,
+            live_pledge in root::any_lovelace(),
+        ) -> PoolTally {
+            PoolTally { stake, delegators, live_pledge }
         }
     }
 
@@ -262,6 +339,9 @@ impl dolos_core::EntityDelta for PoolRegistration {
                         is_new: true,
                         blocks_minted: preserved_blocks,
                         params: self.cert.clone().into(),
+                        stake: None,
+                        delegators: None,
+                        live_pledge: None,
                     },
                     self.epoch,
                 );
@@ -273,6 +353,9 @@ impl dolos_core::EntityDelta for PoolRegistration {
                         is_new: false,
                         blocks_minted: 0,
                         params: self.cert.clone().into(),
+                        stake: None,
+                        delegators: None,
+                        live_pledge: None,
                     }),
                 );
             }
@@ -292,6 +375,9 @@ impl dolos_core::EntityDelta for PoolRegistration {
                 blocks_minted: 0,
                 params: self.cert.clone().into(),
                 is_new: true,
+                stake: None,
+                delegators: None,
+                live_pledge: None,
             };
 
             let state = PoolState {
@@ -468,15 +554,20 @@ pub struct PoolTransition {
     pub(crate) pool: PoolKey,
     pub(crate) next_epoch: Epoch,
 
+    /// The tally of the snapshot this transition freezes into `mark`; `None`
+    /// when the pool has no snapshot of the closing epoch.
+    pub(crate) frozen: Option<PoolTally>,
+
     // undo: save the whole EpochValue so rotation can be reversed in one shot.
     pub(crate) prev_snapshot: Option<EpochValue<PoolSnapshot>>,
 }
 
 impl PoolTransition {
-    pub fn new(pool: PoolKey, next_epoch: Epoch) -> Self {
+    pub fn new(pool: PoolKey, next_epoch: Epoch, frozen: Option<PoolTally>) -> Self {
         Self {
             pool,
             next_epoch,
+            frozen,
             prev_snapshot: None,
         }
     }
@@ -495,6 +586,10 @@ impl dolos_core::EntityDelta for PoolTransition {
         self.prev_snapshot = Some(entity.snapshot.clone());
 
         entity.snapshot.default_transition(self.next_epoch);
+
+        if let (Some(tally), Some(mark)) = (self.frozen, entity.snapshot.mark_mut()) {
+            mark.freeze(tally);
+        }
     }
 
     fn undo(&self, entity: &mut Option<PoolState>) {
@@ -546,8 +641,9 @@ mod prop_tests {
         fn any_pool_transition()(
             pool in root::any_hash_28(),
             next_epoch in root::any_epoch(),
+            frozen in prop::option::of(testing::any_pool_tally()),
         ) -> PoolTransition {
-            PoolTransition::new(PoolKey(pool), next_epoch)
+            PoolTransition::new(PoolKey(pool), next_epoch, frozen)
         }
     }
 
@@ -631,6 +727,9 @@ mod prop_tests {
                 relays: vec![],
                 pool_metadata: None,
             },
+            stake: None,
+            delegators: None,
+            live_pledge: None,
         };
         let pool = PoolState {
             operator,

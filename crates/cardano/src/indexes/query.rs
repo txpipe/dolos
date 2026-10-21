@@ -591,7 +591,7 @@ where
         }
 
         // no witness row (data synced before the witness existed) or its
-        // first block pruned by `sync.max_history`: the archive index still
+        // first block pruned by rolling history: the archive index still
         // knows every later carrier. An archive written before auxiliary-data
         // scripts were tagged learns theirs from `doctor rebuild-state
         // --rewrite-logs`, which re-applies the index of every block it replays

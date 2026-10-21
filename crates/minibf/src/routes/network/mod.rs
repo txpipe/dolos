@@ -2,7 +2,7 @@ mod eras;
 mod naked;
 
 pub use eras::eras;
-pub use naked::naked;
+pub use naked::{naked, register_cache};
 
 #[cfg(test)]
 mod testing {

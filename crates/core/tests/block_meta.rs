@@ -8,9 +8,8 @@ use dolos_testing::{
 };
 
 use dolos_core::{
-    async_query::BlockMetaResolver, config::CardanoConfig, indexes::ArchiveIndexDelta,
-    ArchiveStore as _, ArchiveWriter as _, AsyncQueryFacade, ChainPoint, Domain, QueryLimiter,
-    TxHash, LOCATE_CHUNK,
+    async_query::BlockMetaResolver, indexes::ArchiveIndexDelta, ArchiveStore as _,
+    ArchiveWriter as _, AsyncQueryFacade, ChainPoint, Domain, QueryLimiter, TxHash, LOCATE_CHUNK,
 };
 use pallas::ledger::traverse::MultiEraBlock;
 
@@ -42,6 +41,15 @@ fn domain_with_shared_blocks(
     txs_per_block: usize,
 ) -> (ToyDomain, Vec<Vec<TxHash>>) {
     let domain = ToyDomain::new(None, None);
+    let hashes = load_shared_blocks(&domain, block_count, txs_per_block);
+    (domain, hashes)
+}
+
+fn load_shared_blocks<D: Domain>(
+    domain: &D,
+    block_count: usize,
+    txs_per_block: usize,
+) -> Vec<Vec<TxHash>> {
     let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
         block_count,
         txs_per_block,
@@ -67,7 +75,7 @@ fn domain_with_shared_blocks(
     }
     writer.apply_index(&indexes).unwrap();
     writer.commit().unwrap();
-    (domain, hashes)
+    hashes
 }
 
 #[tokio::test]
@@ -278,7 +286,7 @@ type MeasuredDomain = ToyDomain<MeasuredStores<MemoryStores>>;
 fn measured_domain(limiter: QueryLimiter) -> MeasuredDomain {
     ToyDomain::with_stores(
         ToyDomain::new(None, None).genesis(),
-        CardanoConfig::default(),
+        Default::default(),
         None,
         None,
         MeasuredStores::new(MemoryStores::open()),
@@ -482,5 +490,53 @@ async fn a_dropped_batch_stops_at_the_next_chunk() {
     gate.await.unwrap().unwrap();
 
     assert_eq!(exact_lookups(&domain), LOCATE_CHUNK as u64);
+    assert_eq!(domain.query_limiter().in_use(), 0);
+}
+
+#[tokio::test]
+async fn tx_cbor_batch_answers_each_distinct_hash_like_tx_cbor() {
+    let (domain, hashes) = domain_with_shared_blocks(3, 4);
+    let query = AsyncQueryFacade::new(domain);
+    let missing = TxHash::from([0xff; 32]);
+    let mut requested: Vec<_> = hashes.iter().flatten().rev().copied().collect();
+    requested.insert(5, missing);
+    let distinct = requested.clone();
+    requested.extend_from_slice(&distinct[..3]);
+
+    let batch = query.tx_cbor_batch(requested).await.unwrap();
+
+    assert_eq!(
+        batch.iter().map(|(hash, _)| *hash).collect::<Vec<_>>(),
+        distinct
+    );
+    for (hash, cbor) in batch {
+        let single = query.tx_cbor(hash.to_vec()).await.unwrap();
+        assert_eq!(cbor.is_some(), hash != missing);
+        assert_eq!(cbor, single);
+    }
+}
+
+#[tokio::test]
+async fn tx_cbor_batch_reads_each_body_once_however_many_of_its_txs_are_asked() {
+    let domain = measured_domain(QueryLimiter::default());
+    let hashes = load_shared_blocks(&domain, 3, 4);
+    let query = AsyncQueryFacade::new(domain.clone());
+    let reads = || {
+        domain
+            .archive()
+            .counters
+            .block_reads
+            .load(Ordering::Relaxed)
+    };
+
+    let before = reads();
+    let batch = query
+        .tx_cbor_batch(hashes.iter().flatten().copied())
+        .await
+        .unwrap();
+
+    assert_eq!(batch.len(), 12);
+    assert!(batch.iter().all(|(_, cbor)| cbor.is_some()));
+    assert_eq!(reads() - before, 3);
     assert_eq!(domain.query_limiter().in_use(), 0);
 }

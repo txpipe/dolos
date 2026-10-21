@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use dolos_core::{cbor, BlockSlot, Genesis, NsKey};
 use pallas::{
@@ -14,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     epoch_value::{EpochValue, TransitionDefault},
     eras::EraTransition,
-    pools::PoolHash,
+    pools::{PoolHash, PoolTally},
     pparams::PParamsSet,
     SingletonEntity,
 };
@@ -341,6 +344,20 @@ pub struct EpochState {
     #[n(17)]
     #[cbor(default)]
     pub rupd_progress: Option<ShardProgress>,
+
+    /// The active stake of this epoch: the stake distribution frozen when
+    /// epoch `number - 2` closed, summed when this epoch opens. `None` until
+    /// a frozen distribution exists.
+    #[n(18)]
+    #[cbor(default)]
+    pub active_stake: Option<u64>,
+
+    /// The per-pool tally of the ESTART shards committed so far in this
+    /// boundary. Each `EStartProgress` adds its shard's part; ESTART finalize
+    /// freezes it onto the pools and `EpochTransition` clears it.
+    #[n(19)]
+    #[cbor(default)]
+    pub estart_tally: Option<BTreeMap<PoolHash, PoolTally>>,
 }
 
 impl Default for EpochState {
@@ -358,6 +375,8 @@ impl Default for EpochState {
             ewrap_progress: None,
             estart_progress: None,
             rupd_progress: None,
+            active_stake: None,
+            estart_tally: None,
         }
     }
 }
@@ -461,6 +480,10 @@ pub(crate) mod testing {
             rupd_progress in prop::option::of(
                 (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
             ),
+            (active_stake, estart_tally) in (
+                prop::option::of(root::any_lovelace()),
+                prop::option::of(any_estart_tally()),
+            ),
         ) -> EpochState {
             // ESTART rotates rolling/pparams in lockstep with the epoch
             // number, so a healthy entity has all three aligned. The `strict`
@@ -478,8 +501,18 @@ pub(crate) mod testing {
                 ewrap_progress,
                 estart_progress,
                 rupd_progress,
+                active_stake,
+                estart_tally,
             }
         }
+    }
+
+    pub fn any_estart_tally() -> impl Strategy<Value = BTreeMap<PoolHash, PoolTally>> {
+        prop::collection::btree_map(
+            root::any_pool_hash(),
+            crate::model::pools::testing::any_pool_tally(),
+            0..4,
+        )
     }
 }
 
@@ -1057,33 +1090,41 @@ impl dolos_core::EntityDelta for EWrapProgress {
 /// in-flight pipeline robust against a config change between shards (e.g.
 /// across a crash and restart).
 ///
-/// Unlike `EWrapProgress` this delta carries no per-shard accumulator
-/// payload: the EStart-shard's per-account work lands directly on each
-/// `AccountState` via `AccountTransition` deltas, not into a global pot.
-/// The accumulator delta exists purely to track shard progress.
+/// The shard's per-account work lands directly on each `AccountState` via
+/// `AccountTransition` deltas. Its one accumulator is `tally`, the shard's
+/// part of the stake distribution being frozen, which `apply` adds to
+/// `EpochState.estart_tally` in the same commit as the shard's rotations.
 ///
 /// Idempotent on repeat-apply by guarding on the committed shard count —
 /// a shard that was already committed will have
 /// `estart_progress.committed > completed_shard_index` and should
-/// skip.
+/// skip. The guard covers the tally too, so a skipped shard adds nothing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EStartProgress {
     pub(crate) completed_shard_index: u32,
     pub(crate) total_shards: u32,
+    pub(crate) tally: BTreeMap<PoolHash, PoolTally>,
 
     // undo — captured by `apply` only when state was actually mutated
     // (i.e. the idempotency / ordering / consistency guards all passed).
     pub(crate) applied: bool,
     pub(crate) prev_estart_progress: Option<ShardProgress>,
+    pub(crate) prev_estart_tally: Option<BTreeMap<PoolHash, PoolTally>>,
 }
 
 impl EStartProgress {
-    pub fn new(completed_shard_index: u32, total_shards: u32) -> Self {
+    pub fn new(
+        completed_shard_index: u32,
+        total_shards: u32,
+        tally: BTreeMap<PoolHash, PoolTally>,
+    ) -> Self {
         Self {
             completed_shard_index,
             total_shards,
+            tally,
             applied: false,
             prev_estart_progress: None,
+            prev_estart_tally: None,
         }
     }
 }
@@ -1139,11 +1180,18 @@ impl dolos_core::EntityDelta for EStartProgress {
         }
 
         self.prev_estart_progress = entity.estart_progress.clone();
+        self.prev_estart_tally = entity.estart_tally.clone();
 
         entity.estart_progress = Some(ShardProgress {
             committed: self.completed_shard_index + 1,
             total: self.total_shards,
         });
+
+        let carried = entity.estart_tally.get_or_insert_with(Default::default);
+
+        for (pool, tally) in &self.tally {
+            carried.entry(*pool).or_default().add(tally);
+        }
 
         self.applied = true;
     }
@@ -1155,6 +1203,7 @@ impl dolos_core::EntityDelta for EStartProgress {
 
         let entity = entity.as_mut().expect("existing epoch");
         entity.estart_progress = self.prev_estart_progress.clone();
+        entity.estart_tally = self.prev_estart_tally.clone();
     }
 }
 
@@ -1425,14 +1474,16 @@ impl dolos_core::EntityDelta for EpochTransition {
 
 /// V2 of `EpochTransition` — adds `prev_end` plus three `prev_*_progress`
 /// undo fields and reseeds `entity.end`/`entity.*_progress` on apply, all
-/// to support the new sharded ewrap/estart/rupd pipelines. Constructed by
-/// all post-cutover commit paths; the legacy `EpochTransition` is kept
-/// solely for replay of older WAL rows.
+/// to support the new sharded ewrap/estart/rupd pipelines. It also sets the
+/// new epoch's `active_stake` and clears the boundary's `estart_tally`.
+/// Constructed by all post-cutover commit paths; the legacy
+/// `EpochTransition` is kept solely for replay of older WAL rows.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EpochTransitionV2 {
     pub(crate) new_epoch: Epoch,
     pub(crate) new_pots: Pots,
     pub(crate) era_transition: Option<EraTransition>,
+    pub(crate) active_stake: Option<u64>,
 
     #[serde(skip)]
     pub(crate) genesis: Option<Arc<Genesis>>,
@@ -1446,6 +1497,8 @@ pub struct EpochTransitionV2 {
     pub(crate) prev_ewrap_progress: Option<ShardProgress>,
     pub(crate) prev_estart_progress: Option<ShardProgress>,
     pub(crate) prev_rupd_progress: Option<ShardProgress>,
+    pub(crate) prev_active_stake: Option<u64>,
+    pub(crate) prev_estart_tally: Option<BTreeMap<PoolHash, PoolTally>>,
 }
 
 impl EpochTransitionV2 {
@@ -1453,12 +1506,14 @@ impl EpochTransitionV2 {
         new_epoch: Epoch,
         new_pots: Pots,
         era_transition: Option<EraTransition>,
+        active_stake: Option<u64>,
         genesis: Option<Arc<Genesis>>,
     ) -> Self {
         Self {
             new_epoch,
             new_pots,
             era_transition,
+            active_stake,
             genesis,
             prev_number: 0,
             prev_initial_pots: None,
@@ -1468,6 +1523,8 @@ impl EpochTransitionV2 {
             prev_ewrap_progress: None,
             prev_estart_progress: None,
             prev_rupd_progress: None,
+            prev_active_stake: None,
+            prev_estart_tally: None,
         }
     }
 }
@@ -1503,6 +1560,8 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
         self.prev_ewrap_progress = entity.ewrap_progress.clone();
         self.prev_estart_progress = entity.estart_progress.clone();
         self.prev_rupd_progress = entity.rupd_progress.clone();
+        self.prev_active_stake = entity.active_stake;
+        self.prev_estart_tally = entity.estart_tally.clone();
 
         entity.number = self.new_epoch;
         entity.initial_pots = self.new_pots.clone();
@@ -1529,6 +1588,8 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
         entity.ewrap_progress = None;
         entity.estart_progress = None;
         entity.rupd_progress = None;
+        entity.active_stake = self.active_stake;
+        entity.estart_tally = None;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -1545,6 +1606,8 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
         entity.ewrap_progress = self.prev_ewrap_progress.clone();
         entity.estart_progress = self.prev_estart_progress.clone();
         entity.rupd_progress = self.prev_rupd_progress.clone();
+        entity.active_stake = self.prev_active_stake;
+        entity.estart_tally = self.prev_estart_tally.clone();
     }
 }
 
@@ -1646,7 +1709,7 @@ mod tests {
 
         let mut wrap = EpochWrapUpV3::new(EndStats::default());
         wrap.apply(&mut entity);
-        let mut transition = EpochTransitionV2::new(1, Pots::default(), None, None);
+        let mut transition = EpochTransitionV2::new(1, Pots::default(), None, None, None);
         transition.apply(&mut entity);
 
         let rolling = &entity.as_ref().unwrap().rolling;
@@ -1721,6 +1784,8 @@ mod prop_tests {
                 ewrap_progress: None,
                 estart_progress: None,
                 rupd_progress: None,
+                active_stake: None,
+                estart_tally: None,
             }
         }
     }
@@ -1835,8 +1900,9 @@ mod prop_tests {
         fn any_estart_accumulate()(
             completed_shard_index in 0u32..16u32,
             total_shards in 1u32..=16u32,
+            tally in testing::any_estart_tally(),
         ) -> EStartProgress {
-            EStartProgress::new(completed_shard_index, total_shards)
+            EStartProgress::new(completed_shard_index, total_shards, tally)
         }
     }
 
@@ -1902,11 +1968,12 @@ mod prop_tests {
     prop_compose! {
         fn any_epoch_transition_v2()(
             new_epoch in root::any_epoch(),
+            active_stake in prop::option::of(root::any_lovelace()),
         ) -> EpochTransitionV2 {
             // new_pots is filled in by the test harness from the entity's initial_pots
             // so that `new_pots.max_supply() == entity.initial_pots.max_supply()` holds
             // (which `apply`'s debug_assert requires).
-            EpochTransitionV2::new(new_epoch, crate::pots::Pots::default(), None, None)
+            EpochTransitionV2::new(new_epoch, crate::pots::Pots::default(), None, active_stake, None)
         }
     }
 
@@ -2052,5 +2119,73 @@ mod prop_tests {
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
+    }
+
+    fn tally(stake: u64, delegators: u64, live_pledge: u64) -> PoolTally {
+        PoolTally {
+            stake,
+            delegators,
+            live_pledge,
+        }
+    }
+
+    /// Each shard's tally lands in the carried one exactly once: a shard
+    /// applied again after it committed, or out of order, adds nothing.
+    #[test]
+    fn estart_progress_carries_each_shard_tally_once() {
+        use dolos_core::EntityDelta as _;
+
+        let first = PoolHash::from([1; 28]);
+        let second = PoolHash::from([2; 28]);
+
+        let shard = |index, tally| EStartProgress::new(index, 3, tally);
+
+        let mut entity = Some(EpochState::default());
+
+        shard(0, BTreeMap::from([(first, tally(10, 1, 10))])).apply(&mut entity);
+        shard(
+            1,
+            BTreeMap::from([(first, tally(5, 2, 0)), (second, tally(7, 1, 0))]),
+        )
+        .apply(&mut entity);
+
+        let carried = BTreeMap::from([(first, tally(15, 3, 10)), (second, tally(7, 1, 0))]);
+        assert_eq!(entity.as_ref().unwrap().estart_tally, Some(carried.clone()));
+
+        // shard 1 again, as a resumed boundary would if it replayed it
+        let mut replayed = shard(1, BTreeMap::from([(first, tally(5, 2, 0))]));
+        replayed.apply(&mut entity);
+        assert!(!replayed.applied);
+
+        // shard 3 cannot land before shard 2
+        shard(3, BTreeMap::from([(first, tally(1, 1, 1))])).apply(&mut entity);
+
+        let epoch = entity.unwrap();
+        assert_eq!(epoch.estart_tally, Some(carried));
+        assert_eq!(epoch.estart_progress.map(|x| x.committed), Some(2));
+    }
+
+    /// `EpochTransition` sets the new epoch's active stake and drops the
+    /// boundary's carried tally.
+    #[test]
+    fn epoch_transition_sets_active_stake_and_clears_the_carry() {
+        use dolos_core::EntityDelta as _;
+
+        let mut epoch = EpochState {
+            estart_tally: Some(BTreeMap::from([(PoolHash::from([1; 28]), tally(1, 1, 1))])),
+            active_stake: Some(3),
+            ..Default::default()
+        };
+        epoch.rolling.reset(Some(RollingStats::default()));
+        epoch.pparams.reset(Some(PParamsSet::default()));
+
+        let mut entity = Some(epoch);
+        let new_pots = entity.as_ref().unwrap().initial_pots.clone();
+
+        EpochTransitionV2::new(1, new_pots, None, Some(42), None).apply(&mut entity);
+
+        let epoch = entity.unwrap();
+        assert_eq!(epoch.active_stake, Some(42));
+        assert_eq!(epoch.estart_tally, None);
     }
 }

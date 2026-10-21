@@ -28,8 +28,8 @@ use dolos_cardano::{
         EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet, GovDistr,
         GovRoots, GovState, MetadataLabelState, Nonces, PParamValue, PParamsSet, PendingMirState,
         PendingRewardState, PolicyMintChunk, PoolDelegation, PoolEpochLog, PoolParams,
-        PoolSnapshot, PoolState, ProposalAction, ProposalState, RollingStats, ScriptState,
-        ShardProgress, Stake, VoteEntry,
+        PoolSnapshot, PoolState, PoolTally, ProposalAction, ProposalState, RollingStats,
+        ScriptState, ShardProgress, Stake, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
@@ -505,6 +505,19 @@ pub fn epoch_state() -> EpochState {
             committed: 7,
             total: 8,
         }),
+        active_stake: Some(21_000_000_000_000_000),
+        estart_tally: Some(BTreeMap::from([
+            (hash28(0xc5), pool_tally(1)),
+            (hash28(0xc6), pool_tally(2)),
+        ])),
+    }
+}
+
+fn pool_tally(seed: u8) -> PoolTally {
+    PoolTally {
+        stake: 1_000_000_000_000 + seed as u64,
+        delegators: 300 + seed as u64,
+        live_pledge: 50_000_000_000 + seed as u64,
     }
 }
 
@@ -581,6 +594,24 @@ pub fn gov_state() -> GovState {
                     unregistered_at: Some((55_444_333, 7)),
                 },
             )]),
+        }),
+        dissolved_committee: Some(dolos_cardano::DissolvedCommittee {
+            committee: Committee {
+                members: BTreeMap::from([(StakeCredential::AddrKeyhash(hash28(0xdd)), 420u64)]),
+                threshold: rational(1, 2),
+            },
+            auths: BTreeMap::from([(
+                StakeCredential::AddrKeyhash(hash28(0xdd)),
+                vec![(
+                    50_000u64,
+                    CommitteeAuthorization::HotCredential(StakeCredential::ScriptHash(hash28(
+                        0xde,
+                    ))),
+                )],
+            )]),
+            action: gov_action_id(0xdf, 4),
+            epoch: 505,
+            seated_by: Some(gov_action_id(0xe0, 5)),
         }),
     }
 }
@@ -659,6 +690,9 @@ fn pool_snapshot(seed: u8) -> PoolSnapshot {
         blocks_minted: 128 + seed as u32,
         params: pool_params(seed),
         is_new: seed.is_multiple_of(3),
+        stake: Some(2_000_000_000_000 + seed as u64),
+        delegators: Some(400 + seed as u64),
+        live_pledge: Some(60_000_000_000 + seed as u64),
     }
 }
 

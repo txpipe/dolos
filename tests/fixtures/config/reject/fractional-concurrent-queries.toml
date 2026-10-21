@@ -1,0 +1,8 @@
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "preview"
+
+[serve]
+max_concurrent_queries = 64.4

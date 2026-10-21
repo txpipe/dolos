@@ -65,16 +65,6 @@ backoff_factor = 2
 max_backoff_sec = 60
 dismissible = false
 
-[mithril]
-aggregator = "https://aggregator.release-preprod.api.mithril.network/aggregator"
-genesis_key = "5b3...45d" # redacted
-
-[snapshot]
-download_url = "https://example.com/snapshot.tar.zst"
-
-[stelae.registry]
-user = "dolos"
-
 ```
 
 Each section of the toml controls a different aspect of Dolos' processes. The rest of this document describes in detail each of these sections.
@@ -122,10 +112,8 @@ It defaults here because this volume is already sized for the data; a mainnet
 transfer stages gigabytes. Publisher scratch and Mithril download directories
 are owned by the Stelae publisher application.
 
-It also holds `offchain/`: the DRep metadata MiniBF fetched and verified
-against its on-chain hash, kept so a restart does not fetch it again. It stays
-within `serve.minibf.max_offchain_cache_mb`, dropping the oldest bodies first,
-and deleting it costs nothing but the next fetch.
+An `offchain/` directory left here by an earlier version is removed when
+MiniBF starts: the DRep metadata it held now lives in the cache.
 
 ### `storage.wal` section
 
@@ -200,6 +188,24 @@ another format as `v4` is unsupported and is not detected.
 - `path`: optional override for the mempool path (defaults to `<storage.path>/mempool`).
 - `cache`: size (MB) of the mempool cache (Redb only).
 
+### `storage.cache` section
+
+| property            | type    | example    |
+| ------------------- | ------- | ---------- |
+| enabled             | boolean | true       |
+| path                | string  | "cache"    |
+| memory_budget_bytes | integer | 536870912  |
+| disk_budget_bytes   | integer | 4294967296 |
+| admission           | table   |            |
+
+- `enabled`: whether the cache is on (defaults to `true`). Off, every lookup misses and nothing is stored.
+- `path`: optional override for the directory of the cache's disk tier (defaults to `<storage.path>/cache`).
+- `memory_budget_bytes`: bytes the memory tier may hold (defaults to 512 MiB), apart from the state and archive caches.
+- `disk_budget_bytes`: bytes the disk tier may hold (defaults to 4 GiB).
+- `admission`: a table from namespace name to the least build cost an entry needs to be kept, in place of that namespace's default.
+
+The cache keeps answers derived from the other stores. It is not part of the WAL, the state or the archive, and no setting here changes an answer, only what is kept and for how long. Unknown cache settings fail configuration loading. See [Cache](../operations/cache) for what it holds, its budgets and admission, and the `dolos cache` commands.
+
 ## `genesis` section
 
 Dolos requires Cardano genesis data to operate. For simplicity sake, we've decided to follow the schema for the existing .json files used by the Haskell node. The `genesis` section indicates how to locate the different json files with genesis data for each required era. The content of the json files should match the ones used in the Haskell node.
@@ -216,7 +222,7 @@ Dolos requires Cardano genesis data to operate. For simplicity sake, we've decid
 - `shelley_path`: file path to the Shelley json genesis file
 - `alonzo_path`: file path to the Alonzo json genesis file
 - `conway_path`: file path to the Conway json genesis file
-- `force_protocol`: (optional) the protocol version to force the node to start from. This is useful for networks such as `preview` which skips the Byron era.
+- `force_protocol`: (optional) the protocol version to force the node to start from. When unset, a Shelley genesis whose `protocolVersion.major` is above 2 starts the chain at that version (this is how `preview`, which skips the Byron era, starts at 6); otherwise the chain starts on Byron. An explicit value always wins.
 
 ## `chain` section
 
@@ -313,14 +319,12 @@ The `serve.minibf` section controls the options for the HTTP endpoint that hosts
 | token_registry_url    | string  | "https://token-registry.io" |
 | url                   | string  | "https://minibf.local"      |
 | max_scan_items        | integer | 3000                        |
-| max_offchain_cache_mb | integer | 256 (default)               |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin (defaults to `true`).
 - `token_registry_url`: optional token registry base URL used for off-chain asset metadata.
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
-- `max_offchain_cache_mb`: disk the verified DRep metadata cache may use under `<storage.path>/offchain`, in MB (defaults to 256). `0` keeps the cache in memory only: nothing is written, and bodies an earlier run left there are removed.
 
 ## `serve.minikupo` section
 
@@ -388,68 +392,26 @@ The `retries` section controls backoff behavior for transient failures.
 - `max_backoff_sec`: maximum backoff delay in seconds.
 - `dismissible`: allow skipping further retries for specific errors.
 
-## `mithril` section
+## Bootstrap inputs
 
-The `mithril` section controls the configuration for Mithril bootstrap.
+Bootstrap sources and credentials are not configuration. `dolos.toml`
+describes the node; where a bootstrap reads from is an input of the command
+that reads it, defaulted per known network. A file that still carries a
+`[mithril]`, `[snapshot]` or `[stelae]` section is refused with the argument
+each one moved to:
 
-| property      | type   | example |
-| ------------- | ------ | ------- |
-| aggregator    | string | "https://aggregator.release-preprod.api.mithril.network/aggregator" |
-| genesis_key   | string | "5b3...45d" |
-| ancillary_key | string | "..." |
+| section | moved to |
+| ------- | -------- |
+| `mithril` | `dolos bootstrap mithril --aggregator --genesis-vkey` (`DOLOS_MITHRIL_AGGREGATOR`, `DOLOS_MITHRIL_GENESIS_VKEY`) |
+| `snapshot.download_url` | `dolos bootstrap snapshot --download-url` |
+| `snapshot.state_epochs` | `dolos snapshot digest` / `verify --reproduce` `--state-epochs` or `--state-epochs-file` |
+| `stelae.registry` | `--registry-user` (`DOLOS_STELAE_USER`) and `DOLOS_STELAE_PASSWORD` / `DOLOS_STELAE_TOKEN` or `--registry-credentials-file` on `dolos bootstrap stelae`, `dolos snapshot inspect` and `dolos snapshot verify` |
 
-- `aggregator`: Mithril aggregator URL.
-- `genesis_key`: Mithril genesis verification key.
-- `ancillary_key`: optional ancillary verification key.
-
-## `snapshot` section
-
-The `snapshot` section controls bootstrap from a snapshot archive.
-
-| property     | type   | example |
-| ------------ | ------ | ------- |
-| download_url | string | "https://example.com/snapshot.tar.zst" |
-
-- `download_url`: URL of the snapshot archive to download.
-
-## `stelae` section
-
-The `stelae` section controls how this node reaches a **stele registry** — the
-OCI repositories `dolos bootstrap stelae --source oci://…`, `dolos snapshot
-inspect` and `dolos snapshot verify` read. Publisher configuration belongs to
-the Stelae publisher application; see [publisher command
-migration](../../publisher-migration.md).
-
-### `stelae.registry` section
-
-| property | type   | example |
-| -------- | ------ | ------- |
-| user     | string | "dolos" |
-| password | string | "a-private-registry-credential" |
-| token    | string | "ghp_…" |
-
-- `user`: the identity the registry is read as, sent as HTTP Basic.
-- `password`: optional. Omitted, Dolos uses the official registry's published
-  read-only password, which is compiled into the binary.
-- `token`: a bearer token, for a registry that issues them rather than accepting
-  a pair. Mutually exclusive with `user`.
-
-A registry may charge nothing for reads and still refuse an unidentified one. The
-credential the official registry hands out is not a secret — it is what makes
-free, identity-less access possible without leaving the registry unrestricted —
-but it is not written into your config either: `dolos init` seeds the `user` and
-leaves the password to the binary, so a rotation reaches every node that takes a
-release instead of having to be found again in every generated file. Set
-`password` to point at a registry of your own. Omit the section entirely to
-connect anonymously, which is what a genuinely public repository wants.
-
-Setting `token` and `user` at the same time is an error rather than a precedence
-puzzle — Dolos refuses to open the registry and names both — and so is setting
-`password` with no `user`.
-
-Publisher write credentials are real secrets and never belong in this file.
-Configure them through the Stelae publisher's documented secret interface.
-Dolos uses this section only for registry reads.
+The official stele repository of a known network is read as its published
+read-only user with no input at all; its password is compiled into the binary.
+Any other registry is read anonymously unless the invocation names a user or a
+token. A secret is never a command-line argument: it comes from the
+environment, or from a TOML credentials file naming `password` or `token`.
 
 ## `logging` section
 

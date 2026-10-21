@@ -25,9 +25,12 @@ pallas.workspace = true
 hex.workspace = true
 regex.workspace = true
 serde_with = "3.16.0"
+config = { version = "0.15.19", default-features = false, features = ["toml"] }
 smallvec = { version = "1.15.0", features = ["const_generics", "union"] }
+bytes = "1.11"
 
 [dev-dependencies]
+futures-executor = "0.3.31"
 proptest = "1.7.0"
 serde_json.workspace = true
 dolos-testing = { path = "../testing" }

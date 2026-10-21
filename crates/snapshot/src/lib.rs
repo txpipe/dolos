@@ -726,24 +726,24 @@ pub enum Error {
         source: Box<Error>,
     },
 
-    /// A `snapshot.state_epochs` list this profile will not publish under.
+    /// A `--state-epochs` list this profile will not publish under.
     ///
     /// Refused where the list is read rather than where a dump is cut, because
     /// the list is signed input: it reaches `parameters` before any layer is
     /// written, and a publisher that discovered the problem at the sixteenth
     /// shard would already have attested it.
-    #[error("snapshot.state_epochs is not a list of retained epochs: {0}")]
+    #[error("the state epochs are not a list of retained epochs: {0}")]
     RetainedEpochs(String),
 
-    /// `[stelae.registry]` naming two identities at once.
+    /// Registry credentials naming two identities at once.
     ///
     /// Not a precedence rule, because on a registry whose credentials carry
     /// different capabilities, guessing is the difference between a publish and
     /// a 403 nobody can explain.
     #[error(
-        "[stelae.registry] sets both `token` and `user`; a registry client authenticates as one \
-         identity and which one was meant is not something to guess at — drop the one you did not \
-         mean, or unset DOLOS_STELAE_REGISTRY_TOKEN / DOLOS_STELAE_REGISTRY_USER"
+        "the registry credentials name both a token and a user; a registry client authenticates \
+         as one identity and which one was meant is not something to guess at — drop the one you \
+         did not mean"
     )]
     AmbiguousRegistryIdentity,
 
@@ -751,7 +751,8 @@ pub enum Error {
     /// answer and the wrong one: the operator supplied a secret and it would go
     /// unused.
     #[error(
-        "[stelae.registry] sets `password` with no `user`; basic registry credentials are a pair"
+        "the registry credentials name a password with no user; basic registry credentials are \
+         a pair, so name the user too"
     )]
     OrphanRegistryPassword,
 }

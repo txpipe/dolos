@@ -1,0 +1,8 @@
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "custom"
+
+[upstream]
+peer_address = "127.0.0.1:3001"

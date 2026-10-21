@@ -243,7 +243,7 @@ pub struct Plan {
     /// is a later plan's, and nothing here forecloses it: `restore_state`
     /// takes a kind and a descriptor, and a dump's are the tip's.
     pub state_dumps: BTreeMap<u64, BTreeMap<Namespace, Vec<LayerDescriptor>>>,
-    /// Epochs the stele carries and `sync.max_history` excludes.
+    /// Epochs the stele carries and the history window excludes.
     pub skipped_epochs: usize,
     /// Layers of a kind this build does not implement, which it skips rather
     /// than refuses — see [`unknown_layers`].
@@ -303,7 +303,7 @@ impl Plan {
     /// byte-sorted.
     ///
     /// Derived here rather than in a report, because it is what an operator
-    /// acts on: an epoch dropped by `sync.max_history` is this node's own
+    /// acts on: an epoch dropped by the history window is this node's own
     /// configuration, and a layer dropped for a kind this build does not
     /// implement is a stele from a publisher ahead of it. Empty for every stele
     /// this profile publishes today.
@@ -388,7 +388,7 @@ impl Plan {
     ///
     /// Not [`Inscription::uncompressed_size`], which sums the whole document:
     /// what a restore needs room for is what it is going to read, and an epoch
-    /// dropped by `sync.max_history` is never fetched.
+    /// dropped by the history window is never fetched.
     pub fn uncompressed_size(&self) -> u64 {
         self.layers().map(|l| l.uncompressed_size).sum()
     }
@@ -499,9 +499,10 @@ pub struct Staging<'a> {
 ///
 /// `network_magic` is the node's own, from its genesis; a stele that disagrees
 /// is refused here, which is the whole reason this function exists separately
-/// from [`restore`]. `max_history` is `sync.max_history` in slots: epochs whose
-/// layers fall entirely below `cursor - max_history` are dropped, which is what
-/// ADR-004 replaced the old `full`/`ledger` snapshot variants with.
+/// from [`restore`]. `max_history` is the rolling `history.window` in slots:
+/// epochs whose layers fall entirely below `cursor - max_history` are dropped,
+/// which is what ADR-004 replaced the old `full`/`ledger` snapshot variants
+/// with.
 pub fn plan<R: SteleReader>(
     stele: &R,
     network_magic: u64,
@@ -782,7 +783,7 @@ struct StateLayers {
     dumps: BTreeMap<u64, BTreeMap<Namespace, Vec<LayerDescriptor>>>,
 }
 
-/// Drop the epochs `sync.max_history` puts out of reach.
+/// Drop the epochs the history window puts out of reach.
 ///
 /// `max_history` is a slot window measured back from the tip — the same unit
 /// the node prunes its archive by — so an epoch survives if any of its slots
@@ -910,7 +911,8 @@ pub struct Restoring<'a> {
     /// The node's own network magic, from genesis and never from a file an
     /// operator can edit.
     pub network_magic: u64,
-    /// `sync.max_history` in slots, bounding how much chain history is read.
+    /// The rolling `history.window` in slots, bounding how much chain history
+    /// is read.
     pub max_history: Option<u64>,
     /// `storage.path` — where the stores live, and with them the progress file.
     pub storage_path: &'a Path,

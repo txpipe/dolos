@@ -6,12 +6,14 @@ use std::sync::Arc;
 use dolos_cardano::CardanoLogic;
 use dolos_core::{
     archive::ArchiveStore as _,
-    config::{StorageConfig, SyncConfig},
+    config::{Compatibility, HistoryConfig, MempoolConfig, StorageConfig},
     *,
 };
 use pallas::ledger::traverse::MultiEraBlock;
 
-pub use storage::{ArchiveStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend};
+pub use storage::{
+    ArchiveStoreBackend, CacheBackend, MempoolBackend, StateStoreBackend, WalStoreBackend,
+};
 
 /// Type alias for the WAL store specialized for Cardano.
 pub type WalAdapter = WalStoreBackend<dolos_cardano::CardanoDelta>;
@@ -34,14 +36,18 @@ impl dolos_core::TipSubscription for TipSubscription {
 
 #[derive(Clone)]
 pub struct DomainAdapter {
+    /// The configuration contract the node runs under.
+    pub compatibility: Compatibility,
     pub storage_config: Arc<StorageConfig>,
-    pub sync_config: Arc<SyncConfig>,
+    pub history_config: HistoryConfig,
+    pub mempool_config: MempoolConfig,
     pub genesis: Arc<Genesis>,
     pub wal: WalAdapter,
     pub chain: Arc<std::sync::RwLock<CardanoLogic>>,
     pub state: StateStoreBackend,
     pub archive: ArchiveStoreBackend,
     pub mempool: MempoolBackend,
+    pub cache: CacheBackend,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
     pub query_limiter: QueryLimiter,
 }
@@ -60,6 +66,11 @@ impl DomainAdapter {
         self.state.shutdown().map_err(DomainError::StateError)?;
         self.archive.shutdown().map_err(DomainError::ArchiveError)?;
 
+        // disposable: a failed flush only loses the entries since the last one
+        if let Err(error) = self.cache.flush() {
+            tracing::warn!(%error, "domain adapter: cache flush failed");
+        }
+
         tracing::info!("domain adapter: graceful shutdown complete");
         Ok(())
     }
@@ -74,6 +85,7 @@ impl Domain for DomainAdapter {
     type State = StateStoreBackend;
     type Archive = ArchiveStoreBackend;
     type Mempool = MempoolBackend;
+    type Cache = CacheBackend;
     type TipSubscription = TipSubscription;
 
     fn genesis(&self) -> Arc<Genesis> {
@@ -108,12 +120,20 @@ impl Domain for DomainAdapter {
         &self.mempool
     }
 
+    fn cache(&self) -> &Self::Cache {
+        &self.cache
+    }
+
     fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
     }
 
-    fn sync_config(&self) -> &SyncConfig {
-        &self.sync_config
+    fn history_config(&self) -> &HistoryConfig {
+        &self.history_config
+    }
+
+    fn mempool_config(&self) -> &MempoolConfig {
+        &self.mempool_config
     }
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {
