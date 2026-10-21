@@ -634,8 +634,12 @@ impl Domain for FaultyToyDomain {
         self.inner.storage_config()
     }
 
-    fn sync_config(&self) -> &dolos_core::config::SyncConfig {
-        self.inner.sync_config()
+    fn history_config(&self) -> &dolos_core::config::HistoryConfig {
+        self.inner.history_config()
+    }
+
+    fn mempool_config(&self) -> &dolos_core::config::MempoolConfig {
+        self.inner.mempool_config()
     }
 
     fn genesis(&self) -> Arc<dolos_core::Genesis> {

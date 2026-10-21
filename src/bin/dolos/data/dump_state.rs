@@ -516,7 +516,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     setup_tracing_for_format(config, args.format)?;
 
     let state = crate::common::open_state_store(config)?;
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = crate::common::open_genesis(config)?;
     let network = network_from_genesis(&genesis);
 
     match args.namespace.as_str() {
@@ -550,5 +550,5 @@ fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette
         return Ok(());
     }
 
-    crate::common::setup_tracing(&config.logging, &config.telemetry)
+    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())
 }

@@ -131,7 +131,7 @@ enum Resolved<'a> {
 }
 
 fn resolve<'a>(config: &RootConfig, command: &'a Command) -> miette::Result<Resolved<'a>> {
-    let network = dolos_cardano::networks::KnownNetwork::by_magic(config.chain.magic());
+    let network = dolos_cardano::networks::KnownNetwork::by_name(&config.chain.network);
 
     let resolved = match command {
         Command::Relay(args) => Resolved::Relay(args),
@@ -183,7 +183,7 @@ fn seed_wal(config: &RootConfig) -> miette::Result<()> {
 
 fn setup_tracing(config: &RootConfig, verbose: bool) -> miette::Result<()> {
     if verbose {
-        crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+        crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
     } else {
         crate::common::setup_tracing_error_only()?;
     }

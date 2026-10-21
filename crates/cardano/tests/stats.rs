@@ -17,11 +17,8 @@ use dolos_cardano::{
     UnitSums,
 };
 use dolos_core::{
-    config::{CardanoConfig, CustomUtxo},
-    import::ImportExt as _,
-    sync::SyncExt as _,
-    ArchiveStore as _, ChainError, ChainPoint, Domain as _, EraCbor, Genesis, RawBlock,
-    StateStore as _, TxoRef, WalStore as _,
+    config::CustomUtxo, import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ChainError,
+    ChainPoint, Domain as _, EraCbor, Genesis, RawBlock, StateStore as _, TxoRef, WalStore as _,
 };
 use dolos_testing::{blocks::make_conway_block_with_txs_at, toy_domain::ToyDomain};
 use pallas::{
@@ -344,8 +341,8 @@ fn raw_blocks() -> Vec<(ChainPoint, RawBlock)> {
     out
 }
 
-fn config() -> CardanoConfig {
-    let mut config = CardanoConfig::default();
+fn config() -> dolos_cardano::CardanoLogicConfig {
+    let mut config = dolos_cardano::CardanoLogicConfig::default();
 
     for (i, (address, value)) in seeds().into_iter().enumerate() {
         let cbor = pallas::codec::minicbor::to_vec(output(address, value)).unwrap();

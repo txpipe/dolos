@@ -1,18 +1,25 @@
-[upstream]
-block_production_interval = 10
+compatibility = "v2-alpha.1"
 
-[storage]
-version = "v4"
-path = "data"
+[chain]
+protocol = "cardano"
+network = "custom"
 
-[genesis]
+[chain.cardano]
+magic = 2
+is_testnet = true
+
+[chain.cardano.genesis]
 byron_path = "byron.json"
 shelley_path = "shelley.json"
 alonzo_path = "alonzo.json"
 conway_path = "conway.json"
-force_protocol = 6
 
-[sync]
+[upstream]
+type = "emulator"
+block_production_interval = 10
+
+[storage]
+path = "data"
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
@@ -28,8 +35,3 @@ listen_address = "[::]:6592"
 
 [serve.minikupo]
 listen_address = "[::]:6593"
-
-[chain]
-type = "cardano"
-magic = 2
-is_testnet = true

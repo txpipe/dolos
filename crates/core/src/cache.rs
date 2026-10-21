@@ -376,7 +376,7 @@ impl<D: CacheDiskTier> TieredCache<D> {
     /// Fills run under `limiter`, the domain's query limiter.
     pub fn new(config: &CacheConfig, disk: D, limiter: QueryLimiter) -> Self {
         let memory_budget = if config.enabled {
-            config.memory_budget_bytes
+            config.memory_bytes()
         } else {
             0
         };

@@ -15,8 +15,9 @@ use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
 
-use dolos::core::{Genesis, RawBlock};
+use dolos::core::RawBlock;
 use dolos::engine::{BulkReplaySession, ReplayProgress};
+use dolos_cardano::networks::ResolvedNetwork;
 
 type AnyError = Box<dyn Error + Send + Sync + 'static>;
 
@@ -29,18 +30,8 @@ fn main() -> Result<(), AnyError> {
         .map(|value| value.to_string_lossy().parse::<u64>())
         .transpose()?;
 
-    let config: dolos::core::config::RootConfig = config::Config::builder()
-        .add_source(config::File::from(Path::new(&config_path)))
-        .build()?
-        .try_deserialize()?;
-
-    let genesis = Arc::new(Genesis::from_file_paths(
-        &config.genesis.byron_path,
-        &config.genesis.shelley_path,
-        &config.genesis.alonzo_path,
-        &config.genesis.conway_path,
-        config.genesis.force_protocol,
-    )?);
+    let config = dolos::core::config::load(Some(Path::new(&config_path)))?;
+    let genesis = Arc::new(ResolvedNetwork::resolve(&config.chain)?.genesis()?);
 
     let session = BulkReplaySession::open(&config, genesis, stop_epoch)?;
 

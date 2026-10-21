@@ -1989,7 +1989,7 @@ fn epoch_diff_ids(inscription: &Inscription) -> Vec<Digest> {
 // --------------------------------------------------------------------------
 
 /// A stele always carries the whole tip, whatever history travels with it, so
-/// `sync.max_history` never touches the state layers — only the epoch layers.
+/// The history window never touches the state layers — only the epoch layers.
 #[test]
 fn max_history_selects_epochs_and_never_the_tip() {
     let domain: ToyDomain = harness();
