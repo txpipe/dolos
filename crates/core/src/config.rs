@@ -495,7 +495,8 @@ pub struct ArchiveStoreConfig {
     pub kind: StoreType,
     /// Relative to `storage.path`; default `archive`.
     pub path: Option<PathBuf>,
-    /// Where block segment files go; default the archive directory.
+    /// Where block segment files go, relative to `storage.path`; default the
+    /// archive directory.
     pub blocks_path: Option<PathBuf>,
 }
 
@@ -646,6 +647,19 @@ impl StorageConfig {
     pub fn archive_path(&self) -> Option<PathBuf> {
         match self.archive.kind {
             StoreType::Fjall { .. } => Some(self.resolve(self.archive.path.as_ref(), "archive")),
+            StoreType::Ephemeral => None,
+        }
+    }
+
+    /// The block segments' directory when it is not the archive's; `None` for
+    /// an ephemeral archive.
+    pub fn blocks_path(&self) -> Option<PathBuf> {
+        match self.archive.kind {
+            StoreType::Fjall { .. } => self
+                .archive
+                .blocks_path
+                .as_ref()
+                .map(|path| self.path.join(path)),
             StoreType::Ephemeral => None,
         }
     }
@@ -1293,6 +1307,25 @@ impl RootConfig {
                     names.join(", ")
                 ),
             ));
+        }
+
+        if state.kind == StoreType::Ephemeral {
+            if archive.kind != StoreType::Ephemeral && self.keeps_archive() {
+                return Err(ConfigError::invalid(
+                    ["storage.state.type", "storage.archive.type"],
+                    "an ephemeral state needs an ephemeral archive, and the archive's `type` \
+                     defaults to `fjall`: the state restarts empty, and replaying the archive \
+                     that survives the restart cannot rebuild it; set `storage.archive.type = \
+                     \"ephemeral\"`, or keep the state on `fjall`",
+                ));
+            }
+
+            if self.sync.wal_path.is_some() {
+                return Err(ConfigError::invalid(
+                    ["storage.state.type", "sync.wal_path"],
+                    "with an ephemeral state the WAL is kept in memory; remove `sync.wal_path`",
+                ));
+            }
         }
 
         Ok(())
@@ -2232,8 +2265,83 @@ mod tests {
         };
         assert!(invalid(&config).contains("remove `storage.archive.blocks_path`"));
 
+        config.storage.state = StateStoreConfig::default();
         config.storage.archive.kind = StoreType::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn an_ephemeral_state_needs_an_ephemeral_archive() {
+        let mut config = preview();
+        config.storage.state = StateStoreConfig::ephemeral();
+        assert!(invalid(&config).contains("an ephemeral state needs an ephemeral archive"));
+
+        config.history = HistoryConfig::none();
+        assert!(config.validate().is_ok(), "no archive is kept");
+
+        config.history = HistoryConfig::default();
+        config.storage.archive = ArchiveStoreConfig::ephemeral();
+        assert!(config.validate().is_ok());
+
+        config.storage.state = StateStoreConfig::default();
+        assert!(
+            config.validate().is_ok(),
+            "fjall state over an ephemeral archive"
+        );
+    }
+
+    #[test]
+    fn an_ephemeral_state_takes_no_wal_path() {
+        let mut config = preview();
+        config.storage.state = StateStoreConfig::ephemeral();
+        config.storage.archive = ArchiveStoreConfig::ephemeral();
+        config.sync.wal_path = Some("wal".into());
+        assert!(invalid(&config).contains("remove `sync.wal_path`"));
+
+        config.storage.state = StateStoreConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn mempool_persistence_is_independent_of_the_stores() {
+        let mut config = preview();
+        config.mempool.persistent = true;
+
+        for (state, archive) in [
+            (StateStoreConfig::default(), ArchiveStoreConfig::default()),
+            (StateStoreConfig::default(), ArchiveStoreConfig::ephemeral()),
+            (
+                StateStoreConfig::ephemeral(),
+                ArchiveStoreConfig::ephemeral(),
+            ),
+        ] {
+            config.storage.state = state;
+            config.storage.archive = archive;
+            assert!(config.validate().is_ok());
+            assert_eq!(config.mempool_path(), Some(PathBuf::from("data/mempool")));
+        }
+    }
+
+    #[test]
+    fn blocks_path_resolves_against_the_storage_root() {
+        let mut config = preview();
+        config.storage.path = PathBuf::from("/data");
+        assert_eq!(config.storage.blocks_path(), None);
+
+        config.storage.archive.blocks_path = Some("blocks".into());
+        assert_eq!(
+            config.storage.blocks_path(),
+            Some(PathBuf::from("/data/blocks"))
+        );
+
+        config.storage.archive.blocks_path = Some("/hdd/blocks".into());
+        assert_eq!(
+            config.storage.blocks_path(),
+            Some(PathBuf::from("/hdd/blocks"))
+        );
+
+        config.storage.archive.kind = StoreType::Ephemeral;
+        assert_eq!(config.storage.blocks_path(), None);
     }
 
     #[test]
