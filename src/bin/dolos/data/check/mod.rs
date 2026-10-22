@@ -515,6 +515,7 @@ mod tests {
             register_slot: 0,
             retiring_epoch: None,
             deposit: 500_000_000,
+            calidus: None,
         };
 
         let retired_operator = pallas::crypto::hash::Hash::<28>::from([0x78; 28]);

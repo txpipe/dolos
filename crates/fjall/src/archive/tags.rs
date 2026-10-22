@@ -101,41 +101,27 @@ fn decode_block_tag_key_hash(key: &[u8]) -> KeyHash {
 
 /// Insert a tag into the archive-tags keyspace.
 ///
-/// The stored key form comes from [`dolos_core::key_hash`], which is also
-/// where the `metadata` exception lives — this module knows only that a tag key
-/// has a stored form, not how it is derived.
-///
-/// A key with no valid stored form is dropped rather than stored: `key_hash`
-/// declines it precisely because nothing could look it up again.
+/// The stored key form comes from [`dolos_core::key_hash`]; this module knows
+/// only that a tag key has a stored form, not how it is derived.
 fn insert_tag(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, tag: &Tag, slot: BlockSlot) {
-    let Some(hash) = key_hash(tag.dimension, &tag.key) else {
-        return;
-    };
-
-    let key = build_block_tag_key(tag.dimension, hash, slot);
+    let key = build_block_tag_key(tag.dimension, key_hash(&tag.key), slot);
     batch.insert(keyspace, key, []);
 }
 
-/// Remove a tag from the archive-tags keyspace.
-///
-/// The exact inverse of [`insert_tag`], including which keys it declines: a tag
-/// that was never stored has nothing to remove.
+/// Remove a tag from the archive-tags keyspace: the exact inverse of
+/// [`insert_tag`].
 fn remove_tag(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, tag: &Tag, slot: BlockSlot) {
-    let Some(hash) = key_hash(tag.dimension, &tag.key) else {
-        return;
-    };
-
-    let key = build_block_tag_key(tag.dimension, hash, slot);
+    let key = build_block_tag_key(tag.dimension, key_hash(&tag.key), slot);
     batch.remove(keyspace, key);
 }
 
 /// Insert a tag entry from a record that already carries its stored key hash.
 ///
 /// This is the write mirror of [`TagRecordIterator`]: the 8 hash bytes go in
-/// verbatim, so a record read out of one store lands byte-identical in another.
-/// It is deliberately *not* routed through [`insert_tag`] — that function
-/// derives the stored form from a logical key, which a restore does not have
-/// and cannot recover.
+/// unchanged, so a record read out of one store lands byte-identical in
+/// another. It is deliberately *not* routed through [`insert_tag`] — that
+/// function derives the stored form from a logical key, which a restore does
+/// not have and cannot recover.
 ///
 /// `dim_hash` is `hash_dimension(dim_prefix::BLOCK, record.dimension())`,
 /// passed in rather than computed here: records arrive grouped by dimension,
@@ -395,17 +381,11 @@ impl std::iter::FusedIterator for TagRecordIterator {}
 mod tests {
     use super::*;
 
-    /// The stored form of a logical key, for tests that start from one.
-    /// Production code never unwraps this — see [`insert_tag`].
-    fn stored(dimension: &str, key: &[u8]) -> KeyHash {
-        key_hash(dimension, key).expect("test keys are valid for their dimension")
-    }
-
     #[test]
     fn test_block_tag_key_roundtrip() {
         let tag_key = b"some_address_bytes";
         let slot = 141868807u64;
-        let key = build_block_tag_key("address", stored("address", tag_key), slot);
+        let key = build_block_tag_key("address", key_hash(tag_key), slot);
 
         assert_eq!(key.len(), BLOCK_TAG_KEY_SIZE);
 
@@ -415,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_block_tag_ordering() {
-        let tag_key = stored("address", b"test_address");
+        let tag_key = key_hash(b"test_address");
         let key1 = build_block_tag_key("address", tag_key, 100);
         let key2 = build_block_tag_key("address", tag_key, 200);
         let key3 = build_block_tag_key("address", tag_key, 50);
@@ -429,7 +409,7 @@ mod tests {
     fn test_utxo_block_separation() {
         // UTxO and block tags with same dimension name should have different prefixes
         let utxo_dim_hash = hash_dimension(dim_prefix::UTXO, "address");
-        let block_key = build_block_tag_key("address", stored("address", b"addr"), 0);
+        let block_key = build_block_tag_key("address", key_hash(b"addr"), 0);
 
         // dim_hash for utxo vs block should be different
         assert_ne!(&utxo_dim_hash, &block_key[..DIM_HASH_SIZE]);
@@ -438,11 +418,7 @@ mod tests {
     #[test]
     fn test_any_dimension_works() {
         // Any dimension string should work (chain-agnostic)
-        let key = build_block_tag_key(
-            "another_dimension",
-            stored("another_dimension", b"data"),
-            12345,
-        );
+        let key = build_block_tag_key("another_dimension", key_hash(b"data"), 12345);
 
         // Key should be valid size
         assert_eq!(key.len(), BLOCK_TAG_KEY_SIZE);
@@ -453,8 +429,7 @@ mod tests {
     #[test]
     fn test_prehashed_key_matches_written_key() {
         let slot = 42u64;
-        let written =
-            build_block_tag_key("address", stored("address", b"some_address_bytes"), slot);
+        let written = build_block_tag_key("address", key_hash(b"some_address_bytes"), slot);
 
         let record = TagRecord::new("address", decode_block_tag_key_hash(&written), slot);
         let rebuilt = build_block_tag_key(record.dimension(), record.key_hash, record.slot);
@@ -462,43 +437,19 @@ mod tests {
         assert_eq!(written, rebuilt);
     }
 
-    /// `metadata` is the one dimension whose stored key bytes are not a hash:
-    /// the logical key is already a u64 label and the store keeps it verbatim.
-    /// A record must carry those bytes through unchanged rather than
-    /// re-deriving them.
-    ///
-    /// This module no longer decides that — [`dolos_core::key_hash`] does — so
-    /// what is pinned here is that the decision reaches the on-disk key.
+    /// `metadata` keys its tags like every other dimension: the stored bytes
+    /// are the xxh3 of the big-endian label, not the label itself.
     #[test]
-    fn test_prehashed_key_carries_metadata_label_verbatim() {
+    fn test_metadata_label_is_hashed_like_any_key() {
         let label = 674u64;
         let slot = 42u64;
-        let stored_label = stored("metadata", &label.to_be_bytes());
-        let written = build_block_tag_key("metadata", stored_label, slot);
+        let written = build_block_tag_key("metadata", key_hash(&label.to_be_bytes()), slot);
 
-        assert_eq!(u64::from_be_bytes(stored_label), label);
-        assert_ne!(
-            stored_label,
-            xxhash_rust::xxh3::xxh3_64(&label.to_be_bytes()).to_be_bytes(),
-            "the metadata label is stored raw, not hashed"
+        assert_eq!(
+            decode_block_tag_key_hash(&written),
+            xxhash_rust::xxh3::xxh3_64(&label.to_be_bytes()).to_be_bytes()
         );
-
-        let record = TagRecord::new("metadata", decode_block_tag_key_hash(&written), slot);
-        let rebuilt = build_block_tag_key(record.dimension(), record.key_hash, record.slot);
-
-        assert_eq!(written, rebuilt);
-    }
-
-    /// A `metadata` key that is not eight bytes has no stored form: it would
-    /// land under bytes no query could reconstruct. Both write paths drop it
-    /// rather than store it.
-    #[test]
-    fn test_malformed_metadata_key_has_no_stored_form() {
-        assert!(key_hash("metadata", b"seven!!").is_none());
-        assert!(key_hash("metadata", &674u64.to_be_bytes()).is_some());
-
-        // Every other dimension takes a key of any width.
-        assert!(key_hash("address", b"seven!!").is_some());
+        assert_ne!(decode_block_tag_key_hash(&written), label.to_be_bytes());
     }
 }
 

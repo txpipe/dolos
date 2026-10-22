@@ -58,6 +58,32 @@ pub struct PoolState {
 
     #[n(16)]
     pub deposit: u64,
+
+    /// The pool's highest-nonce CIP-151 registration signed by its cold key
+    /// in a valid transaction. `None` before any registration.
+    #[n(17)]
+    #[cbor(default)]
+    pub calidus: Option<CalidusRegistration>,
+}
+
+/// A CIP-151 calidus key registration, with the transaction and slot that
+/// made it. A revocation keeps its nonce, so a later registration with a
+/// lower one is still rejected.
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CalidusRegistration {
+    /// The registered key; `None` for a revocation (an all-zero key).
+    #[n(0)]
+    #[cbor(with = "minicbor::bytes")]
+    pub pub_key: Option<[u8; 32]>,
+
+    #[n(1)]
+    pub nonce: u64,
+
+    #[n(2)]
+    pub tx_hash: Hash<32>,
+
+    #[n(3)]
+    pub slot: BlockSlot,
 }
 
 /// Pool state that is epoch-specific
@@ -257,6 +283,7 @@ pub(crate) mod testing {
             register_slot in root::any_slot(),
             retiring_epoch in prop::option::of(root::any_epoch()),
             deposit in root::any_lovelace(),
+            calidus in prop::option::of(any_calidus_registration()),
         ) -> PoolState {
             PoolState {
                 operator,
@@ -265,7 +292,19 @@ pub(crate) mod testing {
                 register_slot,
                 retiring_epoch,
                 deposit,
+                calidus,
             }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_calidus_registration()(
+            pub_key in prop::option::of(any::<[u8; 32]>()),
+            nonce in any::<u64>(),
+            tx_hash in root::any_hash_32(),
+            slot in root::any_slot(),
+        ) -> CalidusRegistration {
+            CalidusRegistration { pub_key, nonce, tx_hash, slot }
         }
     }
 }
@@ -390,6 +429,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
                 blocks_minted_total: 0,
                 retiring_epoch: None,
                 deposit: self.pool_deposit,
+                calidus: None,
             };
 
             *entity = Some(state);
@@ -598,11 +638,64 @@ impl dolos_core::EntityDelta for PoolTransition {
     }
 }
 
+/// A CIP-151 registration for a pool. It replaces the stored one only when
+/// its nonce is higher. A pool with no row is left without one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolCalidusUpdate {
+    pub(crate) pool: PoolHash,
+    pub(crate) new: CalidusRegistration,
+
+    // undo
+    pub(crate) prev: Option<CalidusRegistration>,
+}
+
+impl PoolCalidusUpdate {
+    pub fn new(pool: PoolHash, new: CalidusRegistration) -> Self {
+        Self {
+            pool,
+            new,
+            prev: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for PoolCalidusUpdate {
+    type Entity = PoolState;
+
+    fn key(&self) -> NsKey {
+        NsKey::of::<PoolState>(&PoolKey(self.pool))
+    }
+
+    fn apply(&mut self, entity: &mut Option<PoolState>) {
+        let Some(entity) = entity else {
+            return;
+        };
+
+        self.prev = entity.calidus.clone();
+
+        if entity
+            .calidus
+            .as_ref()
+            .is_none_or(|stored| self.new.nonce > stored.nonce)
+        {
+            entity.calidus = Some(self.new.clone());
+        }
+    }
+
+    fn undo(&self, entity: &mut Option<PoolState>) {
+        if let Some(entity) = entity {
+            entity.calidus = self.prev.clone();
+        }
+    }
+}
+
 #[cfg(test)]
 mod prop_tests {
     use super::testing::any_pool_state;
     use super::*;
-    use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use crate::model::testing::{
+        self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
+    };
     use crate::pallas_extras::testing::any_multi_era_pool_registration;
     use proptest::prelude::*;
 
@@ -644,6 +737,15 @@ mod prop_tests {
             frozen in prop::option::of(testing::any_pool_tally()),
         ) -> PoolTransition {
             PoolTransition::new(PoolKey(pool), next_epoch, frozen)
+        }
+    }
+
+    prop_compose! {
+        fn any_pool_calidus_update()(
+            pool in root::any_pool_hash(),
+            new in testing::any_calidus_registration(),
+        ) -> PoolCalidusUpdate {
+            PoolCalidusUpdate::new(pool, new)
         }
     }
 
@@ -700,6 +802,26 @@ mod prop_tests {
                 entity.snapshot.epoch().expect("any_pool_state fills a concrete epoch") + 1;
             assert_delta_roundtrip(Some(entity), delta);
         }
+
+        #[test]
+        fn pool_calidus_update_roundtrip(
+            entity in prop::option::of(any_pool_state()),
+            delta in any_pool_calidus_update(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        /// A pool that already holds a registration gives the delta a
+        /// `prev` to carry through the WAL.
+        #[test]
+        fn pool_calidus_update_serde_roundtrip(
+            entity in any_pool_state(),
+            stored in testing::any_calidus_registration(),
+            delta in any_pool_calidus_update(),
+        ) {
+            let entity = PoolState { calidus: Some(stored), ..entity };
+            assert_delta_serde_roundtrip(Some(entity), delta);
+        }
     }
 
     /// A snapshot lagging the block's epoch must panic, not silently corrupt
@@ -738,6 +860,7 @@ mod prop_tests {
             register_slot: 0,
             retiring_epoch: None,
             deposit: 0,
+            calidus: None,
         };
 
         // Block epoch 6 runs ahead of the pool's epoch-5 snapshot.
