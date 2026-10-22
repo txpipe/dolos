@@ -1,13 +1,15 @@
 //! Commit logic for the open half of the epoch boundary (per-shard runs
 //! plus the finalize pass).
 //!
-//! Both code paths use the same streaming pattern: each entity namespace
-//! is read one record at a time, deltas for that record are applied, and
-//! the result is written immediately. Per-shard commits flush
-//! `EpochState`'s `EStartProgress` and the shard's account-range
-//! slice; the finalize commit flushes pool / drep / proposal transitions,
-//! the closing `EpochTransition` and optional era-summary writes, and
-//! advances the cursor.
+//! Both code paths stream: each entity namespace is read one record at a
+//! time and the result is written immediately. Per-shard commits rotate
+//! the shard's account-range slice in that same pass and flush
+//! `EpochState`'s `EStartProgress`; the finalize commit applies the
+//! queued pool / drep / proposal transitions, the closing
+//! `EpochTransition` and optional era-summary writes, and advances the
+//! cursor.
+
+use std::collections::BTreeMap;
 
 use dolos_core::{
     save_entity_at, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain, EntityDelta as _,
@@ -16,8 +18,8 @@ use dolos_core::{
 use tracing::{debug, instrument, trace, warn};
 
 use crate::{
-    forks, AccountKey, AccountState, CardanoEntity, DRepState, EpochState, EraKey, EraState,
-    GovState, PoolState, ProposalState,
+    forks, AccountKey, AccountState, CardanoEntity, DRepState, EStartProgress, EpochState, EraKey,
+    EraState, GovState, PoolState, ProposalState,
 };
 
 /// Close `previous` at `starting_epoch` and open the era that `new_version`
@@ -127,9 +129,14 @@ impl super::WorkContext {
         Ok(())
     }
 
-    /// Commit a single per-shard run: stream-and-apply per-account snapshot
-    /// transitions for the shard's key ranges, then commit the
-    /// `EStartProgress` delta against `EpochState`.
+    /// Commit a single per-shard run in one state transaction: stream the
+    /// accounts of the shard's key ranges once, adding each to the shard's
+    /// tally as it stands, rotating it and writing it back, then apply the
+    /// shard's `EStartProgress` (carrying the tally) to `EpochState`.
+    ///
+    /// No per-account deltas are built: ESTART writes no WAL and is never
+    /// undone. A crash before the commit leaves the shard's rows untouched,
+    /// and the resumed boundary reads them again.
     ///
     /// **Does not advance the cursor.** Cursor moves only in
     /// `commit_finalize`.
@@ -137,21 +144,30 @@ impl super::WorkContext {
     pub fn commit_shard<D: Domain>(
         &mut self,
         state: &D::State,
+        shard_index: u32,
+        total_shards: u32,
         ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<(), ChainError> {
         debug!("committing estart changes");
 
         let writer = state.start_writer()?;
 
-        // Stream accounts in this shard's ranges only (one per
-        // StakeCredential variant). Each call drains the matching deltas
-        // from `self.deltas`, so a delta keyed inside range N stays in
-        // the map until range N is streamed.
+        let next_epoch = self.starting_epoch_no();
+        let mut tally = BTreeMap::new();
+
         for range in ranges {
-            self.stream_and_apply_namespace::<D, AccountState>(state, &writer, Some(range))?;
+            for record in state.iter_entities_typed::<AccountState>(Some(range))? {
+                let (account_id, mut account) = record?;
+
+                self.tally_account(&mut tally, &account);
+                account.rotate(next_epoch);
+
+                writer.write_entity_typed::<AccountState>(&account_id, &account)?;
+            }
         }
 
-        // EpochState gets the EStartProgress delta.
+        self.add_delta(EStartProgress::new(shard_index, total_shards, tally));
+
         self.deltas
             .apply_singleton::<EpochState, _>(state, &writer)?;
 

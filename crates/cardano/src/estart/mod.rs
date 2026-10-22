@@ -1,25 +1,25 @@
 //! Estart work unit — open half of the epoch boundary.
 //!
 //! Single sharded work unit covering the entire open-half pipeline. The
-//! per-shard body iterates accounts in a key-range slice and emits
-//! `AccountTransition` deltas; `finalize()` runs the global Estart pass
-//! (pool / drep / proposal transitions, nonce, `EpochTransition`, era
-//! transitions) and is the only phase that advances the cursor.
+//! per-shard body streams the accounts of a key-range slice once, in its
+//! state transaction: it tallies the stake distribution the boundary
+//! freezes (`stake`), rotates each account and writes it back.
+//! `finalize()` runs the global Estart pass (pool / drep / proposal
+//! transitions, nonce, `EpochTransition`, era transitions) and is the only
+//! phase that advances the cursor.
 //!
-//! `WorkContext` and the `BoundaryVisitor` trait live here and are shared
-//! between the shard body and the finalize pass. Both code paths build
-//! deltas onto the same `WorkDeltas` accumulator. The `nonces` and `reset`
-//! visitors run in finalize; the `reset` visitor's `visit_account` arm is
-//! reused by the shard body, which also tallies the stake distribution the
-//! boundary freezes (`stake`).
+//! `WorkContext` lives here and is shared between the shard body and the
+//! finalize pass; the shard's only delta is its `EStartProgress`. The
+//! `BoundaryVisitor` trait and its `nonces` and `reset` visitors run in
+//! finalize.
 
 use std::sync::Arc;
 
 use dolos_core::{ChainError, Genesis};
 
 use crate::{
-    eras::ChainSummary, roll::WorkDeltas, AccountState, CardanoDelta, DRepState, EpochState,
-    EraKey, PoolState, ProposalState,
+    eras::ChainSummary, roll::WorkDeltas, CardanoDelta, DRepState, EpochState, EraKey, PoolState,
+    ProposalState,
 };
 
 pub mod avvm;
@@ -43,16 +43,6 @@ pub trait BoundaryVisitor {
         ctx: &mut WorkContext,
         id: &PoolId,
         pool: &PoolState,
-    ) -> Result<(), ChainError> {
-        Ok(())
-    }
-
-    #[allow(unused_variables)]
-    fn visit_account(
-        &mut self,
-        ctx: &mut WorkContext,
-        id: &AccountId,
-        account: &AccountState,
     ) -> Result<(), ChainError> {
         Ok(())
     }
