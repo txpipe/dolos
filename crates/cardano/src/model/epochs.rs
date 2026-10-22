@@ -7,7 +7,7 @@ use dolos_core::{cbor, BlockSlot, Genesis, NsKey};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::{
-        hash::Hash,
+        hash::{Hash, Hasher},
         nonce::{generate_epoch_nonce, generate_rolling_nonce},
     },
     ledger::primitives::Epoch,
@@ -70,12 +70,20 @@ impl Nonces {
         }
     }
 
-    /// Compute active nonce for next epoch.
+    /// Compute active nonce for next epoch. Without a previous tail the
+    /// ledger's neutral nonce leaves the candidate, still mixed with any
+    /// extra entropy.
     pub fn sweep(&self, previous_tail: Option<Hash<32>>, extra_entropy: Option<&[u8]>) -> Self {
         Self {
-            active: match previous_tail {
-                Some(tail) => generate_epoch_nonce(self.candidate, tail, extra_entropy),
-                None => self.candidate,
+            active: match (previous_tail, extra_entropy) {
+                (Some(tail), _) => generate_epoch_nonce(self.candidate, tail, extra_entropy),
+                (None, Some(entropy)) => {
+                    let mut hasher = Hasher::<256>::new();
+                    hasher.input(self.candidate.as_ref());
+                    hasher.input(entropy);
+                    hasher.finalize()
+                }
+                (None, None) => self.candidate,
             },
             candidate: self.evolving,
             evolving: self.evolving,
