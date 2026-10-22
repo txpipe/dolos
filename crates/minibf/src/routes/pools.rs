@@ -24,7 +24,7 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     cip151,
     indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
-    model::{AccountState, PoolState},
+    model::{AccountState, CalidusRegistration, PoolState},
     pallas_extras, AccountKey, PoolEpochLog, PoolHash, PoolKey,
 };
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
@@ -519,76 +519,56 @@ where
     Ok(updates)
 }
 
-async fn load_pool_calidus_key<D>(
+/// The `calidus_key` answer for the registration the pool's state carries.
+/// Height, time and epoch come from the registering block, found by slot. A
+/// revocation, a nonce the answer's `i32` cannot hold, or a block the archive
+/// no longer holds, answers `None`.
+fn pool_calidus_key<D>(
     domain: &Facade<D>,
-    pool: PoolHash,
+    registration: &CalidusRegistration,
 ) -> Result<Option<PoolCalidusKey>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let tip = domain.get_tip_slot()?;
+    let Some(pub_key) = registration.pub_key else {
+        return Ok(None);
+    };
+
+    let Ok(nonce) = registration.nonce.try_into() else {
+        return Ok(None);
+    };
+
+    let Some(body) = domain
+        .archive()
+        .get_block_by_slot(&registration.slot)
+        .map_err(log_and_500("failed to read a calidus registration block"))?
+    else {
+        return Ok(None);
+    };
+
+    let block = MultiEraBlock::decode(&body)
+        .map_err(log_and_500("failed to decode a calidus registration block"))?;
     let chain = domain.get_chain_summary()?;
-    let stream = domain.query().blocks_by_metadata_stream(
-        cip151::CIP151_METADATA_LABEL,
-        0,
-        tip,
-        SlotOrder::Desc,
-    );
 
-    let mut stream = Box::pin(stream);
-
-    while let Some(item) = stream.next().await {
-        let (_, block) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let Some(block) = block else {
-            continue;
-        };
-
-        let block = MultiEraBlock::decode(block.as_slice())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let block_height = block.number();
-        let block_slot = block.slot();
-        let block_time = chain.slot_time(block_slot);
-        let epoch = chain.slot_epoch(block_slot).0;
-
-        for tx in block.txs().into_iter().rev() {
-            let Some(metadata) = cip151::cip151_metadata_for_tx(&tx) else {
-                continue;
-            };
-
-            let Ok(registration) = cip151::parse_cip151_pool_registration(&metadata) else {
-                continue;
-            };
-
-            if registration.pool_id != pool {
-                continue;
-            }
-
-            if cip151::calidus_key_is_revoked(&registration.calidus_pub_key) {
-                return Ok(None);
-            }
-
-            return Ok(Some(PoolCalidusKey {
-                id: bech32_calidus(cip151::calidus_key_id_bytes(&registration.calidus_pub_key))?,
-                pub_key: hex::encode(registration.calidus_pub_key),
-                nonce: registration
-                    .nonce
-                    .try_into()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-                tx_hash: tx.hash().to_string(),
-                block_height: block_height
-                    .try_into()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-                block_time: block_time
-                    .try_into()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-                epoch: epoch
-                    .try_into()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-            }));
-        }
-    }
-
-    Ok(None)
+    Ok(Some(PoolCalidusKey {
+        id: bech32_calidus(cip151::calidus_key_id_bytes(&pub_key))?,
+        pub_key: hex::encode(pub_key),
+        nonce,
+        tx_hash: registration.tx_hash.to_string(),
+        block_height: block
+            .number()
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        block_time: chain
+            .slot_time(registration.slot)
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        epoch: chain
+            .slot_epoch(registration.slot)
+            .0
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    }))
 }
 
 pub async fn by_id<D>(
@@ -637,7 +617,10 @@ where
         compute_pool_metrics(&domain, pool.operator, active_pools, owners, ENTITY_CHUNK).await?;
 
     let (registration, retirement) = load_pool_cert_hashes(&domain, pool.operator).await?;
-    let calidus_key = load_pool_calidus_key(&domain, pool.operator).await?;
+    let calidus_key = match &pool.calidus {
+        Some(registration) => pool_calidus_key(&domain, registration)?,
+        None => None,
+    };
 
     let reward_account = pallas_extras::parse_reward_account(&params.reward_account)
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -1807,11 +1790,10 @@ mod tests {
         replicated_app, PoolIdCase, TestApp, TestFault, REG_POOL_HEX, REG_POOL_ID, SLOW_READ,
     };
     use blockfrost_openapi::models::{
-        pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
+        block_content::BlockContent, pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
         pool_list_extended_inner::PoolListExtendedInner,
         pool_list_retire_inner::PoolListRetireInner,
     };
-    use dolos_cardano::cip151;
     use dolos_cardano::model::{
         DRepDelegation, EpochValue, PoolDelegation, PoolParams, PoolSnapshot, Stake,
     };
@@ -1820,20 +1802,10 @@ mod tests {
     use pallas::{
         codec::utils::Bytes,
         crypto::hash::Hash,
-        ledger::primitives::{
-            alonzo, conway::GovAction, Int, PoolMetadata, Relay, StakeCredential,
-        },
+        ledger::primitives::{alonzo, conway::GovAction, PoolMetadata, Relay, StakeCredential},
     };
     use serde_json::Value;
     use std::{io::ErrorKind, net::TcpListener};
-
-    fn md_int(value: i64) -> alonzo::Metadatum {
-        alonzo::Metadatum::Int(Int::from(value))
-    }
-
-    fn md_map(items: Vec<(alonzo::Metadatum, alonzo::Metadatum)>) -> alonzo::Metadatum {
-        alonzo::Metadatum::Map(items.into())
-    }
 
     fn invalid_pool_id() -> &'static str {
         "not-a-pool"
@@ -1904,57 +1876,36 @@ mod tests {
         assert!(pool.calidus_key.is_none());
     }
 
-    fn cip151_pool_metadata(
-        pool_id: &str,
-        nonce: i128,
-        calidus_key: [u8; 32],
-    ) -> alonzo::Metadatum {
-        let operator = parse_pool_id_unbounded(pool_id)
-            .ok()
-            .flatten()
-            .expect("valid pool id")
-            .to_vec();
-
-        md_map(vec![
-            (md_int(0), md_int(2)),
-            (
-                md_int(1),
-                md_map(vec![
-                    (
-                        md_int(1),
-                        alonzo::Metadatum::Array(vec![
-                            md_int(1),
-                            alonzo::Metadatum::Bytes(Bytes::from(operator)),
-                        ]),
-                    ),
-                    (md_int(2), alonzo::Metadatum::Array(vec![])),
-                    (md_int(3), alonzo::Metadatum::Array(vec![md_int(2)])),
-                    (
-                        md_int(4),
-                        alonzo::Metadatum::Int(Int::try_from(nonce).expect("nonce fits")),
-                    ),
-                    (
-                        md_int(7),
-                        alonzo::Metadatum::Bytes(Bytes::from(calidus_key.to_vec())),
-                    ),
-                ]),
-            ),
-        ])
+    /// The cold key of the pool the calidus tests register.
+    fn calidus_cold_key() -> pallas::crypto::key::ed25519::SecretKey {
+        dolos_testing::cip151::cold_key(9)
     }
 
+    fn calidus_pool_id() -> String {
+        dolos_testing::cip151::pool_bech32(&calidus_cold_key())
+    }
+
+    /// A CIP-151 registration of `calidus_key` for the calidus tests' pool,
+    /// signed by its cold key.
+    fn cip151_registration(nonce: u64, calidus_key: [u8; 32]) -> Vec<(u64, alonzo::Metadatum)> {
+        dolos_testing::cip151::signed_registration(&calidus_cold_key(), nonce, calidus_key)
+    }
+
+    /// Every synthetic block carries the same registration in its first
+    /// transaction; the first one holds, since a later one with the same
+    /// nonce does not exceed it. The chain starts at slot 500,000, so the
+    /// registering block's slot and height differ.
     #[tokio::test]
     async fn pool_by_id_returns_calidus_key() {
         let default_cfg = SyntheticBlockConfig {
-            pool_id: bech32_pool([9u8; 28]).expect("valid pool id"),
+            pool_id: calidus_pool_id(),
+            slot: 500_000,
             ..Default::default()
         };
         let pool_id = default_cfg.pool_id.clone();
         let calidus_pub_key = [0x57; 32];
         let app = TestApp::new_with_cfg(SyntheticBlockConfig {
-            metadata_entries: vec![(
-                cip151::CIP151_METADATA_LABEL,
-                cip151_pool_metadata(&pool_id, 12345, calidus_pub_key),
-            )],
+            metadata_entries: cip151_registration(12345, calidus_pub_key),
             ..default_cfg
         });
 
@@ -1973,21 +1924,74 @@ mod tests {
         assert_eq!(calidus.pub_key, hex::encode(calidus_pub_key));
         assert_eq!(calidus.nonce, 12345);
         assert!(calidus.id.starts_with("calidus1"));
+
+        let registering = &app.vectors().blocks[0];
+        assert_ne!(registering.slot, registering.block_number);
+        assert_eq!(calidus.tx_hash, registering.tx_hashes[0]);
+
+        let (status, bytes) = app
+            .get_bytes(&format!("/blocks/{}", registering.block_hash))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let block: BlockContent = serde_json::from_slice(&bytes).expect("block response");
+        assert_eq!(Some(calidus.block_height), block.height);
+        assert_eq!(calidus.block_time, block.time);
+        assert_eq!(Some(calidus.epoch), block.epoch);
+    }
+
+    /// A registration whose block the archive no longer holds is served as
+    /// no key, not as an error.
+    #[tokio::test]
+    async fn pool_by_id_serves_no_calidus_key_without_its_block() {
+        let app = TestApp::new_with_cfg_and_setup(
+            SyntheticBlockConfig {
+                pool_id: calidus_pool_id(),
+                ..Default::default()
+            },
+            |domain, vectors| {
+                let operator = dolos_testing::cip151::pool_id(&calidus_cold_key());
+                let mut pool = domain
+                    .state()
+                    .read_entity_typed::<PoolState>(&PoolKey(operator))
+                    .expect("pool read")
+                    .expect("pool state");
+                let tip = vectors.blocks.last().expect("synthetic blocks");
+                pool.calidus = Some(CalidusRegistration {
+                    pub_key: Some([0x57; 32]),
+                    nonce: 1,
+                    tx_hash: [0xaa; 32].into(),
+                    slot: tip.slot + 1_000,
+                });
+
+                let writer = domain.state().start_writer().expect("state writer");
+                writer
+                    .write_entity_typed(&PoolKey(operator), &pool)
+                    .expect("pool write");
+                writer.commit().expect("state commit");
+            },
+        );
+
+        let pool_id = app.vectors().pool_id.clone();
+        let (status, bytes) = app.get_bytes(&format!("/pools/{pool_id}")).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let pool: Pool = serde_json::from_slice(&bytes).expect("failed to parse pool response");
+        assert!(pool.calidus_key.is_none());
     }
 
     #[tokio::test]
     async fn pool_by_id_treats_zero_calidus_key_as_revocation() {
-        let default_cfg = SyntheticBlockConfig {
-            pool_id: bech32_pool([9u8; 28]).expect("valid pool id"),
-            ..Default::default()
-        };
-        let pool_id = default_cfg.pool_id.clone();
+        let pool_id = calidus_pool_id();
         let app = TestApp::new_with_cfg(SyntheticBlockConfig {
-            metadata_entries: vec![(
-                cip151::CIP151_METADATA_LABEL,
-                cip151_pool_metadata(&pool_id, 12345, [0u8; 32]),
-            )],
-            ..default_cfg
+            pool_id: pool_id.clone(),
+            metadata_entries: cip151_registration(12345, [0u8; 32]),
+            ..Default::default()
         });
 
         let path = format!("/pools/{pool_id}");
@@ -2002,6 +2006,101 @@ mod tests {
 
         let pool: Pool = serde_json::from_slice(&bytes).expect("failed to parse pool response");
         assert!(pool.calidus_key.is_none());
+    }
+
+    /// The answer's nonce is an `i32`: a registration with a larger one is
+    /// served as no key, not as an error.
+    #[tokio::test]
+    async fn pool_by_id_serves_no_calidus_key_for_a_nonce_above_i32() {
+        let pool_id = calidus_pool_id();
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            pool_id: pool_id.clone(),
+            metadata_entries: cip151_registration(i32::MAX as u64 + 1, [0x57; 32]),
+            ..Default::default()
+        });
+
+        let path = format!("/pools/{pool_id}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let pool: Pool = serde_json::from_slice(&bytes).expect("failed to parse pool response");
+        assert!(pool.calidus_key.is_none());
+    }
+
+    /// A registration without the pool's cold-key signature is not served.
+    #[tokio::test]
+    async fn pool_by_id_ignores_an_unsigned_calidus_key() {
+        let pool_id = calidus_pool_id();
+        let pool = dolos_testing::cip151::pool_id(&calidus_cold_key());
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            pool_id: pool_id.clone(),
+            metadata_entries: dolos_testing::cip151::unsigned_registration(pool, 12345, [0x57; 32]),
+            ..Default::default()
+        });
+
+        let path = format!("/pools/{pool_id}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let pool: Pool = serde_json::from_slice(&bytes).expect("failed to parse pool response");
+        assert!(pool.calidus_key.is_none());
+    }
+
+    /// A registration in a phase-2-invalid transaction registers nothing, so
+    /// the key a valid one set before it is still the one served, though the
+    /// invalid one carries a higher nonce.
+    #[tokio::test]
+    async fn pool_by_id_skips_an_invalid_transactions_calidus_key() {
+        use dolos_core::import::ImportExt as _;
+
+        let pool_id = calidus_pool_id();
+        let registration = cip151_registration;
+        let app = TestApp::new_with_cfg_and_setup(
+            SyntheticBlockConfig {
+                pool_id: pool_id.clone(),
+                metadata_entries: registration(12345, [0x57; 32]),
+                ..Default::default()
+            },
+            |domain, vectors| {
+                let tip = vectors.blocks.last().expect("synthetic blocks");
+                let (_, raw) = dolos_testing::blocks::make_conway_block_with_metadata_at(
+                    tip.slot + 1,
+                    tip.block_number + 1,
+                    Some(tip.block_hash.parse().expect("block hash")),
+                    registration(12346, [0x58; 32]),
+                    false,
+                );
+                domain
+                    .import_blocks(vec![raw])
+                    .expect("import the invalid registration");
+            },
+        );
+
+        let path = format!("/pools/{pool_id}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let pool: Pool = serde_json::from_slice(&bytes).expect("failed to parse pool response");
+        let calidus = pool.calidus_key.expect("missing calidus key");
+        assert_eq!(calidus.pub_key, hex::encode([0x57; 32]));
     }
 
     #[tokio::test]
@@ -2478,6 +2577,7 @@ mod tests {
             register_slot,
             retiring_epoch,
             deposit: 0,
+            calidus: None,
         }
     }
 

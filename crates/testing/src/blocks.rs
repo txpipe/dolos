@@ -208,6 +208,17 @@ pub fn make_conway_block_with_metadata(
     metadata: Vec<(u64, alonzo::Metadatum)>,
     valid: bool,
 ) -> (ChainPoint, RawBlock) {
+    make_conway_block_with_metadata_at(slot, 1, Some(Hash::from([9u8; 32])), metadata, valid)
+}
+
+/// [`make_conway_block_with_metadata`] at a given height, after `prev_hash`.
+pub fn make_conway_block_with_metadata_at(
+    slot: BlockSlot,
+    block_number: u64,
+    prev_hash: Option<Hash<32>>,
+    metadata: Vec<(u64, alonzo::Metadatum)>,
+    valid: bool,
+) -> (ChainPoint, RawBlock) {
     let body = pallas::ledger::primitives::conway::TransactionBody {
         inputs: pallas::codec::utils::Set::from(vec![]),
         outputs: vec![],
@@ -236,7 +247,13 @@ pub fn make_conway_block_with_metadata(
         auxiliary_scripts: None,
     });
 
-    make_conway_block_with_tx(slot, body, Some(aux), valid)
+    make_conway_block_with_txs_at(
+        slot,
+        block_number,
+        prev_hash,
+        vec![(body, valid)],
+        Some(aux),
+    )
 }
 
 /// Number of slots in a Byron epoch on the default genesis values pallas uses
@@ -287,6 +304,74 @@ pub fn make_byron_ebb(epoch: u64, prev_hash: Hash<32>) -> (ChainPoint, RawBlock)
     let point = ChainPoint::Specific(decoded.slot(), decoded.hash());
 
     debug_assert_eq!(decoded.slot(), byron_ebb_slot(epoch));
+
+    (point, Arc::new(raw_bytes))
+}
+
+/// Build a Byron main block numbered `number` at `slot` within `epoch`,
+/// chained onto `prev_hash`.
+///
+/// The body is empty and the signature a placeholder: what the tests need is
+/// the era probe, the header hash and the number Byron headers carry in their
+/// difficulty field.
+pub fn make_byron_block(
+    epoch: u64,
+    slot: u64,
+    number: u64,
+    prev_hash: Hash<32>,
+) -> (ChainPoint, RawBlock) {
+    use pallas::codec::utils::{MaybeIndefArray, TagWrap};
+    use pallas::ledger::primitives::byron::{
+        Block, BlockBody, BlockCons, BlockHead, BlockHeadEx, BlockProof, BlockSig, Ssc, SscProof,
+        Up,
+    };
+
+    let header = KeepRaw::from(BlockHead {
+        protocol_magic: 764_824_073,
+        prev_block: prev_hash,
+        body_proof: BlockProof {
+            tx_proof: (0, Hash::new([0u8; 32]), Hash::new([0u8; 32])),
+            ssc_proof: SscProof::Variant3(Hash::new([0u8; 32])),
+            dlg_proof: Hash::new([0u8; 32]),
+            upd_proof: Hash::new([0u8; 32]),
+        },
+        consensus_data: BlockCons(
+            pallas::ledger::primitives::byron::SlotId { epoch, slot },
+            vec![0u8; 64].into(),
+            MaybeIndefArray::Def(vec![number]),
+            BlockSig::Signature(vec![0u8; 64].into()),
+        ),
+        extra_data: BlockHeadEx {
+            block_version: (1, 0, 0),
+            software_version: ("cardano-sl".into(), 1),
+            attributes: None,
+            extra_proof: Hash::new([0u8; 32]),
+        },
+    });
+
+    // `Up`'s proposal slot has no public constructor; an update payload with
+    // no proposal and no votes is `[[], []]`.
+    let upd_payload: Up = pallas::codec::minicbor::decode(&[0x82, 0x80, 0x80]).unwrap();
+
+    let block = Block {
+        header,
+        body: BlockBody {
+            tx_payload: MaybeIndefArray::Def(vec![]),
+            ssc_payload: Ssc::Variant3(TagWrap::new(MaybeIndefArray::Def(vec![]))),
+            dlg_payload: MaybeIndefArray::Def(vec![]),
+            upd_payload,
+        },
+        extra: MaybeIndefArray::Def(vec![]),
+    };
+
+    let wrapper = (1u16, block);
+    let raw_bytes = pallas::codec::minicbor::to_vec(&wrapper).unwrap();
+
+    let decoded = pallas::ledger::traverse::MultiEraBlock::decode(&raw_bytes).unwrap();
+    let point = ChainPoint::Specific(decoded.slot(), decoded.hash());
+
+    debug_assert_eq!(decoded.slot(), epoch * BYRON_EPOCH_LENGTH + slot);
+    debug_assert_eq!(decoded.number(), number);
 
     (point, Arc::new(raw_bytes))
 }

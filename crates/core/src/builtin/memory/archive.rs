@@ -179,10 +179,10 @@ impl MemoryArchiveWriter {
     }
 
     fn archive_tags_of(block: &ArchiveIndexDelta) -> impl Iterator<Item = ArchiveTag> + '_ {
-        block.tags.iter().filter_map(|tag| {
-            key_hash(tag.dimension, &tag.key)
-                .map(|hash| (Cow::Borrowed(tag.dimension), hash, block.slot))
-        })
+        block
+            .tags
+            .iter()
+            .map(|tag| (Cow::Borrowed(tag.dimension), key_hash(&tag.key), block.slot))
     }
 
     /// The exact entries a block delta writes.
@@ -713,12 +713,7 @@ impl ArchiveStore for MemoryArchiveStore {
         start: BlockSlot,
         end: BlockSlot,
     ) -> Result<Self::SlotIter, ArchiveError> {
-        let Some(hash) = key_hash(dimension, key) else {
-            return Err(ArchiveError::InternalError(format!(
-                "{dimension} key must be 8 bytes, got {}",
-                key.len(),
-            )));
-        };
+        let hash = key_hash(key);
 
         if start > end {
             return Ok(MemorySlotIter(Vec::new().into_iter()));

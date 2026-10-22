@@ -22,6 +22,7 @@ use dolos_core::*;
 
 pub mod archive;
 pub mod blocks;
+pub mod cip151;
 pub mod faults;
 pub mod measured;
 pub mod performance;
