@@ -660,7 +660,8 @@ mod tests {
     /// next digit rounds the cut up to a different double than the truncated
     /// decimal gives. 1273 / 10485760 is 0.00012140274047851562|5, an exact
     /// half at the cut, which rounds up where half down or half to even would
-    /// keep a different double.
+    /// keep a different double. 8529360004794 / 20235083305638617 is
+    /// 0.00042151346134647476|4999…, just short of a half, and stays down.
     #[test]
     fn numeric_ratio_rounds_half_up_at_the_scale() {
         assert_eq!(
@@ -677,12 +678,22 @@ mod tests {
             "0.00012140274047851562".parse::<f64>().unwrap(),
             0.00012140274047851564
         );
+
+        assert_eq!(
+            numeric_ratio(8_529_360_004_794, 20_235_083_305_638_617),
+            0.00042151346134647474
+        );
+        assert_ne!(
+            "0.00042151346134647477".parse::<f64>().unwrap(),
+            0.00042151346134647474
+        );
     }
 
     /// Both stakes lead with the base-10000 digit 1, so the quotient's weight
     /// drops by one and the scale is 24 decimals, not 20:
     /// 0.000093332914661520271677 against 0.00009333291466152027, which is a
-    /// different double.
+    /// different double. 10^16 + 1 is five digits led by 1, not four led by
+    /// 10000, so 1.25e12 over it also takes 24 decimals.
     #[test]
     fn numeric_ratio_scales_past_equal_leading_digits() {
         assert_eq!(
@@ -692,6 +703,15 @@ mod tests {
         assert_ne!(
             "0.00009333291466152027".parse::<f64>().unwrap(),
             9.333291466152028e-5
+        );
+
+        assert_eq!(
+            numeric_ratio(1_250_000_000_000, 10_000_000_000_000_001),
+            0.00012499999999999998
+        );
+        assert_ne!(
+            "0.00012500000000000000".parse::<f64>().unwrap(),
+            0.00012499999999999998
         );
     }
 
