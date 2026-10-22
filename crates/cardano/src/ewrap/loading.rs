@@ -3191,6 +3191,102 @@ mod tests {
             }
         }
     }
+
+    /// A chain with Byron history, Shelley from `first_shelley`, shaped as
+    /// mainnet's or preprod's.
+    fn byron_then_shelley(first_shelley: u64) -> ChainSummary {
+        let byron_length = 21_600;
+        let shelley_start = crate::model::EraBoundary {
+            epoch: first_shelley,
+            slot: first_shelley * byron_length,
+            timestamp: first_shelley * byron_length * 20,
+        };
+
+        let mut chain = ChainSummary::default();
+
+        chain.append_era(
+            1,
+            crate::model::EraState {
+                start: crate::model::EraBoundary {
+                    epoch: 0,
+                    slot: 0,
+                    timestamp: 0,
+                },
+                end: Some(shelley_start.clone()),
+                epoch_length: byron_length,
+                slot_length: 20,
+                protocol: 1,
+            },
+        );
+
+        chain.append_era(
+            2,
+            crate::model::EraState {
+                start: shelley_start,
+                end: None,
+                epoch_length: 432_000,
+                slot_length: 1,
+                protocol: 2,
+            },
+        );
+
+        chain
+    }
+
+    /// RUPD's and EWRAP's gates read the chain's first Shelley epoch, not
+    /// the chain's first epoch: on mainnet the stake gate opens at 211 and
+    /// the reward gate at 212, and on preprod at 7 and 8.
+    #[test]
+    fn the_gates_follow_the_chains_first_shelley_epoch() {
+        for first_shelley in [208, 4] {
+            let chain = byron_then_shelley(first_shelley);
+            assert_eq!(chain.first_shelley_epoch(), first_shelley);
+
+            let rupd = |current_epoch| crate::rupd::RupdWork {
+                current_epoch,
+                snapshot: Default::default(),
+                pots: Default::default(),
+                incentives: Default::default(),
+                blocks_made_total: 0,
+                max_supply: 0,
+                chain: chain.clone(),
+                pparams: None,
+                shard_ranges: None,
+            };
+
+            let first_stake = first_shelley + 2;
+
+            let expected = [
+                (first_stake, None, None),
+                (first_stake + 1, Some(first_shelley), None),
+                (
+                    first_stake + 2,
+                    Some(first_shelley + 1),
+                    Some(first_shelley + 1),
+                ),
+            ];
+
+            for (epoch, stake, reward) in expected {
+                let work = rupd(epoch);
+
+                assert_eq!(
+                    work.stake_epochs(),
+                    stake.map(|x| (x, epoch - 1)),
+                    "stake epochs of {epoch}"
+                );
+                assert_eq!(
+                    work.reward_epochs(),
+                    reward.map(|x| (x, epoch - 1)),
+                    "reward epochs of {epoch}"
+                );
+                assert_eq!(
+                    stake_snapshot_of(epoch, &chain).map(|(epoch, _)| epoch),
+                    stake,
+                    "stake snapshot of {epoch}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -846,6 +846,127 @@ fn the_first_stake_epoch_logs_its_distribution() {
     assert_eq!(staked, total(&expected));
 }
 
+/// What `blocks` minted in the live epoch leave behind: the epoch's counts
+/// and, when a registered pool minted them, that pool's. Blocks with no pool
+/// are a genesis delegate's, which the reward calculation pays no one for.
+fn mint(domain: &ToyDomain, operator: Option<u8>, blocks: u32) {
+    let mut epoch = epoch_state(domain);
+    let rolling = epoch.rolling.unwrap_live_mut();
+    rolling.blocks_minted += blocks;
+    rolling.non_overlay_blocks_minted += blocks;
+
+    let pool = operator.map(|operator| {
+        let mut pool = pools(domain).remove(&pool_hash(operator)).unwrap();
+        pool.snapshot.unwrap_live_mut().blocks_minted += blocks;
+        pool
+    });
+
+    write(domain, |writer| {
+        writer.write_entity_typed(&(), &epoch).unwrap();
+
+        if let Some(pool) = &pool {
+            writer
+                .write_entity_typed(&PoolKey(pool.operator), pool)
+                .unwrap();
+        }
+    });
+}
+
+fn pending_rewards(domain: &ToyDomain) -> u64 {
+    domain
+        .state()
+        .iter_entities_typed::<PendingRewardState>(None)
+        .unwrap()
+        .map(|x| x.unwrap().1.total_value())
+        .sum()
+}
+
+/// Drive a devnet store to the RUPD of `rupd_epoch`, with `blocks` minted in
+/// the epoch before it, by `operator` or by a genesis delegate. Every
+/// boundary on the way runs ESTART alone. A whale delegates to `OWNED`, so
+/// its share of the supply earns more than a lovelace.
+fn run_rupd_after_blocks(rupd_epoch: Epoch, operator: Option<u8>, blocks: u32) -> ToyDomain {
+    let domain = seeded(devnet());
+
+    let whale = account(key(0x30), Some(OWNED), 1_000_000_000_000_000, 0, 0);
+    write(&domain, |writer| {
+        writer
+            .write_entity_typed(&AccountKey::from(&whale.credential), &whale)
+            .unwrap();
+    });
+
+    loop {
+        let epoch = epoch_state(&domain).number;
+
+        run_rupd(&domain);
+
+        if epoch == rupd_epoch {
+            return domain;
+        }
+
+        if epoch + 1 == rupd_epoch {
+            mint(&domain, operator, blocks);
+        }
+
+        open_next_epoch(&domain).unwrap();
+    }
+}
+
+/// The first stake epoch pays no rewards even where a pool earned some: its
+/// RUPD reads the first Shelley snapshot for the logs and computes nothing
+/// against it. The boundary closing it leaves the pots as on a chain where
+/// no pool earned anything, while one epoch later the same blocks are paid.
+#[test]
+fn the_first_stake_epoch_pays_no_rewards() {
+    const BLOCKS: u32 = 10;
+
+    let first_shelley = {
+        let domain = seeded(devnet());
+        dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+            .unwrap()
+            .first_shelley_epoch()
+    };
+    let first_stake = first_shelley + 2;
+
+    // the RUPD of the first stake epoch, after `OWNED` minted, and the path
+    // with the same epoch counts and no pool to pay
+    let earned = run_rupd_after_blocks(first_stake + 1, Some(OWNED), BLOCKS);
+    let unearned = run_rupd_after_blocks(first_stake + 1, None, BLOCKS);
+
+    let incentives = epoch_state(&earned).incentives.expect("incentives");
+    assert!(incentives.available_rewards > 0, "{incentives:?}");
+    assert_eq!(epoch_state(&unearned).incentives, Some(incentives));
+
+    assert_eq!(
+        pending_rewards(&earned),
+        0,
+        "rewards for the first stake epoch"
+    );
+
+    let logs = pool_epoch_logs(&earned, first_stake);
+    assert!(logs[&pool_hash(OWNED)].total_stake > 0);
+    assert!(logs.values().all(|x| x.total_rewards == 0), "{logs:?}");
+
+    for domain in [&earned, &unearned] {
+        wrap_the_epoch(domain);
+        open_next_epoch(domain).unwrap();
+    }
+
+    let (earned, unearned) = (epoch_state(&earned), epoch_state(&unearned));
+    assert_eq!(earned.number, first_stake + 2);
+    assert_eq!(earned.initial_pots, unearned.initial_pots);
+    assert_eq!(
+        format!("{:?}", earned.end),
+        format!("{:?}", unearned.end),
+        "end stats"
+    );
+
+    // the control: the same blocks, one epoch later, are paid
+    let paid = run_rupd_after_blocks(first_stake + 2, Some(OWNED), BLOCKS);
+    assert!(pending_rewards(&paid) > 0, "no rewards one epoch later");
+    assert!(pool_epoch_logs(&paid, first_stake + 1)[&pool_hash(OWNED)].total_rewards > 0);
+}
+
 fn snapshot_of(
     domain: &ToyDomain,
 ) -> (BTreeMap<PoolHash, PoolState>, EpochState, Vec<AccountState>) {
