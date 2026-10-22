@@ -24,34 +24,27 @@ use crate::{
     load_era_summary, load_gov, pallas_extras,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
+    rupd::loading::stake_snapshot_epoch,
     AccountKey, AccountState, ChainSummary, DRepEpochLog, DRepKey, DRepSnapshotEntry, DRepState,
     EraKey, PendingMirState, PendingRewardState, PoolHash, PoolKey, PoolState, ProposalAction,
     ProposalOutcome, ProposalState,
 };
 
-/// `RupdWork::relevant_epochs`, read from the closing boundary's side: the
-/// stake snapshot the epoch's rewards were computed against, and the protocol
-/// its stake totals are read under.
+/// `RupdWork::stake_epochs`, read from the closing boundary's side: the stake
+/// snapshot RUPD logged the epoch's distribution from, and the protocol its
+/// stake totals are read under.
 ///
-/// Both clauses of RUPD's guard are reproduced, the second one included: the
-/// node computes no rewards while the snapshot epoch is still at or before the
-/// first Shelley epoch, because the genesis-initialized snapshot at that epoch
-/// is not a reward input. A merged row written where RUPD wrote none would be
-/// a population this log invented.
+/// The gate is RUPD's stake gate ([`stake_snapshot_epoch`]), not its reward
+/// gate: the first stake epoch, whose snapshot is the first Shelley epoch's,
+/// has a distribution and no rewards, and its rows carry the stake leg alone.
+/// A merged row written where RUPD logged no distribution would be a
+/// population this log invented.
 ///
 /// The protocol is the era of `snapshot_epoch + 1`, not of the snapshot epoch:
 /// the Haskell ledger computes the mark snapshot under the *entering* epoch's
 /// rules, which is what decides whether pointer-address stake counts.
 fn stake_snapshot_of(ending_epoch: Epoch, chain: &ChainSummary) -> Option<(Epoch, EraKey)> {
-    if ending_epoch < 4 {
-        return None;
-    }
-
-    let snapshot_epoch = ending_epoch - 3;
-
-    if snapshot_epoch <= chain.first_shelley_epoch() {
-        return None;
-    }
+    let snapshot_epoch = stake_snapshot_epoch(ending_epoch, chain.first_shelley_epoch())?;
 
     let protocol = EraKey::from(chain.era_for_epoch(snapshot_epoch + 1).protocol);
 
@@ -3258,7 +3251,7 @@ mod tests {
         assert_eq!(row.pool_id, None);
     }
 
-    /// A boundary whose `relevant_epochs` gate is closed writes no stake leg
+    /// A boundary whose stake gate is closed writes no stake leg
     /// at all, however the account looks.
     #[test]
     fn no_stake_snapshot_means_no_stake_leg() {
@@ -3351,9 +3344,9 @@ mod tests {
         );
     }
 
-    /// `RupdWork::relevant_epochs`, both clauses. The first-Shelley one is the
-    /// clause the consolidation evaluation's instrumentation omitted, and the
-    /// one reported epoch difference it produced.
+    /// `RupdWork::stake_epochs`, not its reward gate: the boundary whose
+    /// snapshot is the first Shelley epoch's is open, the one before it is
+    /// closed.
     #[test]
     fn the_stake_snapshot_gate_matches_rupds() {
         let domain = ToyDomain::new(None, None);
@@ -3362,20 +3355,165 @@ mod tests {
         let chain = &boundary.chain_summary;
         let first_shelley = chain.first_shelley_epoch();
 
-        for ending in 0..4 {
+        for ending in 0..first_shelley + 3 {
             assert_eq!(stake_snapshot_of(ending, chain), None, "epoch {ending}");
         }
 
-        // `snapshot_epoch <= first_shelley` is closed; the epoch right after it
-        // is open.
-        let closed = first_shelley + 3;
-        assert_eq!(stake_snapshot_of(closed, chain), None);
+        for open in [first_shelley + 3, first_shelley + 4] {
+            assert_eq!(
+                stake_snapshot_of(open, chain).map(|(epoch, _)| epoch),
+                Some(open - 3),
+                "epoch {open}"
+            );
+        }
+    }
 
-        let open = closed + 1;
-        assert_eq!(
-            stake_snapshot_of(open, chain).map(|(epoch, _)| epoch),
-            Some(open - 3)
+    /// The two gates differ at one epoch only, the first stake epoch's
+    /// boundary (`first_shelley + 3`): a snapshot, and no rewards. Preview's
+    /// `first_shelley == 0` opens it at epoch 3, below the old `< 4` clause.
+    #[test]
+    fn the_stake_gate_opens_one_epoch_before_the_reward_gate() {
+        use crate::rupd::loading::reward_snapshot_epoch;
+
+        for first_shelley in [0, 208] {
+            for epoch in 0..first_shelley + 3 {
+                assert_eq!(stake_snapshot_epoch(epoch, first_shelley), None);
+                assert_eq!(reward_snapshot_epoch(epoch, first_shelley), None);
+            }
+
+            let first_stake = first_shelley + 3;
+            assert_eq!(
+                stake_snapshot_epoch(first_stake, first_shelley),
+                Some(first_shelley)
+            );
+            assert_eq!(reward_snapshot_epoch(first_stake, first_shelley), None);
+
+            for epoch in first_stake + 1..first_stake + 4 {
+                assert_eq!(stake_snapshot_epoch(epoch, first_shelley), Some(epoch - 3));
+                assert_eq!(reward_snapshot_epoch(epoch, first_shelley), Some(epoch - 3));
+            }
+        }
+    }
+
+    /// A chain shaped as mainnet's or preprod's: Byron history, then Shelley
+    /// from `first_shelley`. With `shelley_epochs`, Shelley closes after that
+    /// many epochs and Allegra is the edge; without, Shelley is the edge, as
+    /// on mainnet through its gate epochs.
+    fn byron_then_shelley(first_shelley: u64, shelley_epochs: Option<u64>) -> ChainSummary {
+        let byron_length = 21_600;
+        let shelley_length = 432_000;
+
+        let shelley_start = crate::model::EraBoundary {
+            epoch: first_shelley,
+            slot: first_shelley * byron_length,
+            timestamp: first_shelley * byron_length * 20,
+        };
+
+        let allegra_start = shelley_epochs.map(|epochs| crate::model::EraBoundary {
+            epoch: first_shelley + epochs,
+            slot: shelley_start.slot + epochs * shelley_length,
+            timestamp: shelley_start.timestamp + epochs * shelley_length,
+        });
+
+        let mut chain = ChainSummary::default();
+
+        chain.append_era(
+            1,
+            crate::model::EraState {
+                start: crate::model::EraBoundary {
+                    epoch: 0,
+                    slot: 0,
+                    timestamp: 0,
+                },
+                end: Some(shelley_start.clone()),
+                epoch_length: byron_length,
+                slot_length: 20,
+                protocol: 1,
+            },
         );
+
+        chain.append_era(
+            2,
+            crate::model::EraState {
+                start: shelley_start,
+                end: allegra_start.clone(),
+                epoch_length: shelley_length,
+                slot_length: 1,
+                protocol: 2,
+            },
+        );
+
+        if let Some(allegra_start) = allegra_start {
+            chain.append_era(
+                3,
+                crate::model::EraState {
+                    start: allegra_start,
+                    end: None,
+                    epoch_length: shelley_length,
+                    slot_length: 1,
+                    protocol: 3,
+                },
+            );
+        }
+
+        chain
+    }
+
+    /// RUPD's and EWRAP's gates read the chain's first Shelley epoch, not
+    /// the chain's first epoch: on mainnet the stake gate opens at 211 and
+    /// the reward gate at 212, and on preprod at 7 and 8. Mainnet reaches
+    /// those epochs with Shelley still at the edge, so both the edge and the
+    /// past-era shapes are covered.
+    #[test]
+    fn the_gates_follow_the_chains_first_shelley_epoch() {
+        for (first_shelley, shelley_epochs) in [(208, None), (208, Some(28)), (4, Some(1))] {
+            let chain = byron_then_shelley(first_shelley, shelley_epochs);
+            assert_eq!(chain.first_shelley_epoch(), first_shelley);
+
+            let rupd = |current_epoch| crate::rupd::RupdWork {
+                current_epoch,
+                snapshot: Default::default(),
+                pots: Default::default(),
+                incentives: Default::default(),
+                blocks_made_total: 0,
+                max_supply: 0,
+                chain: chain.clone(),
+                pparams: None,
+                shard_ranges: None,
+            };
+
+            let first_stake = first_shelley + 2;
+
+            let expected = [
+                (first_stake, None, None),
+                (first_stake + 1, Some(first_shelley), None),
+                (
+                    first_stake + 2,
+                    Some(first_shelley + 1),
+                    Some(first_shelley + 1),
+                ),
+            ];
+
+            for (epoch, stake, reward) in expected {
+                let work = rupd(epoch);
+
+                assert_eq!(
+                    work.stake_epochs(),
+                    stake.map(|x| (x, epoch - 1)),
+                    "stake epochs of {epoch}"
+                );
+                assert_eq!(
+                    work.reward_epochs(),
+                    reward.map(|x| (x, epoch - 1)),
+                    "reward epochs of {epoch}"
+                );
+                assert_eq!(
+                    stake_snapshot_of(epoch, &chain).map(|(epoch, _)| epoch),
+                    stake,
+                    "stake snapshot of {epoch}"
+                );
+            }
+        }
     }
 }
 

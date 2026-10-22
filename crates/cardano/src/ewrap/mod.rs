@@ -195,12 +195,13 @@ pub struct BoundaryWork {
     /// the certificate of one of [`Self::retiring_dreps`].
     pub pv9_settlements: HashMap<StakeCredential, crate::hacks::pv9_drep_delegs::Settlement>,
 
-    /// The stake snapshot this boundary's rewards were computed against, and
+    /// The stake snapshot RUPD logged this boundary's distribution from, and
     /// the protocol its stake totals are read under: RUPD's `snapshot_epoch`
     /// (`C - 3`) and the era of `snapshot_epoch + 1`. `None` where RUPD
-    /// computed nothing — `RupdWork::relevant_epochs` returns `None` below
-    /// epoch 4 and while the snapshot epoch is still at or before the first
-    /// Shelley one, and the merged log has to agree with it epoch for epoch.
+    /// logged no distribution — `RupdWork::stake_epochs` returns `None` while
+    /// `C - 3` is before the first Shelley epoch, and the merged log has to
+    /// agree with it epoch for epoch. The first stake epoch has a snapshot
+    /// and no rewards.
     pub stake_snapshot: Option<(Epoch, EraKey)>,
 
     /// The pools whose delegators are in [`Self::stake_snapshot`]'s
