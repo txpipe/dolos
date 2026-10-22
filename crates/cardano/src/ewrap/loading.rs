@@ -3192,14 +3192,23 @@ mod tests {
         }
     }
 
-    /// A chain with Byron history, Shelley from `first_shelley`, shaped as
-    /// mainnet's or preprod's.
-    fn byron_then_shelley(first_shelley: u64) -> ChainSummary {
+    /// A chain shaped as mainnet's or preprod's: Byron history, Shelley from
+    /// `first_shelley` for `shelley_epochs`, then Allegra at the edge. Shelley
+    /// is a past era there, as on the shipped networks.
+    fn byron_then_shelley(first_shelley: u64, shelley_epochs: u64) -> ChainSummary {
         let byron_length = 21_600;
+        let shelley_length = 432_000;
+
         let shelley_start = crate::model::EraBoundary {
             epoch: first_shelley,
             slot: first_shelley * byron_length,
             timestamp: first_shelley * byron_length * 20,
+        };
+
+        let allegra_start = crate::model::EraBoundary {
+            epoch: first_shelley + shelley_epochs,
+            slot: shelley_start.slot + shelley_epochs * shelley_length,
+            timestamp: shelley_start.timestamp + shelley_epochs * shelley_length,
         };
 
         let mut chain = ChainSummary::default();
@@ -3223,10 +3232,21 @@ mod tests {
             2,
             crate::model::EraState {
                 start: shelley_start,
-                end: None,
-                epoch_length: 432_000,
+                end: Some(allegra_start.clone()),
+                epoch_length: shelley_length,
                 slot_length: 1,
                 protocol: 2,
+            },
+        );
+
+        chain.append_era(
+            3,
+            crate::model::EraState {
+                start: allegra_start,
+                end: None,
+                epoch_length: shelley_length,
+                slot_length: 1,
+                protocol: 3,
             },
         );
 
@@ -3238,8 +3258,8 @@ mod tests {
     /// the reward gate at 212, and on preprod at 7 and 8.
     #[test]
     fn the_gates_follow_the_chains_first_shelley_epoch() {
-        for first_shelley in [208, 4] {
-            let chain = byron_then_shelley(first_shelley);
+        for (first_shelley, shelley_epochs) in [(208, 28), (4, 1)] {
+            let chain = byron_then_shelley(first_shelley, shelley_epochs);
             assert_eq!(chain.first_shelley_epoch(), first_shelley);
 
             let rupd = |current_epoch| crate::rupd::RupdWork {

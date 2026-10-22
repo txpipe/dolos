@@ -24,9 +24,9 @@ use pallas::ledger::primitives::{conway::RationalNumber, Epoch, StakeCredential}
 
 use dolos_cardano::{
     estart::EstartWorkUnit, ewrap::EwrapWorkUnit, rupd::RupdWorkUnit, rupd::StakeSnapshot,
-    AccountEpochLog, AccountKey, AccountState, CardanoWorkUnit, DRepDelegation, EpochState,
-    EpochValue, EraKey, PendingRewardState, PoolDelegation, PoolEpochLog, PoolHash, PoolKey,
-    PoolParams, PoolSnapshot, PoolState, PoolTally, Stake,
+    AccountEpochLog, AccountKey, AccountState, CardanoWorkUnit, DRepDelegation, EndStats,
+    EpochState, EpochValue, EraKey, PendingRewardState, PoolDelegation, PoolEpochLog, PoolHash,
+    PoolKey, PoolParams, PoolSnapshot, PoolState, PoolTally, Stake,
 };
 
 fn key(byte: u8) -> StakeCredential {
@@ -847,8 +847,9 @@ fn the_first_stake_epoch_logs_its_distribution() {
 }
 
 /// What `blocks` minted in the live epoch leave behind: the epoch's counts
-/// and, when a registered pool minted them, that pool's. Blocks with no pool
-/// are a genesis delegate's, which the reward calculation pays no one for.
+/// and, when `operator` minted them, that pool's. Without an operator they
+/// are blocks no registered pool minted, which the reward calculation pays
+/// no one for.
 fn mint(domain: &ToyDomain, operator: Option<u8>, blocks: u32) {
     let mut epoch = epoch_state(domain);
     let rolling = epoch.rolling.unwrap_live_mut();
@@ -882,7 +883,7 @@ fn pending_rewards(domain: &ToyDomain) -> u64 {
 }
 
 /// Drive a devnet store to the RUPD of `rupd_epoch`, with `blocks` minted in
-/// the epoch before it, by `operator` or by a genesis delegate. Every
+/// the epoch before it, by `operator` or by no registered pool. Every
 /// boundary on the way runs ESTART alone. A whale delegates to `OWNED`, so
 /// its share of the supply earns more than a lovelace.
 fn run_rupd_after_blocks(rupd_epoch: Epoch, operator: Option<u8>, blocks: u32) -> ToyDomain {
@@ -912,7 +913,8 @@ fn run_rupd_after_blocks(rupd_epoch: Epoch, operator: Option<u8>, blocks: u32) -
     }
 }
 
-/// The first stake epoch pays no rewards even where a pool earned some: its
+/// Dolos pays no rewards for the first stake epoch, even where the ledger
+/// would (`d < 1` and a registered reward account, as on this devnet): its
 /// RUPD reads the first Shelley snapshot for the logs and computes nothing
 /// against it. The boundary closing it leaves the pots as on a chain where
 /// no pool earned anything, while one epoch later the same blocks are paid.
@@ -947,19 +949,20 @@ fn the_first_stake_epoch_pays_no_rewards() {
     assert!(logs[&pool_hash(OWNED)].total_stake > 0);
     assert!(logs.values().all(|x| x.total_rewards == 0), "{logs:?}");
 
-    for domain in [&earned, &unearned] {
+    // ESTART resets the end stats, so they are read between the two
+    let [earned_end, unearned_end] = [&earned, &unearned].map(|domain| {
         wrap_the_epoch(domain);
+        let end = epoch_state(domain).end.expect("end stats");
         open_next_epoch(domain).unwrap();
-    }
+        format!("{end:?}")
+    });
+
+    assert_ne!(earned_end, format!("{:?}", EndStats::default()));
+    assert_eq!(earned_end, unearned_end, "end stats");
 
     let (earned, unearned) = (epoch_state(&earned), epoch_state(&unearned));
     assert_eq!(earned.number, first_stake + 2);
     assert_eq!(earned.initial_pots, unearned.initial_pots);
-    assert_eq!(
-        format!("{:?}", earned.end),
-        format!("{:?}", unearned.end),
-        "end stats"
-    );
 
     // the control: the same blocks, one epoch later, are paid
     let paid = run_rupd_after_blocks(first_stake + 2, Some(OWNED), BLOCKS);

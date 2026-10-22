@@ -282,10 +282,12 @@ pub fn stake_snapshot_epoch(epoch: Epoch, first_shelley: Epoch) -> Option<Snapsh
         .filter(|snapshot_epoch| *snapshot_epoch >= first_shelley)
 }
 
-/// The stake snapshot the rewards of `epoch` are computed against. The
-/// Cardano node computes no rewards while the snapshot epoch is still the
-/// first Shelley epoch: the genesis-initialized snapshot there is not a
-/// reward input.
+/// The stake snapshot the rewards of `epoch` are computed against. Dolos
+/// computes no rewards while the snapshot epoch is still the first Shelley
+/// epoch. This is a Dolos rule, not a ledger one: the ledger pays pools that
+/// minted against that snapshot, but on the shipped networks those rewards
+/// are zero for other reasons (`d = 1` on mainnet, the pre-Babbage reward
+/// prefilter on preview and preprod), and the rule matches their history.
 pub fn reward_snapshot_epoch(epoch: Epoch, first_shelley: Epoch) -> Option<SnapshotEpoch> {
     stake_snapshot_epoch(epoch, first_shelley)
         .filter(|snapshot_epoch| *snapshot_epoch > first_shelley)
