@@ -62,6 +62,7 @@
 //! the Stelae repository. This crate retains the profile-specific encoding,
 //! repository lifecycle and consumer operations that host uses.
 
+pub mod boundary;
 pub mod export;
 pub mod facade;
 pub mod layers;
@@ -531,11 +532,8 @@ pub const MAX_RECORD: usize = 64 * 1024 * 1024;
 /// The key-hashing scheme index layers ship under, as reported in
 /// `parameters.indexKeyHash`.
 ///
-/// Describes every dimension *except* [`dolos_core::VERBATIM_KEY_DIMENSION`],
-/// whose logical key is a `u64` label the stores keep verbatim. That exception
-/// is normative for `indexes` v1 (ADR-004) and lives in
-/// [`dolos_core::key_hash`], which is the only place in the tree that decides
-/// it.
+/// Describes every dimension. [`dolos_core::key_hash`] is the only place in
+/// the tree that decides it.
 pub const INDEX_KEY_HASH: &str = "xxh3-64";
 
 /// Compression algorithm, pinned so blobs dedupe across publishers in practice.
@@ -618,6 +616,15 @@ pub enum Error {
     /// hash. A cursor that has only a slot cannot anchor one.
     #[error("a stele's position needs a block hash, but the chain point is {0}")]
     UnanchoredPoint(String),
+
+    /// Stores that do not stand on the first block of the plan's sequence
+    /// epoch, refused before a layer is written. See [`boundary`].
+    #[error("the stores at {cursor} are not the epoch-{sequence} boundary cut: {reason}")]
+    NotABoundary {
+        cursor: String,
+        sequence: u64,
+        reason: boundary::Ineligible,
+    },
 
     /// A field of the inscription this profile owns — `position` or a layer's
     /// `scope` — is not the shape this profile writes. Raised while reading a

@@ -366,11 +366,8 @@ fn unmarked_snapshot(dir: &Path, store: &str) -> PathBuf {
 
     match store {
         "state" => {
-            let state = dolos_fjall::StateStore::open(
-                &path,
-                &dolos_core::config::FjallStateConfig::default(),
-            )
-            .unwrap();
+            let state =
+                dolos_fjall::StateStore::open(&path, dolos_fjall::Preset::Standard).unwrap();
             let writer = state.start_writer().unwrap();
             writer.set_cursor(ChainPoint::Origin).unwrap();
             writer.commit().unwrap();
@@ -380,7 +377,8 @@ fn unmarked_snapshot(dir: &Path, store: &str) -> PathBuf {
             let archive = dolos_fjall::archive::ArchiveStore::open(
                 dolos_core::StateSchema::default(),
                 &path,
-                &dolos_core::config::FjallArchiveConfig::default(),
+                None,
+                dolos_fjall::Preset::Standard,
             )
             .unwrap();
             let writer = archive.start_writer().unwrap();

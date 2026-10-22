@@ -402,14 +402,17 @@ fn store_type(
 /// them.
 #[derive(Debug)]
 struct Mismatch {
-    fields: Vec<&'static str>,
+    fields: Vec<String>,
     message: String,
 }
 
 impl Mismatch {
-    fn new(fields: impl IntoIterator<Item = &'static str>, message: impl Into<String>) -> Self {
+    fn new(
+        fields: impl IntoIterator<Item = impl Into<String>>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
-            fields: fields.into_iter().collect(),
+            fields: fields.into_iter().map(Into::into).collect(),
             message: message.into(),
         }
     }
@@ -1441,6 +1444,16 @@ const MOVED_TO_ARGUMENTS: [(&str, &str); 3] = [
     ),
 ];
 
+/// Tuning fields a store table of an earlier file set one by one.
+const RETIRED_TUNING: [&str; 6] = [
+    "cache",
+    "max_journal_size",
+    "flush_on_commit",
+    "l0_threshold",
+    "worker_threads",
+    "memtable_size_mb",
+];
+
 /// Keys only a v1 or v2.0.0-alpha.0 file has.
 const LEGACY_KEYS: [&str; 3] = ["genesis", "storage.version", "chain.type"];
 
@@ -1786,8 +1799,92 @@ fn check_tables(document: &::config::Config) -> Result<(), ConfigError> {
     }
 
     table::<RawUpstream, UpstreamConfig>(document, "upstream")?;
+
+    for (store, fields) in [
+        ("storage.state", &["path", "preset"][..]),
+        ("storage.archive", &["path", "blocks_path", "preset"]),
+    ] {
+        refuse_retired_tuning(document, store, fields)?;
+    }
+
     table::<RawStateStore, StateStoreConfig>(document, "storage.state")?;
     table::<RawArchiveStore, ArchiveStoreConfig>(document, "storage.archive")
+}
+
+/// Refuses the per-store tuning fields of earlier files by name, where
+/// deserializing would call them unknown: a Fjall store's preset sets all of
+/// it, and an ephemeral store takes none of it, nor any other field the table
+/// sets (its `fields` first, unknown ones last). A `type`, or a Fjall store's
+/// `preset`, that names nothing is refused first, since deserializing could
+/// otherwise report either error.
+fn refuse_retired_tuning(
+    document: &::config::Config,
+    table: &str,
+    fields: &[&'static str],
+) -> Result<(), ConfigError> {
+    let is_set = |field: &str| {
+        document
+            .get::<::config::Value>(&format!("{table}.{field}"))
+            .is_ok()
+    };
+
+    let retired: Vec<&'static str> = RETIRED_TUNING
+        .iter()
+        .copied()
+        .filter(|field| is_set(field))
+        .collect();
+
+    if retired.is_empty() {
+        return Ok(());
+    }
+
+    let kind = format!("{table}.type");
+    let ephemeral = is_set("type")
+        && match document.get::<StoreKind>(&kind) {
+            Ok(kind) => kind == StoreKind::Ephemeral,
+            Err(error) => return Err(ConfigError::invalid([kind], error.to_string())),
+        };
+
+    let names = |set: &[&str]| -> String {
+        let names: Vec<String> = set.iter().map(|name| format!("`{name}`")).collect();
+        names.join(", ")
+    };
+
+    let mismatch = if ephemeral {
+        let mut unknown: Vec<String> = document
+            .get_table(table)
+            .map(|keys| keys.into_keys().collect())
+            .unwrap_or_default();
+        unknown.retain(|key| {
+            key != "type" && !fields.contains(&key.as_str()) && !retired.contains(&key.as_str())
+        });
+        unknown.sort();
+
+        let set: Vec<&str> = fields
+            .iter()
+            .copied()
+            .filter(|field| is_set(field))
+            .chain(retired)
+            .chain(unknown.iter().map(String::as_str))
+            .collect();
+        let message = format!(
+            "an ephemeral store takes no other field; remove {}",
+            names(&set)
+        );
+        Mismatch::new(std::iter::once("type").chain(set), message)
+    } else {
+        let preset = format!("{table}.preset");
+        if is_set("preset") {
+            if let Err(error) = document.get::<FjallPreset>(&preset) {
+                return Err(ConfigError::invalid([preset], error.to_string()));
+            }
+        }
+
+        let message = format!("tuning is set by `preset`; remove {}", names(&retired));
+        Mismatch::new(retired, message)
+    };
+
+    Err(mismatch.at(table))
 }
 
 fn check_compatibility(document: &::config::Config) -> Result<(), ConfigError> {
@@ -1914,48 +2011,6 @@ pub struct RedbMempoolConfig {
     pub cache: Option<usize>,
 }
 
-/// Options for opening the Fjall state backend. Not read from the file:
-/// `preset = "standard"` opens with the defaults.
-#[derive(Clone, Debug, Default)]
-pub struct FjallStateConfig {
-    /// Size (in MB) of memory allocated for caching.
-    pub cache: Option<usize>,
-    /// Maximum journal size in MB.
-    pub max_journal_size: Option<usize>,
-    /// Flush journal after each commit.
-    pub flush_on_commit: Option<bool>,
-    /// L0 compaction threshold (default: 4, lower = more aggressive).
-    pub l0_threshold: Option<u8>,
-    /// Number of background compaction worker threads.
-    pub worker_threads: Option<usize>,
-    /// Memtable size in MB before flush (default: 64).
-    pub memtable_size_mb: Option<usize>,
-}
-
-/// Options for opening the Fjall archive backend. Not read from the file:
-/// `preset = "standard"` opens with the defaults.
-///
-/// Block segments are always compressed, one zstd frame per block with the
-/// dictionary bundled in `dolos-flatfiles`; there is nothing to configure
-/// about them.
-#[derive(Clone, Debug, Default)]
-pub struct FjallArchiveConfig {
-    /// Where block segment files go; default the archive directory.
-    pub blocks_path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    pub cache: Option<usize>,
-    /// Maximum journal size in MB.
-    pub max_journal_size: Option<usize>,
-    /// Flush journal after each commit.
-    pub flush_on_commit: Option<bool>,
-    /// L0 compaction threshold (default: 4, lower = more aggressive).
-    pub l0_threshold: Option<u8>,
-    /// Number of background compaction worker threads.
-    pub worker_threads: Option<usize>,
-    /// Memtable size in MB before flush (default: 64).
-    pub memtable_size_mb: Option<usize>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2033,10 +2088,179 @@ mod tests {
             .to_string();
         assert!(err.contains("blocks_path"), "{err}");
 
-        let err = serde_json::from_value::<ArchiveStoreConfig>(json!({ "cache": 16 }))
+        let err = serde_json::from_value::<ArchiveStoreConfig>(json!({ "compression": "zstd" }))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("cache"), "{err}");
+        assert!(err.contains("compression"), "{err}");
+    }
+
+    fn table_check(toml: &str) -> Result<(), ConfigError> {
+        let document = ::config::Config::builder()
+            .add_source(::config::File::from_str(toml, ::config::FileFormat::Toml))
+            .build()
+            .unwrap();
+
+        check_tables(&document)
+    }
+
+    #[test]
+    fn stores_refuse_tuning_a_preset_sets() {
+        let retired = [
+            "cache",
+            "max_journal_size",
+            "flush_on_commit",
+            "l0_threshold",
+            "worker_threads",
+            "memtable_size_mb",
+        ];
+
+        for table in ["storage.state", "storage.archive"] {
+            for field in retired {
+                for selection in ["preset = \"standard\"", "type = \"fjall\""] {
+                    let toml = format!("[{table}]\n{selection}\n{field} = 1\n");
+
+                    match table_check(&toml) {
+                        Err(ConfigError::Invalid { keys, message }) => {
+                            assert_eq!(keys, [format!("{table}.{field}")]);
+                            assert_eq!(
+                                message,
+                                format!(
+                                    "in `[{table}]`, tuning is set by `preset`; remove `{field}`"
+                                )
+                            );
+                        }
+                        other => panic!("{toml}: expected a refusal, got {other:?}"),
+                    }
+                }
+            }
+        }
+
+        let err = table_check("[storage.state]\ncache = 1024\nl0_threshold = 8\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("tuning is set by `preset`; remove `cache`, `l0_threshold`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_ephemeral_store_is_not_pointed_at_a_preset() {
+        let cases = [
+            (
+                "[storage.archive]\ntype = \"ephemeral\"\ncache = 64\n",
+                &["storage.archive.type", "storage.archive.cache"][..],
+                "in `[storage.archive]`, an ephemeral store takes no other field; remove `cache`",
+            ),
+            (
+                "[storage.state]\ntype = \"ephemeral\"\npath = \"x\"\ncache = 1\n",
+                &[
+                    "storage.state.type",
+                    "storage.state.path",
+                    "storage.state.cache",
+                ],
+                "in `[storage.state]`, an ephemeral store takes no other field; remove `path`, \
+                 `cache`",
+            ),
+            (
+                "[storage.archive]\ntype = \"ephemeral\"\npath = \"a\"\nblocks_path = \"b\"\n\
+                 preset = \"standard\"\nl0_threshold = 8\n",
+                &[
+                    "storage.archive.type",
+                    "storage.archive.path",
+                    "storage.archive.blocks_path",
+                    "storage.archive.preset",
+                    "storage.archive.l0_threshold",
+                ],
+                "in `[storage.archive]`, an ephemeral store takes no other field; remove `path`, \
+                 `blocks_path`, `preset`, `l0_threshold`",
+            ),
+            (
+                "[storage.state]\ntype = \"ephemeral\"\npreset = \"standard\"\ncache = 1\n",
+                &[
+                    "storage.state.type",
+                    "storage.state.preset",
+                    "storage.state.cache",
+                ],
+                "in `[storage.state]`, an ephemeral store takes no other field; remove `preset`, \
+                 `cache`",
+            ),
+            (
+                "[storage.state]\ntype = \"ephemeral\"\nwal = 1\nmode = 1\nbackend = \"x\"\n\
+                 size = 1\ncompression = 1\ncache = 1\n",
+                &[
+                    "storage.state.type",
+                    "storage.state.cache",
+                    "storage.state.backend",
+                    "storage.state.compression",
+                    "storage.state.mode",
+                    "storage.state.size",
+                    "storage.state.wal",
+                ],
+                "in `[storage.state]`, an ephemeral store takes no other field; remove `cache`, \
+                 `backend`, `compression`, `mode`, `size`, `wal`",
+            ),
+        ];
+
+        for (toml, expected_keys, expected) in cases {
+            match table_check(toml) {
+                Err(ConfigError::Invalid { keys, message }) => {
+                    assert_eq!(keys, expected_keys, "{toml}");
+                    assert_eq!(message, expected, "{toml}");
+                }
+                other => panic!("{toml}: expected a refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_store_type_is_refused_before_its_tuning() {
+        match table_check("[storage.archive]\ntype = \"Ephemeral\"\ncache = 64\n") {
+            Err(ConfigError::Invalid { keys, message }) => {
+                assert_eq!(keys, ["storage.archive.type"]);
+                assert!(
+                    message.contains("variant constructor Ephemeral"),
+                    "{message}"
+                );
+                assert!(!message.contains("cache"), "{message}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_preset_is_refused_before_its_tuning() {
+        for selection in ["", "type = \"fjall\"\n"] {
+            let toml = format!("[storage.state]\n{selection}preset = \"fast\"\ncache = 1\n");
+
+            match table_check(&toml) {
+                Err(ConfigError::Invalid { keys, message }) => {
+                    assert_eq!(keys, ["storage.state.preset"], "{toml}");
+                    assert!(message.contains("variant constructor fast"), "{message}");
+                    assert!(!message.contains("cache"), "{message}");
+                }
+                other => panic!("{toml}: expected a refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_store_fields_list_only_current_ones() {
+        let err = serde_json::from_value::<StateStoreConfig>(json!({ "backend": "fjall" }))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "unknown field `backend`, expected one of `type`, `path`, `preset`"
+        );
+
+        let err = serde_json::from_value::<ArchiveStoreConfig>(json!({ "backend": "fjall" }))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "unknown field `backend`, expected one of `type`, `path`, `blocks_path`, `preset`"
+        );
     }
 
     #[test]

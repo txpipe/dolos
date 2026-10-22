@@ -13,8 +13,9 @@ This module implements the `ArchiveStore` trait using [Fjall](https://github.com
 | 5 | `archive-meta` | The store's compatibility identity | Single key read/write |
 
 `archive-tags` and `index-exact` are projections of the blocks. Keeping them
-here lets the history and its lookups commit in the same batch. Both
-keyspaces use `l0_threshold = 8` and `memtable_size_mb = 128`.
+here lets the history and its lookups commit in the same batch. Both keyspaces
+take the preset's index tuning (L0 threshold 8, 128 MiB memtable) rather than
+the 4 and 64 MiB of the others.
 
 ## Key Schemas
 
@@ -45,7 +46,7 @@ Key:   [dim_hash:8][key_hash:8][slot:8]  (24 bytes)
 Value: (empty)
 ```
 
-`key_hash` is `dolos_core::key_hash`, not a hash this crate decides: two backends that decided it differently would exchange records neither could then look up. For every dimension but `metadata` it is `xxh3_64(logical key)` big-endian; `metadata`'s logical key is already a `u64` label and is kept verbatim. The logical key is not recoverable from the store, which is why `TagRecord` carries the stored hash and nothing else.
+`key_hash` is `dolos_core::key_hash`, not a hash this crate decides: two backends that decided it differently would exchange records neither could then look up. For every dimension it is `xxh3_64(logical key)` big-endian. The logical key is not recoverable from the store, which is why `TagRecord` carries the stored hash and nothing else.
 
 ### Store metadata (`archive-meta`)
 

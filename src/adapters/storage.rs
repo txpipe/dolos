@@ -24,8 +24,8 @@ use dolos_core::{
     cache::Cost,
     compat::{reads_store_identity, IncompatibleStore},
     config::{
-        Compatibility, FjallArchiveConfig, FjallStateConfig, RedbMempoolConfig, RedbStateConfig,
-        RedbWalConfig, RootConfig, StateStoreConfig, StoreType,
+        Compatibility, RedbMempoolConfig, RedbStateConfig, RedbWalConfig, RootConfig,
+        StateStoreConfig, StoreType,
     },
     ArchiveIndexDelta, BlockBody, BlockSlot, CacheDiskTier, CacheEntry, CacheError, ChainPoint,
     EntityDelta, EntityKey, EntityValue, ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey,
@@ -784,10 +784,10 @@ impl StateStoreBackend {
     /// did not write (see [`admit`]).
     pub fn open_fjall(
         path: impl AsRef<Path>,
-        config: &FjallStateConfig,
+        preset: dolos_fjall::Preset,
     ) -> Result<Self, StateError> {
         let path = path.as_ref();
-        let store = dolos_fjall::StateStore::open(path, config)?;
+        let store = dolos_fjall::StateStore::open(path, preset)?;
 
         admit::<StateError>(
             "state",
@@ -818,7 +818,7 @@ impl StateStoreBackend {
         config: &StateStoreConfig,
     ) -> Result<Self, StateError> {
         match config.kind {
-            StoreType::Fjall { .. } => Self::open_fjall(path, &FjallStateConfig::default()),
+            StoreType::Fjall { preset } => Self::open_fjall(path, preset.into()),
             StoreType::Ephemeral => Self::in_memory(),
         }
     }
@@ -1104,10 +1104,11 @@ impl ArchiveStoreBackend {
     pub fn open_fjall(
         path: impl AsRef<Path>,
         schema: StateSchema,
-        config: &dolos_core::config::FjallArchiveConfig,
+        blocks_path: Option<&Path>,
+        preset: dolos_fjall::Preset,
     ) -> Result<Self, ArchiveError> {
         let path = path.as_ref();
-        let store = dolos_fjall::archive::ArchiveStore::open(schema, path, config)?;
+        let store = dolos_fjall::archive::ArchiveStore::open(schema, path, blocks_path, preset)?;
 
         admit::<ArchiveError>(
             "archive",
@@ -1161,12 +1162,8 @@ impl ArchiveStoreBackend {
         kind: StoreType,
     ) -> Result<Self, ArchiveError> {
         match kind {
-            StoreType::Fjall { .. } => {
-                let options = FjallArchiveConfig {
-                    blocks_path,
-                    ..Default::default()
-                };
-                Self::open_fjall(path, schema, &options)
+            StoreType::Fjall { preset } => {
+                Self::open_fjall(path, schema, blocks_path.as_deref(), preset.into())
             }
             StoreType::Ephemeral => Self::in_memory(schema),
         }
@@ -1794,7 +1791,7 @@ mod tests {
     /// `identity`, or by one that predates store identities.
     fn written_state(config: &RootConfig, identity: Option<&str>) {
         let path = config.storage.state_path().unwrap();
-        let store = dolos_fjall::StateStore::open(path, &FjallStateConfig::default()).unwrap();
+        let store = dolos_fjall::StateStore::open(path, dolos_fjall::Preset::Standard).unwrap();
 
         if let Some(identity) = identity {
             store.record_identity(identity).unwrap();
@@ -1820,7 +1817,8 @@ mod tests {
         let store = dolos_fjall::archive::ArchiveStore::open(
             StateSchema::default(),
             path,
-            &FjallArchiveConfig::default(),
+            None,
+            dolos_fjall::Preset::Standard,
         )
         .unwrap();
 
@@ -1873,7 +1871,7 @@ mod tests {
     /// memory, above its table.
     fn written_state_with_unreadable_cursor(config: &RootConfig) {
         let path = config.storage.state_path().unwrap();
-        let store = dolos_fjall::StateStore::open(&path, &FjallStateConfig::default()).unwrap();
+        let store = dolos_fjall::StateStore::open(&path, dolos_fjall::Preset::Standard).unwrap();
         let cursor = store
             .database()
             .keyspace("state-cursor", Default::default)
@@ -1980,7 +1978,7 @@ mod tests {
         let config = config_over(&temp.path().join("data"));
 
         let state = config.storage.state_path().unwrap();
-        dolos_fjall::StateStore::open(&state, &FjallStateConfig::default())
+        dolos_fjall::StateStore::open(&state, dolos_fjall::Preset::Standard)
             .unwrap()
             .shutdown()
             .unwrap();
@@ -2102,7 +2100,7 @@ mod tests {
     /// [`written_state_without_cursor`]'s store, left open.
     fn opened_state_without_cursor(config: &RootConfig) -> dolos_fjall::StateStore {
         let path = config.storage.state_path().unwrap();
-        let state = dolos_fjall::StateStore::open(path, &FjallStateConfig::default()).unwrap();
+        let state = dolos_fjall::StateStore::open(path, dolos_fjall::Preset::Standard).unwrap();
         state
             .record_identity(Compatibility::current().as_str())
             .unwrap();

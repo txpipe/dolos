@@ -30,6 +30,15 @@
 //!   [`dolos_snapshot::export::Following`] and is one function shared with the
 //!   registry publisher rather than a second implementation of contiguity.
 //!
+//! ## Only from a boundary
+//!
+//! A stele is cut from the state right after the first block of its epoch, and
+//! from nothing else (`crates/snapshot/PROFILE.md`, "Only the boundary cut is
+//! published"). The command checks that against the stores before it reports
+//! the plan, and refuses stores standing anywhere else, saying where they
+//! stand. A node that has synced past the boundary cannot reproduce that
+//! epoch's stele.
+//!
 //! ## stdout is the document
 //!
 //! The canonical inscription goes to `stdout` and everything else — the plan,
@@ -113,7 +122,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         producers: args.producers,
     };
 
-    let plan = super::planned(
+    let (plan, boundary) = super::planned(
         config,
         &stores,
         &selection,
@@ -122,7 +131,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     )?;
     let snapshot = StoreSnapshot::new(&stores.archive, &stores.state);
 
-    super::report_plan(&plan)?;
+    super::report_plan(&plan, &boundary)?;
 
     // Read and chained before the stores are walked: a predecessor this plan
     // does not follow is an hour of compression the operator does not have to

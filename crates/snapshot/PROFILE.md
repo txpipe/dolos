@@ -58,12 +58,12 @@ Content records per kind (Dolos profile):
 | Kind | Record | Order | Restore write path |
 |---|---|---|---|
 | `blocks` (per epoch) | `[slot, hash: bytes(32), body: bytes]`, body = raw wire CBOR verbatim | ascending slot, stream order for same-slot (Byron EBB) | `ArchiveWriter::apply` |
-| `indexes` (per epoch) | tags: `[0, dimension: tstr, key_hash: bytes(8), slot]` with `key_hash = xxh3_64(key)` BE — except dimension `metadata`, see below; exact: `[1, kind: tstr, key: bytes, slot]` for block-hash/block-number/tx | sorted, deduped | new `ArchiveWriter::append_prehashed` |
+| `indexes` (per epoch) | tags: `[0, dimension: tstr, key_hash: bytes(8), slot]` with `key_hash = xxh3_64(key)` BE for every dimension; exact: `[1, kind: tstr, key: bytes, slot]` for block-hash/block-number/tx | sorted, deduped | new `ArchiveWriter::append_prehashed` |
 | `log-{ns}` (per epoch, per log namespace, omitted when empty) | `[log_key: bytes, value: bytes]`, log_key = `slot(8, BE) ‖` the namespace's typed key (see key layouts), value = stored EntityValue verbatim | `log_key` | `ArchiveWriter::write_log` into the namespace the kind names |
 | `state-{ns}` (tip or retained dump, per state namespace, `scope.shard` = 0..`parameters.shards[ns]`-1) | `[key: bytes, value: bytes]` | `key`; shard = first nibble of `key[0]` for a 16-way namespace, 0 for a single blob | dispatch on the kind: `state-utxos` → chunked `StateWriter::apply_utxoset` and derived `apply_utxo_tags` in the same commit, else `write_entity` into the namespace the kind names |
 | `digests` (tip, optional) | `[immutable_number, chunk: bytes(32), primary: bytes(32), secondary: bytes(32)]`, each sha256 over the raw file bytes | ascending `immutable_number` | none — verification metadata, not written to stores |
 
-One exception to the tag hashing rule is normative for `indexes` v1: records in dimension `metadata` carry the logical u64 metadata label **verbatim** (big-endian) in `key_hash`, never hashed. The stores keep metadata labels as raw labels rather than hashes, and the layer ships the stored form — that is the whole point of the pre-hashed design. `parameters.indexKeyHash` therefore describes every dimension *except* `metadata`. A publisher that hashes metadata labels produces structurally valid records that restore cleanly but can never be matched by a metadata query; conformance tooling must check this dimension specifically (#1149 tracks whether a future media-type version unifies the rule).
+Every tag dimension, `metadata` included, carries `xxh3_64` of its logical key in `key_hash`, so `parameters.indexKeyHash` describes every dimension. The stores keep only that hash, and the layer ships the stored form — that is the whole point of the pre-hashed design.
 
 State namespaces: the entity namespaces from `dolos_cardano::model::build_schema()` (key = the stored bytes of the namespace's typed key, value = stored minicbor verbatim) plus `utxos` (key = `tx_hash(32) ‖ output_index(4, BE)`, value = CBOR `[era: uint, body: bytes]`). The chain point lives in the inscription's `position`, not in a layer. Live-UTxO tags (`utxo::*`) are not shipped; they are rebuilt at restore into the state store via `utxo_index_delta_from_utxo_delta`.
 
@@ -97,13 +97,15 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 | `policy-mint-chunks` | — | `PolicyKey ‖ u32`: `policy(28) ‖ chunk(4)`, 32 B |
 | `pool-epochs` | — | `PoolKey`, 28 B |
 | `pools` | `PoolKey`: operator hash, 28 B | — |
-| `proposals` | `ProposalKey`: `idx(4) ‖ tx(32)`, 36 B | — |
+| `proposals` | `ProposalKey`: `tx(32) ‖ idx(4)`, 36 B | — |
 | `scripts` | `ScriptKey`: script hash, 28 B | — |
 | `utxos` | `tx_hash(32) ‖ output_index(4)`, 36 B | — |
 
 A state row under a log-only namespace (`—` in the state key column) is never written; one that arrives is held to the log's key kind.
 
 `state-gov` carries the one `GovState` value. Field 9, `dissolved_committee`, is the last seated committee while a no-confidence keeps the committee dissolved, as `[committee, auths, action, epoch, seated_by]`: the members and threshold, each member's authorization history as it stood, the enacted `NoConfidence` action id, the first epoch without a seated committee, and the action id that seated the committee, absent for the Conway-genesis committee, which leaves a four-element array. It is absent while a committee is seated.
+
+`state-pools` carries `PoolState` values. Field 17, `calidus`, is the pool's highest-nonce CIP-151 registration signed by its cold key in a valid transaction, as `[pub_key, nonce, tx_hash, slot]`: the 32-byte public key, or null for a revocation (an all-zero key), the registration's nonce, and the transaction and slot that made it. A registration replaces it only with a higher nonce, so a revocation keeps its nonce. It is absent before any registration.
 
 `state-metadata-labels` carries `MetadataLabelState` values as CBOR `[tx_count: uint]`, with `tx_count` at field 0. Its key is the metadata label in big-endian byte order. Revision 2 uses the exact 8-byte u64 key; the value encoding is unchanged.
 
@@ -143,13 +145,39 @@ The `digests` layer covers the immutable files fully contained in the stele's bl
 
 ### The cut point and the boundary sliver
 
-A stele is cut by syncing with `chain.stop_epoch = E`, and the halt is **one block past the epoch boundary**, not on it. The sync crosses the boundary — Ewrap closes epoch E-1, Estart opens epoch E — and then applies the first block of epoch E before stopping. That block is what makes the stele addressable: Estart alone leaves the cursor a bare `ChainPoint::Slot` carrying no block hash (`estart::commit_finalize`), and `position.point` must carry one for a stele to be verifiable against a chain. The anchoring block may itself sit exactly on `epoch_start(E)`, in which case the sliver is one slot wide.
+A stele is cut by syncing with `dolos sync --stop-epoch E`, and the halt is **one block past the epoch boundary**, not on it. The sync crosses the boundary — Ewrap closes epoch E-1, Estart opens epoch E — and then applies the first block of epoch E before stopping. That block is what makes the stele addressable: Estart alone leaves the cursor a bare `ChainPoint::Slot` carrying no block hash (`estart::commit_finalize`), and `position.point` must carry one for a stele to be verifiable against a chain. The anchoring block may itself sit exactly on `epoch_start(E)`, in which case the sliver is one slot wide.
 
 So the epoch windows a stele covers are `0..=E`: epochs `0..E-1` **complete**, plus epoch E's **boundary sliver** — the window that opens at `epoch_start(E)` and closes at the anchoring block. The sliver is normative, not an artifact of where a publisher happened to stop.
 
 It is load-bearing because of how boundary data is keyed. **All of epoch X's boundary logs key at `epoch_start(X)`**: Ewrap writes the *ending* epoch's closing logs and its completed `EpochState` at `epoch_start(X)` when X is the epoch it closes, and Estart writes the *starting* epoch's opening account logs at `epoch_start(X)` when X is the epoch it opens. One temporal key per epoch, and nothing straddles two windows. Epoch E's estart logs therefore live inside the sliver and nowhere else: a stele that dropped the sliver in the name of a clean boundary would ship a state tip whose opening logs are in no layer at all, and a restored node would never regenerate them.
 
-`sequence`, the immutable tag's E, and `position.epoch` are consequently **one number**: the epoch the cursor stands in, which is also the last epoch the layers cover. The operator-facing form of the same rule is *configure the epoch you want the node to start in* — `stop_epoch = E` produces the stele tagged `epoch-E`.
+`sequence`, the immutable tag's E, and `position.epoch` are consequently **one number**: the epoch the cursor stands in, which is also the last epoch the layers cover. The operator-facing form of the same rule is *stop at the epoch you want the node to start in* — `--stop-epoch E` produces the stele tagged `epoch-E`.
+
+#### Only the boundary cut is published
+
+**A stele captures the state immediately after the first block of its sequence epoch, and no other state.** The cut above is not one choice among several a publisher may make: every path that builds layers — directory and registry publication, a registry dry run, `dolos snapshot digest` and `verify --reproduce` — establishes it from the stores before a layer is written, and refuses otherwise. The check is `dolos_snapshot::boundary::check`, and the export itself runs it, so a library caller holding a hand-built `Plan` cannot reach the layers without it. There is no flag that skips it.
+
+The evidence is the stores' own, never configuration and never arithmetic on the cursor's slot — a node can be configured for one epoch and stand in another, and an epoch's first block rarely sits on its first slot:
+
+1. The state store's cursor is the plan's point, hash included, and the plan's sequence is the epoch that point stands in.
+2. The archive holds the block at the cursor, identified by its hash among the blocks at its slot.
+3. The block before it in the archive, in chain order, is the block its header names as its parent.
+4. That parent stands before `epoch_start(E)`.
+5. The archive ends at the cursor's block.
+
+Steps 3 and 4 together prove the cursor is the epoch's first block: the parent link rules out anything between the two, however many empty slots separate them. A Byron epoch-boundary block, which shares its slot with the first main block after it, is the epoch's first block — its parent is the last main block of E-1 — while that main block is its second, whose parent is the boundary block in E.
+
+Step 5 keeps the stele to the state. Export reads logs and indexes by slot alone, and blocks applied after the cursor write rows inside the stele's windows: Ewrap closing epoch E keys E's `EpochState` at `epoch_start(E)`, inside the sliver, and epoch rewards and period seals key rows at earlier epoch starts; a main block beside a Byron boundary block shares the cursor's own slot. A sync stopped at E stores nothing past E's first block. An archive that holds more ran on past a rebuilt state, such as `doctor rebuild-state --stop-epoch` over a synced archive, and it is refused.
+
+An archive that cannot show step 3 is **insufficient evidence**, and is refused rather than trusted: one pruned past the parent, or one that begins at the cursor because the node was bootstrapped there. A pruned archive's first remaining block says nothing about what came before it. The refusal names the cursor and the epoch, and says which store to publish from instead.
+
+**Epoch 0 is never published.** No boundary opens it, so a stele at sequence 0 would follow no transition; the first stele of any chain is `epoch-1`.
+
+**A node past the boundary cannot publish that epoch.** Its stores no longer hold the boundary state, and nothing reconstructs it. The refusal says so and points at the remedies: restore the `epoch-E` stele, or let the node run on to the next boundary and cut that one with `dolos sync --stop-epoch E+1`.
+
+**The stores must be still for the duration.** The check reads them once, before the walk; it does not freeze them, and no cursor check could make an export over stores something else is writing to consistent. Stillness comes from how the stores are opened: the storage backends lock their directories, so no second process — a daemon included — writes to stores a `dolos snapshot` command holds, and an in-process host reads through the headless replay API, whose snapshot is a borrow that no import can run beside.
+
+**Reading is unaffected.** The rule is a publisher eligibility check. A restore, `inspect`, and transport `verify` read any well-formed stele exactly as before. What changes is reproduction: `digest` and `verify --reproduce` only run over stores standing on a boundary, so a historical stele published from mid-epoch stores before this rule can be verified for its transport but no longer reproduced.
 
 ### Position, parameters and the inscription
 
@@ -218,9 +246,9 @@ and it counts layers rather than epochs.)
 ### Publisher pipeline
 
 1. Restore the publisher node from the previous stele (self-hosting delta pull; first run via Mithril).
-2. Sync with `chain.stop_epoch = E` until `StopEpochReached` — the state crosses the boundary and lands on the **first block of epoch E**, the block that gives `position.point` a hash.
+2. Sync with `dolos sync --stop-epoch E` until `StopEpochReached` — the state crosses the boundary and lands on the **first block of epoch E**, the block that gives `position.point` a hash. The publish establishes that from the stores before it writes a layer (see "Only the boundary cut is published").
 3. The Stelae Cardano publisher uploads only the newly closed epoch's layers and epoch E's boundary sliver; fresh state layers + inscription; tag `epoch-E`, move `latest`. On networks with a Mithril aggregator, fetch the immutable-file digest list from the aggregator's digest route, verify it against a certificate, and write the `digests` layer for the files within the boundary.
-4. Determinism job: an independent runner that synced by any means runs `dolos snapshot digest` and alerts on inscription mismatch.
+4. Determinism job: an independent runner that synced to the same boundary by any means runs `dolos snapshot digest` and alerts on inscription mismatch.
 5. Matching verifiers sign and push referrer signatures; clients enforce k-of-n.
 
 Registry hygiene: keep a trailing window of `epoch-E` tags (e.g. 12); untagged state blobs are reclaimed by registry GC; epoch blobs remain referenced by later manifests. Trust evidence for reclaimed steles survives in the `history` of every later inscription.

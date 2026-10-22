@@ -11,7 +11,7 @@
 
 use dolos_core::{
     save_entity_at, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain, EntityDelta as _,
-    NsKey, RangeOf, StateEntity, StateStore, StateWriter,
+    Genesis, NsKey, RangeOf, StateEntity, StateStore, StateWriter,
 };
 use tracing::{debug, instrument, trace, warn};
 
@@ -19,6 +19,29 @@ use crate::{
     forks, AccountKey, AccountState, CardanoEntity, DRepState, EpochState, EraKey, EraState,
     GovState, PoolState, ProposalState,
 };
+
+/// Close `previous` at `starting_epoch` and open the era that `new_version`
+/// starts there, sized with that protocol's epoch and slot lengths.
+pub(super) fn split_era(
+    mut previous: EraState,
+    starting_epoch: u64,
+    new_version: EraKey,
+    genesis: &Genesis,
+) -> (EraState, EraState) {
+    previous.define_end(starting_epoch);
+
+    let consts = forks::protocol_constants(new_version.into(), genesis);
+
+    let new = EraState {
+        start: previous.end.clone().unwrap(),
+        end: None,
+        epoch_length: consts.epoch_length,
+        slot_length: consts.slot_length,
+        protocol: new_version.into(),
+    };
+
+    (previous, new)
+}
 
 /// Era transition data collected from state.
 struct EraTransitionData {
@@ -45,21 +68,16 @@ impl super::WorkContext {
 
         let previous = state.read_entity_typed::<EraState>(&transition.prev_version)?;
 
-        let Some(mut previous) = previous else {
+        let Some(previous) = previous else {
             return Err(BrokenInvariant::BadBootstrap.into());
         };
 
-        previous.define_end(self.starting_epoch_no());
-
-        let consts = forks::protocol_constants(transition.new_version.into(), &self.genesis);
-
-        let new = EraState {
-            start: previous.end.clone().unwrap(),
-            end: None,
-            epoch_length: consts.epoch_length,
-            slot_length: consts.slot_length,
-            protocol: transition.new_version.into(),
-        };
+        let (previous, new) = split_era(
+            previous,
+            self.starting_epoch_no(),
+            transition.new_version,
+            &self.genesis,
+        );
 
         Ok(Some(EraTransitionData {
             prev_key: transition.prev_version,

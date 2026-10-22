@@ -103,13 +103,7 @@ pub mod archive {
         ACCOUNT_WITHDRAWALS = "account_withdrawals";
 
         /// Transaction metadata labels.
-        ///
-        /// Sourced from core rather than spelled again: it stays a
-        /// dimension-list entry like any other, but the string itself has one
-        /// definition, because this is the dimension whose logical key the
-        /// stores keep verbatim instead of hashing (see
-        /// [`dolos_core::key_hash`]).
-        METADATA = dolos_core::VERBATIM_KEY_DIMENSION;
+        METADATA = "metadata";
 
         /// DRep certificates (registration, deregistration and update) by
         /// the CIP-129 DRep id bytes: the key-or-script header, then the

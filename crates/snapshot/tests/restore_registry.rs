@@ -47,18 +47,18 @@ mod watcher;
 
 use dolos_cardano::indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta};
 use dolos_core::{
-    ArchiveStore, BlockHash, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey,
-    StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, StateStore,
+    TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
 };
 use dolos_snapshot::{
     export::Plan,
     facade::RestoreInput,
     registry::{self, Point},
     restore::{self, default_budget, progress_path_in, Checkpoint},
-    state_layer_count, Error, Network, LOG_NAMESPACES, NAMESPACES, UTXOS,
+    state_layer_count, Error, LOG_NAMESPACES, NAMESPACES, UTXOS,
 };
 use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores};
-use node::{harness, Blank};
+use node::{harness, plan_at_boundary, Blank};
 use registry_fixture::Fixture;
 use stelae::{
     frame::Limits,
@@ -81,8 +81,9 @@ const EPOCH_0: usize = 4;
 /// Its logs would key at `epoch_start(1)`, and the harness writes none there.
 const EPOCH_1: usize = 2;
 
-/// Layers a publish of sequence 0 writes: epoch 0 plus the state tip.
-const PER_PUBLISH: usize = EPOCH_0 + state_layer_count();
+/// Layers a publish of sequence 1 writes: epoch 0, epoch 1's sliver and the
+/// state tip.
+const PER_PUBLISH: usize = EPOCH_0 + EPOCH_1 + state_layer_count();
 
 // ---------------------------------------------------------------------------
 // The node, and the two chain points it publishes from
@@ -90,12 +91,12 @@ const PER_PUBLISH: usize = EPOCH_0 + state_layer_count();
 
 /// The harness ledger and the two plans it publishes.
 ///
-/// The same shape `tests/publish.rs` uses and for the same reason: the first
-/// cursor sits on the epoch-0 boundary so epoch 0's window is unclamped, and
-/// the second one slot past it, so the two steles share epoch 0's layers
-/// exactly and differ in their tips. That is the shape the resume rule is
-/// about.
+/// The same shape as `node::Node` and for the same reason: each plan stands on
+/// its own boundary, in its own stores, so the two steles share epoch 0's
+/// layers exactly and differ in epoch 1 and their tips. That is the shape the
+/// resume rule is about.
 struct Node {
+    earlier: ToyDomain<MemoryStores>,
     domain: ToyDomain<MemoryStores>,
     magic: u64,
     first: Plan,
@@ -104,29 +105,16 @@ struct Node {
 
 impl Node {
     fn build() -> Self {
+        let earlier = harness::<MemoryStores>();
         let domain = harness::<MemoryStores>();
 
-        let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
-
         let magic = u64::from(domain.genesis().network_magic());
-        let network = Network::for_magic(magic);
-        let boundary = summary.epoch_start(1);
 
-        let point = |slot| ChainPoint::Specific(slot, BlockHash::new([0xab; 32]));
-
-        let first = Plan::new(
-            &summary,
-            network.clone(),
-            point(boundary - 1),
-            Default::default(),
-        )
-        .unwrap();
-        let second = Plan::new(&summary, network, point(boundary), Default::default()).unwrap();
-
-        assert_eq!(first.sequence, 0);
-        assert_eq!(second.sequence, 1);
+        let first = plan_at_boundary(&earlier, 1, Default::default());
+        let second = plan_at_boundary(&domain, 2, Default::default());
 
         Self {
+            earlier,
             domain,
             magic,
             first,
@@ -134,12 +122,23 @@ impl Node {
         }
     }
 
+    /// The stores `plan` was made from.
+    fn stores(&self, plan: &Plan) -> &ToyDomain<MemoryStores> {
+        if plan.sequence == self.first.sequence {
+            &self.earlier
+        } else {
+            &self.domain
+        }
+    }
+
     fn publish(&self, repository: &Registry, plan: &Plan) {
+        let stores = self.stores(plan);
+
         registry::publish(
             registry::Publishing::new(repository),
             plan,
-            self.domain.archive(),
-            self.domain.state(),
+            stores.archive(),
+            stores.state(),
             None,
             &Observer::silent(),
         )
@@ -240,8 +239,8 @@ fn a_registry_restore_is_a_directory_restore() {
         dolos_snapshot::export::export(
             &stele,
             &node.first,
-            node.domain.archive(),
-            node.domain.state(),
+            node.earlier.archive(),
+            node.earlier.state(),
             None,
             &dolos_snapshot::export::First,
             &Observer::silent(),
@@ -287,23 +286,23 @@ fn a_registry_restore_is_a_directory_restore() {
     assert_stores_match(&from_registry, &from_dir);
 
     // And the records are the published node's, not merely each other's — the
-    // check that both transports did not reproduce one wrong thing.
-    //
-    // The *cursor* is deliberately not in this comparison. `Node::build` stands
-    // at a synthetic epoch boundary so that epoch 0's window publishes
-    // unclamped, which is a chain point the harness ledger never reached; the
-    // restored node carries the stele's position, correctly, and that is not the
-    // domain's. What a stele has to reproduce is the data, and that is what is
-    // asserted.
+    // check that both transports did not reproduce one wrong thing. The cursor
+    // included: a stele stands where its stores stood.
+    assert_eq!(
+        from_registry.state().read_cursor().unwrap(),
+        node.earlier.state().read_cursor().unwrap(),
+        "the cursor the node published from"
+    );
+
     assert_eq!(
         utxos_of(from_registry.state()),
-        utxos_of(node.domain.state()),
+        utxos_of(node.earlier.state()),
         "the utxo set the node published"
     );
 
     assert_eq!(
         blocks_of(&from_registry.archive),
-        blocks_of(node.domain.archive()),
+        blocks_of(node.earlier.archive()),
         "the blocks the node published"
     );
 
@@ -314,7 +313,7 @@ fn a_registry_restore_is_a_directory_restore() {
 
         assert_eq!(
             entities_of(from_registry.state(), ns),
-            entities_of(node.domain.state(), ns),
+            entities_of(node.earlier.state(), ns),
             "entities under {ns}"
         );
     }
@@ -454,9 +453,9 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<MemoryStores>::open();
 
-    // Sequence 0, interrupted at its first state shard: every epoch layer it
+    // Sequence 1, interrupted at its first state shard: every epoch layer it
     // carries commits, the tip does not.
-    let first = Point::Epoch(0).pull(&repository).unwrap();
+    let first = Point::Epoch(1).pull(&repository).unwrap();
     let identity = first.read_inscription().unwrap().digest().unwrap();
     let plan = restore::plan(&first, node.magic, None).unwrap();
     let index = first.blob_index().unwrap();
@@ -487,10 +486,14 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
         .completed
         .len();
 
-    assert_eq!(seeded, epoch_layers, "epoch 0's layers all committed");
+    assert_eq!(
+        seeded, epoch_layers,
+        "epoch 0's and epoch 1's layers all committed"
+    );
 
-    // Now catch up to sequence 1 — which describes epoch 0 with the same
-    // identities, epoch 1 besides, and a tip of its own.
+    // Now catch up to sequence 2 — which describes epoch 0 with the same
+    // identities, epoch 1 whole rather than its sliver, epoch 2's sliver, and a
+    // tip of its own.
     let resumed = restore_from(
         &fixture.repository("dolos/delta"),
         Point::Latest,
@@ -502,22 +505,22 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
     .unwrap();
 
     assert_eq!(
-        resumed.layers_skipped, seeded,
+        resumed.layers_skipped, EPOCH_0,
         "epoch 0's layers were kept across the inscription change"
     );
 
     assert_eq!(
         resumed.layers_fetched,
-        EPOCH_1 + state_layer_count(),
-        "epoch 1's two layers and every state layer, and nothing else"
+        2 * EPOCH_1 + state_layer_count(),
+        "epoch 1's and epoch 2's two layers each and every state layer, and nothing else"
     );
 
-    // The point resolved to what it claimed. `latest` is sequence 1 here, and
-    // `epoch-0` is still the stele the first half of this test read.
+    // The point resolved to what it claimed. `latest` is sequence 2 here, and
+    // `epoch-1` is still the stele the first half of this test read.
     let latest = Point::Latest.pull(&repository).unwrap();
-    assert_eq!(latest.read_inscription().unwrap().sequence, 1);
+    assert_eq!(latest.read_inscription().unwrap().sequence, 2);
     assert_eq!(
-        Point::Epoch(0)
+        Point::Epoch(1)
             .pull(&repository)
             .unwrap()
             .read_inscription()
@@ -548,7 +551,7 @@ fn a_point_that_names_no_stele_is_refused() {
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<MemoryStores>::open();
 
-    // The repository holds sequence 0 and nothing else.
+    // The repository holds sequence 1 and nothing else.
     let err = restore_from(
         &repository,
         Point::Epoch(97),

@@ -8,8 +8,7 @@
 //!
 //! 1. **The round trip is exact.** Records carry the stored key form, not a
 //!    logical key, because the logical key is not on disk. A store rebuilt from
-//!    them has to answer its own queries identically — including `metadata`,
-//!    the one dimension whose stored bytes are not a hash of anything.
+//!    them has to answer its own queries identically.
 //!
 //! 2. **The order is the content.** Layers are defined as sorted record
 //!    sequences, so an iterator that yields the right records in the wrong
@@ -53,8 +52,8 @@ const SEEDED_DIMENSIONS: [TagDimension; 4] = [
     archive_dimensions::METADATA,
 ];
 
-/// Transaction metadata labels. `metadata` keys are u64 labels, and the store
-/// keeps the label verbatim rather than hashing it.
+/// Transaction metadata labels. `metadata` keys are u64 labels, hashed like
+/// every other dimension's keys.
 const METADATA_LABELS: [u64; 3] = [674, 721, 1990];
 
 /// The shape of a seed: how many blocks of what, over how many epochs.
@@ -307,8 +306,8 @@ macro_rules! conformance_suite {
             }
 
             #[test]
-            fn tag_key_hashes_are_xxh3_except_for_metadata_labels() {
-                super::tag_key_hashes_are_xxh3_except_for_metadata_labels::<$backend>();
+            fn every_tag_key_hash_is_xxh3() {
+                super::every_tag_key_hash_is_xxh3::<$backend>();
             }
 
             #[test]
@@ -329,6 +328,11 @@ macro_rules! conformance_suite {
             #[test]
             fn slots_by_tag_are_ordered_in_both_directions() {
                 super::slots_by_tag_are_ordered_in_both_directions::<$backend>();
+            }
+
+            #[test]
+            fn ebb_leaves_the_previous_block_number_alone() {
+                super::ebb_leaves_the_previous_block_number_alone::<$backend>();
             }
         }
     };
@@ -548,8 +552,6 @@ fn epoch_slice_round_trips_through_append_prehashed<B: Backend>() {
     let (target, _target_guard) = B::open();
     restore(&target, records);
 
-    let mut checked_metadata = false;
-
     for (dimension, key, _) in seeded.tags_in(&exported) {
         let from_source = slots_for_tag(&source, dimension, key, &exported);
         let from_target = slots_for_tag(&target, dimension, key, &exported);
@@ -562,18 +564,7 @@ fn epoch_slice_round_trips_through_append_prehashed<B: Backend>() {
             from_source, from_target,
             "restored store disagrees on dimension {dimension}"
         );
-
-        if *dimension == archive_dimensions::METADATA {
-            checked_metadata = true;
-        }
     }
-
-    assert!(
-        checked_metadata,
-        "the metadata dimension must be part of the round trip: it is the one \
-         whose stored key is a raw label rather than a hash, so it is the \
-         record most likely to survive a lossy round trip unnoticed"
-    );
 
     // The slice really is a slice: nothing outside the exported epoch came
     // along for the ride.
@@ -733,15 +724,9 @@ fn exact_records_are_sorted_by_kind_and_key<B: Backend>() {
 }
 
 /// ADR-004 specifies index layer tag records as
-/// `[0, dimension, key_hash = xxh3_64(key), slot]`. That description holds for
-/// every dimension the store keeps *except* `metadata`, whose logical key is
-/// already a u64 label and is stored verbatim.
-///
-/// This test pins the actual behaviour of both cases, because the format's
-/// cross-implementation promise depends on which one a reader implements: a
-/// third-party publisher that hashes metadata labels produces records this
-/// store cannot use, and vice versa.
-fn tag_key_hashes_are_xxh3_except_for_metadata_labels<B: Backend>() {
+/// `[0, dimension, key_hash = xxh3_64(key), slot]`, and that holds for every
+/// dimension the store keeps, `metadata` included.
+fn every_tag_key_hash_is_xxh3<B: Backend>() {
     use xxhash_rust::xxh3::xxh3_64;
 
     let (store, _guard) = B::open();
@@ -750,37 +735,18 @@ fn tag_key_hashes_are_xxh3_except_for_metadata_labels<B: Backend>() {
     let slots = epoch_slots(EPOCHS[0]);
     let records = collect_all_tags(&store, slots.clone());
 
-    let mut checked_hashed = 0;
-    let mut checked_labels = 0;
+    let mut checked = BTreeSet::new();
 
     for (dimension, key, slot) in seeded.tags_in(&slots) {
-        let expected_hash = if *dimension == archive_dimensions::METADATA {
-            checked_labels += 1;
-            // Stored verbatim: the 8 key bytes *are* the stored key form.
-            let mut raw = [0u8; 8];
-            raw.copy_from_slice(key);
-            raw
-        } else {
-            checked_hashed += 1;
-            xxh3_64(key).to_be_bytes()
-        };
-
-        let expected = TagRecord::new(dimension, expected_hash, *slot);
+        let expected = TagRecord::new(dimension, xxh3_64(key).to_be_bytes(), *slot);
         assert!(
             records.contains(&expected),
             "expected record {expected:?} for dimension {dimension}"
         );
+        checked.insert(*dimension);
     }
 
-    assert!(checked_hashed > 0 && checked_labels > 0);
-
-    // And the two schemes really do differ, so the exception is not a
-    // distinction without a difference.
-    let label = METADATA_LABELS[0];
-    assert_ne!(
-        label.to_be_bytes(),
-        xxh3_64(&label.to_be_bytes()).to_be_bytes()
-    );
+    assert_eq!(checked, SEEDED_DIMENSIONS.into_iter().collect());
 }
 
 /// A rollback has to leave the store where it started. The archive keyspaces
@@ -1189,6 +1155,7 @@ fn measure_banded_publish_cost() {
     let started = std::time::Instant::now();
     let written = seed_deltas(&spec, &mut |delta| apply(&store, &delta));
     let seeding = started.elapsed();
+    let tip = boundary_after(&store, epochs);
 
     println!("--- banded publish cost ---");
     println!(
@@ -1212,7 +1179,7 @@ fn measure_banded_publish_cost() {
         let before = max_rss_bytes();
         let started = std::time::Instant::now();
 
-        let (inscription, temp) = publish_at_band(&store, epochs, band);
+        let (inscription, temp) = publish_at_band(&store, &tip, band);
 
         let elapsed = started.elapsed();
         let peak = max_rss_bytes();
@@ -1239,15 +1206,35 @@ fn measure_banded_publish_cost() {
     );
 }
 
-/// Publish the seeded archive at `band`, into a directory that lives as long
-/// as the returned guard.
+/// Append the two empty blocks that put a publish on the boundary opening the
+/// epoch after the seeded ones — the last block before it and its first — and
+/// return the point of the second.
+#[cfg(unix)]
+fn boundary_after<S: CoreArchiveStore>(store: &S, epochs: u64) -> dolos_core::ChainPoint {
+    use dolos_core::ArchiveWriter as _;
+    use dolos_testing::blocks::make_conway_block_with_prev;
+
+    let start = epochs * EPOCH_LEN;
+    let (last, last_body) = make_conway_block_with_prev(start - 1, None, 0);
+    let (first, first_body) = make_conway_block_with_prev(start, last.hash(), 1);
+
+    let writer = store.start_writer().expect("archive writer");
+    writer.apply(&last, &last_body).expect("apply");
+    writer.apply(&first, &first_body).expect("apply");
+    writer.commit().expect("commit");
+
+    first
+}
+
+/// Publish the seeded archive at `band`, standing at `tip`, into a directory
+/// that lives as long as the returned guard.
 #[cfg(unix)]
 fn publish_at_band<S: CoreArchiveStore>(
     store: &S,
-    epochs: u64,
+    tip: &dolos_core::ChainPoint,
     band: usize,
 ) -> (dolos_snapshot::inscription::Inscription, tempfile::TempDir) {
-    use dolos_core::{ChainPoint, StateStore as _, StateWriter as _};
+    use dolos_core::{StateStore as _, StateWriter as _};
     use dolos_snapshot::{
         export::{IndexBand, Plan},
         Network,
@@ -1256,22 +1243,24 @@ fn publish_at_band<S: CoreArchiveStore>(
     let temp = tempfile::tempdir().expect("tempdir");
 
     let state = dolos_core::builtin::MemoryStateStore::new();
+    let summary = cost_summary();
 
-    // The publish stands on the last slot the seed wrote to, so its plan covers
-    // every epoch in the store and nothing beyond it.
-    let tip = ChainPoint::Specific(
-        epochs * EPOCH_LEN - 1,
-        dolos_core::BlockHash::new([0xab; 32]),
-    );
-
+    // The publish stands on the boundary after the epochs the seed wrote to,
+    // so its plan covers every one of them and the sliver beyond.
     let writer = state.start_writer().expect("state writer");
+    writer
+        .write_entity_typed::<dolos_cardano::model::EraState>(
+            &dolos_cardano::EraKey::from(6),
+            &cost_era(),
+        )
+        .expect("era");
     writer.set_cursor(tip.clone()).expect("set cursor");
     writer.commit().expect("commit");
 
     let plan = Plan::new(
-        &cost_summary(),
+        &summary,
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
-        tip,
+        tip.clone(),
         Default::default(),
     )
     .expect("plan")
@@ -1298,22 +1287,24 @@ fn publish_at_band<S: CoreArchiveStore>(
 fn cost_summary() -> dolos_cardano::eras::ChainSummary {
     let mut chain = dolos_cardano::eras::ChainSummary::default();
 
-    chain.append_era(
-        6,
-        dolos_cardano::model::EraState {
-            start: dolos_cardano::EraBoundary {
-                epoch: 0,
-                slot: 0,
-                timestamp: 0,
-            },
-            end: None,
-            epoch_length: EPOCH_LEN,
-            slot_length: 1,
-            protocol: 6,
-        },
-    );
+    chain.append_era(6, cost_era());
 
     chain
+}
+
+#[cfg(unix)]
+fn cost_era() -> dolos_cardano::model::EraState {
+    dolos_cardano::model::EraState {
+        start: dolos_cardano::EraBoundary {
+            epoch: 0,
+            slot: 0,
+            timestamp: 0,
+        },
+        end: None,
+        epoch_length: EPOCH_LEN,
+        slot_length: 1,
+        protocol: 6,
+    }
 }
 
 /// `ArchiveIndexDelta` carries its block and transaction hashes as `Vec<u8>`,
@@ -1415,6 +1406,75 @@ fn malformed_exact_queries_miss<B: Backend>() {
     let mut extended = hash.clone();
     extended.push(0x00);
     assert_eq!(store.slot_by_block_hash(&extended).unwrap(), None);
+}
+
+/// A Byron epoch-boundary block reports the previous main block's number.
+/// Indexed through the same path as sync, it must neither take over block N's
+/// `block_num` entry nor delete it when the EBB is rolled back.
+fn ebb_leaves_the_previous_block_number_alone<B: Backend>() {
+    use dolos_cardano::indexes::CardanoIndexDeltaBuilder;
+    use dolos_testing::blocks::{
+        byron_ebb_slot, make_byron_block, make_byron_ebb, BYRON_EPOCH_LENGTH,
+    };
+    use pallas::crypto::hash::Hash;
+    use pallas::ledger::traverse::MultiEraBlock;
+
+    const N: u64 = 3;
+
+    // The fixture EBB's number is its epoch, so it opens epoch N.
+    let ebb_slot = byron_ebb_slot(N);
+    let (_, main_n) = make_byron_block(N - 1, BYRON_EPOCH_LENGTH - 20, N, Hash::new([0x00; 32]));
+    let (_, ebb) = make_byron_ebb(N, Hash::new([0x00; 32]));
+    let (_, main_next) = make_byron_block(N, 20, N + 1, Hash::new([0x00; 32]));
+
+    let index = |raw: &[u8]| {
+        let block = MultiEraBlock::decode(raw).expect("decode block");
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.index_block(&block, &std::collections::HashMap::new());
+        (block.number(), builder.build())
+    };
+
+    let (ebb_number, ebb_delta) = index(&ebb);
+    assert_eq!(ebb_number, N, "the EBB reports the previous block's number");
+
+    let (_, main_n_delta) = index(&main_n);
+    let (_, main_next_delta) = index(&main_next);
+
+    let (store, _guard) = B::open();
+    apply(&store, &main_n_delta);
+    apply(&store, &ebb_delta);
+    apply(&store, &main_next_delta);
+
+    assert_eq!(
+        store.slot_by_block_number(N).unwrap(),
+        Some(ebb_slot - 20),
+        "block N's entry must keep its own slot"
+    );
+    assert_eq!(
+        store.slot_by_block_number(N + 1).unwrap(),
+        Some(ebb_slot + 20)
+    );
+    assert_eq!(
+        store.slot_by_block_hash(&ebb_delta[0].block_hash).unwrap(),
+        Some(ebb_slot),
+        "the EBB is still found by hash"
+    );
+
+    for delta in [&main_next_delta, &ebb_delta] {
+        let writer = store.start_writer().expect("start_writer failed");
+        writer.undo_index(delta).expect("undo_index failed");
+        writer.commit().expect("commit failed");
+    }
+
+    assert_eq!(
+        store.slot_by_block_number(N).unwrap(),
+        Some(ebb_slot - 20),
+        "undoing the EBB must not delete block N's entry"
+    );
+    assert_eq!(
+        store.slot_by_block_hash(&ebb_delta[0].block_hash).unwrap(),
+        None
+    );
 }
 
 /// The first block the conformance seed wrote, for tests that need a hash the

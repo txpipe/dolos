@@ -10,6 +10,7 @@ use dolos_core::{ArchiveStore, ChainPoint, StateStore};
 use stelae::progress::Observer;
 
 use crate::{
+    boundary::{self, Boundary},
     export::{self, Document, Plan, Predecessor},
     inscription::Inscription,
     planning::{self, EpochRange},
@@ -53,6 +54,12 @@ pub trait SnapshotSource {
     ) -> Result<Plan, Error> {
         Ok(selection.apply(self.plan(network_magic, retained)?))
     }
+
+    /// Establish that `plan` stands on the first block of its sequence epoch.
+    ///
+    /// Every operation below asks this itself; a host asks it first to refuse
+    /// before doing anything slow.
+    fn boundary(&self, plan: &Plan) -> Result<Boundary, Error>;
 
     /// Write a directory stele through the same profile encoder publication
     /// and registry publication use.
@@ -121,6 +128,10 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         export::plan(self.state, network_magic, retained)
     }
 
+    fn boundary(&self, plan: &Plan) -> Result<Boundary, Error> {
+        boundary::check(plan, self.archive, self.state)
+    }
+
     fn publish_directory(
         &self,
         destination: &Path,
@@ -147,7 +158,7 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         publishing: Publishing<'_>,
         plan: &Plan,
     ) -> Result<Preview, Error> {
-        registry::preview(publishing, plan, self.archive, None)
+        registry::preview(publishing, plan, self.archive, self.state, None)
     }
 
     fn publish_repository(

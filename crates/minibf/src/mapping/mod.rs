@@ -46,6 +46,8 @@ pub mod blocks;
 pub mod cost_models;
 pub mod direct_json;
 pub mod epochs;
+pub mod genesis;
+pub mod governance;
 pub mod network;
 pub mod protocol_params;
 pub mod txs;

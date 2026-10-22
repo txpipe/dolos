@@ -282,11 +282,9 @@ fn target_and_ephemeral_leave_the_instance_untouched() {
 
     // And the alternate-path rebuild is the same state the instance holds,
     // in a store recording this release's identity.
-    let rebuilt = dolos::storage::StateStoreBackend::open_fjall(
-        &target,
-        &dolos_core::config::FjallStateConfig::default(),
-    )
-    .unwrap();
+    let rebuilt =
+        dolos::storage::StateStoreBackend::open_fjall(&target, dolos_fjall::Preset::Standard)
+            .unwrap();
 
     assert_eq!(StateContents::read(&rebuilt), before.state);
     assert_eq!(
@@ -305,9 +303,7 @@ fn a_target_holding_an_unmarked_store_is_refused() {
     node.sync();
 
     let target = node.root.path().join("rebuilt-state");
-    let config = dolos_core::config::FjallStateConfig::default();
-
-    let unmarked = dolos_fjall::StateStore::open(&target, &config).unwrap();
+    let unmarked = dolos_fjall::StateStore::open(&target, dolos_fjall::Preset::Standard).unwrap();
     let writer = unmarked.start_writer().unwrap();
     writer.set_cursor(ChainPoint::Origin).unwrap();
     writer.commit().unwrap();
@@ -317,7 +313,7 @@ fn a_target_holding_an_unmarked_store_is_refused() {
     let output = rebuild(&node, &["--target", &target.display().to_string()]);
     assert!(!output.status.success());
 
-    let unmarked = dolos_fjall::StateStore::open(&target, &config).unwrap();
+    let unmarked = dolos_fjall::StateStore::open(&target, dolos_fjall::Preset::Standard).unwrap();
     assert_eq!(unmarked.identity().unwrap(), None);
     assert_eq!(unmarked.read_cursor().unwrap(), Some(ChainPoint::Origin));
 }
