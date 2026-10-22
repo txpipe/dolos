@@ -1,24 +1,23 @@
 //! Load + compute helpers for `EstartWorkUnit`.
 //!
 //! Adds methods to `WorkContext` covering both halves of the open
-//! pipeline: per-shard account transitions (`load_shard` /
-//! `compute_shard_deltas`) and the finalize-time global pass
+//! pipeline: the per-shard context (`load_shard`; the account pass itself
+//! runs in `commit_shard`) and the finalize-time global pass
 //! (`compute_global_deltas` / `load_finalize`). The shared boundary state
 //! (ended_state + chain summary + AVVM reclamation) is built by
 //! `new_empty_with_avvm`; the once-per-boundary AVVM lookup itself is
 //! `AvvmReclamation::at_boundary`, which the work unit hoists into
 //! `initialize`.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
-use dolos_core::{ChainError, Domain, Genesis, RangeOf, StateStore};
+use dolos_core::{ChainError, Domain, Genesis, StateStore};
 
 use crate::{
     estart::{avvm::AvvmReclamation, stake, BoundaryVisitor as _, PoolOwners, WorkContext},
     gov_from_conway_genesis, load_era_summary,
     roll::WorkDeltas,
-    AccountKey, AccountState, DRepState, EStartProgress, EraKey, GovGenesisInit, PoolState,
-    ProposalState,
+    DRepState, EraKey, GovGenesisInit, PoolState, ProposalState,
 };
 
 impl WorkContext {
@@ -28,8 +27,8 @@ impl WorkContext {
     /// delta that advances the epoch number, recomputes pots, and
     /// (optionally) migrates pparams across an era boundary.
     ///
-    /// Account-keyed transitions are handled by `compute_shard_deltas`,
-    /// which the executor runs once per shard ahead of this finalize pass.
+    /// Accounts are rotated by `commit_shard`, which the executor runs once
+    /// per shard ahead of this finalize pass.
     pub fn compute_global_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let mut visitor_nonces = super::nonces::BoundaryVisitor;
         let mut visitor_reset = super::reset::BoundaryVisitor;
@@ -139,52 +138,18 @@ impl WorkContext {
         Ok(ctx)
     }
 
-    /// Iterate accounts in this shard's two ranges, emit
-    /// `AccountTransition` deltas via the snapshot-rotation visitor and
-    /// tally the stake distribution being frozen. Closes by emitting
-    /// `EStartProgress`, which advances `EpochState.estart_progress` and
-    /// carries the shard's tally.
-    fn compute_shard_deltas<D: Domain>(
-        &mut self,
-        state: &D::State,
-        ranges: Vec<RangeOf<AccountKey>>,
-        shard_index: u32,
-        total_shards: u32,
-    ) -> Result<(), ChainError> {
-        let mut visitor_reset = super::reset::BoundaryVisitor;
-        let mut tally = BTreeMap::new();
-
-        for range in ranges {
-            let accounts = state.iter_entities_typed::<AccountState>(Some(range))?;
-
-            for record in accounts {
-                let (account_id, account) = record?;
-                visitor_reset.visit_account(self, &account_id, &account)?;
-                self.tally_account(&mut tally, &account);
-            }
-        }
-
-        self.add_delta(EStartProgress::new(shard_index, total_shards, tally));
-
-        Ok(())
-    }
-
-    /// Load + compute for a per-shard Estart phase: build a fresh
-    /// context (no global iteration) using the AVVM reclamation total and
-    /// the pool owners precomputed in the work unit's `initialize`, and run
-    /// the per-shard account branch.
+    /// Load for a per-shard Estart phase: build a fresh context (no
+    /// global iteration) with the AVVM reclamation total and the pool
+    /// owners precomputed in the work unit's `initialize`. The shard's
+    /// accounts are read once, by `commit_shard`.
     pub fn load_shard<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
         avvm_reclamation: AvvmReclamation,
         owners: Arc<PoolOwners>,
-        shard_index: u32,
-        total_shards: u32,
-        ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<Self, ChainError> {
         let mut ctx = Self::new_empty_with_avvm::<D>(state, genesis, avvm_reclamation)?;
         ctx.owners = owners;
-        ctx.compute_shard_deltas::<D>(state, ranges, shard_index, total_shards)?;
         Ok(ctx)
     }
 }

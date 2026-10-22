@@ -373,6 +373,14 @@ impl AccountState {
         }
     }
 
+    /// The snapshot rotation ESTART applies as `next_epoch` opens: stake,
+    /// pool and drep delegation each move one epoch forward.
+    pub fn rotate(&mut self, next_epoch: Epoch) {
+        self.stake.default_transition(next_epoch);
+        self.pool.default_transition(next_epoch);
+        self.drep.default_transition(next_epoch);
+    }
+
     pub fn live_stake(&self) -> u64 {
         self.stake.live().map(|x| x.total()).unwrap_or_default()
     }
@@ -1166,10 +1174,7 @@ impl dolos_core::EntityDelta for AccountTransition {
         self.prev_pool = Some(entity.pool.clone());
         self.prev_drep = Some(entity.drep.clone());
 
-        // apply changes
-        entity.stake.default_transition(self.next_epoch);
-        entity.pool.default_transition(self.next_epoch);
-        entity.drep.default_transition(self.next_epoch);
+        entity.rotate(self.next_epoch);
     }
 
     fn undo(&self, entity: &mut Option<AccountState>) {

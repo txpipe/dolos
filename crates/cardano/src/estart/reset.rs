@@ -1,9 +1,9 @@
 use dolos_core::ChainError;
 
 use crate::{
-    estart::{AccountId, PoolId, WorkContext},
+    estart::{PoolId, WorkContext},
     pots::{apply_delta, PotDelta, Pots},
-    AccountState, AccountTransition, EpochTransitionV2, PoolState, PoolTransition,
+    EpochTransitionV2, PoolState, PoolTransition,
 };
 
 pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
@@ -109,32 +109,19 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
     pots
 }
 
-/// Per-entity transition visitor for the snapshot rotation that ESTART
-/// performs. Emits deltas straight onto `WorkContext.deltas` (no internal
-/// `Vec` accumulator) so the per-account branch can be driven from a
-/// shard-scoped iteration without holding millions of deltas in RAM.
+/// Per-entity transition visitor for the snapshot rotation that ESTART's
+/// finalize pass performs on pools. Emits deltas straight onto
+/// `WorkContext.deltas`. Accounts rotate in the shards, without deltas
+/// (`WorkContext::commit_shard`).
 ///
 /// The single `EpochTransition` delta — which advances the epoch number,
 /// recomputes pots, and (optionally) migrates pparams across an era
 /// boundary — is emitted by `WorkContext::compute_global_deltas` (the
-/// finalize-phase entry point), not by `flush`. Sharded callers therefore
-/// run the per-account branch alone and let the finalize unit handle the
-/// closing global delta.
+/// finalize-phase entry point), not by `flush`.
 #[derive(Default)]
 pub struct BoundaryVisitor;
 
 impl super::BoundaryVisitor for BoundaryVisitor {
-    fn visit_account(
-        &mut self,
-        ctx: &mut super::WorkContext,
-        id: &AccountId,
-        _: &AccountState,
-    ) -> Result<(), ChainError> {
-        ctx.add_delta(AccountTransition::new(id.clone(), ctx.starting_epoch_no()));
-
-        Ok(())
-    }
-
     fn visit_pool(
         &mut self,
         ctx: &mut super::WorkContext,
