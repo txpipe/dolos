@@ -14,37 +14,35 @@ If you're looking for a faster way of bootstrapping Dolos, please refer to the a
 
 In essence, this bootstrapping procedure is just about starting Dolos and let it do its thing. From Dolos' perspective, the procedure involves the following:
 
-1. Read the genesis files to load initial data
+1. Load the network's genesis data
 2. Connect to the configured upstream node using Ouroboros
 3. Start the chain-sync mini-protocol from origin
 4. Keep syncing until reaching the tip of the chain
 
 ## Configuration
 
-To bootstrap using a public relay node, the required configuration includes the `upstream` section for the peer connection and the `chain` section for the network parameters:
+On a known network, the only required configuration is the network itself: the node follows the network's default peer.
+
+```toml
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "preprod"
+```
+
+To follow another relay, name it in the `upstream` section:
 
 ```toml
 [upstream]
 peer_address = "preprod-node.world.dev.cardano.org:30000"
-
-[chain]
-type = "cardano"
-magic = 1
-is_testnet = true
 ```
 
-| section  | property     | type    | example                                    |
-| -------- | ------------ | ------- | ------------------------------------------ |
-| upstream | peer_address | string  | "preprod-node.world.dev.cardano.org:30000" |
-| chain    | magic        | integer | 1                                          |
-| chain    | is_testnet   | boolean | true                                       |
-
-- `peer_address`: network address of peer node using `{host}:{port}` syntax.
-- `magic`: the Cardano network magic number.
-- `is_testnet`: flag to indicate if this network is a testnet or not.
+- `network`: `mainnet`, `preprod` or `preview`, whose genesis files and magic are built in; or `custom`, which names its own (see the [schema](../configuration/schema#chain)).
+- `peer_address`: network address of the peer node using `{host}:{port}` syntax. Required on a custom network.
 
 <Aside type="note">
-If you use the `dolos init` command to initialize your configuration, these values will be already populated with their defaults for each of the known networks.
+If you use the `dolos init` command to initialize your configuration, these values will be already populated for each of the known networks.
 </Aside>
 
 ## Execution

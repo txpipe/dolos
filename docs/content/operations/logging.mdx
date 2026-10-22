@@ -20,49 +20,39 @@ Dolos follows a very common convention around log levels. These levels describe 
 | `debug` | normal operation events with a level of detail useful for debugging problems |
 | `trace` | extreme level of detail, usually including data being processed              |
 
-## Sub-components
+## Components
 
-There are some sub-components within _Dolos_ that are more verbose than others. By default, logs from these components are suppressed. You can opt-in to include them as needed:
+Dolos's own events follow `level`. Every other component, such as the libraries Dolos is built on, logs nothing unless `filter` names it:
 
-| component  | description                                                          |
-| ---------- | -------------------------------------------------------------------- |
-| tokio      | The async runtime                                                    |
-| pallas     | Low-level Ouroboros interactions (mini-protocols, CBOR decoding)     |
-| grpc       | The gRPC server (UTxO RPC)                                          |
-| trp        | The Transaction Resolver Protocol server                             |
-| minibf     | The Mini-Blockfrost HTTP server                                      |
-| minikupo   | The Mini-Kupo HTTP server                                            |
-| otlp       | OpenTelemetry exporters                                              |
-| fjall      | The Fjall storage engine                                             |
+| target | component |
+| ------ | --------- |
+| `tokio`, `runtime` | The async runtime |
+| `pallas` | Low-level Ouroboros interactions (mini-protocols, CBOR decoding) |
+| `tonic` | The gRPC server (UTxO RPC) |
+| `jsonrpsee-server` | The Transaction Resolver Protocol server |
+| `fjall`, `lsm_tree` | The Fjall storage engine |
+| `opentelemetry` | OpenTelemetry exporters |
 
 ## Configuration
 
 The `[logging]` section within `dolos.toml` controls these options:
 
-| property         | type    | default  |
-| ---------------- | ------- | -------- |
-| max_level        | string  | `"info"` |
-| include_tokio    | boolean | `false`  |
-| include_pallas   | boolean | `false`  |
-| include_grpc     | boolean | `false`  |
-| include_trp      | boolean | `false`  |
-| include_minibf   | boolean | `false`  |
-| include_minikupo | boolean | `false`  |
-| include_otlp     | boolean | `false`  |
-| include_fjall    | boolean | `false`  |
+| property | type   | default  |
+| -------- | ------ | -------- |
+| level    | string | `"info"` |
+| filter   | string | none     |
 
-- `max_level`: the maximum severity level of events to include in the output. By selecting a specific level, you include that level and every level of higher severity.
-- `include_*`: flags that indicate if the output should include logs from the corresponding sub-component.
+- `level`: the most detailed level of Dolos's own events to include. Selecting a level includes it and every level of higher severity.
+- `filter`: further `target=level` directives, comma-separated, in the syntax of `RUST_LOG`. A directive names a target by its module path prefix; a bare level applies to every target no directive names. A directive that does not parse is refused when the node starts.
 
-All fields are optional. Omitted values use the defaults shown above.
+Both fields are optional.
 
 Example:
 
 ```toml
 [logging]
-max_level = "debug"
-include_pallas = true
-include_grpc = true
+level = "debug"
+filter = "pallas=info,tonic=debug"
 ```
 
-You can find more detailed info about configuration in the [configuration schema section](../configuration/schema).
+You can find more detailed info about configuration in the [configuration schema section](../configuration/schema#logging).

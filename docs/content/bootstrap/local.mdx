@@ -12,34 +12,28 @@ If you're looking for way of bootstrapping Dolos but you don't have a local full
 
 In essence, this bootstrapping procedure is just about starting Dolos and let it do its thing. From Dolos' perspective, the procedure involves the following:
 
-1. Read the genesis files to load initial data
+1. Load the network's genesis data
 2. Connect to the configured upstream node using Ouroboros
 3. Start the chain-sync mini-protocol from origin
 4. Keep syncing until reaching the tip of the chain
 
 ## Configuration
 
-To bootstrap using a local node, the required configuration includes the `upstream` section for the peer connection and the `chain` section for the network parameters:
+To bootstrap using a local node, name it in the `upstream` section, beside the network it follows:
 
 ```toml
-[upstream]
-peer_address = "localhost:30000"
+compatibility = "v2-alpha.1"
 
 [chain]
-type = "cardano"
-magic = 1
-is_testnet = true
+protocol = "cardano"
+network = "preprod"
+
+[upstream]
+peer_address = "localhost:30000"
 ```
 
-| section  | property     | type    | example           |
-| -------- | ------------ | ------- | ----------------- |
-| upstream | peer_address | string  | "localhost:30000" |
-| chain    | magic        | integer | 1                 |
-| chain    | is_testnet   | boolean | true              |
-
-- `peer_address`: network address of peer node using `{host}:{port}` syntax.
-- `magic`: the Cardano network magic number.
-- `is_testnet`: flag to indicate if this network is a testnet or not.
+- `network`: `mainnet`, `preprod` or `preview`, whose genesis files and magic are built in; or `custom`, which names its own (see the [schema](../configuration/schema#chain)).
+- `peer_address`: network address of the peer node using `{host}:{port}` syntax.
 
 <Aside type="tip">
 We use `localhost` as an example but it can also be a different hostname as long as the TCP port is reachable.

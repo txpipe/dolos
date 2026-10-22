@@ -26,28 +26,28 @@ Under the configured `storage.path`, a running node maintains three on-disk stor
 
 ## Storage traits and pluggable backends
 
-Each store is defined as a trait in `dolos-core` — `WalStore`, `StateStore`, `ArchiveStore`, and `MempoolStore` — and the rest of Dolos only ever talks to those traits. Concrete implementations are selected at runtime in `src/adapters/storage.rs`, which wraps each backend in an enum so a node can mix engines per store.
+Each store is defined as a trait in `dolos-core` — `WalStore`, `StateStore`, `ArchiveStore`, and `MempoolStore` — and the rest of Dolos only ever talks to those traits. Concrete implementations are selected at runtime in `src/adapters/storage.rs`, which wraps each backend in an enum, from each store's `type` in the configuration.
 
 Available backends:
 
-- **redb** (`dolos-redb3`) — an embedded ACID B+tree store. It backs the WAL (the only WAL implementation) and the mempool. It is not a state or archive backend.
-- **fjall** (`dolos-fjall`) — an LSM-tree engine tuned for write-heavy workloads with many hot keys. The only persistent backend for the state and archive stores, and the default for both.
-- **no-op** — a store that silently discards writes, used to *disable* the archive.
-- **in-memory** — non-persistent stores for testing and ephemeral nodes. State and archive have builtin implementations in `dolos-core` backed by ordered maps, which serve their traits in full; the WAL and mempool use redb's memory backend instead.
+- **redb** (`dolos-redb3`) — an embedded ACID B+tree store. It backs the WAL (the only WAL implementation) and the persistent mempool. It is not a state or archive backend.
+- **fjall** (`dolos-fjall`) — an LSM-tree engine tuned for write-heavy workloads with many hot keys. The only persistent backend for the state and archive stores (`type = "fjall"`), and the default for both. Its tuning comes from a named preset, `standard`.
+- **in-memory** — non-persistent stores for testing and ephemeral nodes (`type = "ephemeral"`). State and archive have builtin implementations in `dolos-core` backed by ordered maps, which serve their traits in full; the WAL follows the state, in memory with an ephemeral state.
+- **no-op** — an archive that silently discards writes, opened when the configuration keeps no history.
 
 ## Storage modes
 
-The three storage modes exposed in configuration are really combinations of backend selection and history-pruning limits:
+The three storage modes are the values of `history.mode`:
 
-| Mode | Archive | History | Use case |
-| ---- | ------- | ------- | -------- |
-| **Ledger-only** | no-op | none | Only the tip of the chain — smallest footprint, query-light deployments. |
-| **Sliding history** | enabled, pruned | a rolling window (`sync.max_history`) | Recent history for most dApp queries without a full archive. |
-| **Full archive** | enabled, unpruned | complete | The entire chain history — research, validation, explorers. |
+| Mode | `history.mode` | Archive | Use case |
+| ---- | -------------- | ------- | -------- |
+| **Ledger-only** | `none` | none | Only the tip of the chain — smallest footprint, query-light deployments. |
+| **Sliding history** | `rolling`, with a `window` | pruned to the window | Recent history for most dApp queries without a full archive. |
+| **Full archive** | `full` (the default) | complete | The entire chain history — research, validation, explorers. |
 
-`archive.backend = "no_op"` is the ledger-only switch, and it drops the historical lookups with the archive that hosts them. The live-UTxO tags are not affected: they project the UTxO set, so they stay in the state store in every mode (about 3.5 GB on mainnet).
+`history.mode = "none"` is the ledger-only switch, and it drops the historical lookups with the archive that hosts them. The live-UTxO tags are not affected: they project the UTxO set, so they stay in the state store in every mode (about 3.5 GB on mainnet).
 
-Pruning is driven by `prune_history()` on the WAL and archive stores. In the archive it covers the block bodies, the logs, and the `archive-tags` and `index-exact` keyspaces, so a sliding-history node's index footprint is window-sized too. See the [configuration schema](../configuration/schema#storage-section) for the exact keys.
+Pruning is driven by `prune_history()` on the WAL and archive stores. The WAL is always pruned to the protocol's rollback window. In the archive, pruning covers the block bodies, the logs, and the `archive-tags` and `index-exact` keyspaces, so a sliding-history node's index footprint is window-sized too. See the [configuration schema](../configuration/schema#storage) for the exact keys, and for which store types combine.
 
 ## Data model primitives
 
