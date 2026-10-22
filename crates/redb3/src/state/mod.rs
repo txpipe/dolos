@@ -242,6 +242,11 @@ impl dolos_core::StateWriter for StateWriter {
         Err(StateError::Unsupported("undo_utxo_tags"))
     }
 
+    /// Not implemented on this backend; see `apply_utxo_tags`.
+    fn mark_utxos_positioned(&self) -> Result<(), StateError> {
+        Err(StateError::Unsupported("mark_utxos_positioned"))
+    }
+
     fn commit(self) -> Result<(), StateError> {
         self.wx.commit().map_err(Error::from)?;
 
@@ -347,6 +352,34 @@ impl dolos_core::StateStore for StateStore {
     /// Not implemented on this backend; see `StateWriter::apply_utxo_tags`.
     fn utxos_by_tag(&self, _dimension: TagDimension, _key: &[u8]) -> Result<UtxoSet, StateError> {
         Err(StateError::Unsupported("utxos_by_tag"))
+    }
+
+    /// Not implemented on this backend; see `StateWriter::apply_utxo_tags`.
+    fn get_utxo_slots(
+        &self,
+        _refs: Vec<TxoRef>,
+    ) -> Result<std::collections::HashMap<TxoRef, dolos_core::BlockSlot>, StateError> {
+        Err(StateError::Unsupported("get_utxo_slots"))
+    }
+
+    /// Not implemented on this backend; see `StateWriter::apply_utxo_tags`.
+    fn utxos_by_tag_in_slots(
+        &self,
+        _dimension: TagDimension,
+        _key: &[u8],
+        _scan: &dolos_core::SlotScan,
+    ) -> Result<Vec<(dolos_core::BlockSlot, TxoRef)>, StateError> {
+        Err(StateError::Unsupported("utxos_by_tag_in_slots"))
+    }
+
+    /// Not implemented on this backend; see `StateWriter::apply_utxo_tags`.
+    fn utxos_positioned(&self) -> Result<bool, StateError> {
+        Err(StateError::Unsupported("utxos_positioned"))
+    }
+
+    /// Not implemented on this backend; see `StateWriter::apply_utxo_tags`.
+    fn clear_utxo_positions(&self) -> Result<(), StateError> {
+        Err(StateError::Unsupported("clear_utxo_positions"))
     }
 
     /// Not implemented on this backend.

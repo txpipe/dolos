@@ -125,7 +125,22 @@ impl<D: Domain> SyncExt for D {
 
             let block = Arc::new(log.block);
 
-            let undo_data = D::Chain::compute_undo(&block, &log.inputs, point.clone())?;
+            // The entry names the producing slot of every input it could
+            // position when the block rolled. One it could not — the store
+            // carried no slot for it then, as before `dolos doctor
+            // position-utxos` repaired it — is positioned from the archive's
+            // exact index now, so a recovered input goes back in chain order
+            // wherever it came from. A genesis input, or one from a pruned
+            // block, stays unpositioned either way.
+            let missing = log
+                .inputs
+                .keys()
+                .filter(|txo| !log.input_slots.contains_key(txo));
+            let mut input_slots = log.input_slots.clone();
+            input_slots.extend(crate::archive::position_utxos(self.archive(), missing)?);
+
+            let undo_data =
+                D::Chain::compute_undo(&block, &log.inputs, &input_slots, point.clone())?;
 
             writer.apply_utxoset(&undo_data.utxo_delta)?;
             writer.undo_utxo_tags(&undo_data.utxo_index_delta)?;

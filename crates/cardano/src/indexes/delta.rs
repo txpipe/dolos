@@ -6,6 +6,8 @@
 //! entries (one `ArchiveIndexDelta` per block, written through the archive
 //! store).
 
+use std::collections::HashMap;
+
 use dolos_core::{
     keys, ArchiveIndexDelta, BlockSlot, EraCbor, Tag, TagDimension, TxoRef, UtxoIndexDelta,
     UtxoMap, UtxoSetDelta,
@@ -604,6 +606,21 @@ impl CardanoIndexDeltaBuilder {
         self.add_consumed_utxos(&utxo_delta.undone_utxo);
     }
 
+    /// Position the refs added so far: every produced or consumed ref `slot`
+    /// answers for gets that producing slot, so its tags go in or out of the
+    /// chain-ordered index beside the plain ones
+    /// (`UtxoIndexDelta::slots`). A ref it answers `None` for keeps its plain
+    /// tags only.
+    pub fn position_utxos(&mut self, slot: impl Fn(&TxoRef) -> Option<BlockSlot>) {
+        let utxo = &mut self.utxo;
+
+        for (txo, _) in utxo.produced.iter().chain(utxo.consumed.iter()) {
+            if let Some(slot) = slot(txo) {
+                utxo.slots.insert(txo.clone(), slot);
+            }
+        }
+    }
+
     /// Extract UTxO filter tags from raw EraCbor.
     fn extract_tags_from_era_cbor(era_cbor: &EraCbor) -> Option<Vec<Tag>> {
         let output = MultiEraOutput::try_from(era_cbor).ok()?;
@@ -619,8 +636,22 @@ impl CardanoIndexDeltaBuilder {
 /// projection of the set. Used by genesis, WAL replay, the epoch-boundary
 /// AVVM deletion and the stele restore.
 pub fn utxo_index_delta_from_utxo_delta(utxo_delta: &UtxoSetDelta) -> UtxoIndexDelta {
+    utxo_index_delta_with_slots(utxo_delta, &HashMap::new())
+}
+
+/// [`utxo_index_delta_from_utxo_delta`] with the producing slot of every
+/// ref `slots` knows, so the tags of those refs are also kept in chain order.
+///
+/// Used where UTxOs arrive without their block and the slots come from the
+/// archive's exact index instead: the stele restore and `dolos doctor
+/// position-utxos`.
+pub fn utxo_index_delta_with_slots(
+    utxo_delta: &UtxoSetDelta,
+    slots: &HashMap<TxoRef, BlockSlot>,
+) -> UtxoIndexDelta {
     let mut builder = CardanoIndexDeltaBuilder::new();
     builder.add_utxo_tags_from_delta(utxo_delta);
+    builder.position_utxos(|txo| slots.get(txo).copied());
     builder.into_parts().0
 }
 

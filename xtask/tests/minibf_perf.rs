@@ -63,6 +63,21 @@ async fn verify_fixture<Stores: ToyStores>(stores: Stores) {
                 assert!(work.decoded_bytes > 0);
             }
             "address-transactions-page" => assert!(work.tag_candidates > 0),
+            "asset-utxos-page" => {
+                let selected_rows = case.expected.as_array().unwrap().len() as u64;
+                // the page comes off the slot-ordered tag: no exact lookup,
+                // no row past the first chunk of the tag
+                assert_eq!(work.exact_lookups, 0);
+                assert!(work.utxo_refs >= selected_rows);
+                assert!(work.utxo_refs <= 256);
+                // no `to`, so the tip bounds the span: read once
+                assert_eq!(work.tip_reads, 1);
+                // one block for the oldest retained slot, one for the tip,
+                // then only the blocks the page touches
+                let page_blocks =
+                    selected_rows.div_ceil(fixture.shape.transactions_per_block as u64);
+                assert_eq!(work.block_reads, 2 + page_blocks);
+            }
             "account-utxos-wide" => {
                 let selected_rows = case.expected.as_array().unwrap().len() as u64;
                 assert_eq!(
@@ -70,11 +85,13 @@ async fn verify_fixture<Stores: ToyStores>(stores: Stores) {
                     (fixture.shape.blocks * fixture.shape.transactions_per_block) as u64
                 );
                 assert_eq!(work.exact_lookups, work.utxo_refs);
-                assert_eq!(work.tip_reads, selected_rows);
-                assert_eq!(
-                    work.block_reads - work.tip_reads,
-                    fixture.shape.blocks as u64
-                );
+                // no height range, so the tip is never read
+                assert_eq!(work.tip_reads, 0);
+                // one block for the oldest retained slot, then only the
+                // blocks the page touches: one UTxO per tx in the fixture
+                let page_blocks =
+                    selected_rows.div_ceil(fixture.shape.transactions_per_block as u64);
+                assert_eq!(work.block_reads, 1 + page_blocks);
                 assert!(work.decoded_bytes > 0);
             }
             _ => {}

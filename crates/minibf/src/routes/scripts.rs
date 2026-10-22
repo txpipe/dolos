@@ -14,11 +14,10 @@ use blockfrost_openapi::models::{
     script_redeemers_inner::ScriptRedeemersInner,
     script_utxos_inner::ScriptUtxosInner,
 };
-use dolos_cardano::indexes::{
-    AsyncCardanoQueryExt, CardanoStateIndexExt, ScriptLanguage, SlotOrder,
-};
+use dolos_cardano::indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, ScriptLanguage};
 use dolos_cardano::ChainSummary;
 use dolos_core::Domain;
+use dolos_core::SlotOrder;
 use futures_util::StreamExt;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::alonzo::NativeScript;
@@ -147,13 +146,18 @@ where
 
 pub async fn by_hash_utxos<D>(
     Path(script_hash): Path<String>,
-    Query(params): Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<ScriptUtxosInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = parse_script_hash(&script_hash)?;
+    // Blockfrost does not read `from` / `to` here, so a malformed
+    // or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
     let pagination = Pagination::try_from(params)?;
 
     let refs = domain

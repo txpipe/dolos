@@ -23,6 +23,7 @@ Select workloads with `--cases name,name` (default: all):
 | `epoch-blocks-reverse` | Reverse block traversal |
 | `address-transactions-page` | Archive tags joined with blocks |
 | `account-utxos-wide` | State tags, UTxOs and archive metadata |
+| `asset-utxos-page` | Slot-ordered state tags, UTxOs and block metadata |
 | `transaction-utxos` | Transaction lookup and input/output mapping |
 
 Scale with `--blocks`, `--transactions-per-block`, `--log-rows`, `--pool-stride`,

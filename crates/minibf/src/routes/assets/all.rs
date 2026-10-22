@@ -6,7 +6,8 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::assets_inner::AssetsInner;
-use dolos_cardano::{indexes::SlotOrder, model::AssetState, periods::first_mints};
+use dolos_cardano::{model::AssetState, periods::first_mints};
+use dolos_core::SlotOrder;
 use dolos_core::{Domain, DomainError};
 
 use crate::{

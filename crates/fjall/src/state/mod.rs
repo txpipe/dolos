@@ -3,11 +3,12 @@
 //! This module provides an implementation of the `StateStore` trait using
 //! fjall, an LSM-tree based embedded database.
 //!
-//! ## Four Keyspace Design
+//! ## Six Keyspace Design
 //!
-//! State is organized into four keyspaces based on access patterns:
+//! State is organized into six keyspaces based on access patterns:
 //!
-//! 1. **`state-cursor`**: Chain position tracking (single key-value)
+//! 1. **`state-cursor`**: Chain position tracking (single key-value), plus the
+//!    positioned mark under a second key (see below)
 //!
 //! 2. **`state-utxos`**: UTxO set storage Key: `[tx_hash:32][index:4]` (36
 //!    bytes) Value: `[era:2][cbor:...]`
@@ -18,20 +19,38 @@
 //! 4. **`state-tags`**: Live-UTxO tags (mutable: insert on produce, delete on
 //!    consume) Key: `[dim_hash:8][lookup_key:var][txo_ref:36]` -> empty
 //!
+//! 5. **`state-tags-by-slot`**: The same tags in chain order, for the UTxOs
+//!    whose producing slot is known Key:
+//!    `[dim_hash:8][key_len:2][lookup_key:var][slot:8][txo_ref:36]` -> empty
+//!
+//! 6. **`state-utxo-slots`**: The producing slot of every positioned UTxO Key:
+//!    `[txo_ref:36]` -> `[slot:8]`
+//!
 //! This design reduces the number of LSM-tree segment files compared to using
 //! separate keyspaces per entity type, avoiding "too many open files" errors
 //! during heavy compaction.
 //!
-//! The tags keyspace is a projection of the UTxO set and is written in the
-//! same batch, so the two commit together; it keeps its own compaction
-//! settings because its churn (a delete per spent output) is unlike the
+//! The three tag keyspaces are a projection of the UTxO set and are written
+//! in the same batch, so they commit together; they keep their own compaction
+//! settings because their churn (a delete per spent output) is unlike the
 //! entity and UTxO keyspaces'.
+//!
+//! ## The positioned mark
+//!
+//! `state-cursor` holds a second key, the mark that the ordered tags cover
+//! the set (`StateStore::utxos_positioned`). Its value is a copy of the
+//! cursor: every writer that sets the cursor on a positioned store rewrites
+//! the mark with the same bytes, so the two agree exactly when this binary,
+//! or one that maintains the ordered tags too, wrote the last commit. A
+//! binary without them moves the cursor alone, and the store reads as
+//! unpositioned from then on — the only way the mark can go stale.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
 use dolos_core::{
-    ChainPoint, EntityKey, EntityValue, KeyRange, Namespace, StateError,
+    BlockSlot, ChainPoint, EntityKey, EntityValue, KeyRange, Namespace, SlotScan, StateError,
     StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TxoRef,
     UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
 };
@@ -55,18 +74,28 @@ mod keyspace_names {
     pub const ENTITIES: &str = "state-entities";
     /// Live-UTxO tags keyspace (mutable: insert on produce, delete on consume)
     pub const TAGS: &str = "state-tags";
+    /// Live-UTxO tags in chain order, for the positioned UTxOs
+    pub const TAGS_BY_SLOT: &str = "state-tags-by-slot";
+    /// The producing slot of every positioned UTxO
+    pub const UTXO_SLOTS: &str = "state-utxo-slots";
 }
 
 /// Key for the cursor entry
 const CURSOR_KEY: &[u8] = &[0u8];
 
+/// Key for the positioned mark, in the cursor keyspace: its value is the
+/// cursor the mark was last written beside.
+const POSITIONED_KEY: &[u8] = &[1u8];
+
 /// Fjall-based state store implementation with unified entities keyspace.
 ///
-/// Uses 4 keyspaces:
-/// - `cursor`: Chain position tracking
+/// Uses 6 keyspaces:
+/// - `cursor`: Chain position tracking, and the positioned mark
 /// - `utxos`: UTxO set storage
 /// - `entities`: All entity types with namespace hash prefixes
 /// - `tags`: Live-UTxO tags, a projection of `utxos`
+/// - `tags_by_slot`: The same tags in chain order, for the positioned UTxOs
+/// - `utxo_slots`: The producing slot of every positioned UTxO
 #[derive(Clone)]
 pub struct StateStore {
     db: Database,
@@ -78,6 +107,10 @@ pub struct StateStore {
     entities: Keyspace,
     /// Live-UTxO tags keyspace
     tags: Keyspace,
+    /// Live-UTxO tags in chain order
+    tags_by_slot: Keyspace,
+    /// Producing slots of the positioned UTxOs
+    utxo_slots: Keyspace,
     preset: Preset,
 }
 
@@ -92,6 +125,10 @@ impl StateStore {
             utxos: db.keyspace(keyspace_names::UTXOS, || tuning.utxos.options())?,
             entities: db.keyspace(keyspace_names::ENTITIES, || tuning.entities.options())?,
             tags: db.keyspace(keyspace_names::TAGS, || tuning.tags.options())?,
+            tags_by_slot: db.keyspace(keyspace_names::TAGS_BY_SLOT, || {
+                tuning.tags_by_slot.options()
+            })?,
+            utxo_slots: db.keyspace(keyspace_names::UTXO_SLOTS, || tuning.utxo_slots.options())?,
             db,
             preset,
         };
@@ -113,8 +150,26 @@ impl StateStore {
                 (keyspace_names::UTXOS, tuning.utxos),
                 (keyspace_names::ENTITIES, tuning.entities),
                 (keyspace_names::TAGS, tuning.tags),
+                (keyspace_names::TAGS_BY_SLOT, tuning.tags_by_slot),
+                (keyspace_names::UTXO_SLOTS, tuning.utxo_slots),
             ],
         )
+    }
+
+    /// The keyspaces a tag write touches.
+    fn tag_keyspaces(&self) -> tags::Keyspaces<'_> {
+        tags::Keyspaces {
+            tags: &self.tags,
+            by_slot: &self.tags_by_slot,
+            slots: &self.utxo_slots,
+        }
+    }
+
+    /// The stored cursor, as bytes, `None` on a store without one.
+    fn cursor_bytes<R: Readable>(&self, readable: &R) -> Result<Option<Vec<u8>>, Error> {
+        let value = readable.get(&self.cursor, CURSOR_KEY)?;
+
+        Ok(value.map(|value| value.to_vec()))
     }
 
     /// Get a reference to the underlying database
@@ -134,6 +189,8 @@ impl StateStore {
             (keyspace_names::UTXOS, &self.utxos),
             (keyspace_names::ENTITIES, &self.entities),
             (keyspace_names::TAGS, &self.tags),
+            (keyspace_names::TAGS_BY_SLOT, &self.tags_by_slot),
+            (keyspace_names::UTXO_SLOTS, &self.utxo_slots),
         ]
         .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
         .to_vec()
@@ -185,14 +242,31 @@ impl StateStore {
 pub struct StateWriter {
     batch: Mutex<OwnedWriteBatch>,
     store: StateStore,
+    /// The positioned mark this batch keeps or sets.
+    mark: Mutex<Mark>,
+}
+
+/// What a writer does with the positioned mark at commit.
+///
+/// A writer on a positioned store carries the mark along: the cursor it sets
+/// is the one the mark gets. A writer that marks the store carries it from
+/// then on, stamped with the cursor it set in the batch or, failing that,
+/// the one the store already had.
+struct Mark {
+    /// Whether the store is positioned once this batch lands.
+    positioned: bool,
+    /// The cursor set in this batch, if any.
+    cursor: Option<Vec<u8>>,
 }
 
 impl CoreStateWriter for StateWriter {
     fn set_cursor(&self, cursor: ChainPoint) -> Result<(), StateError> {
         let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
+        let mut mark = self.mark.lock().map_err(|_| Error::LockPoisoned)?;
 
         let cursor_bytes = bincode::serialize(&cursor).map_err(|e| Error::Codec(e.to_string()))?;
-        batch.insert(&self.store.cursor, CURSOR_KEY, cursor_bytes);
+        batch.insert(&self.store.cursor, CURSOR_KEY, cursor_bytes.clone());
+        mark.cursor = Some(cursor_bytes);
 
         Ok(())
     }
@@ -230,7 +304,7 @@ impl CoreStateWriter for StateWriter {
     fn apply_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
         let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
 
-        tags::apply(&mut batch, &self.store.tags, delta)?;
+        tags::apply(&mut batch, self.store.tag_keyspaces(), delta)?;
 
         Ok(())
     }
@@ -238,17 +312,38 @@ impl CoreStateWriter for StateWriter {
     fn undo_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
         let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
 
-        tags::undo(&mut batch, &self.store.tags, delta)?;
+        tags::undo(&mut batch, self.store.tag_keyspaces(), delta)?;
+
+        Ok(())
+    }
+
+    fn mark_utxos_positioned(&self) -> Result<(), StateError> {
+        let mut mark = self.mark.lock().map_err(|_| Error::LockPoisoned)?;
+
+        mark.positioned = true;
 
         Ok(())
     }
 
     fn commit(self) -> Result<(), StateError> {
-        let batch = self
-            .batch
-            .into_inner()
-            .map_err(|_| Error::LockPoisoned)?
-            .durability(Some(PersistMode::Buffer));
+        let mut batch = self.batch.into_inner().map_err(|_| Error::LockPoisoned)?;
+        let mark = self.mark.into_inner().map_err(|_| Error::LockPoisoned)?;
+
+        // the mark follows the cursor: rewritten beside a cursor this batch
+        // sets, or stamped with the stored one when the batch only marks;
+        // with neither there is nothing for it to follow
+        if mark.positioned {
+            let cursor = match mark.cursor {
+                Some(cursor) => Some(cursor),
+                None => self.store.cursor_bytes(&self.store.db.snapshot())?,
+            };
+
+            let cursor = cursor.ok_or(Error::MarkWithoutCursor)?;
+
+            batch.insert(&self.store.cursor, POSITIONED_KEY, cursor);
+        }
+
+        let batch = batch.durability(Some(PersistMode::Buffer));
 
         batch.commit().map_err(Error::Fjall)?;
 
@@ -298,9 +393,15 @@ impl CoreStateStore for StateStore {
 
     fn start_writer(&self) -> Result<Self::Writer, StateError> {
         let batch = self.db.batch();
+        let positioned = self.utxos_positioned()?;
+
         Ok(StateWriter {
             batch: Mutex::new(batch),
             store: self.clone(),
+            mark: Mutex::new(Mark {
+                positioned,
+                cursor: None,
+            }),
         })
     }
 
@@ -341,6 +442,47 @@ impl CoreStateStore for StateStore {
         tags::get_by_key(&snapshot, &self.tags, dimension, key).map_err(StateError::from)
     }
 
+    fn get_utxo_slots(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, BlockSlot>, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        tags::get_utxo_slots(&snapshot, &self.utxo_slots, &refs).map_err(StateError::from)
+    }
+
+    fn utxos_by_tag_in_slots(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        scan: &SlotScan,
+    ) -> Result<Vec<(BlockSlot, TxoRef)>, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        tags::get_by_key_in_slots(&snapshot, &self.tags_by_slot, dimension, key, scan)
+            .map_err(StateError::from)
+    }
+
+    /// Positioned exactly when the mark holds a copy of the cursor: a store
+    /// without a cursor, or one whose cursor moved without the mark, is not.
+    fn utxos_positioned(&self) -> Result<bool, StateError> {
+        let snapshot = self.db.snapshot();
+
+        let cursor = self.cursor_bytes(&snapshot)?;
+        let mark = snapshot
+            .get(&self.cursor, POSITIONED_KEY)
+            .map_err(Error::from)?;
+
+        Ok(matches!((cursor, mark), (Some(cursor), Some(mark)) if *mark == *cursor))
+    }
+
+    /// The mark goes first, so a clear cut short by a crash leaves a store
+    /// that reports itself unpositioned before any entry is gone.
+    fn clear_utxo_positions(&self) -> Result<(), StateError> {
+        self.cursor.remove(POSITIONED_KEY).map_err(Error::from)?;
+        self.tags_by_slot.clear().map_err(Error::from)?;
+        self.utxo_slots.clear().map_err(Error::from)?;
+
+        Ok(())
+    }
+
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
@@ -364,5 +506,49 @@ mod tests {
         let store = StateStore::open(dir.path(), Preset::Standard).unwrap();
         assert_fjall_holds(store.database(), &store.tuning());
         assert_memtables_hold(store.database(), &store.tuning());
+    }
+
+    /// The mark is a copy of the cursor, so a cursor moved without it — what
+    /// a binary without the ordered tags leaves behind — reads as
+    /// unpositioned, and a writer of this binary that sets the cursor on a
+    /// positioned store carries the mark along.
+    #[test]
+    fn a_cursor_moved_without_the_mark_unsets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(dir.path(), Preset::Standard).unwrap();
+
+        let writer = store.start_writer().unwrap();
+        writer.mark_utxos_positioned().unwrap();
+        writer
+            .set_cursor(ChainPoint::Specific(10, [1; 32].into()))
+            .unwrap();
+        writer.commit().unwrap();
+        assert!(store.utxos_positioned().unwrap());
+
+        // this binary moves the cursor: the mark follows
+        let writer = store.start_writer().unwrap();
+        writer
+            .set_cursor(ChainPoint::Specific(20, [2; 32].into()))
+            .unwrap();
+        writer.commit().unwrap();
+        assert!(store.utxos_positioned().unwrap());
+
+        // an older binary moves it: the mark stays behind
+        let cursor = bincode::serialize(&ChainPoint::Specific(30, [3; 32].into())).unwrap();
+        store.cursor.insert(CURSOR_KEY, cursor).unwrap();
+        assert!(!store.utxos_positioned().unwrap());
+
+        // and it takes a mark to make the store positioned again
+        let writer = store.start_writer().unwrap();
+        writer
+            .set_cursor(ChainPoint::Specific(40, [4; 32].into()))
+            .unwrap();
+        writer.commit().unwrap();
+        assert!(!store.utxos_positioned().unwrap());
+
+        let writer = store.start_writer().unwrap();
+        writer.mark_utxos_positioned().unwrap();
+        writer.commit().unwrap();
+        assert!(store.utxos_positioned().unwrap());
     }
 }

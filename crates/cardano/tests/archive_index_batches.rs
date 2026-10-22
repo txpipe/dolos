@@ -416,8 +416,10 @@ fn wal_replay_ignores_inputs_the_block_does_not_consume() {
         era_cbor(output(produced_address(), 10 * ADA, Some(DATUM.into()))),
     );
 
-    let catchup = |inputs| CardanoLogic::compute_catchup(raw, inputs, point.clone()).unwrap();
-    let undo = |inputs| CardanoLogic::compute_undo(raw, inputs, point.clone()).unwrap();
+    let no_slots = HashMap::new();
+    let catchup =
+        |inputs| CardanoLogic::compute_catchup(raw, inputs, &no_slots, point.clone()).unwrap();
+    let undo = |inputs| CardanoLogic::compute_undo(raw, inputs, &no_slots, point.clone()).unwrap();
 
     let expected = tags(&catchup(&narrow).archive_index_deltas);
     assert!(!expected[0].1.is_empty());

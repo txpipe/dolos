@@ -16,6 +16,8 @@
 //!   where the `indexes` stele layer is produced from and restored into.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::ops::RangeInclusive;
 
 use thiserror::Error;
 
@@ -54,12 +56,52 @@ impl Tag {
 /// They are updated as UTxOs are produced and consumed, through the state
 /// writer that applies the UTxO set they project
 /// (`StateWriter::apply_utxo_tags`).
+///
+/// A ref with a producing slot in `slots` is also kept in chain order: the
+/// store files its tags under the slot too, so a query can walk one tag by
+/// chain position (`StateStore::utxos_by_tag_in_slots`), and remembers the
+/// slot beside the UTxO (`StateStore::get_utxo_slots`) so the consuming side
+/// can hand it back here. A ref without one — a genesis or custom UTxO, or
+/// one whose block the archive no longer held when it was positioned — has
+/// only its plain tags, and no chain position.
 #[derive(Debug, Clone, Default)]
 pub struct UtxoIndexDelta {
     /// UTxOs to add to filter indexes: (txo_ref, tags)
     pub produced: Vec<(TxoRef, Vec<Tag>)>,
     /// UTxOs to remove from filter indexes: (txo_ref, tags)
     pub consumed: Vec<(TxoRef, Vec<Tag>)>,
+    /// The producing slot of every ref above that has one, produced and
+    /// consumed alike: on the consumed side it names the ordered entries to
+    /// take out, on the produced side the ones to put in.
+    pub slots: HashMap<TxoRef, BlockSlot>,
+}
+
+/// The direction of a chain-ordered read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotOrder {
+    Asc,
+    Desc,
+}
+
+/// One bounded read of a tag's live refs in chain order, the shape
+/// `StateStore::utxos_by_tag_in_slots` takes.
+///
+/// A walk is a sequence of these: the first with no `after`, every next one
+/// resuming past the last pair the previous read returned, until a read comes
+/// back shorter than its `limit`. The store reads nothing past `limit` rows,
+/// so a walk costs what it reads, never the tag.
+#[derive(Debug, Clone)]
+pub struct SlotScan {
+    /// The producing slots to cover, both ends inclusive.
+    pub slots: RangeInclusive<BlockSlot>,
+    /// Ascending from the start of `slots`, or descending from its end.
+    pub order: SlotOrder,
+    /// Resume strictly past this pair in `order`: above it ascending, below
+    /// it descending. `None` starts at the end of `slots` the order begins
+    /// at.
+    pub after: Option<(BlockSlot, TxoRef)>,
+    /// At most this many rows.
+    pub limit: usize,
 }
 
 /// Delta for archive indexes (historical).

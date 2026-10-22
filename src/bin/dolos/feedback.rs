@@ -58,6 +58,22 @@ impl Feedback {
         self.multi.add(pb)
     }
 
+    /// A bar over a count of `unit`s, for a pass whose length is known up
+    /// front.
+    pub fn count_progress_bar(&self, unit: &str) -> ProgressBar {
+        let pb = ProgressBar::new_spinner();
+
+        pb.set_style(
+            ProgressStyle::with_template(&format!(
+                "{{spinner:.green}} [{{elapsed_precise}}] {{bar:40.cyan/blue}} {{human_pos:>11}}/{{human_len:11}} {unit} {{per_sec:>9}} (eta: {{eta}}) {{msg}}"
+            ))
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+
+        self.multi.add(pb)
+    }
+
     pub fn bytes_progress_bar(&self) -> ProgressBar {
         let pb = ProgressBar::new_spinner();
 

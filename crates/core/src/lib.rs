@@ -306,6 +306,11 @@ pub enum PullEvent {
     Rollback(ChainPoint),
 }
 
+/// One WAL entry: the block and everything its state mutation needs.
+///
+/// The field order is the on-disk format: the WAL serializes this
+/// positionally (bincode), so a field added or moved changes every row and
+/// goes with a `CURRENT_WAL_VERSION` bump.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogValue<D>
 where
@@ -314,6 +319,12 @@ where
     pub block: Cbor,
     pub delta: Vec<D>,
     pub inputs: HashMap<TxoRef, Arc<EraCbor>>,
+    /// The producing slot of every input above that had one when the block
+    /// rolled, so a rollback can put the inputs it recovers back in chain
+    /// order without reading a store (WAL v3). An input absent here — the
+    /// store carried no slot for it then — is positioned from the archive at
+    /// rollback instead.
+    pub input_slots: HashMap<TxoRef, BlockSlot>,
 }
 
 impl<D> LogValue<D>
@@ -325,6 +336,7 @@ where
             block: vec![],
             delta: vec![],
             inputs: HashMap::new(),
+            input_slots: HashMap::new(),
         }
     }
 }
@@ -624,24 +636,26 @@ pub trait ChainLogic: Sized + Send + Sync {
 
     /// Compute undo data for a block during rollback.
     ///
-    /// Given the raw block CBOR and the resolved inputs from the WAL,
-    /// returns the UTxO delta, index delta, and transaction hashes needed
-    /// to reverse the block's effects.
+    /// Given the raw block CBOR, the resolved inputs from the WAL and their
+    /// producing slots, returns the UTxO delta, index delta, and transaction
+    /// hashes needed to reverse the block's effects.
     fn compute_undo(
         block: &Cbor,
         inputs: &HashMap<TxoRef, Arc<EraCbor>>,
+        input_slots: &HashMap<TxoRef, BlockSlot>,
         point: ChainPoint,
     ) -> Result<UndoBlockData, ChainError>;
 
     /// Compute catch-up data from a WAL entry for recovery.
     ///
-    /// Given the raw block CBOR and the resolved inputs stored in the WAL,
-    /// computes the UTxO delta, index delta, and transaction hashes needed
-    /// to replay the block's effects. Used during bootstrap to catch up
-    /// stores that are behind the state store.
+    /// Given the raw block CBOR, the resolved inputs stored in the WAL and
+    /// their producing slots, computes the UTxO delta, index delta, and
+    /// transaction hashes needed to replay the block's effects. Used during
+    /// bootstrap to catch up stores that are behind the state store.
     fn compute_catchup(
         block: &Cbor,
         inputs: &HashMap<TxoRef, Arc<EraCbor>>,
+        input_slots: &HashMap<TxoRef, BlockSlot>,
         point: ChainPoint,
     ) -> Result<CatchUpBlockData, ChainError>;
 

@@ -128,6 +128,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/assets/{subject}/history`                                | Get the mint and burn history of a specific asset        |
 | `/assets/{subject}/transactions`                           | Get transactions involving a specific asset              |
 | `/assets/{subject}/txs`                                    | Alias of `/assets/{subject}/transactions` (hashes only)  |
+| `/assets/{subject}/utxos`                                  | Get live UTxOs holding a specific asset                  |
 | `/blocks/latest`                                           | Get latest block information                             |
 | `/blocks/latest/txs`                                       | Get transactions for the latest block                    |
 | `/blocks/latest/txs/cbor`                                  | Get transactions with CBOR data for the latest block     |
@@ -222,6 +223,10 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 `/scripts/{script_hash}` and its `/json`, `/cbor` and `/utxos` variants answer for the scripts the list holds, the way Blockfrost does: a transaction that failed phase-2 validation contributes only the reference script of its collateral return, so a script only its witnesses or auxiliary data carried is in neither. The witness points each script at the block that carried it first, so after `dolos doctor rebuild-state` those lookups need nothing rebuilt in the archive while that block is kept. Once `sync.max_history` prunes it, a lookup finds a later carrier through the archive index, and an archive written by a version that did not tag scripts carried in auxiliary data or in a valid transaction's collateral return has no index entries for them: if the node is going to prune, run the rebuild as `dolos doctor rebuild-state --rewrite-logs` before turning `sync.max_history` on, which fills them in. Like any rebuild it needs the full history, so a node whose archive is already pruned has to bootstrap again instead. A script whose every carrying block was pruned is not found by hash.
 
 pallas 1.3 decodes no Plutus V2 or V3 scripts in auxiliary data, so a script only auxiliary data ever carried in those languages is missing from the list.
+
+## Asset UTxOs on stores synced by an earlier version
+
+`/assets/{subject}/utxos` pages through the live UTxOs of an asset by chain position off the slot-ordered live-UTxO tags: a request reads the rows of its offset and its page and decodes one block per slot the page touches, however many live UTxOs the asset has, so `max_scan_items` caps the page depth and nothing else. A node this version bootstrapped — from genesis, a stele or `dolos doctor rebuild-state` — positions every UTxO as it enters the set. A store an earlier version synced carries the plain tags only, and so does one an earlier version wrote to after this one did; such a node logs it at start and answers this route with a `501` until `dolos doctor position-utxos` builds the positions from the UTxO set and the archive, which takes a pass over the live UTxOs and one exact lookup per transaction. A UTxO whose creation block the archive no longer holds gets no position; it is not listed, as on a node that pruned the block itself, since the route starts at the oldest block held.
 
 ## DRep listing on stores synced by an older release
 

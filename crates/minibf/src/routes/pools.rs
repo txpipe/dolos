@@ -23,10 +23,11 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     cip151,
-    indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
+    indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt},
     model::{AccountState, CalidusRegistration, PoolState},
     pallas_extras, AccountKey, PoolEpochLog, PoolHash, PoolKey,
 };
+use dolos_core::SlotOrder;
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use futures::{future::join_all, StreamExt};
 use itertools::Itertools;

@@ -182,6 +182,14 @@ pub fn cases<Stores: ToyStores>(fixture: &ApiFixture<Stores>) -> Vec<Case> {
             live: true,
         },
         Case {
+            name: "asset-utxos-page".into(),
+            path: format!("/assets/{}/utxos?count=4&order=asc", vectors.asset_unit),
+            fields: vec!["/tx_hash".into(), "/output_index".into()],
+            expected: json!(utxo_expected),
+            array: true,
+            live: true,
+        },
+        Case {
             name: "transaction-utxos".into(),
             path: format!("/txs/{}/utxos", vectors.tx_hash),
             fields: vec![

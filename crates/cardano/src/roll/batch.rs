@@ -120,6 +120,10 @@ pub struct WorkBatch {
     pub blocks: Vec<WorkBlock>,
     pub utxos: RawUtxoMap,
     pub utxos_decoded: HashMap<TxoRef, OwnedMultiEraOutput>,
+    /// The producing slot of every ref in `utxos` that has one: the batch's
+    /// own outputs sit in their block, the inputs it loaded where the state
+    /// store remembers them.
+    pub utxo_slots: HashMap<TxoRef, BlockSlot>,
 
     entities: EntityMap<CardanoEntity>,
 
@@ -227,6 +231,21 @@ impl WorkBatch {
             .unique()
             .collect();
 
+        // the outputs the batch produces sit in their own block
+        for block in self.blocks.iter() {
+            let slot = block.slot();
+
+            for tx in block.block.view().txs() {
+                for (idx, _) in tx.produces() {
+                    self.utxo_slots.insert(TxoRef(tx.hash(), idx as u32), slot);
+                }
+            }
+        }
+
+        // the inputs it loads, where the state store remembers them
+        let slots = domain.state().get_utxo_slots(all_refs.clone())?;
+        self.utxo_slots.extend(slots);
+
         let inputs: HashMap<_, _> = domain.state().get_utxos(all_refs)?.into_iter().collect();
 
         self.utxos.extend(inputs);
@@ -277,6 +296,7 @@ impl WorkBatch {
                 block: (*raw).clone(),
                 delta,
                 inputs: self.utxos.clone(),
+                input_slots: self.utxo_slots.clone(),
             };
 
             entries.push((point.clone(), value));
@@ -423,6 +443,8 @@ impl WorkBatch {
             // Archive indexes (shared logic)
             builder.index_block(work_block.block.view(), &self.utxos_decoded);
         }
+
+        builder.position_utxos(|txo| self.utxo_slots.get(txo).copied());
 
         let (utxo, archive) = builder.into_parts();
 

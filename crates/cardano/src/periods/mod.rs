@@ -25,7 +25,8 @@ use dolos_core::{
 use pallas::{codec::minicbor, ledger::primitives::Epoch};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::{indexes::SlotOrder, ChainSummary};
+use crate::ChainSummary;
+use dolos_core::SlotOrder;
 
 pub mod account_addresses;
 pub mod asset_mints;

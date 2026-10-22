@@ -9,7 +9,7 @@
 //! implementations, passing through the backend-specific config struct. All
 //! path resolution and directory creation is handled by the caller.
 
-use std::{ops::Range, path::Path, path::PathBuf};
+use std::{collections::HashMap, ops::Range, path::Path, path::PathBuf};
 
 use bytes::Bytes;
 use dolos_core::{
@@ -25,7 +25,7 @@ use dolos_core::{
     ArchiveIndexDelta, BlockBody, BlockSlot, CacheDiskTier, CacheEntry, CacheError, ChainPoint,
     EntityDelta, EntityKey, EntityValue, ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey,
     LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace, QueryLimiter,
-    RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
+    RawBlock, SlotScan, StateError, StateSchema, StateStore as CoreStateStore,
     StateWriter as CoreStateWriter, TagDimension, TagRecord, TieredCache, TxHash, TxStatus, TxoRef,
     UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
 };
@@ -620,6 +620,14 @@ impl CoreStateWriter for StateWriterBackend {
         }
     }
 
+    fn mark_utxos_positioned(&self) -> Result<(), StateError> {
+        match self {
+            Self::Redb(w) => w.mark_utxos_positioned(),
+            Self::Fjall(w) => w.mark_utxos_positioned(),
+            Self::Memory(w) => w.mark_utxos_positioned(),
+        }
+    }
+
     fn commit(self) -> Result<(), StateError> {
         match self {
             Self::Redb(w) => (*w).commit(),
@@ -763,6 +771,43 @@ impl CoreStateStore for StateStoreBackend {
             Self::Redb(s) => s.utxos_by_tag(dimension, key),
             Self::Fjall(s) => s.utxos_by_tag(dimension, key),
             Self::Memory(s) => s.utxos_by_tag(dimension, key),
+        }
+    }
+
+    fn get_utxo_slots(&self, refs: Vec<TxoRef>) -> Result<HashMap<TxoRef, BlockSlot>, StateError> {
+        match self {
+            Self::Redb(s) => s.get_utxo_slots(refs),
+            Self::Fjall(s) => s.get_utxo_slots(refs),
+            Self::Memory(s) => s.get_utxo_slots(refs),
+        }
+    }
+
+    fn utxos_by_tag_in_slots(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        scan: &SlotScan,
+    ) -> Result<Vec<(BlockSlot, TxoRef)>, StateError> {
+        match self {
+            Self::Redb(s) => s.utxos_by_tag_in_slots(dimension, key, scan),
+            Self::Fjall(s) => s.utxos_by_tag_in_slots(dimension, key, scan),
+            Self::Memory(s) => s.utxos_by_tag_in_slots(dimension, key, scan),
+        }
+    }
+
+    fn utxos_positioned(&self) -> Result<bool, StateError> {
+        match self {
+            Self::Redb(s) => s.utxos_positioned(),
+            Self::Fjall(s) => s.utxos_positioned(),
+            Self::Memory(s) => s.utxos_positioned(),
+        }
+    }
+
+    fn clear_utxo_positions(&self) -> Result<(), StateError> {
+        match self {
+            Self::Redb(s) => s.clear_utxo_positions(),
+            Self::Fjall(s) => s.clear_utxo_positions(),
+            Self::Memory(s) => s.clear_utxo_positions(),
         }
     }
 

@@ -5,6 +5,7 @@ use crate::feedback::Feedback;
 
 mod catchup_stores;
 mod check;
+mod position_utxos;
 mod rebuild_state;
 mod reclaim_avvm;
 mod reset_wal;
@@ -25,6 +26,9 @@ pub enum Command {
 
     /// rebuild the state store by replaying the local archive
     RebuildState(rebuild_state::Args),
+
+    /// build the slot-ordered live-UTxO tags on a store that predates them
+    PositionUtxos(position_utxos::Args),
 
     /// delete the unredeemed Byron AVVM utxos a pre-fix binary left behind
     ReclaimAvvm(reclaim_avvm::Args),
@@ -68,6 +72,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         Command::Check(x) => check::run(config, x)?,
         Command::CatchupStores(x) => catchup_stores::run(config, x, feedback)?,
         Command::RebuildState(x) => rebuild_state::run(config, x, feedback)?,
+        Command::PositionUtxos(x) => position_utxos::run(config, x, feedback)?,
         Command::ReclaimAvvm(x) => reclaim_avvm::run(config, x)?,
         Command::ResetWal(x) => reset_wal::run(config, x, feedback)?,
         Command::WalIntegrity(x) => wal_integrity::run(config, x)?,

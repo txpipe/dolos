@@ -41,6 +41,9 @@ pub enum Error {
     #[error("lock poisoned")]
     LockPoisoned,
 
+    #[error("the positioned mark needs a cursor to follow, and the store has none")]
+    MarkWithoutCursor,
+
     #[error("invalid dimension: {0}")]
     InvalidDimension(String),
 

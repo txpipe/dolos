@@ -20,13 +20,14 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
+    indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt},
     model::{AccountState, DRepState, PoolState},
     pallas_extras,
     periods::{account_addresses, stats},
     AccountEpochLog, AccountKey, ChainSummary, PoolHash,
 };
 use dolos_core::async_query::BlockMetaResolver;
+use dolos_core::SlotOrder;
 use dolos_core::{ArchiveStore as _, Domain, DomainError, StateStore as _};
 use futures_util::StreamExt;
 use pallas::{
@@ -413,12 +414,17 @@ where
 
 pub async fn by_stake_utxos<D>(
     Path(address): Path<String>,
-    Query(params): Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    // Blockfrost does not read `from` / `to` here, so a malformed
+    // or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
     let pagination = Pagination::try_from(params)?;
 
     let network = domain.get_network_id()?;

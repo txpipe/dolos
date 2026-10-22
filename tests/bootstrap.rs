@@ -8,10 +8,11 @@ use std::collections::{BTreeSet, HashSet};
 use std::str::FromStr as _;
 use std::sync::Arc;
 
-use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
+use dolos_cardano::indexes::{utxo_index_delta_from_utxo_delta, utxo_index_delta_with_slots};
 use dolos_core::{
-    sync::SyncExt as _, ArchiveStore as _, BootstrapExt, ChainLogic, ChainPoint, Domain,
-    StateStore, StateWriter, TagDimension, TxoRef, UtxoSetDelta, WalStore, WorkUnit,
+    archive::position_utxos, sync::SyncExt as _, ArchiveStore as _, BootstrapExt, ChainLogic,
+    ChainPoint, Domain, SlotOrder, SlotScan, StateStore, StateWriter, TagDimension, TxoRef,
+    UtxoSetDelta, WalStore, WorkUnit,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
@@ -39,10 +40,40 @@ enum CrashAfter {
     Archive,
 }
 
+/// Every positioned row of one tag, in chain order, read the way the routes
+/// read it: in bounded chunks resumed past the last row.
+fn ordered_tag(domain: &ToyDomain, dimension: TagDimension, key: &[u8]) -> Vec<(u64, TxoRef)> {
+    let mut rows = Vec::new();
+    let mut scan = SlotScan {
+        slots: 0..=u64::MAX,
+        order: SlotOrder::Asc,
+        after: None,
+        limit: 3,
+    };
+
+    loop {
+        let chunk = domain
+            .state()
+            .utxos_by_tag_in_slots(dimension, key, &scan)
+            .unwrap();
+        let last = chunk.len() < scan.limit;
+        scan.after = chunk.last().cloned();
+        rows.extend(chunk);
+        if last {
+            return rows;
+        }
+    }
+}
+
 /// The live-UTxO tags are a projection of the UTxO set: every live ref answers
 /// under every tag its output carries, and no tag answers with a ref that is
 /// not live. Both directions, so a stale tag (a ref the set no longer holds)
 /// fails as surely as a missing one.
+///
+/// The positions are a projection of the same set: every live ref a block
+/// produced carries the slot of that block — the archive's slot for its tx —
+/// and every tag lists exactly its positioned live refs in slot order, with
+/// no row for a ref the set no longer holds.
 fn assert_tags_match_utxo_set(domain: &ToyDomain) {
     let live: Vec<_> = domain
         .state()
@@ -52,6 +83,30 @@ fn assert_tags_match_utxo_set(domain: &ToyDomain) {
         .map(|(txo, value)| (txo, Arc::new(value)))
         .collect();
     let live_refs: HashSet<TxoRef> = live.iter().map(|(txo, _)| txo.clone()).collect();
+
+    let slots = domain
+        .state()
+        .get_utxo_slots(live_refs.iter().cloned().collect())
+        .unwrap();
+
+    for txo in &live_refs {
+        let produced_at = domain.archive().slot_by_tx_hash(txo.0.as_slice()).unwrap();
+
+        assert_eq!(
+            slots.get(txo).copied(),
+            produced_at,
+            "live ref {txo:?} is positioned where the archive does not put its tx"
+        );
+    }
+
+    assert!(
+        slots.len() < live_refs.len(),
+        "the genesis UTxOs should carry no position"
+    );
+    assert!(
+        !slots.is_empty(),
+        "no live ref is positioned, so this proves nothing"
+    );
 
     let expected = utxo_index_delta_from_utxo_delta(&UtxoSetDelta {
         produced_utxo: live.into_iter().collect(),
@@ -80,6 +135,19 @@ fn assert_tags_match_utxo_set(domain: &ToyDomain) {
                 tag.dimension
             );
 
+            let ordered = ordered_tag(domain, tag.dimension, &tag.key);
+            let mut positioned: Vec<_> = found
+                .iter()
+                .filter_map(|txo| slots.get(txo).map(|slot| (*slot, txo.clone())))
+                .collect();
+            positioned.sort();
+
+            assert_eq!(
+                ordered, positioned,
+                "{} tag in slot order is not its positioned live refs",
+                tag.dimension
+            );
+
             asked += 1;
         }
     }
@@ -87,6 +155,10 @@ fn assert_tags_match_utxo_set(domain: &ToyDomain) {
     assert!(
         asked > 0,
         "the UTxO set carries no tags, so this proves nothing"
+    );
+    assert!(
+        domain.state().utxos_positioned().unwrap(),
+        "a store this binary built reports itself positioned"
     );
 }
 
@@ -132,6 +204,15 @@ fn assert_no_stale_tags(domain: &ToyDomain, keys: &BTreeSet<(TagDimension, Vec<u
         assert!(
             stale.is_empty(),
             "{dimension} tag answers with {stale:?}, which the UTxO set no longer holds"
+        );
+
+        let stale: Vec<_> = ordered_tag(domain, dimension, key)
+            .into_iter()
+            .filter(|(_, txo)| !live_refs.contains(txo))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "{dimension} tag in slot order answers with {stale:?}, which the UTxO set no longer holds"
         );
     }
 }
@@ -301,6 +382,23 @@ fn test_catchup_recovers_state_from_wal() {
     // ... tags included: `catch_up_state` re-derives them from the same WAL
     // entries and commits them with the set.
     assert_tags_match_utxo_set(&domain);
+
+    // ... and positions included: every input an entry resolved that a block
+    // produced — inside the batch or before it — carries that block's slot
+    // in the entry, which is what the replay positioned it by.
+    let mut carried = 0usize;
+    for (_, log) in domain.wal().iter_logs(None, None).unwrap() {
+        for txo in log.inputs.keys() {
+            let produced_at = domain.archive().slot_by_tx_hash(txo.0.as_slice()).unwrap();
+            assert_eq!(
+                log.input_slots.get(txo).copied(),
+                produced_at,
+                "the WAL entry carries {txo:?} at a slot other than its block's"
+            );
+            carried += usize::from(produced_at.is_some());
+        }
+    }
+    assert!(carried > 0, "no WAL entry resolved a block-produced input");
 }
 
 /// Crash-recovery matrix: state and archive each at a different point behind
@@ -561,4 +659,193 @@ fn test_bootstrap_origin_cursor_is_noop() {
 
     // Archive should still be empty — no real blocks were processed.
     assert!(domain.archive().get_tip().unwrap().is_none());
+}
+
+/// A chain whose every block spends the previous block's outputs, so the
+/// inputs a block consumes are positioned refs: the forward path takes their
+/// slots out of the store, the WAL carries them, and the undo and catch-up
+/// paths put them back from the entry.
+fn chained_chain() -> SyntheticBlockConfig {
+    SyntheticBlockConfig {
+        spend_previous_outputs: true,
+        block_count: 3,
+        txs_per_block: 2,
+        ..Default::default()
+    }
+}
+
+/// The first output of every tx of block `index`.
+fn outputs_of_block(
+    vectors: &dolos_testing::synthetic::SyntheticVectors,
+    index: usize,
+) -> Vec<TxoRef> {
+    vectors.blocks[index]
+        .tx_hashes
+        .iter()
+        .map(|tx| TxoRef::from_str(&format!("{tx}#0")).unwrap())
+        .collect()
+}
+
+/// Consuming a positioned input takes its slot and its ordered rows out, and
+/// rolling the consuming blocks back puts them back from the WAL: the inputs
+/// the undone blocks recovered sit in slot order where their blocks put them.
+#[test]
+fn test_rollback_regains_positioned_inputs() {
+    let (blocks, vectors, cardano_config) = build_synthetic_blocks(chained_chain());
+
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    let rollback_target = {
+        let block = pallas::ledger::traverse::MultiEraBlock::decode(&blocks[0]).unwrap();
+        ChainPoint::Specific(block.slot(), block.hash())
+    };
+
+    for block in &blocks {
+        domain.roll_forward(block.clone()).unwrap();
+    }
+
+    // block 1 spent block 0's outputs: live they are not, positioned neither
+    let spent = outputs_of_block(&vectors, 0);
+    assert!(domain.state().get_utxos(spent.clone()).unwrap().is_empty());
+    assert!(domain
+        .state()
+        .get_utxo_slots(spent.clone())
+        .unwrap()
+        .is_empty());
+
+    assert_tags_match_utxo_set(&domain);
+    let tags_at_tip = live_tag_keys(&domain);
+
+    domain.rollback(&rollback_target).unwrap();
+
+    // the undone blocks' inputs are back, at the slot of the block that
+    // produced them, which the archive still holds
+    let slots = domain.state().get_utxo_slots(spent.clone()).unwrap();
+    assert_eq!(slots.len(), spent.len(), "a recovered input lost its slot");
+    for (txo, slot) in &slots {
+        assert_eq!(
+            domain.archive().slot_by_tx_hash(txo.0.as_slice()).unwrap(),
+            Some(*slot)
+        );
+    }
+
+    assert_tags_match_utxo_set(&domain);
+    assert_no_stale_tags(&domain, &tags_at_tip);
+}
+
+/// The last block of the chain replayed from the WAL after a crash before
+/// its state commit: it consumes positioned inputs the earlier blocks left in
+/// the store, and the replay takes their slots out of the entry, not the
+/// store, and takes their ordered rows out with them.
+#[test]
+fn test_catchup_replays_positioned_inputs() {
+    let (blocks, vectors, cardano_config) = build_synthetic_blocks(chained_chain());
+
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    let (last, earlier) = blocks.split_last().unwrap();
+    for block in earlier {
+        domain.roll_forward(block.clone()).unwrap();
+    }
+
+    // the last block spends the block before it; its entry carries their slots
+    let spent = outputs_of_block(&vectors, blocks.len() - 2);
+    assert_eq!(
+        domain.state().get_utxo_slots(spent.clone()).unwrap().len(),
+        spent.len()
+    );
+
+    feed_blocks_partial(&domain, std::slice::from_ref(last), CrashAfter::Wal);
+
+    let (_, entry) = domain.wal().iter_logs(None, None).unwrap().last().unwrap();
+    assert!(
+        spent.iter().all(|txo| entry.input_slots.contains_key(txo)),
+        "the entry lacks the slot of an input it consumes"
+    );
+
+    domain.bootstrap().unwrap();
+
+    assert!(domain.state().get_utxos(spent.clone()).unwrap().is_empty());
+    assert!(domain.state().get_utxo_slots(spent).unwrap().is_empty());
+    assert_tags_match_utxo_set(&domain);
+}
+
+/// A WAL entry written while the store was unpositioned — after an upgrade,
+/// before `dolos doctor position-utxos` — names no slot for the inputs the
+/// store carried none for. Rolling back through it after the repair still
+/// puts those inputs back in chain order: the rollback positions what the
+/// entry could not from the archive.
+#[test]
+fn test_rollback_positions_inputs_the_wal_entry_could_not() {
+    let (blocks, vectors, cardano_config) = build_synthetic_blocks(chained_chain());
+
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    let rollback_target = {
+        let block = pallas::ledger::traverse::MultiEraBlock::decode(&blocks[0]).unwrap();
+        ChainPoint::Specific(block.slot(), block.hash())
+    };
+
+    domain.roll_forward(blocks[0].clone()).unwrap();
+
+    // the store an older binary left behind: plain tags, no positions
+    domain.state().clear_utxo_positions().unwrap();
+    assert!(!domain.state().utxos_positioned().unwrap());
+
+    // the blocks that spend block 0's outputs roll on that store: their WAL
+    // entries carry no slot for those inputs
+    for block in &blocks[1..] {
+        domain.roll_forward(block.clone()).unwrap();
+    }
+
+    // block 0's own entry positions its outputs, which it produced; the
+    // entries after it resolved them as inputs the store carried no slot for
+    let spent = outputs_of_block(&vectors, 0);
+    let mut entries = 0;
+    for (point, log) in domain.wal().iter_logs(None, None).unwrap() {
+        if point.slot() > rollback_target.slot()
+            && spent.iter().any(|txo| log.inputs.contains_key(txo))
+        {
+            entries += 1;
+            assert!(
+                spent.iter().all(|txo| !log.input_slots.contains_key(txo)),
+                "the entry positioned an input the store had no slot for"
+            );
+        }
+    }
+    assert!(entries > 0, "no WAL entry consumed block 0's outputs");
+
+    // what `doctor position-utxos` does: position the live set, then mark
+    let live: Vec<TxoRef> = domain
+        .state()
+        .iter_utxos()
+        .unwrap()
+        .map(|entry| entry.unwrap().0)
+        .collect();
+    let bodies = domain.state().get_utxos(live).unwrap();
+    let slots = position_utxos(domain.archive(), bodies.keys()).unwrap();
+    let delta = UtxoSetDelta {
+        produced_utxo: bodies,
+        ..Default::default()
+    };
+    let writer = domain.state().start_writer().unwrap();
+    writer
+        .apply_utxo_tags(&utxo_index_delta_with_slots(&delta, &slots))
+        .unwrap();
+    writer.mark_utxos_positioned().unwrap();
+    writer.commit().unwrap();
+    assert_tags_match_utxo_set(&domain);
+
+    domain.rollback(&rollback_target).unwrap();
+
+    let slots = domain.state().get_utxo_slots(spent.clone()).unwrap();
+    assert_eq!(
+        slots.len(),
+        spent.len(),
+        "a recovered input the WAL could not position came back without one"
+    );
+    assert_tags_match_utxo_set(&domain);
 }

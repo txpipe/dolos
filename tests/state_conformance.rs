@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dolos_core::{
-    builtin::MemoryStateStore, ChainPoint, EntityKey, EraCbor, KeyBytes, KeyRange, RangeOf, Tag,
-    TxoRef, UtxoIndexDelta, UtxoSet, UtxoSetDelta,
+    builtin::MemoryStateStore, BlockSlot, ChainPoint, EntityKey, EraCbor, KeyBytes, KeyRange,
+    RangeOf, SlotOrder, SlotScan, Tag, TxoRef, UtxoIndexDelta, UtxoSet, UtxoSetDelta,
 };
 use dolos_core::{StateStore as CoreStateStore, StateWriter as CoreStateWriter};
 
@@ -118,6 +118,41 @@ macro_rules! conformance_suite {
             fn consumed_refs_leave_the_tag() {
                 super::consumed_refs_leave_the_tag::<$backend>();
             }
+
+            #[test]
+            fn a_lookup_key_that_prefixes_another_is_its_own_tag() {
+                super::a_lookup_key_that_prefixes_another_is_its_own_tag::<$backend>();
+            }
+
+            #[test]
+            fn positioned_refs_are_listed_in_slot_order() {
+                super::positioned_refs_are_listed_in_slot_order::<$backend>();
+            }
+
+            #[test]
+            fn a_slot_walk_resumes_past_its_cursor() {
+                super::a_slot_walk_resumes_past_its_cursor::<$backend>();
+            }
+
+            #[test]
+            fn utxo_slots_follow_the_set() {
+                super::utxo_slots_follow_the_set::<$backend>();
+            }
+
+            #[test]
+            fn undo_regains_before_it_drops() {
+                super::undo_regains_before_it_drops::<$backend>();
+            }
+
+            #[test]
+            fn a_lookup_key_that_prefixes_another_has_its_own_slot_order() {
+                super::a_lookup_key_that_prefixes_another_has_its_own_slot_order::<$backend>();
+            }
+
+            #[test]
+            fn the_positioned_mark_is_set_cleared_and_kept() {
+                super::the_positioned_mark_is_set_cleared_and_kept::<$backend>();
+            }
         }
     };
 }
@@ -200,6 +235,470 @@ fn refs(items: &[TxoRef]) -> UtxoSet {
     items.iter().cloned().collect()
 }
 
+/// A tagged ref and its producing slot, as the two sides of a delta take
+/// them.
+type Positioned = ((TxoRef, Vec<Tag>), (TxoRef, BlockSlot));
+
+/// A tagged ref with its producing slot.
+fn at(slot: BlockSlot, tagged: (TxoRef, Vec<Tag>)) -> Positioned {
+    let txo = tagged.0.clone();
+    (tagged, (txo, slot))
+}
+
+/// A delta producing `rows`, each at its slot.
+fn produced_at(rows: Vec<Positioned>) -> UtxoIndexDelta {
+    let (produced, slots): (Vec<_>, HashMap<_, _>) = rows.into_iter().unzip();
+
+    UtxoIndexDelta {
+        produced,
+        slots,
+        ..Default::default()
+    }
+}
+
+fn in_slots<S: CoreStateStore>(
+    store: &S,
+    dimension: &'static str,
+    key: u8,
+    scan: &SlotScan,
+) -> Vec<(BlockSlot, TxoRef)> {
+    store
+        .utxos_by_tag_in_slots(dimension, &[key; 4], scan)
+        .expect("utxos_by_tag_in_slots failed")
+}
+
+fn scan(slots: std::ops::RangeInclusive<BlockSlot>, order: SlotOrder) -> SlotScan {
+    SlotScan {
+        slots,
+        order,
+        after: None,
+        limit: usize::MAX,
+    }
+}
+
+fn slots_of<S: CoreStateStore>(store: &S, refs: &[TxoRef]) -> HashMap<TxoRef, BlockSlot> {
+    store
+        .get_utxo_slots(refs.to_vec())
+        .expect("get_utxo_slots failed")
+}
+
+/// Every positioned ref of a tag comes back in slot order, then ref order
+/// inside a slot, ascending or descending; the slot bounds are inclusive on
+/// both ends; a ref without a slot is in the plain tag and nowhere here.
+fn positioned_refs_are_listed_in_slot_order<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    apply_tags(
+        &store,
+        &produced_at(vec![
+            at(30, tagged(3, 0, &[(ADDRESS, 1)])),
+            at(10, tagged(1, 1, &[(ADDRESS, 1), (POLICY, 9)])),
+            at(10, tagged(1, 0, &[(ADDRESS, 1)])),
+            at(20, tagged(2, 0, &[(ADDRESS, 1)])),
+            at(20, tagged(9, 0, &[(ADDRESS, 2)])),
+        ]),
+    );
+
+    // a genesis-like ref: tagged, never positioned
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![tagged(7, 0, &[(ADDRESS, 1)])],
+            ..Default::default()
+        },
+    );
+
+    let asc = vec![
+        (10, txo(1, 0)),
+        (10, txo(1, 1)),
+        (20, txo(2, 0)),
+        (30, txo(3, 0)),
+    ];
+    let mut desc = asc.clone();
+    desc.reverse();
+
+    assert_eq!(
+        in_slots(&store, ADDRESS, 1, &scan(0..=u64::MAX, SlotOrder::Asc)),
+        asc
+    );
+    assert_eq!(
+        in_slots(&store, ADDRESS, 1, &scan(0..=u64::MAX, SlotOrder::Desc)),
+        desc
+    );
+
+    // inclusive bounds, both ends, both directions
+    assert_eq!(
+        in_slots(&store, ADDRESS, 1, &scan(10..=20, SlotOrder::Asc)),
+        asc[..3]
+    );
+    assert_eq!(
+        in_slots(&store, ADDRESS, 1, &scan(11..=30, SlotOrder::Desc)),
+        desc[..2]
+    );
+    assert_eq!(
+        in_slots(&store, ADDRESS, 1, &scan(21..=29, SlotOrder::Asc)),
+        vec![]
+    );
+    assert_eq!(
+        in_slots(
+            &store,
+            ADDRESS,
+            1,
+            &scan(std::ops::RangeInclusive::new(30, 10), SlotOrder::Asc)
+        ),
+        vec![]
+    );
+
+    // the plain tag has the unpositioned ref too, the other key only its own
+    assert_eq!(
+        by_tag(&store, ADDRESS, 1),
+        refs(&[txo(1, 0), txo(1, 1), txo(2, 0), txo(3, 0), txo(7, 0)])
+    );
+    assert_eq!(
+        in_slots(&store, ADDRESS, 2, &scan(0..=u64::MAX, SlotOrder::Asc)),
+        vec![(20, txo(9, 0))]
+    );
+    assert_eq!(
+        in_slots(&store, POLICY, 9, &scan(0..=u64::MAX, SlotOrder::Asc)),
+        vec![(10, txo(1, 1))]
+    );
+
+    // a limit cuts the walk short, zero rows is zero rows
+    let mut two = scan(0..=u64::MAX, SlotOrder::Asc);
+    two.limit = 2;
+    assert_eq!(in_slots(&store, ADDRESS, 1, &two), asc[..2]);
+    two.limit = 0;
+    assert_eq!(in_slots(&store, ADDRESS, 1, &two), vec![]);
+}
+
+/// A walk in chunks resumes strictly past its cursor in its direction,
+/// across slot groups and inside one, and a cursor past the far end — or
+/// before the near one — selects nothing or everything, never a panic.
+fn a_slot_walk_resumes_past_its_cursor<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    apply_tags(
+        &store,
+        &produced_at(vec![
+            at(10, tagged(1, 0, &[(ADDRESS, 1)])),
+            at(10, tagged(1, 1, &[(ADDRESS, 1)])),
+            at(10, tagged(2, 0, &[(ADDRESS, 1)])),
+            at(20, tagged(3, 0, &[(ADDRESS, 1)])),
+            at(30, tagged(4, 0, &[(ADDRESS, 1)])),
+        ]),
+    );
+
+    let whole = in_slots(&store, ADDRESS, 1, &scan(0..=u64::MAX, SlotOrder::Asc));
+    assert_eq!(whole.len(), 5);
+
+    for order in [SlotOrder::Asc, SlotOrder::Desc] {
+        let mut expected = whole.clone();
+        if order == SlotOrder::Desc {
+            expected.reverse();
+        }
+
+        for limit in 1..=6 {
+            let mut walked = Vec::new();
+            let mut scan = scan(0..=u64::MAX, order);
+            scan.limit = limit;
+
+            loop {
+                let chunk = in_slots(&store, ADDRESS, 1, &scan);
+                let last = chunk.len() < limit;
+                scan.after = chunk.last().cloned();
+                walked.extend(chunk);
+                if last {
+                    break;
+                }
+            }
+
+            assert_eq!(walked, expected, "{order:?} in chunks of {limit}");
+        }
+    }
+
+    // a cursor outside the slot range
+    let mut past = scan(10..=20, SlotOrder::Asc);
+    past.after = Some((20, txo(3, 0)));
+    assert_eq!(in_slots(&store, ADDRESS, 1, &past), vec![]);
+    past.after = Some((25, txo(0, 0)));
+    assert_eq!(in_slots(&store, ADDRESS, 1, &past), vec![]);
+    past.after = Some((5, txo(0, 0)));
+    assert_eq!(in_slots(&store, ADDRESS, 1, &past), whole[..4]);
+
+    let mut past = scan(20..=30, SlotOrder::Desc);
+    past.after = Some((20, txo(3, 0)));
+    assert_eq!(in_slots(&store, ADDRESS, 1, &past), vec![]);
+    past.after = Some((15, txo(0, 0)));
+    assert_eq!(in_slots(&store, ADDRESS, 1, &past), vec![]);
+    past.after = Some((35, txo(0, 0)));
+    assert_eq!(
+        in_slots(&store, ADDRESS, 1, &past),
+        vec![(30, txo(4, 0)), (20, txo(3, 0))]
+    );
+}
+
+/// The slot kept beside a ref answers while the ref is live and positioned,
+/// and consuming the ref takes the slot and its ordered rows with it — when
+/// the consuming delta names the slot, as the roll does from this very read.
+fn utxo_slots_follow_the_set<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    apply_tags(
+        &store,
+        &produced_at(vec![
+            at(10, tagged(1, 0, &[(ADDRESS, 1), (POLICY, 9)])),
+            at(20, tagged(2, 0, &[(ADDRESS, 1)])),
+        ]),
+    );
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![tagged(7, 0, &[(ADDRESS, 1)])],
+            ..Default::default()
+        },
+    );
+
+    let slots = slots_of(&store, &[txo(1, 0), txo(2, 0), txo(7, 0), txo(8, 0)]);
+    assert_eq!(
+        slots,
+        HashMap::from([(txo(1, 0), 10), (txo(2, 0), 20)]),
+        "positioned live refs answer, the unpositioned and the unknown do not"
+    );
+
+    // consumed with its slot, as the roll hands it back
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            consumed: vec![tagged(1, 0, &[(ADDRESS, 1), (POLICY, 9)])],
+            slots: slots.clone(),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        slots_of(&store, &[txo(1, 0), txo(2, 0)]),
+        HashMap::from([(txo(2, 0), 20)])
+    );
+    assert_eq!(
+        in_slots(&store, ADDRESS, 1, &scan(0..=u64::MAX, SlotOrder::Asc)),
+        vec![(20, txo(2, 0))]
+    );
+    assert_eq!(
+        in_slots(&store, POLICY, 9, &scan(0..=u64::MAX, SlotOrder::Asc)),
+        vec![]
+    );
+    assert_eq!(by_tag(&store, ADDRESS, 1), refs(&[txo(2, 0), txo(7, 0)]));
+}
+
+/// Undoing a block puts the inputs it consumed back, with their slots, and
+/// takes the outputs it produced out, with theirs. A ref on both sides — one
+/// the block produced and consumed — ends up out, like it is out of the set:
+/// the regained rows go in before the dropped ones go out.
+fn undo_regains_before_it_drops<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    // the input the block will consume, produced earlier at slot 10
+    apply_tags(
+        &store,
+        &produced_at(vec![at(10, tagged(1, 0, &[(ADDRESS, 1)]))]),
+    );
+
+    // the block at slot 20: consumes 1#0, produces 2#0 and 3#0, consumes 3#0
+    let block = UtxoIndexDelta {
+        produced: vec![
+            tagged(2, 0, &[(ADDRESS, 1)]),
+            tagged(3, 0, &[(ADDRESS, 1), (POLICY, 9)]),
+        ],
+        consumed: vec![
+            tagged(1, 0, &[(ADDRESS, 1)]),
+            tagged(3, 0, &[(ADDRESS, 1), (POLICY, 9)]),
+        ],
+        slots: HashMap::from([(txo(1, 0), 10), (txo(2, 0), 20), (txo(3, 0), 20)]),
+    };
+
+    apply_tags(&store, &block);
+
+    assert_eq!(
+        in_slots(&store, ADDRESS, 1, &scan(0..=u64::MAX, SlotOrder::Asc)),
+        vec![(20, txo(2, 0))]
+    );
+    assert_eq!(
+        slots_of(&store, &[txo(1, 0), txo(2, 0), txo(3, 0)]),
+        HashMap::from([(txo(2, 0), 20)])
+    );
+
+    let writer = store.start_writer().expect("start_writer failed");
+    writer
+        .undo_utxo_tags(&block)
+        .expect("undo_utxo_tags failed");
+    writer.commit().expect("commit failed");
+
+    assert_eq!(by_tag(&store, ADDRESS, 1), refs(&[txo(1, 0)]));
+    assert_eq!(by_tag(&store, POLICY, 9), refs(&[]));
+    assert_eq!(
+        in_slots(&store, ADDRESS, 1, &scan(0..=u64::MAX, SlotOrder::Asc)),
+        vec![(10, txo(1, 0))]
+    );
+    assert_eq!(
+        in_slots(&store, POLICY, 9, &scan(0..=u64::MAX, SlotOrder::Asc)),
+        vec![]
+    );
+    assert_eq!(
+        slots_of(&store, &[txo(1, 0), txo(2, 0), txo(3, 0)]),
+        HashMap::from([(txo(1, 0), 10)])
+    );
+}
+
+/// The ordered rows of a lookup key are its own: a key that prefixes another
+/// does not list the longer key's rows, in either direction, and a prefix of
+/// both lists nothing.
+fn a_lookup_key_that_prefixes_another_has_its_own_slot_order<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let short = vec![1u8, 1];
+    let long = vec![1u8, 1, 2];
+    let longer = vec![1u8, 1, 2, 3];
+
+    let rows: Vec<_> = [
+        (txo(1, 0), &short, 10),
+        (txo(2, 0), &long, 5),
+        (txo(2, 1), &long, 15),
+        (txo(3, 0), &longer, 10),
+    ]
+    .into_iter()
+    .map(|(txo, key, slot)| at(slot, (txo, vec![Tag::new(ADDRESS, key.clone())])))
+    .collect();
+
+    apply_tags(&store, &produced_at(rows));
+
+    let whole = |key: &[u8], order| {
+        let scan = scan(0..=u64::MAX, order);
+        store
+            .utxos_by_tag_in_slots(ADDRESS, key, &scan)
+            .expect("utxos_by_tag_in_slots failed")
+    };
+
+    for order in [SlotOrder::Asc, SlotOrder::Desc] {
+        assert_eq!(whole(&short, order), vec![(10, txo(1, 0))]);
+        assert_eq!(whole(&longer, order), vec![(10, txo(3, 0))]);
+        assert_eq!(whole(&[1], order), vec![]);
+    }
+    assert_eq!(
+        whole(&long, SlotOrder::Asc),
+        vec![(5, txo(2, 0)), (15, txo(2, 1))]
+    );
+    assert_eq!(
+        whole(&long, SlotOrder::Desc),
+        vec![(15, txo(2, 1)), (5, txo(2, 0))]
+    );
+}
+
+/// A fresh store is unpositioned; a writer that marks it, positioned; later
+/// writers that move the cursor keep it so; clearing the positions unsets it
+/// and takes the ordered rows and slots with it, leaving the plain tags.
+fn the_positioned_mark_is_set_cleared_and_kept<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    assert!(!store.utxos_positioned().expect("utxos_positioned failed"));
+
+    apply_tags(
+        &store,
+        &produced_at(vec![at(10, tagged(1, 0, &[(ADDRESS, 1)]))]),
+    );
+    assert!(!store.utxos_positioned().expect("utxos_positioned failed"));
+
+    // the mark follows the cursor: with none to follow, the commit fails
+    let writer = store.start_writer().expect("start_writer failed");
+    writer
+        .mark_utxos_positioned()
+        .expect("mark_utxos_positioned failed");
+    assert!(writer.commit().is_err(), "a mark with no cursor commits");
+    assert!(!store.utxos_positioned().expect("utxos_positioned failed"));
+
+    let writer = store.start_writer().expect("start_writer failed");
+    writer
+        .mark_utxos_positioned()
+        .expect("mark_utxos_positioned failed");
+    writer
+        .set_cursor(ChainPoint::Specific(10, [1; 32].into()))
+        .expect("set_cursor failed");
+    writer.commit().expect("commit failed");
+    assert!(store.utxos_positioned().expect("utxos_positioned failed"));
+
+    // a later cursor, with and without a mark of its own
+    for slot in [20, 30] {
+        let writer = store.start_writer().expect("start_writer failed");
+        writer
+            .set_cursor(ChainPoint::Specific(slot, [slot as u8; 32].into()))
+            .expect("set_cursor failed");
+        writer.commit().expect("commit failed");
+        assert!(store.utxos_positioned().expect("utxos_positioned failed"));
+    }
+
+    store
+        .clear_utxo_positions()
+        .expect("clear_utxo_positions failed");
+
+    assert!(!store.utxos_positioned().expect("utxos_positioned failed"));
+    assert_eq!(
+        in_slots(&store, ADDRESS, 1, &scan(0..=u64::MAX, SlotOrder::Asc)),
+        vec![]
+    );
+    assert_eq!(slots_of(&store, &[txo(1, 0)]), HashMap::new());
+    assert_eq!(by_tag(&store, ADDRESS, 1), refs(&[txo(1, 0)]));
+    assert_eq!(
+        store.read_cursor().expect("read_cursor failed"),
+        Some(ChainPoint::Specific(30, [30; 32].into()))
+    );
+
+    // marking again, in a writer that sets no cursor, stamps the stored one
+    let writer = store.start_writer().expect("start_writer failed");
+    writer
+        .mark_utxos_positioned()
+        .expect("mark_utxos_positioned failed");
+    writer.commit().expect("commit failed");
+    assert!(store.utxos_positioned().expect("utxos_positioned failed"));
+}
+
+/// Lookup keys vary in length, and one may be a prefix of another: an asset
+/// with an empty name is the prefix of every asset of its policy. Each is its
+/// own tag on every backend.
+fn a_lookup_key_that_prefixes_another_is_its_own_tag<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let short: Vec<u8> = vec![1, 1];
+    let long: Vec<u8> = vec![1, 1, 2];
+    let longer: Vec<u8> = vec![1, 1, 2, 3];
+
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![
+                (txo(1, 0), vec![Tag::new(ADDRESS, short.clone())]),
+                (txo(2, 0), vec![Tag::new(ADDRESS, long.clone())]),
+                (txo(2, 1), vec![Tag::new(ADDRESS, long.clone())]),
+                (txo(3, 0), vec![Tag::new(ADDRESS, longer.clone())]),
+            ],
+            consumed: vec![],
+            ..Default::default()
+        },
+    );
+
+    let whole = |key: &[u8]| -> Vec<TxoRef> {
+        let mut refs: Vec<TxoRef> = store
+            .utxos_by_tag(ADDRESS, key)
+            .expect("utxos_by_tag failed")
+            .into_iter()
+            .collect();
+        refs.sort();
+        refs
+    };
+    assert_eq!(whole(&short), vec![txo(1, 0)]);
+    assert_eq!(whole(&long), vec![txo(2, 0), txo(2, 1)]);
+    assert_eq!(whole(&longer), vec![txo(3, 0)]);
+    assert!(whole(&[1]).is_empty(), "a prefix of every key is no tag");
+}
+
 /// A produced ref answers under every tag it carries, and only there.
 fn apply_then_utxos_by_tag_finds_the_ref<B: Backend>() {
     let (store, _guard) = B::open();
@@ -218,6 +717,7 @@ fn apply_then_utxos_by_tag_finds_the_ref<B: Backend>() {
                 tagged(2, 0, &[(ADDRESS, 2), (POLICY, 9)]),
             ],
             consumed: vec![],
+            ..Default::default()
         },
     );
 
@@ -252,12 +752,14 @@ fn undo_utxo_tags_removes_exactly_what_apply_added<B: Backend>() {
                 tagged(2, 0, &[(ADDRESS, 2)]),
             ],
             consumed: vec![],
+            ..Default::default()
         },
     );
 
     let block = UtxoIndexDelta {
         produced: vec![tagged(3, 0, &[(ADDRESS, 1), (POLICY, 9)])],
         consumed: vec![tagged(2, 0, &[(ADDRESS, 2)])],
+        ..Default::default()
     };
 
     apply_tags(&store, &block);
@@ -301,6 +803,7 @@ fn consumed_refs_leave_the_tag<B: Backend>() {
                 tagged(1, 1, &[(ADDRESS, 1)]),
             ],
             consumed: vec![],
+            ..Default::default()
         },
     );
 
@@ -309,6 +812,7 @@ fn consumed_refs_leave_the_tag<B: Backend>() {
         &UtxoIndexDelta {
             produced: vec![],
             consumed: vec![tagged(1, 0, &[(ADDRESS, 1), (POLICY, 9)])],
+            ..Default::default()
         },
     );
 
@@ -329,6 +833,7 @@ fn consumed_refs_leave_the_tag<B: Backend>() {
         &UtxoIndexDelta {
             produced: vec![tagged(5, 0, &[(ADDRESS, 5)])],
             consumed: vec![tagged(5, 0, &[(ADDRESS, 5)])],
+            ..Default::default()
         },
     );
 

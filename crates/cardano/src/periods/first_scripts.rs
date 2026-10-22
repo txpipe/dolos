@@ -11,7 +11,8 @@ use dolos_core::{ArchiveWriter as _, BlockSlot, ChainError, Domain, StateStore};
 use pallas::{crypto::hash::Hash, ledger::primitives::Epoch};
 
 use super::{Period, Segment};
-use crate::{indexes::SlotOrder, ChainSummary, FirstScriptChunk, FirstScriptSet};
+use crate::{ChainSummary, FirstScriptChunk, FirstScriptSet};
+use dolos_core::SlotOrder;
 
 /// Seal the staged first scripts of every epoch `sealable` accepts.
 ///

@@ -30,6 +30,10 @@ pub enum Error {
     /// The node uses a fixed limit. Thus, the same request always stops at the
     /// same point.
     ScanBudgetExceeded,
+    /// The slot-ordered tag index the request pages through is not on this
+    /// node: the store predates it and has not been repaired with
+    /// `dolos doctor position-utxos`.
+    UtxosNotPositioned,
     InvalidCertIndex,
     InvalidGovActionId,
     InvalidCommitteeId,
@@ -206,6 +210,15 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "The request exceeds the scan limit of this node. Reduce the page number or the count.",
+                )),
+            )
+                .into_response(),
+            Error::UtxosNotPositioned => (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(ErrorBody::new(
+                    501,
+                    "Not Implemented",
+                    "This node has not built its slot-ordered UTxO index; run `dolos doctor position-utxos` to serve this route.",
                 )),
             )
                 .into_response(),

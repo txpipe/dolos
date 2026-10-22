@@ -478,6 +478,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     fn compute_undo(
         block: &dolos_core::Cbor,
         inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<EraCbor>>,
+        input_slots: &std::collections::HashMap<dolos_core::TxoRef, BlockSlot>,
         _point: ChainPoint,
     ) -> Result<dolos_core::UndoBlockData, ChainError> {
         let block_arc = Arc::new(block.clone());
@@ -502,6 +503,17 @@ impl dolos_core::ChainLogic for CardanoLogic {
         builder.add_produced_utxos(&utxo_delta.undone_utxo);
         builder.add_consumed_utxos(&utxo_delta.recovered_stxi);
 
+        // The undone outputs sit in this block; the recovered inputs where
+        // the WAL says their producers did.
+        let block_slot = blockv.slot();
+        builder.position_utxos(|txo| {
+            if utxo_delta.undone_utxo.contains_key(txo) {
+                Some(block_slot)
+            } else {
+                input_slots.get(txo).copied()
+            }
+        });
+
         // The archive entries the block wrote, rebuilt the way the apply path
         // built them, so `undo_index` removes exactly what `apply_index` added.
         builder.index_block(blockv, &decoded_inputs);
@@ -521,6 +533,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     fn compute_catchup(
         block: &dolos_core::Cbor,
         inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<EraCbor>>,
+        input_slots: &std::collections::HashMap<dolos_core::TxoRef, BlockSlot>,
         _point: ChainPoint,
     ) -> Result<dolos_core::CatchUpBlockData, ChainError> {
         let block_arc = Arc::new(block.clone());
@@ -542,6 +555,17 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         // UTxO filter changes
         builder.add_utxo_tags_from_delta(&utxo_delta);
+
+        // The produced outputs sit in this block; the consumed inputs where
+        // the WAL says their producers did.
+        let block_slot = blockv.slot();
+        builder.position_utxos(|txo| {
+            if utxo_delta.produced_utxo.contains_key(txo) {
+                Some(block_slot)
+            } else {
+                input_slots.get(txo).copied()
+            }
+        });
 
         // Archive indexes (shared logic)
         builder.index_block(blockv, &decoded_inputs);

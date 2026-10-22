@@ -12,7 +12,7 @@ use dolos_core::{
     LogEntity, LogIterTyped, LogKey, StateEntity, StateStore as _,
 };
 
-use crate::{log_and_500, Facade};
+use crate::{error::Error, log_and_500, Facade};
 
 /// Entities or log rows read per blocking task. One chunk of accounts holds
 /// its permit for a few milliseconds.
@@ -232,6 +232,29 @@ where
         self.cursor.advance(last, full);
 
         Ok(Some(out))
+    }
+}
+
+impl<D> Facade<D>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    /// Refuse a request that pages through the slot-ordered tag index on a
+    /// store that does not carry it, see `StateStore::utxos_positioned`.
+    pub async fn require_positioned_utxos(&self) -> Result<(), Error> {
+        let positioned = self
+            .blocking(|facade| {
+                facade.state().utxos_positioned().map_err(log_and_500(
+                    "failed to read whether the utxos are positioned",
+                ))
+            })
+            .await?;
+
+        if positioned {
+            Ok(())
+        } else {
+            Err(Error::UtxosNotPositioned)
+        }
     }
 }
 

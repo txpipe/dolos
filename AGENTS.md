@@ -35,7 +35,7 @@ Dolos keeps its data in distinct stores, each serving a specific purpose:
 ### Where the indexes live
 There is no standalone index store. Every index is a projection and lives in
 the store that holds what it projects:
-- the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
+- the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set); the same tags are kept in chain order for every UTxO whose producing slot is known (`StateStore::utxos_by_tag_in_slots`, the slot carried in `UtxoIndexDelta::slots` and kept beside the UTxO for the consuming side, `StateStore::get_utxo_slots`), which is what lets a route page one tag by chain position without holding it
 - the archive tags and the exact lookups (by block hash, block number, tx hash) project the block history and live in the `ArchiveStore` (`ArchiveStore::slots_by_tag` / `slot_by_*`, written through `ArchiveWriter::apply_index` in the same batch as the blocks)
 
 ### Database File Organization
@@ -110,11 +110,13 @@ The project follows a modular workspace architecture with clear separation of co
 - **Purpose**: Persistent state and archive implementation using the Fjall LSM-tree embedded database
 - **Design Philosophy**: Optimized for write-heavy workloads with many keys, ideal for blockchain data
 - **Components**:
-  - `state`: `StateStore` implementation with four-keyspace design:
-    - **`state-cursor`**: Chain position tracking (single key-value)
+  - `state`: `StateStore` implementation with six-keyspace design:
+    - **`state-cursor`**: Chain position tracking (single key-value), plus the positioned mark under a second key, a copy of the cursor that every commit of a binary maintaining the ordered tags rewrites beside it
     - **`state-utxos`**: UTxO set storage with `[tx_hash:32][index:4]` keys
     - **`state-entities`**: All entity types with `[ns_hash:8][entity_key:var]` keys
     - **`state-tags`**: Live-UTxO tags with `[dim_hash:8][lookup_key:var][txo_ref:36]` keys
+    - **`state-tags-by-slot`**: The same tags in chain order for the positioned UTxOs, with `[dim_hash:8][key_len:2][lookup_key:var][slot:8][txo_ref:36]` keys
+    - **`state-utxo-slots`**: The producing slot of every positioned UTxO, `[txo_ref:36]` -> `[slot:8]`
   - `archive`: `ArchiveStore` implementation with four-keyspace design:
     - **`archive-blocks`**: Slot -> packed physical frame locations in the flat segment files
     - **`archive-logs`**: All log namespaces with `[ns_hash:8][slot:8][key:var]` keys
