@@ -66,7 +66,7 @@ DOLOS_UPSTREAM__PEER_ADDRESS="some-other-hostname:30000" dolos daemon
 
 The rules:
 
-- An override is checked like the file: an unknown key, a value of the wrong type or a broken rule is refused, and the error names the variable rather than the file.
+- An override is checked like the file: an unknown key, a value that cannot be converted to the field's type or a broken rule is refused, and the error names the variable rather than the file. A variable's value is text, converted as a file's value is (see [rules across fields](./schema#rules-across-fields)): `DOLOS_MEMPOOL__PERSISTENT=on` sets `true`.
 - A name may use only letters, digits, `_` and `-` after `DOLOS_`; any other character is refused.
 - A variable that sets a table is refused beside one that sets a key inside it.
 - `compatibility` comes from the file alone.

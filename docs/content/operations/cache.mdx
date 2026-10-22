@@ -4,7 +4,7 @@ sidebar:
   order: 5
 ---
 
-Dolos keeps a cache of answers it derives from its other stores, so that an expensive read is computed once rather than on every request. The cache is disposable: it is not part of the WAL, the state or the archive, it is left out of snapshots and restores, and deleting it changes no answer the node derives, only how fast the first requests are served. The exception is off-chain metadata, which the node does not derive: a cleared body is fetched again from its host, and is gone if the host no longer serves it.
+Dolos keeps a cache of answers it derives from its other stores, so that an expensive read is computed once rather than on every request. The cache is disposable: it is not part of the WAL, the state or the archive, it is left out of snapshots and restores, and deleting it changes no answer the node derives, only how fast the first requests are served. Its entries are not tied to a chain, though: when the chain under the same `storage.path` changes, as when a devnet is reset, clear the cache before starting the node, or it serves the old chain's answers. The exception is off-chain metadata, which the node does not derive: a cleared body is fetched again from its host, and is gone if the host no longer serves it.
 
 ## What it holds
 

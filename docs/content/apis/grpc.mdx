@@ -30,9 +30,7 @@ No changes are required in Dolos to support web access, the same port that accep
 
 ## Authentication Mechanism
 
-Dolos has a built-in mechanism for authenticating clients using TLS. By specifying a specific CA authority via configuration, Dolos wil accept client connections that provide a matching certificate and reject any other connection attempt.
-
-To enable TLS authentication, a `.pem` file needs to be specified via configuration to define the CA authority use for validating client certificates. If no pem is specified, Dolos will assume that the endpoint should not perform any authentication and allow any connection.
+The endpoint accepts any connection. TLS client authentication does not work in this release: the `serve.grpc.tls_client_ca_root` field is accepted, but the endpoint has no server certificate to present, and gRPC fails to start when the field is set. Leave it out, and put the endpoint behind a proxy that authenticates clients when it needs to be restricted. See [`serve.grpc`](../configuration/schema#servegrpc).
 
 ## Available Operations
 

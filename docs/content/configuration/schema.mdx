@@ -40,7 +40,7 @@ listen_address = "[::]:3000"
 
 ## Full reference
 
-Every field the file accepts, each with an example value. Many of these values are not defaults: a persistent mempool, a rolling history and a different peer, for instance. Each field's default is in its section's table below, and a field left at its default can be left out:
+The fields of a node following a known network, each with an example value. The fields of a custom network and of the emulator are in [`chain.cardano`](#chaincardano) and [`upstream`](#upstream). Many of these values are not defaults: a persistent mempool, a rolling history and a different peer, for instance. Each field's default is in its section's table below, and a field left at its default can be left out:
 
 ```toml
 compatibility = "v2-alpha.1"
@@ -331,7 +331,7 @@ The ledger state and the block archive. Each store table is optional and takes a
 | `blocks_path` | path, relative to `storage.path` | the archive directory | archive |
 
 - `fjall` keeps the store on disk in a Fjall database, opened with the named `preset`.
-- `ephemeral` keeps it in memory, and it is lost on restart. It holds everything the store holds in RAM, so it suits devnets, tooling and short tests: a test against `preview`, the smallest public network, fits a workstation, and a node following mainnet does not. An ephemeral store takes no other field.
+- `ephemeral` keeps it in memory, and it is lost on restart. It holds everything the store holds in RAM, so it suits devnets, tooling and short tests rather than a node that follows a public network for long. An ephemeral store takes no other field.
 
 `blocks_path` puts the archive's block segment files in their own directory, such as one on another volume; `data export` and `bootstrap snapshot` move them with the archive.
 
@@ -378,7 +378,7 @@ The database row applies at every open. Fjall records a keyspace's memtable and 
 
 #### Persistence
 
-The two store types combine as follows. Two things are independent of them: the mempool's persistence, and the [cache](#storagecache), which keeps its disk tier at `storage.cache.path` with any store types unless `enabled = false`. The cache is disposable and changes no answer.
+The two store types combine as follows. Two things are independent of them: the mempool's persistence, and the [cache](#storagecache), which keeps its disk tier at `storage.cache.path` with any store types unless `enabled = false`. The cache is disposable, but its disk tier is not tied to a chain: when the chain under the same `storage.path` changes, as when a devnet is reset or an emulator or custom network on ephemeral stores starts over, delete `storage.cache.path` or run `dolos cache clear --all` before starting the node, or it serves the old chain's answers.
 
 | state / archive | WAL | archive after a restart | restart |
 | --------------- | --- | ----------------------- | ------- |
@@ -594,7 +594,14 @@ Besides each field's own type and range, loading refuses:
 
 Each error names the keys involved, and is reported before any store opens.
 
-A value of the wrong type is refused, with one exception: a fraction in an integer field is rounded to the nearest integer rather than refused. `pull_batch_size = 0.4` loads as `0`, and `window = { unit = "slot", value = 0.4 }` as a window of zero slots. Only `serve.max_concurrent_queries` refuses a fraction, so write every other integer as a whole number.
+A plain value of another type is converted to the field's type where it can be, rather than refused:
+
+- a boolean field takes `"true"`, `"yes"`, `"on"`, `"1"` and any non-zero number as `true`, and their opposites as `false`;
+- a number field takes a numeric string, and a boolean as `1` or `0`;
+- a string field takes a number or a boolean;
+- a fraction in an integer field is rounded: `pull_batch_size = 0.4` loads as `0`, and `window = { unit = "slot", value = 0.4 }` as a window of zero slots. Only `serve.max_concurrent_queries` refuses a fraction.
+
+A value with no conversion is refused, such as `"abc"` in an integer field, `"maybe"` in a boolean field, or a list or table in a plain field. A converted value passes `dolos config check`, so write every field in the type its table gives.
 
 ## Command inputs
 
