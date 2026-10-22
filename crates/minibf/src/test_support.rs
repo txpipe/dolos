@@ -557,7 +557,7 @@ impl TestApp {
     pub fn new_with_archived_blocks(genesis: dolos_core::Genesis, blocks: &[RawBlock]) -> Self {
         let domain = ToyDomain::new_with_genesis_and_config(
             Arc::new(genesis),
-            CardanoConfig::default(),
+            dolos_cardano::CardanoLogicConfig::default(),
             None,
             None,
         );
