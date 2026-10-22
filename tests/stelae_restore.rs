@@ -122,6 +122,7 @@ fn a_forced_restore_replaces_a_store_this_release_refuses() {
 
     let node = Node::new();
     node.sync();
+    node.stand_at_boundary();
 
     let before = Contents::read(&node);
 
