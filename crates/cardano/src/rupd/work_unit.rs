@@ -662,6 +662,8 @@ mod tests {
     /// half at the cut, which rounds up where half down or half to even would
     /// keep a different double. 8529360004794 / 20235083305638617 is
     /// 0.00042151346134647476|4999…, just short of a half, and stays down.
+    /// 3000000000014 / 21955336489517329 is 0.00013664103947786739|96…, which
+    /// carries through the 9 to …786740.
     #[test]
     fn numeric_ratio_rounds_half_up_at_the_scale() {
         assert_eq!(
@@ -687,6 +689,15 @@ mod tests {
             "0.00042151346134647477".parse::<f64>().unwrap(),
             0.00042151346134647474
         );
+
+        assert_eq!(
+            numeric_ratio(3_000_000_000_014, 21_955_336_489_517_329),
+            0.0001366410394778674
+        );
+        assert_ne!(
+            "0.00013664103947786749".parse::<f64>().unwrap(),
+            0.0001366410394778674
+        );
     }
 
     /// Both stakes lead with the base-10000 digit 1, so the quotient's weight
@@ -710,7 +721,7 @@ mod tests {
             0.00012499999999999998
         );
         assert_ne!(
-            "0.00012500000000000000".parse::<f64>().unwrap(),
+            "0.00012499999999999999".parse::<f64>().unwrap(),
             0.00012499999999999998
         );
     }
