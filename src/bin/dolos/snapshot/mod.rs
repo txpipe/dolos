@@ -21,6 +21,7 @@ use std::path::Path;
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
+    boundary::Boundary,
     export::Plan,
     facade::{Selection, SnapshotSource as _, StoreSnapshot},
     planning::{self, PlanReport},
@@ -36,7 +37,9 @@ pub use dolos_snapshot::planning::EpochRange;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// computes a stele's inscription and identity without writing one
+    /// computes a stele's inscription and identity without writing one, from
+    /// stores standing on the first block of an epoch, as `dolos sync
+    /// --stop-epoch` leaves them
     Digest(digest::Args),
 
     /// checks a published stele's digests — manifest against inscription,
@@ -100,24 +103,31 @@ fn parse_state_epochs(text: &str) -> miette::Result<Vec<u64>> {
         .collect()
 }
 
-/// This node's plan, narrowed by the operator's selection.
+/// This node's plan, narrowed by the operator's selection, and the boundary
+/// evidence that makes it publishable.
 ///
 /// One sequence for `digest` and `verify --reproduce`, because a node that gave
-/// them different plans would be verifying a different document. `what` is the
-/// word the failing command uses for the plan it was building.
+/// them different plans would be verifying a different document. The boundary
+/// is checked here, before anything slow, though the walk checks it again.
+/// `what` is the word the failing command uses for the plan it was building.
 pub fn planned(
     config: &RootConfig,
     stores: &crate::common::Stores,
     selection: &Selection,
     retained: RetainedEpochs,
     what: &'static str,
-) -> miette::Result<Plan> {
+) -> miette::Result<(Plan, Boundary)> {
     let genesis = crate::common::open_genesis(config)?;
+    let snapshot = StoreSnapshot::new(&stores.archive, &stores.state);
 
-    StoreSnapshot::new(&stores.archive, &stores.state)
+    let plan = snapshot
         .selected_plan(u64::from(genesis.network_magic()), retained, *selection)
         .into_diagnostic()
-        .context(what)
+        .context(what)?;
+
+    let boundary = snapshot.boundary(&plan).into_diagnostic().context(what)?;
+
+    Ok((plan, boundary))
 }
 
 /// The report every command opens with: where the node stands and what the
@@ -127,12 +137,16 @@ pub fn planned(
 /// against a published stele is comparing the same arithmetic. What is here is
 /// the four lines it is said in. Written to `stderr`, because `digest` puts a
 /// document on `stdout` and a report interleaved with it would not be one.
-pub fn report_plan(plan: &Plan) -> miette::Result<()> {
+pub fn report_plan(plan: &Plan, boundary: &Boundary) -> miette::Result<()> {
     let report = PlanReport::read(plan).into_diagnostic()?;
 
     eprintln!("network:  {} ({})", report.network, report.magic);
     eprintln!("cursor:   {}", report.cursor);
     eprintln!("sequence: {} (tag {})", report.sequence, report.tag);
+    eprintln!(
+        "boundary: first block of epoch {}, after {}",
+        boundary.epoch, boundary.parent,
+    );
 
     eprintln!(
         "band:     {} epochs per index traversal ({} MiB budgeted)",

@@ -92,7 +92,8 @@ pub fn open_genesis(config: &RootConfig) -> miette::Result<Genesis> {
 /// When `daemon` and `sync` stop.
 #[derive(Debug, Clone, Default, clap::Args)]
 pub struct StopArgs {
-    /// Stop once the ledger reaches this epoch
+    /// Stop once the ledger reaches this epoch, on its first block: the only
+    /// state a Stelae snapshot of that epoch is cut from
     #[arg(long, value_name = "N")]
     pub stop_epoch: Option<u64>,
 
