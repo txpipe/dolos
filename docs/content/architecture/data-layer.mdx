@@ -24,6 +24,25 @@ Under the configured `storage.path`, a running node maintains three on-disk stor
 | **Archive** | Immutable history: full block bodies, time-indexed logs of entity changes, and the reverse lookups over them — slots by address, payment credential, stake credential, policy, asset, datum and more, plus slot by block hash, block number and tx hash. | History is append-only and read differently from current state, so it uses its own layout (see below). The lookups are a projection of the blocks, so they live beside them and commit with them. |
 | **Mempool** | Submitted-but-unconfirmed transactions and their lifecycle state. | Pending transactions are transient and overlaid on top of committed state during validation. |
 
+## Store identity
+
+Each on-disk state and archive store records, when it is created, the compatibility identifier of the contract the binary that created it writes: the current entry of the `compatibility` values the release reads (`v2-alpha.1` for this release). The state store keeps it under the key `identity` in its `state-cursor` keyspace; the archive keeps it in the `archive-meta` keyspace of its index database.
+
+Every command that opens a state or archive store checks it before anything else:
+
+- A store recording an identity the release reads opens.
+- A store with no identity that holds nothing is new: it records the current identity before its first write.
+- A store holding data but no identity, written before stores recorded one, is refused, and so is a store recording an identity the release does not read. The error names the store, its path and what it found.
+
+The configuration plays no part, so no edit to `dolos.toml` gets a refused store past the check. The remedies are the ways to get stores the release writes itself:
+
+- clear storage and re-sync: `dolos bootstrap relay --force` (or `dolos bootstrap mithril --force`), then `dolos daemon`;
+- restore from a stele: `dolos bootstrap stelae --force`.
+
+`dolos bootstrap` treats a refused store as data in the way: `--force` on its own clears it, and every other run of the command refuses with the same error, `--skip-if-data` and `--continue` included. `--force` clears only the storage root, though, and never a state store that fails to open for another reason, as a half-unpacked one does, or whose cursor fails to read. So beside a refused store it is refused too, naming what to remove by hand, while such a state is there, or while a directory the configuration keeps outside the root (an absolute or `..` `path`, or a `blocks_path` outside the root) holds data: a store with data, an archive that fails to open, or block segments. A directory holding no data, such as a fresh mount point or an empty store this release opens, doesn't stop it. A running node holds its stores, so they fail to open, and `--force` stops at the store's own error: stop the node first. A stele restore, a Mithril import and a relay sync write through the running binary's own stores, so what they produce records that binary's identity. A stele's own compatibility is settled by its media types and schemas, not by this identity. A Dolos snapshot (`dolos bootstrap snapshot`) unpacks the exporting node's stores as they were, so they are checked once unpacked, and a snapshot exported before stores recorded an identity is refused.
+
+The WAL keeps its own format version, wiped when older and refused when newer. The mempool and the cache are outside the check.
+
 ## Storage traits and pluggable backends
 
 Each store is defined as a trait in `dolos-core` — `WalStore`, `StateStore`, `ArchiveStore`, and `MempoolStore` — and the rest of Dolos only ever talks to those traits. Concrete implementations are selected at runtime in `src/adapters/storage.rs`, which wraps each backend in an enum so a node can mix engines per store.
@@ -63,12 +82,14 @@ A few concepts recur across the stores:
 - **API-only state.** A fact the API serves that the ledger rules never read lives in its own state namespace, so a ledger namespace holds only what the ledger knows. `drep-sightings` (`DRepSightingState`, keyed by `DRepKey`) holds one row per DRep a certificate of a valid tx has named, vote delegations and the special DReps included: the position of the first such certificate, down to its place in the tx, and the latest anchor a registration or update carried. `/governance/dreps` lists DReps in that order with that anchor, which is db-sync's order and metadata, and reads the page's `DRepState` rows for the rest. The ledger's own anchor is cleared by an update without one, and a DRep only a vote delegation named has no `DRepState` row. Its deltas undo through the WAL, and its rows are never pruned. On mainnet it holds 1,700 rows, 128 kB on disk.
 - **Index dimensions.** Tag multimaps keyed by address, payment credential, stake credential, policy id, and asset id. The live ones point at the matching UTxOs and live in the state store's `state-tags` keyspace, written in the same batch as the UTxO set; the historical ones point at slots and live in the archive store's `archive-tags` keyspace, beside the `index-exact` keyspace that resolves a block hash, block number or transaction hash to its slot — both written in the same batch as the blocks they project.
 
-Two fjall databases, eight keyspaces:
+The two fjall databases and their keyspaces:
 
 | Store | Keyspaces | One batch commits |
 |---|---|---|
 | state | `state-cursor`, `state-utxos`, `state-entities`, `state-tags` | entities + UTxO set + live-UTxO tags + cursor |
-| archive | `archive-blocks`, `archive-logs`, `archive-tags`, `index-exact` | block locations + logs + archive tags + exact lookups |
+| archive | `archive-blocks`, `archive-logs`, `archive-tags`, `index-exact`, `archive-meta` | block locations + logs + archive tags + exact lookups |
+
+The [store identity](#store-identity) is written once, when the store is created, beside the cursor in `state-cursor` and alone in `archive-meta`.
 
 Source: `crates/core/src/{state,archive,wal,indexes,mempool}.rs`, `crates/redb3/src/*`, `crates/fjall/src/*`, and storage configuration in `crates/core/src/config.rs`.
 
