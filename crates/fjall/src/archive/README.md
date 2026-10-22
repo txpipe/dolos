@@ -10,10 +10,12 @@ This module implements the `ArchiveStore` trait using [Fjall](https://github.com
 | 2 | `archive-logs` | All log namespaces | Range scans within a namespace |
 | 3 | `archive-tags` | Block tags, append-only | Prefix scans by dimension and key |
 | 4 | `index-exact` | Block hash / block number / tx hash → slot | Point lookups |
+| 5 | `archive-meta` | The store's compatibility identity | Single key read/write |
 
-The last two are projections of the blocks. Keeping them here lets the history
-and its lookups commit in the same batch. Both keyspaces use
-`l0_threshold = 8` and `memtable_size_mb = 128`.
+`archive-tags` and `index-exact` are projections of the blocks. Keeping them
+here lets the history and its lookups commit in the same batch. Both keyspaces
+take the preset's index tuning (L0 threshold 8, 128 MiB memtable) rather than
+the 4 and 64 MiB of the others.
 
 ## Key Schemas
 
@@ -45,6 +47,16 @@ Value: (empty)
 ```
 
 `key_hash` is `dolos_core::key_hash`, not a hash this crate decides: two backends that decided it differently would exchange records neither could then look up. For every dimension it is `xxh3_64(logical key)` big-endian. The logical key is not recoverable from the store, which is why `TagRecord` carries the stored hash and nothing else.
+
+### Store metadata (`archive-meta`)
+
+```
+Key:   "identity"
+Value: UTF-8 contract identifier, e.g. "v2-alpha.1"
+```
+
+The compatibility identity the store recorded when it was created, which the
+node's store opener checks before anything else (see the data layer docs).
 
 ### Exact lookups (`index-exact`)
 

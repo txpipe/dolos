@@ -4,15 +4,17 @@
 //! Each shard commits twice — its archive logs and its state, which marks the
 //! shard done in `EWrapProgress`. A restart resumes after the last done shard,
 //! so a shard marked done whose `account-epochs` rows never reached the
-//! archive loses them for good. The finalize pass writes its `drep-epochs`
-//! rows in its own archive commit, ahead of its state. The harness is
+//! archive loses them for good. Finalize commits twice too — the settled
+//! `pool-epochs` rows and the closed epoch to the archive, then its state,
+//! which marks it done in `EpochState.ewrap_finalized`. Finalize's archive
+//! commit also carries the `drep-epochs` rows. The harness is
 //! `ToyDomain`, wrapped in a `FaultyToyDomain` that dies after a set number of
 //! store commits, and the boundary runs through `execute_work_unit`, the
 //! executor the node runs.
 
 use dolos_core::{
-    sync::execute_work_unit, ArchiveStore as _, BlockSlot, Domain, DomainError, StateStore as _,
-    StateWriter as _,
+    sync::execute_work_unit, ArchiveStore as _, ArchiveWriter as _, BlockSlot, Domain, DomainError,
+    StateStore as _, StateWriter as _,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
@@ -21,9 +23,10 @@ use dolos_testing::{
 use pallas::ledger::primitives::{conway::DRep, StakeCredential};
 
 use dolos_cardano::{
-    ewrap::EwrapWorkUnit, AccountEpochLog, AccountKey, AccountState, CardanoWorkUnit,
-    DRepDelegation, DRepEpochLog, DRepKey, DRepState, EpochValue, PendingRewardState,
-    PoolDelegation, PoolHash, Stake,
+    ewrap::EwrapWorkUnit, pallas_extras, AccountEpochLog, AccountKey, AccountState,
+    CardanoWorkUnit, DRepDelegation, DRepEpochLog, DRepKey, DRepState, EpochState, EpochValue,
+    PendingRewardState, PoolDelegation, PoolEpochLog, PoolHash, PoolKey, PoolParams, PoolSnapshot,
+    PoolState, Stake,
 };
 
 const CLOSING_EPOCH: u64 = 5;
@@ -31,6 +34,22 @@ const CLOSING_EPOCH: u64 = 5;
 /// First bytes of the rewarded accounts' key hashes: one each in an early,
 /// a middle and a late shard of the 32.
 const ACCOUNTS: [u8; 3] = [0x10, 0x80, 0xf0];
+
+/// The leader reward each rewarded account's pool pays its operator.
+const LEADER_REWARD: u64 = 30;
+
+/// What RUPD computed for a delegator of each pool that deregistered before
+/// the boundary and so was never paid.
+const FORFEITED: u64 = 7;
+
+/// A pool RUPD logged rewards for that the boundary paid to no account.
+const UNPAID: u8 = 0x01;
+
+/// A pool retiring at the boundary. Finalize refunds its deposit to the
+/// account at [`REFUNDED`] in [`ACCOUNTS`], once per run.
+const RETIRING: u8 = 0x02;
+
+const REFUNDED: usize = 1;
 
 fn credential(byte: u8) -> StakeCredential {
     StakeCredential::AddrKeyhash([byte; 28].into())
@@ -56,7 +75,9 @@ fn vote_delegation(byte: u8) -> DRepDelegation {
 /// A devnet store closing [`CLOSING_EPOCH`], where every account in
 /// [`ACCOUNTS`] is registered and has a pending reward for EWRAP to apply —
 /// which is what gives each of them an `account-epochs` row — and delegates
-/// its vote, which is what gives the distribution its `drep-epochs` rows.
+/// its vote, which is what gives the distribution its `drep-epochs` rows,
+/// where RUPD logged each pool's rewards with the [`FORFEITED`] share still in
+/// them, and where the [`RETIRING`] pool leaves.
 fn seeded() -> ToyDomain {
     let domain = ToyDomain::new(None, None);
     let state = domain.state();
@@ -86,7 +107,7 @@ fn seeded() -> ToyDomain {
         let reward = PendingRewardState {
             credential,
             is_spendable: true,
-            as_leader: vec![(pool, 30)],
+            as_leader: vec![(pool, LEADER_REWARD)],
             as_delegator: vec![(pool, u64::from(byte))],
         };
 
@@ -109,6 +130,66 @@ fn seeded() -> ToyDomain {
         .write_entity_typed(&DRepKey::from(&drep.identifier), &drep)
         .unwrap();
 
+    let params = PoolParams {
+        vrf_keyhash: [0; 32].into(),
+        pledge: 0,
+        cost: 0,
+        margin: pallas_extras::default_rational_number(),
+        reward_account: [&[0xe0][..], &[ACCOUNTS[REFUNDED]; 28][..]].concat(),
+        pool_owners: vec![],
+        relays: vec![],
+        pool_metadata: None,
+    };
+
+    let retiring = PoolState {
+        operator: [RETIRING; 28].into(),
+        snapshot: EpochValue::with_live(
+            CLOSING_EPOCH,
+            PoolSnapshot {
+                is_retired: false,
+                blocks_minted: 0,
+                params,
+                is_new: false,
+                stake: None,
+                delegators: None,
+                live_pledge: None,
+            },
+        ),
+        blocks_minted_total: 0,
+        register_slot: 0,
+        retiring_epoch: Some(CLOSING_EPOCH + 1),
+        deposit: 0,
+        calidus: None,
+    };
+
+    writer
+        .write_entity_typed(&PoolKey(retiring.operator), &retiring)
+        .unwrap();
+
+    writer.commit().unwrap();
+
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(state).unwrap();
+    let slot = summary.epoch_start(CLOSING_EPOCH - 1);
+
+    let computed = ACCOUNTS
+        .into_iter()
+        .map(|byte| (byte, u64::from(byte) + LEADER_REWARD + FORFEITED))
+        .chain([(UNPAID, FORFEITED)]);
+
+    let writer = domain.archive().start_writer().unwrap();
+
+    for (byte, total_rewards) in computed {
+        let log = PoolEpochLog {
+            total_rewards,
+            operator_share: LEADER_REWARD,
+            ..Default::default()
+        };
+
+        writer
+            .write_log_typed(slot, &PoolKey([byte; 28].into()), &log)
+            .unwrap();
+    }
+
     writer.commit().unwrap();
 
     domain
@@ -128,26 +209,27 @@ where
     execute_work_unit(domain, &mut work)
 }
 
-fn account_epochs(domain: &ToyDomain) -> Vec<(BlockSlot, AccountKey, AccountEpochLog)> {
-    domain
-        .archive()
-        .iter_logs_typed::<AccountEpochLog>(None)
-        .unwrap()
-        .map(Result::unwrap)
-        .collect()
+fn epoch_state(domain: &ToyDomain) -> EpochState {
+    dolos_cardano::load_epoch::<ToyDomain>(domain.state()).unwrap()
 }
 
-fn drep_epochs(domain: &ToyDomain) -> Vec<(BlockSlot, DRepKey, DRepEpochLog)> {
-    domain
-        .archive()
-        .iter_logs_typed::<DRepEpochLog>(None)
-        .unwrap()
-        .map(Result::unwrap)
-        .collect()
+/// What EWRAP leaves behind: the archive rows it writes or settles, and the
+/// state it changes.
+#[derive(Debug, PartialEq)]
+struct Outcome {
+    account_epochs: Vec<(BlockSlot, AccountKey, AccountEpochLog)>,
+    pool_epochs: Vec<(BlockSlot, PoolKey, PoolEpochLog)>,
+    closed_epochs: Vec<(BlockSlot, EpochState)>,
+    drep_epochs: Vec<(BlockSlot, DRepKey, DRepEpochLog)>,
+    accounts: Vec<AccountState>,
+    pools: Vec<PoolState>,
+    epoch: EpochState,
 }
 
-fn accounts(domain: &ToyDomain) -> Vec<AccountState> {
-    ACCOUNTS
+fn outcome(domain: &ToyDomain) -> Outcome {
+    let archive = domain.archive();
+
+    let accounts = ACCOUNTS
         .into_iter()
         .map(|byte| {
             let key = AccountKey::from(&credential(byte));
@@ -158,23 +240,102 @@ fn accounts(domain: &ToyDomain) -> Vec<AccountState> {
                 .unwrap()
                 .expect("account present")
         })
-        .collect()
+        .collect();
+
+    Outcome {
+        account_epochs: archive
+            .iter_logs_typed::<AccountEpochLog>(None)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect(),
+        pool_epochs: archive
+            .iter_logs_typed::<PoolEpochLog>(None)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect(),
+        closed_epochs: archive
+            .iter_logs_typed::<EpochState>(None)
+            .unwrap()
+            .map(|x| x.map(|(slot, (), epoch)| (slot, epoch)).unwrap())
+            .collect(),
+        drep_epochs: archive
+            .iter_logs_typed::<DRepEpochLog>(None)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect(),
+        accounts,
+        pools: domain
+            .state()
+            .iter_entities_typed::<PoolState>(None)
+            .unwrap()
+            .map(|x| x.unwrap().1)
+            .collect(),
+        epoch: epoch_state(domain),
+    }
+}
+
+/// A run that never crashed.
+fn clean_run() -> Outcome {
+    let clean = seeded();
+    wrap_the_epoch(&clean).unwrap();
+
+    let expected = outcome(&clean);
+
+    assert_eq!(expected.account_epochs.len(), ACCOUNTS.len());
+    assert_eq!(expected.drep_epochs.len(), ACCOUNTS.len());
+    assert!(
+        expected
+            .closed_epochs
+            .iter()
+            .any(|(_, epoch)| epoch.number == CLOSING_EPOCH),
+        "the closed epoch is archived"
+    );
+    assert!(expected.epoch.ewrap_finalized);
+
+    let deposit = expected
+        .epoch
+        .pparams
+        .unwrap_live()
+        .ensure_pool_deposit()
+        .unwrap();
+    let refunded = &expected.accounts[REFUNDED].stake;
+
+    assert!(deposit > 0);
+    assert_eq!(
+        refunded.next().map(|stake| stake.rewards_sum),
+        Some(refunded.unwrap_live().rewards_sum + deposit),
+        "the retiring pool's deposit is refunded"
+    );
+
+    let settled: Vec<_> = expected
+        .pool_epochs
+        .iter()
+        .map(|(_, pool, log)| (pool.0[0], log.total_rewards, log.operator_share))
+        .collect();
+
+    let paid: Vec<_> = [(UNPAID, 0, 0)]
+        .into_iter()
+        .chain(
+            ACCOUNTS
+                .into_iter()
+                .map(|byte| (byte, u64::from(byte) + LEADER_REWARD, LEADER_REWARD)),
+        )
+        .collect();
+
+    assert_eq!(settled, paid, "pool logs settled on what the boundary paid");
+
+    expected
 }
 
 /// Every crash point in turn: the boundary dies after `n` store commits,
 /// restarts on the same stores, and runs to the end. Whatever `n` is, the
-/// archive ends up with exactly the rows of a run that never crashed, and
-/// the accounts with exactly its balances — a shard re-run after its archive
-/// commit writes the same rows again and applies its rewards once.
+/// archive and state end up exactly as in a run that never crashed — a shard
+/// re-run after its archive commit writes the same rows again and applies its
+/// rewards once, and a finalize re-run after its archive commit settles the
+/// same pool logs again and writes the same `drep-epochs` rows once.
 #[test]
-fn a_crash_at_any_commit_keeps_every_account_epoch_row() {
-    let clean = seeded();
-    wrap_the_epoch(&clean).unwrap();
-
-    let expected_rows = account_epochs(&clean);
-    let expected_accounts = accounts(&clean);
-
-    assert_eq!(expected_rows.len(), ACCOUNTS.len());
+fn a_crash_at_any_commit_ends_like_a_clean_run() {
+    let expected = clean_run();
 
     let mut crash_after = 0;
 
@@ -191,14 +352,9 @@ fn a_crash_at_any_commit_keeps_every_account_epoch_row() {
         wrap_the_epoch(&domain).expect("restart");
 
         assert_eq!(
-            account_epochs(&domain),
-            expected_rows,
-            "account-epochs rows after a crash following commit {crash_after}"
-        );
-        assert_eq!(
-            accounts(&domain),
-            expected_accounts,
-            "accounts after a crash following commit {crash_after}"
+            outcome(&domain),
+            expected,
+            "boundary after a crash following commit {crash_after}"
         );
 
         crash_after += 1;
@@ -207,59 +363,49 @@ fn a_crash_at_any_commit_keeps_every_account_epoch_row() {
     assert!(crash_after > 0, "the boundary committed nothing");
 }
 
-/// Whether a crashed run stopped between the last shard's commit and
-/// finalize's archive commit. A restart there skips finalize altogether:
-/// `EwrapWorkUnit::is_complete` cannot tell a closed boundary from one whose
-/// finalize never committed, a known gap left to its own fix.
-fn before_finalize_committed(domain: &ToyDomain) -> bool {
-    let epoch = dolos_cardano::load_epoch::<ToyDomain>(domain.state()).unwrap();
-    let shards_done = epoch
-        .ewrap_progress
-        .is_some_and(|progress| progress.committed == progress.total);
-
-    shards_done && drep_epochs(domain).is_empty()
-}
-
-/// Every crash point in turn, for the finalize pass's `drep-epochs` rows.
-/// They ride finalize's archive commit, so whatever `n` is the archive ends up
-/// with each row once, equal to a run that never crashed — except in the
-/// window [`before_finalize_committed`] names.
+/// The window between the last shard's commit and finalize's: every shard is
+/// marked done and finalize has not committed, or has committed only its
+/// archive half. The restart runs no shard, runs finalize, and ends as a run
+/// that never crashed, pool logs settled. Finalize runs once: the boundary
+/// triggered again afterwards, as it is until ESTART moves the cursor,
+/// changes nothing, where a second finalize would refund the retiring pool's
+/// deposit twice.
 #[test]
-fn a_crash_at_any_commit_writes_the_drep_epoch_rows_once() {
-    let clean = seeded();
-    wrap_the_epoch(&clean).unwrap();
+fn a_crash_before_finalize_commits_resumes_into_finalize() {
+    let expected = clean_run();
 
-    let expected = drep_epochs(&clean);
-    assert_eq!(expected.len(), ACCOUNTS.len());
+    let shards = expected
+        .epoch
+        .ewrap_progress
+        .as_ref()
+        .expect("ewrap progress")
+        .total;
 
-    let mut crash_after = 0;
-    let mut skipped = 0;
-
-    loop {
+    // two commits per shard, then finalize's archive commit and its state one
+    for crash_after in [2 * shards, 2 * shards + 1] {
         let domain = seeded();
         let crashing =
             FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(crash_after));
 
-        if wrap_the_epoch(&crashing).is_ok() {
-            break;
-        }
+        wrap_the_epoch(&crashing).expect_err("crash before finalize's state commit");
 
-        let skip = before_finalize_committed(&domain);
+        let crashed = epoch_state(&domain);
+        let progress = crashed.ewrap_progress.as_ref().expect("ewrap progress");
+        assert_eq!(progress.committed, progress.total, "every shard done");
+        assert!(!crashed.ewrap_finalized, "finalize not done");
 
         wrap_the_epoch(&domain).expect("restart");
+        assert_eq!(
+            outcome(&domain),
+            expected,
+            "boundary after a crash following commit {crash_after}"
+        );
 
-        if skip {
-            skipped += 1;
-        } else {
-            assert_eq!(
-                drep_epochs(&domain),
-                expected,
-                "drep-epochs rows after a crash following commit {crash_after}"
-            );
-        }
-
-        crash_after += 1;
+        wrap_the_epoch(&domain).expect("trigger again");
+        assert_eq!(
+            outcome(&domain),
+            expected,
+            "boundary triggered again after a crash following commit {crash_after}"
+        );
     }
-
-    assert_eq!(skipped, 1, "the resume window is one crash point");
 }

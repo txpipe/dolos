@@ -60,7 +60,7 @@ use dolos_testing::{
     faults::{FaultyStateStore, TestFault},
     toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
 };
-use node::{export_plan, export_to, harness, plan_at_boundary, Blank};
+use node::{export_plan, export_to, harness, plan_at_boundary, stand_at_boundary, Blank};
 use serde_json::json;
 use stelae::{
     dir::{LayerSpec, SteleDir},
@@ -1020,6 +1020,7 @@ fn large_snapshot_block_chunks_use_automatic_parallel_encoding() {
         None,
     );
     domain.import_blocks(blocks).unwrap();
+    stand_at_boundary(&domain, 1);
     let temp = tempfile::tempdir().unwrap();
     export_to(temp.path(), &domain);
     let blank = Blank::<FjallStores>::open();
@@ -1655,35 +1656,34 @@ fn a_killed_restore_resumes_into_the_same_node_on_fjall() {
 /// and the state tip is redone, because the tip is what a new stele changes.
 ///
 /// The harness ledger is one epoch, so "a newer inscription" is built the way
-/// `tests/publish.rs` builds its second publish: the same stores, standing at
-/// two synthetic chain points a slot apart. The first closes epoch 0; the
-/// second stands in epoch 1.
+/// `node::Node` builds its second publish: the same stores, published on the
+/// epoch-1 boundary and again once they stand on the epoch-2 one.
 ///
 /// That geometry is what makes the assertions mean anything. Epoch 0's layers
 /// are byte-identical across the two steles, because its window closed and a
-/// closed window cannot be published differently. The state shards are **not**,
-/// because a shard's header record names the epoch it is the tip of. So the
-/// resume has genuinely different bytes on both sides of the rule: layers it
-/// may skip, and layers it must not.
+/// closed window cannot be published differently. Epoch 1's are not — the
+/// first stele carries its boundary sliver, the second the whole epoch — and
+/// neither are the state shards, because a shard's header record names the
+/// epoch it is the tip of. So the resume has genuinely different bytes on both
+/// sides of the rule: layers it may skip, and layers it must not.
 #[test]
 fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     let domain: ToyDomain = harness();
     let magic = magic_of(&domain);
 
-    let boundary = epoch_one_starts_at(&domain);
-
     let older = tempfile::tempdir().unwrap();
     let newer = tempfile::tempdir().unwrap();
 
-    let first = export_standing_at(older.path(), &domain, boundary - 1);
-    let second = export_standing_at(newer.path(), &domain, boundary);
+    let first = export_to(older.path(), &domain);
+    stand_at_boundary(&domain, 2);
+    let second = export_to(newer.path(), &domain);
 
     // Two steles, not one. The whole test is about a `diffId` recorded under
     // the first staying true under the second, and that says nothing unless
     // the second is a different document.
     assert_ne!(first.digest().unwrap(), second.digest().unwrap());
-    assert_eq!(first.sequence, 0, "the cursor stands in epoch 0");
-    assert_eq!(second.sequence, 1, "and one slot later, in epoch 1");
+    assert_eq!(first.sequence, 1, "the cursor stands in epoch 1");
+    assert_eq!(second.sequence, 2, "and then in epoch 2");
 
     // And the two sides of the rule, as bytes. Epoch 0's layers carry forward;
     // every state layer is new.
@@ -1750,16 +1750,18 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     let resumed =
         restore_checkpointed(newer.path(), storage.path(), magic, &blank, true, None).unwrap();
 
+    let kept = epoch_zero(&first).len();
+
     assert_eq!(
-        resumed.layers_skipped, seeded,
-        "every epoch layer the older stele had completed was kept"
+        resumed.layers_skipped, kept,
+        "every layer of the closed epoch the older stele had completed was kept"
     );
 
     assert_eq!(
         resumed.layers_fetched,
-        second.layers.len() - seeded,
-        "and everything the newer stele adds was fetched: epoch 1's layers, \
-         and every state layer because a state layer is never inherited"
+        second.layers.len() - kept,
+        "and everything else the newer stele carries was fetched: epoch 1 whole, \
+         epoch 2's sliver, and every state layer because a state layer is never inherited"
     );
 
     assert!(
@@ -1767,10 +1769,8 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
         "the newer stele has to add an epoch, or the tip is all this proves"
     );
 
-    // Against an uninterrupted restore of the *same* stele, not against the
-    // domain: the two steles stand at synthetic chain points the harness ledger
-    // never reached, so their cursor is theirs and not the domain's. What has
-    // to match is everything a restore of `second` produces.
+    // Against an uninterrupted restore of the *same* stele, which is
+    // everything a restore of `second` produces.
     let reference = Blank::<MemoryStores>::open();
     let reference_storage = tempfile::tempdir().unwrap();
 
@@ -1788,53 +1788,6 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     assert_archive_matches(&blank.archive, &reference.archive);
     assert_indexes_match(&blank.archive, &reference.archive);
     assert_utxo_tags_match(blank.state(), reference.state());
-}
-
-/// The slot epoch 1 begins at, for a test that needs to stand on the boundary.
-fn epoch_one_starts_at<B: ToyStores>(domain: &ToyDomain<B>) -> u64 {
-    dolos_cardano::eras::load_chain_summary_from_state(domain.state())
-        .unwrap()
-        .epoch_start(1)
-}
-
-/// Export `domain` as if its cursor stood at `slot`.
-///
-/// [`export_to`] derives everything from the store's own cursor, so two calls
-/// produce one stele twice. A test about what changes *between* steles needs
-/// two, and standing at a synthetic chain point is how `tests/publish.rs`
-/// builds its second publish — for the same reason, and with the same caveat:
-/// the resulting cursor is not one the harness ledger ever reached, so a
-/// restore of it must be compared against another restore rather than against
-/// the domain.
-fn export_standing_at<B: ToyStores>(
-    root: &std::path::Path,
-    domain: &ToyDomain<B>,
-    slot: u64,
-) -> Inscription {
-    let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
-
-    // Any hash will do: `position` needs one to exist, and nothing in an export
-    // reads it back out of the store.
-    let plan = dolos_snapshot::export::Plan::new(
-        &summary,
-        dolos_snapshot::Network::for_magic(magic_of(domain)),
-        ChainPoint::Specific(slot, dolos_core::BlockHash::new([0xab; 32])),
-        Default::default(),
-    )
-    .unwrap();
-
-    let stele = SteleDir::create(root).unwrap();
-
-    dolos_snapshot::export::export(
-        &stele,
-        &plan,
-        domain.archive(),
-        domain.state(),
-        None,
-        &dolos_snapshot::export::First,
-        &Observer::silent(),
-    )
-    .unwrap()
 }
 
 /// The resume is `--continue`'s and nobody else's.
@@ -1999,7 +1952,9 @@ fn max_history_selects_epochs_and_never_the_tip() {
 
     let stele = SteleDir::open(temp.path()).unwrap();
 
-    for max_history in [None, Some(0), Some(u64::MAX)] {
+    // Epochs dropped and kept, per window: the fixture covers epoch 0 whole and
+    // epoch 1's boundary sliver.
+    for (max_history, dropped, kept) in [(None, 0, 2), (Some(0), 1, 1), (Some(u64::MAX), 0, 2)] {
         let plan = restore::plan(&stele, magic_of(&domain), max_history).unwrap();
 
         // Keyed by namespace now, so the tip is one entry per state kind and
@@ -2011,11 +1966,10 @@ fn max_history_selects_epochs_and_never_the_tip() {
             "{max_history:?}"
         );
 
-        // The fixture stands inside epoch zero, so every window reaches the tip
-        // and nothing is ever dropped — which is the assertion, not a shortcut:
-        // the epoch the cursor stands in must survive any window.
-        assert_eq!(plan.skipped_epochs, 0, "{max_history:?}");
-        assert_eq!(plan.epochs.len(), 1, "{max_history:?}");
+        // A zero window drops epoch 0 and keeps the sliver: the epoch the
+        // cursor stands in must survive any window.
+        assert_eq!(plan.skipped_epochs, dropped, "{max_history:?}");
+        assert_eq!(plan.epochs.len(), kept, "{max_history:?}");
     }
 }
 

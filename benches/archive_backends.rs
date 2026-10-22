@@ -60,16 +60,7 @@ impl Backend for Fjall {
     type Store = dolos_fjall::archive::ArchiveStore;
 
     fn open(dir: &std::path::Path) -> Self::Store {
-        // Single worker thread so CI runners are not oversubscribed; the
-        // rest are the backend's own defaults.
-        let config = dolos_core::config::FjallArchiveConfig {
-            cache: Some(16),
-            flush_on_commit: Some(false),
-            worker_threads: Some(1),
-            ..Default::default()
-        };
-
-        dolos_fjall::archive::ArchiveStore::open(schema(), dir, &config)
+        dolos_fjall::archive::ArchiveStore::open(schema(), dir, None, dolos_fjall::Preset::Standard)
             .expect("failed to open fjall archive store")
     }
 }

@@ -1155,6 +1155,7 @@ fn measure_banded_publish_cost() {
     let started = std::time::Instant::now();
     let written = seed_deltas(&spec, &mut |delta| apply(&store, &delta));
     let seeding = started.elapsed();
+    let tip = boundary_after(&store, epochs);
 
     println!("--- banded publish cost ---");
     println!(
@@ -1178,7 +1179,7 @@ fn measure_banded_publish_cost() {
         let before = max_rss_bytes();
         let started = std::time::Instant::now();
 
-        let (inscription, temp) = publish_at_band(&store, epochs, band);
+        let (inscription, temp) = publish_at_band(&store, &tip, band);
 
         let elapsed = started.elapsed();
         let peak = max_rss_bytes();
@@ -1205,15 +1206,35 @@ fn measure_banded_publish_cost() {
     );
 }
 
-/// Publish the seeded archive at `band`, into a directory that lives as long
-/// as the returned guard.
+/// Append the two empty blocks that put a publish on the boundary opening the
+/// epoch after the seeded ones — the last block before it and its first — and
+/// return the point of the second.
+#[cfg(unix)]
+fn boundary_after<S: CoreArchiveStore>(store: &S, epochs: u64) -> dolos_core::ChainPoint {
+    use dolos_core::ArchiveWriter as _;
+    use dolos_testing::blocks::make_conway_block_with_prev;
+
+    let start = epochs * EPOCH_LEN;
+    let (last, last_body) = make_conway_block_with_prev(start - 1, None, 0);
+    let (first, first_body) = make_conway_block_with_prev(start, last.hash(), 1);
+
+    let writer = store.start_writer().expect("archive writer");
+    writer.apply(&last, &last_body).expect("apply");
+    writer.apply(&first, &first_body).expect("apply");
+    writer.commit().expect("commit");
+
+    first
+}
+
+/// Publish the seeded archive at `band`, standing at `tip`, into a directory
+/// that lives as long as the returned guard.
 #[cfg(unix)]
 fn publish_at_band<S: CoreArchiveStore>(
     store: &S,
-    epochs: u64,
+    tip: &dolos_core::ChainPoint,
     band: usize,
 ) -> (dolos_snapshot::inscription::Inscription, tempfile::TempDir) {
-    use dolos_core::{ChainPoint, StateStore as _, StateWriter as _};
+    use dolos_core::{StateStore as _, StateWriter as _};
     use dolos_snapshot::{
         export::{IndexBand, Plan},
         Network,
@@ -1222,22 +1243,24 @@ fn publish_at_band<S: CoreArchiveStore>(
     let temp = tempfile::tempdir().expect("tempdir");
 
     let state = dolos_core::builtin::MemoryStateStore::new();
+    let summary = cost_summary();
 
-    // The publish stands on the last slot the seed wrote to, so its plan covers
-    // every epoch in the store and nothing beyond it.
-    let tip = ChainPoint::Specific(
-        epochs * EPOCH_LEN - 1,
-        dolos_core::BlockHash::new([0xab; 32]),
-    );
-
+    // The publish stands on the boundary after the epochs the seed wrote to,
+    // so its plan covers every one of them and the sliver beyond.
     let writer = state.start_writer().expect("state writer");
+    writer
+        .write_entity_typed::<dolos_cardano::model::EraState>(
+            &dolos_cardano::EraKey::from(6),
+            &cost_era(),
+        )
+        .expect("era");
     writer.set_cursor(tip.clone()).expect("set cursor");
     writer.commit().expect("commit");
 
     let plan = Plan::new(
-        &cost_summary(),
+        &summary,
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
-        tip,
+        tip.clone(),
         Default::default(),
     )
     .expect("plan")
@@ -1264,22 +1287,24 @@ fn publish_at_band<S: CoreArchiveStore>(
 fn cost_summary() -> dolos_cardano::eras::ChainSummary {
     let mut chain = dolos_cardano::eras::ChainSummary::default();
 
-    chain.append_era(
-        6,
-        dolos_cardano::model::EraState {
-            start: dolos_cardano::EraBoundary {
-                epoch: 0,
-                slot: 0,
-                timestamp: 0,
-            },
-            end: None,
-            epoch_length: EPOCH_LEN,
-            slot_length: 1,
-            protocol: 6,
-        },
-    );
+    chain.append_era(6, cost_era());
 
     chain
+}
+
+#[cfg(unix)]
+fn cost_era() -> dolos_cardano::model::EraState {
+    dolos_cardano::model::EraState {
+        start: dolos_cardano::EraBoundary {
+            epoch: 0,
+            slot: 0,
+            timestamp: 0,
+        },
+        end: None,
+        epoch_length: EPOCH_LEN,
+        slot_length: 1,
+        protocol: 6,
+    }
 }
 
 /// `ArchiveIndexDelta` carries its block and transaction hashes as `Vec<u8>`,

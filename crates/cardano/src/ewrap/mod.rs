@@ -476,6 +476,13 @@ impl BoundaryWork {
     /// DRep it now points at, and a `Keep` account keeps its delegation to the
     /// retiring DRep. A delegation made after the certificate is left to the
     /// positional rule.
+    ///
+    /// A `Clear` entry also clears a delegation in the certificate's own
+    /// transaction. Positions record the transaction only, not the certificate
+    /// inside it, so such a delegation compares equal (both mainnet
+    /// certificates that need this sit at index 1 of their transaction).
+    /// Treating it as earlier is safe only because the ledger cleared every
+    /// listed `Clear` account.
     pub fn clears_drep_delegation(&self, drep: &DRep, account: &AccountState) -> bool {
         let predates = |unregistered_at: &(BlockSlot, TxOrder)| {
             account
@@ -487,7 +494,13 @@ impl BoundaryWork {
             use crate::hacks::pv9_drep_delegs::Action;
 
             match settled.action {
-                Action::Clear if predates(&settled.unregistered_at) => return true,
+                Action::Clear
+                    if account
+                        .vote_delegated_at
+                        .is_some_and(|delegated_at| delegated_at <= settled.unregistered_at) =>
+                {
+                    return true
+                }
                 Action::Keep if settled.drep == *drep => return false,
                 _ => (),
             }

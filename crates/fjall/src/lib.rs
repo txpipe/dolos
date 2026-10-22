@@ -13,17 +13,20 @@
 //!   flat segment files from `dolos-flatfiles`), hosting the archive tags and
 //!   the exact lookups that project the blocks
 //! - [`keys`]: Shared key encoding utilities
+//! - [`preset`]: The named tunings both stores open with
 
 use dolos_core::{ArchiveError, StateError};
 
 pub mod archive;
 pub mod keys;
+pub mod preset;
 pub mod state;
 
 /// The segment file crate the archive's locations belong to.
 pub use dolos_flatfiles as flatfiles;
 
 // Re-export main types for convenience
+pub use preset::Preset;
 pub use state::{StateStore, StateWriter};
 
 /// Error type for fjall storage operations

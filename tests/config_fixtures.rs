@@ -349,6 +349,14 @@ fn each_rule_refuses_its_fixture() {
             "an ephemeral store takes no other field; remove `path`",
         ),
         (
+            "store-tuning-field",
+            "in `[storage.state]`, tuning is set by `preset`; remove `cache`",
+        ),
+        (
+            "archive-tuning-field",
+            "in `[storage.archive]`, tuning is set by `preset`; remove `worker_threads`",
+        ),
+        (
             "ephemeral-state-over-fjall-archive",
             "an ephemeral state needs an ephemeral archive",
         ),

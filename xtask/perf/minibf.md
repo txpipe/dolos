@@ -26,8 +26,9 @@ Select workloads with `--cases name,name` (default: all):
 | `transaction-utxos` | Transaction lookup and input/output mapping |
 
 Scale with `--blocks`, `--transactions-per-block`, `--log-rows`, `--pool-stride`,
-`--page` and `--page-size`; keep `--seed`, `--cache-mib` and `--max-scan-items`
-fixed when comparing versions. Pages must fit the generated population.
+`--page` and `--page-size`; keep `--seed` and `--max-scan-items` fixed when
+comparing versions. Both stores open with the `standard` Fjall preset, the
+tuning a node runs with. Pages must fit the generated population.
 
 Fixtures contain synthetic Conway blocks in preview epoch zero and an equally
 sized replay tail. Setup is untimed; logs are populated in bounded batches, but
@@ -100,3 +101,7 @@ These are provisional experiment budgets, not a production SLO; use more samples
 for p99. Optional `--p95-budget-ms`/`--p99-budget-ms` apply to
 both arms. Missing, duplicate, incompatible, failed or undersampled evidence cannot
 pass. Confirm synthetic findings with [real-node calibration](http.md).
+
+Arms pair only when their records carry the same `settings`. A baseline from
+before Fjall presets records `cache_mib_per_store` where newer ones record
+`preset`, so every row of such a comparison reads `UNPAIRED` and the check fails.

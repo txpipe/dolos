@@ -2,13 +2,14 @@
 //!
 //! Four properties, in increasing order of what they cost to check:
 //!
-//! 1. **The skeleton is pinned.** An export over an empty-but-cursored store
-//!    set produces a document with no ledger content in it at all, so the
-//!    golden below is a function of literals only: the network table, the
-//!    `sequence`/`position`/`parameters` shapes, the order the layers are
-//!    listed in, and every layer's header and scope encoding. A ledger change
-//!    cannot move it, which is what makes it a golden rather than a value that
-//!    gets re-pinned as a matter of routine.
+//! 1. **The skeleton is pinned.** An export over the smallest store set a stele
+//!    can be cut from — an era, a cursor, and the two empty blocks that show
+//!    the cursor is its epoch's first — produces a document with no ledger
+//!    content in it, so the golden below is a function of literals only: the
+//!    network table, the `sequence`/`position`/`parameters` shapes, the order
+//!    the layers are listed in, and every layer's header and scope encoding. A
+//!    ledger change cannot move it, which is what makes it a golden rather than
+//!    a value that gets re-pinned as a matter of routine.
 //! 2. **A live node exports a complete stele.** Built by the harness domain
 //!    from synthetic blocks, read back through `SteleDir`, verified clean.
 //! 3. **Read-back equality.** Every layer, decoded through its own codec, is
@@ -40,7 +41,7 @@ use std::{
 use common::read_both_ways;
 use dolos_cardano::{
     eras::ChainSummary, indexes::archive_dimensions, model::EraState,
-    pallas::ledger::traverse::MultiEraBlock, EraBoundary,
+    pallas::ledger::traverse::MultiEraBlock, EraBoundary, EraKey,
 };
 use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
@@ -48,14 +49,21 @@ use dolos_core::{
     ExactRecord, IndexRecord, KeyRange, LogKey, Namespace, StateStore, StateWriter as _, TagRecord,
 };
 use dolos_snapshot::{
+    boundary::Ineligible,
     export::{self, EpochWindow, Plan},
     facade::{Selection, SnapshotSource as _, StoreSnapshot},
     layers::{blocks, indexes, logs, state},
     state_layer_count, state_ns_for, DolosProfile, Network, RetainedEpochs, BLOCKS, INDEXES,
     LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
-use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
-use node::{export_plan, export_to, harness, plan_at_boundary, plan_for};
+use dolos_testing::{
+    blocks::make_conway_block_with_prev,
+    toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
+};
+use node::{
+    export_plan, export_to, extend_archive_past_cursor, harness, plan_at_boundary, plan_for,
+    step_past_boundary,
+};
 use stelae::{
     dir::SteleDir,
     progress::{Observer, Outcome},
@@ -64,14 +72,17 @@ use stelae::{
 
 use watcher::Watcher;
 
-/// The identity of an export over an empty store set at [`SKELETON_POINT`].
+/// The identity of an export over the skeleton store set.
 const GOLDEN_SKELETON: &str =
-    "sha256:7a833b39f88df1b5c9fcf193ebbc0fefb76ffe310221abdc92dd655628597780";
+    "sha256:6115d38d0021a31339c718d91d8748d7070ba8cd05a2d1d718505ab0349c3db0";
 
-/// The chain point the skeleton fixture stands at: mid-epoch-2 under
-/// [`skeleton_summary`], so the export covers three epochs and the last window
-/// is clamped to the cursor.
+/// Where the skeleton fixture stands: on the first block of epoch 2 under
+/// [`skeleton_summary`], after fifty empty slots, so the export covers three
+/// epochs and the last window is the boundary sliver up to the cursor.
 const SKELETON_SLOT: BlockSlot = 250;
+
+/// The last block before the skeleton's boundary, in epoch 1.
+const SKELETON_PARENT_SLOT: BlockSlot = 180;
 
 // --------------------------------------------------------------------------
 // 1. The pinned skeleton
@@ -82,53 +93,89 @@ const SKELETON_SLOT: BlockSlot = 250;
 fn skeleton_summary() -> ChainSummary {
     let mut chain = ChainSummary::default();
 
-    chain.append_era(
-        6,
-        EraState {
-            start: EraBoundary {
-                epoch: 0,
-                slot: 0,
-                timestamp: 0,
-            },
-            end: None,
-            epoch_length: 100,
-            slot_length: 1,
-            protocol: 6,
-        },
-    );
+    chain.append_era(6, skeleton_era());
 
     chain
 }
 
-fn skeleton_point() -> ChainPoint {
-    ChainPoint::Specific(SKELETON_SLOT, dolos_core::BlockHash::new([0x0b; 32]))
+fn skeleton_era() -> EraState {
+    EraState {
+        start: EraBoundary {
+            epoch: 0,
+            slot: 0,
+            timestamp: 0,
+        },
+        end: None,
+        epoch_length: 100,
+        slot_length: 1,
+        protocol: 6,
+    }
 }
 
-/// An archive and a state store holding nothing but a cursor.
-fn empty_stores() -> (MemoryArchiveStore, MemoryStateStore) {
-    let archive = MemoryArchiveStore::new(dolos_cardano::model::build_log_schema());
+/// The two empty blocks that show where the skeleton stands: the last block of
+/// epoch 1 and the first of epoch 2.
+fn skeleton_blocks() -> [(ChainPoint, dolos_core::RawBlock); 2] {
+    let parent = make_conway_block_with_prev(SKELETON_PARENT_SLOT, None, 0);
+    let first = make_conway_block_with_prev(SKELETON_SLOT, parent.0.hash(), 1);
 
+    [parent, first]
+}
+
+fn skeleton_point() -> ChainPoint {
+    let [_, (first, _)] = skeleton_blocks();
+
+    first
+}
+
+/// Put the skeleton's boundary blocks in `archive`.
+fn with_skeleton_blocks<A: ArchiveStore>(archive: A) -> A {
+    let writer = archive.start_writer().unwrap();
+
+    for (point, body) in skeleton_blocks() {
+        writer.apply(&point, &body).unwrap();
+    }
+
+    writer.commit().unwrap();
+
+    archive
+}
+
+/// A state store holding the skeleton's era and a cursor on its boundary.
+fn skeleton_state() -> MemoryStateStore {
     let state = MemoryStateStore::new();
     let writer = state.start_writer().unwrap();
+    writer
+        .write_entity_typed::<EraState>(&EraKey::from(6), &skeleton_era())
+        .unwrap();
     writer.set_cursor(skeleton_point()).unwrap();
     writer.commit().unwrap();
 
-    (archive, state)
+    state
+}
+
+/// The smallest store set a stele can be cut from: an era, a cursor, and the
+/// two blocks that show the cursor is the first of its epoch.
+fn skeleton_stores() -> (MemoryArchiveStore, MemoryStateStore) {
+    let archive = with_skeleton_blocks(MemoryArchiveStore::new(
+        dolos_cardano::model::build_log_schema(),
+    ));
+
+    (archive, skeleton_state())
 }
 
 /// Done criterion 4.
 ///
 /// Every value in the pinned document below is determined by this crate and
-/// ADR-004 together. The layers carry only their header records, so their
-/// `diffId`s freeze the profile name, the kind strings and the scope CBOR — and
-/// nothing about what a ledger happens to hold. A failure here means published
-/// identity moved.
+/// ADR-004 together. Beyond the two boundary blocks and the era, the layers
+/// carry only their header records, so their `diffId`s freeze the profile name,
+/// the kind strings and the scope CBOR — and nothing about what a ledger
+/// happens to hold. A failure here means published identity moved.
 #[test]
-fn an_empty_store_set_exports_the_pinned_skeleton() {
+fn a_bare_boundary_exports_the_pinned_skeleton() {
     let temp = tempfile::tempdir().unwrap();
     let stele = SteleDir::create(temp.path()).unwrap();
 
-    let (archive, state) = empty_stores();
+    let (archive, state) = skeleton_stores();
 
     let plan = Plan::new(
         &skeleton_summary(),
@@ -188,7 +235,7 @@ fn a_log_under_an_uncovered_namespace_fails_the_export() {
     let temp = tempfile::tempdir().unwrap();
     let stele = SteleDir::create(temp.path()).unwrap();
 
-    let (_, state) = empty_stores();
+    let state = skeleton_state();
 
     let stray = NAMESPACES
         .into_iter()
@@ -197,7 +244,7 @@ fn a_log_under_an_uncovered_namespace_fails_the_export() {
 
     let mut schema = dolos_cardano::model::build_log_schema();
     schema.insert(stray, dolos_core::NamespaceType::KeyValue);
-    let archive = MemoryArchiveStore::new(schema);
+    let archive = with_skeleton_blocks(MemoryArchiveStore::new(schema));
 
     let writer = archive.start_writer().unwrap();
     writer
@@ -1136,8 +1183,8 @@ fn a_reproduction_rebuilds_the_dump_it_cuts_and_trusts_the_ones_it_inherits() {
 const CANONICAL_SKELETON: &str = concat!(
     r#"{"compression":{"algo":"zstd","level":9},"history":[],"layers":["#,
     r#"{"diffId":"sha256:922ee4d9b71402ecba461e7b11a76ff61354d2a0be45bb040e5e2ccb80ccb5a1","kind":"blocks","mediaType":"application/vnd.dolos.stele.blocks.v1+zstd","records":1,"scope":{"endSlot":99,"epoch":0,"startSlot":0},"uncompressedSize":43},"#,
-    r#"{"diffId":"sha256:67f548e9704915048e1c1f4316442c3b0d8b8fb7f12032137cba337143fd9cd2","kind":"blocks","mediaType":"application/vnd.dolos.stele.blocks.v1+zstd","records":1,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":44},"#,
-    r#"{"diffId":"sha256:635c9151dfbe340e7f5e8589f1651951ad9dd9b79583b6c90cdce99266899c5c","kind":"blocks","mediaType":"application/vnd.dolos.stele.blocks.v1+zstd","records":1,"scope":{"endSlot":250,"epoch":2,"startSlot":200},"uncompressedSize":44},"#,
+    r#"{"diffId":"sha256:c0dba8cfa17803797dc39470fa963f21e19e61a534fdea1c480f4160000f4b6d","kind":"blocks","mediaType":"application/vnd.dolos.stele.blocks.v1+zstd","records":2,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":144},"#,
+    r#"{"diffId":"sha256:8013ed25e0a7280f0cb5e9fdcf70a8b3218356b27d25852566fed6515b85b894","kind":"blocks","mediaType":"application/vnd.dolos.stele.blocks.v1+zstd","records":2,"scope":{"endSlot":250,"epoch":2,"startSlot":200},"uncompressedSize":177},"#,
     r#"{"diffId":"sha256:0517f93e76f9fe6059bcde6218af5c90f51020af09890c5e3a05cc8f3a32e447","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":99,"epoch":0,"startSlot":0},"uncompressedSize":44},"#,
     r#"{"diffId":"sha256:b64ae324280c4335089cdf9918ac0596fe7f429dbf5a54c2fd2d44f25280b935","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":45},"#,
     r#"{"diffId":"sha256:a76e2bb47934f8473a232a31da4930db8d50ce90a4cab2c232fc032644fff62e","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":250,"epoch":2,"startSlot":200},"uncompressedSize":45},"#,
@@ -1196,7 +1243,7 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:9b99d29fcb443836074f1c44a35f4c85d62e3814295f564209a153094e85d8b2","kind":"state-drep-sightings","mediaType":"application/vnd.dolos.stele.state-drep-sightings.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":55},"#,
     r#"{"diffId":"sha256:0c02e395163b8721766f4e70ade836dcbeabcb5b660e6538caee76757315305e","kind":"state-dreps","mediaType":"application/vnd.dolos.stele.state-dreps.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:d2956a7d3251484d5ef8f45cd923e34ecbc890552eac579c500ba99b0a98cb9a","kind":"state-epochs","mediaType":"application/vnd.dolos.stele.state-epochs.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:a53fdfbe13f40703e1e8cd661ddc5ba5bb54541b22bf7cdcb3b7aa9697fd9cb6","kind":"state-eras","mediaType":"application/vnd.dolos.stele.state-eras.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":45},"#,
+    r#"{"diffId":"sha256:41fb8cc7b96fe6c203c328d01183f645ea55ebeec5aff6a63e50551a4b46bfa7","kind":"state-eras","mediaType":"application/vnd.dolos.stele.state-eras.v1+zstd","records":2,"scope":{"shard":0},"uncompressedSize":60},"#,
     r#"{"diffId":"sha256:44040dbf942196735ba5eae62b2bb978c26618e62660156f45cf0ef6fef2db04","kind":"state-first-mints","mediaType":"application/vnd.dolos.stele.state-first-mints.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":52},"#,
     r#"{"diffId":"sha256:40710b7e955345354c8abd21ffdf9abcef049a7235cf40ae5b55bfb7670c9f85","kind":"state-first-scripts","mediaType":"application/vnd.dolos.stele.state-first-scripts.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":54},"#,
     r#"{"diffId":"sha256:0a74ea019634f7c0135b1030e692d4e3680ff534c89462819fa04c15ada63114","kind":"state-gov","mediaType":"application/vnd.dolos.stele.state-gov.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":44},"#,
@@ -1244,7 +1291,7 @@ const CANONICAL_SKELETON: &str = concat!(
     r#""schemas":{"account-address-chunks":1,"account-addresses":1,"account-epochs":1,"account-stakes":0,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"assets":1,"datums":1,"drep-epochs":1,"drep-sightings":1,"dreps":2,"epochs":4,"eras":2,"first-mint-chunks":2,"first-mints":2,"first-script-chunks":1,"first-scripts":1,"gov":4,"leader-rewards":0,"member-rewards":0,"metadata-labels":2,"payment-address-chunks":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-mint-chunks":1,"pool-deposit-refunds":0,"pool-epochs":2,"pools":3,"proposals":4,"scripts":1,"utxos":1},"#,
     r#""shards":{"account-addresses":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"assets":16,"datums":16,"drep-sightings":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"scripts":16,"utxos":16},"#,
     r#""stateEpochs":[]"#,
-    r#"},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
+    r#"},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"018f99053185b9f7bae6fad0b8aa50710ebc131352dbb47f32d5030622bf51df","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
 );
 
 // --------------------------------------------------------------------------
@@ -1308,6 +1355,298 @@ fn a_discarding_export_reproduces_what_a_publish_stores() {
     assert_eq!(blobs, distinct_layers(&stored));
 }
 
+/// A store set one block past its boundary is refused the same way by every
+/// path that builds layers — directory publication, digest, reproduction and
+/// the headless facade over all three — and before any of them opens a layer.
+#[test]
+fn every_path_refuses_a_cursor_past_the_boundary_before_a_layer() {
+    let domain: ToyDomain = harness();
+
+    let eligible = tempfile::tempdir().unwrap();
+    let published = export_to(eligible.path(), &domain);
+    let first = domain.state().read_cursor().unwrap().unwrap();
+
+    step_past_boundary(&domain);
+
+    let plan = plan_for(&domain);
+    assert_eq!(
+        plan.sequence, 1,
+        "one block past the boundary, still in epoch 1"
+    );
+
+    let expected = Ineligible::LaterBlock { parent: first };
+
+    fn reason<T: std::fmt::Debug>(result: Result<T, dolos_snapshot::Error>) -> Ineligible {
+        match result {
+            Err(dolos_snapshot::Error::NotABoundary { reason, .. }) => reason,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let watcher = Arc::new(Watcher::default());
+    let stele = SteleDir::create(temp.path().join("export")).unwrap();
+
+    assert_eq!(
+        reason(export::export(
+            &stele,
+            &plan,
+            domain.archive(),
+            domain.state(),
+            None,
+            &export::First,
+            &watcher.observer(),
+        )),
+        expected
+    );
+    assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
+
+    let directory = temp.path().join("publish");
+
+    assert_eq!(
+        reason(export::publish(
+            &directory,
+            &plan,
+            domain.archive(),
+            domain.state(),
+            None,
+            &Observer::silent(),
+        )),
+        expected
+    );
+
+    for root in [temp.path().join("export"), directory.clone()] {
+        let blobs = root.join("blobs").join("sha256");
+
+        assert!(
+            !blobs.exists() || std::fs::read_dir(&blobs).unwrap().next().is_none(),
+            "a refused publish wrote a layer into {}",
+            root.display()
+        );
+    }
+
+    assert_eq!(
+        reason(export::reproduce(
+            &plan,
+            domain.archive(),
+            domain.state(),
+            None,
+            &export::First,
+        )),
+        expected
+    );
+
+    assert_eq!(
+        reason(export::digest_document(
+            &plan,
+            domain.archive(),
+            domain.state(),
+            &export::First,
+        )),
+        expected
+    );
+
+    assert_eq!(
+        reason(export::verify_reproduction(
+            &published,
+            &plan,
+            domain.archive(),
+            domain.state(),
+            None,
+        )),
+        expected
+    );
+
+    let source = StoreSnapshot::new(domain.archive(), domain.state());
+
+    assert_eq!(reason(source.boundary(&plan)), expected);
+    assert_eq!(
+        reason(source.publish_directory(&temp.path().join("facade"), &plan, &Observer::silent())),
+        expected
+    );
+    assert_eq!(
+        reason(source.digest_document(&plan, &export::First)),
+        expected
+    );
+    assert_eq!(
+        reason(source.verify_reproduction(&published, &plan)),
+        expected
+    );
+}
+
+/// A plan made while the stores stood on the boundary does not carry them past
+/// it: once they move on, the export refuses the stale plan for the state it
+/// no longer describes, before any layer. The plan alone would pass every
+/// other test of the rule, so the state cursor is what is held against it.
+#[test]
+fn a_plan_the_stores_have_moved_past_is_refused_before_a_layer() {
+    let domain: ToyDomain = harness();
+
+    let plan = plan_for(&domain);
+    let moved = step_past_boundary(&domain);
+
+    let watcher = Arc::new(Watcher::default());
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let refused = export::export(
+        &stele,
+        &plan,
+        domain.archive(),
+        domain.state(),
+        None,
+        &export::First,
+        &watcher.observer(),
+    );
+
+    match refused {
+        Err(dolos_snapshot::Error::NotABoundary { reason, .. }) => {
+            assert_eq!(
+                reason,
+                Ineligible::PlanMismatch {
+                    stored: Some(moved)
+                }
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
+}
+
+/// An archive that runs past a boundary state, as `doctor rebuild-state
+/// --stop-epoch` over a synced archive leaves one, is refused before a layer:
+/// the blocks after the cursor wrote log and index rows inside the stele's
+/// windows. A plan at the archive's tip is refused for the state it does not
+/// describe.
+#[test]
+fn an_archive_past_a_boundary_state_is_refused_before_a_layer() {
+    let domain: ToyDomain = harness();
+
+    let boundary = domain.state().read_cursor().unwrap().unwrap();
+    let tip = extend_archive_past_cursor(&domain);
+
+    let plan = plan_for(&domain);
+    assert_eq!(plan.cursor, boundary);
+
+    let ahead = Plan {
+        cursor: tip.clone(),
+        ..plan.clone()
+    };
+
+    for (plan, expected) in [
+        (plan, Ineligible::ArchivePastCursor { tip }),
+        (
+            ahead,
+            Ineligible::PlanMismatch {
+                stored: Some(boundary),
+            },
+        ),
+    ] {
+        let watcher = Arc::new(Watcher::default());
+        let temp = tempfile::tempdir().unwrap();
+        let stele = SteleDir::create(temp.path()).unwrap();
+
+        let refused = export::export(
+            &stele,
+            &plan,
+            domain.archive(),
+            domain.state(),
+            None,
+            &export::First,
+            &watcher.observer(),
+        );
+
+        match refused {
+            Err(dolos_snapshot::Error::NotABoundary { reason, .. }) => {
+                assert_eq!(reason, expected)
+            }
+            other => panic!("{other:?}"),
+        }
+
+        assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
+    }
+}
+
+/// Log rows keyed past the cursor stay out of the stele: the last window ends
+/// at the cursor's slot whatever the log tables hold beyond it.
+#[test]
+fn log_rows_past_the_cursor_stay_out_of_the_stele() {
+    let domain: ToyDomain = harness();
+
+    let cursor = domain.state().read_cursor().unwrap().unwrap();
+    let writer = domain.archive().start_writer().unwrap();
+
+    for (i, ns) in LOG_NAMESPACES.into_iter().enumerate() {
+        writer
+            .write_log(
+                ns,
+                &common::log_key(ns, cursor.slot() + 5, 0x30 + i as u8),
+                &vec![0x81, i as u8],
+            )
+            .unwrap();
+    }
+
+    writer.commit().unwrap();
+
+    let temp = tempfile::tempdir().unwrap();
+    let published = export_to(temp.path(), &domain);
+
+    let bare: ToyDomain = harness();
+    let temp = tempfile::tempdir().unwrap();
+    assert_eq!(published.layers, export_to(temp.path(), &bare).layers);
+}
+
+/// A block after the cursor's at the cursor's own slot, as a Byron main block
+/// sits beside the boundary block it follows, is refused before a layer. The
+/// last window ends at that slot, and its index and log records carry no block
+/// hash to leave the extra block's out by.
+#[test]
+fn a_block_beside_the_cursor_at_its_slot_is_refused_before_a_layer() {
+    let domain: ToyDomain = harness();
+
+    let cursor = domain.state().read_cursor().unwrap().unwrap();
+    let body = domain
+        .archive()
+        .get_block_by_slot(&cursor.slot())
+        .unwrap()
+        .unwrap();
+    let number = MultiEraBlock::decode(&body).unwrap().number();
+
+    let (beside, beside_body) =
+        make_conway_block_with_prev(cursor.slot(), cursor.hash(), number + 1);
+
+    let archive = domain.archive().start_writer().unwrap();
+    archive.apply(&beside, &beside_body).unwrap();
+    archive.commit().unwrap();
+
+    let plan = plan_for(&domain);
+    assert_eq!(plan.cursor, cursor);
+
+    let watcher = Arc::new(Watcher::default());
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let refused = export::export(
+        &stele,
+        &plan,
+        domain.archive(),
+        domain.state(),
+        None,
+        &export::First,
+        &watcher.observer(),
+    );
+
+    match refused {
+        Err(dolos_snapshot::Error::NotABoundary { reason, .. }) => {
+            assert_eq!(reason, Ineligible::ArchivePastCursor { tip: beside })
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
+}
+
 /// A verifier checking a *different* stele than the one published is the
 /// failure `--epochs` exists to prevent, so the two commands share one range
 /// type and one restriction.
@@ -1318,11 +1657,11 @@ fn a_discarding_export_reproduces_what_a_publish_stores() {
 #[test]
 fn a_restricted_reproduction_matches_the_same_restricted_publish() {
     let domain: ToyDomain = harness();
-    let plan = plan_for(&domain).restrict_epochs(Some(1), None);
+    let plan = plan_for(&domain).restrict_epochs(Some(2), None);
 
     assert!(
         plan.epochs.is_empty(),
-        "the harness ledger lives in epoch zero; selecting above it selects nothing"
+        "the harness stands on the epoch-1 boundary; selecting above it selects nothing"
     );
 
     let temp = tempfile::tempdir().unwrap();
@@ -1679,8 +2018,8 @@ fn export_banded(band: usize) -> (usize, usize, usize, Vec<u8>) {
     let temp = tempfile::tempdir().unwrap();
     let stele = SteleDir::create(temp.path()).unwrap();
 
-    let (_, state) = empty_stores();
-    let archive = Counted::new(index_across_the_skeleton());
+    let state = skeleton_state();
+    let archive = Counted::new(with_skeleton_blocks(index_across_the_skeleton()));
 
     let plan = Plan::new(
         &skeleton_summary(),

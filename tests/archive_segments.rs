@@ -25,13 +25,13 @@ use dolos_fjall::flatfiles::{
 use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
 
 fn open(dir: &Path) -> ArchiveStore {
-    let config = dolos_core::config::FjallArchiveConfig {
-        cache: Some(16),
-        flush_on_commit: Some(false),
-        worker_threads: Some(1),
-        ..Default::default()
-    };
-    ArchiveStore::open(StateSchema::default(), dir, &config).expect("open the fjall archive")
+    ArchiveStore::open(
+        StateSchema::default(),
+        dir,
+        None,
+        dolos_fjall::Preset::Standard,
+    )
+    .expect("open the fjall archive")
 }
 
 fn point(slot: u64) -> ChainPoint {

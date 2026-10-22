@@ -518,6 +518,7 @@ pub fn epoch_state() -> EpochState {
             (hash28(0xc5), pool_tally(1)),
             (hash28(0xc6), pool_tally(2)),
         ])),
+        ewrap_finalized: true,
     }
 }
 
