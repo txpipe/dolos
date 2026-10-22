@@ -37,9 +37,9 @@ pub enum TestFault {
     /// stop a work unit between the two commits of a phase, whichever store
     /// that phase commits first.
     CrashAfterCommits(u32),
-    /// [`StateStore::utxos_by_tag`], [`StateStore::utxos_by_tag_page`] and
-    /// [`StateStore::get_utxos`] sleep this long before answering, as a heavy
-    /// lookup on a large store would.
+    /// [`StateStore::utxos_by_tag`], [`StateStore::utxos_by_tag_page`],
+    /// [`StateStore::utxos_with_tag`] and [`StateStore::get_utxos`] sleep this
+    /// long before answering, as a heavy lookup on a large store would.
     SlowUtxoReads(Duration),
     /// [`StateStore::iter_entities`] sleeps this long before answering, as a
     /// scan of a large store would.
@@ -224,15 +224,28 @@ impl StateStore for FaultyStateStore {
         dimension: TagDimension,
         key: &[u8],
         order: dolos_core::TagOrder,
-        offset: usize,
+        start: dolos_core::TagStart,
         count: usize,
-    ) -> Result<Vec<dolos_core::TxoRef>, StateError> {
+    ) -> Result<Vec<dolos_core::TagEntry>, StateError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
         self.slow_utxo_read();
         self.inner
-            .utxos_by_tag_page(dimension, key, order, offset, count)
+            .utxos_by_tag_page(dimension, key, order, start, count)
+    }
+
+    fn utxos_with_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        entries: Vec<dolos_core::TagEntry>,
+    ) -> Result<Vec<dolos_core::TagEntry>, StateError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.slow_utxo_read();
+        self.inner.utxos_with_tag(dimension, key, entries)
     }
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {

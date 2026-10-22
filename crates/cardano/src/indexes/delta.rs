@@ -586,8 +586,8 @@ impl CardanoIndexDeltaBuilder {
 /// The live-UTxO tags of an output: its address, payment and stake
 /// credentials, policies, assets and reference script.
 ///
-/// The one derivation every tag write uses, so a reader can test an output for
-/// a tag without reading the tag.
+/// The one derivation every tag write uses, so a check of the tags against the
+/// UTxO set derives them the same way.
 pub fn utxo_tags(output: &MultiEraOutput) -> Vec<Tag> {
     let mut tags = Vec::new();
 

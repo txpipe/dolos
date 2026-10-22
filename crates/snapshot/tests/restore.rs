@@ -48,7 +48,7 @@ use dolos_cardano::{
 };
 use dolos_core::{
     ArchiveStore, ChainPoint, Domain as _, EntityKey, ExactRecord, LogKey, StateStore,
-    StateWriter as _, TagOrder, TagRecord, TxoRef, UtxoSet, UtxoSetDelta, UtxoValue,
+    StateWriter as _, TagOrder, TagRecord, TagStart, TxoRef, UtxoSet, UtxoSetDelta, UtxoValue,
 };
 use dolos_snapshot::{
     is_state_kind,
@@ -1179,7 +1179,13 @@ fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
             for order in [TagOrder::Asc, TagOrder::Desc] {
                 let page = |store: &S| {
                     store
-                        .utxos_by_tag_page(tag.dimension, &tag.key, order, 0, usize::MAX)
+                        .utxos_by_tag_page(
+                            tag.dimension,
+                            &tag.key,
+                            order,
+                            TagStart::Skip(0),
+                            usize::MAX,
+                        )
                         .unwrap()
                 };
 

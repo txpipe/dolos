@@ -92,11 +92,13 @@ Value: (empty)
 A lookup key's refs therefore sort in creation order, then by ref. They are a
 projection of the UTxO set, so they are written in the same batch as the set
 (`StateWriter::apply_utxo_tags` / `undo_utxo_tags`) and read through
-`StateStore::utxos_by_tag` (the whole set) or `StateStore::utxos_by_tag_page`
-(one page in creation order, forward or reverse, which stops at offset + count).
-Both keep only keys of the lookup key's exact length: a longer key under the
-same prefix belongs to a longer lookup key, such as an asset name that extends
-another.
+`StateStore::utxos_by_tag` (the whole set), `StateStore::utxos_by_tag_page`
+(one page of entries in creation order, forward or reverse, from an offset or
+just past an entry, which stops at the page's end) or
+`StateStore::utxos_with_tag` (a point read of each given entry's full key).
+The scans keep only keys of the lookup key's exact length: a longer key under
+the same prefix belongs to a longer lookup key, such as an asset name that
+extends another, and is stepped over.
 
 Note the asymmetry with the archive's tags, which hash their key: here the lookup key is stored whole, because a live-UTxO query knows the key it is asking about and wants the exact refs back.
 

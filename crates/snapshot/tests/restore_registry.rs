@@ -48,7 +48,7 @@ mod watcher;
 use dolos_cardano::indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta};
 use dolos_core::{
     ArchiveStore, ChainPoint, Domain as _, EntityKey, ExactRecord, LogKey, StateStore, TagOrder,
-    TagRecord, TxoRef, UtxoSet, UtxoSetDelta, UtxoValue,
+    TagRecord, TagStart, TxoRef, UtxoSet, UtxoSetDelta, UtxoValue,
 };
 use dolos_snapshot::{
     export::Plan,
@@ -789,7 +789,13 @@ fn assert_utxo_tags_match<S: StateStore>(left: &S, right: &S) {
             for order in [TagOrder::Asc, TagOrder::Desc] {
                 let page = |store: &S| {
                     store
-                        .utxos_by_tag_page(tag.dimension, &tag.key, order, 0, usize::MAX)
+                        .utxos_by_tag_page(
+                            tag.dimension,
+                            &tag.key,
+                            order,
+                            TagStart::Skip(0),
+                            usize::MAX,
+                        )
                         .unwrap()
                 };
 

@@ -11,7 +11,7 @@
 //! - UTxOs live in a map keyed on [`TxoRef`], whose `(tx_hash, index)` ordering
 //!   is exactly what fjall's `[tx_hash:32][index:4]` big-endian key encodes;
 //! - the live-UTxO tags live in a map keyed `(dimension, logical key)`, each
-//!   holding the refs tagged under it ordered by `(tag order, ref)` — the order
+//!   holding the [`TagEntry`]s tagged under it, whose ordering is the order
 //!   fjall's `[tag_order:10][txo_ref:36]` key suffix encodes. The query takes
 //!   the logical key, the set is mutable, and nothing ever leaves the store, so
 //!   there is nothing to gain from hashing it;
@@ -31,15 +31,13 @@ use std::ops::Bound;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::state::{
-    EntityValue, Namespace, StateError, StateStore, StateWriter, TagOrder, UtxoEntry,
+    EntityValue, Namespace, StateError, StateStore, StateWriter, TagEntry, TagOrder, TagStart,
+    UtxoEntry,
 };
 use crate::{
     ChainPoint, EntityKey, KeyRange, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap, UtxoPosition,
-    UtxoSet, UtxoSetDelta, UtxoValue, TAG_ORDER_LEN,
+    UtxoSet, UtxoSetDelta, UtxoValue,
 };
-
-/// A tagged UTxO in tag order: its `UtxoPosition::tag_order`, then its ref.
-type TagEntry = ([u8; TAG_ORDER_LEN], TxoRef);
 
 /// The store's whole contents, guarded as one unit so a commit is atomic.
 #[derive(Default)]
@@ -121,10 +119,10 @@ impl MemoryStateWriter {
         let mut ops = self.ops.lock().map_err(|_| poisoned())?;
 
         for (txo, position, tags) in tagged {
-            let order = UtxoPosition::tag_order(*position);
+            let entry = TagEntry::new(*position, txo.clone());
 
             for tag in tags {
-                ops.push(op(tag.dimension, tag.key.clone(), (order, txo.clone())));
+                ops.push(op(tag.dimension, tag.key.clone(), entry.clone()));
             }
         }
 
@@ -181,8 +179,8 @@ impl StateWriter for MemoryStateWriter {
     }
 
     fn undo_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
-        self.push_tags(&delta.produced, Op::RemoveUtxoTag)?;
-        self.push_tags(&delta.consumed, Op::InsertUtxoTag)
+        self.push_tags(&delta.consumed, Op::InsertUtxoTag)?;
+        self.push_tags(&delta.produced, Op::RemoveUtxoTag)
     }
 
     fn commit(self) -> Result<(), StateError> {
@@ -348,7 +346,7 @@ impl StateStore for MemoryStateStore {
         let found = tables
             .utxo_tags
             .get(&(dimension, key.to_vec()))
-            .map(|entries| entries.iter().map(|(_, txo)| txo.clone()).collect())
+            .map(|entries| entries.iter().map(|entry| entry.txo.clone()).collect())
             .unwrap_or_default();
 
         Ok(found)
@@ -359,23 +357,47 @@ impl StateStore for MemoryStateStore {
         dimension: TagDimension,
         key: &[u8],
         order: TagOrder,
-        offset: usize,
+        start: TagStart,
         count: usize,
-    ) -> Result<Vec<TxoRef>, StateError> {
+    ) -> Result<Vec<TagEntry>, StateError> {
         let tables = self.tables.read().map_err(|_| poisoned())?;
 
         let Some(entries) = tables.utxo_tags.get(&(dimension, key.to_vec())) else {
             return Ok(Vec::new());
         };
 
-        let refs = entries.iter().map(|(_, txo)| txo.clone());
+        let (offset, range) = match (&start, order) {
+            (TagStart::Skip(offset), _) => (*offset, entries.range::<TagEntry, _>(..)),
+            (TagStart::After(after), TagOrder::Asc) => {
+                (0, entries.range((Bound::Excluded(after), Bound::Unbounded)))
+            }
+            (TagStart::After(after), TagOrder::Desc) => (0, entries.range(..after)),
+        };
 
         let page = match order {
-            TagOrder::Asc => refs.skip(offset).take(count).collect(),
-            TagOrder::Desc => refs.rev().skip(offset).take(count).collect(),
+            TagOrder::Asc => range.skip(offset).take(count).cloned().collect(),
+            TagOrder::Desc => range.rev().skip(offset).take(count).cloned().collect(),
         };
 
         Ok(page)
+    }
+
+    fn utxos_with_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        entries: Vec<TagEntry>,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let Some(tagged) = tables.utxo_tags.get(&(dimension, key.to_vec())) else {
+            return Ok(Vec::new());
+        };
+
+        Ok(entries
+            .into_iter()
+            .filter(|entry| tagged.contains(entry))
+            .collect())
     }
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {

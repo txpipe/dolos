@@ -96,6 +96,54 @@ async fn route_fixtures_and_work_guards_on_fjall() {
     verify_fixture(FjallStores::open()).await;
 }
 
+/// An address's asset listing probes the walked tag's entries in the other
+/// tag by key and loads the values of the page's rows only, however many rows
+/// it walks: every output in the fixture holds the asset, the address a third
+/// of them.
+async fn verify_asset_listing<Stores: ToyStores>(stores: Stores) {
+    let fixture = ApiFixture::new(stores, FixtureShape::default()).unwrap();
+    let router = dolos_minibf::build_router(
+        MinibfConfig::new("127.0.0.1:0".parse().unwrap()),
+        fixture.domain.clone(),
+    );
+    let vectors = &fixture.vectors;
+    let rows: Vec<Value> = vectors
+        .blocks
+        .iter()
+        .take(4)
+        .map(|block| json!([block.tx_hashes[0], 0]))
+        .collect();
+    let case = cases::Case {
+        name: "address-asset-utxos".into(),
+        path: format!(
+            "/addresses/{}/utxos/{}?count=4&order=asc",
+            vectors.address, vectors.asset_unit
+        ),
+        fields: vec!["/tx_hash".into(), "/output_index".into()],
+        expected: json!(rows),
+        array: true,
+        live: true,
+    };
+
+    fixture.domain.archive().counters.reset();
+    cases::request(router, &case).await.unwrap();
+    let work = fixture.domain.archive().counters.snapshot();
+
+    assert!(fixture.shape.blocks > 4);
+    assert_eq!(work.utxo_reads, 4);
+    assert_eq!(work.exact_lookups, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn asset_listing_loads_the_page_values_only_on_memory() {
+    verify_asset_listing(MemoryStores::open()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn asset_listing_loads_the_page_values_only_on_fjall() {
+    verify_asset_listing(FjallStores::open()).await;
+}
+
 fn scalar_case() -> cases::Case {
     cases::Case {
         name: "fixture".into(),

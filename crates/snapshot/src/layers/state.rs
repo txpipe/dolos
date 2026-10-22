@@ -195,11 +195,17 @@ pub fn decode_utxo_value(bytes: &[u8]) -> Result<UtxoValue, Error> {
     let position = if fields == 4 {
         let slot = uint(STATE, "slot", &mut decoder)?;
         let tx_index = uint(STATE, "tx_index", &mut decoder)?;
-        let tx_index = u16::try_from(tx_index).map_err(|_| {
-            Error::malformed(STATE, format!("tx_index {tx_index} does not fit a u16"))
-        })?;
+        let position = u16::try_from(tx_index)
+            .ok()
+            .and_then(|tx_index| UtxoPosition::checked(slot, tx_index))
+            .ok_or_else(|| {
+                Error::malformed(
+                    STATE,
+                    format!("tx_index {tx_index} is past {}", UtxoPosition::MAX_TX_INDEX),
+                )
+            })?;
 
-        Some(UtxoPosition::new(slot, tx_index))
+        Some(position)
     } else {
         None
     };
@@ -468,7 +474,7 @@ mod tests {
             None,
             Some(UtxoPosition::new(0, 0)),
             Some(UtxoPosition::new(23, 24)),
-            Some(UtxoPosition::new(u64::MAX, u16::MAX)),
+            Some(UtxoPosition::new(u64::MAX, UtxoPosition::MAX_TX_INDEX)),
         ];
 
         for era in [0u16, 23, 24, 255, 256, u16::MAX] {
@@ -499,7 +505,9 @@ mod tests {
         }
     }
 
-    /// A position is both fields or neither, and the index is a `u16`.
+    /// A position is both fields or neither, and the index is at most
+    /// `UtxoPosition::MAX_TX_INDEX`: past it, the tag order a restore builds
+    /// from the record does not exist.
     #[test]
     fn a_malformed_position_is_refused() {
         let three = frame::encode(|e| {
@@ -508,17 +516,19 @@ mod tests {
         })
         .unwrap();
 
-        let wide = frame::encode(|e| {
-            e.array(4)?
-                .u64(6)?
-                .bytes(&[])?
-                .u64(10)?
-                .u64(u64::from(u16::MAX) + 1)?;
-            Ok(())
-        })
-        .unwrap();
+        let index = |tx_index: u64| {
+            frame::encode(|e| {
+                e.array(4)?.u64(6)?.bytes(&[])?.u64(10)?.u64(tx_index)?;
+                Ok(())
+            })
+            .unwrap()
+        };
 
-        for wire in [three, wide] {
+        for wire in [
+            three,
+            index(u64::from(u16::MAX)),
+            index(u64::from(u16::MAX) + 1),
+        ] {
             let err = decode_utxo_value(wire.as_bytes()).unwrap_err();
             assert!(matches!(err, Error::MalformedRecord { .. }), "{err:?}");
         }

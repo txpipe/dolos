@@ -39,10 +39,7 @@ use crate::{
     Facade,
 };
 
-use super::{
-    assets::AssetAmountExtras,
-    utxos::{UtxoFilter, UtxoWalk},
-};
+use super::{assets::AssetAmountExtras, utxos::UtxoWalk};
 
 impl From<Order> for SlotOrder {
     fn from(order: Order) -> Self {
@@ -401,11 +398,11 @@ where
     // `lovelace` lists the outputs without native assets, a scan of the
     // address in creation order. Any other asset narrows the address to the
     // outputs that hold it: the smaller of the two tags is walked in order and
-    // each row checked for the other tag.
+    // each row probed in the other tag by its full key.
     let lovelace = &asset == "lovelace";
 
-    let (walk, filter) = if lovelace {
-        (UtxoWalk::Tag(address_tag.clone()), UtxoFilter::AdaOnly)
+    let walk = if lovelace {
+        UtxoWalk::AdaOnly(address_tag.clone())
     } else {
         let asset = super::assets::decode_asset_subject(&asset)?;
         let asset_tag = Tag::new(utxo_dimensions::ASSET, asset.clone());
@@ -422,11 +419,13 @@ where
             }
         }
 
-        (UtxoWalk::Refs(smaller), UtxoFilter::Tagged(other))
+        UtxoWalk::Intersection {
+            entries: smaller,
+            other,
+        }
     };
 
-    let (utxos, matched) =
-        super::utxos::load_filtered_page(&domain, walk, filter, &pagination).await?;
+    let (utxos, matched) = super::utxos::load_filtered_page(&domain, walk, &pagination).await?;
 
     // `lovelace` on an address that holds UTxOs, all with assets, is an empty
     // page; an address that holds none of an asset is checked like an unknown
@@ -1427,6 +1426,70 @@ mod tests {
             for count in [1, 2] {
                 assert_pages_join(&app, &path, order, count, &full).await;
             }
+        }
+    }
+
+    /// An asset the chain saw but no live UTxO holds is an empty page; one the
+    /// chain never saw is a 404 on a live address; a held asset on an address
+    /// the chain never saw is a 404 too.
+    #[tokio::test]
+    async fn addresses_utxos_asset_empty_and_not_found() {
+        // the second block spends the first block's output, the one holding A
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 2,
+            txs_per_block: 1,
+            asset_names_by_block: ["A", "B"].map(String::from).to_vec(),
+            spend_previous_outputs: true,
+            ..Default::default()
+        });
+        let address = app.vectors().address.clone();
+        let unit = |name: &str| format!("{}{}", app.vectors().policy_id, hex::encode(name));
+        let path = |unit: String| format!("/addresses/{address}/utxos/{unit}");
+
+        assert!(utxo_page(&app, &path(unit("A"))).await.is_empty());
+        assert_eq!(utxo_page(&app, &path(unit("B"))).await.len(), 1);
+        assert_status(&app, &path(unit("NEVER")), StatusCode::NOT_FOUND).await;
+
+        // the asset tag fills its first window, so the address tag, empty, is
+        // the one the listing walks
+        let app = TestApp::new();
+        let path = format!(
+            "/addresses/{}/utxos/{}",
+            missing_address(),
+            app.vectors().asset_unit
+        );
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    /// A payment credential lists the UTxOs of every address with that
+    /// payment part: here only the synthetic address has it.
+    #[tokio::test]
+    async fn addresses_utxos_payment_credential_lists_its_address() {
+        let app = TestApp::new();
+        let address = app.vectors().address.clone();
+
+        let Address::Shelley(shelley) =
+            Address::from_bech32(&address).expect("invalid synthetic test address")
+        else {
+            panic!("expected shelley test address")
+        };
+
+        let payment_cred = bech32::encode::<bech32::Bech32>(
+            bech32::Hrp::parse("addr_vkh").expect("invalid hrp"),
+            shelley.payment().to_vec().as_slice(),
+        )
+        .expect("failed to encode payment credential");
+
+        for order in ["asc", "desc"] {
+            let query = format!("utxos?order={order}&count=100");
+            let by_address = utxo_page(&app, &format!("/addresses/{address}/{query}")).await;
+
+            assert!(!by_address.is_empty());
+            assert_eq!(
+                utxo_page(&app, &format!("/addresses/{payment_cred}/{query}")).await,
+                by_address,
+                "order={order}"
+            );
         }
     }
 

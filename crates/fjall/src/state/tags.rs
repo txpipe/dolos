@@ -15,8 +15,11 @@
 //! storage layer fully chain-agnostic.
 
 use std::collections::HashSet;
+use std::ops::Bound;
 
-use dolos_core::{TagOrder, TxoRef, UtxoIndexDelta, UtxoPosition, UtxoSet, TAG_ORDER_LEN};
+use dolos_core::{
+    TagEntry, TagOrder, TagStart, TxoRef, UtxoIndexDelta, UtxoPosition, UtxoSet, TAG_ORDER_LEN,
+};
 use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
 use crate::keys::{
@@ -36,12 +39,17 @@ fn build_utxo_tag_key(
     position: Option<UtxoPosition>,
     txo: &TxoRef,
 ) -> Vec<u8> {
+    build_entry_key(dimension, lookup_key, &TagEntry::new(position, txo.clone()))
+}
+
+/// The tag key of `entry` under `lookup_key`.
+fn build_entry_key(dimension: &str, lookup_key: &[u8], entry: &TagEntry) -> Vec<u8> {
     let dim_hash = hash_dimension(dim_prefix::UTXO, dimension);
-    let txo_bytes = encode_txo_ref(txo);
+    let txo_bytes = encode_txo_ref(&entry.txo);
     let mut key = Vec::with_capacity(tag_key_len(lookup_key));
     key.extend_from_slice(&dim_hash);
     key.extend_from_slice(lookup_key);
-    key.extend_from_slice(&UtxoPosition::tag_order(position));
+    key.extend_from_slice(&entry.order);
     key.extend_from_slice(&txo_bytes);
     key
 }
@@ -67,6 +75,19 @@ fn decode_utxo_tag_txo(key: &[u8]) -> TxoRef {
     debug_assert!(key.len() >= DIM_HASH_SIZE + TAG_ORDER_LEN + TXO_REF_SIZE);
     let start = key.len() - TXO_REF_SIZE;
     decode_txo_ref(&key[start..])
+}
+
+/// Decode the entry from a UTxO tag key (the last 46 bytes)
+fn decode_utxo_tag_entry(key: &[u8]) -> TagEntry {
+    debug_assert!(key.len() >= DIM_HASH_SIZE + TAG_ORDER_LEN + TXO_REF_SIZE);
+    let start = key.len() - TXO_REF_SIZE - TAG_ORDER_LEN;
+    let mut order = [0; TAG_ORDER_LEN];
+    order.copy_from_slice(&key[start..start + TAG_ORDER_LEN]);
+
+    TagEntry {
+        order,
+        txo: decode_utxo_tag_txo(key),
+    }
 }
 
 // ============================================================================
@@ -122,23 +143,26 @@ pub fn apply(
     Ok(())
 }
 
-/// Undo UTxO tag changes from a UtxoIndexDelta (for rollback)
+/// Undo UTxO tag changes from a UtxoIndexDelta (for rollback), the steps of
+/// [`apply`] undone in reverse. The last write to a key wins in a batch, so a
+/// ref in both halves (an output its own block spent) ends with no tag, as
+/// [`apply`] left it.
 pub fn undo(
     batch: &mut OwnedWriteBatch,
     keyspace: &Keyspace,
     delta: &UtxoIndexDelta,
 ) -> Result<(), Error> {
-    // Remove produced UTxOs (undo insertion)
-    for (txo_ref, position, tags) in &delta.produced {
-        for tag in tags {
-            remove_entry(batch, keyspace, tag.dimension, &tag.key, *position, txo_ref);
-        }
-    }
-
     // Restore consumed UTxOs (undo removal)
     for (txo_ref, position, tags) in &delta.consumed {
         for tag in tags {
             insert_entry(batch, keyspace, tag.dimension, &tag.key, *position, txo_ref);
+        }
+    }
+
+    // Remove produced UTxOs (undo insertion)
+    for (txo_ref, position, tags) in &delta.produced {
+        for tag in tags {
+            remove_entry(batch, keyspace, tag.dimension, &tag.key, *position, txo_ref);
         }
     }
 
@@ -180,23 +204,38 @@ pub fn get_by_key<R: Readable>(
     Ok(result)
 }
 
-/// One page of the TxoRefs for a dimension and lookup key, in key order
-/// (creation position, then ref) or its reverse.
+/// One page of the entries for a dimension and lookup key, in key order
+/// (creation position, then ref) or its reverse, from `start`.
 ///
-/// The scan stops once it has passed `offset` keys and collected `count`.
+/// The scan stops once it has passed the start and collected `count` entries.
+/// Keys of another length under the prefix belong to a longer lookup key and
+/// are stepped over, uncounted.
 pub fn get_page_by_key<R: Readable>(
     readable: &R,
     keyspace: &Keyspace,
     dimension: &str,
     lookup_key: &[u8],
     order: TagOrder,
-    offset: usize,
+    start: TagStart,
     count: usize,
-) -> Result<Vec<TxoRef>, Error> {
+) -> Result<Vec<TagEntry>, Error> {
     let prefix = build_utxo_tag_prefix(dimension, lookup_key);
     let key_len = tag_key_len(lookup_key);
 
-    let scan = readable.prefix(keyspace, prefix);
+    let (offset, scan) = match start {
+        TagStart::Skip(offset) => (offset, readable.prefix(keyspace, &prefix)),
+        TagStart::After(entry) => {
+            let after = build_entry_key(dimension, lookup_key, &entry);
+
+            let range = match order {
+                TagOrder::Asc => (Bound::Excluded(after), Bound::Unbounded),
+                TagOrder::Desc => (Bound::Included(prefix.clone()), Bound::Excluded(after)),
+            };
+
+            (0, readable.range(keyspace, range))
+        }
+    };
+
     let scan: Box<dyn Iterator<Item = fjall::Guard>> = match order {
         TagOrder::Asc => Box::new(scan),
         TagOrder::Desc => Box::new(scan.rev()),
@@ -212,6 +251,11 @@ pub fn get_page_by_key<R: Readable>(
 
         let key = guard.key()?;
 
+        // an ascending range from `after` runs on past the prefix
+        if !key.starts_with(&prefix) {
+            break;
+        }
+
         if key.len() != key_len {
             continue;
         }
@@ -221,10 +265,30 @@ pub fn get_page_by_key<R: Readable>(
             continue;
         }
 
-        page.push(decode_utxo_tag_txo(&key));
+        page.push(decode_utxo_tag_entry(&key));
     }
 
     Ok(page)
+}
+
+/// The entries of `entries` whose tag key under the dimension and lookup key
+/// exists, in the order given: one point read each.
+pub fn filter_by_key<R: Readable>(
+    readable: &R,
+    keyspace: &Keyspace,
+    dimension: &str,
+    lookup_key: &[u8],
+    entries: Vec<TagEntry>,
+) -> Result<Vec<TagEntry>, Error> {
+    let mut kept = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        if readable.contains_key(keyspace, build_entry_key(dimension, lookup_key, &entry))? {
+            kept.push(entry);
+        }
+    }
+
+    Ok(kept)
 }
 
 #[cfg(test)]

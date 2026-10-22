@@ -4,8 +4,8 @@ use itertools::Itertools;
 
 use crate::{
     keys::{EntityKey, KeyCodec, KeyError, KeyRange, RangeOf},
-    ChainError, ChainPoint, Domain, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet,
-    UtxoSetDelta, UtxoValue,
+    ChainError, ChainPoint, Domain, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap, UtxoPosition,
+    UtxoSet, UtxoSetDelta, UtxoValue, TAG_ORDER_LEN,
 };
 
 pub type Namespace = &'static str;
@@ -188,6 +188,37 @@ pub enum TagOrder {
     Desc,
 }
 
+/// A UTxO's entry in a live-UTxO tag: the bytes that order it there
+/// ([`UtxoPosition::tag_order`]), then its ref.
+///
+/// Entries compare in tag order, the order every backend's tag keys sort in:
+/// the order bytes, then the ref as its `[tx_hash:32][index:4 BE]` bytes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TagEntry {
+    pub order: [u8; TAG_ORDER_LEN],
+    pub txo: TxoRef,
+}
+
+impl TagEntry {
+    pub fn new(position: Option<UtxoPosition>, txo: TxoRef) -> Self {
+        Self {
+            order: UtxoPosition::tag_order(position),
+            txo,
+        }
+    }
+}
+
+/// Where [`StateStore::utxos_by_tag_page`] starts, in the order it walks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagStart {
+    /// Past the first `n` entries.
+    Skip(usize),
+    /// Just past this entry, which the tag need not hold any more. A walk
+    /// that resumes here misses no entry that sits past it, whatever was
+    /// written before it.
+    After(TagEntry),
+}
+
 /// Iterator used by backends that do not implement [`StateStore::iter_utxos`].
 ///
 /// Never constructed — those backends return [`StateError::Unsupported`], so
@@ -249,8 +280,11 @@ pub trait StateWriter: Sized + Send + Sync {
     /// UTxO is not there, or a UTxO without its tags.
     fn apply_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError>;
 
-    /// Reverse `apply_utxo_tags`: `produced` refs lose their tags, `consumed`
-    /// refs regain them.
+    /// Reverse `apply_utxo_tags`, its steps undone in reverse: `consumed` refs
+    /// regain their tags, then `produced` refs lose them.
+    ///
+    /// The order decides a ref in both halves, an output the block spent
+    /// itself: apply leaves it no tag, so undo must too.
     fn undo_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError>;
 
     #[allow(clippy::double_must_use)]
@@ -384,21 +418,35 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     /// in typed lookups (address, payment credential, asset, …).
     fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, StateError>;
 
-    /// One page of the refs [`StateStore::utxos_by_tag`] returns, in tag
-    /// order: by creation position (`UtxoPosition::tag_order`), then by ref,
-    /// walked in `order`.
+    /// One page of the entries of the refs [`StateStore::utxos_by_tag`]
+    /// returns, in tag order ([`TagEntry`]), walked in `order` from `start`.
     ///
-    /// Skips `offset` refs and returns at most `count`. The read stops at
-    /// `offset + count`, so a page costs its offset and its size, not the
-    /// size of the tag.
+    /// Returns at most `count` entries. The read stops at `count` past the
+    /// start, so a page costs its offset (for [`TagStart::Skip`]) and its
+    /// size, not the size of the tag. A backend that keeps the tags of
+    /// several lookup keys under one prefix (fjall, where `policy` prefixes
+    /// every `policy ‖ name` asset key) also steps over the keys of the longer
+    /// lookup keys that sort among them.
     fn utxos_by_tag_page(
         &self,
         dimension: TagDimension,
         key: &[u8],
         order: TagOrder,
-        offset: usize,
+        start: TagStart,
         count: usize,
-    ) -> Result<Vec<TxoRef>, StateError>;
+    ) -> Result<Vec<TagEntry>, StateError>;
+
+    /// The entries of `entries` that the tag `(dimension, key)` also holds, in
+    /// the order given.
+    ///
+    /// One point read of each entry's tag key and no UTxO read, so testing an
+    /// entry that the tag does not hold costs what testing one it holds does.
+    fn utxos_with_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        entries: Vec<TagEntry>,
+    ) -> Result<Vec<TagEntry>, StateError>;
 
     /// Iterate the whole UTxO set.
     ///

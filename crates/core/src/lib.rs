@@ -207,20 +207,29 @@ pub struct UtxoPosition {
 pub const TAG_ORDER_LEN: usize = 10;
 
 impl UtxoPosition {
+    /// The largest tx index a position holds. [`Self::tag_order`] writes the
+    /// index plus one, so `u16::MAX` has no tag order.
+    pub const MAX_TX_INDEX: u16 = u16::MAX - 1;
+
     pub fn new(slot: BlockSlot, tx_index: u16) -> Self {
         Self { slot, tx_index }
+    }
+
+    /// The position at `slot` and `tx_index`, or `None` when the index is past
+    /// [`Self::MAX_TX_INDEX`]. Decoders use it to refuse a stored index no
+    /// block can hold.
+    pub fn checked(slot: BlockSlot, tx_index: u16) -> Option<Self> {
+        (tx_index <= Self::MAX_TX_INDEX).then(|| Self::new(slot, tx_index))
     }
 
     /// The position of the transaction at `index` in the block at `slot`.
     ///
     /// Panics at 65535 transactions, which no block can hold.
     pub fn of_tx(slot: BlockSlot, index: usize) -> Self {
-        let tx_index = u16::try_from(index)
+        u16::try_from(index)
             .ok()
-            .filter(|index| *index < u16::MAX)
-            .expect("a block holds fewer than 65535 transactions");
-
-        Self::new(slot, tx_index)
+            .and_then(|index| Self::checked(slot, index))
+            .expect("a block holds fewer than 65535 transactions")
     }
 
     /// The bytes that order a UTxO in its live-UTxO tags: the slot, big-endian,
@@ -331,7 +340,13 @@ impl<'b, C> Decode<'b, C> for UtxoValue {
 
         let position = match len {
             Some(2) => None,
-            Some(4) => Some(UtxoPosition::new(d.u64()?, d.u16()?)),
+            Some(4) => {
+                let position = UtxoPosition::checked(d.u64()?, d.u16()?).ok_or_else(|| {
+                    minicbor::decode::Error::message("utxo value: tx_index out of range")
+                })?;
+
+                Some(position)
+            }
             _ => {
                 return Err(minicbor::decode::Error::message(
                     "utxo value: expected [era, body] or [era, body, slot, tx_index]",
@@ -1047,6 +1062,19 @@ mod tests {
         // a position is both fields or neither
         let three = [0x83, 0x06, 0x41, 0xa0, 0x09];
         assert!(UtxoValue::decode_cbor(&three).is_err());
+
+        // an index with no tag order
+        let past_max = UtxoValue::new(EraCbor(6, vec![0xa0]), Some(UtxoPosition::new(9, u16::MAX)));
+        assert!(UtxoValue::decode_cbor(&past_max.encode_cbor()).is_err());
+
+        let at_max = UtxoValue::new(
+            EraCbor(6, vec![0xa0]),
+            UtxoPosition::checked(9, UtxoPosition::MAX_TX_INDEX),
+        );
+        assert_eq!(
+            UtxoValue::decode_cbor(&at_max.encode_cbor()).unwrap(),
+            at_max
+        );
     }
 
     #[test]

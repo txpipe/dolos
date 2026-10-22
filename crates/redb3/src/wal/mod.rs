@@ -965,6 +965,32 @@ mod tests {
         assert!(store.data_table_is_empty().unwrap());
     }
 
+    /// A version-2 WAL holds inputs without their creation position, so it
+    /// cannot be read as version 3: opening it wipes the entries and stamps 3.
+    #[test]
+    fn a_version_2_wal_is_wiped_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        {
+            let db = open_raw_db(&path);
+            let wx = db.begin_write().unwrap();
+            {
+                let mut metadata = wx.open_table(WAL_METADATA).unwrap();
+                metadata.insert(WAL_METADATA_VERSION_KEY, 2).unwrap();
+
+                let mut table = wx.open_table(WAL).unwrap();
+                let key = DbChainPoint::from(ChainPoint::Specific(42, [1u8; 32].into()));
+                table.insert(key, vec![0xDEu8, 0xAD, 0xBE, 0xEF]).unwrap();
+            }
+            wx.commit().unwrap();
+        }
+
+        let store = open_test_store(&path).unwrap();
+        assert_eq!(store.read_version().unwrap(), Some(3));
+        assert!(store.data_table_is_empty().unwrap());
+    }
+
     #[test]
     fn newer_version_on_disk_refuses_to_open() {
         let dir = tempfile::tempdir().unwrap();

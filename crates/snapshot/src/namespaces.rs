@@ -31,7 +31,8 @@ use crate::Error;
 ///
 /// The one namespace with no entity type behind it, so the one string this
 /// crate owns outright. Its key is `tx_hash(32) ‖ output_index(4, BE)` and its
-/// value is CBOR `[era, body]` — see [`crate::layers::state`].
+/// value is CBOR `[era, body, slot, tx_index]`, or `[era, body]` for a UTxO no
+/// block produced — see [`crate::layers::state`].
 pub const UTXOS: Namespace = "utxos";
 
 /// Every namespace, state or log, in ascending byte order.

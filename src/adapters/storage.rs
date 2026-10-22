@@ -31,9 +31,9 @@ use dolos_core::{
     EntityDelta, EntityKey, EntityValue, ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey,
     LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace, QueryLimiter,
     RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
-    StateWriter as CoreStateWriter, TagDimension, TagOrder, TagRecord, TieredCache, TxHash,
-    TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError,
-    WalStore,
+    StateWriter as CoreStateWriter, TagDimension, TagEntry, TagOrder, TagRecord, TagStart,
+    TieredCache, TxHash, TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet,
+    UtxoSetDelta, WalError, WalStore,
 };
 use dolos_redb3::cache::RedbCacheTier;
 use serde::{de::DeserializeOwned, Serialize};
@@ -1066,13 +1066,26 @@ impl CoreStateStore for StateStoreBackend {
         dimension: TagDimension,
         key: &[u8],
         order: TagOrder,
-        offset: usize,
+        start: TagStart,
         count: usize,
-    ) -> Result<Vec<TxoRef>, StateError> {
+    ) -> Result<Vec<TagEntry>, StateError> {
         match self {
-            Self::Redb(s) => s.utxos_by_tag_page(dimension, key, order, offset, count),
-            Self::Fjall(s) => s.utxos_by_tag_page(dimension, key, order, offset, count),
-            Self::Memory(s) => s.utxos_by_tag_page(dimension, key, order, offset, count),
+            Self::Redb(s) => s.utxos_by_tag_page(dimension, key, order, start, count),
+            Self::Fjall(s) => s.utxos_by_tag_page(dimension, key, order, start, count),
+            Self::Memory(s) => s.utxos_by_tag_page(dimension, key, order, start, count),
+        }
+    }
+
+    fn utxos_with_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        entries: Vec<TagEntry>,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        match self {
+            Self::Redb(s) => s.utxos_with_tag(dimension, key, entries),
+            Self::Fjall(s) => s.utxos_with_tag(dimension, key, entries),
+            Self::Memory(s) => s.utxos_with_tag(dimension, key, entries),
         }
     }
 

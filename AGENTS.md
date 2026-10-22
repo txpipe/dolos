@@ -35,7 +35,7 @@ Dolos keeps its data in distinct stores, each serving a specific purpose:
 ### Where the indexes live
 There is no standalone index store. Every index is a projection and lives in
 the store that holds what it projects:
-- the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag` for the whole set, `StateStore::utxos_by_tag_page` for one page in creation order, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
+- the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag` for the whole set, `StateStore::utxos_by_tag_page` for one page in creation order, `StateStore::utxos_with_tag` to probe entries by their full key, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
 - the archive tags and the exact lookups (by block hash, block number, tx hash) project the block history and live in the `ArchiveStore` (`ArchiveStore::slots_by_tag` / `slot_by_*`, written through `ArchiveWriter::apply_index` in the same batch as the blocks)
 
 ### Store identity
