@@ -3946,7 +3946,9 @@ mod tests {
     }
 
     /// The `Rational64` arithmetic this replaced cast the margin into `i64`, so
-    /// a denominator near `u64::MAX` came out negative or overflowed.
+    /// a denominator near `u64::MAX` came out negative or overflowed. The
+    /// ledger accepts an unreduced margin, and a 100% one past 2^53 keeps its
+    /// integer part.
     #[test]
     fn bf_fees_take_any_margin() {
         let fees = bf_compatible_fees(&fee_log(
@@ -3958,6 +3960,14 @@ mod tests {
 
         assert_eq!(margin_f64(u64::MAX / 4, u64::MAX - 1), 0.25);
         assert_eq!(margin_f64(1, 0), 0.0);
+
+        let full = (1 << 60, 1 << 60);
+
+        assert_eq!(margin_f64(full.0, full.1), 1.0);
+        assert_eq!(
+            bf_compatible_fees(&fee_log(1_000_000_000_000, 340_000_000, Some(full))),
+            1_000_000_000_000
+        );
     }
 
     /// Margins past 2^53 go through the decimal expansion. The first sits
@@ -3965,7 +3975,7 @@ mod tests {
     /// rounded down, one lovelace short in `fees`. The second is a double
     /// away from the plain `f64` division of its operands, and so is the
     /// third, whose numerator is within 2^53 and whose odd denominator is just
-    /// past it.
+    /// past it, down to 2^53 + 1.
     #[test]
     fn bf_fees_round_wide_margins_to_the_nearest_double() {
         let midpoint = (12_777_994_273_690_747, 1 << 63);
@@ -3991,6 +4001,12 @@ mod tests {
         assert_eq!(
             bf_compatible_fees(&fee_log(73_496_656_964_163, 340_000_000, Some(narrow))),
             5_516_022_643_447
+        );
+
+        assert_eq!(margin_f64(narrow.0, (1 << 53) + 1), 0.07504706182950192);
+        assert_ne!(
+            narrow.0 as f64 / ((1u64 << 53) + 1) as f64,
+            0.07504706182950192
         );
     }
 
