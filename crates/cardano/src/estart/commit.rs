@@ -10,8 +10,9 @@
 //! advances the cursor.
 
 use dolos_core::{
-    save_entity_at, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain, EntityDelta as _,
-    Genesis, NsKey, RangeOf, StateEntity, StateStore, StateWriter,
+    save_entity_at, ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError,
+    ChainPoint, Domain, EntityDelta as _, Genesis, NsKey, RangeOf, StateEntity, StateStore,
+    StateWriter,
 };
 use tracing::{debug, instrument, trace, warn};
 
@@ -129,19 +130,22 @@ impl super::WorkContext {
 
     /// Commit a single per-shard run: stream-and-apply per-account snapshot
     /// transitions for the shard's key ranges, then commit the
-    /// `EStartProgress` delta against `EpochState`.
+    /// `EStartProgress` delta against `EpochState`, after the shard's
+    /// stake-only account-epoch rows reach the archive.
     ///
     /// **Does not advance the cursor.** Cursor moves only in
     /// `commit_finalize`.
-    #[instrument(skip(self, state))]
+    #[instrument(skip(self, state, archive))]
     pub fn commit_shard<D: Domain>(
         &mut self,
         state: &D::State,
+        archive: &D::Archive,
         ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<(), ChainError> {
         debug!("committing estart changes");
 
         let writer = state.start_writer()?;
+        let archive_writer = archive.start_writer()?;
 
         // Stream accounts in this shard's ranges only (one per
         // StakeCredential variant). Each call drains the matching deltas
@@ -155,10 +159,23 @@ impl super::WorkContext {
         self.deltas
             .apply_singleton::<EpochState, _>(state, &writer)?;
 
+        let slot = self.account_epoch_slot();
+
+        debug!(log_count = self.logs.len(), "writing shard archive logs");
+        for (account, log) in self.logs.drain(..) {
+            archive_writer.write_log_typed(slot, &account, &log)?;
+        }
+
         if !self.deltas.entities.is_empty() {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted shard deltas");
         }
 
+        // Archive first, as EWRAP's shards do: the state commit marks the
+        // shard done in `EStartProgress`, and a restart never re-runs a done
+        // shard. A crash in between re-runs the shard from the same
+        // pre-rotation accounts, which writes the same rows under the same
+        // keys again.
+        archive_writer.commit()?;
         writer.commit()?;
 
         debug!("estart commit complete");
@@ -283,10 +300,11 @@ mod tests {
             chain_summary: ChainSummary::default(),
             genesis: domain.genesis(),
             avvm_reclamation: Default::default(),
-            owners: Default::default(),
+            inputs: Default::default(),
             tally_protocol: EraKey::from(9),
             deltas: Default::default(),
             active_stake: None,
+            logs: Vec::new(),
         }
     }
 

@@ -846,6 +846,51 @@ fn the_first_stake_epoch_logs_its_distribution() {
     assert_eq!(staked, total(&expected));
 }
 
+/// ESTART opening the first stake epoch writes its rows with the stake leg
+/// alone, from the first Shelley epoch's snapshot, and the EWRAP closing the
+/// epoch after it writes the same rows under the same keys: the first stake
+/// epoch carries no reward, so its full rows are the stake-only ones, account
+/// for account, genesis delegator included.
+#[test]
+fn estart_writes_the_first_stake_epochs_rows_as_ewrap_does() {
+    let domain = seeded(devnet_with_genesis_pool());
+
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let first_shelley = summary.first_shelley_epoch();
+    let first_stake = first_shelley + 2;
+
+    let mut estart_rows = None;
+
+    loop {
+        let epoch = epoch_state(&domain).number;
+
+        run_rupd(&domain);
+
+        if epoch == first_shelley + 3 {
+            break;
+        }
+
+        open_next_epoch(&domain).unwrap();
+
+        if epoch_state(&domain).number == first_stake {
+            estart_rows = Some(account_epoch_logs(&domain, first_stake));
+        }
+    }
+
+    let estart_rows = estart_rows.unwrap();
+
+    let genesis_row = &estart_rows[&key(GENESIS_DELEGATOR)];
+    assert_eq!(genesis_row.active_stake, Some(GENESIS_FUNDS));
+    assert_eq!(genesis_row.pool_id, Some(pool_hash(GENESIS_POOL)));
+    assert!(estart_rows
+        .values()
+        .all(|row| row.member_reward.is_none() && row.leader_rewards.is_empty()));
+
+    wrap_the_epoch(&domain);
+
+    assert_eq!(account_epoch_logs(&domain, first_stake), estart_rows);
+}
+
 /// What `blocks` minted in the live epoch leave behind: the epoch's counts
 /// and, when `operator` minted them, that pool's. Without an operator they
 /// are blocks no registered pool minted, which the reward calculation pays

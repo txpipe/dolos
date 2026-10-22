@@ -28,6 +28,7 @@ use crate::{
 pub mod commit;
 pub mod loading;
 pub mod ratify;
+pub mod stake;
 pub mod work_unit;
 
 // visitors
@@ -393,27 +394,16 @@ impl BoundaryWork {
         account: &AccountState,
         applied: &[AppliedReward],
     ) -> AccountEpochLog {
-        let mut row = AccountEpochLog::default();
-
         // The stake leg: RUPD's three filters, reproduced against the same
         // immutable snapshot it read. `go` cannot move mid-epoch, so
-        // `snapshot_at(C - 3)` is the same value here that it was at RUPD time.
-        if let Some((stake_epoch, protocol)) = self.stake_snapshot {
-            if let Some(pool) = account.delegated_pool_at(stake_epoch) {
-                if self.stake_pools.contains(pool) {
-                    // Not filtered on `> 0`: a zero-stake delegator's row must
-                    // exist.
-                    row.active_stake = Some(
-                        account
-                            .stake
-                            .snapshot_at(stake_epoch)
-                            .map(|stake| stake.total_for_era(protocol))
-                            .unwrap_or_default(),
-                    );
-                    row.pool_id = Some(*pool);
-                }
-            }
-        }
+        // `snapshot_at(C - 3)` is the same value here that it was at RUPD time,
+        // and at the ESTART that wrote the leg alone.
+        let mut row = self
+            .stake_snapshot
+            .and_then(|(epoch, protocol)| {
+                stake::stake_leg(account, epoch, protocol, &self.stake_pools)
+            })
+            .unwrap_or_default();
 
         for reward in applied {
             if reward.as_leader {

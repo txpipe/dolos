@@ -20,36 +20,15 @@ use pallas::ledger::primitives::{
 };
 
 use crate::{
+    ewrap::stake::{admits_pool, stake_snapshot_of},
     ewrap::{AccountId, BoundaryVisitor as _, BoundaryWork, DRepId, ProposalId},
     load_era_summary, load_gov, pallas_extras,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
-    rupd::loading::stake_snapshot_epoch,
-    AccountKey, AccountState, ChainSummary, DRepEpochLog, DRepKey, DRepSnapshotEntry, DRepState,
-    EraKey, PendingMirState, PendingRewardState, PoolHash, PoolKey, PoolState, ProposalAction,
+    AccountKey, AccountState, DRepEpochLog, DRepKey, DRepSnapshotEntry, DRepState, EraKey,
+    PendingMirState, PendingRewardState, PoolHash, PoolKey, PoolState, ProposalAction,
     ProposalOutcome, ProposalState,
 };
-
-/// `RupdWork::stake_epochs`, read from the closing boundary's side: the stake
-/// snapshot RUPD logged the epoch's distribution from, and the protocol its
-/// stake totals are read under.
-///
-/// The gate is RUPD's stake gate ([`stake_snapshot_epoch`]), not its reward
-/// gate: the first stake epoch, whose snapshot is the first Shelley epoch's,
-/// has a distribution and no rewards, and its rows carry the stake leg alone.
-/// A merged row written where RUPD logged no distribution would be a
-/// population this log invented.
-///
-/// The protocol is the era of `snapshot_epoch + 1`, not of the snapshot epoch:
-/// the Haskell ledger computes the mark snapshot under the *entering* epoch's
-/// rules, which is what decides whether pointer-address stake counts.
-fn stake_snapshot_of(ending_epoch: Epoch, chain: &ChainSummary) -> Option<(Epoch, EraKey)> {
-    let snapshot_epoch = stake_snapshot_epoch(ending_epoch, chain.first_shelley_epoch())?;
-
-    let protocol = EraKey::from(chain.era_for_epoch(snapshot_epoch + 1).protocol);
-
-    Some((snapshot_epoch, protocol))
-}
 
 /// DRep votes standing at `cutoff` that the ledger still held when the
 /// snapshot was taken: only DReps in the snapshot, and only votes cast
@@ -672,15 +651,8 @@ impl BoundaryWork {
 
             // Pool counts are in the thousands, so holding the set is memory
             // rather than scan time.
-            if let Some(stake_epoch) = stake_epoch {
-                let admitted = pool
-                    .snapshot
-                    .snapshot_at(stake_epoch)
-                    .is_some_and(|snapshot| !snapshot.is_retired);
-
-                if admitted {
-                    self.stake_pools.insert(pool.operator);
-                }
+            if stake_epoch.is_some_and(|epoch| admits_pool(&pool, epoch)) {
+                self.stake_pools.insert(pool.operator);
             }
 
             if self.should_retire_pool(&pool) {
@@ -1747,8 +1719,9 @@ mod tests {
     use super::*;
     use crate::hacks::pv9_drep_delegs::{Action as Pv9Action, Entry as Pv9Entry};
     use crate::{
-        ewrap::AppliedReward, AccountTransition, AssignRewards, ControlledAmountInc,
-        DRepDelegation, DRepRegistration, DRepUnRegistration, EpochValue, PoolDelegation, Stake,
+        ewrap::AppliedReward, rupd::loading::stake_snapshot_epoch, AccountTransition,
+        AssignRewards, ChainSummary, ControlledAmountInc, DRepDelegation, DRepRegistration,
+        DRepUnRegistration, EpochValue, PoolDelegation, Stake,
     };
 
     /// Pins the rotation-timing assumption behind the distribution snapshot
@@ -4390,7 +4363,7 @@ mod ratification_tests {
         )
         .unwrap();
         shard
-            .commit_shard::<ToyDomain>(domain.state(), ranges)
+            .commit_shard::<ToyDomain>(domain.state(), domain.archive(), ranges)
             .unwrap();
 
         let mut estart = crate::estart::WorkContext::load_finalize::<ToyDomain>(
