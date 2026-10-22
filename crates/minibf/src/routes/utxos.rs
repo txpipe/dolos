@@ -220,8 +220,9 @@ impl Chunks {
 /// one of them ends before its window does. Returns that one, read whole,
 /// first, and the other tag second.
 ///
-/// Every read stops at its window, and the last window is under twice the
-/// smaller tag's size, so neither tag is read much past the smaller one's end.
+/// Every read stops at its window, and the last window is the first one the
+/// smaller tag does not fill: [`WALK_CHUNK`], or under twice the smaller tag's
+/// size. Neither tag is read much past the smaller one's end.
 pub async fn smaller_tag<D>(
     domain: &Facade<D>,
     first: Tag,
