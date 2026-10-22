@@ -845,6 +845,63 @@ impl GrpcConfig {
     }
 }
 
+/// A URL path that an HTTP API serves every route under, such as `/api/v0`
+/// for the Blockfrost server URL. Parsing drops a trailing slash and refuses
+/// a value a router cannot nest under (route syntax, delimiters) or a client
+/// cannot reach (`.` and `..` segments, which clients resolve away).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoutePrefix(String);
+
+impl RoutePrefix {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let refuse = |reason: &str| Err(format!("`{value}` is not a route prefix: {reason}"));
+
+        let Some(segments) = value.trim_end_matches('/').strip_prefix('/') else {
+            return if value.is_empty() || !value.starts_with('/') {
+                refuse("it must start with `/`")
+            } else {
+                refuse("it must name at least one segment")
+            };
+        };
+
+        for segment in segments.split('/') {
+            if segment.is_empty() {
+                return refuse("it has an empty segment");
+            }
+
+            if segment == "." || segment == ".." {
+                return refuse("`.` and `..` segments are not allowed");
+            }
+
+            let unreserved =
+                |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~');
+
+            if !segment.chars().all(unreserved) {
+                return refuse("segments may only use letters, digits, `-`, `.`, `_` and `~`");
+            }
+        }
+
+        Ok(Self(format!("/{segments}")))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for RoutePrefix {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for RoutePrefix {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MinibfConfig {
@@ -859,6 +916,8 @@ pub struct MinibfConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_scan_items: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    route_prefix: Option<RoutePrefix>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     ipfs_gateways: Option<Vec<String>>,
 }
 
@@ -870,6 +929,7 @@ impl MinibfConfig {
             token_registry_url: None,
             public_url: None,
             max_scan_items: None,
+            route_prefix: None,
             ipfs_gateways: None,
         }
     }
@@ -890,6 +950,16 @@ impl MinibfConfig {
 
     pub fn max_scan_items(&self) -> u64 {
         self.max_scan_items.unwrap_or(default_max_scan_items())
+    }
+
+    pub fn with_route_prefix(mut self, route_prefix: RoutePrefix) -> Self {
+        self.route_prefix = Some(route_prefix);
+        self
+    }
+
+    /// The prefix every route is served under; `None` serves them at the root.
+    pub fn route_prefix(&self) -> Option<&RoutePrefix> {
+        self.route_prefix.as_ref()
     }
 
     /// These are the base URLs of the HTTP gateways, in order. The gateways
@@ -2612,5 +2682,46 @@ mod tests {
             PathBuf::from("/etc/node/genesis/byron.json")
         );
         assert_eq!(genesis.conway_path, PathBuf::from("/abs/c.json"));
+    }
+
+    #[test]
+    fn a_route_prefix_drops_its_trailing_slash() {
+        for (value, prefix) in [
+            ("/api/v0", "/api/v0"),
+            ("/api/v0/", "/api/v0"),
+            ("/api/v0//", "/api/v0"),
+            ("/a-b.c_d~e/f2", "/a-b.c_d~e/f2"),
+        ] {
+            assert_eq!(
+                RoutePrefix::parse(value).unwrap().as_str(),
+                prefix,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_route_prefix_names_why_it_is_refused() {
+        for (value, reason) in [
+            ("", "must start with `/`"),
+            ("api/v0", "must start with `/`"),
+            ("/", "at least one segment"),
+            ("//api", "empty segment"),
+            ("/api//v0", "empty segment"),
+            ("/api/..", "`.` and `..`"),
+            ("/api/./v0", "`.` and `..`"),
+            ("/api/{v}", "letters, digits"),
+            ("/api/{*rest}", "letters, digits"),
+            ("/api/:v0", "letters, digits"),
+            ("/api/v0%20x", "letters, digits"),
+            ("/api/v0?x=y", "letters, digits"),
+            ("/api/v0#fragment", "letters, digits"),
+            ("/api/v0 x", "letters, digits"),
+        ] {
+            let error = RoutePrefix::parse(value).unwrap_err();
+
+            assert!(error.contains(&format!("`{value}`")), "{error}");
+            assert!(error.contains(reason), "{value}: {error}");
+        }
     }
 }

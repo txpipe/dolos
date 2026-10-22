@@ -327,7 +327,8 @@ where
     }
 
     let permissive_cors = facade.config.permissive_cors();
-    let app = Router::new()
+    let route_prefix = facade.config.route_prefix().cloned();
+    let routes = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
         .route("/metrics", get(routes::metrics::naked::<D>))
@@ -682,7 +683,17 @@ where
         .route(
             "/governance/proposals/{gov_action_id}/votes",
             get(routes::governance::proposal_votes_by_gov_action::<D>),
-        )
+        );
+
+    // The fallback and layers go on the outer router, so a path outside the
+    // prefix answers like any unmatched path, and the trace span sees the
+    // whole request path. The nested routes inherit the fallback.
+    let routes = match route_prefix {
+        Some(prefix) => Router::new().nest(prefix.as_str(), routes),
+        None => routes,
+    };
+
+    let app = routes
         .fallback(routes::invalid_path)
         .with_state(facade)
         .layer(
@@ -756,6 +767,76 @@ where
             .map_err(ServeError::ShutdownError)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod route_prefix_tests {
+    use axum::http::StatusCode;
+    use serde_json::{json, Value};
+
+    use crate::test_support::TestApp;
+
+    async fn assert_invalid_path(app: &TestApp, path: &str) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+
+        let body: Value =
+            serde_json::from_slice(&bytes).unwrap_or_else(|_| panic!("no json body for {path}"));
+        assert_eq!(
+            body,
+            json!({
+                "status_code": 400,
+                "error": "Bad Request",
+                "message": "Invalid path.",
+            }),
+            "{path}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_route_is_served_under_the_prefix() {
+        let app = TestApp::new_with_route_prefix("/api/v0/");
+
+        for path in [
+            "/api/v0",
+            "/api/v0/",
+            "/api/v0/network",
+            "/api/v0/network/",
+            "/api/v0/health",
+            "/api/v0/metrics",
+        ] {
+            let (status, _) = app.get_bytes(path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn paths_outside_the_prefix_answer_invalid_path() {
+        let app = TestApp::new_with_route_prefix("/api/v0");
+
+        for path in [
+            "/",
+            "/network",
+            "/health",
+            "/api/v0x/network",
+            "/api/v1/network",
+        ] {
+            assert_invalid_path(&app, path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn unmatched_paths_under_the_prefix_answer_invalid_path() {
+        let app = TestApp::new_with_route_prefix("/api/v0");
+
+        for path in [
+            "/api/v0/nonexistent",
+            "/api/v0/blocks/latest/nope",
+            "/api/v0/txs",
+        ] {
+            assert_invalid_path(&app, path).await;
+        }
     }
 }
 
