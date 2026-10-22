@@ -16,10 +16,7 @@ use std::{
 use super::load::drive_requests;
 use anyhow::Context;
 use clap::Parser;
-use dolos_core::{
-    config::{FjallArchiveConfig, FjallStateConfig, MinibfConfig},
-    Domain, SyncExt,
-};
+use dolos_core::{config::MinibfConfig, Domain, SyncExt};
 use dolos_testing::{
     performance::{ApiFixture, FixtureShape},
     toy_domain::FjallStores,
@@ -28,6 +25,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::measure;
+
+/// The tuning both fixture stores open with: the one a node runs with.
+const PRESET: dolos_fjall::Preset = dolos_fjall::Preset::Standard;
 
 #[derive(clap::Subcommand)]
 pub enum Cmd {
@@ -112,8 +112,6 @@ pub struct Args {
     pub timeout_ms: u64,
     #[arg(long, default_value_t = 3_000)]
     pub max_scan_items: u64,
-    #[arg(long, default_value_t = 64)]
-    pub cache_mib: usize,
     #[arg(long, default_value = "all")]
     pub cases: String,
     #[arg(long)]
@@ -167,11 +165,10 @@ impl Args {
         );
         anyhow::ensure!(
             self.timeout_ms > 0
-                && self.cache_mib > 0
                 && self.max_scan_items > 0
                 && self.live_batch_size > 0
                 && self.max_fixture_mib > 0,
-            "timeout, cache, scan limit, live batch size and fixture bound must be positive"
+            "timeout, scan limit, live batch size and fixture bound must be positive"
         );
         let rates: Vec<u64> = super::parse_list(&self.rates)?;
         anyhow::ensure!(!rates.is_empty(), "rates must not be empty");
@@ -226,16 +223,7 @@ pub async fn drive(
 }
 
 async fn measure_case(args: &Args, name: &str, rate: u64) -> anyhow::Result<(Value, Value)> {
-    let state_config = FjallStateConfig {
-        cache: Some(args.cache_mib),
-        ..Default::default()
-    };
-    let archive_config = FjallArchiveConfig {
-        cache: Some(args.cache_mib),
-        ..Default::default()
-    };
-    let stores = FjallStores::open_in(&args.work, &state_config, &archive_config)
-        .map_err(anyhow::Error::msg)?;
+    let stores = FjallStores::open_in(&args.work, PRESET).map_err(anyhow::Error::msg)?;
     let store_path = stores.path().to_path_buf();
     let mut fixture = ApiFixture::new(stores, args.shape()).map_err(anyhow::Error::msg)?;
     let fixture_bytes = fixture
@@ -479,7 +467,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
                     "settings": {
                         "requests": args.requests, "concurrency": args.concurrency, "rate": rate,
                         "timeout_ms": args.timeout_ms, "max_scan_items": args.max_scan_items,
-                        "cache_mib_per_store": args.cache_mib, "cache": "route-primed",
+                        "preset": PRESET.name(), "cache": "route-primed",
                         "durability": "production-defaults", "storage_version": "v4",
                         "dictionary": super::dictionary::Dictionary::bundled().id().to_string(),
                         "measurement_protocol": 2,

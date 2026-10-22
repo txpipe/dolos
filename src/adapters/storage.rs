@@ -20,8 +20,7 @@ use dolos_core::{
     },
     cache::Cost,
     config::{
-        FjallArchiveConfig, FjallStateConfig, RedbMempoolConfig, RedbStateConfig, RedbWalConfig,
-        RootConfig, StateStoreConfig, StoreType,
+        RedbMempoolConfig, RedbStateConfig, RedbWalConfig, RootConfig, StateStoreConfig, StoreType,
     },
     ArchiveIndexDelta, BlockBody, BlockSlot, CacheDiskTier, CacheEntry, CacheError, ChainPoint,
     EntityDelta, EntityKey, EntityValue, ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey,
@@ -520,9 +519,9 @@ impl StateStoreBackend {
     /// Open a state store with the Fjall backend.
     pub fn open_fjall(
         path: impl AsRef<Path>,
-        config: &FjallStateConfig,
+        preset: dolos_fjall::Preset,
     ) -> Result<Self, StateError> {
-        Ok(Self::Fjall(dolos_fjall::StateStore::open(path, config)?))
+        Ok(Self::Fjall(dolos_fjall::StateStore::open(path, preset)?))
     }
 
     /// Create an in-memory state store.
@@ -543,7 +542,7 @@ impl StateStoreBackend {
         config: &StateStoreConfig,
     ) -> Result<Self, StateError> {
         match config.kind {
-            StoreType::Fjall { .. } => Self::open_fjall(path, &FjallStateConfig::default()),
+            StoreType::Fjall { preset } => Self::open_fjall(path, preset.into()),
             StoreType::Ephemeral => Self::in_memory(),
         }
     }
@@ -810,10 +809,11 @@ impl ArchiveStoreBackend {
     pub fn open_fjall(
         path: impl AsRef<Path>,
         schema: StateSchema,
-        config: &dolos_core::config::FjallArchiveConfig,
+        blocks_path: Option<&Path>,
+        preset: dolos_fjall::Preset,
     ) -> Result<Self, ArchiveError> {
         Ok(Self::Fjall(
-            dolos_fjall::archive::ArchiveStore::open(schema, path, config)
+            dolos_fjall::archive::ArchiveStore::open(schema, path, blocks_path, preset)
                 .map_err(ArchiveError::from)?,
         ))
     }
@@ -859,12 +859,8 @@ impl ArchiveStoreBackend {
         kind: StoreType,
     ) -> Result<Self, ArchiveError> {
         match kind {
-            StoreType::Fjall { .. } => {
-                let options = FjallArchiveConfig {
-                    blocks_path,
-                    ..Default::default()
-                };
-                Self::open_fjall(path, schema, &options)
+            StoreType::Fjall { preset } => {
+                Self::open_fjall(path, schema, blocks_path.as_deref(), preset.into())
             }
             StoreType::Ephemeral => Self::in_memory(schema),
         }
