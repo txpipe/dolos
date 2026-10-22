@@ -43,6 +43,8 @@ A variable whose name starts with `DOLOS_` and contains `__` sets one key, overr
 | `serve.minibf.listen_address` | `DOLOS_SERVE__MINIBF__LISTEN_ADDRESS` |
 | `storage.cache.admission.offchain-failures` | `DOLOS_STORAGE__CACHE__ADMISSION__OFFCHAIN-FAILURES` |
 
+Shells refuse a variable name that contains `-`, so `export` and the `NAME=value dolos …` form both fail for a key like the last one. Set it with `env`, as in `env 'DOLOS_STORAGE__CACHE__ADMISSION__OFFCHAIN-FAILURES=500' dolos daemon`, or through an orchestrator's environment list, such as a Kubernetes `env` entry.
+
 For example, with this file:
 
 ```toml

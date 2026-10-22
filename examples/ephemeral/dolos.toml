@@ -10,5 +10,8 @@ type = "ephemeral"
 [storage.archive]
 type = "ephemeral"
 
+[storage.cache]
+enabled = false
+
 [serve.minibf]
 listen_address = "[::]:3000"

@@ -12,7 +12,7 @@ Dolos v2 changes the shape of `dolos.toml`. A file written for Dolos v1 or v2.0.
 
 ### Rewriting a file
 
-1. Start from the v2 reference that matches your node: the [ordinary node](../configuration/schema#an-ordinary-node) for a known network, or the [full reference](../configuration/schema#full-reference).
+1. Start from the [ordinary node](../configuration/schema#an-ordinary-node), or the file `dolos init` writes. Add the tables your node needs from the [full reference](../configuration/schema#full-reference). Its values are examples, not defaults: each section of the schema gives the field's default.
 2. Carry your settings over with the [migration map](#migration-map) below. Settings left at their defaults can be dropped: a known network needs no genesis files, magic or peer.
 3. Validate the result without starting the node, or opening any store:
 
@@ -157,7 +157,8 @@ A custom network has no defaults, so it passes the Mithril and stele inputs expl
 | `include_trp` | `jsonrpsee-server=<level>` |
 | `include_fjall` | `fjall=<level>,lsm_tree=<level>` |
 | `include_otlp` | `opentelemetry=<level>` |
-| `include_minibf`, `include_minikupo` | none: their events are Dolos's own, and follow `level` |
+| `include_minibf` | `minibf=<level>`, for MiniBF's request log |
+| `include_minikupo` | `minikupo=<level>`, for MiniKupo's request log |
 
 For example, `max_level = "debug"` with `include_pallas = true` becomes:
 

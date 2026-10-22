@@ -22,7 +22,7 @@ Dolos follows a very common convention around log levels. These levels describe 
 
 ## Components
 
-Dolos's own events follow `level`. Every other component, such as the libraries Dolos is built on, logs nothing unless `filter` names it:
+Dolos's own events, under the `dolos` and `gasket` targets, follow `level`. Every other target logs nothing unless `filter` names it. That covers the libraries Dolos is built on, and the request logs of the HTTP APIs:
 
 | target | component |
 | ------ | --------- |
@@ -32,6 +32,8 @@ Dolos's own events follow `level`. Every other component, such as the libraries 
 | `jsonrpsee-server` | The Transaction Resolver Protocol server |
 | `fjall`, `lsm_tree` | The Fjall storage engine |
 | `opentelemetry` | OpenTelemetry exporters |
+| `minibf` | MiniBF's request log, one event per HTTP request |
+| `minikupo` | MiniKupo's request log, one event per HTTP request |
 
 ## Configuration
 

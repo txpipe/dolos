@@ -148,7 +148,7 @@ fn the_full_reference_parses() {
 
     let grpc = serve.grpc.as_ref().unwrap();
     assert_eq!(grpc.listen_address, "[::]:50051");
-    assert_eq!(grpc.tls_client_ca_root, Some("./client-ca.pem".into()));
+    assert_eq!(grpc.tls_client_ca_root, None);
     assert!(grpc.permissive_cors());
     assert!(!grpc.http2_adaptive_window());
     assert_eq!(grpc.http2_initial_stream_window_size, Some(8_388_608));
@@ -244,6 +244,7 @@ fn the_ephemeral_example_parses() {
 
     assert_eq!(config.storage.state, StateStoreConfig::ephemeral());
     assert_eq!(config.storage.archive, ArchiveStoreConfig::ephemeral());
+    assert!(!config.storage.cache.enabled);
     assert_eq!(config.storage.state_path(), None);
     assert_eq!(config.storage.archive_path(), None);
     assert_eq!(config.wal_path(), None);

@@ -6,7 +6,7 @@ network = "mainnet"
 
 [upstream]
 type = "peer"                 # optional; default peer
-peer_address = "backbone.mainnet.cardanofoundation.org:3001" # default per known network
+peer_address = "backbone.mainnet.cardanofoundation.org:3001" # default: the known network's peer
 
 [sync]
 wal_path = "wal"              # default <storage.path>/wal; relative to storage.path
@@ -56,7 +56,6 @@ max_concurrent_queries = 32   # 1..=64
 
 [serve.grpc]
 listen_address = "[::]:50051"
-tls_client_ca_root = "./client-ca.pem"
 permissive_cors = true
 http2_adaptive_window = false
 http2_initial_stream_window_size = 8388608
