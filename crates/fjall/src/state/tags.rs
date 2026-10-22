@@ -5,15 +5,18 @@
 //! lookup keys (addresses, policies, assets) to sets of TxoRefs, and are
 //! written in the same batch as the UTxO set they project.
 //!
-//! Key format: `[dim_hash:8][lookup_key:var][txo_ref:36]` with empty value.
-//! Queries use prefix scanning to find all TxoRefs for a given lookup key.
+//! Key format: `[dim_hash:8][lookup_key:var][tag_order:10][txo_ref:36]` with
+//! empty value. `tag_order` is the UTxO's creation position as
+//! `UtxoPosition::tag_order` writes it, so the keys of one lookup key sort in
+//! creation order, then by ref. Queries use prefix scanning to find the
+//! TxoRefs for a given lookup key, forward or in reverse.
 //!
 //! The `dim_hash` is computed as `xxh3("utxo:" + dimension)`, making the
 //! storage layer fully chain-agnostic.
 
 use std::collections::HashSet;
 
-use dolos_core::{TxoRef, UtxoIndexDelta, UtxoSet};
+use dolos_core::{TagOrder, TxoRef, UtxoIndexDelta, UtxoPosition, UtxoSet, TAG_ORDER_LEN};
 use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
 use crate::keys::{
@@ -25,15 +28,29 @@ use crate::Error;
 // Key Encoding
 // ============================================================================
 
-/// Build a UTxO tag key: `[dim_hash:8][lookup_key:var][txo_ref:36]`
-fn build_utxo_tag_key(dimension: &str, lookup_key: &[u8], txo: &TxoRef) -> Vec<u8> {
+/// Build a UTxO tag key:
+/// `[dim_hash:8][lookup_key:var][tag_order:10][txo_ref:36]`
+fn build_utxo_tag_key(
+    dimension: &str,
+    lookup_key: &[u8],
+    position: Option<UtxoPosition>,
+    txo: &TxoRef,
+) -> Vec<u8> {
     let dim_hash = hash_dimension(dim_prefix::UTXO, dimension);
     let txo_bytes = encode_txo_ref(txo);
-    let mut key = Vec::with_capacity(DIM_HASH_SIZE + lookup_key.len() + TXO_REF_SIZE);
+    let mut key = Vec::with_capacity(tag_key_len(lookup_key));
     key.extend_from_slice(&dim_hash);
     key.extend_from_slice(lookup_key);
+    key.extend_from_slice(&UtxoPosition::tag_order(position));
     key.extend_from_slice(&txo_bytes);
     key
+}
+
+/// The length of every tag key under `lookup_key`. A longer key under the same
+/// prefix belongs to a longer lookup key that starts with this one (an asset
+/// name extending another), so reads keep only keys of exactly this length.
+fn tag_key_len(lookup_key: &[u8]) -> usize {
+    DIM_HASH_SIZE + lookup_key.len() + TAG_ORDER_LEN + TXO_REF_SIZE
 }
 
 /// Build prefix for UTxO tag queries: `[dim_hash:8][lookup_key:var]`
@@ -47,7 +64,7 @@ fn build_utxo_tag_prefix(dimension: &str, lookup_key: &[u8]) -> Vec<u8> {
 
 /// Decode TxoRef from UTxO tag key (last 36 bytes)
 fn decode_utxo_tag_txo(key: &[u8]) -> TxoRef {
-    debug_assert!(key.len() >= DIM_HASH_SIZE + TXO_REF_SIZE);
+    debug_assert!(key.len() >= DIM_HASH_SIZE + TAG_ORDER_LEN + TXO_REF_SIZE);
     let start = key.len() - TXO_REF_SIZE;
     decode_txo_ref(&key[start..])
 }
@@ -62,9 +79,10 @@ fn insert_entry(
     keyspace: &Keyspace,
     dimension: &str,
     lookup_key: &[u8],
+    position: Option<UtxoPosition>,
     txo: &TxoRef,
 ) {
-    let key = build_utxo_tag_key(dimension, lookup_key, txo);
+    let key = build_utxo_tag_key(dimension, lookup_key, position, txo);
     batch.insert(keyspace, key, []);
 }
 
@@ -74,9 +92,10 @@ fn remove_entry(
     keyspace: &Keyspace,
     dimension: &str,
     lookup_key: &[u8],
+    position: Option<UtxoPosition>,
     txo: &TxoRef,
 ) {
-    let key = build_utxo_tag_key(dimension, lookup_key, txo);
+    let key = build_utxo_tag_key(dimension, lookup_key, position, txo);
     batch.remove(keyspace, key);
 }
 
@@ -87,16 +106,16 @@ pub fn apply(
     delta: &UtxoIndexDelta,
 ) -> Result<(), Error> {
     // Insert produced UTxOs
-    for (txo_ref, tags) in &delta.produced {
+    for (txo_ref, position, tags) in &delta.produced {
         for tag in tags {
-            insert_entry(batch, keyspace, tag.dimension, &tag.key, txo_ref);
+            insert_entry(batch, keyspace, tag.dimension, &tag.key, *position, txo_ref);
         }
     }
 
     // Remove consumed UTxOs
-    for (txo_ref, tags) in &delta.consumed {
+    for (txo_ref, position, tags) in &delta.consumed {
         for tag in tags {
-            remove_entry(batch, keyspace, tag.dimension, &tag.key, txo_ref);
+            remove_entry(batch, keyspace, tag.dimension, &tag.key, *position, txo_ref);
         }
     }
 
@@ -110,16 +129,16 @@ pub fn undo(
     delta: &UtxoIndexDelta,
 ) -> Result<(), Error> {
     // Remove produced UTxOs (undo insertion)
-    for (txo_ref, tags) in &delta.produced {
+    for (txo_ref, position, tags) in &delta.produced {
         for tag in tags {
-            remove_entry(batch, keyspace, tag.dimension, &tag.key, txo_ref);
+            remove_entry(batch, keyspace, tag.dimension, &tag.key, *position, txo_ref);
         }
     }
 
     // Restore consumed UTxOs (undo removal)
-    for (txo_ref, tags) in &delta.consumed {
+    for (txo_ref, position, tags) in &delta.consumed {
         for tag in tags {
-            insert_entry(batch, keyspace, tag.dimension, &tag.key, txo_ref);
+            insert_entry(batch, keyspace, tag.dimension, &tag.key, *position, txo_ref);
         }
     }
 
@@ -147,20 +166,65 @@ pub fn get_by_key<R: Readable>(
 
     // Build prefix: [dim_hash:8][lookup_key]
     let prefix = build_utxo_tag_prefix(dimension, lookup_key);
+    let key_len = tag_key_len(lookup_key);
 
     // Prefix scan: all keys starting with prefix
     for guard in readable.prefix(keyspace, prefix) {
         let key = guard.key()?;
 
-        // Key format: [dim_hash:8][lookup_key:var][txo_ref:36]
-        // Minimum length: DIM_HASH_SIZE + lookup_key.len() + TXO_REF_SIZE
-        if key.len() >= DIM_HASH_SIZE + lookup_key.len() + TXO_REF_SIZE {
-            let txo_ref = decode_utxo_tag_txo(&key);
-            result.insert(txo_ref);
+        if key.len() == key_len {
+            result.insert(decode_utxo_tag_txo(&key));
         }
     }
 
     Ok(result)
+}
+
+/// One page of the TxoRefs for a dimension and lookup key, in key order
+/// (creation position, then ref) or its reverse.
+///
+/// The scan stops once it has passed `offset` keys and collected `count`.
+pub fn get_page_by_key<R: Readable>(
+    readable: &R,
+    keyspace: &Keyspace,
+    dimension: &str,
+    lookup_key: &[u8],
+    order: TagOrder,
+    offset: usize,
+    count: usize,
+) -> Result<Vec<TxoRef>, Error> {
+    let prefix = build_utxo_tag_prefix(dimension, lookup_key);
+    let key_len = tag_key_len(lookup_key);
+
+    let scan = readable.prefix(keyspace, prefix);
+    let scan: Box<dyn Iterator<Item = fjall::Guard>> = match order {
+        TagOrder::Asc => Box::new(scan),
+        TagOrder::Desc => Box::new(scan.rev()),
+    };
+
+    let mut page = Vec::with_capacity(count.min(1024));
+    let mut skipped = 0;
+
+    for guard in scan {
+        if page.len() == count {
+            break;
+        }
+
+        let key = guard.key()?;
+
+        if key.len() != key_len {
+            continue;
+        }
+
+        if skipped < offset {
+            skipped += 1;
+            continue;
+        }
+
+        page.push(decode_utxo_tag_txo(&key));
+    }
+
+    Ok(page)
 }
 
 #[cfg(test)]
@@ -171,12 +235,21 @@ mod tests {
     fn test_utxo_tag_key_roundtrip() {
         let lookup_key = b"addr_test1qz...";
         let txo = TxoRef([0xab; 32].into(), 42);
-        let key = build_utxo_tag_key("address", lookup_key, &txo);
+        let position = Some(UtxoPosition::new(1_000, 3));
+        let key = build_utxo_tag_key("address", lookup_key, position, &txo);
 
-        // Verify size: dim_hash(8) + lookup_key + txo_ref(36)
-        assert_eq!(key.len(), DIM_HASH_SIZE + lookup_key.len() + TXO_REF_SIZE);
+        assert_eq!(key.len(), tag_key_len(lookup_key));
+        assert_eq!(
+            key.len(),
+            DIM_HASH_SIZE + lookup_key.len() + TAG_ORDER_LEN + TXO_REF_SIZE
+        );
 
-        // Verify TxoRef decoding
+        let order_start = DIM_HASH_SIZE + lookup_key.len();
+        assert_eq!(
+            key[order_start..order_start + TAG_ORDER_LEN],
+            UtxoPosition::tag_order(position)
+        );
+
         let decoded_txo = decode_utxo_tag_txo(&key);
         assert_eq!(txo.0, decoded_txo.0);
         assert_eq!(txo.1, decoded_txo.1);
@@ -186,18 +259,47 @@ mod tests {
     fn test_utxo_tag_prefix() {
         let lookup_key = b"addr_test1qz...";
         let txo = TxoRef([0xab; 32].into(), 42);
-        let key = build_utxo_tag_key("address", lookup_key, &txo);
+        let key = build_utxo_tag_key("address", lookup_key, None, &txo);
         let prefix = build_utxo_tag_prefix("address", lookup_key);
 
         // Key should start with prefix
         assert!(key.starts_with(&prefix));
     }
 
+    /// Byte order is creation order: slot, then tx index, then the ref, with
+    /// the UTxOs that have no position first.
+    #[test]
+    fn tag_keys_sort_in_creation_order() {
+        let key = |position: Option<(u64, u16)>, hash: u8, index: u32| {
+            build_utxo_tag_key(
+                "address",
+                b"addr",
+                position.map(|(slot, tx)| UtxoPosition::new(slot, tx)),
+                &TxoRef([hash; 32].into(), index),
+            )
+        };
+
+        let ordered = [
+            key(None, 0x01, 0),
+            key(None, 0xff, 0),
+            key(Some((0, 0)), 0x00, 0),
+            key(Some((0, 1)), 0x00, 0),
+            key(Some((1, 0)), 0xff, 0),
+            key(Some((1, 0)), 0xff, 1),
+            key(Some((1, 2)), 0x00, 0),
+            key(Some((256, 0)), 0x00, 0),
+        ];
+
+        for pair in ordered.windows(2) {
+            assert!(pair[0] < pair[1], "{:?} !< {:?}", pair[0], pair[1]);
+        }
+    }
+
     #[test]
     fn test_dimension_separation() {
         // Different dimensions should have different prefixes
-        let key1 = build_utxo_tag_key("address", b"test", &TxoRef([0; 32].into(), 0));
-        let key2 = build_utxo_tag_key("payment", b"test", &TxoRef([0; 32].into(), 0));
+        let key1 = build_utxo_tag_key("address", b"test", None, &TxoRef([0; 32].into(), 0));
+        let key2 = build_utxo_tag_key("payment", b"test", None, &TxoRef([0; 32].into(), 0));
 
         // First 8 bytes (dim_hash) should be different
         assert_ne!(&key1[..DIM_HASH_SIZE], &key2[..DIM_HASH_SIZE]);
@@ -206,7 +308,12 @@ mod tests {
     #[test]
     fn test_any_dimension_works() {
         // Any dimension string should work (chain-agnostic)
-        let key = build_utxo_tag_key("some_custom_dimension", b"data", &TxoRef([0; 32].into(), 0));
+        let key = build_utxo_tag_key(
+            "some_custom_dimension",
+            b"data",
+            None,
+            &TxoRef([0; 32].into(), 0),
+        );
 
         // Key should be valid size
         assert!(key.len() > DIM_HASH_SIZE);

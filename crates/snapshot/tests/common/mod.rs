@@ -36,7 +36,7 @@ use dolos_cardano::{
 };
 use dolos_core::{
     keys, BlockHash, EntityKey, EraCbor, ExactKind, ExactRecord, IndexRecord, LogKey, Namespace,
-    TagRecord, TxoRef,
+    TagRecord, TxoRef, UtxoValue,
 };
 use dolos_snapshot::{
     layers::{
@@ -303,7 +303,8 @@ pub fn state(ns: Namespace, shard: u8) -> Vec<StateRecord> {
     let byte = (shard << 4) | (i & 0x0f);
 
     vec![if ns == UTXOS {
-        state::utxo(&TxoRef([byte; 32].into(), 3), &EraCbor(6, vec![0xa0, byte])).unwrap()
+        let value = UtxoValue::new(EraCbor(6, vec![0xa0, byte]), None);
+        state::utxo(&TxoRef([byte; 32].into(), 3), &value).unwrap()
     } else {
         state::entity(
             &EntityKey::from_raw(&state_key(ns, byte)),

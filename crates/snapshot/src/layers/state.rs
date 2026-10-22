@@ -37,8 +37,9 @@
 //! ## The one place bytes are built rather than carried
 //!
 //! Entity values are the stored minicbor, verbatim. UTxO values are not: the
-//! state store holds an [`EraCbor`], which is a Rust value rather than a byte
-//! string, so this codec composes `[era, body]` itself. It composes it through
+//! state store hands out a [`UtxoValue`], which is a Rust value rather than a
+//! byte string, so this codec composes `[era, body, slot, tx_index]` — or
+//! `[era, body]` for a UTxO no block produced — itself. It composes it through
 //! [`stelae::frame::encode`] — the same validator every record goes through —
 //! so the one transformed field in the whole profile is canonical by
 //! construction rather than by inspection.
@@ -54,7 +55,9 @@
 //! population would be all overhead. The counts are fixed by the profile
 //! specification (`crate::STATE_KINDS`), never by data or configuration.
 
-use dolos_core::{EntityKey, EntityValue, Era, EraCbor, Namespace, TxoRef};
+use dolos_core::{
+    EntityKey, EntityValue, Era, EraCbor, Namespace, TxoRef, UtxoPosition, UtxoValue,
+};
 use stelae::frame::{self, CanonicalCbor};
 
 use crate::{namespaces, Error};
@@ -92,8 +95,8 @@ pub struct StateRecord {
     /// The namespace's typed key, stored, or [`UTXO_KEY_LEN`] bytes under
     /// [`crate::UTXOS`].
     pub key: Vec<u8>,
-    /// The stored `EntityValue` verbatim, or CBOR `[era, body]` under
-    /// [`crate::UTXOS`].
+    /// The stored `EntityValue` verbatim, or CBOR `[era, body, slot, tx_index]`
+    /// (`[era, body]` without a position) under [`crate::UTXOS`].
     pub value: EntityValue,
 }
 
@@ -105,8 +108,8 @@ pub fn entity(key: &EntityKey, value: &EntityValue) -> StateRecord {
     }
 }
 
-/// A record for one UTxO, composing the `[era, body]` value.
-pub fn utxo(txo: &TxoRef, value: &EraCbor) -> Result<StateRecord, Error> {
+/// A record for one UTxO, composing its `[era, body, slot, tx_index]` value.
+pub fn utxo(txo: &TxoRef, value: &UtxoValue) -> Result<StateRecord, Error> {
     let mut key = Vec::with_capacity(UTXO_KEY_LEN);
     key.extend_from_slice(txo.0.as_ref());
     key.extend_from_slice(&txo.1.to_be_bytes());
@@ -125,7 +128,7 @@ pub fn as_entity(record: &StateRecord) -> EntityKey {
 
 /// Read a record back as a UTxO. Refuses a key that is not UTxO-width — an
 /// entity record, above all.
-pub fn as_utxo(record: &StateRecord) -> Result<(TxoRef, EraCbor), Error> {
+pub fn as_utxo(record: &StateRecord) -> Result<(TxoRef, UtxoValue), Error> {
     let key: [u8; UTXO_KEY_LEN] = record.key.as_slice().try_into().map_err(|_| {
         Error::malformed(
             STATE,
@@ -146,27 +149,64 @@ pub fn as_utxo(record: &StateRecord) -> Result<(TxoRef, EraCbor), Error> {
     ))
 }
 
-/// The `utxos` value: `[era: uint, body: bytes]`.
-pub fn encode_utxo_value(value: &EraCbor) -> Result<CanonicalCbor, Error> {
+/// The `utxos` value: `[era: uint, body: bytes, slot: uint, tx_index: uint]`,
+/// the creation position last. A UTxO no block produced has no position and
+/// is `[era: uint, body: bytes]`.
+pub fn encode_utxo_value(value: &UtxoValue) -> Result<CanonicalCbor, Error> {
+    let EraCbor(era, body) = &value.output;
+
     Ok(frame::encode(|e| {
-        e.array(2)?.u64(u64::from(value.0))?.bytes(&value.1)?;
+        match value.position {
+            Some(UtxoPosition { slot, tx_index }) => {
+                e.array(4)?
+                    .u64(u64::from(*era))?
+                    .bytes(body)?
+                    .u64(slot)?
+                    .u64(u64::from(tx_index))?;
+            }
+            None => {
+                e.array(2)?.u64(u64::from(*era))?.bytes(body)?;
+            }
+        }
         Ok(())
     })?)
 }
 
-pub fn decode_utxo_value(bytes: &[u8]) -> Result<EraCbor, Error> {
+pub fn decode_utxo_value(bytes: &[u8]) -> Result<UtxoValue, Error> {
     let mut decoder = minicbor::Decoder::new(bytes);
 
-    open(STATE, &mut decoder, 2)?;
+    let fields = decoder
+        .array()
+        .map_err(|e| Error::malformed(STATE, format!("expected an array: {e}")))?
+        .ok_or_else(|| Error::malformed(STATE, "indefinite-length array"))?;
+
+    if fields != 2 && fields != 4 {
+        return Err(Error::malformed(
+            STATE,
+            format!("expected 2 or 4 fields, found {fields}"),
+        ));
+    }
 
     let era = uint(STATE, "era", &mut decoder)?;
     let era = Era::try_from(era)
         .map_err(|_| Error::malformed(STATE, format!("era {era} does not fit a u16")))?;
     let body = blob(STATE, "body", &mut decoder)?.to_vec();
 
+    let position = if fields == 4 {
+        let slot = uint(STATE, "slot", &mut decoder)?;
+        let tx_index = uint(STATE, "tx_index", &mut decoder)?;
+        let tx_index = u16::try_from(tx_index).map_err(|_| {
+            Error::malformed(STATE, format!("tx_index {tx_index} does not fit a u16"))
+        })?;
+
+        Some(UtxoPosition::new(slot, tx_index))
+    } else {
+        None
+    };
+
     close(STATE, &decoder, bytes)?;
 
-    Ok(EraCbor(era, body))
+    Ok(UtxoValue::new(EraCbor(era, body), position))
 }
 
 /// Encode one record of `ns`'s state layer.
@@ -397,40 +437,96 @@ mod tests {
         }
     }
 
+    fn unpositioned(era: Era, body: Vec<u8>) -> UtxoValue {
+        UtxoValue::new(EraCbor(era, body), None)
+    }
+
     #[test]
     fn a_utxo_record_round_trips() {
         let ref_ = txo(0x30, 7);
-        let value = EraCbor(6, vec![0xa0, 0x01]);
 
-        let original = utxo(&ref_, &value).unwrap();
+        for position in [None, Some(UtxoPosition::new(91_000_000, 12))] {
+            let value = UtxoValue::new(EraCbor(6, vec![0xa0, 0x01]), position);
 
-        assert_eq!(original.key.len(), UTXO_KEY_LEN);
+            let original = utxo(&ref_, &value).unwrap();
 
-        let encoded = encode(UTXOS, &original).unwrap();
-        let decoded = decode(UTXOS, encoded.as_bytes()).unwrap();
+            assert_eq!(original.key.len(), UTXO_KEY_LEN);
 
-        assert_eq!(decoded, original);
-        assert_eq!(as_utxo(&decoded).unwrap(), (ref_, value));
+            let encoded = encode(UTXOS, &original).unwrap();
+            let decoded = decode(UTXOS, encoded.as_bytes()).unwrap();
+
+            assert_eq!(decoded, original);
+            assert_eq!(as_utxo(&decoded).unwrap(), (ref_.clone(), value));
+        }
     }
 
     /// The composed field, checked against the encoding profile it has to obey
     /// rather than against itself.
     #[test]
     fn the_utxo_value_is_canonical_by_construction() {
-        for era in [0u16, 23, 24, 255, 256, u16::MAX] {
-            let value = EraCbor(era, vec![0xff; 3]);
-            let composed = encode_utxo_value(&value).unwrap();
+        let positions = [
+            None,
+            Some(UtxoPosition::new(0, 0)),
+            Some(UtxoPosition::new(23, 24)),
+            Some(UtxoPosition::new(u64::MAX, u16::MAX)),
+        ];
 
-            // `CanonicalCbor::new` is the validator; re-running it over the
-            // bytes proves the composition did not merely happen to pass once.
-            CanonicalCbor::new(composed.as_bytes().to_vec()).unwrap();
-            assert_eq!(decode_utxo_value(composed.as_bytes()).unwrap(), value);
+        for era in [0u16, 23, 24, 255, 256, u16::MAX] {
+            for position in positions {
+                let value = UtxoValue::new(EraCbor(era, vec![0xff; 3]), position);
+                let composed = encode_utxo_value(&value).unwrap();
+
+                // `CanonicalCbor::new` is the validator; re-running it over
+                // the bytes proves the composition did not merely happen to
+                // pass once.
+                CanonicalCbor::new(composed.as_bytes().to_vec()).unwrap();
+                assert_eq!(decode_utxo_value(composed.as_bytes()).unwrap(), value);
+            }
+        }
+    }
+
+    /// The store codec (`UtxoValue::encode_cbor`) and the record's composed
+    /// value are the same bytes.
+    #[test]
+    fn the_record_value_is_the_stored_value() {
+        for position in [None, Some(UtxoPosition::new(4_492_800, 3))] {
+            let value = UtxoValue::new(EraCbor(6, vec![0xa0, 0x01]), position);
+
+            assert_eq!(
+                encode_utxo_value(&value).unwrap().as_bytes(),
+                value.encode_cbor().as_slice()
+            );
+        }
+    }
+
+    /// A position is both fields or neither, and the index is a `u16`.
+    #[test]
+    fn a_malformed_position_is_refused() {
+        let three = frame::encode(|e| {
+            e.array(3)?.u64(6)?.bytes(&[])?.u64(10)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let wide = frame::encode(|e| {
+            e.array(4)?
+                .u64(6)?
+                .bytes(&[])?
+                .u64(10)?
+                .u64(u64::from(u16::MAX) + 1)?;
+            Ok(())
+        })
+        .unwrap();
+
+        for wire in [three, wide] {
+            let err = decode_utxo_value(wire.as_bytes()).unwrap_err();
+            assert!(matches!(err, Error::MalformedRecord { .. }), "{err:?}");
         }
     }
 
     /// The era is a `u16` in the stores and a CBOR uint on the wire, so the
     /// widths disagree and the decoder narrows. `encode_utxo_value` cannot
-    /// reach the refusal — an `EraCbor` already holds a `u16` — so the wire
+    /// reach the refusal — a `UtxoValue` already holds a `u16` — so the wire
     /// bytes are built directly, which is the only way an out-of-range era
     /// arrives at all.
     #[test]
@@ -455,7 +551,7 @@ mod tests {
     #[test]
     fn the_two_readers_refuse_each_others_records() {
         let entity_record = entity(&entity_key(1), &Vec::new());
-        let utxo_record = utxo(&txo(1, 0), &EraCbor(1, Vec::new())).unwrap();
+        let utxo_record = utxo(&txo(1, 0), &unpositioned(1, Vec::new())).unwrap();
 
         assert!(as_utxo(&entity_record).is_err());
         assert!(encode(AssetState::NS, &utxo_record).is_err());
@@ -542,7 +638,7 @@ mod tests {
     #[test]
     fn both_key_widths_shard_identically() {
         let entity_record = entity(&entity_key(0xc3), &Vec::new());
-        let utxo_record = utxo(&txo(0xc3, 0), &EraCbor(1, Vec::new())).unwrap();
+        let utxo_record = utxo(&txo(0xc3, 0), &unpositioned(1, Vec::new())).unwrap();
 
         assert_eq!(shard_of(&entity_record.key, 16), 12);
         assert_eq!(shard_of(&utxo_record.key, 16), 12);
@@ -555,7 +651,7 @@ mod tests {
         for record in [
             entity(&entity_key(0x00), &Vec::new()),
             entity(&entity_key(0x01), &Vec::new()),
-            utxo(&txo(0x01, 0), &EraCbor(1, Vec::new())).unwrap(),
+            utxo(&txo(0x01, 0), &unpositioned(1, Vec::new())).unwrap(),
         ] {
             order.check(&record).unwrap();
         }

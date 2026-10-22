@@ -31,8 +31,9 @@ use dolos_core::{
     EntityDelta, EntityKey, EntityValue, ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey,
     LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace, QueryLimiter,
     RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
-    StateWriter as CoreStateWriter, TagDimension, TagRecord, TieredCache, TxHash, TxStatus, TxoRef,
-    UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
+    StateWriter as CoreStateWriter, TagDimension, TagOrder, TagRecord, TieredCache, TxHash,
+    TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError,
+    WalStore,
 };
 use dolos_redb3::cache::RedbCacheTier;
 use serde::{de::DeserializeOwned, Serialize};
@@ -1060,6 +1061,21 @@ impl CoreStateStore for StateStoreBackend {
         }
     }
 
+    fn utxos_by_tag_page(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        order: TagOrder,
+        offset: usize,
+        count: usize,
+    ) -> Result<Vec<TxoRef>, StateError> {
+        match self {
+            Self::Redb(s) => s.utxos_by_tag_page(dimension, key, order, offset, count),
+            Self::Fjall(s) => s.utxos_by_tag_page(dimension, key, order, offset, count),
+            Self::Memory(s) => s.utxos_by_tag_page(dimension, key, order, offset, count),
+        }
+    }
+
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         match self {
             Self::Redb(s) => s.iter_utxos().map(StateUtxoIterBackend::Redb),
@@ -1772,7 +1788,7 @@ impl MempoolStore for MempoolBackend {
 mod tests {
     use dolos_core::{
         config::{ArchiveStoreConfig, ChainConfig, HistoryConfig, HistoryWindow},
-        EraCbor, Tag,
+        EraCbor, Tag, UtxoValue,
     };
 
     use super::*;
@@ -2129,7 +2145,7 @@ mod tests {
 
         let utxo = (
             TxoRef(TxHash::from([1u8; 32]), 0),
-            std::sync::Arc::new(EraCbor(0, vec![0x80])),
+            std::sync::Arc::new(UtxoValue::new(EraCbor(0, vec![0x80]), None)),
         );
 
         let writer = state.start_writer().unwrap();

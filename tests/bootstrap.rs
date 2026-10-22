@@ -60,7 +60,7 @@ fn assert_tags_match_utxo_set(domain: &ToyDomain) {
 
     let mut asked = 0usize;
 
-    for (txo, tags) in &expected.produced {
+    for (txo, _, tags) in &expected.produced {
         for tag in tags {
             let found = domain
                 .state()
@@ -108,7 +108,7 @@ fn live_tag_keys(domain: &ToyDomain) -> BTreeSet<(TagDimension, Vec<u8>)> {
     delta
         .produced
         .into_iter()
-        .flat_map(|(_, tags)| tags)
+        .flat_map(|(_, _, tags)| tags)
         .map(|tag| (tag.dimension, tag.key))
         .collect()
 }

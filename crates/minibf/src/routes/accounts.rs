@@ -20,14 +20,14 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
+    indexes::{utxo_dimensions, AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::{AccountState, DRepState, PoolState, ProposalState},
     pallas_extras,
     periods::{account_addresses, stats},
     AccountEpochLog, AccountKey, ChainSummary, PoolHash,
 };
 use dolos_core::async_query::BlockMetaResolver;
-use dolos_core::{ArchiveStore as _, Domain, DomainError, StateStore as _};
+use dolos_core::{ArchiveStore as _, Domain, DomainError, StateStore as _, Tag};
 use futures_util::StreamExt;
 use pallas::{
     crypto::hash::{Hash, Hasher},
@@ -461,19 +461,9 @@ where
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&address, network)?;
 
-    let stake = account_key.address.to_vec();
-    let refs = domain
-        .blocking(move |domain| {
-            domain
-                .state()
-                .utxos_by_stake(&stake)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-        })
-        .await?;
+    let tag = Tag::new(utxo_dimensions::STAKE, account_key.address.to_vec());
 
-    let utxos =
-        super::utxos::load_utxo_models(&domain, refs, pagination, super::utxos::UtxoFilter::All)
-            .await?;
+    let utxos = super::utxos::load_tag_page(&domain, &tag, &pagination).await?;
 
     Ok(Json(utxos))
 }
@@ -1433,7 +1423,7 @@ mod tests {
         account_withdrawal_content_inner::AccountWithdrawalContentInner,
     };
     use dolos_cardano::model::{EpochValue, PoolParams, PoolSnapshot};
-    use dolos_core::{ArchiveWriter as _, EraCbor, StateWriter as _, UtxoSetDelta};
+    use dolos_core::{ArchiveWriter as _, EraCbor, StateWriter as _, UtxoSetDelta, UtxoValue};
     use dolos_testing::{
         synthetic::SyntheticBlockConfig, toy_domain::ToyDomain, utxo_with_value, MIN_UTXO_AMOUNT,
     };
@@ -1523,7 +1513,7 @@ mod tests {
         assert_bad_request(encode_bech32("addr_vk", &[7u8; 32]));
     }
 
-    fn asset_utxo(address: &str, assets: &[([u8; 28], u64)]) -> Arc<EraCbor> {
+    fn asset_utxo(address: &str, assets: &[([u8; 28], u64)]) -> EraCbor {
         let multi: BTreeMap<_, _> = assets
             .iter()
             .map(|(policy, quantity)| {
@@ -1537,10 +1527,7 @@ mod tests {
             })
             .collect();
 
-        Arc::new(utxo_with_value(
-            address,
-            Value::Multiasset(MIN_UTXO_AMOUNT, multi),
-        ))
+        utxo_with_value(address, Value::Multiasset(MIN_UTXO_AMOUNT, multi))
     }
 
     fn asset_unit(policy: [u8; 28]) -> String {
@@ -2091,14 +2078,27 @@ mod tests {
             // ASSET_A sorts first ascending because its oldest occurrence is
             // first, and first descending because its newest occurrence is
             // last.
-            let produced_utxo = HashMap::from([
+            let replaced = [
                 (oldest_ref, asset_utxo(&vectors.address, &[(ASSET_A, 5)])),
                 (middle_ref, asset_utxo(&vectors.address, &[(ASSET_B, 3)])),
                 (
                     newest_ref,
                     asset_utxo(&vectors.address, &[(ASSET_A, 7), (ASSET_C, 1)]),
                 ),
-            ]);
+            ];
+
+            // the replaced UTxOs keep the position their tags are ordered by
+            let current = domain
+                .state()
+                .get_utxos(ordered_refs.clone())
+                .expect("failed to load fixture utxos");
+            let produced_utxo = replaced
+                .into_iter()
+                .map(|(txo_ref, output)| {
+                    let position = current[&txo_ref].position();
+                    (txo_ref, Arc::new(UtxoValue::new(output, position)))
+                })
+                .collect::<HashMap<_, _>>();
 
             let writer = domain
                 .state()

@@ -116,8 +116,9 @@ macro_rules! entity_entry {
     }};
 }
 
-/// The `utxos` value is `[era, body]`, composed by the profile rather than
-/// carried from a store, so its canary goes through the profile's own codec.
+/// The `utxos` value is `[era, body, slot, tx_index]`, composed by the profile
+/// rather than carried from a store, so its canary goes through the profile's
+/// own codec.
 fn encode_utxos() -> (Namespace, Vec<u8>) {
     let value = state::encode_utxo_value(&canaries::utxo_value())
         .expect("the utxo canary encodes")
@@ -546,6 +547,8 @@ pub fn registry() -> Vec<Entry> {
         ),
         Entry {
             ns: UTXOS,
+            // The creation position (slot, tx index) joins revision 1 in
+            // place: the v2 freeze resets every revision to 1.
             history: &[Pinned {
                 rev: 1,
                 hex: include_str!("goldens/utxos.rev1.hex"),

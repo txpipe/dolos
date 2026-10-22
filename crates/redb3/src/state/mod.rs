@@ -2,7 +2,8 @@ use std::{collections::HashMap, ops::Bound, path::Path, sync::Arc};
 
 use dolos_core::{
     config::RedbStateConfig, ChainPoint, EmptyUtxoIter, EntityKey, EntityValue, KeyRange,
-    Namespace, StateError, StateSchema, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet,
+    Namespace, StateError, StateSchema, TagDimension, TagOrder, TxoRef, UtxoIndexDelta, UtxoMap,
+    UtxoSet,
 };
 
 use redb::{
@@ -347,6 +348,18 @@ impl dolos_core::StateStore for StateStore {
     /// Not implemented on this backend; see `StateWriter::apply_utxo_tags`.
     fn utxos_by_tag(&self, _dimension: TagDimension, _key: &[u8]) -> Result<UtxoSet, StateError> {
         Err(StateError::Unsupported("utxos_by_tag"))
+    }
+
+    /// Not implemented on this backend; see `StateWriter::apply_utxo_tags`.
+    fn utxos_by_tag_page(
+        &self,
+        _dimension: TagDimension,
+        _key: &[u8],
+        _order: TagOrder,
+        _offset: usize,
+        _count: usize,
+    ) -> Result<Vec<TxoRef>, StateError> {
+        Err(StateError::Unsupported("utxos_by_tag_page"))
     }
 
     /// Not implemented on this backend.

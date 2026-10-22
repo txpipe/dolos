@@ -11,9 +11,10 @@
 //! - UTxOs live in a map keyed on [`TxoRef`], whose `(tx_hash, index)` ordering
 //!   is exactly what fjall's `[tx_hash:32][index:4]` big-endian key encodes;
 //! - the live-UTxO tags live in a map keyed `(dimension, logical key)`, each
-//!   holding the refs tagged under it — the query takes the logical key, the
-//!   set is mutable, and nothing ever leaves the store, so there is nothing to
-//!   gain from hashing it;
+//!   holding the refs tagged under it ordered by `(tag order, ref)` — the order
+//!   fjall's `[tag_order:10][txo_ref:36]` key suffix encodes. The query takes
+//!   the logical key, the set is mutable, and nothing ever leaves the store, so
+//!   there is nothing to gain from hashing it;
 //! - the cursor is one slot.
 //!
 //! ## Ephemeral by design
@@ -25,15 +26,20 @@
 //! tooling and tests, where it is the fastest store available and the only
 //! memory-resident one that serves the snapshot export seam.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::state::{EntityValue, Namespace, StateError, StateStore, StateWriter, UtxoEntry};
-use crate::{
-    ChainPoint, EntityKey, EraCbor, KeyRange, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap,
-    UtxoSet, UtxoSetDelta,
+use crate::state::{
+    EntityValue, Namespace, StateError, StateStore, StateWriter, TagOrder, UtxoEntry,
 };
+use crate::{
+    ChainPoint, EntityKey, KeyRange, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap, UtxoPosition,
+    UtxoSet, UtxoSetDelta, UtxoValue, TAG_ORDER_LEN,
+};
+
+/// A tagged UTxO in tag order: its `UtxoPosition::tag_order`, then its ref.
+type TagEntry = ([u8; TAG_ORDER_LEN], TxoRef);
 
 /// The store's whole contents, guarded as one unit so a commit is atomic.
 #[derive(Default)]
@@ -43,8 +49,8 @@ struct Tables {
     /// Values stay behind the `Arc` they arrive in, so `get_utxos` — the
     /// hottest read on this store — hands them out without copying a CBOR body
     /// per lookup.
-    utxos: BTreeMap<TxoRef, Arc<EraCbor>>,
-    utxo_tags: BTreeMap<(TagDimension, Vec<u8>), HashSet<TxoRef>>,
+    utxos: BTreeMap<TxoRef, Arc<UtxoValue>>,
+    utxo_tags: BTreeMap<(TagDimension, Vec<u8>), BTreeSet<TagEntry>>,
 }
 
 /// A single mutation, recorded by a writer and replayed at commit.
@@ -57,10 +63,10 @@ enum Op {
     SetCursor(ChainPoint),
     WriteEntity(Namespace, EntityKey, EntityValue),
     DeleteEntity(Namespace, EntityKey),
-    PutUtxo(TxoRef, Arc<EraCbor>),
+    PutUtxo(TxoRef, Arc<UtxoValue>),
     DeleteUtxo(TxoRef),
-    InsertUtxoTag(TagDimension, Vec<u8>, TxoRef),
-    RemoveUtxoTag(TagDimension, Vec<u8>, TxoRef),
+    InsertUtxoTag(TagDimension, Vec<u8>, TagEntry),
+    RemoveUtxoTag(TagDimension, Vec<u8>, TagEntry),
 }
 
 fn poisoned() -> StateError {
@@ -109,14 +115,16 @@ impl MemoryStateWriter {
 
     fn push_tags(
         &self,
-        tagged: &[(TxoRef, Vec<crate::Tag>)],
-        op: fn(TagDimension, Vec<u8>, TxoRef) -> Op,
+        tagged: &[(TxoRef, Option<UtxoPosition>, Vec<crate::Tag>)],
+        op: fn(TagDimension, Vec<u8>, TagEntry) -> Op,
     ) -> Result<(), StateError> {
         let mut ops = self.ops.lock().map_err(|_| poisoned())?;
 
-        for (txo, tags) in tagged {
+        for (txo, position, tags) in tagged {
+            let order = UtxoPosition::tag_order(*position);
+
             for tag in tags {
-                ops.push(op(tag.dimension, tag.key.clone(), txo.clone()));
+                ops.push(op(tag.dimension, tag.key.clone(), (order, txo.clone())));
             }
         }
 
@@ -148,12 +156,12 @@ impl StateWriter for MemoryStateWriter {
     fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), StateError> {
         let mut ops = self.ops.lock().map_err(|_| poisoned())?;
 
-        for (txo, era_cbor) in &delta.produced_utxo {
-            ops.push(Op::PutUtxo(txo.clone(), era_cbor.clone()));
+        for (txo, value) in &delta.produced_utxo {
+            ops.push(Op::PutUtxo(txo.clone(), value.clone()));
         }
 
-        for (txo, era_cbor) in &delta.recovered_stxi {
-            ops.push(Op::PutUtxo(txo.clone(), era_cbor.clone()));
+        for (txo, value) in &delta.recovered_stxi {
+            ops.push(Op::PutUtxo(txo.clone(), value.clone()));
         }
 
         for txo in delta.consumed_utxo.keys() {
@@ -197,18 +205,18 @@ impl StateWriter for MemoryStateWriter {
                 Op::DeleteUtxo(txo) => {
                     tables.utxos.remove(&txo);
                 }
-                Op::InsertUtxoTag(dimension, key, txo) => {
+                Op::InsertUtxoTag(dimension, key, entry) => {
                     tables
                         .utxo_tags
                         .entry((dimension, key))
                         .or_default()
-                        .insert(txo);
+                        .insert(entry);
                 }
-                Op::RemoveUtxoTag(dimension, key, txo) => {
+                Op::RemoveUtxoTag(dimension, key, tagged) => {
                     if let std::collections::btree_map::Entry::Occupied(mut entry) =
                         tables.utxo_tags.entry((dimension, key))
                     {
-                        entry.get_mut().remove(&txo);
+                        entry.get_mut().remove(&tagged);
                         if entry.get().is_empty() {
                             entry.remove();
                         }
@@ -340,10 +348,34 @@ impl StateStore for MemoryStateStore {
         let found = tables
             .utxo_tags
             .get(&(dimension, key.to_vec()))
-            .cloned()
+            .map(|entries| entries.iter().map(|(_, txo)| txo.clone()).collect())
             .unwrap_or_default();
 
         Ok(found)
+    }
+
+    fn utxos_by_tag_page(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        order: TagOrder,
+        offset: usize,
+        count: usize,
+    ) -> Result<Vec<TxoRef>, StateError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let Some(entries) = tables.utxo_tags.get(&(dimension, key.to_vec())) else {
+            return Ok(Vec::new());
+        };
+
+        let refs = entries.iter().map(|(_, txo)| txo.clone());
+
+        let page = match order {
+            TagOrder::Asc => refs.skip(offset).take(count).collect(),
+            TagOrder::Desc => refs.rev().skip(offset).take(count).collect(),
+        };
+
+        Ok(page)
     }
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {

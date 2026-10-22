@@ -6,8 +6,9 @@ use tracing::info;
 pub use pallas;
 
 use dolos_core::{
-    config::CustomUtxo, BlockSlot, ChainError, ChainPoint, Domain, DomainError, EraCbor, Genesis,
-    MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore, TipEvent, WorkUnit,
+    config::CustomUtxo, BlockSlot, ChainError, ChainPoint, Domain, DomainError, Genesis,
+    MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore, TipEvent, UtxoValue,
+    WorkUnit,
 };
 
 use crate::{
@@ -477,7 +478,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
     fn compute_undo(
         block: &dolos_core::Cbor,
-        inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<EraCbor>>,
+        inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<UtxoValue>>,
         _point: ChainPoint,
     ) -> Result<dolos_core::UndoBlockData, ChainError> {
         let block_arc = Arc::new(block.clone());
@@ -520,7 +521,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
     fn compute_catchup(
         block: &dolos_core::Cbor,
-        inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<EraCbor>>,
+        inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<UtxoValue>>,
         _point: ChainPoint,
     ) -> Result<dolos_core::CatchUpBlockData, ChainError> {
         let block_arc = Arc::new(block.clone());
@@ -558,7 +559,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         })
     }
 
-    fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError> {
+    fn decode_utxo(&self, utxo: Arc<UtxoValue>) -> Result<Self::Utxo, ChainError> {
         let out = OwnedMultiEraOutput::decode(utxo)?;
 
         Ok(out)

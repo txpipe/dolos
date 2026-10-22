@@ -8,7 +8,8 @@ use std::{
 
 use dolos_core::{
     archive::Skippable, ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, EntityKey,
-    EntityValue, LogKey, Namespace, StateError, StateStore, TagDimension, TxoRef, UtxoMap, UtxoSet,
+    EntityValue, LogKey, Namespace, StateError, StateStore, TagDimension, TagOrder, TxoRef,
+    UtxoMap, UtxoSet,
 };
 use serde::Serialize;
 
@@ -342,6 +343,23 @@ impl<Inner: StateStore> StateStore for MeasuredState<Inner> {
 
     fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, StateError> {
         let refs = self.inner.utxos_by_tag(dimension, key)?;
+        self.counters
+            .utxo_refs
+            .fetch_add(refs.len() as u64, Ordering::Relaxed);
+        Ok(refs)
+    }
+
+    fn utxos_by_tag_page(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        order: TagOrder,
+        offset: usize,
+        count: usize,
+    ) -> Result<Vec<TxoRef>, StateError> {
+        let refs = self
+            .inner
+            .utxos_by_tag_page(dimension, key, order, offset, count)?;
         self.counters
             .utxo_refs
             .fetch_add(refs.len() as u64, Ordering::Relaxed);

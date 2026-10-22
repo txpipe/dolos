@@ -35,7 +35,7 @@ Dolos keeps its data in distinct stores, each serving a specific purpose:
 ### Where the indexes live
 There is no standalone index store. Every index is a projection and lives in
 the store that holds what it projects:
-- the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
+- the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag` for the whole set, `StateStore::utxos_by_tag_page` for one page in creation order, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
 - the archive tags and the exact lookups (by block hash, block number, tx hash) project the block history and live in the `ArchiveStore` (`ArchiveStore::slots_by_tag` / `slot_by_*`, written through `ArchiveWriter::apply_index` in the same batch as the blocks)
 
 ### Store identity
@@ -115,9 +115,9 @@ The project follows a modular workspace architecture with clear separation of co
 - **Components**:
   - `state`: `StateStore` implementation with four-keyspace design:
     - **`state-cursor`**: Chain position tracking, and the compatibility identity the store recorded at creation
-    - **`state-utxos`**: UTxO set storage with `[tx_hash:32][index:4]` keys
+    - **`state-utxos`**: UTxO set storage with `[tx_hash:32][index:4]` keys and CBOR `[era, body, slot, tx_index]` values, the creation position last (`[era, body]` for a UTxO no block produced)
     - **`state-entities`**: All entity types with `[ns_hash:8][entity_key:var]` keys
-    - **`state-tags`**: Live-UTxO tags with `[dim_hash:8][lookup_key:var][txo_ref:36]` keys
+    - **`state-tags`**: Live-UTxO tags with `[dim_hash:8][lookup_key:var][slot:8][tx_index + 1:2][txo_ref:36]` keys, so a lookup key's UTxOs sort in creation order (`StateStore::utxos_by_tag_page` reads one page of them)
   - `archive`: `ArchiveStore` implementation with these keyspaces:
     - **`archive-blocks`**: Slot -> packed physical frame locations in the flat segment files
     - **`archive-logs`**: All log namespaces with `[ns_hash:8][slot:8][key:var]` keys

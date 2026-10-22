@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use dolos_core::{
     builtin::MemoryStateStore, ChainPoint, EntityKey, EraCbor, KeyBytes, KeyRange, RangeOf, Tag,
-    TxoRef, UtxoIndexDelta, UtxoSet, UtxoSetDelta,
+    TagOrder, TxoRef, UtxoIndexDelta, UtxoPosition, UtxoSet, UtxoSetDelta, UtxoValue,
 };
 use dolos_core::{StateStore as CoreStateStore, StateWriter as CoreStateWriter};
 
@@ -118,6 +118,16 @@ macro_rules! conformance_suite {
             fn consumed_refs_leave_the_tag() {
                 super::consumed_refs_leave_the_tag::<$backend>();
             }
+
+            #[test]
+            fn tag_pages_walk_creation_order() {
+                super::tag_pages_walk_creation_order::<$backend>();
+            }
+
+            #[test]
+            fn tag_reads_skip_longer_lookup_keys() {
+                super::tag_reads_skip_longer_lookup_keys::<$backend>();
+            }
         }
     };
 }
@@ -145,11 +155,13 @@ fn txo(n: u8, idx: u32) -> TxoRef {
     TxoRef([n; 32].into(), idx)
 }
 
-fn utxo(n: u8) -> Arc<EraCbor> {
-    Arc::new(EraCbor(6, vec![n; 8]))
+/// A UTxO whose value and creation position both derive from `n`.
+fn utxo(n: u8) -> Arc<UtxoValue> {
+    let position = UtxoPosition::new(u64::from(n) * 1_000, u16::from(n));
+    Arc::new(UtxoValue::new(EraCbor(6, vec![n; 8]), Some(position)))
 }
 
-fn produce(refs: &[(TxoRef, Arc<EraCbor>)]) -> UtxoSetDelta {
+fn produce(refs: &[(TxoRef, Arc<UtxoValue>)]) -> UtxoSetDelta {
     UtxoSetDelta {
         produced_utxo: refs.iter().cloned().collect(),
         ..Default::default()
@@ -162,7 +174,7 @@ fn apply_utxos<S: CoreStateStore>(store: &S, delta: &UtxoSetDelta) {
     writer.commit().expect("commit failed");
 }
 
-fn all_utxos<S: CoreStateStore>(store: &S) -> Vec<(TxoRef, EraCbor)> {
+fn all_utxos<S: CoreStateStore>(store: &S) -> Vec<(TxoRef, UtxoValue)> {
     store
         .iter_utxos()
         .expect("iter_utxos failed")
@@ -173,13 +185,28 @@ fn all_utxos<S: CoreStateStore>(store: &S) -> Vec<(TxoRef, EraCbor)> {
 const ADDRESS: &str = "address";
 const POLICY: &str = "policy";
 
-fn tagged(n: u8, idx: u32, tags: &[(&'static str, u8)]) -> (TxoRef, Vec<Tag>) {
+/// The tags of `txo(n, idx)`, created by the tx at index 0 of slot `n`.
+fn tagged(
+    n: u8,
+    idx: u32,
+    tags: &[(&'static str, u8)],
+) -> (TxoRef, Option<UtxoPosition>, Vec<Tag>) {
+    tagged_at(txo(n, idx), Some((u64::from(n), 0)), tags)
+}
+
+fn tagged_at(
+    txo: TxoRef,
+    position: Option<(u64, u16)>,
+    tags: &[(&'static str, u8)],
+) -> (TxoRef, Option<UtxoPosition>, Vec<Tag>) {
     let tags = tags
         .iter()
         .map(|(dimension, key)| Tag::new(dimension, vec![*key; 4]))
         .collect();
 
-    (txo(n, idx), tags)
+    let position = position.map(|(slot, tx_index)| UtxoPosition::new(slot, tx_index));
+
+    (txo, position, tags)
 }
 
 fn apply_tags<S: CoreStateStore>(store: &S, delta: &UtxoIndexDelta) {
@@ -198,6 +225,112 @@ fn by_tag<S: CoreStateStore>(store: &S, dimension: &'static str, key: u8) -> Utx
 
 fn refs(items: &[TxoRef]) -> UtxoSet {
     items.iter().cloned().collect()
+}
+
+fn page<S: CoreStateStore>(store: &S, order: TagOrder, offset: usize, count: usize) -> Vec<TxoRef> {
+    store
+        .utxos_by_tag_page(ADDRESS, &[1; 4], order, offset, count)
+        .expect("utxos_by_tag_page failed")
+}
+
+/// The ordered read returns the refs `utxos_by_tag` returns, sorted by creation
+/// position — no position first, then slot, then tx index — and then by ref,
+/// which within one tx is the output index. A page is a window of that order,
+/// or of its reverse.
+fn tag_pages_walk_creation_order<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    // hash order disagrees with position order on purpose
+    let rows = [
+        (txo(0xf0, 1), None),
+        (txo(0x10, 0), None),
+        (txo(0x05, 2), Some((900, 0))),
+        (txo(0x05, 0), Some((900, 0))),
+        (txo(0xee, 0), Some((900, 1))),
+        (txo(0x01, 0), Some((1_000, 0))),
+        (txo(0xaa, 3), Some((0, 0))),
+        (txo(0x77, 0), Some((u64::from(u32::MAX) + 5, 2))),
+    ];
+
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: rows
+                .iter()
+                .map(|(txo, position)| tagged_at(txo.clone(), *position, &[(ADDRESS, 1)]))
+                .collect(),
+            consumed: vec![],
+        },
+    );
+
+    let mut sorted = rows.to_vec();
+    sorted.sort_by_key(|(txo, position)| (*position, txo.clone()));
+    let asc: Vec<TxoRef> = sorted.into_iter().map(|(txo, _)| txo).collect();
+    let desc: Vec<TxoRef> = asc.iter().rev().cloned().collect();
+
+    assert_eq!(
+        page(&store, TagOrder::Asc, 0, usize::MAX)
+            .into_iter()
+            .collect::<UtxoSet>(),
+        by_tag(&store, ADDRESS, 1),
+        "the pages cover the set and nothing else"
+    );
+
+    assert_eq!(page(&store, TagOrder::Asc, 0, usize::MAX), asc);
+    assert_eq!(page(&store, TagOrder::Desc, 0, usize::MAX), desc);
+
+    assert_eq!(page(&store, TagOrder::Asc, 2, 3), asc[2..5]);
+    assert_eq!(page(&store, TagOrder::Desc, 2, 3), desc[2..5]);
+
+    assert_eq!(
+        page(&store, TagOrder::Asc, 6, 5),
+        asc[6..],
+        "the last page is partial"
+    );
+    assert_eq!(page(&store, TagOrder::Desc, 6, 5), desc[6..]);
+
+    assert!(page(&store, TagOrder::Asc, rows.len(), 5).is_empty());
+    assert!(page(&store, TagOrder::Desc, 100, 1).is_empty());
+    assert!(page(&store, TagOrder::Asc, 0, 0).is_empty());
+
+    // consumed at its position, a ref leaves the order
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![],
+            consumed: vec![tagged_at(txo(0x05, 0), Some((900, 0)), &[(ADDRESS, 1)])],
+        },
+    );
+
+    let remaining: Vec<TxoRef> = asc.into_iter().filter(|x| *x != txo(0x05, 0)).collect();
+    assert_eq!(page(&store, TagOrder::Asc, 0, usize::MAX), remaining);
+}
+
+/// A lookup key that extends another (an asset name that extends a shorter
+/// one) shares its prefix on disk; neither read returns its refs.
+fn tag_reads_skip_longer_lookup_keys<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let mut longer = tagged_at(txo(0x33, 0), None, &[]);
+    longer.2.push(Tag::new(ADDRESS, vec![1; 5]));
+
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![tagged(1, 0, &[(ADDRESS, 1)]), longer],
+            consumed: vec![],
+        },
+    );
+
+    assert_eq!(by_tag(&store, ADDRESS, 1), refs(&[txo(1, 0)]));
+    assert_eq!(page(&store, TagOrder::Asc, 0, usize::MAX), vec![txo(1, 0)]);
+    assert_eq!(page(&store, TagOrder::Desc, 0, usize::MAX), vec![txo(1, 0)]);
+    assert_eq!(
+        store
+            .utxos_by_tag(ADDRESS, &[1; 5])
+            .expect("utxos_by_tag failed"),
+        refs(&[txo(0x33, 0)])
+    );
 }
 
 /// A produced ref answers under every tag it carries, and only there.
@@ -573,7 +706,7 @@ fn iter_utxos_yields_the_whole_set_in_ref_order<B: Backend>() {
         "iter_utxos yields the whole set"
     );
 
-    let expected: HashMap<TxoRef, EraCbor> = refs
+    let expected: HashMap<TxoRef, UtxoValue> = refs
         .iter()
         .map(|(txo, value)| (txo.clone(), value.as_ref().clone()))
         .collect();

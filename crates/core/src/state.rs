@@ -4,8 +4,8 @@ use itertools::Itertools;
 
 use crate::{
     keys::{EntityKey, KeyCodec, KeyError, KeyRange, RangeOf},
-    ChainError, ChainPoint, Domain, EraCbor, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap,
-    UtxoSet, UtxoSetDelta,
+    ChainError, ChainPoint, Domain, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet,
+    UtxoSetDelta, UtxoValue,
 };
 
 pub type Namespace = &'static str;
@@ -177,7 +177,16 @@ pub enum StateError {
 /// for (snapshot export, index rebuild) serialize and drop each entry, so
 /// shared ownership would be a per-item allocation nobody uses. A caller that
 /// wants a [`UtxoMap`] wraps the values itself.
-pub type UtxoEntry = (TxoRef, EraCbor);
+pub type UtxoEntry = (TxoRef, UtxoValue);
+
+/// The direction [`StateStore::utxos_by_tag_page`] walks a tag in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagOrder {
+    /// Oldest creation position first.
+    Asc,
+    /// Newest creation position first.
+    Desc,
+}
 
 /// Iterator used by backends that do not implement [`StateStore::iter_utxos`].
 ///
@@ -374,6 +383,22 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     /// been consumed. Chain-specific code names the dimensions and wraps this
     /// in typed lookups (address, payment credential, asset, …).
     fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, StateError>;
+
+    /// One page of the refs [`StateStore::utxos_by_tag`] returns, in tag
+    /// order: by creation position (`UtxoPosition::tag_order`), then by ref,
+    /// walked in `order`.
+    ///
+    /// Skips `offset` refs and returns at most `count`. The read stops at
+    /// `offset + count`, so a page costs its offset and its size, not the
+    /// size of the tag.
+    fn utxos_by_tag_page(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        order: TagOrder,
+        offset: usize,
+        count: usize,
+    ) -> Result<Vec<TxoRef>, StateError>;
 
     /// Iterate the whole UTxO set.
     ///
