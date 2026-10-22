@@ -33,6 +33,7 @@ pub mod bootstrap;
 pub mod builtin;
 pub mod cache;
 pub mod cbor;
+pub mod compat;
 pub mod config;
 pub mod crawl;
 pub mod import;
@@ -415,15 +416,33 @@ impl Genesis {
         conway: impl AsRef<Path>,
         force_protocol: Option<usize>,
     ) -> Result<Self, std::io::Error> {
-        let shelley_bytes = std::fs::read(shelley.as_ref())?;
+        use pallas::interop::hardano::configs;
+
+        let (byron, shelley, alonzo, conway) = (
+            byron.as_ref(),
+            shelley.as_ref(),
+            alonzo.as_ref(),
+            conway.as_ref(),
+        );
+
+        // An error names its file: the paths are resolved, so the operator
+        // cannot tell which one was meant otherwise.
+        let named = |path: &Path| {
+            let path = path.display().to_string();
+            move |error: std::io::Error| {
+                std::io::Error::new(error.kind(), format!("{path}: {error}"))
+            }
+        };
+
+        let shelley_bytes = std::fs::read(shelley).map_err(named(shelley))?;
         let mut hasher = Hasher::<256>::new();
         hasher.input(&shelley_bytes);
         let shelley_hash = hasher.finalize();
 
-        let byron = pallas::interop::hardano::configs::byron::from_file(byron.as_ref())?;
-        let shelley = pallas::interop::hardano::configs::shelley::from_file(shelley.as_ref())?;
-        let alonzo = pallas::interop::hardano::configs::alonzo::from_file(alonzo.as_ref())?;
-        let conway = pallas::interop::hardano::configs::conway::from_file(conway.as_ref())?;
+        let byron = configs::byron::from_file(byron).map_err(named(byron))?;
+        let shelley = configs::shelley::from_file(shelley).map_err(named(shelley))?;
+        let alonzo = configs::alonzo::from_file(alonzo).map_err(named(alonzo))?;
+        let conway = configs::conway::from_file(conway).map_err(named(conway))?;
 
         Ok(Self {
             byron,
@@ -483,13 +502,19 @@ pub enum ChainError {
     #[error("invalid chain config: {0}")]
     InvalidConfig(String),
 
+    #[error("unknown network `{name}`; known networks are {known} and `custom`")]
+    UnknownNetwork { name: String, known: String },
+
+    #[error("loading genesis files: {0}")]
+    GenesisFiles(#[source] std::io::Error),
+
     #[error("network magic {magic} does not match the Shelley genesis networkMagic {genesis}")]
     NetworkMagicMismatch { magic: u32, genesis: u32 },
 
     #[error("protocol params not found: {0}")]
     PParamsNotFound(String),
 
-    #[error("protocol parameter `{0}` is not set at this point of the chain; the genesis probably starts past Byron: set `genesis.force_protocol` to its starting protocol version, then wipe the store and bootstrap it again, since the setting is read only when the genesis is first applied")]
+    #[error("protocol parameter `{0}` is not set at this point of the chain; the genesis probably starts past Byron: set `chain.cardano.genesis.force_protocol` to its starting protocol version, then wipe the store and bootstrap it again, since the setting is read only when the genesis is first applied")]
     StartingPParamMissing(&'static str),
 
     #[error("the genesis starts at protocol version {0}, which this dolos can't fast-forward to")]
@@ -709,7 +734,8 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type TipSubscription: TipSubscription;
 
     fn storage_config(&self) -> &config::StorageConfig;
-    fn sync_config(&self) -> &config::SyncConfig;
+    fn history_config(&self) -> &config::HistoryConfig;
+    fn mempool_config(&self) -> &config::MempoolConfig;
     fn genesis(&self) -> Arc<Genesis>;
 
     /// The one limiter every query facade built from this domain runs its
@@ -734,17 +760,9 @@ pub trait Domain: Send + Sync + Clone + 'static {
     const MAX_PRUNE_INDEX_ROWS_PER_HOUSEKEEPING: u64 = 100_000;
 
     fn housekeeping(&self) -> Result<bool, DomainError> {
-        let max_ledger_slots = self
-            .storage_config()
-            .state
-            .max_history()
-            .unwrap_or(Self::Chain::mutable_slots(self));
-
-        info!(max_ledger_slots, "pruning ledger for excess history");
-
         let mut archive_pruned = true;
 
-        if let Some(max_slots) = self.sync_config().max_history {
+        if let Some(max_slots) = self.history_config().max_slots() {
             info!(max_slots, "pruning archive for excess history");
 
             archive_pruned = self.archive().prune_history(
@@ -754,15 +772,12 @@ pub trait Domain: Send + Sync + Clone + 'static {
             )?;
         }
 
-        let mut wal_pruned = true;
+        let max_slots = Self::Chain::mutable_slots(self);
+        info!(max_slots, "pruning wal for excess history");
 
-        if let Some(max_slots) = self.sync_config().max_rollback {
-            info!(max_slots, "pruning wal for excess history");
-
-            wal_pruned = self
-                .wal()
-                .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
-        }
+        let wal_pruned = self
+            .wal()
+            .prune_history(max_slots, Some(Self::MAX_PRUNE_SLOTS_PER_HOUSEKEEPING))?;
 
         Ok(archive_pruned && wal_pruned)
     }

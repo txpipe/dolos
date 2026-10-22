@@ -1,0 +1,14 @@
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "preview"
+
+[sync]
+wal_path = "wal"
+
+[storage.state]
+type = "ephemeral"
+
+[storage.archive]
+type = "ephemeral"

@@ -42,9 +42,7 @@ impl Backend for Fjall {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
 
         let config = FjallStateConfig {
-            path: None,
             cache: Some(16),
-            max_history: None,
             max_journal_size: None,
             flush_on_commit: Some(false),
             l0_threshold: None,

@@ -8,14 +8,14 @@ pub struct Args {}
 
 #[tokio::main]
 pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
 
     let domain = crate::common::setup_domain(&config)?;
 
     let exit = crate::common::hook_exit_token();
 
     let drivers = FuturesUnordered::new();
-    let network_magic = config.chain.magic();
+    let network_magic = crate::common::resolve_network(&config)?.magic();
 
     dolos::serve::load_drivers(
         &drivers,

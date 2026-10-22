@@ -10,7 +10,7 @@
 //! Everything below this module is `dolos_snapshot::restore`, which is generic
 //! over the store traits. What only this module knows is the node: its network
 //! magic, which comes from genesis and never from a file an operator can edit,
-//! and its `sync.max_history`, which bounds how much chain history a restore
+//! and its `history.window`, which bounds how much chain history a restore
 //! bothers to read.
 //!
 //! ## The two sources are one restore
@@ -168,17 +168,17 @@ impl Node {
             .into_diagnostic()
             .context("creating the storage directory")?;
 
+        let genesis = crate::common::open_genesis(config)?;
+
         let stores = crate::common::open_data_stores(config)
             .into_diagnostic()
             .context("opening the data stores")?;
-
-        let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
         Ok(Self {
             root,
             stores,
             magic: u64::from(genesis.network_magic()),
-            max_history: config.sync.max_history,
+            max_history: config.history.max_slots(),
         })
     }
 
@@ -286,7 +286,7 @@ fn report(
 
     if plan.skipped_epochs > 0 {
         println!(
-            "epochs:   {} restored, {} skipped by sync.max_history",
+            "epochs:   {} restored, {} skipped by history.window",
             plan.epochs.len(),
             plan.skipped_epochs,
         );
@@ -295,7 +295,7 @@ fn report(
     }
 
     // Printed only when it happened, and never folded into the epoch line: an
-    // epoch dropped by `sync.max_history` is this node's own configuration, and
+    // epoch dropped by the history window is this node's own configuration, and
     // a layer dropped for a kind this build does not implement is a stele from
     // a publisher ahead of it. An operator acts on the second by upgrading.
     if !plan.skipped_unknown.is_empty() {

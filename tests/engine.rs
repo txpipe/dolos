@@ -3,14 +3,21 @@ mod node;
 use std::io;
 use std::sync::Arc;
 
-use dolos::core::config::ChainConfig;
-use dolos::core::{ChainPoint, Domain as _, RawBlock, StateStore, StateWriter as _};
+use dolos::core::config::ArchiveStoreConfig;
+use dolos::core::{
+    ChainPoint, Domain as _, MempoolStore as _, MempoolTxStage, RawBlock, StateStore,
+    StateWriter as _, SyncExt as _,
+};
 use dolos::engine::{
-    BulkReplayRunError, BulkReplaySession, DomainBuilder, ReplayProgress, ReplayWorkspace,
+    BulkReplayRunError, BulkReplaySession, DomainBuildError, DomainBuilder, ReplayProgress,
+    ReplayWorkspace,
 };
 use dolos_snapshot::source::SnapshotSource as _;
 use dolos_testing::blocks::make_conway_block_with_prev;
+use dolos_testing::mempool::make_test_mempool_tx;
 use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+use pallas::ledger::traverse::MultiEraBlock;
+use serial_test::serial;
 
 fn fixture() -> (node::Node, Arc<dolos::core::Genesis>, Vec<RawBlock>) {
     let mut node = node::Node::new();
@@ -20,7 +27,7 @@ fn fixture() -> (node::Node, Arc<dolos::core::Genesis>, Vec<RawBlock>) {
         slot: 100,
         ..Default::default()
     });
-    node.config.chain = ChainConfig::Cardano(chain);
+    node.config.chain = node.custom_chain(2, chain.custom_utxos);
     (node, genesis, blocks)
 }
 
@@ -29,6 +36,104 @@ fn public_builder_cleanly_initializes_configured_stores() {
     let (node, genesis, _) = fixture();
     let domain = DomainBuilder::new(&node.config, genesis).build().unwrap();
     assert_eq!(domain.state().read_cursor().unwrap(), None);
+    domain.shutdown().unwrap();
+}
+
+#[test]
+fn the_builder_sizes_the_query_limiter_from_the_configuration() {
+    let (mut node, genesis, _) = fixture();
+    node.config.serve.max_concurrent_queries = 4;
+
+    let domain = DomainBuilder::new(&node.config, genesis).build().unwrap();
+
+    assert_eq!(domain.query_limiter().cap(), 4);
+    domain.shutdown().unwrap();
+}
+
+/// Neither the builder nor a replay workspace opens a store for a
+/// configuration it refuses, or for a custom magic its genesis does not match.
+#[test]
+fn a_refused_configuration_opens_no_store() {
+    let (node, genesis, _) = fixture();
+
+    let mut invalid = node.config.clone();
+    invalid.serve.max_concurrent_queries = 0;
+
+    let mut mismatched = node.config.clone();
+    mismatched.chain = node.custom_chain(43, vec![]);
+
+    // Only a configuration built in code can carry this: the file refuses it
+    // as it is read.
+    let mut ephemeral_with_a_path = node.config.clone();
+    ephemeral_with_a_path.storage.archive = ArchiveStoreConfig {
+        blocks_path: Some(node.config.storage.path.join("blocks")),
+        ..ArchiveStoreConfig::ephemeral()
+    };
+
+    for config in [&invalid, &ephemeral_with_a_path] {
+        assert!(matches!(
+            DomainBuilder::new(config, genesis.clone()).build(),
+            Err(DomainBuildError::Config(_))
+        ));
+    }
+    assert!(matches!(
+        DomainBuilder::new(&mismatched, genesis.clone()).build(),
+        Err(DomainBuildError::Chain(_))
+    ));
+
+    for config in [&invalid, &mismatched, &ephemeral_with_a_path] {
+        assert!(ReplayWorkspace::open(config, genesis.clone()).is_err());
+    }
+
+    assert!(!node.config.storage.path.exists());
+}
+
+/// The harness reads its file as written, so a developer's `DOLOS_` variables
+/// cannot send its stores elsewhere.
+#[test]
+#[serial]
+fn the_harness_configuration_ignores_the_environment() {
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::write(elsewhere.path().join("marker"), "untouched").unwrap();
+
+    std::env::set_var("DOLOS_STORAGE__PATH", elsewhere.path());
+    let (node, genesis, _) = fixture();
+    let built = DomainBuilder::new(&node.config, genesis).build();
+    std::env::remove_var("DOLOS_STORAGE__PATH");
+    built.unwrap().shutdown().unwrap();
+
+    assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 1);
+    assert_eq!(node.config.storage.path, node.root.path().join("data"));
+    assert!(node.config.storage.path.exists());
+}
+
+#[test]
+fn sync_finalizes_a_transaction_after_the_configured_confirmations() {
+    let (mut node, genesis, blocks) = fixture();
+    node.config.mempool.retain_confirmed_blocks = 2;
+
+    let domain = DomainBuilder::new(&node.config, genesis).build().unwrap();
+
+    let tx = MultiEraBlock::decode(&blocks[0]).unwrap().txs()[0].hash();
+    let mempool = domain.mempool();
+    mempool.receive(make_test_mempool_tx(tx)).unwrap();
+    mempool.mark_inflight(&[tx]).unwrap();
+    mempool.mark_acknowledged(&[tx]).unwrap();
+
+    let finalized = || {
+        mempool
+            .dump_finalized(0, 100)
+            .items
+            .iter()
+            .any(|logged| logged.hash == tx && logged.stage == MempoolTxStage::Finalized)
+    };
+
+    domain.roll_forward(blocks[0].clone()).unwrap();
+    assert!(!finalized(), "one confirmation");
+
+    domain.roll_forward(blocks[1].clone()).unwrap();
+    assert!(finalized(), "two confirmations");
+
     domain.shutdown().unwrap();
 }
 
@@ -43,7 +148,7 @@ fn inspection_does_not_initialize_a_fresh_workspace() {
 
 #[test]
 fn configured_boundary_survives_inspection_and_requires_explicit_advancement() {
-    let mut node = node::Node::new();
+    let node = node::Node::new();
     let mut genesis = dolos_cardano::include::preview::load();
     genesis.force_protocol = Some(9);
     let epoch_one = genesis.shelley.epoch_length.unwrap() as u64;
@@ -51,7 +156,6 @@ fn configured_boundary_survives_inspection_and_requires_explicit_advancement() {
     let (before, block_before) = make_conway_block_with_prev(epoch_one - 1, None, 1);
     let (boundary, block_boundary) = make_conway_block_with_prev(epoch_one, before.hash(), 2);
     let (after, block_after) = make_conway_block_with_prev(epoch_one + 1, boundary.hash(), 3);
-    node.config.chain = ChainConfig::Cardano(Default::default());
 
     let mut session = BulkReplaySession::open(&node.config, genesis.clone(), Some(1)).unwrap();
     let progress = session

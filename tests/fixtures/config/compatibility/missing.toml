@@ -1,0 +1,3 @@
+[chain]
+protocol = "cardano"
+network = "preview"

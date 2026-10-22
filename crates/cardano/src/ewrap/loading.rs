@@ -2219,6 +2219,7 @@ mod tests {
             register_slot: 0,
             retiring_epoch: Some(CLOSING_EPOCH + 1),
             deposit: 0,
+            calidus: None,
         };
 
         let writer = state.start_writer().unwrap();
@@ -4253,6 +4254,64 @@ mod ratification_tests {
             sibling.canceled_epoch,
             Some(CLOSING + 1),
             "a live sibling of an enacted action is pruned even unsnapshotted"
+        );
+    }
+
+    /// A no-confidence ratified at the boundary dissolves the seated
+    /// committee and keeps it: the members, their authorizations before the
+    /// committee GC drops them, the enacting action, the epoch the boundary
+    /// opens and the committee root that seated it.
+    #[test]
+    fn an_enacted_no_confidence_keeps_the_seated_committee() {
+        let seating = GovActionId {
+            transaction_id: [0x0c; 32].into(),
+            action_index: 0,
+        };
+
+        let mut no_confidence = withdrawal(0x01, Some(Vote::Yes), CLOSING + 10);
+        no_confidence.action = ProposalAction::NoConfidence;
+        no_confidence.purpose = Some(crate::GovPurpose::Committee);
+        no_confidence.parent = Some(seating.clone());
+
+        let domain = seed(std::slice::from_ref(&no_confidence));
+
+        let mut gov = crate::load_gov::<ToyDomain>(domain.state()).unwrap();
+        gov.prev_gov_action_ids.committee = Some(seating.clone());
+        let seated = gov.committee.clone().unwrap();
+        let auths = gov.committee_auths.clone();
+        let writer = domain.state().start_writer().unwrap();
+        writer.write_entity_typed(&(), &gov).unwrap();
+        writer.commit().unwrap();
+
+        let boundary = finalize(&domain);
+        assert_eq!(
+            boundary
+                .ratification
+                .as_ref()
+                .unwrap()
+                .enactment_order
+                .len(),
+            1
+        );
+
+        let action = GovActionId {
+            transaction_id: no_confidence.tx,
+            action_index: no_confidence.idx,
+        };
+
+        let gov = crate::load_gov::<ToyDomain>(domain.state()).unwrap();
+        assert_eq!(gov.committee, None);
+        assert!(gov.committee_auths.is_empty());
+        assert_eq!(gov.prev_gov_action_ids.committee, Some(action.clone()));
+        assert_eq!(
+            gov.dissolved_committee,
+            Some(crate::DissolvedCommittee {
+                committee: seated,
+                auths,
+                action,
+                epoch: CLOSING + 1,
+                seated_by: Some(seating),
+            })
         );
     }
 

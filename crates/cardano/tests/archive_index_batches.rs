@@ -20,10 +20,9 @@ use dolos_cardano::{
     CardanoLogic,
 };
 use dolos_core::{
-    config::{CardanoConfig, CustomUtxo},
-    import::ImportExt as _,
-    ArchiveIndexDelta, ArchiveStore as _, BlockSlot, ChainLogic as _, ChainPoint, Domain as _,
-    EraCbor, ExactRecord, RawBlock, Tag, TagRecord, TxoRef,
+    config::CustomUtxo, import::ImportExt as _, ArchiveIndexDelta, ArchiveStore as _, BlockSlot,
+    ChainLogic as _, ChainPoint, Domain as _, EraCbor, ExactRecord, RawBlock, Tag, TagRecord,
+    TxoRef,
 };
 use dolos_testing::{blocks::make_conway_block_with_txs_at, toy_domain::ToyDomain};
 use pallas::{
@@ -229,8 +228,8 @@ fn chain() -> Chain {
     Chain { blocks, produced }
 }
 
-fn config() -> CardanoConfig {
-    let mut config = CardanoConfig::default();
+fn config() -> dolos_cardano::CardanoLogicConfig {
+    let mut config = dolos_cardano::CardanoLogicConfig::default();
 
     for (txo, address) in Seeds::all() {
         let cbor = pallas::codec::minicbor::to_vec(output(address, 5 * ADA, None)).unwrap();

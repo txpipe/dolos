@@ -25,6 +25,7 @@ pallas.workspace = true
 hex.workspace = true
 regex.workspace = true
 serde_with = "3.16.0"
+config = { version = "0.15.19", default-features = false, features = ["toml"] }
 smallvec = { version = "1.15.0", features = ["const_generics", "union"] }
 bytes = "1.11"
 

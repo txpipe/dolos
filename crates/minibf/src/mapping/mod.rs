@@ -46,6 +46,8 @@ pub mod blocks;
 pub mod cost_models;
 pub mod direct_json;
 pub mod epochs;
+pub mod genesis;
+pub mod governance;
 pub mod network;
 pub mod protocol_params;
 pub mod txs;
@@ -489,22 +491,35 @@ pub async fn pool_offchain_metadata(
     url: &str,
     expected_hash: Option<&[u8]>,
 ) -> Option<PoolOffchainMetadata> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .user_agent("Dolos MiniBF")
-        .build()
-        .ok()?;
+    let body = pool_offchain_body(url).await.ok()?;
 
-    let res = client.get(url).send().await.ok()?;
+    parse_pool_offchain_metadata(&body, expected_hash)
+}
 
-    if res.status() != StatusCode::OK {
-        return None;
+pub(crate) async fn pool_offchain_body(url: &str) -> Result<Vec<u8>, OffchainFetchError> {
+    let client = offchain_http_client().map_err(|_| OffchainFetchError::Client)?;
+
+    fetch_offchain_body(client, url, Duration::from_secs(5), MAX_POOL_METADATA_BYTES).await
+}
+
+#[derive(Debug)]
+pub(crate) enum OffchainFetchError {
+    Client,
+    Connection,
+    HttpResponse(StatusCode),
+    Body,
+    SizeExceeded,
+}
+
+impl OffchainFetchError {
+    fn into_metadata_error(self, url: &str) -> DrepsInnerMetadataError {
+        match self {
+            Self::Client => offchain_unknown_error(url),
+            Self::Connection | Self::Body => offchain_connection_error(url),
+            Self::HttpResponse(status) => offchain_http_response_error(url, status),
+            Self::SizeExceeded => offchain_size_error(url),
+        }
     }
-
-    let body = res.bytes().await.ok()?;
-
-    parse_pool_offchain_metadata(body.as_ref(), expected_hash)
 }
 
 /// This structure contains governance metadata from an anchor.
@@ -518,8 +533,9 @@ pub struct AnchorMetadata {
     pub bytes: String,
 }
 
+pub(crate) const MAX_POOL_METADATA_BYTES: usize = 512;
 const MAX_ANCHOR_METADATA_BYTES: usize = 3_000_000;
-const MAX_ANCHOR_REDIRECTS: usize = 3;
+const MAX_OFFCHAIN_REDIRECTS: usize = 3;
 
 /// This is the total timeout for one governance-anchor request. It is more than
 /// a plain HTTP metadata request needs. An `ipfs://` anchor resolves through a
@@ -617,31 +633,57 @@ fn is_public_http_url(url: &reqwest::Url) -> bool {
     literal.parse::<IpAddr>().map(is_public_ip).unwrap_or(true)
 }
 
-/// This function returns the shared HTTP client for governance-anchor fetches.
+fn offchain_http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .no_proxy()
+        .dns_resolver(Arc::new(PublicDnsResolver))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() > MAX_OFFCHAIN_REDIRECTS {
+                attempt.error("The number of redirects is more than the limit.")
+            } else if is_public_http_url(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("The redirect target is not public.")
+            }
+        }))
+        .user_agent("Dolos MiniBF")
+}
+
+/// This function returns the HTTP client for metadata outside the blockchain.
 ///
 /// This function creates the client one time and stores the result. All
 /// metadata requests use this client and its connection pool. If the builder
 /// returns an error, this function stores and returns the same error.
-fn anchor_http_client() -> Result<&'static reqwest::Client, &'static reqwest::Error> {
-    static CLIENT: LazyLock<Result<reqwest::Client, reqwest::Error>> = LazyLock::new(|| {
-        reqwest::Client::builder()
-            .timeout(ANCHOR_FETCH_TIMEOUT)
-            .no_proxy()
-            .dns_resolver(Arc::new(PublicDnsResolver))
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= MAX_ANCHOR_REDIRECTS {
-                    attempt.error("too many redirects")
-                } else if is_public_http_url(attempt.url()) {
-                    attempt.follow()
-                } else {
-                    attempt.error("the redirect target is not public")
-                }
-            }))
-            .user_agent("Dolos MiniBF")
-            .build()
-    });
+fn offchain_http_client() -> Result<&'static reqwest::Client, &'static reqwest::Error> {
+    static CLIENT: LazyLock<Result<reqwest::Client, reqwest::Error>> =
+        LazyLock::new(|| offchain_http_client_builder().build());
 
     CLIENT.as_ref()
+}
+
+async fn fetch_offchain_body(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+    max_bytes: usize,
+) -> Result<Vec<u8>, OffchainFetchError> {
+    let url = match reqwest::Url::parse(url) {
+        Ok(url) if is_public_http_url(&url) => url,
+        _ => return Err(OffchainFetchError::Connection),
+    };
+
+    let response = client
+        .get(url)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|_| OffchainFetchError::Connection)?;
+
+    if response.status() != StatusCode::OK {
+        return Err(OffchainFetchError::HttpResponse(response.status()));
+    }
+
+    read_offchain_body(response, max_bytes).await
 }
 
 pub(crate) fn offchain_hash_mismatch_error(
@@ -706,35 +748,35 @@ fn offchain_no_gateway_error(url: &str) -> DrepsInnerMetadataError {
     )
 }
 
-async fn read_anchor_body(
+async fn read_offchain_body(
     mut response: reqwest::Response,
-    url: &str,
-) -> Result<Vec<u8>, DrepsInnerMetadataError> {
+    max_bytes: usize,
+) -> Result<Vec<u8>, OffchainFetchError> {
     if response
         .content_length()
-        .is_some_and(|size| size > MAX_ANCHOR_METADATA_BYTES as u64)
+        .is_some_and(|size| size > max_bytes as u64)
     {
-        return Err(offchain_size_error(url));
+        return Err(OffchainFetchError::SizeExceeded);
     }
 
     let capacity = response
         .content_length()
         .unwrap_or_default()
-        .min(MAX_ANCHOR_METADATA_BYTES as u64) as usize;
+        .min(max_bytes as u64) as usize;
     let mut body = Vec::with_capacity(capacity);
 
     loop {
         let chunk = response
             .chunk()
             .await
-            .map_err(|_| offchain_connection_error(url))?;
+            .map_err(|_| OffchainFetchError::Body)?;
 
         let Some(chunk) = chunk else {
             break;
         };
 
-        if chunk.len() > MAX_ANCHOR_METADATA_BYTES - body.len() {
-            return Err(offchain_size_error(url));
+        if chunk.len() > max_bytes - body.len() {
+            return Err(OffchainFetchError::SizeExceeded);
         }
 
         body.extend_from_slice(&chunk);
@@ -814,7 +856,7 @@ pub async fn anchor_offchain_body(
         return Err(offchain_no_gateway_error(url));
     }
 
-    let client = anchor_http_client().map_err(|error| {
+    let client = offchain_http_client().map_err(|error| {
         tracing::error!(%error, "cannot create the HTTP client for governance metadata");
         offchain_unknown_error(url)
     })?;
@@ -860,25 +902,14 @@ async fn fetch_anchor_candidate(
     original_url: &str,
     expected_hash: &[u8],
 ) -> Result<Vec<u8>, DrepsInnerMetadataError> {
-    let request_url = match reqwest::Url::parse(request_url) {
-        Ok(url) if is_public_http_url(&url) => url,
-        _ => return Err(offchain_connection_error(original_url)),
-    };
-
-    let response = client
-        .get(request_url)
-        .send()
-        .await
-        .map_err(|_| offchain_connection_error(original_url))?;
-
-    if response.status() != StatusCode::OK {
-        return Err(offchain_http_response_error(
-            original_url,
-            response.status(),
-        ));
-    }
-
-    let body = read_anchor_body(response, original_url).await?;
+    let body = fetch_offchain_body(
+        client,
+        request_url,
+        ANCHOR_FETCH_TIMEOUT,
+        MAX_ANCHOR_METADATA_BYTES,
+    )
+    .await
+    .map_err(|error| error.into_metadata_error(original_url))?;
 
     let actual_hash = Hasher::<256>::hash(body.as_ref());
 
@@ -894,7 +925,7 @@ async fn fetch_anchor_candidate(
 }
 
 #[cfg(test)]
-mod anchor_tests {
+mod offchain_tests {
     use super::*;
     use std::{
         io::{Read, Write},
@@ -914,6 +945,15 @@ mod anchor_tests {
     }
 
     fn serve_body(body: Vec<u8>, content_length: Option<usize>) -> (String, JoinHandle<()>) {
+        let headers = content_length
+            .map(|size| format!("Content-Length: {size}\r\n"))
+            .unwrap_or_default();
+
+        serve_response(body, "200 OK", &headers)
+    }
+
+    fn serve_response(body: Vec<u8>, status: &str, headers: &str) -> (String, JoinHandle<()>) {
+        let headers = format!("HTTP/1.1 {status}\r\n{headers}Connection: close\r\n\r\n");
         let listener = TcpListener::bind("127.0.0.1:0").expect("Cannot bind the test server.");
         let address = listener
             .local_addr()
@@ -921,13 +961,14 @@ mod anchor_tests {
 
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("Cannot accept the test request.");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let mut request = [0; 1024];
             let _ = stream.read(&mut request);
-
-            let content_length = content_length
-                .map(|size| format!("Content-Length: {size}\r\n"))
-                .unwrap_or_default();
-            let headers = format!("HTTP/1.1 200 OK\r\n{content_length}Connection: close\r\n\r\n");
 
             stream
                 .write_all(headers.as_bytes())
@@ -938,25 +979,13 @@ mod anchor_tests {
         (format!("http://{address}/metadata"), server)
     }
 
-    async fn get_local_response(url: &str) -> reqwest::Response {
-        reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .expect("Cannot create the test HTTP client.")
-            .get(url)
-            .send()
-            .await
-            .expect("Cannot get the test response.")
-    }
-
     fn local_candidate_client(url: &str) -> (reqwest::Client, String) {
         let port = reqwest::Url::parse(url)
             .expect("Cannot parse the test URL.")
             .port()
             .expect("The test URL has no port.");
         let address = SocketAddr::from(([127, 0, 0, 1], port));
-        let client = reqwest::Client::builder()
-            .no_proxy()
+        let client = offchain_http_client_builder()
             .dns_resolver(Arc::new(FixedDnsResolver(address)))
             .build()
             .expect("Cannot create the test HTTP client.");
@@ -994,47 +1023,282 @@ mod anchor_tests {
     }
 
     #[tokio::test]
-    async fn anchor_body_rejects_oversized_content_length() {
-        let (url, server) = serve_body(Vec::new(), Some(MAX_ANCHOR_METADATA_BYTES + 1));
-        let response = get_local_response(&url).await;
+    async fn offchain_fetch_rejects_oversized_content_length() {
+        for max_bytes in [MAX_POOL_METADATA_BYTES, MAX_ANCHOR_METADATA_BYTES] {
+            let (url, server) = serve_body(Vec::new(), Some(max_bytes + 1));
+            let (client, request_url) = local_candidate_client(&url);
 
-        let error = read_anchor_body(response, &url)
-            .await
-            .expect_err("The oversized response was accepted.");
+            let error =
+                fetch_offchain_body(&client, &request_url, Duration::from_secs(5), max_bytes)
+                    .await
+                    .expect_err("The client accepted a response with more bytes than the limit.");
 
-        server.join().expect("The test server did not stop.");
-        assert_eq!(error.code, Code::SizeExceeded);
+            server.join().expect("The test server did not stop.");
+            assert!(matches!(error, OffchainFetchError::SizeExceeded));
+        }
     }
 
     #[tokio::test]
-    async fn anchor_body_rejects_oversized_stream() {
-        let body = vec![b'x'; MAX_ANCHOR_METADATA_BYTES + 1];
+    async fn offchain_fetch_rejects_oversized_stream() {
+        for max_bytes in [MAX_POOL_METADATA_BYTES, MAX_ANCHOR_METADATA_BYTES] {
+            let body = vec![b'x'; max_bytes + 1];
+            let (url, server) = serve_body(body, None);
+            let (client, request_url) = local_candidate_client(&url);
+
+            let error =
+                fetch_offchain_body(&client, &request_url, Duration::from_secs(5), max_bytes)
+                    .await
+                    .expect_err("The client accepted a response with more bytes than the limit.");
+
+            server.join().expect("The test server did not stop.");
+            assert!(matches!(error, OffchainFetchError::SizeExceeded));
+        }
+    }
+
+    #[tokio::test]
+    async fn offchain_fetch_accepts_size_limit() {
+        for max_bytes in [MAX_POOL_METADATA_BYTES, MAX_ANCHOR_METADATA_BYTES] {
+            for content_length in [Some(max_bytes), None] {
+                let body = vec![b'x'; max_bytes];
+                let (url, server) = serve_body(body, content_length);
+                let (client, request_url) = local_candidate_client(&url);
+
+                let body =
+                    fetch_offchain_body(&client, &request_url, Duration::from_secs(5), max_bytes)
+                        .await
+                        .expect("The client did not accept the response at the size limit.");
+
+                server.join().expect("The test server did not stop.");
+                assert_eq!(body.len(), max_bytes);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn offchain_client_filters_private_dns_results() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!(
+            "http://localhost:{}/metadata",
+            listener.local_addr().unwrap().port()
+        );
+
+        let result = offchain_http_client()
+            .unwrap()
+            .get(url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn offchain_fetch_blocks_private_redirects_before_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let headers = format!(
+            "Location: http://{}/metadata\r\n",
+            listener.local_addr().unwrap()
+        );
+        let (url, server) = serve_response(Vec::new(), "302 Found", &headers);
+        let (client, request_url) = local_candidate_client(&url);
+
+        let error = fetch_offchain_body(
+            &client,
+            &request_url,
+            Duration::from_secs(5),
+            MAX_POOL_METADATA_BYTES,
+        )
+        .await
+        .expect_err("The client accepted a redirect to a private address.");
+
+        server.join().unwrap();
+        assert!(matches!(error, OffchainFetchError::Connection));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn offchain_fetch_enforces_chunked_body_limit() {
+        for max_bytes in [MAX_POOL_METADATA_BYTES, MAX_ANCHOR_METADATA_BYTES] {
+            for extra in [0, 1] {
+                let first = "x".repeat(max_bytes / 2);
+                let second = "x".repeat(max_bytes - first.len() + extra);
+                let body = format!(
+                    "{:x}\r\n{first}\r\n{:x}\r\n{second}\r\n0\r\n\r\n",
+                    first.len(),
+                    second.len(),
+                )
+                .into_bytes();
+                let (url, server) =
+                    serve_response(body, "200 OK", "Transfer-Encoding: chunked\r\n");
+                let (client, request_url) = local_candidate_client(&url);
+
+                let result =
+                    fetch_offchain_body(&client, &request_url, Duration::from_secs(5), max_bytes)
+                        .await;
+
+                server.join().unwrap();
+                if extra == 0 {
+                    assert_eq!(result.unwrap().len(), max_bytes);
+                } else {
+                    assert!(matches!(result, Err(OffchainFetchError::SizeExceeded)));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn offchain_fetch_allows_three_redirects_and_rejects_four() {
+        use axum::response::IntoResponse;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for redirects in [3, 4] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/metadata", listener.local_addr().unwrap());
+            let requests = Arc::new(AtomicUsize::new(0));
+            let calls = requests.clone();
+            let app = axum::Router::new().fallback(move || {
+                let index = calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if index < redirects {
+                        (
+                            StatusCode::FOUND,
+                            [(
+                                axum::http::header::LOCATION,
+                                format!("/metadata/{}", index + 1),
+                            )],
+                        )
+                            .into_response()
+                    } else {
+                        "metadata".into_response()
+                    }
+                }
+            });
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (client, request_url) = local_candidate_client(&url);
+
+            let result = fetch_offchain_body(
+                &client,
+                &request_url,
+                Duration::from_secs(5),
+                MAX_POOL_METADATA_BYTES,
+            )
+            .await;
+
+            server.abort();
+            if redirects == 3 {
+                assert_eq!(result.unwrap(), b"metadata");
+            } else {
+                assert!(matches!(result, Err(OffchainFetchError::Connection)));
+            }
+            assert_eq!(requests.load(Ordering::SeqCst), 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn offchain_fetch_preserves_http_and_body_errors() {
+        let (url, server) = serve_response(Vec::new(), "404 Not Found", "");
+        let (client, request_url) = local_candidate_client(&url);
+        let error = fetch_offchain_body(
+            &client,
+            &request_url,
+            Duration::from_secs(5),
+            MAX_POOL_METADATA_BYTES,
+        )
+        .await
+        .unwrap_err();
+        server.join().unwrap();
+        assert!(matches!(
+            error,
+            OffchainFetchError::HttpResponse(StatusCode::NOT_FOUND)
+        ));
+
+        let (url, server) = serve_body(Vec::new(), Some(1));
+        let (client, request_url) = local_candidate_client(&url);
+        let error = fetch_offchain_body(
+            &client,
+            &request_url,
+            Duration::from_secs(5),
+            MAX_POOL_METADATA_BYTES,
+        )
+        .await
+        .unwrap_err();
+        server.join().unwrap();
+        assert!(matches!(error, OffchainFetchError::Body));
+    }
+
+    #[tokio::test]
+    async fn pool_metadata_accepts_valid_body_and_checks_optional_hash() {
+        let mut body = br#"{"name":"Dolos","description":"Pool","ticker":"DLS","homepage":"https://example.com"}"#.to_vec();
+        body.resize(MAX_POOL_METADATA_BYTES, b' ');
+        let hash = Hasher::<256>::hash(&body);
         let (url, server) = serve_body(body, None);
-        let response = get_local_response(&url).await;
+        let (client, request_url) = local_candidate_client(&url);
+        let body = fetch_offchain_body(
+            &client,
+            &request_url,
+            Duration::from_secs(5),
+            MAX_POOL_METADATA_BYTES,
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
 
-        let error = read_anchor_body(response, &url)
-            .await
-            .expect_err("The oversized response was accepted.");
-
-        server.join().expect("The test server did not stop.");
-        assert_eq!(error.code, Code::SizeExceeded);
+        for expected_hash in [None, Some(hash.as_ref())] {
+            let metadata = parse_pool_offchain_metadata(&body, expected_hash).unwrap();
+            assert_eq!(metadata.name, "Dolos");
+            assert_eq!(metadata.ticker, "DLS");
+        }
+        assert!(parse_pool_offchain_metadata(&body, Some(&[0; 32])).is_none());
+        assert!(parse_pool_offchain_metadata(b"not JSON", None).is_none());
     }
 
     #[tokio::test]
-    async fn anchor_body_accepts_size_limit() {
-        let mut body = Vec::with_capacity(MAX_ANCHOR_METADATA_BYTES);
-        body.push(b'"');
-        body.resize(MAX_ANCHOR_METADATA_BYTES - 1, b'x');
-        body.push(b'"');
-        let (url, server) = serve_body(body, Some(MAX_ANCHOR_METADATA_BYTES));
-        let response = get_local_response(&url).await;
+    async fn anchor_candidate_keeps_governance_size_limit() {
+        assert_eq!(MAX_POOL_METADATA_BYTES, 512);
+        assert_eq!(MAX_ANCHOR_METADATA_BYTES, 3_000_000);
+        let original_url = "ipfs://bafy-size-limit";
 
-        let body = read_anchor_body(response, &url)
-            .await
-            .expect("The response at the size limit was rejected.");
+        for size in [
+            MAX_POOL_METADATA_BYTES + 1,
+            MAX_ANCHOR_METADATA_BYTES,
+            MAX_ANCHOR_METADATA_BYTES + 1,
+        ] {
+            let mut expected = b"{}".to_vec();
+            expected.resize(size, b' ');
+            let hash = Hasher::<256>::hash(&expected);
+            let response_body = if size <= MAX_ANCHOR_METADATA_BYTES {
+                expected.clone()
+            } else {
+                Vec::new()
+            };
+            let (url, server) = serve_body(response_body, Some(size));
+            let (client, request_url) = local_candidate_client(&url);
 
-        server.join().expect("The test server did not stop.");
-        assert_eq!(body.len(), MAX_ANCHOR_METADATA_BYTES);
+            let result =
+                fetch_anchor_candidate(&client, &request_url, original_url, hash.as_ref()).await;
+
+            server.join().unwrap();
+            if size <= MAX_ANCHOR_METADATA_BYTES {
+                assert_eq!(result.unwrap(), expected);
+            } else {
+                assert_eq!(
+                    result.err().unwrap(),
+                    DrepsInnerMetadataError::new(
+                        Code::SizeExceeded,
+                        format!("The response from {original_url} is larger than 3000000 bytes."),
+                    ),
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1226,6 +1490,17 @@ where
 
         Ok(Json(tx))
     }
+}
+
+/// Gives a stable key order to DTOs with `HashMap` fields.
+///
+/// A `HashMap` serializes its keys in a random order for each instance.
+/// `serde_json::Value` sorts object keys while serde_json's `preserve_order`
+/// feature stays off.
+pub fn sorted_json<T: Serialize>(model: T) -> Result<Json<serde_json::Value>, StatusCode> {
+    serde_json::to_value(model)
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[derive(Default)]

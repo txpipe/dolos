@@ -15,10 +15,7 @@ use dolos_cardano::pallas_extras;
 use dolos_cardano::rupd::StakeSnapshot;
 use dolos_cardano::CardanoWorkUnit;
 use dolos_cardano::PoolHash;
-use dolos_core::{
-    config::{CardanoConfig, FjallStateConfig},
-    Domain, StateStore,
-};
+use dolos_core::{config::FjallStateConfig, Domain, StateStore};
 use dolos_testing::harness::cardano::{copy_dir_recursive, Config, HarnessDomain, LedgerHarness};
 
 /// High-performance fjall configuration for epoch tests.
@@ -31,8 +28,6 @@ fn fast_fjall_config() -> FjallStateConfig {
         worker_threads: Some(4),      // Sufficient for tests
         max_journal_size: Some(512),  // Moderate - test data is ephemeral
         flush_on_commit: Some(false), // Async writes for speed
-        path: None,
-        max_history: None,
     }
 }
 
@@ -442,7 +437,7 @@ fn run_epoch_pots_test(
         state_dir: work_state_dir,
         immutable_dir: upstream_dir.join("immutable"),
         genesis,
-        chain: CardanoConfig {
+        chain: dolos_cardano::CardanoLogicConfig {
             stop_epoch: Some(stop_epoch),
             ..Default::default()
         },
