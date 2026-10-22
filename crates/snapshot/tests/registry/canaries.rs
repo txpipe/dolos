@@ -24,12 +24,12 @@ use dolos_cardano::{
     model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AssetState,
         AuthHistory, CalidusRegistration, Committee, CommitteeAuthorization, Constitution,
-        DRepDelegation, DRepExpiry, DRepSightingState, DRepState, DatumState, EndStats, EpochState,
-        EpochValue, EraBoundary, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
-        FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces, PParamValue,
-        PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation,
-        PoolEpochLog, PoolParams, PoolSnapshot, PoolState, PoolTally, ProposalAction,
-        ProposalState, RollingStats, ScriptState, ShardProgress, Stake, VoteEntry,
+        DRepDelegation, DRepEpochLog, DRepExpiry, DRepSightingState, DRepState, DatumState,
+        EndStats, EpochState, EpochValue, EraBoundary, EraState, FirstMintChunk, FirstMintSet,
+        FirstScriptChunk, FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces,
+        PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
+        PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, PoolTally,
+        ProposalAction, ProposalState, RollingStats, ScriptState, ShardProgress, Stake, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
@@ -123,6 +123,14 @@ pub fn account_epoch_log() -> AccountEpochLog {
         member_reward: Some(2_345_678_901),
         leader_rewards: vec![(hash28(0x21), 1_234_567_890), (hash28(0x22), 987_654_321)],
         deposit_refunds: vec![(hash28(0x41), 500_000_000), (hash28(0x42), 500_000_000)],
+    }
+}
+
+/// A power past `u32`, so the golden pins the full-width integer encoding.
+pub fn drep_epoch_log() -> DRepEpochLog {
+    DRepEpochLog {
+        voting_power: 12_345_678_901_234,
+        registered: true,
     }
 }
 

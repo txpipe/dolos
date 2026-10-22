@@ -125,7 +125,7 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountAddressChunk, AccountStats, AddressStats, AssetMintChunk, EpochState,
+        AccountAddressChunk, AccountStats, AddressStats, AssetMintChunk, DRepEpochLog, EpochState,
         FirstMintChunk, FirstScriptChunk, FixedNamespace as _, PaymentAddressChunk, PolicyKey,
         PolicyMintChunk, PoolEpochLog, PoolKey,
     };
@@ -195,6 +195,23 @@ mod tests {
             wire(&[slot.as_slice(), &[1; 28]].concat()).as_bytes(),
         )
         .unwrap();
+
+        // drep epochs take a drep: a credential header and its hash, or the
+        // one-byte tag of Abstain or NoConfidence
+        for drep in [&[0x22][..], &[0x23], &[0x00], &[0x01]] {
+            let hash: &[u8] = if drep[0] > 1 { &[1; 28] } else { &[] };
+            let key = [slot.as_slice(), drep, hash].concat();
+            decode(DRepEpochLog::NS, wire(&key).as_bytes()).unwrap();
+        }
+
+        for drep in [&[][..], &[0x22; 28], &[0x22; 30], &[0x00, 0x01], &[0x02]] {
+            let key = [slot.as_slice(), drep].concat();
+            let err = decode(DRepEpochLog::NS, wire(&key).as_bytes()).unwrap_err();
+            assert!(
+                matches!(err, Error::MalformedRecord { .. }),
+                "drep-epochs/{drep:02x?}: {err:?}"
+            );
+        }
 
         for (ns, len) in [
             (EpochState::NS, 32),
