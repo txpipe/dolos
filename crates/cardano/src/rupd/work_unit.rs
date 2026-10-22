@@ -321,7 +321,9 @@ impl RupdWorkUnit {
             .as_ref()
             .ok_or_else(|| DomainError::Internal("rupd work not loaded".into()))?;
 
-        let Some((_, epoch)) = work.relevant_epochs() else {
+        // The first stake epoch logs its distribution too, with rewards 0:
+        // no RUPD computed any for it, so no pending reward names its pools.
+        let Some((_, epoch)) = work.stake_epochs() else {
             return Ok(());
         };
 
@@ -446,11 +448,11 @@ where
             .as_ref()
             .ok_or_else(|| DomainError::Internal("rupd work not loaded".into()))?;
 
-        // RUPD doesn't run before the snapshot epoch is past first
-        // Shelley — `relevant_epochs` returns None and we emit no
-        // rewards.  We still emit `RupdProgress` in `commit_state` so
-        // the cursor advances.
-        let rewards = if work.relevant_epochs().is_some() {
+        // No rewards before the snapshot epoch is past first Shelley —
+        // `reward_epochs` returns None, even where the stake snapshot is
+        // loaded for the logs. We still emit `RupdProgress` in
+        // `commit_state` so the cursor advances.
+        let rewards = if work.reward_epochs().is_some() {
             crate::rewards::define_rewards(work)?
         } else {
             RewardMap::<RupdWork>::from_pending(Default::default(), work.incentives.clone())
@@ -553,7 +555,7 @@ mod tests {
 
     /// Single Conway era, `epoch_length = 100`, so epoch boundaries land on
     /// slots 0, 100, 200, ... and `first_shelley_epoch()` is 0 — enough for
-    /// `relevant_epochs()` to resolve at `CURRENT_EPOCH`.
+    /// `stake_epochs()` to resolve at `CURRENT_EPOCH`.
     fn test_chain_summary() -> crate::ChainSummary {
         let mut summary = crate::ChainSummary::default();
         summary.append_era(

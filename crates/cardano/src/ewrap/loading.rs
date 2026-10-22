@@ -24,34 +24,27 @@ use crate::{
     load_era_summary, load_gov, pallas_extras,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
+    rupd::loading::stake_snapshot_epoch,
     AccountKey, AccountState, ChainSummary, DRepKey, DRepSnapshotEntry, DRepState, EraKey,
     PendingMirState, PendingRewardState, PoolHash, PoolKey, PoolState, ProposalAction,
     ProposalOutcome, ProposalState,
 };
 
-/// `RupdWork::relevant_epochs`, read from the closing boundary's side: the
-/// stake snapshot the epoch's rewards were computed against, and the protocol
-/// its stake totals are read under.
+/// `RupdWork::stake_epochs`, read from the closing boundary's side: the stake
+/// snapshot RUPD logged the epoch's distribution from, and the protocol its
+/// stake totals are read under.
 ///
-/// Both clauses of RUPD's guard are reproduced, the second one included: the
-/// node computes no rewards while the snapshot epoch is still at or before the
-/// first Shelley epoch, because the genesis-initialized snapshot at that epoch
-/// is not a reward input. A merged row written where RUPD wrote none would be
-/// a population this log invented.
+/// The gate is RUPD's stake gate ([`stake_snapshot_epoch`]), not its reward
+/// gate: the first stake epoch, whose snapshot is the first Shelley epoch's,
+/// has a distribution and no rewards, and its rows carry the stake leg alone.
+/// A merged row written where RUPD logged no distribution would be a
+/// population this log invented.
 ///
 /// The protocol is the era of `snapshot_epoch + 1`, not of the snapshot epoch:
 /// the Haskell ledger computes the mark snapshot under the *entering* epoch's
 /// rules, which is what decides whether pointer-address stake counts.
 fn stake_snapshot_of(ending_epoch: Epoch, chain: &ChainSummary) -> Option<(Epoch, EraKey)> {
-    if ending_epoch < 4 {
-        return None;
-    }
-
-    let snapshot_epoch = ending_epoch - 3;
-
-    if snapshot_epoch <= chain.first_shelley_epoch() {
-        return None;
-    }
+    let snapshot_epoch = stake_snapshot_epoch(ending_epoch, chain.first_shelley_epoch())?;
 
     let protocol = EraKey::from(chain.era_for_epoch(snapshot_epoch + 1).protocol);
 
@@ -3055,7 +3048,7 @@ mod tests {
         assert_eq!(row.pool_id, None);
     }
 
-    /// A boundary whose `relevant_epochs` gate is closed writes no stake leg
+    /// A boundary whose stake gate is closed writes no stake leg
     /// at all, however the account looks.
     #[test]
     fn no_stake_snapshot_means_no_stake_leg() {
@@ -3148,9 +3141,9 @@ mod tests {
         );
     }
 
-    /// `RupdWork::relevant_epochs`, both clauses. The first-Shelley one is the
-    /// clause the consolidation evaluation's instrumentation omitted, and the
-    /// one reported epoch difference it produced.
+    /// `RupdWork::stake_epochs`, not its reward gate: the boundary whose
+    /// snapshot is the first Shelley epoch's is open, the one before it is
+    /// closed.
     #[test]
     fn the_stake_snapshot_gate_matches_rupds() {
         let domain = ToyDomain::new(None, None);
@@ -3159,20 +3152,44 @@ mod tests {
         let chain = &boundary.chain_summary;
         let first_shelley = chain.first_shelley_epoch();
 
-        for ending in 0..4 {
+        for ending in 0..first_shelley + 3 {
             assert_eq!(stake_snapshot_of(ending, chain), None, "epoch {ending}");
         }
 
-        // `snapshot_epoch <= first_shelley` is closed; the epoch right after it
-        // is open.
-        let closed = first_shelley + 3;
-        assert_eq!(stake_snapshot_of(closed, chain), None);
+        for open in [first_shelley + 3, first_shelley + 4] {
+            assert_eq!(
+                stake_snapshot_of(open, chain).map(|(epoch, _)| epoch),
+                Some(open - 3),
+                "epoch {open}"
+            );
+        }
+    }
 
-        let open = closed + 1;
-        assert_eq!(
-            stake_snapshot_of(open, chain).map(|(epoch, _)| epoch),
-            Some(open - 3)
-        );
+    /// The two gates differ at one epoch only, the first stake epoch's
+    /// boundary (`first_shelley + 3`): a snapshot, and no rewards. Preview's
+    /// `first_shelley == 0` opens it at epoch 3, below the old `< 4` clause.
+    #[test]
+    fn the_stake_gate_opens_one_epoch_before_the_reward_gate() {
+        use crate::rupd::loading::reward_snapshot_epoch;
+
+        for first_shelley in [0, 208] {
+            for epoch in 0..first_shelley + 3 {
+                assert_eq!(stake_snapshot_epoch(epoch, first_shelley), None);
+                assert_eq!(reward_snapshot_epoch(epoch, first_shelley), None);
+            }
+
+            let first_stake = first_shelley + 3;
+            assert_eq!(
+                stake_snapshot_epoch(first_stake, first_shelley),
+                Some(first_shelley)
+            );
+            assert_eq!(reward_snapshot_epoch(first_stake, first_shelley), None);
+
+            for epoch in first_stake + 1..first_stake + 4 {
+                assert_eq!(stake_snapshot_epoch(epoch, first_shelley), Some(epoch - 3));
+                assert_eq!(reward_snapshot_epoch(epoch, first_shelley), Some(epoch - 3));
+            }
+        }
     }
 }
 
