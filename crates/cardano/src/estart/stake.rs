@@ -56,6 +56,10 @@ pub fn tally_protocol(ended: &EpochState, active_protocol: EraKey) -> EraKey {
 
 impl WorkContext {
     /// Add an account, as it stands before rotation, to its pool's tally.
+    ///
+    /// A delegator counts only with stake above zero: db-sync leaves the
+    /// others out of `epoch_stake`, which is what Blockfrost's
+    /// `delegators_count` counts. The pool keeps its entry either way.
     pub(crate) fn tally_account(
         &self,
         tally: &mut BTreeMap<PoolHash, PoolTally>,
@@ -75,7 +79,10 @@ impl WorkContext {
 
         let entry = tally.entry(*pool).or_default();
         entry.stake += stake;
-        entry.delegators += 1;
+
+        if stake > 0 {
+            entry.delegators += 1;
+        }
 
         let owns = self
             .owners

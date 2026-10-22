@@ -10,16 +10,78 @@
 //! the closing `EpochWrapUp` and writes the completed `EpochState` to
 //! archive.
 
+use std::collections::HashMap;
+
 use dolos_core::{
-    save_entity_at, ArchiveStore, ArchiveWriter, ChainError, Domain, EntityDelta as _, NsKey,
-    RangeOf, StateEntity, StateStore, StateWriter,
+    save_entity_at, ArchiveStore, ArchiveWriter, BlockSlot, ChainError, Domain, EntityDelta as _,
+    LogRangeOf, NsKey, RangeOf, StateEntity, StateStore, StateWriter,
 };
 use tracing::{debug, instrument, trace, warn};
 
 use crate::{
-    ewrap::BoundaryWork, AccountKey, AccountState, CardanoEntity, DRepState, EpochState, GovState,
-    PendingMirState, PendingRewardState, PoolState, ProposalState,
+    ewrap::BoundaryWork, model::PoolHash, AccountEpochLog, AccountKey, AccountState, CardanoEntity,
+    DRepState, EpochState, GovState, PendingMirState, PendingRewardState, PoolEpochLog, PoolState,
+    ProposalState,
 };
+
+/// What each pool paid out at the boundary, summed from the merged account
+/// rows of the epoch: `(total, operator share)`, the leader rewards being the
+/// operator's share.
+#[derive(Debug, Default)]
+struct PaidRewards(HashMap<PoolHash, (u64, u64)>);
+
+impl PaidRewards {
+    fn add(&mut self, row: &AccountEpochLog) {
+        if let (Some(pool), Some(amount)) = (row.pool_id, row.member_reward) {
+            let (total, _) = self.0.entry(pool).or_default();
+            *total = total.saturating_add(amount);
+        }
+
+        for (pool, amount) in &row.leader_rewards {
+            let (total, operator) = self.0.entry(*pool).or_default();
+            *total = total.saturating_add(*amount);
+            *operator = operator.saturating_add(*amount);
+        }
+    }
+
+    fn of(&self, pool: &PoolHash) -> (u64, u64) {
+        self.0.get(pool).copied().unwrap_or_default()
+    }
+}
+
+/// Settle the epoch's `PoolEpochLog` rewards on what the boundary paid.
+///
+/// RUPD writes each log with the rewards it computed, but not all of them
+/// reach an account: a delegator that deregistered before this boundary
+/// forfeits its share. Blockfrost (db-sync) reports only what was paid. The
+/// shard passes recorded exactly that in the merged account rows under the
+/// same temporal key, so the totals are summed back from those rows, and a
+/// log is rewritten only when its figures change.
+fn settle_stake_logs<A: ArchiveStore>(
+    archive: &A,
+    writer: &A::Writer,
+    slot: BlockSlot,
+) -> Result<(), ChainError> {
+    let mut paid = PaidRewards::default();
+
+    for row in archive.iter_logs_typed::<AccountEpochLog>(Some(LogRangeOf::slot(slot)))? {
+        let (_, _, row) = row?;
+        paid.add(&row);
+    }
+
+    for entry in archive.iter_logs_typed::<PoolEpochLog>(Some(LogRangeOf::slot(slot)))? {
+        let (_, pool, mut log) = entry?;
+        let (total, operator) = paid.of(&pool.0);
+
+        if (log.total_rewards, log.operator_share) != (total, operator) {
+            log.total_rewards = total;
+            log.operator_share = operator;
+            writer.write_log_typed(slot, &pool, &log)?;
+        }
+    }
+
+    Ok(())
+}
 
 impl BoundaryWork {
     /// Stream entities from a namespace, apply deltas, and write immediately.
@@ -144,9 +206,13 @@ impl BoundaryWork {
     /// wrapup-global deltas for pools, dreps, proposals, plus the
     /// `EpochWrapUp` delta on `EpochState` that closes the boundary
     /// (overwrites `entity.end` with the final stats, rotates
-    /// rolling/pparams snapshots, clears `ewrap_progress`). Also writes the
-    /// completed `EpochState` snapshot to the archive, at the start of its
-    /// epoch.
+    /// rolling/pparams snapshots, sets `ewrap_finalized`). Also settles the
+    /// epoch's `PoolEpochLog` rewards and writes the completed `EpochState`
+    /// snapshot to the archive, at the start of its epoch.
+    ///
+    /// The state commit is what marks finalize done, so a crash before it
+    /// re-runs finalize on restart; the archive writes it repeats are
+    /// overwrites of the same keys with the same values.
     #[instrument(skip_all)]
     pub fn commit_finalize<D: Domain>(
         &mut self,
@@ -155,8 +221,15 @@ impl BoundaryWork {
     ) -> Result<(), ChainError> {
         debug!("committing ewrap changes");
 
+        // Captured before `EpochWrapUp` lands on `ending_state` below.
+        let account_epoch_slot = self.account_epoch_slot();
+
         let writer = state.start_writer()?;
         let archive_writer = archive.start_writer()?;
+
+        // The shard passes already wrote the epoch's account rows, so what
+        // each pool paid is known here.
+        settle_stake_logs(archive, &archive_writer, account_epoch_slot)?;
 
         // Apply deltas to pools / dreps / proposals. The only `AssignRewards`
         // deltas Ewrap queues against accounts come from MIR processing
@@ -216,5 +289,114 @@ impl BoundaryWork {
 
         debug!("ewrap commit complete");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_core::{ArchiveStore as _, ArchiveWriter as _};
+    use dolos_testing::toy_domain::ToyDomain;
+    use pallas::{crypto::hash::Hash, ledger::primitives::StakeCredential};
+
+    use super::*;
+    use crate::PoolKey;
+
+    const SLOT: BlockSlot = 1_000;
+
+    fn pool(byte: u8) -> PoolHash {
+        Hash::from([byte; 28])
+    }
+
+    fn account(byte: u8) -> AccountKey {
+        AccountKey(StakeCredential::AddrKeyhash([byte; 28].into()))
+    }
+
+    fn stake_log(total_rewards: u64, operator_share: u64) -> PoolEpochLog {
+        PoolEpochLog {
+            total_rewards,
+            operator_share,
+            ..Default::default()
+        }
+    }
+
+    fn row(
+        pool_id: Option<PoolHash>,
+        member_reward: Option<u64>,
+        leader_rewards: Vec<(PoolHash, u64)>,
+    ) -> AccountEpochLog {
+        AccountEpochLog {
+            active_stake: Some(1),
+            pool_id,
+            member_reward,
+            leader_rewards,
+            deposit_refunds: vec![],
+        }
+    }
+
+    fn read(domain: &ToyDomain, slot: BlockSlot, pool: PoolHash) -> PoolEpochLog {
+        domain
+            .archive()
+            .read_log_typed::<PoolEpochLog>(slot, &PoolKey(pool))
+            .unwrap()
+            .expect("missing stake log")
+    }
+
+    /// RUPD computed 100 for pool 1 (30 to the operator) and 40 for pool 2,
+    /// but a delegator of pool 1 deregistered and forfeited its 20, and pool 2
+    /// paid nothing. The logs end up holding what the boundary paid; the
+    /// next epoch's log is left alone.
+    #[test]
+    fn stake_logs_settle_on_paid_rewards() {
+        let domain = ToyDomain::new(None, None);
+        let (first, second) = (pool(1), pool(2));
+
+        let writer = domain.archive().start_writer().unwrap();
+        writer
+            .write_log_typed(SLOT, &PoolKey(first), &stake_log(100, 30))
+            .unwrap();
+        writer
+            .write_log_typed(SLOT, &PoolKey(second), &stake_log(40, 0))
+            .unwrap();
+        writer
+            .write_log_typed(SLOT + 1, &PoolKey(first), &stake_log(7, 7))
+            .unwrap();
+
+        // the operator's reward account also delegates to pool 1
+        let rows = [
+            (0x01, row(Some(first), Some(50), vec![(first, 30)])),
+            (0x02, row(Some(first), None, vec![])),
+            (0x03, row(Some(second), None, vec![])),
+        ];
+        for (byte, row) in &rows {
+            writer.write_log_typed(SLOT, &account(*byte), row).unwrap();
+        }
+        writer.commit().unwrap();
+
+        let writer = domain.archive().start_writer().unwrap();
+        settle_stake_logs(domain.archive(), &writer, SLOT).unwrap();
+        writer.commit().unwrap();
+
+        let settled = read(&domain, SLOT, first);
+        assert_eq!((settled.total_rewards, settled.operator_share), (80, 30));
+
+        let settled = read(&domain, SLOT, second);
+        assert_eq!((settled.total_rewards, settled.operator_share), (0, 0));
+
+        let untouched = read(&domain, SLOT + 1, first);
+        assert_eq!((untouched.total_rewards, untouched.operator_share), (7, 7));
+    }
+
+    #[test]
+    fn paid_rewards_split_out_the_operator_share() {
+        let (first, second) = (pool(1), pool(2));
+        let mut paid = PaidRewards::default();
+
+        paid.add(&row(Some(first), Some(10), vec![(first, 4), (second, 6)]));
+        paid.add(&row(Some(second), Some(1), vec![]));
+        paid.add(&row(None, None, vec![]));
+
+        assert_eq!(paid.of(&first), (14, 4));
+        assert_eq!(paid.of(&second), (7, 6));
+        assert_eq!(paid.of(&pool(3)), (0, 0));
     }
 }

@@ -324,10 +324,10 @@ pub struct EpochState {
     /// state, set by `EpochTransition` during ESTART). `Some(p)` means
     /// shards `0..p.committed` have committed; `p.total` is the boundary's
     /// shard count, captured at the first shard's commit. Each
-    /// `EWrapProgress` (Ewrap) advances `committed`; `EpochWrapUp`
-    /// (Ewrap) clears the field back to `None`. The persisted `total`
-    /// guards against a config change mid-boundary breaking the in-flight
-    /// pipeline.
+    /// `EWrapProgress` (Ewrap) advances `committed`; `EpochTransitionV2`
+    /// (ESTART finalize) clears the field back to `None`. The persisted
+    /// `total` guards against a config change mid-boundary breaking the
+    /// in-flight pipeline.
     #[n(15)]
     #[cbor(default)]
     pub ewrap_progress: Option<ShardProgress>,
@@ -366,6 +366,15 @@ pub struct EpochState {
     #[n(19)]
     #[cbor(default)]
     pub estart_tally: Option<BTreeMap<PoolHash, PoolTally>>,
+
+    /// Whether Ewrap's finalize pass has committed in this boundary.
+    /// `EpochWrapUpV3` sets it in finalize's own state commit and
+    /// `EpochTransitionV2` clears it. `ewrap_progress` at `committed ==
+    /// total` only says the shards are done: until this is set, finalize is
+    /// still owed.
+    #[n(20)]
+    #[cbor(default)]
+    pub ewrap_finalized: bool,
 }
 
 impl Default for EpochState {
@@ -385,6 +394,7 @@ impl Default for EpochState {
             rupd_progress: None,
             active_stake: None,
             estart_tally: None,
+            ewrap_finalized: false,
         }
     }
 }
@@ -488,9 +498,10 @@ pub(crate) mod testing {
             rupd_progress in prop::option::of(
                 (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
             ),
-            (active_stake, estart_tally) in (
+            (active_stake, estart_tally, ewrap_finalized) in (
                 prop::option::of(root::any_lovelace()),
                 prop::option::of(any_estart_tally()),
+                any::<bool>(),
             ),
         ) -> EpochState {
             // ESTART rotates rolling/pparams in lockstep with the epoch
@@ -511,6 +522,7 @@ pub(crate) mod testing {
                 rupd_progress,
                 active_stake,
                 estart_tally,
+                ewrap_finalized,
             }
         }
     }
@@ -887,14 +899,15 @@ impl dolos_core::EntityDelta for EpochWrapUpV2 {
 /// V3 of `EpochWrapUp` — drops the `prev_ewrap_progress` undo field
 /// because `apply` no longer mutates `EpochState.ewrap_progress`. After
 /// V3 commits, `ewrap_progress` is left at `Some(total, total)` from the
-/// last `EWrapProgress` shard delta and serves as the unambiguous
-/// "EWRAP done, ESTART pending finalize" marker. `EpochTransitionV2`
-/// (run at ESTART finalize) is the only remaining writer that clears
-/// the field; that single-writer invariant is what lets a crash
+/// last `EWrapProgress` shard delta, and `ewrap_finalized` is set: the
+/// two together are the "EWRAP done, ESTART pending finalize" marker.
+/// `EpochTransitionV2` (run at ESTART finalize) is the only writer that
+/// clears them; that single-writer invariant is what lets a crash
 /// between EWRAP finalize and ESTART finalize be recovered cleanly:
-/// the next boundary trigger sees `committed == total` and short-
-/// circuits the EwrapWorkUnit instead of replaying it over partially-
-/// rotated state.
+/// the next boundary trigger sees both and short-circuits the
+/// EwrapWorkUnit instead of replaying it over partially-rotated state.
+/// A crash before V3 commits leaves `ewrap_finalized` unset, so the
+/// trigger runs finalize again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochWrapUpV3 {
     pub(crate) stats: EndStats,
@@ -903,6 +916,7 @@ pub struct EpochWrapUpV3 {
     pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
     pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
+    pub(crate) prev_ewrap_finalized: bool,
     // No prev_ewrap_progress — apply does not mutate ewrap_progress.
 }
 
@@ -913,6 +927,7 @@ impl EpochWrapUpV3 {
             prev_rolling: None,
             prev_pparams: None,
             prev_end: None,
+            prev_ewrap_finalized: false,
         }
     }
 }
@@ -930,10 +945,12 @@ impl dolos_core::EntityDelta for EpochWrapUpV3 {
         self.prev_rolling = Some(entity.rolling.clone());
         self.prev_pparams = Some(entity.pparams.clone());
         self.prev_end = entity.end.clone();
+        self.prev_ewrap_finalized = entity.ewrap_finalized;
 
         entity.rolling.scheduled_or_default();
         entity.pparams.scheduled_or_default();
         entity.end = Some(self.stats.clone());
+        entity.ewrap_finalized = true;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -941,6 +958,7 @@ impl dolos_core::EntityDelta for EpochWrapUpV3 {
         entity.rolling = self.prev_rolling.clone().expect("apply captured rolling");
         entity.pparams = self.prev_pparams.clone().expect("apply captured pparams");
         entity.end = self.prev_end.clone();
+        entity.ewrap_finalized = self.prev_ewrap_finalized;
     }
 }
 
@@ -1507,6 +1525,7 @@ pub struct EpochTransitionV2 {
     pub(crate) prev_rupd_progress: Option<ShardProgress>,
     pub(crate) prev_active_stake: Option<u64>,
     pub(crate) prev_estart_tally: Option<BTreeMap<PoolHash, PoolTally>>,
+    pub(crate) prev_ewrap_finalized: bool,
 }
 
 impl EpochTransitionV2 {
@@ -1533,6 +1552,7 @@ impl EpochTransitionV2 {
             prev_rupd_progress: None,
             prev_active_stake: None,
             prev_estart_tally: None,
+            prev_ewrap_finalized: false,
         }
     }
 }
@@ -1570,6 +1590,7 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
         self.prev_rupd_progress = entity.rupd_progress.clone();
         self.prev_active_stake = entity.active_stake;
         self.prev_estart_tally = entity.estart_tally.clone();
+        self.prev_ewrap_finalized = entity.ewrap_finalized;
 
         entity.number = self.new_epoch;
         entity.initial_pots = self.new_pots.clone();
@@ -1598,6 +1619,7 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
         entity.rupd_progress = None;
         entity.active_stake = self.active_stake;
         entity.estart_tally = None;
+        entity.ewrap_finalized = false;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -1616,6 +1638,7 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
         entity.rupd_progress = self.prev_rupd_progress.clone();
         entity.active_stake = self.prev_active_stake;
         entity.estart_tally = self.prev_estart_tally.clone();
+        entity.ewrap_finalized = self.prev_ewrap_finalized;
     }
 }
 
@@ -1794,6 +1817,7 @@ mod prop_tests {
                 rupd_progress: None,
                 active_stake: None,
                 estart_tally: None,
+                ewrap_finalized: false,
             }
         }
     }
@@ -2195,5 +2219,34 @@ mod prop_tests {
         let epoch = entity.unwrap();
         assert_eq!(epoch.active_stake, Some(42));
         assert_eq!(epoch.estart_tally, None);
+    }
+
+    /// EWRAP finalize marks itself done and `EpochTransition` clears the mark
+    /// for the next boundary; each undo puts back what it found.
+    #[test]
+    fn ewrap_finalize_marks_itself_done_until_the_transition() {
+        use dolos_core::EntityDelta as _;
+
+        let mut epoch = EpochState::default();
+        epoch.rolling.reset(Some(RollingStats::default()));
+        epoch.pparams.reset(Some(PParamsSet::default()));
+
+        let mut entity = Some(epoch);
+        let finalized = |entity: &Option<EpochState>| entity.as_ref().unwrap().ewrap_finalized;
+
+        let mut wrapup = EpochWrapUpV3::new(EndStats::default());
+        wrapup.apply(&mut entity);
+        assert!(finalized(&entity));
+
+        let new_pots = entity.as_ref().unwrap().initial_pots.clone();
+        let mut transition = EpochTransitionV2::new(1, new_pots, None, None, None);
+        transition.apply(&mut entity);
+        assert!(!finalized(&entity));
+
+        transition.undo(&mut entity);
+        assert!(finalized(&entity));
+
+        wrapup.undo(&mut entity);
+        assert!(!finalized(&entity));
     }
 }

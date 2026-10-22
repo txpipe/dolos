@@ -97,7 +97,7 @@ pub struct PoolEpochLog {
     #[n(2)]
     pub relative_size: f64,
 
-    /// Number of delegators for epoch
+    /// Number of delegators with stake above zero for epoch
     #[n(3)]
     pub delegators_count: u64,
 
