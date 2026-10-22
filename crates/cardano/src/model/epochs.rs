@@ -605,7 +605,7 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         // the epoch. `last_block_slot` moves forward to the most recent block.
         // Blocks roll in slot order, so these values are the correct min and
         // max.
-        if stats.first_block_slot == 0 {
+        if stats.blocks_minted == 1 {
             stats.first_block_slot = self.block_slot;
         }
         stats.last_block_slot = self.block_slot;
@@ -1652,6 +1652,101 @@ impl dolos_core::EntityDelta for SetEpochIncentives {
     fn undo(&self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("EpochState must exist");
         entity.incentives = self.prev_incentives.clone();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_core::EntityDelta;
+
+    use super::*;
+
+    #[test]
+    fn epoch_stats_preserve_first_slot_across_apply_undo_and_reapply() {
+        for rolling in [
+            EpochValue::new(0),
+            EpochValue::with_live(0, RollingStats::default()),
+        ] {
+            for slots in [[0, 0, 2, 4], [0, 20, 40, 60], [2, 4, 6, 8]] {
+                let mut entity = Some(EpochState {
+                    rolling: rolling.clone(),
+                    ..Default::default()
+                });
+                let mut states = vec![entity.clone()];
+                let mut deltas = slots.map(|block_slot| EpochStatsUpdate {
+                    block_slot,
+                    ..Default::default()
+                });
+
+                for (index, delta) in deltas.iter_mut().enumerate() {
+                    delta.apply(&mut entity);
+                    assert_eq!(
+                        entity.as_ref().unwrap().rolling.unwrap_live(),
+                        &RollingStats {
+                            blocks_minted: (index + 1) as u32,
+                            first_block_slot: slots[0],
+                            last_block_slot: slots[index],
+                            ..Default::default()
+                        }
+                    );
+                    states.push(entity.clone());
+                }
+
+                for (delta, expected) in deltas.iter().zip(&states).rev() {
+                    delta.undo(&mut entity);
+                    assert_eq!(&entity, expected);
+                }
+
+                for (delta, expected) in deltas.iter_mut().zip(states.iter().skip(1)) {
+                    delta.apply(&mut entity);
+                    assert_eq!(&entity, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn epoch_stats_reset_first_slot_on_transition() {
+        let mut entity = Some(EpochState {
+            pparams: EpochValue::with_live(0, PParamsSet::default()),
+            ..Default::default()
+        });
+        let mut first_block = EpochStatsUpdate::default();
+        first_block.apply(&mut entity);
+        let completed_epoch = entity.clone();
+
+        let mut wrap = EpochWrapUpV3::new(EndStats::default());
+        wrap.apply(&mut entity);
+        let mut transition = EpochTransitionV2::new(1, Pots::default(), None, None, None);
+        transition.apply(&mut entity);
+
+        let rolling = &entity.as_ref().unwrap().rolling;
+        assert_eq!(
+            rolling.mark(),
+            completed_epoch.as_ref().unwrap().rolling.live()
+        );
+        assert_eq!(rolling.unwrap_live(), &RollingStats::default());
+
+        let mut next_block = EpochStatsUpdate {
+            epoch: 1,
+            block_slot: 100,
+            ..Default::default()
+        };
+        next_block.apply(&mut entity);
+        assert_eq!(
+            entity.as_ref().unwrap().rolling.unwrap_live(),
+            &RollingStats {
+                blocks_minted: 1,
+                first_block_slot: 100,
+                last_block_slot: 100,
+                ..Default::default()
+            }
+        );
+
+        next_block.undo(&mut entity);
+        transition.undo(&mut entity);
+        wrap.undo(&mut entity);
+        assert_eq!(entity, completed_epoch);
     }
 }
 
