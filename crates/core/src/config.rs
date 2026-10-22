@@ -845,6 +845,63 @@ impl GrpcConfig {
     }
 }
 
+/// A URL path that an HTTP API serves every route under, such as `/api/v0`
+/// for the Blockfrost server URL. Parsing drops a trailing slash and refuses
+/// a value a router cannot nest under (route syntax, delimiters) or a client
+/// cannot reach (`.` and `..` segments, which clients resolve away).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoutePrefix(String);
+
+impl RoutePrefix {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let refuse = |reason: &str| Err(format!("`{value}` is not a route prefix: {reason}"));
+
+        let Some(segments) = value.trim_end_matches('/').strip_prefix('/') else {
+            return if value.is_empty() || !value.starts_with('/') {
+                refuse("it must start with `/`")
+            } else {
+                refuse("it must name at least one segment")
+            };
+        };
+
+        for segment in segments.split('/') {
+            if segment.is_empty() {
+                return refuse("it has an empty segment");
+            }
+
+            if segment == "." || segment == ".." {
+                return refuse("`.` and `..` segments are not allowed");
+            }
+
+            let unreserved =
+                |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~');
+
+            if !segment.chars().all(unreserved) {
+                return refuse("segments may only use letters, digits, `-`, `.`, `_` and `~`");
+            }
+        }
+
+        Ok(Self(format!("/{segments}")))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for RoutePrefix {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for RoutePrefix {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MinibfConfig {
@@ -858,11 +915,8 @@ pub struct MinibfConfig {
     pub public_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_scan_items: Option<u64>,
-    /// Optional base path for all Blockfrost API endpoints (e.g., "/api/v0").
-    /// When set, all API routes will be nested under this path.
-    /// Set to "/api/v0" for full Blockfrost OpenAPI specification compliance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_path: Option<String>,
+    route_prefix: Option<RoutePrefix>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ipfs_gateways: Option<Vec<String>>,
 }
@@ -875,7 +929,7 @@ impl MinibfConfig {
             token_registry_url: None,
             public_url: None,
             max_scan_items: None,
-            base_path: None,
+            route_prefix: None,
             ipfs_gateways: None,
         }
     }
@@ -898,49 +952,14 @@ impl MinibfConfig {
         self.max_scan_items.unwrap_or(default_max_scan_items())
     }
 
-    /// The base path with any trailing slash removed. Returns `None` when no
-    /// base path is set. [`MinibfConfig::validate`] makes sure that the value
-    /// is correct. Then the router can nest under the value with no more
-    /// checks.
-    pub fn base_path(&self) -> Option<String> {
-        self.base_path
-            .as_deref()
-            .map(|base_path| base_path.trim_end_matches('/').to_string())
+    pub fn with_route_prefix(mut self, route_prefix: RoutePrefix) -> Self {
+        self.route_prefix = Some(route_prefix);
+        self
     }
 
-    /// Rejects a `base_path` that the router cannot nest under. The value must
-    /// start with `/`. Each segment must have one or more characters. Each
-    /// character must be a letter, a digit, `-`, `.`, `_` or `~` (the RFC 3986
-    /// unreserved characters). This allowlist keeps axum route syntax
-    /// (`{param}`, `{*rest}`, `:param`) and URL delimiters out of the prefix.
-    /// As a result, the router does not panic at startup, and the prefix does
-    /// not become a capture group. This check runs when the configuration
-    /// loads. Thus a malformed value stops startup and does not stop a `serve`
-    /// process that already operates.
-    pub fn validate(&self) -> Result<(), String> {
-        let Some(configured_base_path) = self.base_path.as_deref() else {
-            return Ok(());
-        };
-
-        let is_valid = configured_base_path
-            .trim_end_matches('/')
-            .strip_prefix('/')
-            .is_some_and(|segments| {
-                segments.split('/').all(|segment| {
-                    !segment.is_empty()
-                        && segment.chars().all(|c| {
-                            c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~')
-                        })
-                })
-            });
-
-        if !is_valid {
-            return Err(format!(
-                "base_path \"{configured_base_path}\" is not valid. Start the base_path with '/'. Use only letters, digits, '-', '.', '_' or '~' in each segment."
-            ));
-        }
-
-        Ok(())
+    /// The prefix every route is served under; `None` serves them at the root.
+    pub fn route_prefix(&self) -> Option<&RoutePrefix> {
+        self.route_prefix.as_ref()
     }
 
     /// These are the base URLs of the HTTP gateways, in order. The gateways
@@ -1324,12 +1343,6 @@ impl RootConfig {
                     ServeConfig::MAX_CONCURRENT_QUERIES.end(),
                 ),
             ));
-        }
-
-        if let Some(minibf) = &self.serve.minibf {
-            minibf
-                .validate()
-                .map_err(|error| ConfigError::invalid(["serve.minibf.base_path"], error))?;
         }
 
         let (state, archive) = (&self.storage.state, &self.storage.archive);
@@ -2672,77 +2685,43 @@ mod tests {
     }
 
     #[test]
-    fn root_validation_checks_minibf_base_path() {
-        let mut config = preview();
-        assert!(config.validate().is_ok());
-
-        let mut minibf = MinibfConfig::new("[::]:0".parse().unwrap());
-        minibf.base_path = Some("/".into());
-        config.serve.minibf = Some(minibf);
-
-        match config.validate() {
-            Err(ConfigError::Invalid { keys, message }) => {
-                assert_eq!(keys, ["serve.minibf.base_path"]);
-                assert!(message.contains("base_path \"/\""), "{message}");
-            }
-            other => panic!("expected a validation error, got {other:?}"),
-        }
-
-        for base_path in [None, Some("/api/v0"), Some("/api/v0/")] {
-            config.serve.minibf.as_mut().unwrap().base_path = base_path.map(String::from);
-            assert!(config.validate().is_ok(), "{base_path:?}");
-        }
-    }
-
-    #[test]
-    fn minibf_validation_error_uses_configured_base_path() {
-        let mut config = MinibfConfig::new("[::]:0".parse().unwrap());
-        config.base_path = Some("/".into());
-
-        let error = config.validate().unwrap_err();
-
-        assert!(error.contains("base_path \"/\""), "{error}");
-    }
-
-    #[test]
-    fn minibf_validation_accepts_plain_base_paths() {
-        for valid in ["/api/v0", "/api/v0/", "/v1", "/a-b.c_d~e/f2"] {
-            let mut config = MinibfConfig::new("[::]:0".parse().unwrap());
-            config.base_path = Some(valid.into());
-
-            assert!(config.validate().is_ok(), "validate rejected {valid:?}");
-        }
-    }
-
-    #[test]
-    fn minibf_validation_rejects_route_syntax_and_delimiters() {
-        for invalid in [
-            "/api/{",
-            "/api/}",
-            "/api/{}",
-            "/api/{v}",
-            "/api/{*rest}",
-            "/api/:v0",
-            "//api",
-            "/api//v0",
-            "/api/v0%20x",
-            "/api/v0?x=y",
-            "/api/v0#fragment",
-            "/api/v0 with-space",
-            "/with*wildcard",
-            "no-leading-slash",
-            "",
-            "/",
+    fn a_route_prefix_drops_its_trailing_slash() {
+        for (value, prefix) in [
+            ("/api/v0", "/api/v0"),
+            ("/api/v0/", "/api/v0"),
+            ("/api/v0//", "/api/v0"),
+            ("/a-b.c_d~e/f2", "/a-b.c_d~e/f2"),
         ] {
-            let mut config = MinibfConfig::new("[::]:0".parse().unwrap());
-            config.base_path = Some(invalid.into());
+            assert_eq!(
+                RoutePrefix::parse(value).unwrap().as_str(),
+                prefix,
+                "{value}"
+            );
+        }
+    }
 
-            let error = config
-                .validate()
-                .err()
-                .unwrap_or_else(|| panic!("validate accepted {invalid:?}"));
+    #[test]
+    fn a_route_prefix_names_why_it_is_refused() {
+        for (value, reason) in [
+            ("", "must start with `/`"),
+            ("api/v0", "must start with `/`"),
+            ("/", "at least one segment"),
+            ("//api", "empty segment"),
+            ("/api//v0", "empty segment"),
+            ("/api/..", "`.` and `..`"),
+            ("/api/./v0", "`.` and `..`"),
+            ("/api/{v}", "letters, digits"),
+            ("/api/{*rest}", "letters, digits"),
+            ("/api/:v0", "letters, digits"),
+            ("/api/v0%20x", "letters, digits"),
+            ("/api/v0?x=y", "letters, digits"),
+            ("/api/v0#fragment", "letters, digits"),
+            ("/api/v0 x", "letters, digits"),
+        ] {
+            let error = RoutePrefix::parse(value).unwrap_err();
 
-            assert!(error.contains("base_path"), "{error}");
+            assert!(error.contains(&format!("`{value}`")), "{error}");
+            assert!(error.contains(reason), "{value}: {error}");
         }
     }
 }

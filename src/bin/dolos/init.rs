@@ -891,22 +891,6 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_base_path_leaves_the_config_untouched() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("other.toml");
-        ConfigEditor::default().save(&path).unwrap();
-        let before = std::fs::read(&path).unwrap();
-
-        let mut editor = ConfigEditor::default();
-        editor.0.serve.minibf.as_mut().unwrap().base_path = Some("/".into());
-        let report = editor.save(&path).unwrap_err();
-        let message = format!("{report:?}");
-
-        assert!(message.contains("base_path"), "{message}");
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-    }
-
-    #[test]
     fn history_choices_map_onto_history_modes() {
         assert_eq!(
             HistoryConfig::from(HistoryPrunningOptions::KeepEverything),

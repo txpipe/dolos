@@ -10,7 +10,7 @@ use axum::{
 };
 use dolos_cardano::periods::stats::TOTALS;
 use dolos_core::{
-    config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig},
+    config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig, RoutePrefix},
     import::ImportExt as _,
     CacheStore as _, Domain, StateStore,
 };
@@ -522,15 +522,12 @@ impl TestApp {
         Self::build(cfg, fault, minibf)
     }
 
-    /// App that serves each route under `base_path`. The value must pass
-    /// `MinibfConfig::validate`, the same check that startup does. The tests
-    /// in `dolos-core` cover the values that this check rejects.
-    pub fn new_with_base_path(base_path: &str) -> Self {
-        let mut minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        minibf.base_path = Some(base_path.into());
-        minibf
-            .validate()
-            .expect("the test base_path did not pass MinibfConfig::validate");
+    /// App that serves each route under `route_prefix`, parsed as a
+    /// configuration file would be.
+    pub fn new_with_route_prefix(route_prefix: &str) -> Self {
+        let route_prefix = RoutePrefix::parse(route_prefix).expect("invalid route prefix");
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
+            .with_route_prefix(route_prefix);
         Self::build(
             SyntheticBlockConfig {
                 block_count: 5,

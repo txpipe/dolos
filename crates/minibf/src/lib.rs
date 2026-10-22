@@ -327,8 +327,8 @@ where
     }
 
     let permissive_cors = facade.config.permissive_cors();
-    let base_path = facade.config.base_path();
-    let app = Router::new()
+    let route_prefix = facade.config.route_prefix().cloned();
+    let routes = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
         .route("/metrics", get(routes::metrics::naked::<D>))
@@ -683,7 +683,17 @@ where
         .route(
             "/governance/proposals/{gov_action_id}/votes",
             get(routes::governance::proposal_votes_by_gov_action::<D>),
-        )
+        );
+
+    // The fallback and layers go on the outer router, so a path outside the
+    // prefix answers like any unmatched path, and the trace span sees the
+    // whole request path. The nested routes inherit the fallback.
+    let routes = match route_prefix {
+        Some(prefix) => Router::new().nest(prefix.as_str(), routes),
+        None => routes,
+    };
+
+    let app = routes
         .fallback(routes::invalid_path)
         .with_state(facade)
         .layer(
@@ -717,20 +727,12 @@ where
         } else {
             CorsLayer::new()
         });
-
-    // `MinibfConfig::validate` runs at config-parse time. It rejects a
-    // malformed `base_path`. Thus the nest operation here cannot fail.
-    let router = match &base_path {
-        Some(base_path) => Router::new().nest(base_path, app),
-        None => app,
-    };
-
     // Added via `Router::layer`, NormalizePathLayer runs *after* route matching
     // and never trims before routing (`/blocks/latest/` would miss its route).
     // Wrap the router with it and nest that behind an outer `Router` via
     // `fallback_service`, so trimming happens before routing while the public
     // return type stays `Router` (the wrapped type is an implementation detail).
-    let normalized = NormalizePathLayer::trim_trailing_slash().layer(router);
+    let normalized = NormalizePathLayer::trim_trailing_slash().layer(app);
     Router::new().fallback_service(normalized)
 }
 
@@ -769,56 +771,72 @@ where
 }
 
 #[cfg(test)]
-mod base_path_tests {
+mod route_prefix_tests {
     use axum::http::StatusCode;
+    use serde_json::{json, Value};
 
     use crate::test_support::TestApp;
 
-    #[tokio::test]
-    async fn routes_resolve_under_configured_base_path() {
-        let app = TestApp::new_with_base_path("/api/v0");
+    async fn assert_invalid_path(app: &TestApp, path: &str) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
 
-        let (status, _) = app.get_bytes("/api/v0/network").await;
-        assert_eq!(status, StatusCode::OK, "prefixed route should resolve");
-
-        let (status, _) = app.get_bytes("/network").await;
+        let body: Value =
+            serde_json::from_slice(&bytes).unwrap_or_else(|_| panic!("no json body for {path}"));
         assert_eq!(
-            status,
-            StatusCode::NOT_FOUND,
-            "root route should 404 when base_path is set"
+            body,
+            json!({
+                "status_code": 400,
+                "error": "Bad Request",
+                "message": "Invalid path.",
+            }),
+            "{path}"
         );
     }
 
     #[tokio::test]
-    async fn trailing_slash_in_base_path_config_is_trimmed() {
-        // The router removes a trailing slash from `base_path` before it nests the
-        // routes.
-        let app = TestApp::new_with_base_path("/api/v0/");
+    async fn every_route_is_served_under_the_prefix() {
+        let app = TestApp::new_with_route_prefix("/api/v0/");
 
-        let (status, _) = app.get_bytes("/api/v0/network").await;
-        assert_eq!(status, StatusCode::OK);
+        for path in [
+            "/api/v0",
+            "/api/v0/",
+            "/api/v0/network",
+            "/api/v0/network/",
+            "/api/v0/health",
+            "/api/v0/metrics",
+        ] {
+            let (status, _) = app.get_bytes(path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+        }
     }
 
     #[tokio::test]
-    async fn trailing_slash_in_request_is_normalized() {
-        let app = TestApp::new_with_base_path("/api/v0");
+    async fn paths_outside_the_prefix_answer_invalid_path() {
+        let app = TestApp::new_with_route_prefix("/api/v0");
 
-        // The router removes a trailing slash from the request path before route
-        // matching.
-        let (status, _) = app.get_bytes("/api/v0/network/").await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "the router did not remove the trailing slash from the request path"
-        );
+        for path in [
+            "/",
+            "/network",
+            "/health",
+            "/api/v0x/network",
+            "/api/v1/network",
+        ] {
+            assert_invalid_path(&app, path).await;
+        }
+    }
 
-        // The base path resolves to the root route of the nested router.
-        let (status, _) = app.get_bytes("/api/v0/").await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "the base path with a trailing slash did not resolve to the root route"
-        );
+    #[tokio::test]
+    async fn unmatched_paths_under_the_prefix_answer_invalid_path() {
+        let app = TestApp::new_with_route_prefix("/api/v0");
+
+        for path in [
+            "/api/v0/nonexistent",
+            "/api/v0/blocks/latest/nope",
+            "/api/v0/txs",
+        ] {
+            assert_invalid_path(&app, path).await;
+        }
     }
 }
 
