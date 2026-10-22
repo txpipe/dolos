@@ -23,9 +23,10 @@ use dolos_testing::{
 use pallas::ledger::primitives::{conway::RationalNumber, Epoch, StakeCredential};
 
 use dolos_cardano::{
-    estart::EstartWorkUnit, rupd::RupdWorkUnit, rupd::StakeSnapshot, AccountKey, AccountState,
-    CardanoWorkUnit, DRepDelegation, EpochState, EpochValue, EraKey, PoolDelegation, PoolEpochLog,
-    PoolHash, PoolKey, PoolParams, PoolSnapshot, PoolState, PoolTally, Stake,
+    estart::EstartWorkUnit, ewrap::EwrapWorkUnit, rupd::RupdWorkUnit, rupd::StakeSnapshot,
+    AccountEpochLog, AccountKey, AccountState, CardanoWorkUnit, DRepDelegation, EndStats,
+    EpochState, EpochValue, EraKey, PendingRewardState, PoolDelegation, PoolEpochLog, PoolHash,
+    PoolKey, PoolParams, PoolSnapshot, PoolState, PoolTally, Stake,
 };
 
 fn key(byte: u8) -> StakeCredential {
@@ -665,6 +666,309 @@ fn rupd_refuses_an_unfrozen_stake_snapshot() {
         "{:?}",
         result.err()
     );
+}
+
+/// A pool and its delegator from the genesis staking section, which
+/// `genesis/staking.rs` loads with no frozen tally.
+const GENESIS_POOL: u8 = 0xb1;
+const GENESIS_DELEGATOR: u8 = 0xb2;
+const GENESIS_FUNDS: u64 = 2_000;
+
+fn devnet_with_genesis_pool() -> Arc<Genesis> {
+    let mut genesis = dolos_cardano::include::devnet::load();
+
+    let pool = hex::encode([GENESIS_POOL; 28]);
+    let delegator = hex::encode([GENESIS_DELEGATOR; 28]);
+
+    let vrf = hex::encode([GENESIS_POOL; 32]);
+
+    let staking = format!(
+        r#"{{
+            "pools": {{
+                "{pool}": {{
+                    "cost": 0,
+                    "margin": 0.0,
+                    "pledge": 0,
+                    "publicKey": "{pool}",
+                    "relays": [],
+                    "rewardAccount": {{
+                        "credential": {{ "keyHash": "{delegator}" }},
+                        "network": "Testnet"
+                    }},
+                    "vrf": "{vrf}"
+                }}
+            }},
+            "stake": {{ "{delegator}": "{pool}" }}
+        }}"#
+    );
+
+    genesis.shelley.staking = Some(serde_json::from_str(&staking).unwrap());
+
+    // a testnet base address whose stake part is the delegator
+    let address = format!("00{}{delegator}", hex::encode([0x01; 28]));
+    genesis
+        .shelley
+        .initial_funds
+        .get_or_insert_with(Default::default)
+        .insert(address, GENESIS_FUNDS);
+
+    Arc::new(genesis)
+}
+
+/// Run EWRAP over the boundary that closes the current epoch.
+fn wrap_the_epoch(domain: &ToyDomain) {
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let slot = summary.epoch_start(epoch_state(domain).number + 1);
+
+    let mut work = CardanoWorkUnit::Ewrap(Box::new(EwrapWorkUnit::new(slot, domain.genesis())));
+
+    execute_work_unit(domain, &mut work).unwrap();
+}
+
+fn pool_epoch_logs(domain: &ToyDomain, epoch: Epoch) -> BTreeMap<PoolHash, PoolEpochLog> {
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let slot = summary.epoch_start(epoch);
+
+    pools(domain)
+        .into_keys()
+        .filter_map(|pool| {
+            let log = domain
+                .archive()
+                .read_log_typed::<PoolEpochLog>(slot, &PoolKey(pool))
+                .unwrap()?;
+            Some((pool, log))
+        })
+        .collect()
+}
+
+fn account_epoch_logs(
+    domain: &ToyDomain,
+    epoch: Epoch,
+) -> BTreeMap<StakeCredential, AccountEpochLog> {
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let slot = summary.epoch_start(epoch);
+
+    all_accounts(domain)
+        .into_iter()
+        .filter_map(|account| {
+            let log = domain
+                .archive()
+                .read_log_typed::<AccountEpochLog>(slot, &AccountKey::from(&account.credential))
+                .unwrap()?;
+            Some((account.credential, log))
+        })
+        .collect()
+}
+
+/// The first stake epoch (`first_shelley + 2`) logs the distribution of the
+/// first Shelley epoch, genesis pools included, as every later epoch logs
+/// its own: a `PoolEpochLog` per pool with rewards 0, and the stake leg of
+/// each delegator's `AccountEpochLog`. No reward is computed for it. RUPD
+/// runs in every epoch and ESTART at every boundary; EWRAP runs at the one
+/// that closes the RUPD epoch of the first stake epoch, since the store's
+/// pots do not fund its accounts and pools.
+#[test]
+fn the_first_stake_epoch_logs_its_distribution() {
+    let domain = seeded(devnet_with_genesis_pool());
+
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let first_shelley = summary.first_shelley_epoch();
+    let first_stake = first_shelley + 2;
+
+    let genesis_pool = pools(&domain).remove(&pool_hash(GENESIS_POOL)).unwrap();
+    assert_eq!(genesis_pool.snapshot.unwrap_live().tally(), None);
+
+    let mut first_stake_distribution = None;
+
+    loop {
+        let epoch = epoch_state(&domain).number;
+
+        if epoch == first_shelley + 1 {
+            first_stake_distribution = Some(scanned(&domain, first_shelley));
+        }
+
+        run_rupd(&domain);
+
+        if epoch == first_shelley + 3 {
+            break;
+        }
+
+        assert!(
+            pool_epoch_logs(&domain, epoch.saturating_sub(1)).is_empty(),
+            "RUPD of epoch {epoch} logged a distribution"
+        );
+
+        open_next_epoch(&domain).unwrap();
+    }
+
+    let pending = domain
+        .state()
+        .iter_entities_typed::<PendingRewardState>(None)
+        .unwrap()
+        .count();
+    assert_eq!(pending, 0, "rewards computed against the genesis snapshot");
+
+    wrap_the_epoch(&domain);
+
+    let expected = first_stake_distribution.unwrap();
+    let genesis_tally = expected.get(&pool_hash(GENESIS_POOL)).unwrap();
+    assert_eq!(genesis_tally.stake, GENESIS_FUNDS);
+    assert_eq!(genesis_tally.delegators, 1);
+
+    let pool_logs = pool_epoch_logs(&domain, first_stake);
+    assert_eq!(
+        pool_logs.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>()
+    );
+
+    for (pool, tally) in &expected {
+        let log = &pool_logs[pool];
+
+        assert_eq!(log.total_stake, tally.stake, "pool {pool}");
+        assert_eq!(log.delegators_count, tally.delegators, "pool {pool}");
+        assert_eq!(log.live_pledge, tally.live_pledge, "pool {pool}");
+        assert_eq!(log.total_rewards, 0, "pool {pool}");
+        assert_eq!(log.operator_share, 0, "pool {pool}");
+    }
+
+    let account_logs = account_epoch_logs(&domain, first_stake);
+
+    let genesis_row = &account_logs[&key(GENESIS_DELEGATOR)];
+    assert_eq!(genesis_row.active_stake, Some(GENESIS_FUNDS));
+    assert_eq!(genesis_row.pool_id, Some(pool_hash(GENESIS_POOL)));
+    assert_eq!(genesis_row.member_reward, None);
+    assert!(genesis_row.leader_rewards.is_empty());
+
+    let staked: u64 = account_logs
+        .values()
+        .filter_map(|row| row.active_stake)
+        .sum();
+    assert_eq!(staked, total(&expected));
+}
+
+/// What `blocks` minted in the live epoch leave behind: the epoch's counts
+/// and, when `operator` minted them, that pool's. Without an operator they
+/// are blocks no registered pool minted, which the reward calculation pays
+/// no one for.
+fn mint(domain: &ToyDomain, operator: Option<u8>, blocks: u32) {
+    let mut epoch = epoch_state(domain);
+    let rolling = epoch.rolling.unwrap_live_mut();
+    rolling.blocks_minted += blocks;
+    rolling.non_overlay_blocks_minted += blocks;
+
+    let pool = operator.map(|operator| {
+        let mut pool = pools(domain).remove(&pool_hash(operator)).unwrap();
+        pool.snapshot.unwrap_live_mut().blocks_minted += blocks;
+        pool
+    });
+
+    write(domain, |writer| {
+        writer.write_entity_typed(&(), &epoch).unwrap();
+
+        if let Some(pool) = &pool {
+            writer
+                .write_entity_typed(&PoolKey(pool.operator), pool)
+                .unwrap();
+        }
+    });
+}
+
+fn pending_rewards(domain: &ToyDomain) -> u64 {
+    domain
+        .state()
+        .iter_entities_typed::<PendingRewardState>(None)
+        .unwrap()
+        .map(|x| x.unwrap().1.total_value())
+        .sum()
+}
+
+/// Drive a devnet store to the RUPD of `rupd_epoch`, with `blocks` minted in
+/// the epoch before it, by `operator` or by no registered pool. Every
+/// boundary on the way runs ESTART alone. A whale delegates to `OWNED`, so
+/// its share of the supply earns more than a lovelace.
+fn run_rupd_after_blocks(rupd_epoch: Epoch, operator: Option<u8>, blocks: u32) -> ToyDomain {
+    let domain = seeded(devnet());
+
+    let whale = account(key(0x30), Some(OWNED), 1_000_000_000_000_000, 0, 0);
+    write(&domain, |writer| {
+        writer
+            .write_entity_typed(&AccountKey::from(&whale.credential), &whale)
+            .unwrap();
+    });
+
+    loop {
+        let epoch = epoch_state(&domain).number;
+
+        run_rupd(&domain);
+
+        if epoch == rupd_epoch {
+            return domain;
+        }
+
+        if epoch + 1 == rupd_epoch {
+            mint(&domain, operator, blocks);
+        }
+
+        open_next_epoch(&domain).unwrap();
+    }
+}
+
+/// Dolos pays no rewards for the first stake epoch, even where the ledger
+/// would pay the delegators (a post-Babbage store whose pool has credited
+/// non-overlay blocks, as driven here): its RUPD reads the first Shelley
+/// snapshot for the logs and computes nothing against it. The boundary closing
+/// it leaves the pots as on a chain where no pool earned anything, while one
+/// epoch later the same blocks are paid.
+#[test]
+fn the_first_stake_epoch_pays_no_rewards() {
+    const BLOCKS: u32 = 10;
+
+    let first_shelley = {
+        let domain = seeded(devnet());
+        dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+            .unwrap()
+            .first_shelley_epoch()
+    };
+    let first_stake = first_shelley + 2;
+
+    // the RUPD of the first stake epoch, after `OWNED` minted, and the path
+    // with the same epoch counts and no pool to pay
+    let earned = run_rupd_after_blocks(first_stake + 1, Some(OWNED), BLOCKS);
+    let unearned = run_rupd_after_blocks(first_stake + 1, None, BLOCKS);
+
+    let incentives = epoch_state(&earned).incentives.expect("incentives");
+    assert!(incentives.available_rewards > 0, "{incentives:?}");
+    assert_eq!(epoch_state(&unearned).incentives, Some(incentives));
+
+    assert_eq!(
+        pending_rewards(&earned),
+        0,
+        "rewards for the first stake epoch"
+    );
+
+    let logs = pool_epoch_logs(&earned, first_stake);
+    assert!(logs[&pool_hash(OWNED)].total_stake > 0);
+    assert!(logs.values().all(|x| x.total_rewards == 0), "{logs:?}");
+
+    // ESTART resets the end stats, so they are read between the two
+    let [earned_end, unearned_end] = [&earned, &unearned].map(|domain| {
+        wrap_the_epoch(domain);
+        let end = epoch_state(domain).end.expect("end stats");
+        open_next_epoch(domain).unwrap();
+        format!("{end:?}")
+    });
+
+    assert_ne!(earned_end, format!("{:?}", EndStats::default()));
+    assert_eq!(earned_end, unearned_end, "end stats");
+
+    let (earned, unearned) = (epoch_state(&earned), epoch_state(&unearned));
+    assert_eq!(earned.number, first_stake + 2);
+    assert_eq!(earned.initial_pots, unearned.initial_pots);
+
+    // the control: the same blocks, one epoch later, are paid
+    let paid = run_rupd_after_blocks(first_stake + 2, Some(OWNED), BLOCKS);
+    assert!(pending_rewards(&paid) > 0, "no rewards one epoch later");
+    assert!(pool_epoch_logs(&paid, first_stake + 1)[&pool_hash(OWNED)].total_rewards > 0);
 }
 
 fn snapshot_of(
