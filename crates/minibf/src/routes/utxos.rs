@@ -510,13 +510,20 @@ mod tests {
         dolos_testing::utxo_with_value(address, Value::Multiasset(MIN_UTXO_AMOUNT, assets))
     }
 
-    /// Two configured UTxOs on the listed address, one hashing below and one
-    /// above every tx, so the no-position rows have a ref order to keep.
+    /// Every tx of every block also pays the listed address twice, so rows
+    /// share a block at several tx indexes and a tx at several output
+    /// indexes. Two configured UTxOs on the address, one hashing below and one
+    /// above every tx, give the no-position rows a ref order to keep.
     fn chain_with_configured_rows() -> TestApp {
+        let base = SyntheticBlockConfig::default();
+        let address = Address::from_bech32(&base.address)
+            .expect("bech32 address")
+            .to_vec();
         let cfg = SyntheticBlockConfig {
             block_count: 4,
             txs_per_block: 3,
-            ..Default::default()
+            extra_outputs_by_block: vec![vec![vec![address.clone(), address]; 3]; 4],
+            ..base
         };
 
         TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
@@ -550,7 +557,7 @@ mod tests {
         for order in ["asc", "desc"] {
             let expected = whole_set_rows(&app, &address, order).await;
 
-            assert!(expected.len() > 12, "the fixture lists too few rows");
+            assert!(expected.len() > 24, "the fixture lists too few rows");
             assert!(expected.iter().any(|row| row.block.is_empty()));
             assert!(expected.iter().any(|row| !row.block.is_empty()));
 
