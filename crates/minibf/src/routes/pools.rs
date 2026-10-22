@@ -3964,8 +3964,8 @@ mod tests {
     /// exactly on a midpoint between two doubles, which a 60-decimal cut
     /// rounded down, one lovelace short in `fees`. The second is a double
     /// away from the plain `f64` division of its operands, and so is the
-    /// third, whose numerator is within 2^53 and whose denominator is below
-    /// 2^63.
+    /// third, whose numerator is within 2^53 and whose odd denominator is just
+    /// past it.
     #[test]
     fn bf_fees_round_wide_margins_to_the_nearest_double() {
         let midpoint = (12_777_994_273_690_747, 1 << 63);
@@ -3984,13 +3984,13 @@ mod tests {
         assert_eq!(margin_f64(numerator, denominator), 0.19953253589494388);
         assert_ne!(numerator as f64 / denominator as f64, 0.19953253589494388);
 
-        let narrow = (675_963_839_381_191, 44_185_663_971_266_116);
+        let narrow = (675_963_839_381_191, 9_007_199_254_746_239);
 
-        assert_eq!(margin_f64(narrow.0, narrow.1), 0.015298261441103826);
-        assert_ne!(narrow.0 as f64 / narrow.1 as f64, 0.015298261441103826);
+        assert_eq!(margin_f64(narrow.0, narrow.1), 0.07504706182945822);
+        assert_ne!(narrow.0 as f64 / narrow.1 as f64, 0.07504706182945822);
         assert_eq!(
             bf_compatible_fees(&fee_log(73_496_656_964_163, 340_000_000, Some(narrow))),
-            1_124_705_871_875
+            5_516_022_643_447
         );
     }
 
