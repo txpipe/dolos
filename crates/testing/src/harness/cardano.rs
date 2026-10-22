@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use dolos_cardano::{CardanoDelta, CardanoLogic, CardanoWorkUnit};
 use dolos_core::{
     builtin::NoDiskTier,
-    config::{FjallStateConfig, HistoryConfig, MempoolConfig, StorageConfig},
+    config::{HistoryConfig, MempoolConfig, StorageConfig},
     BootstrapExt, ChainLogic, Domain, DomainError, Genesis, MempoolError, MempoolEvent,
     MempoolStore, MempoolTx, MempoolTxStage, StateStore as CoreStateStore, TipEvent,
     TipSubscription as CoreTipSubscription, *,
@@ -23,8 +23,6 @@ pub struct Config {
     pub genesis: Genesis,
     /// Cardano chain config (stop_epoch, custom_utxos, etc).
     pub chain: dolos_cardano::CardanoLogicConfig,
-    /// Fjall state store configuration.
-    pub fjall_config: FjallStateConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -221,8 +219,9 @@ pub struct LedgerHarness {
 
 impl LedgerHarness {
     pub fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        // 1. Open fjall StateStore from provided dir with custom config
-        let state = dolos_fjall::StateStore::open(&config.state_dir, &config.fjall_config)?;
+        // 1. Open fjall StateStore from provided dir
+        let state =
+            dolos_fjall::StateStore::open(&config.state_dir, dolos_fjall::Preset::Standard)?;
 
         // 3. Initialize chain logic
         let genesis = Arc::new(config.genesis);

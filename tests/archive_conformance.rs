@@ -72,17 +72,13 @@ impl Backend for Fjall {
     fn open() -> (Self::Store, Self::Guard) {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
 
-        // Only the fields this suite cares about; the rest are the backend's
-        // own defaults rather than a re-listing of them that can go stale.
-        let config = dolos_core::config::FjallArchiveConfig {
-            cache: Some(16),
-            flush_on_commit: Some(false),
-            worker_threads: Some(1),
-            ..Default::default()
-        };
-
-        let store = dolos_fjall::archive::ArchiveStore::open(schema(), dir.path(), &config)
-            .expect("failed to open fjall archive store");
+        let store = dolos_fjall::archive::ArchiveStore::open(
+            schema(),
+            dir.path(),
+            None,
+            dolos_fjall::Preset::Standard,
+        )
+        .expect("failed to open fjall archive store");
 
         (store, dir)
     }

@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use dolos_cardano::indexes::archive_dimensions;
 use dolos_core::{
-    config::{FjallArchiveConfig, FjallStateConfig},
     ArchiveIndexDelta, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter,
     EntityKey, EraCbor, NamespaceType, StateSchema, StateStore as CoreStateStore,
     StateWriter as CoreStateWriter, Tag, TagRecord, TxoRef, UtxoSetDelta,
@@ -78,14 +77,8 @@ fn assert_lazy_iter<S: CoreStateStore>(store: &S) {
 #[serial]
 fn test_fjall_lazy_iter() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
-    let config = FjallStateConfig {
-        cache: Some(64),
-        flush_on_commit: Some(false),
-        worker_threads: Some(1),
-        ..Default::default()
-    };
-    let store =
-        dolos_fjall::StateStore::open(tmpdir.path(), &config).expect("failed to open fjall store");
+    let store = dolos_fjall::StateStore::open(tmpdir.path(), dolos_fjall::Preset::Standard)
+        .expect("failed to open fjall store");
 
     assert_lazy_iter(&store);
 }
@@ -200,14 +193,8 @@ fn assert_shard_range_iter<S: CoreStateStore>(store: &S) {
 #[serial]
 fn test_fjall_shard_range_iter() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
-    let config = FjallStateConfig {
-        cache: Some(64),
-        flush_on_commit: Some(false),
-        worker_threads: Some(1),
-        ..Default::default()
-    };
-    let store =
-        dolos_fjall::StateStore::open(tmpdir.path(), &config).expect("failed to open fjall store");
+    let store = dolos_fjall::StateStore::open(tmpdir.path(), dolos_fjall::Preset::Standard)
+        .expect("failed to open fjall store");
 
     assert_shard_range_iter(&store);
 }
@@ -310,17 +297,8 @@ fn assert_lazy_utxo_iter<S: CoreStateStore>(store: &S) {
 #[serial]
 fn test_fjall_lazy_utxo_iter() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
-    let config = FjallStateConfig {
-        // A small block cache on purpose: cached blocks are live heap, and the
-        // point of the measurement is the iterator's footprint, not the
-        // engine's cache budget.
-        cache: Some(1),
-        flush_on_commit: Some(false),
-        worker_threads: Some(1),
-        ..Default::default()
-    };
-    let store =
-        dolos_fjall::StateStore::open(tmpdir.path(), &config).expect("failed to open fjall store");
+    let store = dolos_fjall::StateStore::open(tmpdir.path(), dolos_fjall::Preset::Standard)
+        .expect("failed to open fjall store");
 
     assert_lazy_utxo_iter(&store);
 }
@@ -451,17 +429,13 @@ fn assert_lazy_archive_tag_iter<S: CoreArchiveStore>(store: &S) {
 #[serial]
 fn test_fjall_lazy_archive_tag_iter() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
-    let config = FjallArchiveConfig {
-        // Small on purpose: cached blocks are live heap, and the measurement is
-        // the iterator's footprint, not the engine's cache budget.
-        cache: Some(1),
-        flush_on_commit: Some(false),
-        worker_threads: Some(1),
-        ..Default::default()
-    };
-    let store =
-        dolos_fjall::archive::ArchiveStore::open(StateSchema::default(), tmpdir.path(), &config)
-            .expect("failed to open fjall archive store");
+    let store = dolos_fjall::archive::ArchiveStore::open(
+        StateSchema::default(),
+        tmpdir.path(),
+        None,
+        dolos_fjall::Preset::Standard,
+    )
+    .expect("failed to open fjall archive store");
 
     assert_lazy_archive_tag_iter(&store);
 }

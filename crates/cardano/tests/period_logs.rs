@@ -16,13 +16,13 @@ use dolos_core::{
     Genesis, StateStore as _, WalStore as _,
 };
 use dolos_testing::{
-    synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+    synthetic::{build_synthetic_blocks, sample_alonzo_block, SyntheticBlockConfig},
     toy_domain::ToyDomain,
     MIN_UTXO_AMOUNT,
 };
 use pallas::ledger::{
     addresses::{Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart},
-    primitives::StakeCredential,
+    primitives::{alonzo, StakeCredential, TransactionInput},
     traverse::MultiEraBlock,
 };
 
@@ -264,6 +264,61 @@ fn rollback_unstages_exactly_the_mints_its_block_created() {
 
     domain.rollback(&points[0]).unwrap();
     assert_eq!(staged_mints(&domain), after[0]);
+}
+
+/// A zero-quantity entry stages no first mint and no mint stats, beside a real
+/// mint in the same tx that does.
+#[test]
+fn zero_mint_stages_no_first_mint() {
+    let (blocks, vectors, chain_config) = build_synthetic_blocks(plain(SyntheticBlockConfig {
+        block_count: 1,
+        txs_per_block: 1,
+        ..Default::default()
+    }));
+    let last = vectors.blocks.last().unwrap();
+
+    let mut assets = std::collections::BTreeMap::new();
+    assets.insert(b"A".to_vec().into(), 1);
+    assets.insert(b"ZERO".to_vec().into(), 0);
+
+    let mut mint: alonzo::Mint = std::collections::BTreeMap::new();
+    mint.insert([0x44u8; 28].into(), assets);
+
+    let input = TransactionInput {
+        transaction_id: last.tx_hashes[0].parse().unwrap(),
+        index: 0,
+    };
+
+    let (block, _, _) = sample_alonzo_block(
+        last.block_number + 1,
+        last.slot + 1,
+        Some(last.block_hash.parse().unwrap()),
+        input,
+        vec![],
+        Some(mint),
+    );
+
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+    domain.roll_forward(blocks[0].clone()).unwrap();
+    domain.roll_forward(block.clone()).unwrap();
+
+    let decoded = MultiEraBlock::decode(&block).unwrap();
+
+    let subjects: Vec<Vec<u8>> = staged(&domain)
+        .into_iter()
+        .filter(|(_, _, slot)| *slot == decoded.slot())
+        .map(|(_, subject, _)| subject[28..].to_vec())
+        .collect();
+    assert_eq!(subjects, [b"A".to_vec()]);
+
+    let point = ChainPoint::Specific(decoded.slot(), decoded.hash());
+    let entry = domain.wal().read_entry(&point).unwrap().unwrap();
+    let count = |f: fn(&CardanoDelta) -> bool| entry.delta.iter().filter(|x| f(x)).count();
+
+    assert_eq!(count(|x| matches!(x, CardanoDelta::StageFirstMint(_))), 1);
+    assert_eq!(count(|x| matches!(x, CardanoDelta::MintStatsUpdate(_))), 1);
 }
 
 /// The script hashes the witness holds, and the `(epoch, script hash)` keys

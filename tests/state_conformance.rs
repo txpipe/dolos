@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dolos_core::{
-    builtin::MemoryStateStore, config::FjallStateConfig, ChainPoint, EntityKey, EraCbor, KeyBytes,
-    KeyRange, RangeOf, Tag, TxoRef, UtxoIndexDelta, UtxoSet, UtxoSetDelta,
+    builtin::MemoryStateStore, ChainPoint, EntityKey, EraCbor, KeyBytes, KeyRange, RangeOf, Tag,
+    TxoRef, UtxoIndexDelta, UtxoSet, UtxoSetDelta,
 };
 use dolos_core::{StateStore as CoreStateStore, StateWriter as CoreStateWriter};
 
@@ -41,16 +41,7 @@ impl Backend for Fjall {
     fn open() -> (Self::Store, Self::Guard) {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
 
-        let config = FjallStateConfig {
-            cache: Some(16),
-            max_journal_size: None,
-            flush_on_commit: Some(false),
-            l0_threshold: None,
-            worker_threads: Some(1),
-            memtable_size_mb: None,
-        };
-
-        let store = dolos_fjall::StateStore::open(dir.path(), &config)
+        let store = dolos_fjall::StateStore::open(dir.path(), dolos_fjall::Preset::Standard)
             .expect("failed to open fjall state store");
 
         (store, dir)

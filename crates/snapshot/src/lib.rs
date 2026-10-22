@@ -62,6 +62,7 @@
 //! the Stelae repository. This crate retains the profile-specific encoding,
 //! repository lifecycle and consumer operations that host uses.
 
+pub mod boundary;
 pub mod export;
 pub mod facade;
 pub mod layers;
@@ -615,6 +616,15 @@ pub enum Error {
     /// hash. A cursor that has only a slot cannot anchor one.
     #[error("a stele's position needs a block hash, but the chain point is {0}")]
     UnanchoredPoint(String),
+
+    /// Stores that do not stand on the first block of the plan's sequence
+    /// epoch, refused before a layer is written. See [`boundary`].
+    #[error("the stores at {cursor} are not the epoch-{sequence} boundary cut: {reason}")]
+    NotABoundary {
+        cursor: String,
+        sequence: u64,
+        reason: boundary::Ineligible,
+    },
 
     /// A field of the inscription this profile owns — `position` or a layer's
     /// `scope` — is not the shape this profile writes. Raised while reading a

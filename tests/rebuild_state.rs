@@ -281,11 +281,9 @@ fn target_and_ephemeral_leave_the_instance_untouched() {
     assert_eq!(after, before);
 
     // And the alternate-path rebuild is the same state the instance holds.
-    let rebuilt = dolos::storage::StateStoreBackend::open_fjall(
-        &target,
-        &dolos_core::config::FjallStateConfig::default(),
-    )
-    .unwrap();
+    let rebuilt =
+        dolos::storage::StateStoreBackend::open_fjall(&target, dolos_fjall::Preset::Standard)
+            .unwrap();
 
     assert_eq!(StateContents::read(&rebuilt), before.state);
 }
