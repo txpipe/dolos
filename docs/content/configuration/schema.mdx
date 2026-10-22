@@ -459,7 +459,7 @@ The client APIs. Each API runs when its table is present.
 | ----- | ---- | ------- |
 | `max_concurrent_queries` | integer | `32`; valid 1 to 64 |
 
-`max_concurrent_queries` bounds the blocking query work the node runs at once, across every API. A value outside 1 to 64 is refused. It is also the one integer field that refuses a fraction; see [rules across fields](#rules-across-fields).
+`max_concurrent_queries` bounds the blocking query work the node runs at once, across every API. A value outside 1 to 64 is refused. It is also the one integer field that takes nothing but a whole number, written bare or as a string; see [rules across fields](#rules-across-fields).
 
 ### `serve.grpc`
 
@@ -476,7 +476,7 @@ The [UTxO RPC](../apis/grpc) endpoint.
 | `http2_max_frame_size` | integer (bytes) | hyper's default |
 | `http2_max_concurrent_streams` | integer (streams per connection) | hyper's default |
 
-- `tls_client_ca_root` names a CA root file that client certificates would be checked against. **It does not work in this release, so leave it out.** The endpoint has no server certificate to present, and gRPC fails to start when the field is set. `dolos config check` does not catch this.
+- `tls_client_ca_root` names a CA root file that client certificates would be checked against. **It does not work in this release, so leave it out.** The endpoint has no server certificate to present, so when the field is set gRPC fails as it starts, and the node stops with it: sync and every other API shut down and the command exits with an error. `dolos config check` does not catch this.
 - `permissive_cors` allows cross-origin requests from any origin.
 - `http2_adaptive_window` sizes the HTTP/2 flow-control windows to the link. While it is on, the two `http2_initial_*_window_size` fields have no effect.
 
@@ -596,10 +596,12 @@ Each error names the keys involved, and is reported before any store opens.
 
 A plain value of another type is converted to the field's type where it can be, rather than refused:
 
-- a boolean field takes `"true"`, `"yes"`, `"on"`, `"1"` and any non-zero number as `true`, and their opposites as `false`;
-- a number field takes a numeric string, and a boolean as `1` or `0`;
+- a boolean field takes `"true"`, `"yes"`, `"on"`, `"1"` and any non-zero number as `true`, and `"false"`, `"no"`, `"off"`, `"0"` and zero as `false`, in any letter case;
+- an integer field takes a whole number written as a string, such as `"50"`, and takes a boolean, or the words `"true"`, `"yes"` and `"on"` in any letter case, as `1`, and their opposites as `0`;
 - a string field takes a number or a boolean;
-- a fraction in an integer field is rounded: `pull_batch_size = 0.4` loads as `0`, and `window = { unit = "slot", value = 0.4 }` as a window of zero slots. Only `serve.max_concurrent_queries` refuses a fraction.
+- a fraction in an integer field is rounded: `pull_batch_size = 0.4` loads as `0`, and `window = { unit = "slot", value = 0.4 }` as a window of zero slots. No integer field takes a negative number, but a negative fraction loads as `0` rather than being refused.
+
+A fraction written as a string, such as `"0.4"`, is refused rather than rounded, and so is a fraction in an [environment variable](./introduction#environment-variables), whose value is always a string. `serve.max_concurrent_queries` is stricter: it takes only a whole number, bare or as a string, and refuses a fraction (`2.0` included), a boolean and the words above.
 
 A value with no conversion is refused, such as `"abc"` in an integer field, `"maybe"` in a boolean field, or a list or table in a plain field. A converted value passes `dolos config check`, so write every field in the type its table gives.
 
