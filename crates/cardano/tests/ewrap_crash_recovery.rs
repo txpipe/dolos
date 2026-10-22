@@ -6,7 +6,8 @@
 //! so a shard marked done whose `account-epochs` rows never reached the
 //! archive loses them for good. Finalize commits twice too — the settled
 //! `pool-epochs` rows and the closed epoch to the archive, then its state,
-//! which marks it done in `EpochState.ewrap_finalized`. The harness is
+//! which marks it done in `EpochState.ewrap_finalized`. Finalize's archive
+//! commit also carries the `drep-epochs` rows. The harness is
 //! `ToyDomain`, wrapped in a `FaultyToyDomain` that dies after a set number of
 //! store commits, and the boundary runs through `execute_work_unit`, the
 //! executor the node runs.
@@ -19,12 +20,13 @@ use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
     toy_domain::ToyDomain,
 };
-use pallas::ledger::primitives::StakeCredential;
+use pallas::ledger::primitives::{conway::DRep, StakeCredential};
 
 use dolos_cardano::{
     ewrap::EwrapWorkUnit, pallas_extras, AccountEpochLog, AccountKey, AccountState,
-    CardanoWorkUnit, DRepDelegation, EpochState, EpochValue, PendingRewardState, PoolDelegation,
-    PoolEpochLog, PoolHash, PoolKey, PoolParams, PoolSnapshot, PoolState, Stake,
+    CardanoWorkUnit, DRepDelegation, DRepEpochLog, DRepKey, DRepState, EpochState, EpochValue,
+    PendingRewardState, PoolDelegation, PoolEpochLog, PoolHash, PoolKey, PoolParams, PoolSnapshot,
+    PoolState, Stake,
 };
 
 const CLOSING_EPOCH: u64 = 5;
@@ -53,11 +55,29 @@ fn credential(byte: u8) -> StakeCredential {
     StakeCredential::AddrKeyhash([byte; 28].into())
 }
 
+/// The registered DRep the first account delegates to.
+fn drep() -> DRep {
+    DRep::Key([0xd0; 28].into())
+}
+
+/// Each account's vote delegation: the registered DRep and both pseudo-DReps,
+/// so the completed distribution has one entry per account.
+fn vote_delegation(byte: u8) -> DRepDelegation {
+    let drep = match byte {
+        0x10 => drep(),
+        0x80 => DRep::Abstain,
+        _ => DRep::NoConfidence,
+    };
+
+    DRepDelegation::Delegated(drep)
+}
+
 /// A devnet store closing [`CLOSING_EPOCH`], where every account in
 /// [`ACCOUNTS`] is registered and has a pending reward for EWRAP to apply —
-/// which is what gives each of them an `account-epochs` row — where RUPD
-/// logged each pool's rewards with the [`FORFEITED`] share still in them, and
-/// where the [`RETIRING`] pool leaves.
+/// which is what gives each of them an `account-epochs` row — and delegates
+/// its vote, which is what gives the distribution its `drep-epochs` rows,
+/// where RUPD logged each pool's rewards with the [`FORFEITED`] share still in
+/// them, and where the [`RETIRING`] pool leaves.
 fn seeded() -> ToyDomain {
     let domain = ToyDomain::new(None, None);
     let state = domain.state();
@@ -77,7 +97,7 @@ fn seeded() -> ToyDomain {
             registered_at: Some(0),
             stake: EpochValue::with_live(CLOSING_EPOCH, Stake::default()),
             pool: EpochValue::with_live(CLOSING_EPOCH, PoolDelegation::NotDelegated),
-            drep: EpochValue::with_live(CLOSING_EPOCH, DRepDelegation::NotDelegated),
+            drep: EpochValue::with_live(CLOSING_EPOCH, vote_delegation(byte)),
             vote_delegated_at: None,
             deregistered_at: None,
             credential: credential.clone(),
@@ -94,6 +114,21 @@ fn seeded() -> ToyDomain {
         writer.write_entity_typed(&key, &account).unwrap();
         writer.write_entity_typed(&key, &reward).unwrap();
     }
+
+    let drep = DRepState {
+        identifier: drep(),
+        registered_at: Some((0, 0)),
+        voting_power: 0,
+        last_active_slot: None,
+        unregistered_at: None,
+        expired: false,
+        deposit: 0,
+        anchor: None,
+        expiry: None,
+    };
+    writer
+        .write_entity_typed(&DRepKey::from(&drep.identifier), &drep)
+        .unwrap();
 
     let params = PoolParams {
         vrf_keyhash: [0; 32].into(),
@@ -185,6 +220,7 @@ struct Outcome {
     account_epochs: Vec<(BlockSlot, AccountKey, AccountEpochLog)>,
     pool_epochs: Vec<(BlockSlot, PoolKey, PoolEpochLog)>,
     closed_epochs: Vec<(BlockSlot, EpochState)>,
+    drep_epochs: Vec<(BlockSlot, DRepKey, DRepEpochLog)>,
     accounts: Vec<AccountState>,
     pools: Vec<PoolState>,
     epoch: EpochState,
@@ -222,6 +258,11 @@ fn outcome(domain: &ToyDomain) -> Outcome {
             .unwrap()
             .map(|x| x.map(|(slot, (), epoch)| (slot, epoch)).unwrap())
             .collect(),
+        drep_epochs: archive
+            .iter_logs_typed::<DRepEpochLog>(None)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect(),
         accounts,
         pools: domain
             .state()
@@ -241,6 +282,7 @@ fn clean_run() -> Outcome {
     let expected = outcome(&clean);
 
     assert_eq!(expected.account_epochs.len(), ACCOUNTS.len());
+    assert_eq!(expected.drep_epochs.len(), ACCOUNTS.len());
     assert!(
         expected
             .closed_epochs
@@ -290,7 +332,7 @@ fn clean_run() -> Outcome {
 /// archive and state end up exactly as in a run that never crashed — a shard
 /// re-run after its archive commit writes the same rows again and applies its
 /// rewards once, and a finalize re-run after its archive commit settles the
-/// same pool logs again.
+/// same pool logs again and writes the same `drep-epochs` rows once.
 #[test]
 fn a_crash_at_any_commit_ends_like_a_clean_run() {
     let expected = clean_run();

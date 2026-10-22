@@ -21,8 +21,8 @@ use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
 
 use crate::{
     eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountEpochLog,
-    AccountState, CardanoDelta, DRepState, EpochState, EraKey, GovDistr, GovState, PoolHash,
-    PoolState, ProposalOutcome, ProposalState,
+    AccountState, CardanoDelta, DRepEpochLog, DRepState, EpochState, EraKey, GovDistr, GovState,
+    PoolHash, PoolState, ProposalOutcome, ProposalState,
 };
 
 pub mod commit;
@@ -268,6 +268,11 @@ pub struct BoundaryWork {
     /// [`Self::account_epoch_slot`].
     pub logs: Vec<(AccountId, AccountEpochLog)>,
 
+    /// One row per entry of the DRep distribution this boundary completes,
+    /// written by the finalize pass under [`Self::drep_epoch_slot`]. Empty
+    /// when the distribution is incomplete, and on the shard passes.
+    pub drep_logs: Vec<(DRepId, DRepEpochLog)>,
+
     /// Credentials whose rewards were applied (need to be dequeued from state).
     pub applied_reward_credentials: Vec<StakeCredential>,
 
@@ -367,6 +372,14 @@ impl BoundaryWork {
     pub fn account_epoch_slot(&self) -> BlockSlot {
         self.chain_summary
             .epoch_start(self.ending_state.number.saturating_sub(1))
+    }
+
+    /// The slot the `drep-epochs` rows are keyed under: the start of the epoch
+    /// the boundary closes, like the `epochs` log, so a rollback to the
+    /// boundary itself keeps them. Koios labels the distribution with the
+    /// next epoch: its `epoch_no` is the key's epoch plus one.
+    pub fn drep_epoch_slot(&self) -> BlockSlot {
+        self.chain_summary.epoch_start(self.ending_state.number)
     }
 
     /// Assemble one account's row of the merged log.

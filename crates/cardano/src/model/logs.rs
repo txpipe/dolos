@@ -127,3 +127,24 @@ pub struct PoolEpochLog {
 }
 
 entity_boilerplate!(PoolEpochLog, "pool-epochs", log = super::PoolKey);
+
+/// One DRep's voting power in one completed DRep distribution.
+///
+/// Written by EWRAP's finalize pass for every entry of the distribution the
+/// boundary closing epoch `n` completes, Abstain and NoConfidence included,
+/// keyed by `(epoch_start(n), drep)`, like the `epochs` log. Koios labels that
+/// distribution `epoch_no = n + 1`, the key's epoch plus one, and the
+/// boundary closing `n + 1` tallies it.
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
+pub struct DRepEpochLog {
+    /// Stake in Lovelaces the distribution attributes to the DRep.
+    #[n(0)]
+    pub voting_power: u64,
+
+    /// Whether the DRep was registered at the boundary; always true for the
+    /// Abstain and NoConfidence pseudo-DReps.
+    #[n(1)]
+    pub registered: bool,
+}
+
+entity_boilerplate!(DRepEpochLog, "drep-epochs", log = super::DRepKey);
