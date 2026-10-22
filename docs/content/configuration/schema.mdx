@@ -599,7 +599,7 @@ A plain value of another type is converted to the field's type where it can be, 
 - a boolean field takes `"true"`, `"yes"`, `"on"`, `"1"` and any non-zero number as `true`, and `"false"`, `"no"`, `"off"`, `"0"` and zero as `false`, in any letter case;
 - an integer field takes a whole number written as a string, such as `"50"`, and takes a boolean, or the words `"true"`, `"yes"` and `"on"` in any letter case, as `1`, and their opposites as `0`;
 - a string field takes a number or a boolean;
-- a fraction in an integer field is rounded: `pull_batch_size = 0.4` loads as `0`, and `window = { unit = "slot", value = 0.4 }` as a window of zero slots. No integer field takes a negative number, but a negative fraction loads as `0` rather than being refused.
+- a fraction in an integer field is rounded: `pull_batch_size = 0.4` loads as `0`, and `window = { unit = "slot", value = 0.4 }` as a window of zero slots. No integer field takes a negative number: `-5` is refused, but a negative number written with a decimal point, such as `-0.4` or `-5.0`, loads as `0`.
 
 A fraction written as a string, such as `"0.4"`, is refused rather than rounded, and so is a fraction in an [environment variable](./introduction#environment-variables), whose value is always a string. `serve.max_concurrent_queries` is stricter: it takes only a whole number, bare or as a string, and refuses a fraction (`2.0` included), a boolean and the words above.
 
