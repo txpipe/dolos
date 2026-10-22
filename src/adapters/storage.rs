@@ -1868,10 +1868,12 @@ mod tests {
 
     /// A state this release wrote, holding a cursor that fails to read beside
     /// an identity that reads: each is flushed to a table of its own, and only
-    /// the cursor's is corrupt.
+    /// the cursor's is corrupt. Its journal is emptied, as fjall leaves it once
+    /// it has rotated: replaying the writes would put the cursor back in
+    /// memory, above its table.
     fn written_state_with_unreadable_cursor(config: &RootConfig) {
         let path = config.storage.state_path().unwrap();
-        let store = dolos_fjall::StateStore::open(path, &FjallStateConfig::default()).unwrap();
+        let store = dolos_fjall::StateStore::open(&path, &FjallStateConfig::default()).unwrap();
         let cursor = store
             .database()
             .keyspace("state-cursor", Default::default)
@@ -1890,6 +1892,17 @@ mod tests {
         cursor.rotate_memtable_and_wait().unwrap();
         store.shutdown().unwrap();
         drop((cursor, store));
+
+        for file in std::fs::read_dir(&path).unwrap() {
+            let file = file.unwrap().path();
+
+            if file.extension().is_some_and(|extension| extension == "jnl") {
+                let journal = std::fs::OpenOptions::new().write(true).open(file).unwrap();
+                let len = journal.metadata().unwrap().len();
+                journal.set_len(0).unwrap();
+                journal.set_len(len).unwrap();
+            }
+        }
 
         corrupt_tables(&keyspace, &identity);
     }
