@@ -3192,10 +3192,11 @@ mod tests {
         }
     }
 
-    /// A chain shaped as mainnet's or preprod's: Byron history, Shelley from
-    /// `first_shelley` for `shelley_epochs`, then Allegra at the edge. Shelley
-    /// is a past era there, as on the shipped networks.
-    fn byron_then_shelley(first_shelley: u64, shelley_epochs: u64) -> ChainSummary {
+    /// A chain shaped as mainnet's or preprod's: Byron history, then Shelley
+    /// from `first_shelley`. With `shelley_epochs`, Shelley closes after that
+    /// many epochs and Allegra is the edge; without, Shelley is the edge, as
+    /// on mainnet through its gate epochs.
+    fn byron_then_shelley(first_shelley: u64, shelley_epochs: Option<u64>) -> ChainSummary {
         let byron_length = 21_600;
         let shelley_length = 432_000;
 
@@ -3205,11 +3206,11 @@ mod tests {
             timestamp: first_shelley * byron_length * 20,
         };
 
-        let allegra_start = crate::model::EraBoundary {
-            epoch: first_shelley + shelley_epochs,
-            slot: shelley_start.slot + shelley_epochs * shelley_length,
-            timestamp: shelley_start.timestamp + shelley_epochs * shelley_length,
-        };
+        let allegra_start = shelley_epochs.map(|epochs| crate::model::EraBoundary {
+            epoch: first_shelley + epochs,
+            slot: shelley_start.slot + epochs * shelley_length,
+            timestamp: shelley_start.timestamp + epochs * shelley_length,
+        });
 
         let mut chain = ChainSummary::default();
 
@@ -3232,33 +3233,37 @@ mod tests {
             2,
             crate::model::EraState {
                 start: shelley_start,
-                end: Some(allegra_start.clone()),
+                end: allegra_start.clone(),
                 epoch_length: shelley_length,
                 slot_length: 1,
                 protocol: 2,
             },
         );
 
-        chain.append_era(
-            3,
-            crate::model::EraState {
-                start: allegra_start,
-                end: None,
-                epoch_length: shelley_length,
-                slot_length: 1,
-                protocol: 3,
-            },
-        );
+        if let Some(allegra_start) = allegra_start {
+            chain.append_era(
+                3,
+                crate::model::EraState {
+                    start: allegra_start,
+                    end: None,
+                    epoch_length: shelley_length,
+                    slot_length: 1,
+                    protocol: 3,
+                },
+            );
+        }
 
         chain
     }
 
     /// RUPD's and EWRAP's gates read the chain's first Shelley epoch, not
     /// the chain's first epoch: on mainnet the stake gate opens at 211 and
-    /// the reward gate at 212, and on preprod at 7 and 8.
+    /// the reward gate at 212, and on preprod at 7 and 8. Mainnet reaches
+    /// those epochs with Shelley still at the edge, so both the edge and the
+    /// past-era shapes are covered.
     #[test]
     fn the_gates_follow_the_chains_first_shelley_epoch() {
-        for (first_shelley, shelley_epochs) in [(208, 28), (4, 1)] {
+        for (first_shelley, shelley_epochs) in [(208, None), (208, Some(28)), (4, Some(1))] {
             let chain = byron_then_shelley(first_shelley, shelley_epochs);
             assert_eq!(chain.first_shelley_epoch(), first_shelley);
 

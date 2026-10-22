@@ -914,10 +914,11 @@ fn run_rupd_after_blocks(rupd_epoch: Epoch, operator: Option<u8>, blocks: u32) -
 }
 
 /// Dolos pays no rewards for the first stake epoch, even where the ledger
-/// would (`d < 1` and a registered reward account, as on this devnet): its
-/// RUPD reads the first Shelley snapshot for the logs and computes nothing
-/// against it. The boundary closing it leaves the pots as on a chain where
-/// no pool earned anything, while one epoch later the same blocks are paid.
+/// would pay the delegators (a post-Babbage store whose pool has credited
+/// non-overlay blocks, as driven here): its RUPD reads the first Shelley
+/// snapshot for the logs and computes nothing against it. The boundary closing
+/// it leaves the pots as on a chain where no pool earned anything, while one
+/// epoch later the same blocks are paid.
 #[test]
 fn the_first_stake_epoch_pays_no_rewards() {
     const BLOCKS: u32 = 10;
