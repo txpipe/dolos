@@ -307,11 +307,11 @@ pub fn inspect_existing_data(
 }
 
 /// The decision on storage holding a store this release refuses. `--force` on
-/// its own clears it, unless clearing the storage root would leave part of
-/// the stores it replaces: a state that fails to open for another reason or
-/// whose cursor fails to read, or a directory outside the root that holds
-/// data. Those are named for removal by hand, after the refusal, each with
-/// the reason `--force` leaves it.
+/// its own clears it, unless storage also holds a state that fails to open
+/// for another reason or whose cursor fails to read, which `--force` never
+/// clears, or a directory outside the root that holds data, which clearing
+/// the root doesn't reach. Those are named for removal by hand, after the
+/// refusal, each with the reason `--force` leaves it.
 fn clear_refused(
     config: &RootConfig,
     policy: ExistingDataPolicy,
@@ -1936,6 +1936,28 @@ mod tests {
         corrupt_tables(&keyspace, &[]);
     }
 
+    /// What `--force` on its own is told beside a refused store: the refusal
+    /// a run without flags gets, then each of `left` on a line of its own.
+    fn would_leave(config: &RootConfig, left: &[String]) -> String {
+        let refusal = inspect_existing_data(config, ExistingDataPolicy::default()).unwrap_err();
+
+        format!(
+            "{refusal}\n`--force` would leave:\n{}\nStop anything using them, remove them by \
+             hand, then run the bootstrap again",
+            left.join("\n")
+        )
+    }
+
+    /// The line naming a state that fails to open or to read its cursor, with
+    /// the `error` it failed with.
+    fn unreadable_state_line(config: &RootConfig, error: Error) -> String {
+        format!(
+            "  {}: a state store that fails to open or to read its cursor, which `--force` \
+             never clears: {error}",
+            config.storage.state_path().unwrap().display()
+        )
+    }
+
     /// The refusal an open came to, or `None` when the store opened.
     fn refusal<T>(opened: Result<T, Error>) -> Option<IncompatibleStore> {
         match opened {
@@ -2560,7 +2582,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let config = config_over(&temp.path().join("data"));
         written_state_with_unreadable_cursor(&config);
-        assert!(open_state_store(&config).unwrap().read_cursor().is_err());
+        let error: Error = open_state_store(&config)
+            .unwrap()
+            .read_cursor()
+            .unwrap_err()
+            .into();
 
         for policy in every_policy() {
             let inspected = inspect_existing_data(&config, policy);
@@ -2582,13 +2608,9 @@ mod tests {
         };
 
         assert!(message.contains("the archive store"), "{message}");
-        assert!(
-            message.contains(&format!(
-                "{}: a state store that fails to open or to read its cursor, which `--force` \
-                 never clears: ",
-                config.storage.state_path().unwrap().display()
-            )),
-            "{message}"
+        assert_eq!(
+            message,
+            would_leave(&config, &[unreadable_state_line(&config, error)])
         );
     }
 
@@ -2674,6 +2696,17 @@ mod tests {
         written_segment(&segments);
 
         let state = config.storage.state_path().unwrap();
+        let expected = would_leave(
+            &config,
+            &[
+                unreadable_state_line(&config, open_state_store(&config).err().unwrap()),
+                format!(
+                    "  {}: data outside {}, the storage root `--force` clears",
+                    segments.display(),
+                    config.storage.path.display()
+                ),
+            ],
+        );
 
         for policy in every_policy() {
             let message = match inspect_existing_data(&config, policy) {
@@ -2689,17 +2722,8 @@ mod tests {
                 assert!(message.contains("only on its own"), "{message}");
                 assert!(!message.contains("fails to open"), "{message}");
             } else {
-                for named in [
-                    "the archive store".to_string(),
-                    format!(
-                        "{}: a state store that fails to open or to read its cursor, which \
-                         `--force` never clears: ",
-                        state.display()
-                    ),
-                    format!("{}: data outside", segments.display()),
-                ] {
-                    assert!(message.contains(&named), "{message}");
-                }
+                assert!(message.contains("the archive store"), "{message}");
+                assert_eq!(message, expected);
             }
         }
 

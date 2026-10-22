@@ -89,7 +89,7 @@ pub struct Args {
     skip_if_data: bool,
 
     /// Continue bootstrap even if data exists, trusting the subcommand to
-    /// handle resumption
+    /// handle resumption; a store this release refuses is an error instead
     #[arg(long, alias = "resume", global = true)]
     r#continue: bool,
 

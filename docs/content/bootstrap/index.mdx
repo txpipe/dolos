@@ -25,7 +25,7 @@ These flags apply to all bootstrap methods:
 | ---- | ----------- | ------- |
 | `--force` | Clear existing data before bootstrapping | `false` |
 | `--skip-if-data` | Skip bootstrap if data already exists (exit 0); a store this release refuses is an error instead | `false` |
-| `--continue` | Continue bootstrap even if data exists, trusting the subcommand to handle resumption | `false` |
+| `--continue` | Continue bootstrap even if data exists, trusting the subcommand to handle resumption; a store this release refuses is an error instead | `false` |
 | `--verbose` | Enable verbose logging output | `false` |
 
 By default, `dolos bootstrap` will error if it detects existing data in storage. Use one of the flags above to control this behavior.
