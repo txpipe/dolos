@@ -12,12 +12,9 @@
 //! inputs to rebuild it at publish time — the most expensive machinery in the
 //! original design — the hashing scheme is promoted into the profile and the
 //! stored form travels. This codec therefore *never hashes anything*: it copies
-//! [`dolos_core::KeyHash`] bytes through in both directions. The one dimension
-//! whose stored form is not a hash ([`dolos_core::VERBATIM_KEY_DIMENSION`],
-//! whose keys are already `u64` labels) needs no special case here for exactly
-//! that reason — it is opaque bytes like every other dimension, and
-//! [`dolos_core::key_hash`] remains the only place in the tree that knows the
-//! difference.
+//! [`dolos_core::KeyHash`] bytes through in both directions, and
+//! [`dolos_core::key_hash`] remains the only place in the tree that derives
+//! them.
 //!
 //! ## Order: tags, then exact
 //!
@@ -208,7 +205,7 @@ pub fn slot_of(record: &IndexRecord) -> BlockSlot {
 
 #[cfg(test)]
 mod tests {
-    use dolos_core::{key_hash, MAX_EXACT_KEY_LEN, VERBATIM_KEY_DIMENSION};
+    use dolos_core::MAX_EXACT_KEY_LEN;
 
     use super::*;
 
@@ -240,28 +237,6 @@ mod tests {
 
             assert_eq!(decode(encoded.as_bytes()).unwrap(), original);
         }
-    }
-
-    /// The dimension whose stored key is a verbatim `u64` label rather than a
-    /// hash. Nothing in this codec treats it specially — that is the property
-    /// under test.
-    #[test]
-    fn the_verbatim_dimension_carries_its_label_unchanged() {
-        let label = 674u64;
-        let stored = key_hash(VERBATIM_KEY_DIMENSION, &label.to_be_bytes()).unwrap();
-
-        assert_eq!(stored, label.to_be_bytes(), "the label is kept, not hashed");
-
-        let original: IndexRecord = TagRecord::new(VERBATIM_KEY_DIMENSION, stored, 900).into();
-        let encoded = encode(&original).unwrap();
-        let decoded = decode(encoded.as_bytes()).unwrap();
-
-        assert_eq!(decoded, original);
-
-        let IndexRecord::Tag(tag) = decoded else {
-            panic!("expected a tag record");
-        };
-        assert_eq!(u64::from_be_bytes(tag.key_hash), label);
     }
 
     #[test]

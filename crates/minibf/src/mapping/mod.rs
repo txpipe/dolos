@@ -46,6 +46,8 @@ pub mod blocks;
 pub mod cost_models;
 pub mod direct_json;
 pub mod epochs;
+pub mod genesis;
+pub mod governance;
 pub mod network;
 pub mod protocol_params;
 pub mod txs;
@@ -1450,6 +1452,17 @@ where
 
         Ok(Json(tx))
     }
+}
+
+/// Gives a stable key order to DTOs with `HashMap` fields.
+///
+/// A `HashMap` serializes its keys in a random order for each instance.
+/// `serde_json::Value` sorts object keys while serde_json's `preserve_order`
+/// feature stays off.
+pub fn sorted_json<T: Serialize>(model: T) -> Result<Json<serde_json::Value>, StatusCode> {
+    serde_json::to_value(model)
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[derive(Default)]

@@ -2219,6 +2219,7 @@ mod tests {
             register_slot: 0,
             retiring_epoch: Some(CLOSING_EPOCH + 1),
             deposit: 0,
+            calidus: None,
         };
 
         let writer = state.start_writer().unwrap();
