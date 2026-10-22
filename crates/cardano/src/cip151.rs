@@ -1,5 +1,9 @@
 use pallas::{
-    crypto::hash::{Hash, Hasher},
+    codec::minicbor,
+    crypto::{
+        hash::{Hash, Hasher},
+        key::ed25519::{PublicKey, Signature},
+    },
     ledger::{primitives::Metadatum, traverse::MultiEraTx},
 };
 use thiserror::Error;
@@ -8,6 +12,8 @@ pub const CIP151_METADATA_LABEL: u64 = 867;
 
 const POOL_SCOPE_KIND: u64 = 1;
 const CALIDUS_KEY_HASH_HEADER: u8 = 0xa1;
+const CIP8_VALIDATION_METHOD: u64 = 2;
+const COSE_WITNESS_TYPE: u64 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cip151PoolRegistration {
@@ -126,6 +132,139 @@ pub fn parse_cip151_pool_registration(
     })
 }
 
+/// Whether `metadata`, the label-867 entry `registration` was parsed from,
+/// carries a CIP-8 (validation method 2) signature by the pool's cold key.
+///
+/// It follows the check Blockfrost and Koios run (pg_cardano's
+/// `tools_verify_cip88_pool_key_registration`): a COSE_Sign1 over the
+/// blake2b-256 hash of the payload's CBOR, whose protected header names the
+/// signer's key hash as `address`. It also requires that key to be the pool's
+/// cold key, so no other key can register for the pool.
+pub fn cip151_registration_is_signed(
+    metadata: &Metadatum,
+    registration: &Cip151PoolRegistration,
+) -> bool {
+    if registration.validation_method != CIP8_VALIDATION_METHOD {
+        return false;
+    }
+
+    let Ok(items) = as_map(metadata, "registration") else {
+        return false;
+    };
+
+    let Some(Ok(payload)) = lookup(items, 1).map(minicbor::to_vec) else {
+        return false;
+    };
+
+    let Some(Ok(witnesses)) = lookup(items, 2).map(|x| as_array(x, "witnesses")) else {
+        return false;
+    };
+
+    let digest = Hasher::<256>::hash(&payload);
+
+    witnesses
+        .iter()
+        .any(|witness| cose_witness_signs(witness, &registration.pool_id, digest.as_slice()))
+}
+
+/// Whether `witness` is a COSE witness by the key hashing to `pool_id` over
+/// `digest`.
+fn cose_witness_signs(witness: &Metadatum, pool_id: &Hash<28>, digest: &[u8]) -> bool {
+    let Ok(witness) = as_map(witness, "witness") else {
+        return false;
+    };
+
+    if let Some(kind) = lookup(witness, 0) {
+        if as_uint(kind, "witness_type") != Ok(COSE_WITNESS_TYPE) {
+            return false;
+        }
+    }
+
+    let Some(pub_key) = lookup(witness, 1)
+        .and_then(|x| as_map(x, "cose_key").ok())
+        .and_then(|x| lookup(x, -2))
+        .and_then(|x| as_bytes(x, "cose_key_pub").ok())
+        .and_then(|x| <[u8; 32]>::try_from(x).ok())
+    else {
+        return false;
+    };
+
+    if Hasher::<224>::hash(&pub_key) != *pool_id {
+        return false;
+    }
+
+    let Some(Ok(sign1)) = lookup(witness, 2).map(|x| as_array(x, "cose_sign1")) else {
+        return false;
+    };
+
+    let [protected, hashed, _, signature] = sign1 else {
+        return false;
+    };
+
+    let Ok(protected) = as_bytes(protected, "protected_header") else {
+        return false;
+    };
+
+    if protected_header_address(protected) != Some(pool_id.as_slice()) {
+        return false;
+    }
+
+    let payload = match as_uint(hashed, "hashed") {
+        Ok(0) => digest.to_vec(),
+        Ok(1) => Hasher::<224>::hash(digest).to_vec(),
+        _ => return false,
+    };
+
+    let Some(signature) = as_bytes(signature, "signature")
+        .ok()
+        .and_then(|x| <[u8; 64]>::try_from(x).ok())
+    else {
+        return false;
+    };
+
+    PublicKey::from(pub_key).verify(
+        cose_sig_structure(protected, &payload),
+        &Signature::from(signature),
+    )
+}
+
+/// The `address` entry of a COSE protected header.
+fn protected_header_address(protected: &[u8]) -> Option<&[u8]> {
+    let mut decoder = minicbor::Decoder::new(protected);
+    let entries = decoder.map().ok()??;
+
+    for _ in 0..entries {
+        let is_address = match decoder.datatype().ok()? {
+            minicbor::data::Type::String => decoder.str().ok()? == "address",
+            _ => {
+                decoder.skip().ok()?;
+                false
+            }
+        };
+
+        if is_address {
+            return decoder.bytes().ok();
+        }
+
+        decoder.skip().ok()?;
+    }
+
+    None
+}
+
+/// The COSE `Sig_structure` a COSE_Sign1 signs, with no external data.
+fn cose_sig_structure(protected: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(4)
+        .and_then(|e| e.str("Signature1"))
+        .and_then(|e| e.bytes(protected))
+        .and_then(|e| e.bytes(&[]))
+        .and_then(|e| e.bytes(payload))
+        .expect("encoding into a vec is infallible");
+    encoder.into_writer()
+}
+
 pub fn calidus_key_is_revoked(pub_key: &[u8; 32]) -> bool {
     pub_key.iter().all(|byte| *byte == 0)
 }
@@ -197,7 +336,11 @@ fn as_bytes<'a>(value: &'a Metadatum, field: &'static str) -> Result<&'a [u8], C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pallas::{codec::utils::Bytes, ledger::primitives::Int};
+    use dolos_testing::cip151::{self as signer, Witness};
+    use pallas::{
+        codec::utils::{Bytes, KeyValuePairs},
+        ledger::primitives::Int,
+    };
 
     fn md_int(value: i64) -> Metadatum {
         Metadatum::Int(Int::from(value))
@@ -339,6 +482,193 @@ mod tests {
             hex::encode(calidus_key_id_bytes(&pub_key)),
             "a1171983a1178a55b02afacfd6ad6b516da375469fd7dbcf54a2f95823"
         );
+    }
+
+    /// The registration pg_cardano's README verifies, which Blockfrost and
+    /// Koios accept.
+    const SIGNED_REGISTRATION: &str = "a1190363a3000201a5018201581c6648d73a09b282c120c8476789f8232b7eead94ff560917ae8fc4eb10280038102041a08d77f10075820fb01193646bb8820cc8c1fc70752d068e1b37be2f1aef88a2bc70cf598de6a630281a201a40101032720062158201ca00b7625ea6a25a6c8c128e308877a563d133ff108147fd1edc36eca3a447c02845829a201276761646472657373581c6648d73a09b282c120c8476789f8232b7eead94ff560917ae8fc4eb10058203a1807ae73acd6dc91f39fa2f6d24e0996d348bb21939e1d9bc5cd75dd778a6858406b8978326e011a9531ac55040adeba410edd9ad8d28b59ad2b7b7d5923b82745ed85155c0ba367b2e54aa8e1f91eb96a58e8249f89d5d0b1f83ba4946d808607";
+
+    fn signed_registration() -> Metadatum {
+        let bytes = hex::decode(SIGNED_REGISTRATION).unwrap();
+        let entries: KeyValuePairs<u64, Metadatum> = minicbor::decode(&bytes).unwrap();
+        entries.to_vec().remove(0).1
+    }
+
+    fn is_signed(metadata: &Metadatum) -> bool {
+        let registration = parse_cip151_pool_registration(metadata).unwrap();
+        cip151_registration_is_signed(metadata, &registration)
+    }
+
+    fn set_payload_field(metadata: &mut Metadatum, key: i64, value: Metadatum) {
+        let Metadatum::Map(items) = metadata else {
+            panic!("registration is a map");
+        };
+        let mut items: Vec<_> = items.iter().cloned().collect();
+        let Metadatum::Map(payload) = &mut items[1].1 else {
+            panic!("payload is a map");
+        };
+        let mut payload: Vec<_> = payload.iter().cloned().collect();
+        payload
+            .iter_mut()
+            .find(|(k, _)| *k == md_int(key))
+            .unwrap()
+            .1 = value;
+        items[1].1 = Metadatum::Map(payload.into());
+        *metadata = Metadatum::Map(items.into());
+    }
+
+    #[test]
+    fn verifies_a_published_registration() {
+        assert!(is_signed(&signed_registration()));
+    }
+
+    #[test]
+    fn a_changed_payload_breaks_the_signature() {
+        let mut metadata = signed_registration();
+        set_payload_field(&mut metadata, 4, md_int(0x08d77f11));
+
+        assert!(!is_signed(&metadata));
+    }
+
+    #[test]
+    fn a_registration_without_witnesses_is_not_signed() {
+        let mut metadata = signed_registration();
+        let Metadatum::Map(items) = &metadata else {
+            unreachable!()
+        };
+        let items: Vec<_> = items.iter().take(2).cloned().collect();
+        metadata = Metadatum::Map(items.into());
+
+        assert!(!is_signed(&metadata));
+    }
+
+    #[test]
+    fn verifies_the_testing_signer() {
+        let cold_key = signer::cold_key(1);
+        let (_, metadata) = signer::signed_registration(&cold_key, 7, [0x57; 32]).remove(0);
+
+        assert!(is_signed(&metadata));
+    }
+
+    #[test]
+    fn a_signature_by_another_key_is_not_the_pools() {
+        let cold_key = signer::cold_key(1);
+        let pool = signer::pool_id(&cold_key);
+        let other = signer::cold_key(2);
+        let (_, metadata) = signer::registration_signed_by(pool, &other, 7, [0x57; 32]).remove(0);
+
+        assert!(!is_signed(&metadata));
+    }
+
+    #[test]
+    fn an_unsigned_registration_is_not_signed() {
+        let pool = signer::pool_id(&signer::cold_key(1));
+        let (_, metadata) = signer::unsigned_registration(pool, 7, [0x57; 32]).remove(0);
+
+        assert!(!is_signed(&metadata));
+    }
+
+    fn is_signed_with(witness: &Witness) -> bool {
+        let pool = signer::pool_id(&signer::cold_key(1));
+        let (_, metadata) = signer::registration_with(pool, 7, [0x57; 32], witness).remove(0);
+
+        is_signed(&metadata)
+    }
+
+    #[test]
+    fn another_key_naming_the_pool_as_address_is_not_the_pools() {
+        let cold_key = signer::cold_key(1);
+        let other = signer::cold_key(2);
+        let witness = Witness {
+            address: Some(signer::pool_id(&cold_key).to_vec()),
+            ..Witness::by(&other)
+        };
+
+        assert!(!is_signed_with(&witness));
+    }
+
+    #[test]
+    fn a_cold_key_signature_without_an_address_is_not_signed() {
+        let cold_key = signer::cold_key(1);
+        let witness = Witness {
+            address: None,
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(!is_signed_with(&witness));
+    }
+
+    #[test]
+    fn a_cold_key_signature_naming_another_address_is_not_signed() {
+        let cold_key = signer::cold_key(1);
+        let other = signer::cold_key(2);
+        let witness = Witness {
+            address: Some(signer::pool_id(&other).to_vec()),
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(!is_signed_with(&witness));
+    }
+
+    #[test]
+    fn a_hashed_signature_over_the_digest_hash_is_signed() {
+        let cold_key = signer::cold_key(1);
+        let witness = Witness {
+            hashed: 1,
+            signs_digest_hash: true,
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(is_signed_with(&witness));
+    }
+
+    #[test]
+    fn a_hashed_signature_over_the_bare_digest_is_not_signed() {
+        let cold_key = signer::cold_key(1);
+        let witness = Witness {
+            hashed: 1,
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(!is_signed_with(&witness));
+    }
+
+    #[test]
+    fn a_hashed_flag_other_than_zero_or_one_is_not_signed() {
+        let cold_key = signer::cold_key(1);
+        let flagged = |signs_digest_hash| Witness {
+            hashed: 2,
+            signs_digest_hash,
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(!is_signed_with(&flagged(false)));
+        assert!(!is_signed_with(&flagged(true)));
+    }
+
+    #[test]
+    fn a_payload_declaring_another_validation_method_is_not_signed() {
+        let cold_key = signer::cold_key(1);
+        let method = |validation_method| Witness {
+            validation_method,
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(!is_signed_with(&method(0)));
+        assert!(!is_signed_with(&method(1)));
+    }
+
+    #[test]
+    fn only_a_cose_witness_type_is_signed() {
+        let cold_key = signer::cold_key(1);
+        let typed = |kind| Witness {
+            kind: Some(kind),
+            ..Witness::by(&cold_key)
+        };
+
+        assert!(is_signed_with(&typed(0)));
+        assert!(!is_signed_with(&typed(1)));
+        assert!(!is_signed_with(&typed(2)));
     }
 
     #[test]

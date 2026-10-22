@@ -185,7 +185,7 @@ impl Table {
 
         let table = rx.open_multimap_table(*table)?;
 
-        let all_values = table.get(key.as_ref())?;
+        let all_values = table.get(key)?;
 
         Ok(all_values)
     }

@@ -658,7 +658,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     setup_tracing_for_format(config, args.format)?;
 
     let archive = crate::common::open_archive_store(config)?;
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = crate::common::open_genesis(config)?;
     let network = dolos_cardano::network_from_genesis(&genesis);
 
     let use_epoch_filter = args.epoch_start.is_some() || args.epoch_end.is_some();
@@ -736,5 +736,5 @@ fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette
         return Ok(());
     }
 
-    crate::common::setup_tracing(&config.logging, &config.telemetry)
+    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())
 }

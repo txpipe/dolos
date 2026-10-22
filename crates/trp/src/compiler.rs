@@ -74,7 +74,7 @@ pub fn load_compiler<D: Domain>(
     let compiler = tx3_cardano::Compiler::new(
         pparams,
         tx3_cardano::Config {
-            extra_fees: config.extra_fees,
+            extra_fees: config.extra_fees_lovelace,
         },
         cursor,
     );

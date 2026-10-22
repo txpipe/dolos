@@ -171,7 +171,7 @@ pub fn run(
     feedback: &crate::feedback::Feedback,
 ) -> miette::Result<()> {
     let stores = crate::common::open_data_stores(config)?;
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = crate::common::open_genesis(config)?;
 
     let mut issues: Vec<Issue> = Vec::new();
     let mut timings: Vec<Timing> = Vec::new();
@@ -515,6 +515,7 @@ mod tests {
             register_slot: 0,
             retiring_epoch: None,
             deposit: 500_000_000,
+            calidus: None,
         };
 
         let retired_operator = pallas::crypto::hash::Hash::<28>::from([0x78; 28]);

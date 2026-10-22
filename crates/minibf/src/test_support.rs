@@ -10,7 +10,7 @@ use axum::{
 };
 use dolos_cardano::periods::stats::TOTALS;
 use dolos_core::{
-    config::{CacheConfig, CardanoConfig, MinibfConfig, SyncConfig},
+    config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig},
     import::ImportExt as _,
     CacheStore as _, Domain, StateStore,
 };
@@ -422,7 +422,7 @@ impl TestDomainBuilder {
         let min_slot = {
             let temp = ToyDomain::new_with_genesis_and_config(
                 genesis.clone(),
-                CardanoConfig::default(),
+                dolos_cardano::CardanoLogicConfig::default(),
                 None,
                 None,
             );
@@ -787,11 +787,10 @@ pub fn replicated_app_with_fault(fault: Option<TestFault>) -> TestApp {
 /// every entry, missed and hit, over [`stake_address_chain`], whose first
 /// epochs are sealed and last staged. The miss must keep its entry.
 pub async fn totals_bodies(path: impl Fn(&SyntheticVectors) -> String) -> [Vec<u8>; 3] {
-    let mut sync = SyncConfig::default();
-    sync.max_history = Some(1_000);
+    let history = HistoryConfig::rolling(HistoryWindow::slots(1_000));
 
     let off = TestApp::new_with_cfg_and_domain(stake_address_chain(), |domain| {
-        domain.with_sync_config(sync)
+        domain.with_history_config(history)
     });
 
     let cache = CacheConfig {

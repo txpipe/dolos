@@ -285,6 +285,7 @@ impl TableRow for PoolState {
             "pool bech32",
             "registered at",
             "retiring epoch",
+            "calidus key",
             "pledge (go)",
             "pledge (set)",
             "pledge (mark)",
@@ -311,6 +312,11 @@ impl TableRow for PoolState {
                     .map(|x| x.to_string())
                     .unwrap_or_default()
             ),
+            self.calidus
+                .as_ref()
+                .and_then(|x| x.pub_key)
+                .map(hex::encode)
+                .unwrap_or_default(),
             format_pool_epoch(&self.snapshot, 3),
             format_pool_epoch(&self.snapshot, 2),
             format_pool_epoch(&self.snapshot, 1),
@@ -516,7 +522,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     setup_tracing_for_format(config, args.format)?;
 
     let state = crate::common::open_state_store(config)?;
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = crate::common::open_genesis(config)?;
     let network = network_from_genesis(&genesis);
 
     match args.namespace.as_str() {
@@ -550,5 +556,5 @@ fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette
         return Ok(());
     }
 
-    crate::common::setup_tracing(&config.logging, &config.telemetry)
+    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())
 }

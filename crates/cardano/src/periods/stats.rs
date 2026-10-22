@@ -24,10 +24,10 @@ use std::{
 };
 
 use dolos_core::{
-    cache::Cost, ArchiveError, ArchiveStore as _, ArchiveWriter as _, CacheEntry, CacheError,
-    CacheNamespace, CacheStore as _, ChainError, Domain, DomainError, Entity as _, EntityKey,
-    EntityValue, KeyCodec as _, KeyError, KeyRange, LogKey, LogRangeOf, RangeOf, StateStore as _,
-    StateWriter as _,
+    cache::Cost, config::HistoryMode, ArchiveError, ArchiveStore as _, ArchiveWriter as _,
+    CacheEntry, CacheError, CacheNamespace, CacheStore as _, ChainError, Domain, DomainError,
+    Entity as _, EntityKey, EntityValue, KeyCodec as _, KeyError, KeyRange, LogKey, LogRangeOf,
+    RangeOf, StateStore as _, StateWriter as _,
 };
 use pallas::{
     codec::{
@@ -655,11 +655,11 @@ pub const TOTALS: CacheNamespace = CacheNamespace::immutable("totals", 1).with_a
 /// this many unit entries.
 pub const CANDIDATE_EPOCH_ENTRIES: u64 = 4_096;
 
-/// Register [`TOTALS`], unless `sync.max_history` prunes the archive, whose
+/// Register [`TOTALS`], unless rolling history prunes the archive, whose
 /// sealed stats it drops: there every read folds as without a cache. Answers
 /// whether it registered.
 pub fn register_totals_cache<D: Domain>(domain: &D) -> Result<bool, CacheError> {
-    if domain.sync_config().max_history.is_some() {
+    if domain.history_config().mode == HistoryMode::Rolling {
         return Ok(false);
     }
 
@@ -1166,8 +1166,9 @@ where
 #[cfg(test)]
 mod tests {
     use dolos_core::{
-        config::SyncConfig, ArchiveStore as _, BlockSlot, CacheStore as _, Domain as _,
-        StateStore as _, StateWriter as _,
+        config::{HistoryConfig, HistoryWindow},
+        ArchiveStore as _, BlockSlot, CacheStore as _, Domain as _, StateStore as _,
+        StateWriter as _,
     };
     use dolos_testing::{
         faults::{FaultyToyDomain, TestFault},
@@ -1772,11 +1773,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_max_history_the_totals_cache_is_off() {
-        let mut sync = SyncConfig::default();
-        sync.max_history = Some(1_000);
+    async fn with_rolling_history_the_totals_cache_is_off() {
+        let history = HistoryConfig::rolling(HistoryWindow::slots(1_000));
 
-        let domain = seeded().with_sync_config(sync);
+        let domain = seeded().with_history_config(history);
         seal_as(&domain, &domain).unwrap();
 
         assert!(!register_totals_cache(&domain).unwrap());

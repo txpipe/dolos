@@ -1,0 +1,24 @@
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "custom"
+
+[chain.cardano]
+magic = 42
+is_testnet = true
+
+[chain.cardano.genesis]
+byron_path = "./genesis/byron.json"
+shelley_path = "./genesis/shelley.json"
+alonzo_path = "./genesis/alonzo.json"
+conway_path = "./genesis/conway.json"
+force_protocol = 9
+
+[[chain.cardano.custom_utxos]]
+ref = ["0101010101010101010101010101010101010101010101010101010101010101", 0]
+era = 7
+cbor = []
+
+[upstream]
+peer_address = "127.0.0.1:3001"

@@ -33,6 +33,7 @@ mod error;
 pub(crate) mod hacks;
 pub(crate) mod inputs;
 pub(crate) mod mapping;
+pub(crate) mod offchain;
 mod pagination;
 mod routes;
 pub(crate) mod scan;
@@ -45,7 +46,7 @@ pub use routes::network::register_cache as register_network_cache;
 
 /// Registers the off-chain metadata namespaces, as the router does, for tools
 /// that work on the cache without serving.
-pub use routes::governance::register_caches as register_governance_caches;
+pub use offchain::register as register_governance_caches;
 
 pub(crate) fn log_and_500<E: std::fmt::Debug>(context: &str) -> impl Fn(E) -> StatusCode + '_ {
     move |err| {
@@ -318,7 +319,7 @@ where
         tracing::error!(%error, "failed to register the /network cache namespace");
     }
 
-    routes::governance::register_caches(facade.cache());
+    offchain::register(facade.cache());
 
     // disposable: without the namespace the totals routes fold uncached
     if let Err(error) = dolos_cardano::periods::stats::register_totals_cache(&facade.inner) {
@@ -740,10 +741,8 @@ where
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let storage_path = domain.storage_config().path.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            routes::governance::remove_legacy_dir(&storage_path)
-        })
-        .await;
+        let _ =
+            tokio::task::spawn_blocking(move || offchain::remove_legacy_dir(&storage_path)).await;
 
         let app = build_router(cfg.clone(), domain);
 
@@ -831,9 +830,8 @@ mod tests {
         use std::sync::atomic::Ordering;
 
         use dolos_core::{
-            config::{CardanoConfig, MinibfConfig},
-            indexes::ArchiveIndexDelta,
-            ArchiveStore as _, ArchiveWriter as _, ChainPoint, Domain as _,
+            config::MinibfConfig, indexes::ArchiveIndexDelta, ArchiveStore as _,
+            ArchiveWriter as _, ChainPoint, Domain as _,
         };
         use dolos_testing::{
             measured::MeasuredStores,
@@ -846,7 +844,7 @@ mod tests {
 
         let domain = ToyDomain::with_stores(
             ToyDomain::new(None, None).genesis(),
-            CardanoConfig::default(),
+            dolos_cardano::CardanoLogicConfig::default(),
             None,
             None,
             MeasuredStores::new(MemoryStores::open()),

@@ -16,15 +16,15 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
 
     let mut stores = crate::common::open_data_stores(config).context("opening data stores")?;
 
     let max_slots = match args.max_slots {
         Some(x) => x,
-        None => match config.sync.max_history {
+        None => match config.history.max_slots() {
             Some(x) => x,
-            None => bail!("neither args or config provided for max_slots"),
+            None => bail!("pass --max-slots, or configure rolling history"),
         },
     };
 

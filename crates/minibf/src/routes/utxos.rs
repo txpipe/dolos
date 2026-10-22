@@ -172,7 +172,7 @@ where
 /// The chain position is the sort key of the UTxO models.
 ///
 /// Chain position is `None` for an output whose creation block was pruned by
-/// `sync.max_history` — the block that carries its slot no longer exists, so
+/// rolling history — the block that carries its slot no longer exists, so
 /// true chain order is unrecoverable for it. The `TxoRef` tie-breaker keeps
 /// those rows in a deterministic order across requests; without it their
 /// order came from `HashMap` iteration, and two page requests could slice two

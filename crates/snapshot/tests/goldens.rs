@@ -48,7 +48,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 69] = [
     ),
     (
         INDEXES,
-        "sha256:a0179ae003b2f11abfb41885369b6cd1a6c8996630fa49aa3bed238a74d1b433",
+        "sha256:fb039df612425645ba18b366a3625d4c41e2f1a8fb551b0609b131284ae3bda0",
         23,
         619,
     ),
@@ -390,13 +390,13 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 69] = [
     ),
     (
         "state-proposals",
-        "sha256:c069310df75e00e50c580ae2080edcca7cc1e1f4993a562d44be88d34827649a",
+        "sha256:d3c5a0e174489d9a8522624369f38f3505ce8deb89e68d519fccbe2ff51a54a9",
         2,
         92,
     ),
     (
         "state-proposals",
-        "sha256:330d734b2fb990f308ae5af3d4b57e498dc8dd4df1aa5d75718eceb57c6c5967",
+        "sha256:b2b0cd4830b6717c2560c00186b083b16cf9aab342528d3382a575aac1c83859",
         2,
         92,
     ),
@@ -458,7 +458,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 69] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:cdf0e734c5353d551ec195d3c24733d4b727e21410d7edcb95e6e424c8e89670";
+    "sha256:d3e1798371c5a0f6d9111da5bac27a95adfdc296e4f730d323e2c72b1b582ee9";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -660,7 +660,7 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106","kind":"blocks","#,
     r#""mediaType":"application/vnd.dolos.stele.blocks.v1+zstd","records":4,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":167},"#,
-    r#"{"diffId":"sha256:a0179ae003b2f11abfb41885369b6cd1a6c8996630fa49aa3bed238a74d1b433","kind":"indexes","#,
+    r#"{"diffId":"sha256:fb039df612425645ba18b366a3625d4c41e2f1a8fb551b0609b131284ae3bda0","kind":"indexes","#,
     r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":23,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":619},"#,
     r#"{"diffId":"sha256:620b0484b8c0d6e305c6c9746950c9f9dd186b256fb2febf030d0e75507b3fe3","kind":"log-account-address-chunks","#,
@@ -831,10 +831,10 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:2e08f9652e630bb56ccebab9fa7b9a718803b001a1e701daee0fc2f98386447d","kind":"state-pools","#,
     r#""mediaType":"application/vnd.dolos.stele.state-pools.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":80},"#,
-    r#"{"diffId":"sha256:c069310df75e00e50c580ae2080edcca7cc1e1f4993a562d44be88d34827649a","kind":"state-proposals","#,
+    r#"{"diffId":"sha256:d3c5a0e174489d9a8522624369f38f3505ce8deb89e68d519fccbe2ff51a54a9","kind":"state-proposals","#,
     r#""mediaType":"application/vnd.dolos.stele.state-proposals.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":92},"#,
-    r#"{"diffId":"sha256:330d734b2fb990f308ae5af3d4b57e498dc8dd4df1aa5d75718eceb57c6c5967","kind":"state-proposals","#,
+    r#"{"diffId":"sha256:b2b0cd4830b6717c2560c00186b083b16cf9aab342528d3382a575aac1c83859","kind":"state-proposals","#,
     r#""mediaType":"application/vnd.dolos.stele.state-proposals.v1+zstd","records":2,"#,
     r#""scope":{"shard":0},"uncompressedSize":92},"#,
     r#"{"diffId":"sha256:3b078fcf6aff66fc64dda5ef1b993c39a162a965b0563de7d2abd19097564764","kind":"state-scripts","#,

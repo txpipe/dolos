@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{
-    config::{CardanoConfig, CustomUtxo},
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainError, Domain, RawBlock, TxoRef,
+    config::CustomUtxo, ArchiveStore, ArchiveWriter, BlockSlot, ChainError, Domain, RawBlock,
+    TxoRef,
 };
 
 use crate::{tx_sequence_to_hash, utxo_with_value};
@@ -327,7 +327,11 @@ struct SyntheticTxSpec {
 
 pub fn build_synthetic_blocks(
     cfg: SyntheticBlockConfig,
-) -> (Vec<RawBlock>, SyntheticVectors, CardanoConfig) {
+) -> (
+    Vec<RawBlock>,
+    SyntheticVectors,
+    dolos_cardano::CardanoLogicConfig,
+) {
     let submit_sk = unsafe { SecretKeyExtended::from_bytes_unchecked([3u8; 64]) };
     let submit_pk = submit_sk.public_key();
     let submit_keyhash = keyhash_from_pubkey(submit_pk.as_ref());
@@ -341,7 +345,7 @@ pub fn build_synthetic_blocks(
     let submit_amount = cfg.lovelace * 10;
     let submit_output = cfg.lovelace * 5;
 
-    let mut chain_config = CardanoConfig::default();
+    let mut chain_config = dolos_cardano::CardanoLogicConfig::default();
 
     let address_bytes = Address::from_bech32(&cfg.address)
         .expect("invalid synthetic address")

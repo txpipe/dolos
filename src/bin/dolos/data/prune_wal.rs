@@ -1,12 +1,13 @@
 use dolos_core::config::RootConfig;
-use miette::{bail, Context, IntoDiagnostic};
+use miette::{Context, IntoDiagnostic};
 use tracing::info;
 
 use dolos::prelude::*;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    /// the maximum number of slots to keep in the WAL
+    /// the maximum number of slots to keep in the WAL; defaults to the
+    /// network's rollback window
     #[arg(long)]
     max_slots: Option<u64>,
 
@@ -16,16 +17,13 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())?;
 
     let mut wal = crate::common::open_wal_store(config)?;
 
     let max_slots = match args.max_slots {
         Some(x) => x,
-        None => match config.sync.max_rollback {
-            Some(x) => x,
-            None => bail!("neither args or config provided for max_slots"),
-        },
+        None => dolos_cardano::mutable_slots(&crate::common::open_genesis(config)?),
     };
 
     info!(max_slots, "prunning to max slots");

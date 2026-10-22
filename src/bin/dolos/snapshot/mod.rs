@@ -112,7 +112,7 @@ pub fn planned(
     retained: RetainedEpochs,
     what: &'static str,
 ) -> miette::Result<Plan> {
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let genesis = crate::common::open_genesis(config)?;
 
     StoreSnapshot::new(&stores.archive, &stores.state)
         .selected_plan(u64::from(genesis.network_magic()), retained, *selection)

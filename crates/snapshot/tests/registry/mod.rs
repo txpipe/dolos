@@ -284,7 +284,8 @@ pub fn registry() -> Vec<Entry> {
             canaries::gov_state,
             // Revision 3 appends each snapshot DRep's newest deregistration.
             // Revision 4 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
+            // the value is unchanged. Field 9, the dissolved committee, joins
+            // revision 4 in place: the v2 freeze resets every revision to 1.
             &[
                 Pinned {
                     rev: 1,
@@ -352,7 +353,9 @@ pub fn registry() -> Vec<Entry> {
             canaries::pool_state,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged. Revision 3 appends the stake,
-            // delegators and live pledge each snapshot freezes with.
+            // delegators and live pledge each snapshot freezes with. Field
+            // 17, the calidus key, joins revision 3 in place: the v2 freeze
+            // resets every revision to 1.
             &[
                 Pinned {
                     rev: 1,

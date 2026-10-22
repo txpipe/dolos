@@ -23,13 +23,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use dolos_cardano::{
     model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AssetState,
-        AuthHistory, Committee, CommitteeAuthorization, Constitution, DRepDelegation, DRepEpochLog,
-        DRepExpiry, DRepSightingState, DRepState, DatumState, EndStats, EpochState, EpochValue,
-        EraBoundary, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet,
-        GovDistr, GovRoots, GovState, MetadataLabelState, Nonces, PParamValue, PParamsSet,
-        PendingMirState, PendingRewardState, PolicyMintChunk, PoolDelegation, PoolEpochLog,
-        PoolParams, PoolSnapshot, PoolState, PoolTally, ProposalAction, ProposalState,
-        RollingStats, ScriptState, ShardProgress, Stake, VoteEntry,
+        AuthHistory, CalidusRegistration, Committee, CommitteeAuthorization, Constitution,
+        DRepDelegation, DRepEpochLog, DRepExpiry, DRepSightingState, DRepState, DatumState,
+        EndStats, EpochState, EpochValue, EraBoundary, EraState, FirstMintChunk, FirstMintSet,
+        FirstScriptChunk, FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces,
+        PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
+        PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, PoolTally,
+        ProposalAction, ProposalState, RollingStats, ScriptState, ShardProgress, Stake, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
@@ -603,6 +603,24 @@ pub fn gov_state() -> GovState {
                 },
             )]),
         }),
+        dissolved_committee: Some(dolos_cardano::DissolvedCommittee {
+            committee: Committee {
+                members: BTreeMap::from([(StakeCredential::AddrKeyhash(hash28(0xdd)), 420u64)]),
+                threshold: rational(1, 2),
+            },
+            auths: BTreeMap::from([(
+                StakeCredential::AddrKeyhash(hash28(0xdd)),
+                vec![(
+                    50_000u64,
+                    CommitteeAuthorization::HotCredential(StakeCredential::ScriptHash(hash28(
+                        0xde,
+                    ))),
+                )],
+            )]),
+            action: gov_action_id(0xdf, 4),
+            epoch: 505,
+            seated_by: Some(gov_action_id(0xe0, 5)),
+        }),
     }
 }
 
@@ -703,6 +721,12 @@ pub fn pool_state() -> PoolState {
         register_slot: 55_555_555,
         retiring_epoch: Some(777),
         deposit: 500_000_000,
+        calidus: Some(CalidusRegistration {
+            pub_key: Some([0xf1; 32]),
+            nonce: 151,
+            tx_hash: hash32(0xf2),
+            slot: 66_666_666,
+        }),
     }
 }
 

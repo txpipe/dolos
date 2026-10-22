@@ -6,9 +6,8 @@ use tracing::info;
 pub use pallas;
 
 use dolos_core::{
-    config::CardanoConfig, BlockSlot, ChainError, ChainPoint, Domain, DomainError, EraCbor,
-    Genesis, MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore, TipEvent,
-    WorkUnit,
+    config::CustomUtxo, BlockSlot, ChainError, ChainPoint, Domain, DomainError, EraCbor, Genesis,
+    MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore, TipEvent, WorkUnit,
 };
 
 use crate::{
@@ -269,8 +268,18 @@ pub(crate) struct Cache {
     pub stability_window: u64,
 }
 
+/// What [`CardanoLogic`] runs with, resolved from the configuration and the
+/// invocation.
+#[derive(Debug, Clone, Default)]
+pub struct CardanoLogicConfig {
+    /// Stop once the chain reaches this epoch.
+    pub stop_epoch: Option<pallas::ledger::primitives::Epoch>,
+    /// Outputs added to the genesis UTxO set.
+    pub custom_utxos: Vec<CustomUtxo>,
+}
+
 pub struct CardanoLogic {
-    config: CardanoConfig,
+    config: CardanoLogicConfig,
     work: Option<WorkBuffer>,
     pub(crate) cache: Cache,
     /// Flag indicating the cache needs refresh after a work unit that modifies
@@ -290,7 +299,7 @@ impl CardanoLogic {
 }
 
 impl dolos_core::ChainLogic for CardanoLogic {
-    type Config = CardanoConfig;
+    type Config = CardanoLogicConfig;
     type Block = OwnedMultiEraBlock;
     type Utxo = OwnedMultiEraOutput;
     type Delta = CardanoDelta;

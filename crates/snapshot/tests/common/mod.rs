@@ -35,8 +35,8 @@ use dolos_cardano::{
     periods::{GroupKey, Ungrouped},
 };
 use dolos_core::{
-    key_hash, keys, BlockHash, EntityKey, EraCbor, ExactKind, ExactRecord, IndexRecord, LogKey,
-    Namespace, TagRecord, TxoRef, VERBATIM_KEY_DIMENSION,
+    keys, BlockHash, EntityKey, EraCbor, ExactKind, ExactRecord, IndexRecord, LogKey, Namespace,
+    TagRecord, TxoRef,
 };
 use dolos_snapshot::{
     layers::{
@@ -65,9 +65,6 @@ pub const LAST_IMMUTABLE: u64 = 3;
 
 /// The boundary block this stele stands at.
 pub const POINT_HASH: [u8; 32] = [0x0b; 32];
-
-/// A transaction-metadata label, carried verbatim rather than hashed.
-pub const METADATA_LABEL: u64 = 674;
 
 /// The shards the fixture populates for a sixteen-way state kind. Sixteen
 /// exist; a fixture that wrote all of them would say nothing more than two do
@@ -227,18 +224,7 @@ pub fn indexes() -> Vec<IndexRecord> {
     let mut records: Vec<IndexRecord> = dimensions
         .into_iter()
         .enumerate()
-        .map(|(i, dimension)| {
-            let stored = if dimension == VERBATIM_KEY_DIMENSION {
-                // The exception, and the only place the fixture derives a stored
-                // key rather than pinning one: the point of this record is that
-                // the label survives untouched.
-                key_hash(dimension, &METADATA_LABEL.to_be_bytes()).unwrap()
-            } else {
-                [0x10 + i as u8; 8]
-            };
-
-            TagRecord::new(dimension, stored, START_SLOT).into()
-        })
+        .map(|(i, dimension)| TagRecord::new(dimension, [0x10 + i as u8; 8], START_SLOT).into())
         .collect();
 
     records.extend([

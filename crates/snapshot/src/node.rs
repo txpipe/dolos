@@ -140,10 +140,7 @@ mod tests {
     use super::*;
 
     fn storage(path: &str) -> StorageConfig {
-        let document = format!(
-            "version = \"v3\"\npath = {}\n",
-            toml::Value::String(path.to_owned()),
-        );
+        let document = format!("path = {}\n", toml::Value::String(path.to_owned()));
 
         toml::from_str(&document).expect("a storage section with a path")
     }

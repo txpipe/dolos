@@ -61,6 +61,55 @@ fn daemon_syncs(workspace: &ScenarioWorkspace) {
     );
 }
 
+/// `dolos sync --stop-epoch 1` from genesis ends once the ledger enters
+/// epoch 1, so the state tip is past the first epoch boundary. Chain-sync
+/// asks for one header at a time, so the run takes minutes over a remote
+/// relay.
+fn sync_passes_the_first_epoch_boundary(workspace: &ScenarioWorkspace) {
+    reset_and_bootstrap(workspace);
+
+    let mut cmd = prepare_scenario_process(workspace);
+
+    let handle = cmd
+        .args(["sync", "--stop-epoch", "1"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("failed to spawn process");
+
+    let mut guard = ProcessGuard::new(handle);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(40 * 60);
+    while guard
+        .try_wait()
+        .expect("failed to query process status")
+        .is_none()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sync did not reach epoch 1 for {}",
+            workspace.name()
+        );
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    let summary = fetch_summary(workspace);
+    let epoch_length = dolos_cardano::networks::PREVIEW
+        .genesis()
+        .shelley
+        .epoch_length
+        .unwrap() as u64;
+
+    assert!(
+        summary
+            .state
+            .tip_slot
+            .is_some_and(|tip| tip >= epoch_length),
+        "state tip {:?} is not past the first epoch boundary at slot {epoch_length}",
+        summary.state.tip_slot
+    );
+}
+
 macro_rules! test_for_scenario {
     ($name:ident, $func:ident, $scenario:expr) => {
         #[test]
@@ -77,6 +126,12 @@ test_for_scenario!(daemon_syncs_for_preview_min_implicit, daemon_syncs, 2);
 test_for_scenario!(daemon_syncs_for_mainnet_full_implicit, daemon_syncs, 3);
 test_for_scenario!(daemon_syncs_for_preprod_full_implicit, daemon_syncs, 4);
 test_for_scenario!(daemon_syncs_for_custom_network, daemon_syncs, 5);
+test_for_scenario!(daemon_syncs_for_preview_ordinary, daemon_syncs, 6);
+test_for_scenario!(
+    sync_passes_the_first_epoch_boundary_for_preview_ordinary,
+    sync_passes_the_first_epoch_boundary,
+    6
+);
 
 // ===========================================================================
 // Block-sequence integrity tests

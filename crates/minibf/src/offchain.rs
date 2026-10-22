@@ -292,7 +292,7 @@ fn keep_failure<C: CacheStore>(cache: &C, anchor: &Anchor, failure: &DrepsInnerM
 /// Keeps `body` in the cache as the verified body of `anchor`, as a fetch
 /// would.
 #[cfg(test)]
-pub(super) async fn cache_verified_body<C: CacheStore>(cache: &C, anchor: &Anchor, body: &[u8]) {
+pub(crate) async fn cache_verified_body<C: CacheStore>(cache: &C, anchor: &Anchor, body: &[u8]) {
     let body = body.to_vec();
 
     cache

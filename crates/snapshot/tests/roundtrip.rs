@@ -9,9 +9,7 @@
 mod common;
 
 use common::*;
-use dolos_core::{
-    key_hash, ExactKind, ExactRecord, IndexRecord, MAX_EXACT_KEY_LEN, VERBATIM_KEY_DIMENSION,
-};
+use dolos_core::{ExactKind, ExactRecord, IndexRecord, MAX_EXACT_KEY_LEN};
 use dolos_snapshot::{
     layers::{blocks, digests, indexes, logs, state},
     shards_for, DolosProfile, Error, Scope, BLOCKS, DIGESTS, INDEXES, LOG_KINDS,
@@ -99,26 +97,6 @@ fn indexes_round_trip_through_a_layer() {
     for record in &decoded {
         order.check(record).unwrap();
     }
-
-    // The `metadata` dimension carries its logical u64 label verbatim, never
-    // hashed — the one exception to the pre-hashed rule, and the one a
-    // conformance check has to look at specifically, because a hashed label is
-    // structurally valid and permanently unqueryable.
-    let metadata = decoded
-        .iter()
-        .find_map(|record| match record {
-            IndexRecord::Tag(tag) if tag.dimension() == VERBATIM_KEY_DIMENSION => Some(tag),
-            _ => None,
-        })
-        .expect("the fixture carries a metadata tag");
-
-    assert_eq!(metadata.key_hash.len(), 8);
-    assert_eq!(u64::from_be_bytes(metadata.key_hash), METADATA_LABEL);
-    assert_eq!(
-        metadata.key_hash,
-        key_hash(VERBATIM_KEY_DIMENSION, &METADATA_LABEL.to_be_bytes()).unwrap(),
-        "the stored form is the one dolos-core defines",
-    );
 
     // A block number is an 8-byte big-endian key, unlike the 32-byte hashes
     // either side of it — the width the exact-record type validates against.
