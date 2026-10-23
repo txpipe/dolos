@@ -11,7 +11,7 @@ use pallas::{
 use tracing::trace;
 
 use super::WorkDeltas;
-use crate::cip25::{cip25_metadata_for_tx, cip25_metadata_has_asset};
+use crate::cip25::{cip25_metadata_for_tx, cip25_mint_names_asset};
 use crate::cip68::{has_cip25_metadata, parse_cip67_label_from_asset_name};
 use crate::roll::BlockVisitor;
 use crate::{
@@ -70,6 +70,8 @@ impl BlockVisitor for AssetStateVisitor {
             }
 
             let quantity: i128 = amount.into();
+            let names_asset =
+                cip25_mint_names_asset(cip25_metadata.as_ref(), policy, asset.name(), amount);
 
             deltas.add_for_entity(MintStatsUpdate::new(
                 *policy,
@@ -85,6 +87,7 @@ impl BlockVisitor for AssetStateVisitor {
                 (block.slot(), *order as u32),
                 tx.hash(),
                 amount,
+                names_asset,
             ));
 
             if self.staged.insert((*policy, asset.name().to_vec())) {
@@ -97,16 +100,12 @@ impl BlockVisitor for AssetStateVisitor {
                 }));
             }
 
-            if quantity > 0 {
-                if let Some(metadata) = cip25_metadata.as_ref() {
-                    if cip25_metadata_has_asset(metadata, policy, asset.name()) {
-                        deltas.add_for_entity(MetadataTxUpdate::new(
-                            *policy,
-                            asset.name().to_vec(),
-                            tx.hash(),
-                        ));
-                    }
-                }
+            if names_asset {
+                deltas.add_for_entity(MetadataTxUpdate::new(
+                    *policy,
+                    asset.name().to_vec(),
+                    tx.hash(),
+                ));
             }
         }
 

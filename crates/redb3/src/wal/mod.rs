@@ -200,7 +200,9 @@ const WAL_METADATA_VERSION_KEY: &str = "version";
 /// 2: deltas carry typed, variable-length entity keys (decision 0051).
 /// 3: `EpochStatsUpdate` and `ScriptFirstSeen` drop the fields nothing reads.
 /// 4: inputs carry each UTxO's creation position beside its output.
-pub const CURRENT_WAL_VERSION: u32 = 4;
+/// 5: staged asset mints carry whether their tx's CIP-25 metadata names the
+///    asset.
+pub const CURRENT_WAL_VERSION: u32 = 5;
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 

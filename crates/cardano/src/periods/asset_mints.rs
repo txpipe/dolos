@@ -41,7 +41,7 @@ pub(crate) fn seal<D: Domain>(
 
         // rows come in key order: asset, then epoch, then chain order
         for (i, (key, row)) in chunk.iter().enumerate() {
-            mints.push((row.tx_hash, row.amount));
+            mints.push(row.clone());
 
             let closes = chunk
                 .get(i + 1)
@@ -67,15 +67,11 @@ pub(crate) fn seal<D: Domain>(
 /// chain order, sealed ones their count.
 fn segments(
     periods: BTreeMap<Epoch, Period<AssetMintSet, EntityValue>>,
-) -> Result<Vec<Segment<(Hash<32>, i64)>>, ChainError> {
+) -> Result<Vec<Segment<AssetMintSet>>, ChainError> {
     periods
         .into_iter()
         .map(|(epoch, period)| match period {
-            Period::Staged(rows) => Ok(Segment::Staged(
-                rows.into_iter()
-                    .map(|row| (row.tx_hash, row.amount))
-                    .collect(),
-            )),
+            Period::Staged(rows) => Ok(Segment::Staged(rows)),
             Period::Sealed(first) => Ok(Segment::Sealed {
                 epoch,
                 count: super::chunk_count(&first)?,
@@ -108,9 +104,14 @@ pub fn page<D: Domain>(
 
     let segments = segments(super::join(staged, sealed))?;
 
-    super::page::<AssetMintChunk>(segments, order, skip, count, |epoch, chunks| {
+    let mints = super::page::<AssetMintChunk>(segments, order, skip, count, |epoch, chunks| {
         super::load_chunks(archive, chain, epoch, chunks, |i| (*asset, i))
-    })
+    })?;
+
+    Ok(mints
+        .into_iter()
+        .map(|row| (row.tx_hash, row.amount))
+        .collect())
 }
 
 #[cfg(test)]
@@ -163,6 +164,7 @@ mod tests {
             let row = AssetMintSet {
                 tx_hash: tx(asset, epoch, i),
                 amount,
+                names_asset: amount > 0 && i % 5 == 0,
             };
             writer.write_entity_typed(&key, &row).unwrap();
         };
@@ -261,8 +263,29 @@ mod tests {
     fn a_seal_moves_immutable_epochs_to_the_archive() {
         let domain = seeded();
         let before = pages(&domain);
+        let rows = staged(&domain);
 
         seal_as(&domain, &domain).unwrap();
+
+        // every sealed entry is its staged row, flag included, in chain order
+        for asset in [A, B] {
+            let asset = AssetKey(asset.into());
+
+            let staged: Vec<_> = rows
+                .iter()
+                .filter(|(key, _)| key.group == asset && key.epoch < 7)
+                .map(|(_, row)| row.clone())
+                .collect();
+            assert!(staged.iter().any(|row| row.names_asset));
+
+            let sealed: Vec<_> = logs(&domain)
+                .into_iter()
+                .filter(|(_, (group, _), _)| *group == asset)
+                .flat_map(|(_, _, chunk)| chunk.mints)
+                .collect();
+
+            assert_eq!(sealed, staged);
+        }
 
         // only epoch 7 stays staged
         assert!(staged(&domain).iter().all(|(key, _)| key.epoch == 7));
