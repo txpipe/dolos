@@ -544,8 +544,8 @@ mod tests {
         utxo_dimensions, utxo_index_delta_from_utxo_delta, utxo_tags, CardanoStateIndexExt as _,
     };
     use dolos_core::{
-        async_query::BlockMetaResolver, EraCbor, MempoolStore as _, MempoolTx, StateWriter as _,
-        UtxoIndexDelta, UtxoPosition, UtxoSetDelta,
+        async_query::BlockMetaResolver, EraCbor, MempoolStore as _, MempoolTx, StateStore,
+        StateWriter as _, UtxoIndexDelta, UtxoPosition, UtxoSetDelta,
     };
     use dolos_testing::{synthetic::SyntheticBlockConfig, TestAddress, MIN_UTXO_AMOUNT};
     use pallas::{
@@ -665,7 +665,7 @@ mod tests {
     }
 
     /// Writes `utxos` with their tags, as a block that produces them does.
-    fn produce<D: Domain>(domain: &D, utxos: Vec<(TxoRef, UtxoValue)>) {
+    fn produce(state: &impl StateStore, utxos: Vec<(TxoRef, UtxoValue)>) {
         let delta = UtxoSetDelta {
             produced_utxo: utxos
                 .into_iter()
@@ -674,7 +674,7 @@ mod tests {
             ..Default::default()
         };
 
-        let writer = domain.state().start_writer().expect("state writer");
+        let writer = state.start_writer().expect("state writer");
         writer.apply_utxoset(&delta).expect("apply utxos");
         writer
             .apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&delta))
@@ -689,7 +689,7 @@ mod tests {
             .map(|(txo, output)| (txo, UtxoValue::new(output, None)))
             .collect();
 
-        produce(domain, utxos);
+        produce(domain.state(), utxos);
     }
 
     fn asset_output(address: TestAddress, policy: &str, name: &str) -> EraCbor {
@@ -837,11 +837,8 @@ mod tests {
     }
 
     /// Spends `txo` the way a block does: out of the set and out of its tags.
-    fn spend<D: Domain>(domain: &D, txo: &TxoRef) {
-        let consumed_utxo = domain
-            .state()
-            .get_utxos(vec![txo.clone()])
-            .expect("utxo read");
+    fn spend(state: &impl StateStore, txo: &TxoRef) {
+        let consumed_utxo = state.get_utxos(vec![txo.clone()]).expect("utxo read");
         assert_eq!(consumed_utxo.len(), 1, "{txo} is live");
 
         let delta = UtxoSetDelta {
@@ -849,7 +846,7 @@ mod tests {
             ..Default::default()
         };
 
-        let writer = domain.state().start_writer().expect("state writer");
+        let writer = state.start_writer().expect("state writer");
         writer.apply_utxoset(&delta).expect("apply utxos");
         writer
             .apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&delta))
@@ -916,7 +913,7 @@ mod tests {
             let first = walk.next(&facade, 3).await.expect("first read");
             assert_eq!(first, all[..3], "{order:?}");
 
-            spend(&facade.inner, &first[0].txo);
+            spend(facade.inner.state(), &first[0].txo);
 
             let next = walk.next(&facade, 3).await.expect("second read");
             assert_eq!(next, all[3..6], "{order:?}: the walk skipped a row");
@@ -1015,7 +1012,7 @@ mod tests {
             .clone();
         let value = value_of(&app, &gone.to_string());
 
-        spend(&facade.inner, &gone);
+        spend(facade.inner.state(), &gone);
 
         let loaded = rows
             .load(&facade, first, false)
@@ -1025,7 +1022,7 @@ mod tests {
 
         let position = Some(UtxoPosition::new(u64::MAX, 0));
         produce(
-            &facade.inner,
+            facade.inner.state(),
             vec![(gone.clone(), UtxoValue::new(value.output, position))],
         );
 
@@ -1043,6 +1040,58 @@ mod tests {
         }
 
         assert!(listed, "the re-created UTxO is no row");
+    }
+
+    /// Through the routes, a rollback between the tag read and the value read
+    /// of the window that holds a row, then a fork block that re-creates the
+    /// row past the walk, moves the row to the end of the plain listing and of
+    /// the `lovelace` walk: each counts a ref only once its value loads.
+    #[tokio::test]
+    async fn listings_count_a_ref_once_its_value_loads() {
+        for listing in ["", "/lovelace"] {
+            let app = chain_with_configured_rows();
+            let address = app.vectors().address.clone();
+            let path = format!("/addresses/{address}/utxos{listing}?order=asc&count=100");
+
+            let before: Vec<String> = page_rows(&app, &path)
+                .await
+                .into_iter()
+                .map(|row| row.txo)
+                .collect();
+            let moved = before
+                .iter()
+                .find(|txo| value_of(&app, txo).position().is_some())
+                .expect("a block row")
+                .clone();
+
+            let txo: TxoRef = moved.parse().expect("txo ref");
+            let position = Some(UtxoPosition::new(u64::MAX, 0));
+            let mut fork = Some(UtxoValue::new(value_of(&app, &moved).output, position));
+            let mut rolled_back = false;
+
+            app.facade().inner.after_tag_page(move |entries, state| {
+                if !rolled_back {
+                    if entries.iter().any(|entry| entry.txo == txo) {
+                        spend(state, &txo);
+                        rolled_back = true;
+                    }
+                } else if let Some(value) = fork.take() {
+                    produce(state, vec![(txo.clone(), value)]);
+                }
+            });
+
+            let after: Vec<String> = page_rows(&app, &path)
+                .await
+                .into_iter()
+                .map(|row| row.txo)
+                .collect();
+
+            let mut expected: Vec<String> =
+                before.into_iter().filter(|txo| *txo != moved).collect();
+            expected.push(moved);
+
+            assert_eq!(after, expected, "listing {listing:?}");
+        }
     }
 
     /// Both of an asset listing's tags are read a window at a time, each read

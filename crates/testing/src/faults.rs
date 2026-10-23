@@ -1,7 +1,7 @@
 use std::{
     sync::{
         atomic::{AtomicU32, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -10,7 +10,7 @@ use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
     ArchiveError, ArchiveIndexDelta, ArchiveStore, ArchiveWriter, BlockBody, BlockSlot, ChainPoint,
     Domain, DomainError, IndexRecord, LogEntry, LogKey, LogValue, Namespace, RawBlock, StateError,
-    StateStore, StateWriter, TagDimension, TipEvent, UtxoIndexDelta, WalError, WalStore,
+    StateStore, StateWriter, TagDimension, TagEntry, TipEvent, UtxoIndexDelta, WalError, WalStore,
 };
 
 use crate::toy_domain::{Mempool, TipSubscription, ToyDomain};
@@ -91,7 +91,20 @@ impl FaultyToyDomain {
     pub fn entity_scans(&self) -> usize {
         self.state.scans.load(Ordering::SeqCst)
     }
+
+    /// Runs `hook` after every [`StateStore::utxos_by_tag_page`] read, with the
+    /// entries read and the store under the adapter, before the caller gets
+    /// them: a write that lands between a listing's tag read and its value
+    /// read.
+    pub fn after_tag_page(
+        &self,
+        hook: impl FnMut(&[TagEntry], &MemoryStateStore) + Send + 'static,
+    ) {
+        *self.state.tag_page_hook.lock().expect("tag page hook") = Some(Box::new(hook));
+    }
 }
+
+type TagPageHook = Box<dyn FnMut(&[TagEntry], &MemoryStateStore) + Send>;
 
 #[derive(Clone)]
 pub struct FaultyStateStore {
@@ -99,6 +112,7 @@ pub struct FaultyStateStore {
     fault: TestFault,
     commits: Arc<AtomicU32>,
     scans: Arc<AtomicUsize>,
+    tag_page_hook: Arc<Mutex<Option<TagPageHook>>>,
 }
 
 impl FaultyStateStore {
@@ -112,6 +126,7 @@ impl FaultyStateStore {
             fault,
             commits,
             scans: Default::default(),
+            tag_page_hook: Default::default(),
         }
     }
 
@@ -226,21 +241,28 @@ impl StateStore for FaultyStateStore {
         order: dolos_core::TagOrder,
         start: dolos_core::TagStart,
         count: usize,
-    ) -> Result<Vec<dolos_core::TagEntry>, StateError> {
+    ) -> Result<Vec<TagEntry>, StateError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
         self.slow_utxo_read();
-        self.inner
-            .utxos_by_tag_page(dimension, key, order, start, count)
+        let entries = self
+            .inner
+            .utxos_by_tag_page(dimension, key, order, start, count)?;
+
+        if let Some(hook) = self.tag_page_hook.lock().expect("tag page hook").as_mut() {
+            hook(&entries, &self.inner);
+        }
+
+        Ok(entries)
     }
 
     fn utxos_with_tag(
         &self,
         dimension: TagDimension,
         key: &[u8],
-        entries: Vec<dolos_core::TagEntry>,
-    ) -> Result<Vec<dolos_core::TagEntry>, StateError> {
+        entries: Vec<TagEntry>,
+    ) -> Result<Vec<TagEntry>, StateError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
