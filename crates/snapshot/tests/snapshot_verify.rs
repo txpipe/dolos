@@ -457,6 +457,23 @@ fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
         "the interrupted publish recorded no stake-only window 1"
     );
 
+    // The failed seal never joined the uploads, and a resume adopts a recorded
+    // layer only once its blob is up, so wait for it.
+    let recorded = recorded
+        .layers
+        .into_iter()
+        .find(|layer| layer.descriptor == stale)
+        .unwrap();
+    let probe = process();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !probe.adopt_carried(recorded.clone()).unwrap() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the stake-only window 1 never finished uploading"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
     let host_b: ToyDomain<MemoryStores> = node::harness();
     for sequence in [2, 3] {
         let plan = plan_at_boundary(&host_b, sequence, RetainedEpochs::default());
