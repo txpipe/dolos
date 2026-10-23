@@ -581,11 +581,13 @@ fn mint_flags_follow_the_cip25_predicate() {
             vec![mint(TEXT_KEYS, "A", -1)],
         ],
         vec![vec![mint(TEXT_KEYS, "A", 2)], vec![]],
+        // a burn by a tx whose label 721 names the asset
+        vec![vec![mint(TEXT_KEYS, "A", -1)], vec![]],
     ];
 
     let build = |metadata_entries| {
         let cfg = plain(SyntheticBlockConfig {
-            block_count: 2,
+            block_count: 3,
             txs_per_block: 2,
             mints_by_block: mints_by_block.clone(),
             metadata_entries,
@@ -607,7 +609,7 @@ fn mint_flags_follow_the_cip25_predicate() {
 
     assert_eq!(
         named[&asset(TEXT_KEYS, "A")],
-        [(1, true), (-1, false), (2, true)]
+        [(1, true), (-1, false), (2, true), (-1, false)]
     );
     assert_eq!(named[&asset(TEXT_KEYS, "B")], [(1, false)]);
     assert_eq!(named[&asset(BYTE_KEYS, "C")], [(1, true)]);
@@ -617,7 +619,7 @@ fn mint_flags_follow_the_cip25_predicate() {
 
     assert_eq!(
         unnamed[&asset(TEXT_KEYS, "A")],
-        [(1, false), (-1, false), (2, false)]
+        [(1, false), (-1, false), (2, false), (-1, false)]
     );
     assert_eq!(unnamed[&asset(BYTE_KEYS, "C")], [(1, false)]);
 }
