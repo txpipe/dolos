@@ -29,7 +29,7 @@ use dolos_cardano::{
         FixedNamespace as _, GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressKey,
         PaymentAddressSet, PaymentKey, PaymentStats, PendingMirState, PendingRewardState,
         PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState,
-        ScriptKey, ScriptState,
+        ScriptKey,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
     periods::{GroupKey, Ungrouped},
@@ -133,7 +133,6 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         PolicyMintChunk::NS => keys::encode(&(PolicyKey([byte; 28].into()), u32::from(byte))),
         PoolState::NS | PoolEpochLog::NS => keys::encode(&PoolKey([byte; 28].into())),
         ProposalState::NS => keys::encode(&ProposalKey::new([byte; 32].into(), u32::from(byte))),
-        ScriptState::NS => keys::encode(&ScriptKey([byte; 28].into())),
         FirstScriptSet::NS => keys::encode(&GroupKey {
             group: Ungrouped,
             epoch: u64::from(byte),

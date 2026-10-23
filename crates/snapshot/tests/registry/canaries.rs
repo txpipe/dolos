@@ -29,7 +29,7 @@ use dolos_cardano::{
         FirstScriptChunk, FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces,
         PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
         PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, PoolTally,
-        ProposalAction, ProposalState, RollingStats, ScriptState, ShardProgress, Stake, VoteEntry,
+        ProposalAction, ProposalState, RollingStats, ShardProgress, Stake, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
@@ -322,10 +322,6 @@ pub fn account_address_chunk() -> AccountAddressChunk {
                 .into(),
         ],
     }
-}
-
-pub fn script_state() -> ScriptState {
-    ScriptState { slot: 99_999_999 }
 }
 
 pub fn first_script_set() -> FirstScriptSet {

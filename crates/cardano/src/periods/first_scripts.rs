@@ -2,8 +2,8 @@
 //! (decision 0057).
 //!
 //! A sealed epoch holds one list, in first-seen order, at
-//! `epoch_start(e) ‖ chunk`. The `scripts` witness decides at roll time which
-//! sighting is a script's first, so every staged row is listed.
+//! `epoch_start(e) ‖ chunk`. The archive's `script` tag decides at roll time
+//! which sighting is a script's first, so every staged row is listed.
 
 use std::{collections::BTreeMap, ops::RangeInclusive};
 

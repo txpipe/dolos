@@ -57,6 +57,7 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
         }
         ArchiveStoreBackend::Memory(_)
         | ArchiveStoreBackend::LogsOnly(_)
+        | ArchiveStoreBackend::TagReads(_)
         | ArchiveStoreBackend::NoOp(_) => (),
     }
 

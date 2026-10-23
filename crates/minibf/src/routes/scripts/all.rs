@@ -135,7 +135,7 @@ mod tests {
     /// either end.
     #[tokio::test]
     async fn scripts_all_lists_only_archived_scripts() {
-        use dolos_cardano::model::{FirstScriptSet, ScriptKey, ScriptState};
+        use dolos_cardano::model::{FirstScriptSet, ScriptKey};
         use dolos_cardano::periods::{GroupKey, Ungrouped};
         use dolos_core::{StateStore as _, StateWriter as _};
         use pallas::crypto::hash::Hash;
@@ -162,9 +162,6 @@ mod tests {
                 };
 
                 let writer = domain.state().start_writer().unwrap();
-                writer
-                    .write_entity_typed(&ScriptKey(phantom), &ScriptState::from(first))
-                    .unwrap();
                 writer
                     .write_entity_typed(
                         &GroupKey {

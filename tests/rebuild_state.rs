@@ -199,9 +199,9 @@ fn rewrite_logs_reproduces_the_log_rows_and_leaves_blocks_alone() {
 }
 
 /// An archive written before scripts in auxiliary data were tagged has no
-/// `script` tag for them, so once rolling history prunes a script's first
-/// block, `script_by_hash` cannot find a later one. `--rewrite-logs`
-/// re-applies the index of every block it replays, which fills them in.
+/// `script` tag for them, so `script_by_hash` cannot find them and the roll
+/// takes each repeat for a first sighting. `--rewrite-logs` re-applies the
+/// index of every block it replays, which fills them in.
 #[test]
 fn rewrite_logs_fills_in_index_entries_an_older_archive_lacks() {
     use dolos_cardano::indexes::archive_dimensions::SCRIPT;

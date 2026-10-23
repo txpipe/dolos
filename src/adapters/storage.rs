@@ -1123,6 +1123,19 @@ pub enum ArchiveStoreBackend {
     /// [`Self::logs_only`] is the sole constructor, and it never nests one
     /// gate inside another.
     LogsOnly(Box<ArchiveStoreBackend>),
+    /// Read-gated view over an already-open archive: tag reads pass through,
+    /// every other read finds nothing and every write is discarded, as in
+    /// [`Self::NoOp`].
+    ///
+    /// This exists for replays into a fresh state over an archive that holds
+    /// the chain (`dolos doctor rebuild-state` without `--rewrite-logs`): the
+    /// roll tells a script's first sighting from a repeat by the `script`
+    /// tags below its batch, which only the source archive holds, while the
+    /// seal must not read the logs the source sealed.
+    ///
+    /// [`Self::tag_reads`] is the sole constructor, and it never nests one
+    /// gate inside another.
+    TagReads(Box<ArchiveStoreBackend>),
     Fjall(dolos_fjall::archive::ArchiveStore),
     NoOp(NoOpArchiveStore),
 }
@@ -1169,7 +1182,20 @@ impl ArchiveStoreBackend {
     pub fn logs_only(&self) -> Option<Self> {
         match self {
             Self::LogsOnly(_) => Some(self.clone()),
+            Self::TagReads(inner) => inner.logs_only(),
             Self::Memory(_) | Self::Fjall(_) => Some(Self::LogsOnly(Box::new(self.clone()))),
+            Self::NoOp(_) => None,
+        }
+    }
+
+    /// Wrap this backend's already-open store in a [`Self::TagReads`] read
+    /// gate, aliasing it as [`Self::logs_only`] does. Returns `None` when
+    /// there is no store to wrap.
+    pub fn tag_reads(&self) -> Option<Self> {
+        match self {
+            Self::TagReads(_) => Some(self.clone()),
+            Self::LogsOnly(inner) => inner.tag_reads(),
+            Self::Memory(_) | Self::Fjall(_) => Some(Self::TagReads(Box::new(self.clone()))),
             Self::NoOp(_) => None,
         }
     }
@@ -1204,7 +1230,7 @@ impl ArchiveStoreBackend {
         match self {
             Self::Fjall(s) => Ok(s.identity()?),
             Self::LogsOnly(inner) => inner.identity(),
-            Self::Memory(_) | Self::NoOp(_) => Ok(None),
+            Self::Memory(_) | Self::TagReads(_) | Self::NoOp(_) => Ok(None),
         }
     }
 
@@ -1215,14 +1241,14 @@ impl ArchiveStoreBackend {
         match self {
             Self::Fjall(s) => Ok(s.holds_data()?),
             Self::LogsOnly(inner) => inner.holds_data(),
-            Self::Memory(_) | Self::NoOp(_) => Ok(false),
+            Self::Memory(_) | Self::TagReads(_) | Self::NoOp(_) => Ok(false),
         }
     }
 
     pub fn shutdown(&self) -> Result<(), ArchiveError> {
         match self {
             Self::Memory(s) => s.shutdown(),
-            Self::LogsOnly(inner) => inner.shutdown(),
+            Self::LogsOnly(inner) | Self::TagReads(inner) => inner.shutdown(),
             Self::Fjall(s) => s.shutdown().map_err(ArchiveError::from),
             Self::NoOp(s) => s.shutdown(),
         }
@@ -1469,6 +1495,9 @@ impl CoreArchiveStore for ArchiveStoreBackend {
                 .map(|writer| ArchiveWriterBackend::LogsOnly(Box::new(writer))),
             Self::Fjall(s) => CoreArchiveStore::start_writer(s)
                 .map(|writer| ArchiveWriterBackend::Fjall(Box::new(writer))),
+            Self::TagReads(_) => {
+                CoreArchiveStore::start_writer(&NoOpArchiveStore).map(ArchiveWriterBackend::NoOp)
+            }
             Self::NoOp(s) => CoreArchiveStore::start_writer(s).map(ArchiveWriterBackend::NoOp),
         }
     }
@@ -1482,6 +1511,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Memory(s) => CoreArchiveStore::read_logs(s, ns, keys),
             Self::LogsOnly(inner) => CoreArchiveStore::read_logs(inner.as_ref(), ns, keys),
             Self::Fjall(s) => CoreArchiveStore::read_logs(s, ns, keys),
+            Self::TagReads(_) => CoreArchiveStore::read_logs(&NoOpArchiveStore, ns, keys),
             Self::NoOp(s) => CoreArchiveStore::read_logs(s, ns, keys),
         }
     }
@@ -1493,6 +1523,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::LogsOnly(inner) => CoreArchiveStore::iter_logs(inner.as_ref(), ns, range),
             Self::Fjall(s) => CoreArchiveStore::iter_logs(s, ns, range)
                 .map(|iter| ArchiveLogIterBackend::Fjall(Box::new(iter))),
+            Self::TagReads(_) => CoreArchiveStore::iter_logs(&NoOpArchiveStore, ns, range)
+                .map(ArchiveLogIterBackend::NoOp),
             Self::NoOp(s) => {
                 CoreArchiveStore::iter_logs(s, ns, range).map(ArchiveLogIterBackend::NoOp)
             }
@@ -1504,6 +1536,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Memory(s) => CoreArchiveStore::get_block_by_slot(s, slot),
             Self::LogsOnly(inner) => CoreArchiveStore::get_block_by_slot(inner.as_ref(), slot),
             Self::Fjall(s) => CoreArchiveStore::get_block_by_slot(s, slot),
+            Self::TagReads(_) => CoreArchiveStore::get_block_by_slot(&NoOpArchiveStore, slot),
             Self::NoOp(s) => CoreArchiveStore::get_block_by_slot(s, slot),
         }
     }
@@ -1513,6 +1546,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Memory(s) => CoreArchiveStore::get_blocks_by_slot(s, slot),
             Self::LogsOnly(inner) => CoreArchiveStore::get_blocks_by_slot(inner.as_ref(), slot),
             Self::Fjall(s) => CoreArchiveStore::get_blocks_by_slot(s, slot),
+            Self::TagReads(_) => CoreArchiveStore::get_blocks_by_slot(&NoOpArchiveStore, slot),
             Self::NoOp(s) => CoreArchiveStore::get_blocks_by_slot(s, slot),
         }
     }
@@ -1528,6 +1562,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::LogsOnly(inner) => CoreArchiveStore::get_range(inner.as_ref(), from, to),
             Self::Fjall(s) => CoreArchiveStore::get_range(s, from, to)
                 .map(|iter| ArchiveBlockIterBackend::Fjall(Box::new(iter))),
+            Self::TagReads(_) => CoreArchiveStore::get_range(&NoOpArchiveStore, from, to)
+                .map(ArchiveBlockIterBackend::NoOp),
             Self::NoOp(s) => {
                 CoreArchiveStore::get_range(s, from, to).map(ArchiveBlockIterBackend::NoOp)
             }
@@ -1539,6 +1575,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Memory(s) => CoreArchiveStore::find_intersect(s, intersect),
             Self::LogsOnly(inner) => CoreArchiveStore::find_intersect(inner.as_ref(), intersect),
             Self::Fjall(s) => CoreArchiveStore::find_intersect(s, intersect),
+            Self::TagReads(_) => CoreArchiveStore::find_intersect(&NoOpArchiveStore, intersect),
             Self::NoOp(s) => CoreArchiveStore::find_intersect(s, intersect),
         }
     }
@@ -1548,6 +1585,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Memory(s) => CoreArchiveStore::get_tip(s),
             Self::LogsOnly(inner) => CoreArchiveStore::get_tip(inner.as_ref()),
             Self::Fjall(s) => CoreArchiveStore::get_tip(s),
+            Self::TagReads(_) => CoreArchiveStore::get_tip(&NoOpArchiveStore),
             Self::NoOp(s) => CoreArchiveStore::get_tip(s),
         }
     }
@@ -1571,6 +1609,12 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Fjall(s) => {
                 CoreArchiveStore::prune_history(s, max_slots, max_prune_slots, max_prune_index_rows)
             }
+            Self::TagReads(_) => CoreArchiveStore::prune_history(
+                &NoOpArchiveStore,
+                max_slots,
+                max_prune_slots,
+                max_prune_index_rows,
+            ),
             Self::NoOp(s) => {
                 CoreArchiveStore::prune_history(s, max_slots, max_prune_slots, max_prune_index_rows)
             }
@@ -1582,6 +1626,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Memory(s) => CoreArchiveStore::truncate_front(s, after),
             Self::LogsOnly(inner) => CoreArchiveStore::truncate_front(inner.as_ref(), after),
             Self::Fjall(s) => CoreArchiveStore::truncate_front(s, after),
+            Self::TagReads(_) => CoreArchiveStore::truncate_front(&NoOpArchiveStore, after),
             Self::NoOp(s) => CoreArchiveStore::truncate_front(s, after),
         }
     }
@@ -1591,6 +1636,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Memory(s) => CoreArchiveStore::slot_by_block_hash(s, hash),
             Self::LogsOnly(inner) => CoreArchiveStore::slot_by_block_hash(inner.as_ref(), hash),
             Self::Fjall(s) => CoreArchiveStore::slot_by_block_hash(s, hash),
+            Self::TagReads(_) => CoreArchiveStore::slot_by_block_hash(&NoOpArchiveStore, hash),
             Self::NoOp(s) => CoreArchiveStore::slot_by_block_hash(s, hash),
         }
     }
@@ -1600,6 +1646,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Memory(s) => CoreArchiveStore::slot_by_block_number(s, number),
             Self::LogsOnly(inner) => CoreArchiveStore::slot_by_block_number(inner.as_ref(), number),
             Self::Fjall(s) => CoreArchiveStore::slot_by_block_number(s, number),
+            Self::TagReads(_) => CoreArchiveStore::slot_by_block_number(&NoOpArchiveStore, number),
             Self::NoOp(s) => CoreArchiveStore::slot_by_block_number(s, number),
         }
     }
@@ -1609,6 +1656,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Memory(s) => CoreArchiveStore::slot_by_tx_hash(s, hash),
             Self::LogsOnly(inner) => CoreArchiveStore::slot_by_tx_hash(inner.as_ref(), hash),
             Self::Fjall(s) => CoreArchiveStore::slot_by_tx_hash(s, hash),
+            Self::TagReads(_) => CoreArchiveStore::slot_by_tx_hash(&NoOpArchiveStore, hash),
             Self::NoOp(s) => CoreArchiveStore::slot_by_tx_hash(s, hash),
         }
     }
@@ -1623,7 +1671,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         match self {
             Self::Memory(s) => CoreArchiveStore::slots_by_tag(s, dimension, key, start, end)
                 .map(ArchiveSlotIterBackend::Memory),
-            Self::LogsOnly(inner) => {
+            Self::LogsOnly(inner) | Self::TagReads(inner) => {
                 CoreArchiveStore::slots_by_tag(inner.as_ref(), dimension, key, start, end)
             }
             Self::Fjall(s) => CoreArchiveStore::slots_by_tag(s, dimension, key, start, end)
@@ -1641,7 +1689,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         match self {
             Self::Memory(s) => CoreArchiveStore::iter_archive_tags(s, dimensions, slots)
                 .map(ArchiveTagIterBackend::Memory),
-            Self::LogsOnly(inner) => {
+            Self::LogsOnly(inner) | Self::TagReads(inner) => {
                 CoreArchiveStore::iter_archive_tags(inner.as_ref(), dimensions, slots)
             }
             Self::Fjall(s) => CoreArchiveStore::iter_archive_tags(s, dimensions, slots)
@@ -1660,6 +1708,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Fjall(s) => {
                 CoreArchiveStore::iter_exact_records(s, slots).map(ArchiveExactIterBackend::Fjall)
             }
+            Self::TagReads(_) => CoreArchiveStore::iter_exact_records(&NoOpArchiveStore, slots)
+                .map(ArchiveExactIterBackend::NoOp),
             Self::NoOp(s) => {
                 CoreArchiveStore::iter_exact_records(s, slots).map(ArchiveExactIterBackend::NoOp)
             }

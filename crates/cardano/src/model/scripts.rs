@@ -3,11 +3,11 @@
 //!
 //! Nothing else enumerates scripts. They are not ledger state, and the archive
 //! index keeps a hash of the script hash, so it answers "where is this script"
-//! but not "which scripts are there". Three namespaces do:
+//! but not "which scripts are there". The `script` tag follows phase-2
+//! validity, so a script's first tag is its first sighting: the roll seeks it
+//! to tell a new script from a repeat, and `/scripts/{hash}` reads the script
+//! there. Two namespaces list them:
 //!
-//! - `scripts`, the witness, keyed by script hash: the slot the script was
-//!   first seen at, which is what a block needs to tell a new script from a
-//!   repeat and what `/scripts/{hash}` starts its lookup from.
 //! - `first-scripts`, a `Set` keyed `epoch ‖ script hash`: the scripts an
 //!   unsealed epoch saw first.
 //! - `first-script-chunks`, the `Chunk` the set seals into: an epoch's scripts
@@ -22,26 +22,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::periods::{ChunkRow, GroupKey, Ungrouped};
 
-/// The slot of the block that first carried a script. The script's place in
-/// the listing is kept by its [`FirstScriptSet`] row.
-#[derive(
-    Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord,
-)]
-pub struct ScriptState {
-    #[n(0)]
-    pub slot: u64,
-}
-
 hash_key!(
-    /// The hash of a script, the key of its `scripts` row.
+    /// The hash of a script, the member of its `first-scripts` key.
     ScriptKey,
     Hash<28>,
     28
 );
 
 display_as_stored!(ScriptKey);
-
-entity_boilerplate!(ScriptState, "scripts", state = ScriptKey);
 
 /// A script an epoch saw first, held in state until the epoch seals into
 /// [`FirstScriptChunk`]s. The value is where the script was first seen: its
@@ -67,12 +55,6 @@ pub struct FirstScriptSet {
 pub type FirstScriptKey = GroupKey<Ungrouped, ScriptKey>;
 
 entity_boilerplate!(FirstScriptSet, "first-scripts", state = FirstScriptKey);
-
-impl From<FirstScriptSet> for ScriptState {
-    fn from(x: FirstScriptSet) -> Self {
-        Self { slot: x.slot }
-    }
-}
 
 /// One chunk of the scripts an epoch saw first, in first-seen order.
 ///
@@ -109,12 +91,6 @@ pub(crate) mod testing {
     use proptest::prelude::*;
 
     prop_compose! {
-        pub fn any_script_state()(slot in root::any_slot()) -> ScriptState {
-            ScriptState { slot }
-        }
-    }
-
-    prop_compose! {
         pub fn any_first_script_set()(
             slot in root::any_slot(),
             tx_index in 0u32..500,
@@ -126,52 +102,6 @@ pub(crate) mod testing {
 }
 
 // --- Deltas ---
-
-/// Records where a script was first seen.
-///
-/// Emitted once per script, by the block that carries it first: the roll
-/// tells new scripts from repeats ahead of applying, so an existing row is
-/// left alone.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScriptFirstSeen {
-    pub(crate) script_hash: Hash<28>,
-    pub(crate) first: ScriptState,
-
-    /// For undo: did this delta create the row?
-    pub(crate) was_new: bool,
-}
-
-impl ScriptFirstSeen {
-    pub fn new(script_hash: Hash<28>, first: ScriptState) -> Self {
-        Self {
-            script_hash,
-            first,
-            was_new: false,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for ScriptFirstSeen {
-    type Entity = ScriptState;
-
-    fn key(&self) -> NsKey {
-        NsKey::of::<ScriptState>(&ScriptKey(self.script_hash))
-    }
-
-    fn apply(&mut self, entity: &mut Option<ScriptState>) {
-        self.was_new = entity.is_none();
-
-        if self.was_new {
-            *entity = Some(self.first);
-        }
-    }
-
-    fn undo(&self, entity: &mut Option<ScriptState>) {
-        if self.was_new {
-            *entity = None;
-        }
-    }
-}
 
 /// Stages a script in the `first-scripts` row of the epoch that saw it first.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,44 +151,13 @@ impl dolos_core::EntityDelta for StageFirstScript {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{any_first_script_set, any_script_state};
+    use super::testing::any_first_script_set;
     use super::*;
     use crate::model::testing::{
         self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
     };
     use dolos_core::{EntityDelta as _, KeyCodec as _};
     use proptest::prelude::*;
-
-    fn first(slot: u64) -> ScriptState {
-        ScriptState { slot }
-    }
-
-    #[test]
-    fn first_seen_records_a_new_script() {
-        let mut delta = ScriptFirstSeen::new(Hash::new([1u8; 28]), first(42));
-        let mut entity = None;
-
-        delta.apply(&mut entity);
-
-        assert!(delta.was_new);
-        assert_eq!(entity, Some(first(42)));
-
-        delta.undo(&mut entity);
-        assert_eq!(entity, None);
-    }
-
-    #[test]
-    fn first_seen_leaves_a_known_script_alone() {
-        let mut delta = ScriptFirstSeen::new(Hash::new([1u8; 28]), first(42));
-        let mut entity = Some(first(10));
-
-        delta.apply(&mut entity);
-        assert!(!delta.was_new);
-        assert_eq!(entity, Some(first(10)));
-
-        delta.undo(&mut entity);
-        assert_eq!(entity, Some(first(10)));
-    }
 
     #[test]
     fn positions_order_as_db_sync_lists() {
@@ -295,15 +194,6 @@ mod tests {
     }
 
     prop_compose! {
-        fn any_script_first_seen()(
-            script_hash in root::any_hash_28(),
-            first in any_script_state(),
-        ) -> ScriptFirstSeen {
-            ScriptFirstSeen::new(script_hash, first)
-        }
-    }
-
-    prop_compose! {
         fn any_stage_first_script()(
             epoch in 0u64..1000,
             script_hash in root::any_hash_28(),
@@ -314,15 +204,6 @@ mod tests {
     }
 
     proptest! {
-        #[test]
-        fn script_first_seen_roundtrip(
-            entity in prop::option::of(any_script_state()),
-            delta in any_script_first_seen(),
-        ) {
-            assert_delta_roundtrip(entity, delta.clone());
-            assert_delta_serde_roundtrip(entity, delta);
-        }
-
         #[test]
         fn stage_first_script_roundtrip(
             entity in prop::option::of(any_first_script_set()),

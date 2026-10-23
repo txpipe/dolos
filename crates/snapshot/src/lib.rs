@@ -112,7 +112,7 @@ use dolos_cardano::model::{
     DRepState, DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolEpochLog, PoolState, ProposalState, ScriptState,
+    PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -203,12 +203,12 @@ pub const LOG_KINDS: [(&str, Namespace); 12] = [
 /// not a constructor (`state_kinds_derive_from_their_namespaces`).
 ///
 /// The shard count is **specification, never tuning**: the namespaces whose
-/// populations are chain-scale — the UTxO set, accounts, assets, datums and
-/// scripts — shard sixteen ways by the first key nibble, and every other
+/// populations are chain-scale — the UTxO set, accounts, assets and datums —
+/// shard sixteen ways by the first key nibble, and every other
 /// namespace is a single blob. Re-sharding a namespace is a media-type-version
 /// event for that namespace's kind, decided by the format's owner; it is not a
 /// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 23] = [
+pub const STATE_KINDS: [(&str, Namespace, u8); 22] = [
     ("state-account-addresses", AccountAddressSet::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
@@ -230,7 +230,6 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 23] = [
     ("state-pending-rewards", PendingRewardState::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
-    ("state-scripts", ScriptState::NS, 16),
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 

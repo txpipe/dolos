@@ -202,18 +202,21 @@ impl CardanoIndexDeltaBuilder {
             .push(Tag::new(archive::SCRIPT_REDEEMERS, hash));
     }
 
-    /// Tag the current block with every script `tx` carries outside the
-    /// outputs it produces: the witnesses, the auxiliary data, and the
-    /// collateral return of a valid tx.
+    /// Tag the current block with every script a valid `tx` carries outside
+    /// the outputs it produces: the witnesses, the auxiliary data and the
+    /// collateral return. A phase-2-invalid tx gets none.
     ///
-    /// They count because `/scripts` lists them
-    /// (`roll::scripts::tx_script_hashes`): a listed script is found through
-    /// the archive index once the block that carried it first is pruned. The
-    /// tags do not follow phase-2 validity; `script_by_hash` filters the
-    /// blocks it reads. A produced output's reference script is tagged with
-    /// it, see [`utxo_tags`].
+    /// With the produced outputs' reference scripts, tagged with them (see
+    /// [`utxo_tags`]), the `script` tag marks exactly what `/scripts` counts
+    /// (`roll::scripts::tx_script_hashes`). The roll reads the first tag as
+    /// the script's first sighting and `script_by_hash` finds the script
+    /// there.
     pub fn add_tx_scripts(&mut self, tx: &MultiEraTx) {
         use pallas::ledger::traverse::{ComputeHash as _, OriginalHash as _};
+
+        if !tx.is_valid() {
+            return;
+        }
 
         for script in tx.native_scripts() {
             self.add_script_hash(script.original_hash().to_vec());
@@ -237,7 +240,7 @@ impl CardanoIndexDeltaBuilder {
 
         // a phase-2-invalid tx produces its collateral return, which is tagged
         // with the other outputs it produces
-        let collateral_return = tx.collateral_return().filter(|_| tx.is_valid());
+        let collateral_return = tx.collateral_return();
 
         if let Some(script_ref) = collateral_return.as_ref().and_then(|x| x.script_ref()) {
             self.add_script_hash(pallas_extras::script_ref_hash(&script_ref).to_vec());
@@ -895,6 +898,48 @@ mod tests {
         expected.sort();
 
         assert_eq!(tagged, expected);
+    }
+
+    /// The `script` tags of a tx, with the reference scripts of the outputs
+    /// it produces, are exactly the scripts `/scripts` counts for it, valid or
+    /// not: an invalid tx's witnesses and auxiliary scripts get no tag, so the
+    /// first tag is the first counted carrier.
+    #[test]
+    fn script_tags_follow_phase_2_validity() {
+        use pallas::ledger::traverse::MultiEraTx;
+        use std::collections::BTreeSet;
+
+        for valid in [true, false] {
+            let (mut tx, _) = crate::roll::scripts::tests::every_place();
+            tx.success = valid;
+            let cbor = tx.cbor();
+            let tx = MultiEraTx::decode(&cbor).unwrap();
+
+            let mut builder = CardanoIndexDeltaBuilder::new();
+            builder.start_block(1, vec![0xaa; 32], Some(1));
+            builder.add_tx_scripts(&tx);
+
+            for (_, output) in tx.produces() {
+                if let Some(script_ref) = output.script_ref() {
+                    builder.add_script_hash(pallas_extras::script_ref_hash(&script_ref).to_vec());
+                }
+            }
+
+            let tagged: BTreeSet<Vec<u8>> = builder
+                .build()
+                .iter()
+                .flat_map(|block| block.tags.iter())
+                .filter(|tag| tag.dimension == archive::SCRIPT)
+                .map(|tag| tag.key.clone())
+                .collect();
+
+            let counted: BTreeSet<Vec<u8>> = crate::roll::scripts::tx_script_hashes(&tx)
+                .iter()
+                .map(|x| x.to_vec())
+                .collect();
+
+            assert_eq!(tagged, counted, "valid: {valid}");
+        }
     }
 
     /// Drive every tag-producing method on the builder once.

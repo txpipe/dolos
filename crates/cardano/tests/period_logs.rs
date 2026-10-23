@@ -6,7 +6,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use dolos_cardano::{
     model::{
         AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, FirstMintChunk,
-        FirstMintSet, FirstScriptSet, ScriptState,
+        FirstMintSet, FirstScriptSet,
     },
     periods::is_sealable,
     AccountKey, CardanoDelta,
@@ -321,35 +321,24 @@ fn zero_mint_stages_no_first_mint() {
     assert_eq!(count(|x| matches!(x, CardanoDelta::MintStatsUpdate(_))), 1);
 }
 
-/// The script hashes the witness holds, and the `(epoch, script hash)` keys
-/// staged as first seen.
-type ScriptRows = (BTreeSet<[u8; 28]>, BTreeSet<(u64, [u8; 28])>);
-
-fn scripts(domain: &ToyDomain) -> ScriptRows {
-    let witness = domain
-        .state()
-        .iter_entities_typed::<ScriptState>(None)
-        .unwrap()
-        .map(|row| *row.unwrap().0 .0)
-        .collect();
-
-    let staged = domain
+/// The `(epoch, script hash, slot)` of each script staged as first seen.
+fn scripts(domain: &ToyDomain) -> BTreeSet<(u64, [u8; 28], u64)> {
+    domain
         .state()
         .iter_entities_typed::<FirstScriptSet>(None)
         .unwrap()
         .map(|row| {
-            let (key, _) = row.unwrap();
-            (key.epoch, *key.member.0)
+            let (key, row) = row.unwrap();
+            (key.epoch, *key.member.0, row.slot)
         })
-        .collect();
-
-    (witness, staged)
+        .collect()
 }
 
 /// Rollback for first scripts: undoing the block that first carried a script
-/// removes its witness and set rows, and a block that only repeats scripts
-/// leaves them alone. The first block's tx failed phase-2 validation, so the
-/// scripts it carries count from the second block.
+/// removes its set rows, and a block that only repeats scripts leaves them
+/// alone. The first block's tx failed phase-2 validation, so its witnesses
+/// get no `script` tag and the scripts are staged once, at the second block,
+/// the first valid carrier.
 #[test]
 fn rollback_removes_the_script_rows_of_the_block_that_first_carried_them() {
     let cfg = SyntheticBlockConfig {
@@ -374,10 +363,12 @@ fn rollback_removes_the_script_rows_of_the_block_that_first_carried_them() {
         after.push(scripts(&domain));
     }
 
-    let none = (BTreeSet::new(), BTreeSet::new());
+    let none = BTreeSet::new();
     assert_eq!(after[0], none, "an invalid tx's witnesses were recorded");
-    assert_eq!(after[1].0.len(), 3);
-    assert_eq!(after[1].1.len(), 3);
+    assert_eq!(after[1].len(), 3);
+    assert!(after[1]
+        .iter()
+        .all(|(_, _, slot)| *slot == points[1].slot()));
     assert_eq!(after[2], after[1]);
 
     domain.rollback(&points[1]).unwrap();

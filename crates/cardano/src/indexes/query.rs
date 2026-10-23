@@ -15,7 +15,7 @@ use dolos_core::{
 };
 
 use crate::indexes::dimensions::archive;
-use crate::model::{DatumKey, DatumState, ScriptKey, ScriptState};
+use crate::model::{DatumKey, DatumState};
 use crate::pallas_extras;
 
 use futures_core::Stream;
@@ -206,9 +206,8 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
     /// cardano-db-sync's `script` table has it: a script only a
     /// phase-2-invalid tx witnessed is not found.
     ///
-    /// The `scripts` witness points at the block that carried the script
-    /// first, so no archive tag is needed to find it. Without a witness row,
-    /// or with that block pruned, it falls back to the archive index.
+    /// The `script` tag marks the blocks that count the script, so the first
+    /// tagged block the archive still holds returns it.
     async fn script_by_hash(
         &self,
         script_hash: &Hash<28>,
@@ -565,43 +564,13 @@ where
         script_hash: &Hash<28>,
     ) -> Result<Option<ScriptData>, DomainError> {
         let script_hash = *script_hash;
-        let key = ScriptKey(script_hash);
-
-        let (first_slot, first_blocks) = self
-            .run_blocking(move |domain| {
-                let row: Option<ScriptState> =
-                    domain.state().read_entity_typed::<ScriptState>(&key)?;
-
-                let Some(row) = row else {
-                    return Ok((None, vec![]));
-                };
-
-                let blocks = domain.archive().get_blocks_by_slot(&row.slot)?;
-                Ok((Some(row.slot), blocks))
-            })
-            .await?;
-
-        for raw in first_blocks {
-            let block = MultiEraBlock::decode(raw.as_slice())
-                .map_err(|e| DomainError::ChainError(ChainError::DecodingError(e)))?;
-
-            if let Some(script) = script_in_block(&block, script_hash) {
-                return Ok(Some(script));
-            }
-        }
-
-        // no witness row (data synced before the witness existed) or its
-        // first block pruned by rolling history: the archive index still
-        // knows every later carrier. An archive written before auxiliary-data
-        // scripts were tagged learns theirs from `doctor rebuild-state
-        // --rewrite-logs`, which re-applies the index of every block it replays
         let end_slot = archive_tip_slot(self).await?;
 
         find_first_by_tag(
             self,
             archive::SCRIPT,
             script_hash.as_slice().to_vec(),
-            first_slot.unwrap_or(0),
+            0,
             end_slot,
             |block| script_in_block(block, script_hash),
         )

@@ -176,7 +176,6 @@ pub enum CardanoEntity {
     PaymentStats(Box<PaymentStats>),
     PaymentAddressChunk(Box<PaymentAddressChunk>),
     AccountStats(Box<AccountStats>),
-    ScriptState(Box<ScriptState>),
     FirstScriptSet(Box<FirstScriptSet>),
     FirstScriptChunk(Box<FirstScriptChunk>),
     MetadataLabelState(Box<MetadataLabelState>),
@@ -228,7 +227,6 @@ variant_boilerplate!(PaymentAddressSet);
 variant_boilerplate!(PaymentStats);
 variant_boilerplate!(PaymentAddressChunk);
 variant_boilerplate!(AccountStats);
-variant_boilerplate!(ScriptState);
 variant_boilerplate!(FirstScriptSet);
 variant_boilerplate!(FirstScriptChunk);
 variant_boilerplate!(MetadataLabelState);
@@ -267,7 +265,6 @@ impl dolos_core::Entity for CardanoEntity {
                 PaymentAddressChunk::decode_entity(ns, value).map(Into::into)
             }
             AccountStats::NS => AccountStats::decode_entity(ns, value).map(Into::into),
-            ScriptState::NS => ScriptState::decode_entity(ns, value).map(Into::into),
             FirstScriptSet::NS => FirstScriptSet::decode_entity(ns, value).map(Into::into),
             FirstScriptChunk::NS => FirstScriptChunk::decode_entity(ns, value).map(Into::into),
             MetadataLabelState::NS => MetadataLabelState::decode_entity(ns, value).map(Into::into),
@@ -304,7 +301,6 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PaymentStats(x) => PaymentStats::encode_entity(x),
             Self::PaymentAddressChunk(x) => PaymentAddressChunk::encode_entity(x),
             Self::AccountStats(x) => AccountStats::encode_entity(x),
-            Self::ScriptState(x) => ScriptState::encode_entity(x),
             Self::FirstScriptSet(x) => FirstScriptSet::encode_entity(x),
             Self::FirstScriptChunk(x) => FirstScriptChunk::encode_entity(x),
             Self::MetadataLabelState(x) => MetadataLabelState::encode_entity(x),
@@ -346,7 +342,6 @@ pub fn build_schema() -> StateSchema {
     register_state::<PaymentAddressSet>(&mut schema);
     register_state::<PaymentStats>(&mut schema);
     register_state::<AccountStats>(&mut schema);
-    register_state::<ScriptState>(&mut schema);
     register_state::<FirstScriptSet>(&mut schema);
     register_state::<MetadataLabelState>(&mut schema);
     register_state::<AssetMintSet>(&mut schema);
@@ -398,6 +393,11 @@ mod schema_tests {
 
 // --- CardanoDelta ---
 
+/// The payload of a retired [`CardanoDelta`] variant. It has no values, so
+/// nothing constructs the variant and a WAL row carrying it fails to decode.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum Retired {}
+
 // Variant order is part of the on-disk WAL format: bincode encodes enum
 // variants by positional index (no name tags). The index of every variant
 // a released binary has written is frozen (0..=63 as of v1.7.0-alpha.0)
@@ -405,7 +405,8 @@ mod schema_tests {
 // the end. The `EpochTransition` and
 // `EpochWrapUp` variants point at the *legacy* (deprecated) struct
 // shapes for the same reason; `EpochTransitionV2` / `EpochWrapUpV2` are
-// the live shapes used by all new commit paths.
+// the live shapes used by all new commit paths. A delta nothing writes any
+// more is retired in place, holding a `Retired` so its index is never reused.
 #[allow(deprecated)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum CardanoDelta {
@@ -481,7 +482,9 @@ pub enum CardanoDelta {
     StagePaymentStats(Box<StagePaymentStats>),
     StageAccountStats(Box<StageAccountStats>),
     MetadataLabelTxInc(Box<MetadataLabelTxInc>),
-    ScriptFirstSeen(Box<ScriptFirstSeen>),
+    /// `ScriptFirstSeen`, which wrote the `scripts` witness the `script` tag
+    /// replaced.
+    RetiredScriptFirstSeen(Retired),
     StageFirstScript(Box<StageFirstScript>),
     StageAssetMint(Box<StageAssetMint>),
     DRepSighting(Box<DRepSighting>),
@@ -600,7 +603,6 @@ delta_from!(StageAddressStats);
 delta_from!(StagePaymentAddress);
 delta_from!(StagePaymentStats);
 delta_from!(StageAccountStats);
-delta_from!(ScriptFirstSeen);
 delta_from!(StageFirstScript);
 delta_from!(MetadataLabelTxInc);
 delta_from!(StageAssetMint);
@@ -655,7 +657,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDRepSnapshot(x) => x.key(),
             Self::GovDistrBoundaryCredit(x) => x.key(),
             Self::ProposalResolved(x) => x.key(),
-            Self::ScriptFirstSeen(x) => x.key(),
+            Self::RetiredScriptFirstSeen(x) => match *x {},
             Self::StageFirstScript(x) => x.key(),
             Self::AssignRewards(x) => x.key(),
             Self::NonceTransition(x) => x.key(),
@@ -739,7 +741,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDRepSnapshot(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDistrBoundaryCredit(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::ProposalResolved(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::ScriptFirstSeen(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::RetiredScriptFirstSeen(x) => match *x {},
             Self::StageFirstScript(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::AssignRewards(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NonceTransition(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -823,7 +825,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDRepSnapshot(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDistrBoundaryCredit(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::ProposalResolved(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::ScriptFirstSeen(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::RetiredScriptFirstSeen(x) => match *x {},
             Self::StageFirstScript(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::AssignRewards(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NonceTransition(x) => Self::downcast_undo(x.as_ref(), entity),
@@ -940,10 +942,7 @@ mod wal_tests {
                 StageAccountStats::new((7, account), AccountStats { tx_count: 1 }).into(),
             ),
             (71, MetadataLabelTxInc::new(674, 1).into()),
-            (
-                72,
-                ScriptFirstSeen::new([0x55; 28].into(), ScriptState { slot: 100 }).into(),
-            ),
+            // 72 is retired: `retired_variants_hold_their_index`
             (
                 73,
                 StageFirstScript::new(
@@ -1000,6 +999,15 @@ mod wal_tests {
             assert_eq!(&encoded[..4], &index.to_le_bytes());
             let decoded: CardanoDelta = bincode::deserialize(&encoded).unwrap();
             assert_eq!(bincode::serialize(&decoded).unwrap(), encoded);
+        }
+    }
+
+    /// A retired variant keeps its index, so the variants after it keep
+    /// theirs, and a row carrying it is refused rather than read as another.
+    #[test]
+    fn retired_variants_hold_their_index() {
+        for index in [72u32] {
+            assert!(bincode::deserialize::<CardanoDelta>(&index.to_le_bytes()).is_err());
         }
     }
 }

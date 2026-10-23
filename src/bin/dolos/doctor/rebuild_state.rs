@@ -1,8 +1,9 @@
 //! `dolos doctor rebuild-state` — regenerate the state store from the local
 //! archive.
 //!
-//! The archive holds the full raw chain, and state computation never reads
-//! the archive, so a synced instance can rebuild its state store offline by
+//! The archive holds the full raw chain, and state computation reads nothing
+//! of it but the `script` tags below each batch, which a replay leaves as
+//! they were, so a synced instance can rebuild its state store offline by
 //! replaying its own archive through the import lifecycle: no network, no
 //! snapshot re-import, no re-writing of the archive. This is the
 //! debugging loop for state-math fixes — a full replay re-writes every store
@@ -218,10 +219,11 @@ fn preflight(archive: &ArchiveStoreBackend) -> miette::Result<ChainPoint> {
 
 /// Assemble the rebuild domain: the fresh state store, an empty in-memory WAL
 /// (the import lifecycle skips `commit_wal`, so it stays empty), the given
-/// archive backend (no-op, or the write-gated view under `--rewrite-logs`)
-/// and an ephemeral mempool. Genesis fires automatically on the first
-/// imported block; the archive entries it projects are discarded by the no-op
-/// archive, which is correct — the live archive already carries them.
+/// archive backend (the tag-read view, or the write-gated view under
+/// `--rewrite-logs`) and an ephemeral mempool. Genesis fires automatically on
+/// the first imported block; the archive entries it projects are discarded by
+/// the tag-read view, which is correct — the live archive already carries
+/// them.
 fn build_domain(
     config: &RootConfig,
     state: StateStoreBackend,
@@ -400,12 +402,16 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let tip = preflight(&archive)?;
 
+    // the roll reads the source archive's `script` tags as its witness of
+    // first sightings, whatever the replay writes
     let domain_archive = if args.rewrite_logs {
         archive
             .logs_only()
             .ok_or_else(|| miette::miette!("--rewrite-logs needs a persistent archive"))?
     } else {
-        ArchiveStoreBackend::noop()
+        archive
+            .tag_reads()
+            .ok_or_else(|| miette::miette!("rebuilding state needs an archive"))?
     };
 
     let (state, wal) = match &mode {
