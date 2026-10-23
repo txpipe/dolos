@@ -157,7 +157,7 @@ A relative path resolves against one of three bases, named for every path field 
 An absolute path is used as written, which is how a store, or the archive's block segments, goes on another volume.
 
 <Aside type="caution">
-`dolos bootstrap --force` clears only `storage.path`. A store kept outside it is left as it was, so a forced bootstrap would resume from that store's old contents. Delete such a store yourself before you run one. `dolos data cleanup` refuses outright while the WAL, state, archive, block segments or mempool are kept outside `storage.path`; it does not check the cache. Beside a store this release refuses (see [store identity](../architecture/data-layer#store-identity)), `--force` is refused instead, naming what to remove, while a state store outside `storage.path` holds data or, unless `history.mode` is `none`, an archive or block segments there do. `--force` does not check an outside WAL, mempool or cache, and leaves it as it was.
+`dolos bootstrap --force` clears only `storage.path`. A store kept outside it is left as it was, so a forced bootstrap would resume from that store's old contents. Delete such a store yourself before you run one. `dolos data cleanup` refuses outright while the WAL, state, archive, block segments or mempool are kept outside `storage.path`; it does not check the cache. Beside a store this release refuses (see [store identity](../architecture/data-layer#store-identity)), `--force` is refused instead, naming what to remove, while a store outside `storage.path` holds data or is itself refused: the state, and unless `history.mode` is `none` the archive and its block segments. `--force` does not check an outside WAL, mempool or cache, and leaves it as it was.
 </Aside>
 
 ## `compatibility`
