@@ -71,6 +71,10 @@ pub struct SyntheticBlockConfig {
     /// resolvable input, which is what the endpoints reading the spent side of
     /// a tx need.
     pub spend_previous_outputs: bool,
+    /// Fund each tx after the first of a block from output 0 of the tx before
+    /// it in the same block, so every block spends outputs it produced.
+    /// Excludes `spend_previous_outputs`, which spends those outputs again.
+    pub spend_within_block: bool,
     /// Indices of the phase-2-invalid txs in each block. Each outer entry
     /// represents one block; an empty list leaves every tx valid.
     pub invalid_txs_by_block: Vec<Vec<u32>>,
@@ -194,6 +198,7 @@ impl Default for SyntheticBlockConfig {
             extra_certs_by_block: vec![],
             proposal_deposit: 100_000_000,
             spend_previous_outputs: false,
+            spend_within_block: false,
             invalid_txs_by_block: vec![],
             ada_only_by_block: vec![],
             mint_redeemer: None,
@@ -345,6 +350,11 @@ pub fn build_synthetic_blocks(
     let submit_amount = cfg.lovelace * 10;
     let submit_output = cfg.lovelace * 5;
 
+    assert!(
+        !(cfg.spend_previous_outputs && cfg.spend_within_block),
+        "spend_within_block spends the outputs spend_previous_outputs spends"
+    );
+
     let mut chain_config = dolos_cardano::CardanoLogicConfig::default();
 
     let address_bytes = Address::from_bech32(&cfg.address)
@@ -485,7 +495,15 @@ pub fn build_synthetic_blocks(
                 .then(|| prev_block_tx_hashes.get(tx_offset).copied())
                 .flatten();
 
-            let seed_tx_hash = match funded_by_account {
+            // the tx before this one in the block, whose output 0 this one
+            // spends
+            let funded_in_block = cfg
+                .spend_within_block
+                .then(|| tx_offset.checked_sub(1))
+                .flatten()
+                .map(|previous| tx_specs[previous].body.compute_hash());
+
+            let seed_tx_hash = match funded_in_block.or(funded_by_account) {
                 Some(hash) => hash,
                 None => {
                     let seed_tx_hash =

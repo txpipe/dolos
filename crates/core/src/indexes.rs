@@ -19,7 +19,7 @@ use std::borrow::Cow;
 
 use thiserror::Error;
 
-use crate::{BlockSlot, TxoRef};
+use crate::{BlockSlot, TxoRef, UtxoPosition};
 
 /// A dimension name identifying an index table.
 ///
@@ -53,13 +53,14 @@ impl Tag {
 /// UTxO filter indexes track the current set of UTxOs matching various tags.
 /// They are updated as UTxOs are produced and consumed, through the state
 /// writer that applies the UTxO set they project
-/// (`StateWriter::apply_utxo_tags`).
+/// (`StateWriter::apply_utxo_tags`). Each entry carries the UTxO's creation
+/// position, which orders it within every tag (`UtxoPosition::tag_order`).
 #[derive(Debug, Clone, Default)]
 pub struct UtxoIndexDelta {
-    /// UTxOs to add to filter indexes: (txo_ref, tags)
-    pub produced: Vec<(TxoRef, Vec<Tag>)>,
-    /// UTxOs to remove from filter indexes: (txo_ref, tags)
-    pub consumed: Vec<(TxoRef, Vec<Tag>)>,
+    /// UTxOs to add to filter indexes: (txo_ref, position, tags)
+    pub produced: Vec<(TxoRef, Option<UtxoPosition>, Vec<Tag>)>,
+    /// UTxOs to remove from filter indexes: (txo_ref, position, tags)
+    pub consumed: Vec<(TxoRef, Option<UtxoPosition>, Vec<Tag>)>,
 }
 
 /// Delta for archive indexes (historical).

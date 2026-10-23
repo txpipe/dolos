@@ -801,7 +801,7 @@ where
             txoref.1,
         );
 
-        let utxo = MultiEraOutput::decode(eracbor.0.try_into().unwrap(), &eracbor.1)
+        let utxo = MultiEraOutput::decode(eracbor.era().try_into().unwrap(), eracbor.cbor())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let amount = utxo

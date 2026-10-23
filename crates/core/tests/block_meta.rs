@@ -9,7 +9,8 @@ use dolos_testing::{
 
 use dolos_core::{
     async_query::BlockMetaResolver, indexes::ArchiveIndexDelta, ArchiveStore as _,
-    ArchiveWriter as _, AsyncQueryFacade, ChainPoint, Domain, QueryLimiter, TxHash, LOCATE_CHUNK,
+    ArchiveWriter as _, AsyncQueryFacade, BlockSlot, ChainPoint, Domain, QueryLimiter, TxHash,
+    UtxoPosition, LOCATE_CHUNK,
 };
 use pallas::ledger::traverse::MultiEraBlock;
 
@@ -248,6 +249,90 @@ async fn undecodable_requested_body_remains_an_error() {
         assert!(resolver.resolve_batch([hash]).await.is_err());
         assert_eq!(resolver.fetches(), expected_fetches);
     }
+}
+
+/// Archives the bodies of a synthetic chain, without indexing them, and
+/// returns each block's slot and tx hashes.
+fn archive_bodies(domain: &ToyDomain, block_count: usize) -> Vec<(BlockSlot, Vec<TxHash>)> {
+    let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+        block_count,
+        txs_per_block: 2,
+        ..Default::default()
+    });
+
+    let writer = domain.archive().start_writer().unwrap();
+    let mut archived = Vec::new();
+
+    for raw in &blocks {
+        let block = MultiEraBlock::decode(raw).unwrap();
+        writer
+            .apply(&ChainPoint::Specific(block.slot(), block.hash()), raw)
+            .unwrap();
+        archived.push((
+            block.slot(),
+            block.txs().iter().map(|tx| tx.hash()).collect(),
+        ));
+    }
+
+    writer.commit().unwrap();
+    archived
+}
+
+/// A position resolves to the block at its slot when that block carries the
+/// tx at its index, with no exact index to consult. One whose block is gone
+/// (pruned history) or carries another tx there is left out, not an error.
+#[tokio::test]
+async fn positions_resolve_held_blocks_and_leave_out_the_rest() {
+    let domain = ToyDomain::new(None, None);
+    let archived = archive_bodies(&domain, 2);
+    let (first_slot, first) = &archived[0];
+    let (second_slot, second) = &archived[1];
+    let pruned = TxHash::from([0xee; 32]);
+
+    let resolved = AsyncQueryFacade::new(domain)
+        .block_meta_by_positions([
+            (first[1], UtxoPosition::new(*first_slot, 1)),
+            (second[0], UtxoPosition::new(*second_slot, 0)),
+            (second[1], UtxoPosition::new(*second_slot, 0)),
+            (pruned, UtxoPosition::new(second_slot + 1_000, 0)),
+        ])
+        .await
+        .unwrap();
+
+    assert_eq!(resolved.len(), 2, "{resolved:?}");
+    assert_eq!(resolved[&first[1]].slot, *first_slot);
+    assert_eq!(resolved[&first[1]].tx_index, 1);
+    assert_eq!(resolved[&second[0]].slot, *second_slot);
+    assert_eq!(resolved[&second[0]].tx_index, 0);
+}
+
+/// A body at the position's slot that does not decode is an error when no
+/// other body there carries the tx, never a silent miss.
+#[tokio::test]
+async fn positions_on_an_undecodable_body_are_an_error() {
+    let domain = ToyDomain::new(None, None);
+    let archived = archive_bodies(&domain, 1);
+    let (slot, txs) = &archived[0];
+    let corrupt = std::sync::Arc::new(b"not a block".to_vec());
+
+    let writer = domain.archive().start_writer().unwrap();
+    writer
+        .apply(&ChainPoint::Specific(slot + 1, [0xff; 32].into()), &corrupt)
+        .unwrap();
+    writer.commit().unwrap();
+
+    let query = AsyncQueryFacade::new(domain);
+
+    assert!(query
+        .block_meta_by_positions([(TxHash::from([0xee; 32]), UtxoPosition::new(slot + 1, 0))])
+        .await
+        .is_err());
+
+    let resolved = query
+        .block_meta_by_positions([(txs[0], UtxoPosition::new(*slot, 0))])
+        .await
+        .unwrap();
+    assert_eq!(resolved[&txs[0]].slot, *slot);
 }
 
 #[tokio::test]
