@@ -483,11 +483,10 @@ where
 /// configured) or whose block was pruned gets none.
 ///
 /// The lookup and the value read are not one snapshot. When a rollback removes
-/// a row's block after its value was read, the lookup finds no block carrying
-/// its transaction at that position, so the row lists without a block hash for
-/// one response, whether or not a fork block has re-included the transaction
-/// elsewhere. A request after the fork reads the row's new position and its
-/// block.
+/// a row's block after its value was read, the row lists without a block hash
+/// for one response, unless a fork block at that slot already carries its
+/// transaction at the same index. A request after the fork reads the row's new
+/// position and its block.
 async fn into_models<D, T>(
     domain: &Facade<D>,
     rows: Vec<(TxoRef, Arc<UtxoValue>)>,
