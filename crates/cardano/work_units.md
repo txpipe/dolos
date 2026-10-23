@@ -168,6 +168,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 - Classifies retiring pools / expiring dreps / enacting+dropping proposals; processes pending MIRs; runs enactment + refund + wrapup-global visitors.
 - Assembles the final `EndStats` (prepare-time fields combined with the accumulator fields populated by the preceding shard runs) and emits a single `EpochWrapUp` to close the boundary.
 - Direct writes: writes the completed `EpochState` to the archive under the epoch-start temporal key.
+- Direct writes: one `DRepEpochLog` archive entry per entry of the completed DRep distribution (Abstain and NoConfidence included), under the same epoch-start temporal key; none when the distribution is incomplete.
 - Direct deletes: `PendingMirState` entries for processed MIRs.
 - Deltas emitted in finalize (10 distinct variants, 11 sites):
   - **Enactment** (`ewrap/enactment.rs`):

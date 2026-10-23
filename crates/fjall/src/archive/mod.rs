@@ -8,7 +8,7 @@
 //! pinned by the shared conformance suite (`tests/archive_conformance.rs`),
 //! with the builtin memory archive as the oracle.
 //!
-//! ## Four Keyspace Design
+//! ## Keyspace Design
 //!
 //! 1. **`archive-blocks`**: slot → packed 16-byte [`BlockLocation`]s, newest
 //!    first. Key is the 8-byte big-endian slot; the value encoding is
@@ -27,6 +27,9 @@
 //!
 //! 4. **`index-exact`**: exact-match lookups (block hash, block number, tx hash
 //!    → slot). Key: `[dim_hash:8][key_data:var]` → `[slot:8]`. See [`exact`].
+//!
+//! 5. **`archive-meta`**: the compatibility identity the store recorded when it
+//!    was created, under the key `identity`.
 //!
 //! The two index keyspaces are projections of the blocks and are written in
 //! the same batch as the block locations, so the history and its lookups
@@ -121,7 +124,12 @@ mod keyspace_names {
     pub const TAGS: &str = "archive-tags";
     /// Exact-match keyspace (block hash, tx hash, block number -> slot)
     pub const EXACT: &str = "index-exact";
+    /// Store metadata keyspace (the compatibility identity)
+    pub const META: &str = "archive-meta";
 }
+
+/// Key for the compatibility identity in the metadata keyspace
+const IDENTITY_KEY: &[u8] = b"identity";
 
 fn io_err(e: std::io::Error) -> ArchiveError {
     ArchiveError::InternalError(e.to_string())
@@ -142,6 +150,7 @@ pub struct ArchiveStore {
     logs: Keyspace,
     tags: Keyspace,
     exact: Keyspace,
+    meta: Keyspace,
     flatfiles: Arc<FlatFileStore>,
     schema: Arc<StateSchema>,
     preset: Preset,
@@ -211,6 +220,7 @@ impl ArchiveStore {
             logs: db.keyspace(keyspace_names::LOGS, || tuning.logs.options())?,
             tags: db.keyspace(keyspace_names::TAGS, || tuning.tags.options())?,
             exact: db.keyspace(keyspace_names::EXACT, || tuning.exact.options())?,
+            meta: db.keyspace(keyspace_names::META, || tuning.meta.options())?,
             db,
             flatfiles: Arc::new(flatfiles),
             schema: Arc::new(schema),
@@ -232,6 +242,7 @@ impl ArchiveStore {
                 (keyspace_names::LOGS, tuning.logs),
                 (keyspace_names::TAGS, tuning.tags),
                 (keyspace_names::EXACT, tuning.exact),
+                (keyspace_names::META, tuning.meta),
             ],
         )
     }
@@ -246,6 +257,32 @@ impl ArchiveStore {
         &self.db
     }
 
+    /// The compatibility identity the store recorded when it was created.
+    pub fn identity(&self) -> Result<Option<String>, Error> {
+        let value = self.meta.get(IDENTITY_KEY)?;
+
+        Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
+    /// Record the compatibility identity, synced to disk before it returns.
+    pub fn record_identity(&self, identity: &str) -> Result<(), Error> {
+        self.meta.insert(IDENTITY_KEY, identity.as_bytes())?;
+        self.db.persist(PersistMode::SyncAll)?;
+
+        Ok(())
+    }
+
+    /// Whether the index holds any block location, log row or index entry.
+    pub fn holds_data(&self) -> Result<bool, Error> {
+        for keyspace in [&self.blocks, &self.logs, &self.tags, &self.exact] {
+            if !keyspace.is_empty()? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     /// Per-keyspace disk footprint: `(name, bytes, path)`.
     pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
         [
@@ -253,6 +290,7 @@ impl ArchiveStore {
             (keyspace_names::LOGS, &self.logs),
             (keyspace_names::TAGS, &self.tags),
             (keyspace_names::EXACT, &self.exact),
+            (keyspace_names::META, &self.meta),
         ]
         .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
         .to_vec()
@@ -268,6 +306,7 @@ impl ArchiveStore {
         self.logs.major_compact()?;
         self.tags.major_compact()?;
         self.exact.major_compact()?;
+        self.meta.major_compact()?;
         self.db.persist(PersistMode::SyncAll)?;
 
         Ok(())
@@ -1689,5 +1728,49 @@ mod tests {
         assert_eq!(locations(&store, 2), retained);
         assert_eq!(store.get_block_by_slot(&3).unwrap().unwrap(), *body(3, 1));
         assert_eq!(store.get_block_by_slot(&2).unwrap().unwrap(), *body(2, 0));
+    }
+
+    /// Any one keyspace of history counts as data: a block location, a log
+    /// row, a tag or an exact lookup, each alone.
+    #[test]
+    fn every_history_keyspace_holds_data() {
+        let mut schema = StateSchema::default();
+        schema.insert("logs", dolos_core::NamespaceType::KeyValue);
+
+        let empty = ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        assert!(!empty.holds_data().unwrap());
+
+        let blocks = ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        write(&blocks, &[(10, body(10, 0))]);
+
+        let logs = ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        let writer = logs.start_writer().unwrap();
+        writer
+            .write_log("logs", &LogKey::of(10, &1u32), &vec![1])
+            .unwrap();
+        writer.commit().unwrap();
+
+        let tags = ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        write_indexes(
+            &tags,
+            &[ArchiveIndexDelta {
+                slot: 10,
+                tags: vec![dolos_core::Tag::new("address", vec![1; 28])],
+                ..Default::default()
+            }],
+        );
+
+        let exact = ArchiveStore::for_tempdir(schema).unwrap();
+        write_indexes(&exact, &[number_delta(10, 1)]);
+
+        for (only, store) in [&blocks, &logs, &tags, &exact].into_iter().enumerate() {
+            let filled = [&store.blocks, &store.logs, &store.tags, &store.exact]
+                .map(|keyspace| !keyspace.is_empty().unwrap());
+            let mut expected = [false; 4];
+            expected[only] = true;
+
+            assert_eq!(filled, expected, "keyspace {only}");
+            assert!(store.holds_data().unwrap(), "keyspace {only}");
+        }
     }
 }

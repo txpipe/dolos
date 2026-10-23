@@ -69,6 +69,7 @@ permissive_cors = true
 public_url = "https://api.example.com"
 token_registry_url = "https://tokens.example.com"
 max_scan_items = 3000
+route_prefix = "/api/v0"
 ipfs_gateways = ["https://ipfs.io", "https://gateway.pinata.cloud"]
 
 [serve.minikupo]

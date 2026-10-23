@@ -43,3 +43,11 @@ The process doesn't support resuming from previous runs, if you interrupt the pr
 The above command won't proceed if it detects that you already have data from
 previous Dolos runs.
 </Aside>
+
+<Aside type="caution">
+A snapshot holds the stores of the node that exported it. Once unpacked, they
+pass the same [identity check](../architecture/data-layer#store-identity) as
+any store: a snapshot exported before stores recorded a compatibility identity
+is refused. Bootstrap from a [stele](../migration/dolos-v2#stores) or re-sync
+instead.
+</Aside>

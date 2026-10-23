@@ -114,6 +114,7 @@ permissive_cors = true
 public_url = "https://api.example.com"
 token_registry_url = "https://tokens.example.com"
 max_scan_items = 3000
+route_prefix = "/api/v0"
 ipfs_gateways = ["https://ipfs.io", "https://gateway.pinata.cloud"]
 
 [serve.minikupo]
@@ -156,7 +157,7 @@ A relative path resolves against one of three bases, named for every path field 
 An absolute path is used as written, which is how a store, or the archive's block segments, goes on another volume.
 
 <Aside type="caution">
-`dolos bootstrap --force` clears only `storage.path`. A store kept outside it is left as it was, so a forced bootstrap would resume from that store's old contents. Delete such a store yourself before you run one. `dolos data cleanup` refuses this layout outright.
+`dolos bootstrap --force` clears only `storage.path`. A store kept outside it is left as it was, so a forced bootstrap would resume from that store's old contents. Delete such a store yourself before you run one. Beside a store this release refuses (see [store identity](../architecture/data-layer#store-identity)), `--force` is refused instead, naming the data it would leave. `dolos data cleanup` refuses this layout outright.
 </Aside>
 
 ## `compatibility`
@@ -493,11 +494,13 @@ The Blockfrost-compatible [MiniBF](../apis/minibf) endpoint.
 | `public_url` | string (URL) | none |
 | `token_registry_url` | string (URL) | none |
 | `max_scan_items` | integer (items) | `3000` |
+| `route_prefix` | string (URL path) | none |
 | `ipfs_gateways` | array of strings (URLs) | `["https://ipfs.io", "https://gateway.pinata.cloud"]` |
 
 - `public_url` is the URL clients reach the API at, reported by `/`.
 - `token_registry_url` is the token registry read for off-chain asset metadata.
 - `max_scan_items` caps the items a page-based scan reads on the heavy endpoints.
+- `route_prefix` is a URL path every endpoint is served under, `/health` and `/metrics` included; set `"/api/v0"` to match the Blockfrost server URL. It starts with `/`, its segments use only letters, digits, `-`, `.`, `_` and `~`, and `.` and `..` segments are refused; a trailing `/` is dropped. A path outside the prefix answers like any unknown path. Unset, the endpoints are served at the root.
 - `ipfs_gateways` resolve `ipfs://` governance-anchor URLs, tried in order until one serves the content. An empty list turns IPFS resolution off.
 
 ### `serve.minikupo`

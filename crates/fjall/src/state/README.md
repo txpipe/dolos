@@ -16,7 +16,7 @@ The state store is organized into **4 keyspaces** based on access patterns, rath
 
 | Keyspace | Name | Purpose | Access Pattern |
 |----------|------|---------|----------------|
-| 1 | `state-cursor` | Chain position tracking | Single key read/write |
+| 1 | `state-cursor` | Chain position and compatibility identity | Single key reads/writes |
 | 2 | `state-utxos` | UTxO set storage | Point lookups by TxoRef |
 | 3 | `state-entities` | All entity types | Point lookups and range scans |
 | 4 | `state-tags` | Live-UTxO tags | Prefix scans by dimension and lookup key |
@@ -25,11 +25,19 @@ The state store is organized into **4 keyspaces** based on access patterns, rath
 
 ### Cursor Keyspace (`state-cursor`)
 
-Single entry storing the current chain position:
+The current chain position:
 
 ```
 Key:   [0x00]
 Value: bincode-serialized ChainPoint
+```
+
+And the compatibility identity the store recorded when it was created, which
+the node's store opener checks before anything else (see the data layer docs):
+
+```
+Key:   "identity"
+Value: UTF-8 contract identifier, e.g. "v2-alpha.1"
 ```
 
 ### UTxO Keyspace (`state-utxos`)

@@ -169,6 +169,10 @@ fn the_full_reference_parses() {
     );
     assert_eq!(minibf.max_scan_items(), 3000);
     assert_eq!(
+        minibf.route_prefix().map(|prefix| prefix.as_str()),
+        Some("/api/v0")
+    );
+    assert_eq!(
         minibf.ipfs_gateways(),
         ["https://ipfs.io", "https://gateway.pinata.cloud"]
     );
@@ -364,6 +368,11 @@ fn each_rule_refuses_its_fixture() {
         (
             "ephemeral-state-with-a-wal-path",
             "with an ephemeral state the WAL is kept in memory; remove `sync.wal_path`",
+        ),
+        (
+            "route-prefix-dot-segment",
+            "`/api/..` is not a route prefix: `.` and `..` segments are not allowed for key \
+             `serve.minibf.route_prefix`",
         ),
         ("unknown-field", "unknown field `version`"),
         ("moved-section", "[mithril] moved to"),

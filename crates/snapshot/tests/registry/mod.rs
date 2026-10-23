@@ -57,8 +57,8 @@ pub mod ground_rules;
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepSightingState, DRepState,
-    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepEpochLog, DRepSightingState,
+    DRepState, DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
     PoolEpochLog, PoolState, ProposalState, ScriptState,
@@ -177,6 +177,15 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
+            enc_drep_epochs,
+            DRepEpochLog,
+            canaries::drep_epoch_log,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/drep-epochs.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
             enc_drep_sightings,
             DRepSightingState,
             canaries::drep_sighting_state,
@@ -215,7 +224,9 @@ pub fn registry() -> Vec<Entry> {
             // it asserts.
             // Revision 3 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged. Revision 4 appends the epoch's active
-            // stake and the ESTART shards' carried tally.
+            // stake and the ESTART shards' carried tally. Field 20, the EWRAP
+            // finalize mark, joins revision 4 in place: the v2 freeze resets
+            // every revision to 1.
             &[
                 Pinned {
                     rev: 1,
