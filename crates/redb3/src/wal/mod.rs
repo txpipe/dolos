@@ -198,7 +198,8 @@ const WAL_METADATA_VERSION_KEY: &str = "version";
 /// triggers an automatic wipe; a newer version triggers a refusal to start.
 ///
 /// 2: deltas carry typed, variable-length entity keys (decision 0051).
-pub const CURRENT_WAL_VERSION: u32 = 2;
+/// 3: `EpochStatsUpdate` and `ScriptFirstSeen` drop the fields nothing reads.
+pub const CURRENT_WAL_VERSION: u32 = 3;
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 

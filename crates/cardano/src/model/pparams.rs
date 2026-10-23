@@ -11,7 +11,7 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    epoch_value::{EpochValue, TransitionDefault},
+    epoch_value::{ShallowEpochValue, TransitionDefault},
     eras::{EraKey, EraTransition},
 };
 use crate::pallas_extras::{
@@ -272,7 +272,7 @@ impl TransitionDefault for PParamsSet {
     }
 }
 
-impl EpochValue<PParamsSet> {
+impl ShallowEpochValue<PParamsSet> {
     pub fn era_transition(&self) -> Option<EraTransition> {
         let original = self.unwrap_live().protocol_major_or_default();
 

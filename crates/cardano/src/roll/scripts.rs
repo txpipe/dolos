@@ -19,7 +19,10 @@ use pallas::{
 };
 
 use super::{BlockVisitor, WorkDeltas};
-use crate::{pallas_extras, PParamsSet, ScriptFirstSeen, ScriptKey, ScriptState, StageFirstScript};
+use crate::{
+    model::FirstScriptSet, pallas_extras, PParamsSet, ScriptFirstSeen, ScriptKey, ScriptState,
+    StageFirstScript,
+};
 
 fn reference_script(output: &MultiEraOutput) -> Option<Hash<28>> {
     output
@@ -73,11 +76,11 @@ pub fn tx_script_hashes(tx: &MultiEraTx<'_>) -> Vec<Hash<28>> {
 
 /// The scripts `block` carries, each with where in the block it is seen, in
 /// first-seen order. A script carried twice is listed at each sighting.
-pub fn block_script_sightings(block: &MultiEraBlock<'_>) -> Vec<(Hash<28>, ScriptState)> {
+pub fn block_script_sightings(block: &MultiEraBlock<'_>) -> Vec<(Hash<28>, FirstScriptSet)> {
     sightings(block.slot(), &block.txs())
 }
 
-fn sightings(slot: u64, txs: &[MultiEraTx<'_>]) -> Vec<(Hash<28>, ScriptState)> {
+fn sightings(slot: u64, txs: &[MultiEraTx<'_>]) -> Vec<(Hash<28>, FirstScriptSet)> {
     txs.iter()
         .enumerate()
         .flat_map(|(tx_index, tx)| {
@@ -85,7 +88,7 @@ fn sightings(slot: u64, txs: &[MultiEraTx<'_>]) -> Vec<(Hash<28>, ScriptState)> 
                 .into_iter()
                 .enumerate()
                 .map(move |(order, hash)| {
-                    let first = ScriptState {
+                    let first = FirstScriptSet {
                         slot,
                         tx_index: tx_index as u32,
                         order: order as u32,
@@ -109,7 +112,7 @@ impl ScriptRegistryContext {
     /// Read the witness for a batch whose blocks carry `carried`.
     pub fn load<S: StateStore>(
         state: &S,
-        carried: &[Vec<(Hash<28>, ScriptState)>],
+        carried: &[Vec<(Hash<28>, FirstScriptSet)>],
     ) -> Result<Self, ChainError> {
         let scripts: Vec<Hash<28>> = carried
             .iter()
@@ -141,11 +144,11 @@ impl ScriptRegistryContext {
 #[derive(Default)]
 pub struct ScriptRegistryVisitor {
     context: ScriptRegistryContext,
-    carried: Vec<(Hash<28>, ScriptState)>,
+    carried: Vec<(Hash<28>, FirstScriptSet)>,
 }
 
 impl ScriptRegistryVisitor {
-    pub fn new(context: ScriptRegistryContext, carried: Vec<(Hash<28>, ScriptState)>) -> Self {
+    pub fn new(context: ScriptRegistryContext, carried: Vec<(Hash<28>, FirstScriptSet)>) -> Self {
         Self { context, carried }
     }
 
@@ -161,7 +164,7 @@ impl ScriptRegistryVisitor {
                 continue;
             }
 
-            deltas.add_for_entity(ScriptFirstSeen::new(script, first));
+            deltas.add_for_entity(ScriptFirstSeen::new(script, first.into()));
             deltas.add_for_entity(StageFirstScript::new(epoch, script, first));
         }
     }
@@ -188,7 +191,7 @@ impl BlockVisitor for ScriptRegistryVisitor {
 pub(crate) mod tests {
     use dolos_core::{builtin::MemoryStateStore, Entity as _, EntityDelta as _, StateWriter as _};
 
-    use crate::{model::FirstScriptSet, CardanoEntity};
+    use crate::CardanoEntity;
     use pallas::{
         codec::{
             minicbor,
@@ -475,8 +478,8 @@ pub(crate) mod tests {
         Hash::new([byte; 28])
     }
 
-    fn at(slot: u64, tx_index: u32, order: u32) -> ScriptState {
-        ScriptState {
+    fn at(slot: u64, tx_index: u32, order: u32) -> FirstScriptSet {
+        FirstScriptSet {
             slot,
             tx_index,
             order,
@@ -567,7 +570,7 @@ pub(crate) mod tests {
 
     /// Run `blocks` through one batch's visitors, each block `(epoch,
     /// sightings)`, and commit them.
-    fn roll(state: &MemoryStateStore, blocks: Vec<(Epoch, Vec<(Hash<28>, ScriptState)>)>) {
+    fn roll(state: &MemoryStateStore, blocks: Vec<(Epoch, Vec<(Hash<28>, FirstScriptSet)>)>) {
         let carried: Vec<_> = blocks.iter().map(|(_, x)| x.clone()).collect();
         let mut context = ScriptRegistryContext::load(state, &carried).unwrap();
 
@@ -619,20 +622,20 @@ pub(crate) mod tests {
         assert_eq!(
             witnessed(&state),
             vec![
-                (script(1), at(10, 0, 0)),
-                (script(2), at(10, 0, 1)),
-                (script(3), at(11, 1, 0)),
-                (script(4), at(20, 0, 1)),
+                (script(1), ScriptState { slot: 10 }),
+                (script(2), ScriptState { slot: 10 }),
+                (script(3), ScriptState { slot: 11 }),
+                (script(4), ScriptState { slot: 20 }),
             ]
         );
 
         assert_eq!(
             staged(&state),
             vec![
-                (4, script(1), at(10, 0, 0).into()),
-                (4, script(2), at(10, 0, 1).into()),
-                (4, script(3), at(11, 1, 0).into()),
-                (5, script(4), at(20, 0, 1).into()),
+                (4, script(1), at(10, 0, 0)),
+                (4, script(2), at(10, 0, 1)),
+                (4, script(3), at(11, 1, 0)),
+                (5, script(4), at(20, 0, 1)),
             ]
         );
     }
@@ -689,7 +692,11 @@ pub(crate) mod tests {
 
         assert_eq!(
             witnessed(&state),
-            vec![(witness.compute_hash(), at(50, 1, 0))]
+            vec![(witness.compute_hash(), ScriptState { slot: 50 })]
+        );
+        assert_eq!(
+            staged(&state),
+            vec![(3, witness.compute_hash(), at(50, 1, 0))]
         );
     }
 

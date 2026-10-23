@@ -251,9 +251,7 @@ impl TableRow for PoolEpochLog {
             "active stake",
             "delegators count",
             "live pledge",
-            "declared pledge",
             "total rewards",
-            "operator share",
         ]
     }
 
@@ -271,9 +269,7 @@ impl TableRow for PoolEpochLog {
             format!("{}", self.total_stake),
             format!("{}", self.delegators_count),
             format!("{}", self.live_pledge),
-            format!("{}", self.declared_pledge),
             format!("{}", self.total_rewards),
-            format!("{}", self.operator_share),
         ]
     }
 }

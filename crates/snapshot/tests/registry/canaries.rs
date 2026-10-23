@@ -18,7 +18,7 @@
 //! the ledger does, not by a test-only raw constructor — the encoding a stele
 //! carries is the encoding the ledger writes.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use dolos_cardano::{
     model::{
@@ -92,12 +92,16 @@ fn gov_action_id(seed: u8, index: u32) -> GovActionId {
 /// An `EpochValue` with all six of its fields populated, filled the way the
 /// ledger fills one: three `schedule`/`transition` rounds and a final
 /// `schedule`, leaving `go`, `set`, `mark`, `live` and `next` distinct and the
-/// position three epochs past `start`.
+/// position three epochs past `start`. A shallow value ends with `go` and
+/// `set` empty, as the ledger leaves them.
 ///
 /// Driving the public API rather than the `cfg(test)` raw constructor is the
 /// point — a canary built by a back door would pin an arrangement the ledger
 /// cannot actually produce.
-fn filled_epoch_value<T: Clone + std::fmt::Debug>(start: Epoch, slots: [T; 5]) -> EpochValue<T> {
+fn filled_epoch_value<T: Clone + std::fmt::Debug, const DEEP: bool>(
+    start: Epoch,
+    slots: [T; 5],
+) -> EpochValue<T, DEEP> {
     let [go, set, mark, live, next] = slots;
 
     let mut value = EpochValue::with_live(start, go);
@@ -146,9 +150,7 @@ pub fn pool_epoch_log() -> PoolEpochLog {
         relative_size: 0.015625,
         delegators_count: 317,
         live_pledge: 30_000_000_000,
-        declared_pledge: 25_000_000_000,
         total_rewards: 4_400_000_000,
-        operator_share: 340_000_000,
         fixed_cost: 170_000_000,
         margin_cost: Some(rational(3, 100)),
     }
@@ -323,11 +325,7 @@ pub fn account_address_chunk() -> AccountAddressChunk {
 }
 
 pub fn script_state() -> ScriptState {
-    ScriptState {
-        slot: 99_999_999,
-        tx_index: 321,
-        order: 7,
-    }
+    ScriptState { slot: 99_999_999 }
 }
 
 pub fn first_script_set() -> FirstScriptSet {
@@ -411,16 +409,12 @@ fn rolling_stats(seed: u64) -> RollingStats {
         new_accounts: 700 + seed,
         removed_accounts: 60 + seed,
         withdrawals: 50_000 + seed,
-        registered_pools: BTreeSet::from([hash28(0xb0), hash28(0xb1), hash28(0xb2)]),
         blocks_minted: 21_600 + seed as u32,
         drep_deposits: 4_000 + seed,
         proposal_deposits: 300 + seed,
         drep_refunds: 20 + seed,
-        __proposal_refunds: 1 + seed,
         treasury_donations: 11_000 + seed,
-        reserve_mirs: 12_000 + seed,
         non_overlay_blocks_minted: 21_000 + seed as u32,
-        treasury_mirs: 13_000 + seed,
         tx_count: 140_000 + seed,
         output: cbor::U128::new(340_282_366_920_938_463_463u128 + seed as u128),
         first_block_slot: 86_400_000 + seed,
@@ -456,14 +450,9 @@ fn end_stats() -> EndStats {
         unspendable_to_reserves: 800_000,
         treasury_mirs: 700_000,
         reserve_mirs: 600_000,
-        invalid_treasury_mirs: 500_000,
-        invalid_reserve_mirs: 400_000,
         treasury_withdrawals: 300_000,
-        invalid_treasury_withdrawals: 200_000,
         proposal_invalid_refunds: 100_000,
         proposal_refunds: 90_000,
-        __drep_deposits: 80_000,
-        __drep_refunds: 70_000,
     }
 }
 
