@@ -50,7 +50,7 @@ use dolos_core::{
 };
 use dolos_snapshot::{
     boundary::Ineligible,
-    export::{self, EpochWindow, Plan},
+    export::{self, EpochWindow, Plan, Predecessor as _},
     facade::{Selection, SnapshotSource as _, StoreSnapshot},
     layers::{blocks, indexes, logs, state},
     state_layer_count, state_ns_for, DolosProfile, Network, RetainedEpochs, BLOCKS, INDEXES,
@@ -61,8 +61,8 @@ use dolos_testing::{
     toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
 };
 use node::{
-    export_plan, export_to, extend_archive_past_cursor, harness, plan_at_boundary, plan_for,
-    step_past_boundary,
+    account_layer, export_plan, export_to, extend_archive_past_cursor, harness, plan_at_boundary,
+    plan_for, settled, stake_only, step_past_boundary, write_account_row,
 };
 use stelae::{
     dir::SteleDir,
@@ -1172,6 +1172,337 @@ fn a_reproduction_rebuilds_the_dump_it_cuts_and_trusts_the_ones_it_inherits() {
     .unwrap();
 
     assert_eq!(verified, followed);
+}
+
+/// A predecessor that lends every inheritable layer of an earlier stele, as a
+/// registry's chained publish does from a manifest or a resumption record, and
+/// counts what it is asked for and what it lends.
+struct Lending {
+    history: Vec<stelae::inscription::HistoryEntry>,
+    layers: Vec<stelae::inscription::LayerDescriptor>,
+    asked: std::sync::Mutex<Vec<(String, u64)>>,
+    lent: AtomicUsize,
+    landed: std::sync::Mutex<Vec<stelae::inscription::LayerDescriptor>>,
+}
+
+impl Lending {
+    /// A publish of `plan` chained onto `predecessor`, lending its layers.
+    fn following(predecessor: &stelae::inscription::Inscription, plan: &Plan) -> Self {
+        let canonical = predecessor.canonicalize().unwrap();
+        let following = export::Following::read(&canonical, plan).unwrap();
+
+        Self::with_history(following.history().to_vec(), predecessor)
+    }
+
+    /// A first publish resuming from a record of `interrupted`'s layers: no
+    /// history, and the layers to lend.
+    fn resuming(interrupted: &stelae::inscription::Inscription) -> Self {
+        Self::with_history(vec![], interrupted)
+    }
+
+    fn with_history(
+        history: Vec<stelae::inscription::HistoryEntry>,
+        lender: &stelae::inscription::Inscription,
+    ) -> Self {
+        Self {
+            history,
+            layers: lender.layers.clone(),
+            asked: Default::default(),
+            lent: AtomicUsize::new(0),
+            landed: Default::default(),
+        }
+    }
+
+    fn find(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Option<stelae::inscription::LayerDescriptor> {
+        self.layers
+            .iter()
+            .find(|layer| layer.kind == kind && &layer.scope == scope)
+            .filter(|_| dolos_snapshot::is_inheritable(kind, scope))
+            .cloned()
+    }
+
+    /// The windows a `log-account-epochs` layer was asked for.
+    fn account_windows(&self) -> Vec<u64> {
+        self.asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kind, _)| kind == "log-account-epochs")
+            .map(|(_, epoch)| *epoch)
+            .collect()
+    }
+
+    /// The forecast for `plan` against `domain`'s stores is what the export
+    /// through this predecessor, `exported`, built and lent.
+    fn forecast_matches(
+        &self,
+        plan: &Plan,
+        domain: &ToyDomain<MemoryStores>,
+        exported: &stelae::inscription::Inscription,
+    ) {
+        let forecast = export::forecast(plan, domain.archive(), self, None).unwrap();
+        let lent = self.lent.load(Ordering::Relaxed);
+
+        assert_eq!(
+            forecast,
+            export::Forecast {
+                layers_built: exported.layers.len() - lent,
+                layers_reused: lent,
+            }
+        );
+    }
+}
+
+impl export::Predecessor for Lending {
+    fn history(&self) -> &[stelae::inscription::HistoryEntry] {
+        &self.history
+    }
+
+    fn adopt(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<Option<stelae::inscription::LayerDescriptor>, stelae_driver::Error> {
+        if let Some(epoch) = scope.get("epoch").and_then(serde_json::Value::as_u64) {
+            self.asked.lock().unwrap().push((kind.to_owned(), epoch));
+        }
+
+        let found = self.find(kind, scope);
+        self.lent
+            .fetch_add(usize::from(found.is_some()), Ordering::Relaxed);
+
+        Ok(found)
+    }
+
+    fn carried_forward(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<bool, stelae_driver::Error> {
+        Ok(self.find(kind, scope).is_some())
+    }
+
+    fn landed(
+        &self,
+        descriptor: &stelae::inscription::LayerDescriptor,
+    ) -> Result<(), stelae_driver::Error> {
+        self.landed.lock().unwrap().push(descriptor.clone());
+
+        Ok(())
+    }
+}
+
+fn reproduce_fresh(
+    plan: &Plan,
+    domain: &ToyDomain<MemoryStores>,
+) -> stelae::inscription::Inscription {
+    export::reproduce(plan, domain.archive(), domain.state(), None, &export::First).unwrap()
+}
+
+/// Finding 1 of the QA review of dolos#1499: a stele cut at 2 carries window
+/// 1's account rows as ESTART wrote them, stake leg alone; the EWRAP closing 2
+/// rewrites them in full before 3 is cut. The publish at 3 builds that window's
+/// layer from the stores rather than adopt the stale one, and still adopts
+/// window 0's, so a chained publish equals one with nothing to inherit, and
+/// its forecast counts what it then builds and lends.
+#[test]
+fn a_chained_publish_rebuilds_the_account_rows_ewrap_rewrote() {
+    let domain: ToyDomain<MemoryStores> = harness();
+
+    write_account_row(&domain, 1, stake_only());
+
+    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
+    let predecessor = reproduce_fresh(&cut_at_2, &domain);
+
+    write_account_row(&domain, 1, settled());
+
+    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
+    let lending = Lending::following(&predecessor, &cut_at_3);
+
+    let chained =
+        export::reproduce(&cut_at_3, domain.archive(), domain.state(), None, &lending).unwrap();
+
+    assert_eq!(chained.layers, reproduce_fresh(&cut_at_3, &domain).layers);
+
+    // Window 1 really changed, and window 0 really was lent.
+    assert_ne!(account_layer(&chained, 1), account_layer(&predecessor, 1));
+    assert_eq!(account_layer(&chained, 0), account_layer(&predecessor, 0));
+
+    assert_eq!(lending.account_windows(), vec![0]);
+    let asked = lending.asked.lock().unwrap().clone();
+    assert!(asked.contains(&("log-epochs".to_owned(), 1)), "{asked:?}");
+
+    lending.forecast_matches(&cut_at_3, &domain, &chained);
+}
+
+/// Finding A of the second QA review of dolos#1499: a first publish
+/// interrupted at 2 recorded window 1's stake-only account rows, and its retry
+/// at 4, past the boundary that settled them, has only that record to lend
+/// from. A record does not say when it built a layer, so the retry builds every
+/// account window from its stores and still takes every other kind.
+#[test]
+fn a_resumed_first_publish_builds_every_account_window() {
+    let domain: ToyDomain<MemoryStores> = harness();
+
+    write_account_row(&domain, 1, stake_only());
+
+    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
+    let interrupted = reproduce_fresh(&cut_at_2, &domain);
+
+    write_account_row(&domain, 1, settled());
+
+    let cut_at_4 = plan_at_boundary(&domain, 4, RetainedEpochs::default());
+    let resuming = Lending::resuming(&interrupted);
+
+    let resumed =
+        export::reproduce(&cut_at_4, domain.archive(), domain.state(), None, &resuming).unwrap();
+
+    assert_eq!(resumed.layers, reproduce_fresh(&cut_at_4, &domain).layers);
+    assert_ne!(account_layer(&resumed, 1), account_layer(&interrupted, 1));
+
+    assert!(resuming.account_windows().is_empty());
+    let asked = resuming.asked.lock().unwrap().clone();
+    assert!(asked.contains(&("blocks".to_owned(), 1)), "{asked:?}");
+    assert!(resuming.lent.load(Ordering::Relaxed) > 0);
+
+    resuming.forecast_matches(&cut_at_4, &domain, &resumed);
+}
+
+/// Finding E of the third QA review of dolos#1499: a host's publish at 2 was
+/// interrupted after it recorded window 1's stake-only account rows. Another
+/// host published 2, then 3 restricted to fewer epochs, so the manifest at 3
+/// lacks window 1. The first host's publish at 4 finds window 1 settled and the
+/// manifest silent, and the record would lend the stale layer. Held to the
+/// manifest, it builds the window from its stores instead.
+#[test]
+fn a_record_never_supplies_an_account_window_the_manifest_lacks() {
+    let domain: ToyDomain<MemoryStores> = harness();
+
+    write_account_row(&domain, 1, stake_only());
+
+    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
+    let interrupted = reproduce_fresh(&cut_at_2, &domain);
+
+    write_account_row(&domain, 1, settled());
+
+    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
+    let mut restricted = reproduce_fresh(&cut_at_3, &domain);
+    let window_1 = account_layer(&restricted, 1);
+    restricted.layers.retain(|layer| *layer != window_1);
+
+    let cut_at_4 = plan_at_boundary(&domain, 4, RetainedEpochs::default());
+    let lending_record = || {
+        let mut lending = Lending::following(&restricted, &cut_at_4);
+        lending.layers.push(account_layer(&interrupted, 1));
+        lending
+    };
+
+    // Without the manifest's word, the record's stake-only rows ride along.
+    let unheld = export::reproduce(
+        &cut_at_4,
+        domain.archive(),
+        domain.state(),
+        None,
+        &lending_record(),
+    )
+    .unwrap();
+    assert_eq!(account_layer(&unheld, 1), account_layer(&interrupted, 1));
+
+    let settling = export::Settling::new(lending_record(), Some(&restricted)).unwrap();
+    let held =
+        export::reproduce(&cut_at_4, domain.archive(), domain.state(), None, &settling).unwrap();
+
+    assert_eq!(held.layers, reproduce_fresh(&cut_at_4, &domain).layers);
+    assert_eq!(account_layer(&held, 1), window_1);
+
+    // Window 0 is in the manifest and still lent; window 1 never reached the
+    // record's lender.
+    assert_eq!(settling.inner().account_windows(), vec![0]);
+
+    let forecast = export::forecast(&cut_at_4, domain.archive(), &settling, None).unwrap();
+    let lent = settling.inner().lent.load(Ordering::Relaxed);
+
+    assert_eq!(
+        forecast,
+        export::Forecast {
+            layers_built: held.layers.len() - lent,
+            layers_reused: lent,
+        }
+    );
+}
+
+/// Finding H of the fourth QA review of dolos#1499: the settling wrapper hands
+/// every layer that lands to the predecessor it wraps, which is where a
+/// registry publish writes its resumption record.
+#[test]
+fn a_settling_predecessor_passes_each_landed_layer_on() {
+    let domain: ToyDomain<MemoryStores> = harness();
+
+    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
+    let predecessor = reproduce_fresh(&cut_at_2, &domain);
+
+    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
+    let landed = |predecessor: &dyn export::Predecessor| {
+        export::reproduce(
+            &cut_at_3,
+            domain.archive(),
+            domain.state(),
+            None,
+            predecessor,
+        )
+        .unwrap()
+    };
+
+    let bare = Lending::following(&predecessor, &cut_at_3);
+    landed(&bare);
+
+    let settling = export::Settling::new(
+        Lending::following(&predecessor, &cut_at_3),
+        Some(&predecessor),
+    )
+    .unwrap();
+    landed(&settling);
+
+    let sorted = |lending: &Lending| {
+        let mut layers = lending.landed.lock().unwrap().clone();
+        layers.sort_by_key(|layer| (layer.kind.clone(), layer.scope.to_string()));
+        layers
+    };
+
+    assert!(!sorted(&bare).is_empty());
+    assert_eq!(sorted(settling.inner()), sorted(&bare));
+}
+
+/// Finding C of the second QA review of dolos#1499: the forecast asks the
+/// settling rule too. The predecessor at 2 holds window 1's stake-only account
+/// rows, and these stores, cut at 3, hold none there, so the publish writes no
+/// such layer and the forecast counts none.
+#[test]
+fn a_forecast_counts_no_unsettled_account_window_the_stores_lack() {
+    let source: ToyDomain<MemoryStores> = harness();
+
+    write_account_row(&source, 1, stake_only());
+
+    let cut_at_2 = plan_at_boundary(&source, 2, RetainedEpochs::default());
+    let predecessor = reproduce_fresh(&cut_at_2, &source);
+
+    let domain: ToyDomain<MemoryStores> = harness();
+    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
+    let lending = Lending::following(&predecessor, &cut_at_3);
+
+    let chained =
+        export::reproduce(&cut_at_3, domain.archive(), domain.state(), None, &lending).unwrap();
+
+    assert!(!chained.layers.iter().any(|layer| {
+        layer.kind == "log-account-epochs"
+            && layer.scope.get("epoch").and_then(serde_json::Value::as_u64) == Some(1)
+    }));
+
+    lending.forecast_matches(&cut_at_3, &domain, &chained);
 }
 
 /// The whole skeleton document, so a change to a key spelling, a scope shape or

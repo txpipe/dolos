@@ -822,6 +822,12 @@ pub trait ChainLogic: Sized + Send + Sync {
         point: ChainPoint,
     ) -> Result<CatchUpBlockData, ChainError>;
 
+    /// Called by a rollback to `to` before the archive drops every log row
+    /// keyed at or after `to`'s slot. No block undo restores rows that
+    /// boundary work wrote there, so this is where the chain says so. The
+    /// default does nothing.
+    fn rolling_back<D: Domain>(_domain: &D, _to: &ChainPoint) {}
+
     // TODO: remove from the interface - this is Cardano-specific
     fn decode_utxo(&self, utxo: Arc<UtxoValue>) -> Result<Self::Utxo, ChainError>;
 

@@ -58,7 +58,7 @@
 //! check, which is publisher plumbing. No restore, no signatures.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
     ops::Range,
     sync::{atomic::AtomicBool, Mutex},
@@ -81,8 +81,8 @@ use crate::{
     namespaces::NAMESPACES,
     reporting::{Cursor, Records},
     state_layer_count, DigestsScope, DolosProfile, EpochScope, Error, Network, RetainedEpochs,
-    Scope, StateScope, BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, INDEXES, LOG_KINDS,
-    LOG_NAMESPACES, STATE_KINDS, UTXOS,
+    Scope, StateScope, BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, EPOCH_KINDS, INDEXES,
+    LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
 };
 
 /// The slot window one epoch layer covers.
@@ -648,6 +648,74 @@ fn retained_dumps(
             ))
         })
         .collect()
+}
+
+/// A predecessor held to its manifest for `log-account-epochs`.
+///
+/// A registry's chained publish carries a layer forward out of the manifest it
+/// follows or, failing that, out of an interrupted publish's resumption record.
+/// The record names the layers that publish uploaded, not the sequence that
+/// built them, and a window of this kind settles one boundary after it closes
+/// ([`crate::is_settled`]): a record can hold a window's stake-only rows that
+/// the manifest lacks, say because that publish was restricted to fewer
+/// epochs. This answers for such a window only where the manifest holds it,
+/// and leaves every other kind to `inner`.
+pub struct Settling<P> {
+    inner: P,
+    published: BTreeSet<(String, String)>,
+}
+
+impl<P: Predecessor> Settling<P> {
+    /// `inner`, carrying the account windows `manifest` holds and no others.
+    /// `None` is a repository with no stele yet.
+    pub fn new(inner: P, manifest: Option<&Inscription>) -> Result<Self, Error> {
+        let published = manifest
+            .into_iter()
+            .flat_map(|manifest| &manifest.layers)
+            .filter(|layer| crate::settles_late(&layer.kind))
+            .map(|layer| crate::scope_key(&layer.kind, &layer.scope))
+            .collect::<Result<_, _>>()?;
+
+        Ok(Self { inner, published })
+    }
+
+    pub fn inner(&self) -> &P {
+        &self.inner
+    }
+
+    fn admits(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, stelae_driver::Error> {
+        Ok(!crate::settles_late(kind) || self.published.contains(&crate::scope_key(kind, scope)?))
+    }
+}
+
+impl<P: Predecessor> Predecessor for Settling<P> {
+    fn history(&self) -> &[HistoryEntry] {
+        self.inner.history()
+    }
+
+    fn adopt(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<Option<LayerDescriptor>, stelae_driver::Error> {
+        if !self.admits(kind, scope)? {
+            return Ok(None);
+        }
+
+        self.inner.adopt(kind, scope)
+    }
+
+    fn carried_forward(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<bool, stelae_driver::Error> {
+        Ok(self.admits(kind, scope)? && self.inner.carried_forward(kind, scope)?)
+    }
+
+    fn landed(&self, descriptor: &LayerDescriptor) -> Result<(), stelae_driver::Error> {
+        self.inner.landed(descriptor)
+    }
 }
 
 /// The history rule, which is [`stelae::inscription::history_for`]: it reads a
@@ -1403,7 +1471,12 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
 ) -> Result<Option<LayerDescriptor>, Error> {
     let scope = window.scope(plan.network.magic());
 
-    let (spec, adopted) = inherit(&scope, kind, previous)?;
+    // Asked before `adopt`, which already arranges the blob it answers with.
+    let (spec, adopted) = if crate::is_settled(kind, window.epoch, previous.history()) {
+        inherit(&scope, kind, previous)?
+    } else {
+        (scope.layer_spec(kind)?, None)
+    };
 
     if let Some(descriptor) = adopted {
         let at = cursor.open(kind, &spec.scope);
@@ -1467,7 +1540,7 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
 /// method documents — a recorded blob the repository has since dropped — and
 /// here that turns a forecast layer into no layer at all rather than into a
 /// rebuild, because a past epoch's state is not in this publish's stores.
-pub(crate) fn carried_dumps(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
+fn carried_dumps(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
     let mut total = 0;
 
     for epoch in plan.adoptable_dumps() {
@@ -1491,13 +1564,75 @@ pub(crate) fn carried_dumps(plan: &Plan, previous: &dyn Predecessor) -> Result<u
 /// The tip's count is structural — every shard of every kind, empty ones
 /// included — and so is the cut dump's, since it is the same layers under a
 /// second scope. Only the adopted past is a lookup.
-pub(crate) fn state_layers(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
+fn state_layers(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
     let cut = usize::from(plan.cuts_a_dump());
 
     Ok(state_layer_count() * (1 + cut) + carried_dumps(plan, previous)?)
 }
 
-pub(crate) fn log_layers<A: ArchiveStore>(
+/// What a publish of `plan` chained onto `previous` would write, counted
+/// without writing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Forecast {
+    pub layers_built: usize,
+    pub layers_reused: usize,
+}
+
+/// The layers a publish of `plan` chained onto `previous` would build and carry
+/// forward — the forecast, not the outcome: see
+/// [`Predecessor::carried_forward`] for the one direction it may be wrong in.
+///
+/// What [`crate::registry::preview`] reports. It asks [`export`]'s questions
+/// through the same `layer_spec` and [`crate::is_settled`], so a dry run and
+/// the publish that follows it cannot disagree about which layers are
+/// inherited.
+pub fn forecast<A: ArchiveStore>(
+    plan: &Plan,
+    archive: &A,
+    previous: &dyn Predecessor,
+    digest_records: Option<&[digests::ImmutableDigests]>,
+) -> Result<Forecast, Error> {
+    // Every epoch selected contributes one `blocks` and one `indexes` layer and
+    // as many log layers as it has namespaces with logs, the state tip
+    // contributes every shard of every kind however the epochs were restricted,
+    // the retained dumps contribute what `state_layers` counts, and the digests
+    // layer is there exactly when its records are.
+    let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
+        + log_layers(plan, archive, previous)?
+        + state_layers(plan, previous)?
+        + usize::from(digest_records.is_some());
+
+    // A failure here is the scope refusing a kind it does not describe, and it
+    // propagates rather than counting as a miss: a dry run that quietly
+    // reported "build it" for a layer nobody could build would be the one
+    // number a publisher trusts, wrong. A dump this publish adopts is a layer
+    // nothing walks a store for; the one it cuts out of its own tip is not,
+    // because the tip is walked either way.
+    let mut layers_reused = carried_dumps(plan, previous)?;
+
+    for window in &plan.epochs {
+        let scope = window.scope(plan.network.magic());
+
+        for kind in EPOCH_KINDS {
+            let spec = scope.layer_spec(kind)?;
+
+            if crate::is_settled(kind, window.epoch, previous.history())
+                && previous.carried_forward(kind, &spec.scope)?
+            {
+                layers_reused += 1;
+            }
+        }
+    }
+
+    // A layer carried forward is a layer that exists, so `total` counted it
+    // too — see `log_layers`, which asks the predecessor first.
+    Ok(Forecast {
+        layers_built: total - layers_reused,
+        layers_reused,
+    })
+}
+
+fn log_layers<A: ArchiveStore>(
     plan: &Plan,
     archive: &A,
     previous: &dyn Predecessor,
@@ -1511,7 +1646,10 @@ pub(crate) fn log_layers<A: ArchiveStore>(
         for (kind, ns) in LOG_KINDS {
             let spec = scope.layer_spec(kind)?;
 
-            let present = previous.carried_forward(kind, &spec.scope)?
+            let carried = crate::is_settled(kind, window.epoch, previous.history())
+                && previous.carried_forward(kind, &spec.scope)?;
+
+            let present = carried
                 || archive
                     .iter_logs(ns, range.clone())?
                     .next()

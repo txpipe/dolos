@@ -185,10 +185,11 @@ mod tests {
             chain_summary: summary,
             genesis: mainnet_genesis(),
             avvm_reclamation: Default::default(),
-            owners: Default::default(),
+            inputs: Default::default(),
             tally_protocol: active_protocol,
             deltas: Default::default(),
             active_stake: None,
+            logs: Vec::new(),
         }
     }
 
