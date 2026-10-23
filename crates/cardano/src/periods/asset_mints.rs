@@ -164,7 +164,7 @@ mod tests {
             let row = AssetMintSet {
                 tx_hash: tx(asset, epoch, i),
                 amount,
-                names_asset: amount > 0 && i % 5 == 0,
+                names_asset: amount > 0 && i.is_multiple_of(5),
             };
             writer.write_entity_typed(&key, &row).unwrap();
         };

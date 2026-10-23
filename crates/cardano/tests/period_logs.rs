@@ -2,7 +2,7 @@
 //! and ESTART seals short epochs.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeSet, HashMap},
     sync::Arc,
 };
 
@@ -546,8 +546,8 @@ fn asset(policy: [u8; 28], name: &str) -> AssetKey {
 }
 
 /// The staged `(amount, names_asset)` of each asset, in chain order.
-fn staged_flags(domain: &ToyDomain) -> BTreeMap<AssetKey, Vec<(i64, bool)>> {
-    let mut out: BTreeMap<_, Vec<_>> = BTreeMap::new();
+fn staged_flags(domain: &ToyDomain) -> HashMap<AssetKey, Vec<(i64, bool)>> {
+    let mut out: HashMap<_, Vec<_>> = HashMap::new();
 
     for row in domain
         .state()
