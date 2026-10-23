@@ -20,6 +20,9 @@ use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 
 type TagKey = (TagDimension, Vec<u8>);
 
+/// The UTxO set and the tags held after one block.
+type Snapshot = (Vec<(TxoRef, UtxoValue)>, BTreeMap<TagKey, Vec<TagEntry>>);
+
 fn chain(cfg: SyntheticBlockConfig) -> (Vec<RawBlock>, ToyDomain) {
     let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
     let genesis = Arc::new(dolos_cardano::include::preview::load());
@@ -103,11 +106,7 @@ fn implied(domain: &ToyDomain, tags: &BTreeSet<TagKey>) -> BTreeMap<TagKey, Vec<
 
 /// Rolls `blocks` forward one at a time, checking the tags against the set
 /// after each, and returns the set and the tags after each block.
-fn roll_forward(
-    domain: &ToyDomain,
-    blocks: &[RawBlock],
-    tags: &BTreeSet<TagKey>,
-) -> Vec<(Vec<(TxoRef, UtxoValue)>, BTreeMap<TagKey, Vec<TagEntry>>)> {
+fn roll_forward(domain: &ToyDomain, blocks: &[RawBlock], tags: &BTreeSet<TagKey>) -> Vec<Snapshot> {
     blocks
         .iter()
         .enumerate()
@@ -124,12 +123,7 @@ fn roll_forward(
 
 /// Rolls back one block at a time, checking that the set and the tags are
 /// what they were after each block still applied.
-fn roll_back(
-    domain: &ToyDomain,
-    blocks: &[RawBlock],
-    tags: &BTreeSet<TagKey>,
-    after: &[(Vec<(TxoRef, UtxoValue)>, BTreeMap<TagKey, Vec<TagEntry>>)],
-) {
+fn roll_back(domain: &ToyDomain, blocks: &[RawBlock], tags: &BTreeSet<TagKey>, after: &[Snapshot]) {
     for i in (0..blocks.len() - 1).rev() {
         domain.rollback(&point(&blocks[i])).unwrap();
 
