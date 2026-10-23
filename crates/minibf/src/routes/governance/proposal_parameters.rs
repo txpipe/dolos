@@ -415,6 +415,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn governance_proposal_parameters_distinguish_absent_and_empty_cost_models() {
+        let empty_models = CostModels {
+            plutus_v1: None,
+            plutus_v2: None,
+            plutus_v3: None,
+            unknown: Default::default(),
+        };
+        let updates = [
+            empty_update(),
+            ProtocolParamUpdate {
+                cost_models_for_script_languages: Some(empty_models.clone()),
+                ..empty_update()
+            },
+            ProtocolParamUpdate {
+                max_block_body_size: Some(90_015),
+                cost_models_for_script_languages: Some(empty_models.clone()),
+                ..empty_update()
+            },
+            ProtocolParamUpdate {
+                cost_models_for_script_languages: Some(CostModels {
+                    plutus_v1: Some(vec![]),
+                    ..empty_models
+                }),
+                ..empty_update()
+            },
+        ];
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![vec![updates
+                .into_iter()
+                .map(|update| GovAction::ParameterChange(None, Box::new(update), None))
+                .collect()]],
+            ..Default::default()
+        });
+        let tx: Hash<32> = tx_hash_of_block(&app, 0).parse().unwrap();
+        let expected = [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({}),
+            serde_json::json!({"PlutusV1": []}),
+        ];
+
+        for (idx, cost_models) in expected.into_iter().enumerate() {
+            let id = bech32_gov_action(&tx, idx as u32).unwrap();
+            let paths = [
+                format!("/governance/proposals/{tx}/{idx}/parameters"),
+                format!("/governance/proposals/{id}/parameters"),
+            ];
+            let mut responses = vec![];
+            for path in paths {
+                let (status, bytes) = app.get_bytes(&path).await;
+                assert_eq!(status, StatusCode::OK, "{path}");
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    value["parameters"].get("cost_models"),
+                    Some(&cost_models),
+                    "{path}"
+                );
+                if idx == 2 {
+                    assert_eq!(value["parameters"]["max_block_size"], 90_015);
+                }
+                responses.push(bytes);
+            }
+            assert_eq!(responses[0], responses[1]);
+        }
+    }
+
+    #[tokio::test]
     async fn governance_proposal_parameters_have_stable_bytes() {
         let app = parameters_app();
         let tx = tx_hash_of_block(&app, 0);

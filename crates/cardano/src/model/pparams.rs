@@ -377,6 +377,9 @@ impl PParamsSet {
 
     pub fn merge(&mut self, other: Self) {
         for param in other.values {
+            if matches!(&param, PParamValue::CostModelsUnknown(models) if models.is_empty()) {
+                continue;
+            }
             self.set(param);
         }
     }
@@ -479,6 +482,86 @@ impl PParamsSet {
     pgetter!(DrepDeposit, u64);
     pgetter!(DrepInactivityPeriod, u64);
     pgetter!(MinFeeRefScriptCostPerByte, RationalNumber);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cost_models_sentinel_roundtrips_distinct_from_absent() {
+        let absent = PParamsSet::default();
+        let empty = absent
+            .clone()
+            .with(PParamValue::CostModelsUnknown(BTreeMap::new()));
+        let populated = absent
+            .clone()
+            .with(PParamValue::CostModelsUnknown(BTreeMap::from([(
+                7,
+                vec![1, -2],
+            )])));
+
+        assert_ne!(absent, empty);
+        assert_ne!(
+            minicbor::to_vec(&absent).unwrap(),
+            minicbor::to_vec(&empty).unwrap()
+        );
+        assert_ne!(
+            bincode::serialize(&absent).unwrap(),
+            bincode::serialize(&empty).unwrap()
+        );
+
+        for set in [absent, empty, populated] {
+            let cbor = minicbor::to_vec(&set).unwrap();
+            let decoded: PParamsSet = minicbor::decode(&cbor).unwrap();
+            assert_eq!(decoded, set);
+
+            let bytes = bincode::serialize(&set).unwrap();
+            let decoded: PParamsSet = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(decoded, set);
+        }
+    }
+
+    #[test]
+    fn cost_models_sentinel_merge_preserves_models_and_applies_scalar() {
+        let current = PParamsSet::default()
+            .with(PParamValue::CostModelsPlutusV1(vec![1]))
+            .with(PParamValue::CostModelsPlutusV2(vec![2]))
+            .with(PParamValue::CostModelsPlutusV3(vec![3]))
+            .with(PParamValue::CostModelsUnknown(BTreeMap::from([(
+                7,
+                vec![4, -5],
+            )])))
+            .with(PParamValue::MinFeeA(44));
+        let update = PParamsSet::default()
+            .with(PParamValue::CostModelsUnknown(BTreeMap::new()))
+            .with(PParamValue::MinFeeA(45));
+
+        let mut merged = current.clone();
+        merged.merge(update);
+        assert_eq!(merged, current.with(PParamValue::MinFeeA(45)));
+
+        let mut empty = PParamsSet::default();
+        empty.merge(PParamsSet::default().with(PParamValue::CostModelsUnknown(BTreeMap::new())));
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn cost_models_merge_keeps_populated_map_replacement_and_known_empty_values() {
+        let original = BTreeMap::from([(7, vec![1]), (8, vec![2])]);
+        let replacement = BTreeMap::from([(7, vec![3])]);
+        let mut current = PParamsSet::default()
+            .with(PParamValue::CostModelsUnknown(original))
+            .with(PParamValue::CostModelsPlutusV1(vec![4]));
+        let update = PParamsSet::default()
+            .with(PParamValue::CostModelsUnknown(replacement.clone()))
+            .with(PParamValue::CostModelsPlutusV1(vec![]));
+
+        current.merge(update.clone());
+        assert_eq!(current, update);
+        assert_eq!(current.cost_models_unknown(), Some(replacement));
+        assert_eq!(current.cost_models_plutus_v1(), Some(vec![]));
+    }
 }
 
 #[cfg(test)]

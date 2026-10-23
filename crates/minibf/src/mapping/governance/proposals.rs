@@ -98,13 +98,9 @@ impl IntoModel<ProposalParameters> for ProposalParametersBuilder {
                 protocol_minor_ver: None,
                 min_utxo: params.ada_per_utxo_byte().map(|x| x.to_string()),
                 min_pool_cost: params.min_pool_cost().map(|x| x.to_string()),
-                // Blockfrost tells "set to the empty map" (`{}`) apart from
-                // "not named at all" (`null`) because db-sync keys a row per
-                // cost model. `PParamsSet` records a language at a time, so a
-                // change naming no language leaves nothing behind to tell the
-                // two apart and both read as `null` here.
                 cost_models: map_cost_models_raw(&params.cost_models_for_script_languages())
-                    .flatten(),
+                    .flatten()
+                    .or_else(|| params.cost_models_unknown().map(|_| Default::default())),
             }
         );
 
@@ -265,6 +261,24 @@ impl IntoModel<Proposal> for ProposalModelBuilder {
 mod tests {
     use super::*;
     use pallas::ledger::primitives::StakeCredential;
+
+    #[test]
+    fn proposal_parameters_preserve_legacy_cost_models() {
+        let params =
+            PParamsSet::default().with(dolos_cardano::PParamValue::CostModelsPlutusV1(vec![1, -2]));
+        assert!(params.cost_models_unknown().is_none());
+        let model = ProposalParametersBuilder {
+            tx: [7; 32].into(),
+            idx: 0,
+            params,
+        }
+        .into_model()
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(model.parameters.cost_models).unwrap(),
+            serde_json::json!({"PlutusV1": [1, -2]})
+        );
+    }
 
     #[test]
     fn governance_type_names_every_action() {

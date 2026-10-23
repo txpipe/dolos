@@ -1013,6 +1013,29 @@ mod tests {
         ProposalAction::ParamChange(PParamsSet::default().with(kind_value))
     }
 
+    #[test]
+    fn cost_models_are_technical_not_security_including_empty_sentinel() {
+        let input = base_input();
+        let run = run_state(&input);
+
+        for value in [
+            PParamValue::CostModelsPlutusV1(vec![1]),
+            PParamValue::CostModelsPlutusV2(vec![2]),
+            PParamValue::CostModelsPlutusV3(vec![3]),
+            PParamValue::CostModelsUnknown(BTreeMap::from([(7, vec![4])])),
+            PParamValue::CostModelsUnknown(BTreeMap::new()),
+        ] {
+            assert_eq!(pparam_drep_group(value.kind()), Some(DRepGroup::Technical));
+            assert!(!pparam_is_security(value.kind()));
+            let action = param_change(value);
+            assert_eq!(drep_threshold(&run, &action), Some(rational(58, 100)));
+            assert_eq!(spo_threshold(&run, &action), Some(zero_threshold()));
+        }
+
+        let absent = ProposalAction::ParamChange(PParamsSet::default());
+        assert_eq!(drep_threshold(&run, &absent), Some(zero_threshold()));
+    }
+
     // §5.3.1 — threshold resolution
 
     /// Each pparam group resolves to its own DRep threshold; an update
