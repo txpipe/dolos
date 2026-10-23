@@ -69,12 +69,16 @@ async fn verify_fixture<Stores: ToyStores>(stores: Stores) {
                     work.utxo_refs,
                     (fixture.shape.blocks * fixture.shape.transactions_per_block) as u64
                 );
-                assert_eq!(work.exact_lookups, work.utxo_refs);
-                assert_eq!(work.tip_reads, selected_rows);
-                assert_eq!(
-                    work.block_reads - work.tip_reads,
-                    fixture.shape.blocks as u64
-                );
+                // only the blocks the page touches are read: one UTxO per tx
+                // in the fixture, and the window widens to whole blocks
+                let page_blocks =
+                    selected_rows.div_ceil(fixture.shape.transactions_per_block as u64);
+                let window_txs = page_blocks * fixture.shape.transactions_per_block as u64;
+                // every tx is located once, and the window's txs again by the
+                // block resolver
+                assert_eq!(work.exact_lookups, work.utxo_refs + window_txs);
+                assert_eq!(work.tip_reads, 0);
+                assert_eq!(work.block_reads, page_blocks);
                 assert!(work.decoded_bytes > 0);
             }
             _ => {}
