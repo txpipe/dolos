@@ -1605,6 +1605,54 @@ mod tests {
     use dolos_core::EntityDelta;
 
     use super::*;
+    use crate::PParamValue;
+
+    #[test]
+    fn pparams_update_empty_and_scalar_preserve_models_and_undo() {
+        let current = PParamsSet::default()
+            .with(PParamValue::CostModelsPlutusV1(vec![1]))
+            .with(PParamValue::CostModelsPlutusV2(vec![2]))
+            .with(PParamValue::CostModelsPlutusV3(vec![3]))
+            .with(PParamValue::CostModelsUnknown(BTreeMap::from([(
+                7,
+                vec![4, -5],
+            )])))
+            .with(PParamValue::MinFeeA(44));
+        for update in [
+            PParamsSet::default(),
+            PParamsSet::default().with(PParamValue::MinFeeA(45)),
+        ] {
+            for scheduled in [None, Some(current.clone().with(PParamValue::MinFeeB(10)))] {
+                let mut pparams = ShallowEpochValue::with_live(0, current.clone());
+                pparams.schedule(0, scheduled.clone());
+                let mut entity = Some(EpochState {
+                    pparams,
+                    ..Default::default()
+                });
+                let before = entity.clone();
+                let mut delta = PParamsUpdate::new(update.clone());
+                delta.apply(&mut entity);
+
+                let pparams = &entity.as_ref().unwrap().pparams;
+                assert_eq!(pparams.live(), Some(&current));
+                let mut expected = scheduled.unwrap_or_else(|| current.clone());
+                if let Some(fee) = update.min_fee_a() {
+                    expected.set(PParamValue::MinFeeA(fee));
+                }
+                assert_eq!(pparams.next(), Some(&expected));
+                assert_eq!(delta.to_update, update);
+
+                let applied = entity.clone();
+                let bytes = bincode::serialize(&delta).unwrap();
+                let mut delta: PParamsUpdate = bincode::deserialize(&bytes).unwrap();
+                assert_eq!(delta.to_update, update);
+                delta.undo(&mut entity);
+                assert_eq!(entity, before);
+                delta.apply(&mut entity);
+                assert_eq!(entity, applied);
+            }
+        }
+    }
 
     #[test]
     fn epoch_stats_preserve_first_slot_across_apply_undo_and_reapply() {

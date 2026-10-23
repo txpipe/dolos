@@ -763,6 +763,7 @@ pub fn proposal_state() -> ProposalState {
             (StakeCredential::ScriptHash(hash28(0x1d)), vote_entry(4)),
         ]),
         spo_votes: BTreeMap::from([(hash28(0x1e), vote_entry(5)), (hash28(0x1f), vote_entry(6))]),
+        cost_models_present: true,
     }
 }
 

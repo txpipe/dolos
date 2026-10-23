@@ -54,13 +54,19 @@ pub struct ProposalParametersBuilder {
     pub tx: Hash<32>,
     pub idx: u32,
     pub params: PParamsSet,
+    pub cost_models_present: bool,
 }
 
 impl IntoModel<ProposalParameters> for ProposalParametersBuilder {
     type SortKey = ();
 
     fn into_model(self) -> Result<ProposalParameters, StatusCode> {
-        let Self { tx, idx, params } = self;
+        let Self {
+            tx,
+            idx,
+            params,
+            cost_models_present,
+        } = self;
 
         let parameters = protocol_params_model!(
             params,
@@ -98,13 +104,9 @@ impl IntoModel<ProposalParameters> for ProposalParametersBuilder {
                 protocol_minor_ver: None,
                 min_utxo: params.ada_per_utxo_byte().map(|x| x.to_string()),
                 min_pool_cost: params.min_pool_cost().map(|x| x.to_string()),
-                // Blockfrost tells "set to the empty map" (`{}`) apart from
-                // "not named at all" (`null`) because db-sync keys a row per
-                // cost model. `PParamsSet` records a language at a time, so a
-                // change naming no language leaves nothing behind to tell the
-                // two apart and both read as `null` here.
                 cost_models: map_cost_models_raw(&params.cost_models_for_script_languages())
-                    .flatten(),
+                    .flatten()
+                    .or_else(|| cost_models_present.then(Default::default)),
             }
         );
 
@@ -267,6 +269,25 @@ mod tests {
     use pallas::ledger::primitives::StakeCredential;
 
     #[test]
+    fn proposal_parameters_preserve_legacy_cost_models() {
+        let params =
+            PParamsSet::default().with(dolos_cardano::PParamValue::CostModelsPlutusV1(vec![1, -2]));
+        assert!(params.cost_models_unknown().is_none());
+        let model = ProposalParametersBuilder {
+            tx: [7; 32].into(),
+            idx: 0,
+            params,
+            cost_models_present: false,
+        }
+        .into_model()
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(model.parameters.cost_models).unwrap(),
+            serde_json::json!({"PlutusV1": [1, -2]})
+        );
+    }
+
+    #[test]
     fn governance_type_names_every_action() {
         let cases = [
             (
@@ -336,6 +357,7 @@ mod tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
+            cost_models_present: false,
         }
     }
 
