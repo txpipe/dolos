@@ -9,11 +9,12 @@
 
 use std::collections::HashSet;
 
+use dolos_core::{StateError, StateStore};
 use pallas::ledger::primitives::Epoch;
 
 use crate::{
     rupd::loading::stake_snapshot_epoch, AccountEpochLog, AccountState, ChainSummary, EraKey,
-    PoolHash, PoolState,
+    PoolHash, PoolKey, PoolState,
 };
 
 /// `RupdWork::stake_epochs`, read from the closing boundary's side: the stake
@@ -76,4 +77,43 @@ pub(crate) fn stake_leg(
         pool_id: Some(*pool),
         ..Default::default()
     })
+}
+
+/// `account`'s stake leg for `current + 1`, read at tip epoch `current`
+/// before any boundary logs it: the distribution of `current + 1` is the
+/// `mark` frozen at the boundary into `current`, built by [`stake_leg`] under
+/// the gate and pool filter of the EWRAP that writes the full row.
+///
+/// `None` when that EWRAP would write no row, and when the account's or its
+/// pool's values are not at `current`: their `mark` then names another epoch,
+/// and the leg is never read from `set`, `go` or a live value instead.
+pub fn next_epoch_stake_leg<S: StateStore>(
+    state: &S,
+    account: &AccountState,
+    current: Epoch,
+    chain: &ChainSummary,
+) -> Result<Option<AccountEpochLog>, StateError> {
+    let Some((stake_epoch, protocol)) = stake_snapshot_of(current + 2, chain) else {
+        return Ok(None);
+    };
+
+    if !account.stake.is_at_epoch(current) || !account.pool.is_at_epoch(current) {
+        return Ok(None);
+    }
+
+    let Some(pool) = account.delegated_pool_at(stake_epoch) else {
+        return Ok(None);
+    };
+
+    let Some(pool) = state.read_entity_typed::<PoolState>(&PoolKey(*pool))? else {
+        return Ok(None);
+    };
+
+    if !pool.snapshot.is_at_epoch(current) || !admits_pool(&pool, stake_epoch) {
+        return Ok(None);
+    }
+
+    let pools = HashSet::from([pool.operator]);
+
+    Ok(stake_leg(account, stake_epoch, protocol, &pools))
 }
