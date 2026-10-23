@@ -1413,7 +1413,6 @@ mod tests {
                 RollingStats {
                     blocks_minted: 1,
                     consumed_utxos: claimed.deposit_per_pool,
-                    registered_pools: [pool_hash(7)].into(),
                     ..Default::default()
                 },
             ),
