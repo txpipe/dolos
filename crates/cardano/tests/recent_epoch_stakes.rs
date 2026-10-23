@@ -10,11 +10,14 @@
 //! devnet genesis (`first_shelley_epoch` 0), and every work unit runs through
 //! `execute_work_unit`, the executor the node runs.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use dolos_core::{
-    sync::execute_work_unit, ArchiveStore as _, ArchiveWriter as _, BlockSlot, Domain, DomainError,
-    Genesis, StateStore as _, StateWriter as _,
+    sync::execute_work_unit, ArchiveStore as _, ArchiveWriter as _, BlockSlot, ChainPoint, Domain,
+    DomainError, Genesis, StateStore as _, StateWriter as _, SyncExt as _,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
@@ -529,4 +532,67 @@ fn a_crash_at_any_estart_commit_keeps_the_rows() {
         crash_after > 2,
         "the boundary committed too little to crash between a shard's two commits"
     );
+}
+
+/// What `f` logs, as the node's formatter writes it.
+fn logs_of(f: impl FnOnce()) -> String {
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let buffer = Buffer::default();
+    let sink = buffer.clone();
+
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, f);
+
+    let bytes = buffer.0.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}
+
+/// A rollback onto the opening epoch's first slot cuts the rows ESTART wrote
+/// there, and the node warns before the cut, naming their slot. Finding D of
+/// the second QA review of dolos#1499.
+#[test]
+fn a_rollback_that_drops_estarts_rows_warns() {
+    let domain = seeded();
+
+    while epoch_state(&domain).number < 3 {
+        rupd(&domain);
+        ewrap(&domain);
+        estart(&domain).unwrap();
+        churn(&domain);
+    }
+
+    let opened = epoch_state(&domain).number;
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let start = summary.epoch_start(opened);
+
+    assert!(!logged(&domain)[&opened].is_empty());
+
+    let said = logs_of(|| domain.rollback(&ChainPoint::Slot(start)).unwrap());
+
+    assert!(
+        !logged(&domain).contains_key(&opened),
+        "the rollback kept ESTART's rows"
+    );
+    assert!(
+        said.contains("rollback drops the stake rows ESTART logged"),
+        "{said}"
+    );
+    assert!(said.contains(&format!("slot={start}")), "{said}");
 }

@@ -81,8 +81,8 @@ use crate::{
     namespaces::NAMESPACES,
     reporting::{Cursor, Records},
     state_layer_count, DigestsScope, DolosProfile, EpochScope, Error, Network, RetainedEpochs,
-    Scope, StateScope, BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, INDEXES, LOG_KINDS,
-    LOG_NAMESPACES, STATE_KINDS, UTXOS,
+    Scope, StateScope, BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, EPOCH_KINDS, INDEXES,
+    LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
 };
 
 /// The slot window one epoch layer covers.
@@ -1404,7 +1404,7 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
     let scope = window.scope(plan.network.magic());
 
     // Asked before `adopt`, which already arranges the blob it answers with.
-    let (spec, adopted) = if crate::is_settled(kind, window.epoch, plan.sequence) {
+    let (spec, adopted) = if crate::is_settled(kind, window.epoch, previous.history()) {
         inherit(&scope, kind, previous)?
     } else {
         (scope.layer_spec(kind)?, None)
@@ -1472,7 +1472,7 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
 /// method documents — a recorded blob the repository has since dropped — and
 /// here that turns a forecast layer into no layer at all rather than into a
 /// rebuild, because a past epoch's state is not in this publish's stores.
-pub(crate) fn carried_dumps(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
+fn carried_dumps(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
     let mut total = 0;
 
     for epoch in plan.adoptable_dumps() {
@@ -1496,13 +1496,75 @@ pub(crate) fn carried_dumps(plan: &Plan, previous: &dyn Predecessor) -> Result<u
 /// The tip's count is structural — every shard of every kind, empty ones
 /// included — and so is the cut dump's, since it is the same layers under a
 /// second scope. Only the adopted past is a lookup.
-pub(crate) fn state_layers(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
+fn state_layers(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
     let cut = usize::from(plan.cuts_a_dump());
 
     Ok(state_layer_count() * (1 + cut) + carried_dumps(plan, previous)?)
 }
 
-pub(crate) fn log_layers<A: ArchiveStore>(
+/// What a publish of `plan` chained onto `previous` would write, counted
+/// without writing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Forecast {
+    pub layers_built: usize,
+    pub layers_reused: usize,
+}
+
+/// The layers a publish of `plan` chained onto `previous` would build and carry
+/// forward — the forecast, not the outcome: see
+/// [`Predecessor::carried_forward`] for the one direction it may be wrong in.
+///
+/// What [`crate::registry::preview`] reports. It asks [`export`]'s questions
+/// through the same `layer_spec` and [`crate::is_settled`], so a dry run and
+/// the publish that follows it cannot disagree about which layers are
+/// inherited.
+pub fn forecast<A: ArchiveStore>(
+    plan: &Plan,
+    archive: &A,
+    previous: &dyn Predecessor,
+    digest_records: Option<&[digests::ImmutableDigests]>,
+) -> Result<Forecast, Error> {
+    // Every epoch selected contributes one `blocks` and one `indexes` layer and
+    // as many log layers as it has namespaces with logs, the state tip
+    // contributes every shard of every kind however the epochs were restricted,
+    // the retained dumps contribute what `state_layers` counts, and the digests
+    // layer is there exactly when its records are.
+    let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
+        + log_layers(plan, archive, previous)?
+        + state_layers(plan, previous)?
+        + usize::from(digest_records.is_some());
+
+    // A failure here is the scope refusing a kind it does not describe, and it
+    // propagates rather than counting as a miss: a dry run that quietly
+    // reported "build it" for a layer nobody could build would be the one
+    // number a publisher trusts, wrong. A dump this publish adopts is a layer
+    // nothing walks a store for; the one it cuts out of its own tip is not,
+    // because the tip is walked either way.
+    let mut layers_reused = carried_dumps(plan, previous)?;
+
+    for window in &plan.epochs {
+        let scope = window.scope(plan.network.magic());
+
+        for kind in EPOCH_KINDS {
+            let spec = scope.layer_spec(kind)?;
+
+            if crate::is_settled(kind, window.epoch, previous.history())
+                && previous.carried_forward(kind, &spec.scope)?
+            {
+                layers_reused += 1;
+            }
+        }
+    }
+
+    // A layer carried forward is a layer that exists, so `total` counted it
+    // too — see `log_layers`, which asks the predecessor first.
+    Ok(Forecast {
+        layers_built: total - layers_reused,
+        layers_reused,
+    })
+}
+
+fn log_layers<A: ArchiveStore>(
     plan: &Plan,
     archive: &A,
     previous: &dyn Predecessor,
@@ -1516,7 +1578,7 @@ pub(crate) fn log_layers<A: ArchiveStore>(
         for (kind, ns) in LOG_KINDS {
             let spec = scope.layer_spec(kind)?;
 
-            let carried = crate::is_settled(kind, window.epoch, plan.sequence)
+            let carried = crate::is_settled(kind, window.epoch, previous.history())
                 && previous.carried_forward(kind, &spec.scope)?;
 
             let present = carried

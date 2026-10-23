@@ -55,8 +55,11 @@
 //! and this module supplies the half the protocol cannot: **which layers may be
 //! skipped at all.**
 //!
-//! Epoch layers may. They describe a closed window of a chain that cannot
-//! change again, so the same `diffId` in a newer inscription is the same layer.
+//! Epoch layers may. They describe a closed window, so the same `diffId` in a
+//! newer inscription is the same layer. A `log-account-epochs` window settles
+//! one stele after it closes ([`crate::is_settled`]); its settled layer is
+//! new bytes under a new `diffId`, which the checkpoint has not recorded and so
+//! restores.
 //!
 //! **The state tip never may.** It is the tip: it is rewritten by every
 //! publish, and — independently of that — a tip layer's descriptor scope is

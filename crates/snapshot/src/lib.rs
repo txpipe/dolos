@@ -119,6 +119,7 @@ use serde_json::json;
 use stelae::{
     dir::LayerSpec,
     frame::{self, CanonicalCbor},
+    inscription::HistoryEntry,
     Compression, Profile,
 };
 
@@ -413,22 +414,29 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
             .is_some()
 }
 
-/// Whether a publish at `sequence` may carry forward its predecessor's layer of
-/// `kind` for the window of `epoch`, where [`is_inheritable`] admits the kind.
+/// Whether a publish chained onto `history` may carry forward a layer of `kind`
+/// for the window of `epoch`, where [`is_inheritable`] admits the kind.
 ///
 /// Every closed window's layer is final when it is first published, except
 /// `log-account-epochs`. ESTART opening an epoch writes its rows with the stake
 /// leg alone, and the EWRAP closing the epoch after it rewrites them in full
-/// under the same keys, at the boundary into `epoch + 2`. The predecessor, at
-/// `sequence - 1`, therefore published that window's final rows only if
-/// `epoch + 2 <= sequence - 1`; a younger window is built again from the
-/// stores, which hold the full rows by now.
-pub fn is_settled(kind: &str, epoch: u64, sequence: u64) -> bool {
+/// under the same keys, at the boundary into `epoch + 2`. The predecessor, the
+/// last entry of `history`, therefore published that window's final rows only
+/// if `epoch + 2` is at or below its sequence; a younger window is built again
+/// from the stores, which hold the full rows by now.
+///
+/// With no predecessor the only source left is an interrupted publish's
+/// resumption record, which does not say which sequence built a layer, so a
+/// first publish builds every window of this kind.
+pub fn is_settled(kind: &str, epoch: u64, history: &[HistoryEntry]) -> bool {
     let late = LOG_KINDS
         .iter()
         .any(|(log, ns)| *log == kind && *ns == AccountEpochLog::NS);
 
-    !late || epoch + 3 <= sequence
+    !late
+        || history
+            .last()
+            .is_some_and(|built| epoch + 2 <= built.sequence)
 }
 
 /// The epoch kinds a window always produces a layer for.
@@ -1743,19 +1751,27 @@ mod tests {
 
     /// The predecessor at 9 published window 8's account rows as ESTART wrote
     /// them, and the EWRAP closing 9 rewrote them before 10 was cut; window
-    /// 7's were already EWRAP's. Every other kind is final once its window
+    /// 7's were already EWRAP's. Without a predecessor nothing says when a
+    /// window's rows were built. Every other kind is final once its window
     /// closes.
     #[test]
     fn only_a_settled_windows_account_rows_are_carried_forward() {
-        assert!(is_settled("log-account-epochs", 7, 10));
-        assert!(!is_settled("log-account-epochs", 8, 10));
-        assert!(!is_settled("log-account-epochs", 9, 10));
+        let after_9 = [HistoryEntry {
+            sequence: 9,
+            inscription_digest: stelae::digest::Digest::from_bytes([9; 32]),
+        }];
+
+        assert!(is_settled("log-account-epochs", 7, &after_9));
+        assert!(!is_settled("log-account-epochs", 8, &after_9));
+        assert!(!is_settled("log-account-epochs", 9, &after_9));
+        assert!(!is_settled("log-account-epochs", 0, &[]));
 
         for kind in EPOCH_KINDS
             .into_iter()
             .filter(|kind| *kind != "log-account-epochs")
         {
-            assert!(is_settled(kind, 9, 10), "{kind}");
+            assert!(is_settled(kind, 9, &after_9), "{kind}");
+            assert!(is_settled(kind, 9, &[]), "{kind}");
         }
     }
 }
