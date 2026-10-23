@@ -1,6 +1,6 @@
 use dolos_core::config::GrpcConfig;
 use pallas::interop::utxorpc::LedgerContext;
-use tonic::transport::{Certificate, Server, ServerTlsConfig};
+use tonic::transport::Server;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
@@ -117,18 +117,6 @@ where
         let builder = apply_http2_tuning(Server::builder().accept_http1(true), &cfg);
 
         let mut server = builder.layer(cors_layer);
-
-        if let Some(pem) = &cfg.tls_client_ca_root {
-            let pem = std::env::current_dir().unwrap().join(pem);
-            let pem = std::fs::read_to_string(pem).map_err(|e| ServeError::Internal(e.into()))?;
-            let pem = Certificate::from_pem(pem);
-
-            let tls = ServerTlsConfig::new().client_ca_root(pem);
-
-            server = server
-                .tls_config(tls)
-                .map_err(|e| ServeError::Internal(e.into()))?;
-        }
 
         info!("serving via gRPC on address: {}", cfg.listen_address);
 
