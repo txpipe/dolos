@@ -18,7 +18,8 @@ use dolos_cardano::{
 };
 use dolos_core::{
     config::CustomUtxo, import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ChainError,
-    ChainPoint, Domain as _, EraCbor, Genesis, RawBlock, StateStore as _, TxoRef, WalStore as _,
+    ChainPoint, Domain as _, EraCbor, Genesis, RawBlock, StateStore as _, TxoRef, UtxoValue,
+    WalStore as _,
 };
 use dolos_testing::{blocks::make_conway_block_with_txs_at, toy_domain::ToyDomain};
 use pallas::{
@@ -379,8 +380,11 @@ impl Oracle {
         let mut outputs = HashMap::new();
 
         let mut hold = |txo: TxoRef, cbor: Vec<u8>| {
-            let output =
-                OwnedMultiEraOutput::decode(Arc::new(EraCbor(Era::Conway.into(), cbor))).unwrap();
+            let output = OwnedMultiEraOutput::decode(Arc::new(UtxoValue::new(
+                EraCbor(Era::Conway.into(), cbor),
+                None,
+            )))
+            .unwrap();
             outputs.insert(txo, output);
         };
 

@@ -8,7 +8,8 @@ use std::{
 
 use dolos_core::{
     archive::Skippable, ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, EntityKey,
-    EntityValue, LogKey, Namespace, StateError, StateStore, TagDimension, TxoRef, UtxoMap, UtxoSet,
+    EntityValue, LogKey, Namespace, StateError, StateStore, TagDimension, TagEntry, TagOrder,
+    TagStart, TxoRef, UtxoMap, UtxoSet,
 };
 use serde::Serialize;
 
@@ -346,6 +347,36 @@ impl<Inner: StateStore> StateStore for MeasuredState<Inner> {
             .utxo_refs
             .fetch_add(refs.len() as u64, Ordering::Relaxed);
         Ok(refs)
+    }
+
+    fn utxos_by_tag_page(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        order: TagOrder,
+        start: TagStart,
+        count: usize,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        let entries = self
+            .inner
+            .utxos_by_tag_page(dimension, key, order, start, count)?;
+        self.counters
+            .utxo_refs
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        Ok(entries)
+    }
+
+    /// Each probed entry is one tag key read, counted with the refs.
+    fn utxos_with_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        entries: Vec<TagEntry>,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        self.counters
+            .utxo_refs
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        self.inner.utxos_with_tag(dimension, key, entries)
     }
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {

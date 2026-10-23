@@ -199,7 +199,8 @@ const WAL_METADATA_VERSION_KEY: &str = "version";
 ///
 /// 2: deltas carry typed, variable-length entity keys (decision 0051).
 /// 3: `EpochStatsUpdate` and `ScriptFirstSeen` drop the fields nothing reads.
-pub const CURRENT_WAL_VERSION: u32 = 3;
+/// 4: inputs carry each UTxO's creation position beside its output.
+pub const CURRENT_WAL_VERSION: u32 = 4;
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 
@@ -962,6 +963,32 @@ mod tests {
 
         let store = open_test_store(&path).unwrap();
         assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
+        assert!(store.data_table_is_empty().unwrap());
+    }
+
+    /// A version-3 WAL holds inputs without their creation position, so it
+    /// cannot be read as version 4: opening it wipes the entries and stamps 4.
+    #[test]
+    fn a_version_3_wal_is_wiped_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        {
+            let db = open_raw_db(&path);
+            let wx = db.begin_write().unwrap();
+            {
+                let mut metadata = wx.open_table(WAL_METADATA).unwrap();
+                metadata.insert(WAL_METADATA_VERSION_KEY, 3).unwrap();
+
+                let mut table = wx.open_table(WAL).unwrap();
+                let key = DbChainPoint::from(ChainPoint::Specific(42, [1u8; 32].into()));
+                table.insert(key, vec![0xDEu8, 0xAD, 0xBE, 0xEF]).unwrap();
+            }
+            wx.commit().unwrap();
+        }
+
+        let store = open_test_store(&path).unwrap();
+        assert_eq!(store.read_version().unwrap(), Some(4));
         assert!(store.data_table_is_empty().unwrap());
     }
 

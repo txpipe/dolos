@@ -47,8 +47,8 @@ use dolos_cardano::{
     AccountKey, AccountStats, AddressKey, AddressStats,
 };
 use dolos_core::{
-    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, StateStore,
-    StateWriter as _, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    ArchiveStore, ChainPoint, Domain as _, EntityKey, ExactRecord, LogKey, StateStore,
+    StateWriter as _, TagOrder, TagRecord, TagStart, TxoRef, UtxoSet, UtxoSetDelta, UtxoValue,
 };
 use dolos_snapshot::{
     is_state_kind,
@@ -541,7 +541,7 @@ impl<S: StateStore> Progress for UtxoBatchObserver<S> {
                 .collect(),
             ..Default::default()
         };
-        for (txo, tags) in utxo_index_delta_from_utxo_delta(&delta).produced {
+        for (txo, _, tags) in utxo_index_delta_from_utxo_delta(&delta).produced {
             for tag in tags {
                 assert!(
                     self.state
@@ -620,7 +620,7 @@ fn resume_repairs_utxos_written_without_tags_by_an_older_restore() {
 
     let tags = utxo_index_delta_from_utxo_delta(&delta);
     assert!(!tags.produced.is_empty());
-    for (_, tags) in &tags.produced {
+    for (_, _, tags) in &tags.produced {
         for tag in tags {
             assert!(blank
                 .state()
@@ -1106,6 +1106,11 @@ fn assert_state_matches<S: StateStore>(restored: &S, original: &S) {
 
     let utxos = utxos_of(original);
     assert!(!utxos.is_empty(), "the fixture has no utxos");
+    assert!(
+        utxos.values().any(|value| value.position().is_some()),
+        "no fixture utxo has a creation position, so its trip proves nothing"
+    );
+    // the values compare whole: the creation position rides the record
     assert_eq!(utxos_of(restored), utxos, "the utxo set");
 }
 
@@ -1143,7 +1148,8 @@ fn assert_indexes_match<A: ArchiveStore>(restored: &A, original: &A) {
 ///
 /// This is the point. `utxo::*` tags are never shipped — ADR-004's Amendment
 /// 2 — so they exist in a restored node only because the restore rebuilt
-/// them, and only a query proves it did.
+/// them, and only a query proves it did. The ordered reads compare too: the
+/// rebuilt keys carry the creation positions the sync wrote.
 fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
     // Every dimension the ledger tagged the restored UTxO set under, asked of
     // both stores.
@@ -1158,7 +1164,7 @@ fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
     let rebuilt = utxo_index_delta_from_utxo_delta(&delta);
     let mut asked = 0usize;
 
-    for (txo, tags) in &rebuilt.produced {
+    for (txo, _, tags) in &rebuilt.produced {
         for tag in tags {
             let left: UtxoSet = restored.utxos_by_tag(tag.dimension, &tag.key).unwrap();
             let right: UtxoSet = original.utxos_by_tag(tag.dimension, &tag.key).unwrap();
@@ -1169,6 +1175,27 @@ fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
                 tag.dimension
             );
             assert_eq!(left, right, "utxos under {}", tag.dimension);
+
+            for order in [TagOrder::Asc, TagOrder::Desc] {
+                let page = |store: &S| {
+                    store
+                        .utxos_by_tag_page(
+                            tag.dimension,
+                            &tag.key,
+                            order,
+                            TagStart::Skip(0),
+                            usize::MAX,
+                        )
+                        .unwrap()
+                };
+
+                assert_eq!(
+                    page(restored),
+                    page(original),
+                    "{order:?} order under {}",
+                    tag.dimension
+                );
+            }
 
             asked += 1;
         }
@@ -1188,7 +1215,7 @@ fn entities_of<S: StateStore>(store: &S, ns: &'static str) -> Vec<(EntityKey, Ve
         .collect()
 }
 
-fn utxos_of<S: StateStore>(store: &S) -> std::collections::BTreeMap<TxoRef, EraCbor> {
+fn utxos_of<S: StateStore>(store: &S) -> std::collections::BTreeMap<TxoRef, UtxoValue> {
     store.iter_utxos().unwrap().map(Result::unwrap).collect()
 }
 

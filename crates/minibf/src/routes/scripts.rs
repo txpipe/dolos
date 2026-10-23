@@ -14,11 +14,9 @@ use blockfrost_openapi::models::{
     script_redeemers_inner::ScriptRedeemersInner,
     script_utxos_inner::ScriptUtxosInner,
 };
-use dolos_cardano::indexes::{
-    AsyncCardanoQueryExt, CardanoStateIndexExt, ScriptLanguage, SlotOrder,
-};
+use dolos_cardano::indexes::{utxo_dimensions, AsyncCardanoQueryExt, ScriptLanguage, SlotOrder};
 use dolos_cardano::ChainSummary;
-use dolos_core::Domain;
+use dolos_core::{Domain, Tag};
 use futures_util::StreamExt;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::alonzo::NativeScript;
@@ -156,19 +154,14 @@ where
     let hash = parse_script_hash(&script_hash)?;
     let pagination = Pagination::try_from(params)?;
 
-    let refs = domain
-        .blocking(move |domain| {
-            domain
-                .state()
-                .utxos_by_script_ref(hash.as_slice())
-                .map_err(log_and_500("failed to query script_ref index"))
-        })
-        .await?;
+    let tag = Tag::new(utxo_dimensions::SCRIPT_REF, hash.to_vec());
+
+    let items = super::utxos::load_tag_page(&domain, &tag, &pagination).await?;
 
     // an unknown script is a 404. a known script that no live UTxO holds as a
     // reference script is an empty page. the index cannot tell the two apart,
-    // so the archive existence check runs only when the index returns nothing.
-    if refs.is_empty() {
+    // so the archive existence check runs only when the index holds nothing.
+    if items.is_empty() && super::utxos::tag_is_empty(&domain, &tag).await? {
         domain
             .query()
             .script_by_hash(&hash)
@@ -178,10 +171,6 @@ where
 
         return Ok(Json(vec![]));
     }
-
-    let items =
-        super::utxos::load_utxo_models(&domain, refs, pagination, super::utxos::UtxoFilter::All)
-            .await?;
 
     Ok(Json(items))
 }

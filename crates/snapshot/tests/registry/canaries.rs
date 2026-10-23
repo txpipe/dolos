@@ -46,7 +46,7 @@ use dolos_cardano::{
     },
     pots::{EpochIncentives, Pots},
 };
-use dolos_core::{cbor, EraCbor};
+use dolos_core::{cbor, EraCbor, UtxoPosition, UtxoValue};
 
 // Every byte differs from its neighbours, so a field that shifts by one
 // position, or a hash that is truncated rather than carried whole, changes the
@@ -767,9 +767,13 @@ pub fn proposal_state() -> ProposalState {
 }
 
 /// The one namespace whose value the profile *builds* rather than carries: the
-/// `[era, body]` wrapper of `crate::layers::state`.
-pub fn utxo_value() -> EraCbor {
-    EraCbor(6, bytes_of::<48>(0x33).to_vec())
+/// `[era, body, slot, tx_index]` wrapper of `crate::layers::state`. The
+/// position takes multi-byte uints, so a narrowed field moves the pinned bytes.
+pub fn utxo_value() -> UtxoValue {
+    UtxoValue::new(
+        EraCbor(6, bytes_of::<48>(0x33).to_vec()),
+        Some(UtxoPosition::new(134_217_728, 300)),
+    )
 }
 
 // The values the enum tables pin; nothing else builds them.
