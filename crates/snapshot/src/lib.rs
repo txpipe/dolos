@@ -62,6 +62,7 @@
 //! the Stelae repository. This crate retains the profile-specific encoding,
 //! repository lifecycle and consumer operations that host uses.
 
+pub mod boundary;
 pub mod export;
 pub mod facade;
 pub mod layers;
@@ -107,8 +108,8 @@ pub use stelae::{dir, inscription, transport, SteleReader};
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepSightingState, DRepState,
-    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepEpochLog, DRepSightingState,
+    DRepState, DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
     PoolEpochLog, PoolState, ProposalState, ScriptState,
@@ -171,12 +172,13 @@ pub const LOG_NAMESPACES: [Namespace; LOG_KINDS.len()] = {
 /// Nothing in the tree marks an entity as log-bearing, so this table is where
 /// the log namespaces are spelled, held to the entity types by
 /// `log_kinds_derive_from_their_namespaces` in `tests/coverage.rs`.
-pub const LOG_KINDS: [(&str, Namespace); 11] = [
+pub const LOG_KINDS: [(&str, Namespace); 12] = [
     ("log-account-address-chunks", AccountAddressChunk::NS),
     ("log-account-epochs", AccountEpochLog::NS),
     ("log-account-stats", AccountStats::NS),
     ("log-address-stats", AddressStats::NS),
     ("log-asset-mint-chunks", AssetMintChunk::NS),
+    ("log-drep-epochs", DRepEpochLog::NS),
     ("log-epochs", EpochState::NS),
     ("log-first-mint-chunks", FirstMintChunk::NS),
     ("log-first-script-chunks", FirstScriptChunk::NS),
@@ -615,6 +617,15 @@ pub enum Error {
     /// hash. A cursor that has only a slot cannot anchor one.
     #[error("a stele's position needs a block hash, but the chain point is {0}")]
     UnanchoredPoint(String),
+
+    /// Stores that do not stand on the first block of the plan's sequence
+    /// epoch, refused before a layer is written. See [`boundary`].
+    #[error("the stores at {cursor} are not the epoch-{sequence} boundary cut: {reason}")]
+    NotABoundary {
+        cursor: String,
+        sequence: u64,
+        reason: boundary::Ineligible,
+    },
 
     /// A field of the inscription this profile owns — `position` or a layer's
     /// `scope` — is not the shape this profile writes. Raised while reading a

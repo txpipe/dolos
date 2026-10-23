@@ -3,7 +3,8 @@
 //!
 //! Dolos reads the active stake ESTART stores on `EpochState`, the
 //! distribution of two epochs back, from `first_shelley_epoch + 2` on and
-//! with no gap. Preprod's early stake snapshot has one: live Blockfrost has a
+//! with no gap; `/epochs/{n}/stakes` lists the same distributions from the
+//! same epoch. Preprod's early stake snapshot has one: live Blockfrost has a
 //! value for epochs 6-12, `null` for 13-28 and values again from 29. Epochs
 //! 0-5 have no frozen distribution and read `null` already. Preview and
 //! mainnet have no gap.

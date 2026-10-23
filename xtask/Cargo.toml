@@ -24,6 +24,7 @@ postgres-native-tls = "0.5"
 bech32 = { workspace = true }
 pallas = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
+dolos-fjall = { path = "../crates/fjall" }
 dolos-flatfiles = { path = "../crates/flatfiles" }
 dolos-minibf = { path = "../crates/minibf" }
 dolos-testing = { path = "../crates/testing" }

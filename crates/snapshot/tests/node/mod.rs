@@ -14,12 +14,17 @@
 
 use std::sync::Arc;
 
-use dolos_core::{import::ImportExt as _, Domain as _, StateStore as _};
+use dolos_cardano::pallas::ledger::traverse::MultiEraBlock;
+use dolos_core::{
+    import::ImportExt as _, ArchiveStore as _, ArchiveWriter as _, Domain as _, StateStore as _,
+    StateWriter as _,
+};
 use dolos_snapshot::{
     export::{self, First, Plan},
-    Network, RetainedEpochs,
+    RetainedEpochs,
 };
 use dolos_testing::{
+    blocks::make_conway_block_with_prev,
     synthetic::{build_synthetic_blocks, seed_epoch_logs, seed_reward_logs, SyntheticBlockConfig},
     toy_domain::{ToyDomain, ToyStores},
 };
@@ -35,12 +40,15 @@ use stelae::{dir::SteleDir, inscription::Inscription, progress::Observer};
 /// reason. An export has to run on a coherent ledger to mean anything, so this
 /// fixture stays inside one epoch rather than joining the exclusion list.
 ///
-/// The cost is that a harness stele covers a single epoch. That is not where
+/// The cost is that the ledger covers a single epoch. That is not where
 /// multi-epoch geometry is checked in any case: it is arithmetic over a
-/// `ChainSummary`, and it is pinned by the three-epoch skeleton golden in
-/// `tests/export.rs` and by `Plan`'s own unit tests. What the fixture is for is
-/// *records* — a real UTxO set, real archive tags and exact records, real
-/// logs — and one epoch holds all of those.
+/// `ChainSummary`, and it is pinned by the skeleton golden in `tests/export.rs`
+/// and by `Plan`'s own unit tests. What the fixture is for is *records* — a
+/// real UTxO set, real archive tags and exact records, real logs — and one
+/// epoch holds all of those.
+///
+/// The stores then stand on the epoch-1 boundary — see [`stand_at_boundary`] —
+/// because a stele is only ever cut there.
 ///
 /// Deterministic: two calls build byte-identical ledgers, which is what lets
 /// the restore suite cross-check against an independently built node.
@@ -71,7 +79,39 @@ pub fn harness<B: ToyStores>() -> ToyDomain<B> {
     seed_epoch_logs(&domain, &[epoch]).unwrap();
     seed_reward_logs(&domain, &vectors.stake_address, &vectors.pool_id, &[epoch]).unwrap();
 
+    stand_at_boundary(&domain, 1);
+
     domain
+}
+
+/// Put `domain`'s stores on the first block of `epoch`, as a `stop_epoch` sync
+/// leaves them.
+///
+/// Appends two empty blocks chained onto the archive's tip — the last block of
+/// the epoch before, on its last slot, and the epoch's first block, on its
+/// first — and moves the state cursor onto the second. That is the evidence the
+/// boundary check reads. The ledger is not run over them: the ledger state the
+/// fixture computes stays the one a stele carries, and the blocks are what the
+/// archive shows about where the state stands.
+pub fn stand_at_boundary<B: ToyStores>(domain: &ToyDomain<B>, epoch: u64) {
+    let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
+    let start = summary.epoch_start(epoch);
+
+    let (_, tip) = domain.archive().get_tip().unwrap().unwrap();
+    let tip = MultiEraBlock::decode(&tip).unwrap();
+
+    let (last, last_body) =
+        make_conway_block_with_prev(start - 1, Some(tip.hash()), tip.number() + 1);
+    let (first, first_body) = make_conway_block_with_prev(start, last.hash(), tip.number() + 2);
+
+    let archive = domain.archive().start_writer().unwrap();
+    archive.apply(&last, &last_body).unwrap();
+    archive.apply(&first, &first_body).unwrap();
+    archive.commit().unwrap();
+
+    let state = domain.state().start_writer().unwrap();
+    state.set_cursor(first).unwrap();
+    state.commit().unwrap();
 }
 
 /// An archive and a state store with nothing in them: where a restore writes.
@@ -114,28 +154,28 @@ pub use registry_node::Node;
 /// copy of the fixture would be a second answer to "where do the two plans
 /// stand".
 mod registry_node {
-    use dolos_core::{BlockHash, ChainPoint, Domain as _};
+    use dolos_core::Domain as _;
     use dolos_snapshot::{
         export::Plan,
         registry::{self, Published, Publishing, Registry},
-        Error, Network, RetainedEpochs,
+        Error, RetainedEpochs,
     };
     use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
     use stelae::progress::Observer;
 
-    use super::harness;
+    use super::{harness, plan_at_boundary};
 
-    /// The harness ledger and the two plans it publishes: sequence 0 standing
-    /// on the last slot of epoch 0, and sequence 1 one slot past it — the
-    /// first block of epoch 1 (decision 0025: `sequence` is the epoch the
-    /// cursor stands in).
+    /// The harness ledger and the two plans it publishes: sequence 1 standing
+    /// on the first block of epoch 1, and sequence 2 on the first block of
+    /// epoch 2 (decision 0025: `sequence` is the epoch the cursor stands in).
     ///
-    /// That the first cursor sits on the boundary is not a convenience: a
-    /// stele cut mid-epoch clamps its last window to the cursor, so the same
-    /// epoch published later in full has a different scope and is correctly
-    /// rebuilt rather than inherited. See `tests/publish.rs` for the longer
-    /// argument.
+    /// A stele is only cut from stores standing on its boundary, so each plan
+    /// has its own: `earlier` stands at epoch 1, `domain` has gone on to
+    /// epoch 2. Epoch 0's window is complete in both, so the second publish
+    /// inherits it; epoch 1's is the first's boundary sliver and the second's
+    /// whole epoch, so it is rebuilt.
     pub struct Node {
+        pub earlier: ToyDomain<MemoryStores>,
         pub domain: ToyDomain<MemoryStores>,
         pub first: Plan,
         pub second: Plan,
@@ -143,42 +183,34 @@ mod registry_node {
 
     impl Node {
         pub fn build() -> Self {
+            let earlier = harness::<MemoryStores>();
             let domain = harness::<MemoryStores>();
-
-            let summary =
-                dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
-
-            let magic = u64::from(domain.genesis().network_magic());
-            let network = Network::for_magic(magic);
-            let boundary = summary.epoch_start(1);
-
-            // Any hash will do: `position` needs one to exist, and nothing in
-            // an export reads it back out of the store.
-            let point = |slot| ChainPoint::Specific(slot, BlockHash::new([0xab; 32]));
 
             let retained = RetainedEpochs::default();
 
-            let first = Plan::new(
-                &summary,
-                network.clone(),
-                point(boundary - 1),
-                retained.clone(),
-            )
-            .unwrap();
-            let second = Plan::new(&summary, network, point(boundary), retained).unwrap();
+            let first = plan_at_boundary(&earlier, 1, retained.clone());
+            let second = plan_at_boundary(&domain, 2, retained);
 
-            assert_eq!(first.sequence, 0);
-            assert_eq!(second.sequence, 1);
             assert_eq!(
-                first.epochs,
+                first.epochs[..1],
                 second.epochs[..1],
                 "epoch 0's window has to be the same in both, or there is nothing to inherit"
             );
 
             Self {
+                earlier,
                 domain,
                 first,
                 second,
+            }
+        }
+
+        /// The stores `plan` was made from.
+        pub fn stores(&self, plan: &Plan) -> &ToyDomain<MemoryStores> {
+            if plan.sequence == self.first.sequence {
+                &self.earlier
+            } else {
+                &self.domain
             }
         }
 
@@ -209,11 +241,13 @@ mod registry_node {
             plan: &Plan,
             observer: &Observer,
         ) -> Result<Published, Error> {
+            let stores = self.stores(plan);
+
             registry::publish(
                 publishing,
                 plan,
-                self.domain.archive(),
-                self.domain.state(),
+                stores.archive(),
+                stores.state(),
                 None,
                 observer,
             )
@@ -227,12 +261,14 @@ mod registry_node {
             publishing: Publishing<'_>,
             plan: &Plan,
         ) -> Result<Published, Error> {
+            let stores = self.stores(plan);
+
             registry::publish_into(
                 stele,
                 publishing,
                 plan,
-                self.domain.archive(),
-                self.domain.state(),
+                stores.archive(),
+                stores.state(),
                 None,
                 &Observer::silent(),
             )
@@ -245,67 +281,62 @@ mod registry_node {
     }
 }
 
-/// A plan for `domain` standing at the **first slot of `epoch`**, retaining the
-/// state dumps `retained` names.
+/// Move `domain`'s stores one block past the boundary they stand on: an empty
+/// block a few slots later in the same epoch, chained onto the cursor's, with
+/// the cursor on it. Where a node that kept syncing past `stop_epoch` stands.
+pub fn step_past_boundary<B: ToyStores>(domain: &ToyDomain<B>) -> dolos_core::ChainPoint {
+    let next = extend_archive_past_cursor(domain);
+
+    let state = domain.state().start_writer().unwrap();
+    state.set_cursor(next.clone()).unwrap();
+    state.commit().unwrap();
+
+    next
+}
+
+/// Append one empty block to `domain`'s archive, a few slots after the state
+/// cursor and chained onto its block, leaving the cursor where it is. Where a
+/// `doctor rebuild-state --stop-epoch` leaves a node: a full archive beside a
+/// boundary state.
+pub fn extend_archive_past_cursor<B: ToyStores>(domain: &ToyDomain<B>) -> dolos_core::ChainPoint {
+    let cursor = domain.state().read_cursor().unwrap().unwrap();
+    let body = domain
+        .archive()
+        .get_block_by_slot(&cursor.slot())
+        .unwrap()
+        .unwrap();
+    let number = MultiEraBlock::decode(&body).unwrap().number();
+
+    let (next, next_body) =
+        make_conway_block_with_prev(cursor.slot() + 5, cursor.hash(), number + 1);
+
+    let archive = domain.archive().start_writer().unwrap();
+    archive.apply(&next, &next_body).unwrap();
+    archive.commit().unwrap();
+
+    next
+}
+
+/// A plan for `domain` standing on the **first block of `epoch`**, retaining
+/// the state dumps `retained` names.
 ///
-/// The harness ledger lives inside epoch zero and epoch zero is the one epoch a
-/// retained list may not name, so nothing published at the live cursor can ever
-/// cut a dump. Standing at a synthetic boundary point is how the dump paths are
-/// reached at all — the same device `Node` already uses for its second publish,
-/// and for the same reason: everything downstream is derived by `Plan::new`
-/// from the chain summary, so the point being synthetic changes what the plan
-/// covers and nothing about how it is built.
+/// Stores standing in an earlier epoch are moved onto that boundary first —
+/// see [`stand_at_boundary`] — so the plan is the one a publish from them would
+/// make. The harness ledger lives inside epoch zero, so this is how the dump
+/// paths, which need a sequence a retained list can name, are reached at all.
 pub fn plan_at_boundary<B: ToyStores>(
     domain: &ToyDomain<B>,
     epoch: u64,
     retained: RetainedEpochs,
 ) -> Plan {
-    plan_standing_at(
-        domain,
-        epoch,
-        |summary| summary.epoch_start(epoch),
-        retained,
-    )
-}
-
-/// A plan for `domain` standing at the **last slot of `epoch`**, retaining the
-/// state dumps `retained` names.
-///
-/// The sequence is the same as [`plan_at_boundary`]'s for that epoch, and the
-/// epoch windows are not: a stele cut mid-epoch clamps its last window to the
-/// cursor, so the same epoch published later in full wears a *different scope*
-/// and is correctly rebuilt rather than inherited. A pair of publishes meant to
-/// exercise inheritance has to start here, which is the same reason
-/// `Node::first` sits where it does — see `tests/publish.rs` for the longer
-/// argument.
-pub fn plan_at_epoch_end<B: ToyStores>(
-    domain: &ToyDomain<B>,
-    epoch: u64,
-    retained: RetainedEpochs,
-) -> Plan {
-    plan_standing_at(
-        domain,
-        epoch,
-        |summary| summary.epoch_start(epoch + 1) - 1,
-        retained,
-    )
-}
-
-fn plan_standing_at<B: ToyStores>(
-    domain: &ToyDomain<B>,
-    epoch: u64,
-    slot: impl Fn(&dolos_cardano::eras::ChainSummary) -> u64,
-    retained: RetainedEpochs,
-) -> Plan {
     let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
-    let magic = u64::from(domain.genesis().network_magic());
+    let cursor = domain.state().read_cursor().unwrap().unwrap();
 
-    // Any hash will do: `position` needs one to exist, and nothing in an export
-    // reads it back out of the store.
-    let point =
-        dolos_core::ChainPoint::Specific(slot(&summary), dolos_core::BlockHash::new([0xab; 32]));
+    if summary.slot_epoch(cursor.slot()).0 < epoch {
+        stand_at_boundary(domain, epoch);
+    }
 
-    let plan = Plan::new(&summary, Network::for_magic(magic), point, retained).unwrap();
+    let plan = plan_retaining(domain, retained);
     assert_eq!(plan.sequence, epoch);
 
     plan

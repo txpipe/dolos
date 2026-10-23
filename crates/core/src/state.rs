@@ -166,6 +166,9 @@ pub enum StateError {
     /// handle instead of a panic.
     #[error("{0} is not supported on this storage backend")]
     Unsupported(&'static str),
+
+    #[error(transparent)]
+    IncompatibleStore(#[from] crate::compat::IncompatibleStore),
 }
 
 /// A single entry of the UTxO set, as yielded by [`StateStore::iter_utxos`].

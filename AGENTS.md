@@ -38,6 +38,9 @@ the store that holds what it projects:
 - the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
 - the archive tags and the exact lookups (by block hash, block number, tx hash) project the block history and live in the `ArchiveStore` (`ArchiveStore::slots_by_tag` / `slot_by_*`, written through `ArchiveWriter::apply_index` in the same batch as the blocks)
 
+### Store identity
+Every on-disk state and archive store records the compatibility identifier it was created under (the current entry of `dolos_core::compat::SUPPORTED_CONTRACTS`): under the key `identity` in `state-cursor`, and in the archive's `archive-meta` keyspace. The adapters' `open_fjall` constructors (`src/adapters/storage.rs`) are the one gate: a supported identity opens, an empty store without one records the current identity before its first write, and a store holding data without one, or recording an unsupported one, is refused with `IncompatibleStore`. Nothing in the configuration enters the check. The WAL keeps its own version; the mempool and cache are outside it.
+
 ### Database File Organization
 
 ```
@@ -111,15 +114,16 @@ The project follows a modular workspace architecture with clear separation of co
 - **Design Philosophy**: Optimized for write-heavy workloads with many keys, ideal for blockchain data
 - **Components**:
   - `state`: `StateStore` implementation with four-keyspace design:
-    - **`state-cursor`**: Chain position tracking (single key-value)
+    - **`state-cursor`**: Chain position tracking, and the compatibility identity the store recorded at creation
     - **`state-utxos`**: UTxO set storage with `[tx_hash:32][index:4]` keys
     - **`state-entities`**: All entity types with `[ns_hash:8][entity_key:var]` keys
     - **`state-tags`**: Live-UTxO tags with `[dim_hash:8][lookup_key:var][txo_ref:36]` keys
-  - `archive`: `ArchiveStore` implementation with four-keyspace design:
+  - `archive`: `ArchiveStore` implementation with these keyspaces:
     - **`archive-blocks`**: Slot -> packed physical frame locations in the flat segment files
     - **`archive-logs`**: All log namespaces with `[ns_hash:8][slot:8][key:var]` keys
     - **`archive-tags`**: Tag-based prefix scans for block tags with `[dim_hash:8][key_hash:8][slot:8]` keys
     - **`index-exact`**: Exact-match lookups with `[dim_hash:8][key_data:var]` -> `[slot:8]`
+    - **`archive-meta`**: The compatibility identity the store recorded at creation
   - `keys`: Shared key encoding utilities
 - **Key Advantages**:
   - Reduced segment files compared to per-entity keyspaces

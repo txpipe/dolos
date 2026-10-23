@@ -36,6 +36,20 @@ To start _Dolos_ in `serve` mode, use the following command:
 dolos serve
 ```
 
+## Stopping
+
+`daemon` and `sync` run until they are stopped. To stop on a condition instead, pass it as an argument; it is not part of the configuration:
+
+| argument | effect |
+| -------- | ------ |
+| `--until-tip` | stop pulling once the upstream tip is reached |
+| `--max-blocks N` | stop pulling after `N` blocks |
+| `--stop-epoch N` | stop once the ledger reaches epoch `N`, on its first block |
+
+```sh
+dolos sync --until-tip
+```
+
 ## Summary of Modes
 
 | mode   | description                    |

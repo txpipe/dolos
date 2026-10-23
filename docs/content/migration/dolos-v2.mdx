@@ -1,0 +1,205 @@
+---
+title: Migrating to Dolos v2
+sidebar:
+  label: Dolos v2
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+What changes for a node moving to Dolos v2, and what to do about each change: the shape of `dolos.toml`, and the stores the node opens.
+
+## Configuration
+
+Dolos v2 changes the shape of `dolos.toml`. A file written for Dolos v1 or v2.0.0-alpha.0 is refused, with no compatibility layer: rewrite it once in the v2 shape described in the [configuration schema](../configuration/schema). This section maps the old fields onto the new ones.
+
+### Rewriting a file
+
+1. Start from the [ordinary node](../configuration/schema#an-ordinary-node), or the file `dolos init` writes. Add the tables your node needs from the [full reference](../configuration/schema#full-reference). Its values are examples, not defaults: each section of the schema gives the field's default.
+2. Carry your settings over with the [migration map](#migration-map) below. Settings left at their defaults can be dropped: a known network needs no genesis files, magic or peer.
+3. Validate the result without starting the node, or opening any store:
+
+   ```sh
+   dolos config check --config dolos.v2.toml
+   ```
+
+4. Replace the old file, or point the node at the new one with `--config`.
+
+Rewriting the configuration does not touch the data in storage. Replacing the stores is a step of its own: see [Stores](#stores).
+
+### What the node says about an old file
+
+The node checks the file's `compatibility` declaration before anything else, and stops before any store opens:
+
+| message | cause | remedy |
+| ------- | ----- | ------ |
+| this is a Dolos v1 or v2.0.0-alpha.0 configuration, which this release does not read | the file has a root `[genesis]`, `storage.version` or `chain.type`, and no `compatibility` | rewrite it as described on this page |
+| the configuration does not declare `compatibility` | no `compatibility` in a file that is otherwise not recognisably old | add `compatibility = "v2-alpha.1"` at the top of the file |
+| `compatibility` must be a string | `compatibility` is a number, a table or another non-string | quote the value |
+| unsupported `compatibility = "…"` | a contract this release does not accept | use one the message lists |
+| the configuration carries sections that are now command arguments | a `[mithril]`, `[snapshot]` or `[stelae]` table | remove it, and pass the values as [command inputs](#bootstrap-inputs) |
+
+`compatibility` is read from the file alone, so an environment variable cannot supply it.
+
+### Migration map
+
+| v1 / alpha.0 | v2 |
+| ------------ | -- |
+| no compatibility declaration; `storage.version` | root `compatibility = "v2-alpha.1"`; `storage.version` removed |
+| `chain.type`, `chain.magic`, `chain.is_testnet` | `chain.protocol = "cardano"` and `chain.network`; `magic` and `is_testnet` only under `[chain.cardano]`, for `network = "custom"` |
+| root `[genesis]` | built in for `mainnet`, `preprod` and `preview`; `[chain.cardano.genesis]` for `custom`, resolved against the configuration file's directory |
+| `chain.custom_utxos` | `chain.cardano.custom_utxos` |
+| `upstream.peer_address`, or `upstream.block_production_interval` | `upstream.type = "peer"` (the default) with `peer_address`, defaulted per known network; or `type = "emulator"` with `block_production_interval`, on a custom network only |
+| `[storage.wal]` (`backend`, `path`, `cache`) | `sync.wal_path`; the WAL is on disk exactly when the state is `fjall` |
+| `sync.max_rollback` | removed: the rollback window is the protocol's |
+| root `[retries]` (`backoff_unit_sec`, `max_backoff_sec`, …) | `[sync.retry]` (`backoff_unit_seconds`, `max_backoff_seconds`, …) |
+| `sync.max_history`; archive `backend = "no_op"` | `history.mode` (`none`, `rolling`, `full`) and, for `rolling`, `window = { unit = "slot", value = … }` |
+| state `max_history` | removed: managed by the node |
+| store `backend` (`fjall`, `redb`, `in_memory`) | store `type = "fjall"` or `"ephemeral"` |
+| store `cache`, `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb` | `preset = "standard"`, which sets all of them; the old fields are refused by name |
+| `[storage.mempool]`; `submit.prune_height` | root `[mempool]` (`persistent`, `path`, `retain_confirmed_blocks`); `prune_height` removed |
+| `storage.cache.memory_budget_bytes`, `disk_budget_bytes` | `storage.cache.memory_mb`, `disk_mb`, in MiB |
+| `[mithril]`, `snapshot.download_url`, `[stelae]` | [command inputs](#bootstrap-inputs) of the bootstrap and snapshot commands |
+| `snapshot.state_epochs` | `--state-epochs` or `--state-epochs-file` on `dolos snapshot digest` and `verify --reproduce`; the Stelae publisher's own `stateEpochs` |
+| `sync.sync_limit`, `chain.stop_epoch` | `--until-tip`, `--max-blocks`, `--stop-epoch` on `dolos daemon` and `dolos sync` |
+| the query limit, fixed at 32 | `serve.max_concurrent_queries`, from 1 to 64 |
+| `serve.minibf.url`, `serve.trp.extra_fees` | `serve.minibf.public_url`, `serve.trp.extra_fees_lovelace` |
+| `logging.max_level`, `include_*` | `logging.level` and `logging.filter` (see [logging](#logging)) |
+| `telemetry.enabled` | the `[telemetry]` table's presence |
+| `/etc/dolos/daemon.toml` merged under `dolos.toml`; `_` between levels in environment variables | one file, `--config` or `./dolos.toml`; `DOLOS_` with `__` between levels |
+
+Any other field the file does not know is refused, naming the field.
+
+### An example
+
+A v2.0.0-alpha.0 file for a preview node:
+
+```toml
+[upstream]
+peer_address = "relay.cnode-m1.demeter.run:3002"
+
+[storage]
+version = "v4"
+path = "data"
+
+[genesis]
+byron_path = "byron.json"
+shelley_path = "shelley.json"
+alonzo_path = "alonzo.json"
+conway_path = "conway.json"
+force_protocol = 6
+
+[sync]
+max_history = 2592000
+max_rollback = 25920
+
+[submit]
+prune_height = 200
+
+[serve.minibf]
+listen_address = "[::]:3000"
+
+[chain]
+type = "cardano"
+magic = 2
+is_testnet = true
+
+[logging]
+max_level = "DEBUG"
+```
+
+becomes, in v2:
+
+```toml
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "preview"
+
+[storage]
+path = "data"
+
+[history]
+mode = "rolling"
+window = { unit = "slot", value = 2592000 }
+
+[serve.minibf]
+listen_address = "[::]:3000"
+
+[logging]
+level = "debug"
+```
+
+The genesis files, magic, `force_protocol` and peer come from the known network; the rollback window from the protocol; `prune_height` has no successor. The genesis files can be deleted.
+
+### Bootstrap inputs
+
+The `[mithril]`, `[snapshot]` and `[stelae]` tables described where bootstraps read from. They are now inputs of the commands, with defaults for the known networks, so most nodes need none of them:
+
+| v1 / alpha.0 | v2 |
+| ------------ | -- |
+| `mithril.aggregator` | `dolos bootstrap mithril --aggregator`, or `DOLOS_MITHRIL_AGGREGATOR` |
+| `mithril.genesis_key` | `dolos bootstrap mithril --genesis-vkey`, or `DOLOS_MITHRIL_GENESIS_VKEY` |
+| `mithril.ancillary_key` | removed: the ledger state is rebuilt from the blocks |
+| `snapshot.download_url` | `dolos bootstrap snapshot --download-url` |
+| `stelae.registry.user` | `--registry-user`, or `DOLOS_STELAE_USER` |
+| `stelae.registry.password`, `token` | `DOLOS_STELAE_PASSWORD`, `DOLOS_STELAE_TOKEN`, or `--registry-credentials-file` |
+
+A custom network has no defaults, so it passes the Mithril and stele inputs explicitly. See [command inputs](../configuration/schema#command-inputs).
+
+### Logging
+
+`logging.max_level` becomes `logging.level`, for Dolos's own events. Each `include_*` flag becomes a `target=level` directive in `logging.filter`:
+
+| flag | `filter` directive |
+| ---- | ------------------ |
+| `include_tokio` | `tokio=<level>,runtime=<level>` |
+| `include_pallas` | `pallas=<level>` |
+| `include_grpc` | `tonic=<level>` |
+| `include_trp` | `jsonrpsee-server=<level>` |
+| `include_fjall` | `fjall=<level>,lsm_tree=<level>` |
+| `include_otlp` | `opentelemetry=<level>` |
+| `include_minibf` | `minibf=<level>`, for MiniBF's request log |
+| `include_minikupo` | `minikupo=<level>`, for MiniKupo's request log |
+
+For example, `max_level = "debug"` with `include_pallas = true` becomes:
+
+```toml
+[logging]
+level = "debug"
+filter = "pallas=debug"
+```
+
+### Environment variables
+
+Overrides now separate levels with `__`, so `DOLOS_UPSTREAM_PEER_ADDRESS` becomes `DOLOS_UPSTREAM__PEER_ADDRESS`. A variable without `__` is no longer read as an override. See the [introduction](../configuration/introduction#environment-variables).
+
+<Aside type="note">
+The v1 and v2.0.0-alpha.0 example configurations remain in the repository's history, under the [`v2.0.0-alpha.0`](https://github.com/txpipe/dolos/tree/v2.0.0-alpha.0/examples) tag, as a record of the old shape. They are not current instructions.
+</Aside>
+
+## Stores
+
+Dolos v2 opens only the state and archive stores it wrote itself. Each store records, when it is created, the compatibility identifier of the contract the binary that created it writes (`v2-alpha.1`), and every command checks it before it reads or writes anything. Stores written by Dolos v1, or by a v2 alpha that predates store identities, record none, so v2 refuses them:
+
+```
+the state store at /var/lib/dolos/data/state holds data but records no compatibility identity; this dolos opens stores that record `v2-alpha.1`. Clear it and re-sync (`dolos bootstrap relay --force`), or restore it from a stele (`dolos bootstrap stelae --force`); see https://docs.txpipe.io/dolos/migration/dolos-v2
+```
+
+A store recording an identifier the release does not read is refused the same way, and the error names that identifier. The check reads only the stores: no configuration edit gets a refused store past it.
+
+To move a node to v2, replace its stores with ones v2 writes:
+
+- **Restore from a stele** (minutes): `dolos bootstrap stelae --force`. The restore writes through v2's own stores, so they record its identity whatever release published the stele.
+- **Re-sync** (hours to days): `dolos bootstrap mithril --force`, or `dolos bootstrap relay --force` and then `dolos daemon` to sync from the relay.
+
+`--force` on its own is what clears the refused stores. Without it, `dolos bootstrap` refuses with the same error, `--skip-if-data` and `--continue` included, rather than leave the node a store it refuses. `--force` clears only the storage root, though, and never a state store that fails to open for another reason, as a half-unpacked one does, or whose cursor fails to read. So `--force` is refused too, naming what to remove by hand before bootstrapping, while such a state is there, or while the state, the archive or its block segments sit outside the root (an absolute or `..` `storage.state.path`, `storage.archive.path` or `storage.archive.blocks_path`; the archive and its segments only while `history.mode` is not `none`) and hold data: a store with data, an archive that fails to open, or block segments. `--force` neither checks nor clears a WAL, mempool or cache outside the root. A directory holding no data, such as a fresh mount point or an empty store this release opens, doesn't stop it. Stop the node first: a running node holds its stores, so they fail to open, and `--force` stops at the store's own error.
+
+The check covers the fjall stores. A v1 store kept in redb (a `redb` state backend, or the archive, which v1 keeps in redb by default) is not one v2 can open at all, so it has no identity to check: remove it by hand before bootstrapping v2. The exception is v1's default layout, a fjall state beside a redb archive, with the state in the storage root. Its state is refused, so `--force` clears the root, the archive in it included, once you have removed what it names outside the root. With the state outside the root, remove the redb archive by hand as well: once the state is gone, nothing is left refused, and `--force` clears nothing.
+
+<Aside type="caution">
+A Dolos snapshot (`dolos bootstrap snapshot`) unpacks the stores of the node that exported it as they were. One exported before stores recorded an identity is refused once unpacked; bootstrap from a stele or re-sync instead.
+</Aside>
+
+The WAL keeps its own format version: one written by an older release is wiped, and one from a newer release is refused. The mempool and the cache are outside the check. See the [data layer](../architecture/data-layer#store-identity) for where each store keeps its identity.

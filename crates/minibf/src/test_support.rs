@@ -10,7 +10,7 @@ use axum::{
 };
 use dolos_cardano::periods::stats::TOTALS;
 use dolos_core::{
-    config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig},
+    config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig, RoutePrefix},
     import::ImportExt as _,
     ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _, CacheStore as _, ChainPoint, Domain,
     RawBlock, StateStore,
@@ -520,8 +520,30 @@ impl TestApp {
     }
 
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        Self::build(cfg, fault, minibf)
+    }
+
+    /// App that serves each route under `route_prefix`, parsed as a
+    /// configuration file would be.
+    pub fn new_with_route_prefix(route_prefix: &str) -> Self {
+        let route_prefix = RoutePrefix::parse(route_prefix).expect("invalid route prefix");
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
+            .with_route_prefix(route_prefix);
+        Self::build(
+            SyntheticBlockConfig {
+                block_count: 5,
+                txs_per_block: 3,
+                ..Default::default()
+            },
+            None,
+            minibf,
+        )
+    }
+
+    fn build(cfg: SyntheticBlockConfig, fault: Option<TestFault>, minibf: MinibfConfig) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(domain, Some(vectors), fault, None)
+        Self::from_domain(domain, Some(vectors), fault, minibf)
     }
 
     pub fn new_with_cfg_and_setup(
@@ -530,7 +552,8 @@ impl TestApp {
     ) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         setup(&domain, &vectors);
-        Self::from_domain(domain, Some(vectors), None, None)
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        Self::from_domain(domain, Some(vectors), None, minibf)
     }
 
     /// App over `cfg`'s chain on the domain `adjust` returns, for a domain
@@ -540,14 +563,17 @@ impl TestApp {
         adjust: impl FnOnce(ToyDomain) -> ToyDomain,
     ) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(adjust(domain), Some(vectors), None, None)
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        Self::from_domain(adjust(domain), Some(vectors), None, minibf)
     }
 
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
     /// can be exercised without building a chain of thousands of blocks.
     pub fn new_with_scan_limit(cfg: SyntheticBlockConfig, max_scan_items: u64) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(domain, Some(vectors), None, Some(max_scan_items))
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
+            .with_max_scan_items(max_scan_items);
+        Self::from_domain(domain, Some(vectors), None, minibf)
     }
 
     /// App over a fresh domain for `genesis` whose archive holds `blocks`,
@@ -583,29 +609,24 @@ impl TestApp {
         writer.apply_index(&deltas).expect("index archived blocks");
         writer.commit().expect("commit archived blocks");
 
-        Self::from_domain(domain, None, None, None)
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        Self::from_domain(domain, None, None, minibf)
     }
 
     fn from_domain(
         domain: ToyDomain,
         vectors: Option<SyntheticVectors>,
         fault: Option<TestFault>,
-        max_scan_items: Option<u64>,
+        minibf: MinibfConfig,
     ) -> Self {
         let domain = match fault {
             Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
             None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
         };
 
-        let cfg = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        let cfg = match max_scan_items {
-            Some(max) => cfg.with_max_scan_items(max),
-            None => cfg,
-        };
-
         let facade = Facade {
             inner: domain,
-            config: cfg,
+            config: minibf,
         };
 
         let router = build_router_with_facade(facade.clone());
@@ -820,7 +841,8 @@ pub fn replicated_app_with_fault(fault: Option<TestFault>) -> TestApp {
     let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
     replicate_accounts_and_pools(&domain, 4);
 
-    TestApp::from_domain(domain, Some(vectors), fault, None)
+    let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+    TestApp::from_domain(domain, Some(vectors), fault, minibf)
 }
 
 /// The body of a totals route with the totals cache off, then on and keeping
@@ -894,6 +916,7 @@ impl TestAppBuilder {
             TestDomainBuilder::new_with_synthetic_and_protocol(self.cfg, self.force_protocol)
                 .finish();
 
-        TestApp::from_domain(domain, Some(vectors), None, None)
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        TestApp::from_domain(domain, Some(vectors), None, minibf)
     }
 }

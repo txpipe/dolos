@@ -202,6 +202,90 @@ fn configured_boundary_survives_inspection_and_requires_explicit_advancement() {
     session.finish().unwrap();
 }
 
+/// The automated cut is the one the boundary check accepts: a replay stopped by
+/// `stop_epoch = 1` stands on epoch 1's first block, with epoch 0's last block
+/// as its parent, and publishes. One block further, the same stores are
+/// refused before a layer is written.
+#[test]
+fn a_stop_epoch_cut_publishes_and_a_later_cursor_is_refused() {
+    let node = node::Node::new();
+    let mut genesis = dolos_cardano::include::preview::load();
+    genesis.force_protocol = Some(9);
+    let epoch_one = genesis.shelley.epoch_length.unwrap() as u64;
+    let genesis = Arc::new(genesis);
+    let magic = u64::from(genesis.network_magic());
+    let (before, block_before) = make_conway_block_with_prev(epoch_one - 1, None, 1);
+    let (boundary, block_boundary) = make_conway_block_with_prev(epoch_one, before.hash(), 2);
+    let (_, block_after) = make_conway_block_with_prev(epoch_one + 1, boundary.hash(), 3);
+
+    let mut session = BulkReplaySession::open(&node.config, genesis.clone(), Some(1)).unwrap();
+    session
+        .import_blocks(vec![block_before, block_boundary, block_after.clone()])
+        .unwrap();
+    session.finish().unwrap();
+
+    let retained = || dolos_snapshot::planning::retained_epochs(&[]).unwrap();
+    let silent = dolos_snapshot::progress::Observer::silent();
+    let steles = tempfile::tempdir().unwrap();
+
+    let workspace = ReplayWorkspace::open(&node.config, genesis.clone()).unwrap();
+    let snapshot = workspace.snapshot();
+    let plan = snapshot.plan(magic, retained()).unwrap();
+    let evidence = snapshot.boundary(&plan).unwrap();
+    assert_eq!(evidence.epoch, 1);
+    assert_eq!(evidence.first, boundary);
+    assert_eq!(evidence.parent, before);
+    snapshot
+        .publish_directory(&steles.path().join("cut"), &plan, &silent)
+        .unwrap();
+    drop(snapshot);
+    workspace.finish().unwrap();
+
+    let workspace = ReplayWorkspace::open(&node.config, genesis.clone()).unwrap();
+    let mut session = workspace.start(Some(2)).unwrap();
+    session.import_blocks(vec![block_after]).unwrap();
+    session.finish().unwrap();
+
+    let workspace = ReplayWorkspace::open(&node.config, genesis).unwrap();
+    let snapshot = workspace.snapshot();
+    let plan = snapshot.plan(magic, retained()).unwrap();
+    assert_eq!(
+        plan.sequence, 1,
+        "still in epoch 1, one block past its first"
+    );
+
+    let refused = snapshot.boundary(&plan).unwrap_err();
+    assert!(
+        matches!(
+            &refused,
+            dolos_snapshot::Error::NotABoundary {
+                reason: dolos_snapshot::boundary::Ineligible::LaterBlock { parent },
+                ..
+            } if *parent == boundary
+        ),
+        "{refused:?}"
+    );
+
+    let late = steles.path().join("late");
+    let err = snapshot
+        .publish_directory(&late, &plan, &silent)
+        .unwrap_err();
+    assert!(
+        matches!(err, dolos_snapshot::Error::NotABoundary { .. }),
+        "{err:?}"
+    );
+    assert!(
+        !late.join("blobs").join("sha256").exists()
+            || std::fs::read_dir(late.join("blobs").join("sha256"))
+                .unwrap()
+                .next()
+                .is_none(),
+        "a refused publish wrote a layer"
+    );
+    drop(snapshot);
+    workspace.finish().unwrap();
+}
+
 #[test]
 fn unfinished_replay_resumes_from_its_committed_input() {
     let (node, genesis, blocks) = fixture();

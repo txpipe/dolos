@@ -15,21 +15,8 @@ use dolos_cardano::pallas_extras;
 use dolos_cardano::rupd::StakeSnapshot;
 use dolos_cardano::CardanoWorkUnit;
 use dolos_cardano::PoolHash;
-use dolos_core::{config::FjallStateConfig, Domain, StateStore};
+use dolos_core::{Domain, StateStore};
 use dolos_testing::harness::cardano::{copy_dir_recursive, Config, HarnessDomain, LedgerHarness};
-
-/// High-performance fjall configuration for epoch tests.
-/// Optimized for maximum speed with 2GB cache.
-fn fast_fjall_config() -> FjallStateConfig {
-    FjallStateConfig {
-        cache: Some(2048),            // 2GB cache for hot UTxO data
-        memtable_size_mb: Some(128),  // 2x default - fewer flushes
-        l0_threshold: Some(8),        // 2x default - less compaction pressure
-        worker_threads: Some(4),      // Sufficient for tests
-        max_journal_size: Some(512),  // Moderate - test data is ephemeral
-        flush_on_commit: Some(false), // Async writes for speed
-    }
-}
 
 fn discover_ground_truths(base: &Path) -> Vec<(String, u64)> {
     let entries = match std::fs::read_dir(base) {
@@ -441,7 +428,6 @@ fn run_epoch_pots_test(
             stop_epoch: Some(stop_epoch),
             ..Default::default()
         },
-        fjall_config: fast_fjall_config(),
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -483,7 +469,7 @@ fn run_epoch_pots_test(
                 CardanoWorkUnit::Rupd(rupd) => {
                     // Dump delegation and stake from RUPD (snapshot-based data)
                     if let Some(w) = rupd.work() {
-                        if let Some((_, performance_epoch)) = w.relevant_epochs() {
+                        if let Some((_, performance_epoch)) = w.stake_epochs() {
                             if let Err(e) =
                                 dump_delegation_csv(&w.snapshot, &dumps_dir, performance_epoch)
                             {

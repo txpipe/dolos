@@ -178,6 +178,14 @@ impl BlockVisitor for AccountVisitor {
                 let overwrite = self.protocol_version.unwrap_or(0) < 5;
 
                 for (cred, amount) in creds {
+                    if amount < 0 {
+                        tracing::warn!(
+                            source = ?source,
+                            credential = ?cred,
+                            amount = amount,
+                            "NEGATIVE MIR amount detected - clamping to 0"
+                        );
+                    }
                     let amount = amount.max(0) as u64;
                     // Store pending MIR to be applied at EWRAP (not immediately)
                     // This ensures MIRs are only applied to accounts that are

@@ -63,6 +63,12 @@ impl BlockVisitor for AssetStateVisitor {
             trace!(%policy, asset = %hex::encode(asset.name()), "detected mint");
 
             let amount = asset.mint_coin().unwrap_or_default();
+
+            // a zero-quantity entry mints nothing: no count, first mint or asset state
+            if amount == 0 {
+                continue;
+            }
+
             let quantity: i128 = amount.into();
 
             deltas.add_for_entity(MintStatsUpdate::new(
@@ -73,16 +79,13 @@ impl BlockVisitor for AssetStateVisitor {
                 block.slot(),
             ));
 
-            // db-sync stores no zero-quantity entry, so the history lists none
-            if amount != 0 {
-                deltas.add_for_entity(StageAssetMint::mint(
-                    AssetKey::of_parts(policy.as_slice(), asset.name()),
-                    self.epoch,
-                    (block.slot(), *order as u32),
-                    tx.hash(),
-                    amount,
-                ));
-            }
+            deltas.add_for_entity(StageAssetMint::mint(
+                AssetKey::of_parts(policy.as_slice(), asset.name()),
+                self.epoch,
+                (block.slot(), *order as u32),
+                tx.hash(),
+                amount,
+            ));
 
             if self.staged.insert((*policy, asset.name().to_vec())) {
                 deltas.add_for_entity(StageFirstMint::new(FirstMintSet {

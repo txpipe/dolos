@@ -21,8 +21,8 @@ use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
 
 use crate::{
     eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountEpochLog,
-    AccountState, CardanoDelta, DRepState, EpochState, EraKey, GovDistr, GovState, PoolHash,
-    PoolState, ProposalOutcome, ProposalState,
+    AccountState, CardanoDelta, DRepEpochLog, DRepState, EpochState, EraKey, GovDistr, GovState,
+    PoolHash, PoolState, ProposalOutcome, ProposalState,
 };
 
 pub mod commit;
@@ -195,12 +195,13 @@ pub struct BoundaryWork {
     /// the certificate of one of [`Self::retiring_dreps`].
     pub pv9_settlements: HashMap<StakeCredential, crate::hacks::pv9_drep_delegs::Settlement>,
 
-    /// The stake snapshot this boundary's rewards were computed against, and
+    /// The stake snapshot RUPD logged this boundary's distribution from, and
     /// the protocol its stake totals are read under: RUPD's `snapshot_epoch`
     /// (`C - 3`) and the era of `snapshot_epoch + 1`. `None` where RUPD
-    /// computed nothing — `RupdWork::relevant_epochs` returns `None` below
-    /// epoch 4 and while the snapshot epoch is still at or before the first
-    /// Shelley one, and the merged log has to agree with it epoch for epoch.
+    /// logged no distribution — `RupdWork::stake_epochs` returns `None` while
+    /// `C - 3` is before the first Shelley epoch, and the merged log has to
+    /// agree with it epoch for epoch. The first stake epoch has a snapshot
+    /// and no rewards.
     pub stake_snapshot: Option<(Epoch, EraKey)>,
 
     /// The pools whose delegators are in [`Self::stake_snapshot`]'s
@@ -266,6 +267,11 @@ pub struct BoundaryWork {
     /// The merged account-epoch rows of the shard, written under
     /// [`Self::account_epoch_slot`].
     pub logs: Vec<(AccountId, AccountEpochLog)>,
+
+    /// One row per entry of the DRep distribution this boundary completes,
+    /// written by the finalize pass under [`Self::drep_epoch_slot`]. Empty
+    /// when the distribution is incomplete, and on the shard passes.
+    pub drep_logs: Vec<(DRepId, DRepEpochLog)>,
 
     /// Credentials whose rewards were applied (need to be dequeued from state).
     pub applied_reward_credentials: Vec<StakeCredential>,
@@ -368,6 +374,14 @@ impl BoundaryWork {
             .epoch_start(self.ending_state.number.saturating_sub(1))
     }
 
+    /// The slot the `drep-epochs` rows are keyed under: the start of the epoch
+    /// the boundary closes, like the `epochs` log, so a rollback to the
+    /// boundary itself keeps them. Koios labels the distribution with the
+    /// next epoch: its `epoch_no` is the key's epoch plus one.
+    pub fn drep_epoch_slot(&self) -> BlockSlot {
+        self.chain_summary.epoch_start(self.ending_state.number)
+    }
+
     /// Assemble one account's row of the merged log.
     ///
     /// `applied` is the slice of [`Self::applied_rewards`] this account's visit
@@ -463,6 +477,13 @@ impl BoundaryWork {
     /// DRep it now points at, and a `Keep` account keeps its delegation to the
     /// retiring DRep. A delegation made after the certificate is left to the
     /// positional rule.
+    ///
+    /// A `Clear` entry also clears a delegation in the certificate's own
+    /// transaction. Positions record the transaction only, not the certificate
+    /// inside it, so such a delegation compares equal (both mainnet
+    /// certificates that need this sit at index 1 of their transaction).
+    /// Treating it as earlier is safe only because the ledger cleared every
+    /// listed `Clear` account.
     pub fn clears_drep_delegation(&self, drep: &DRep, account: &AccountState) -> bool {
         let predates = |unregistered_at: &(BlockSlot, TxOrder)| {
             account
@@ -474,7 +495,13 @@ impl BoundaryWork {
             use crate::hacks::pv9_drep_delegs::Action;
 
             match settled.action {
-                Action::Clear if predates(&settled.unregistered_at) => return true,
+                Action::Clear
+                    if account
+                        .vote_delegated_at
+                        .is_some_and(|delegated_at| delegated_at <= settled.unregistered_at) =>
+                {
+                    return true
+                }
                 Action::Keep if settled.drep == *drep => return false,
                 _ => (),
             }

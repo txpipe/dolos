@@ -681,6 +681,10 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
+    // Before the repository is read, so an ineligible store set is refused
+    // without touching the network. `export` asks again, for its other callers.
+    crate::boundary::check(plan, archive, state)?;
+
     let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
     let previous = chained(publishing, latest.as_ref(), plan)?;
@@ -729,12 +733,18 @@ where
 /// epoch publishes one per namespace that wrote something — so the count is a
 /// property of the store, not arithmetic over the plan, and a dry run that did
 /// not look would report layers the publish then does not write.
-pub fn preview<A: ArchiveStore>(
+///
+/// It takes the state store because a dry run asks the boundary question the
+/// publish does, against the same stores, and refuses where the publish would.
+pub fn preview<A: ArchiveStore, S: StateStore>(
     publishing: Publishing<'_>,
     plan: &Plan,
     archive: &A,
+    state: &S,
     digest_records: Option<&[digests::ImmutableDigests]>,
 ) -> Result<Preview, Error> {
+    crate::boundary::check(plan, archive, state)?;
+
     let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
     let previous = chained(publishing, latest.as_ref(), plan)?;

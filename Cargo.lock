@@ -7141,6 +7141,7 @@ dependencies = [
  "dolos",
  "dolos-cardano",
  "dolos-core",
+ "dolos-fjall",
  "dolos-flatfiles",
  "dolos-minibf",
  "dolos-testing",

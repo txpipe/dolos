@@ -152,7 +152,8 @@ impl TransitionDefault for PoolSnapshot {
 }
 
 /// One pool's share of a stake distribution: the stake delegated to it, its
-/// delegators, and the part of the stake its owners delegate.
+/// delegators with stake above zero, and the part of the stake its owners
+/// delegate.
 #[derive(Debug, Encode, Decode, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoolTally {
     #[n(0)]

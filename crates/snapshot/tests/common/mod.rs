@@ -24,11 +24,12 @@ use dolos_cardano::{
     model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountKey, AccountState,
         AccountStats, AddressKey, AddressStats, AssetKey, AssetMintChunk, AssetMintSet, AssetState,
-        DRepKey, DRepSightingState, DRepState, DatumKey, DatumState, EpochState, EraKey, EraState,
-        FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet, FixedNamespace as _,
-        GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressKey, PaymentAddressSet,
-        PaymentKey, PaymentStats, PendingMirState, PendingRewardState, PolicyKey, PolicyMintChunk,
-        PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState, ScriptKey, ScriptState,
+        DRepEpochLog, DRepKey, DRepSightingState, DRepState, DatumKey, DatumState, EpochState,
+        EraKey, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet,
+        FixedNamespace as _, GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressKey,
+        PaymentAddressSet, PaymentKey, PaymentStats, PendingMirState, PendingRewardState,
+        PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState,
+        ScriptKey, ScriptState,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
     periods::{GroupKey, Ungrouped},
@@ -122,7 +123,7 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
             member: (u64::from(byte), u32::from(byte)),
         }),
         DatumState::NS => keys::encode(&DatumKey([byte; 32].into())),
-        DRepSightingState::NS | DRepState::NS => {
+        DRepEpochLog::NS | DRepSightingState::NS | DRepState::NS => {
             keys::encode(&DRepKey(DRep::Key([byte; 28].into())))
         }
         EpochState::NS | GovState::NS => keys::encode(&()),

@@ -210,15 +210,15 @@ pub struct FjallStores {
 impl FjallStores {
     pub fn open_in(
         parent: &std::path::Path,
-        state_config: &dolos_core::config::FjallStateConfig,
-        archive_config: &dolos_core::config::FjallArchiveConfig,
+        preset: dolos_fjall::Preset,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let dir = tempfile::tempdir_in(parent)?;
-        let state = dolos_fjall::StateStore::open(dir.path().join("state"), state_config)?;
+        let state = dolos_fjall::StateStore::open(dir.path().join("state"), preset)?;
         let archive = dolos_fjall::archive::ArchiveStore::open(
             dolos_cardano::model::build_log_schema(),
             dir.path().join("archive"),
-            archive_config,
+            None,
+            preset,
         )?;
         Ok(Self {
             state,
@@ -240,16 +240,15 @@ impl ToyStores for FjallStores {
     fn open() -> Self {
         let dir = tempfile::tempdir().expect("temp dir for the fjall stores");
 
-        let state = dolos_fjall::StateStore::open(
-            dir.path().join("state"),
-            &dolos_core::config::FjallStateConfig::default(),
-        )
-        .expect("opening the fjall state store");
+        let state =
+            dolos_fjall::StateStore::open(dir.path().join("state"), dolos_fjall::Preset::Standard)
+                .expect("opening the fjall state store");
 
         let archive = dolos_fjall::archive::ArchiveStore::open(
             dolos_cardano::model::build_log_schema(),
             dir.path().join("archive"),
-            &dolos_core::config::FjallArchiveConfig::default(),
+            None,
+            dolos_fjall::Preset::Standard,
         )
         .expect("opening the fjall archive store");
 

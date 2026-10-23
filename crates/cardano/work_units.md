@@ -132,7 +132,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 ### `finalize()` — Rupd global pass
 
 - Direct write: `EpochState.incentives = Some(work.incentives)` and `EpochState.rupd_progress = None`. Single one-shot write so concurrent shard commits can't race.
-- Direct writes: per-pool `PoolEpochLog` archive entries from the shard-accumulator (`total_rewards`, `operator_share`, `delegators_count` rolled up across shards; `blocks_minted`, `total_stake`, `relative_size`, `declared_pledge`, `fixed_cost`, `margin_cost` from globals).
+- Direct writes: per-pool `PoolEpochLog` archive entries from the shard-accumulator (`total_rewards`, `delegators_count` rolled up across shards; `blocks_minted`, `total_stake`, `relative_size`, `fixed_cost`, `margin_cost` from globals).
 - No deltas emitted in finalize.
 
 `PendingRewardState` writes are overwrite-by-key, so true mid-shard resume is safe (rerunning a shard rewrites the same credentials with identical data).
@@ -168,6 +168,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 - Classifies retiring pools / expiring dreps / enacting+dropping proposals; processes pending MIRs; runs enactment + refund + wrapup-global visitors.
 - Assembles the final `EndStats` (prepare-time fields combined with the accumulator fields populated by the preceding shard runs) and emits a single `EpochWrapUp` to close the boundary.
 - Direct writes: writes the completed `EpochState` to the archive under the epoch-start temporal key.
+- Direct writes: one `DRepEpochLog` archive entry per entry of the completed DRep distribution (Abstain and NoConfidence included), under the same epoch-start temporal key; none when the distribution is incomplete.
 - Direct deletes: `PendingMirState` entries for processed MIRs.
 - Deltas emitted in finalize (10 distinct variants, 11 sites):
   - **Enactment** (`ewrap/enactment.rs`):

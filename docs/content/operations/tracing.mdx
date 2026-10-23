@@ -4,23 +4,21 @@ sidebar:
   order: 3
 ---
 
-Dolos can export per-transaction OpenTelemetry traces that track the full mempool lifecycle of each submitted transaction. This feature is disabled by default. When enabled, traces are sent to an OTLP-compatible collector such as Jaeger or Grafana Tempo.
+Dolos can export per-transaction OpenTelemetry traces that track the full mempool lifecycle of each submitted transaction. This feature is off by default. When it is on, traces are sent to an OTLP-compatible collector such as Jaeger or Grafana Tempo.
 
 ## Configuration
 
-The `[telemetry]` section in your `dolos.toml` controls trace export:
+The `[telemetry]` section in your `dolos.toml` controls trace export. Export is on when the section is present, and off when it is absent:
 
-| property        | type    | default                  | description                              |
-| --------------- | ------- | ------------------------ | ---------------------------------------- |
-| `enabled`       | boolean | `false`                  | Enable OpenTelemetry trace export        |
-| `otlp_endpoint` | string  | `"http://localhost:4317"` | gRPC endpoint of the OTLP collector      |
-| `service_name`  | string  | `"dolos"`                | Service name reported in exported traces |
+| property        | type   | default                   | description                              |
+| --------------- | ------ | ------------------------- | ---------------------------------------- |
+| `otlp_endpoint` | string | `"http://localhost:4317"` | gRPC endpoint of the OTLP collector      |
+| `service_name`  | string | `"dolos"`                 | Service name reported in exported traces |
 
 Example:
 
 ```toml
 [telemetry]
-enabled = true
 otlp_endpoint = "http://localhost:4317"
 service_name = "dolos"
 ```
@@ -69,11 +67,10 @@ You will also need a minimal `tempo.yaml` configuration that enables the OTLP gR
 
 ### Enable telemetry in Dolos
 
-Add the `[telemetry]` block to your `dolos.toml`:
+Add the `[telemetry]` section to your `dolos.toml`; an empty one exports with the defaults:
 
 ```toml
 [telemetry]
-enabled = true
 ```
 
 The default `otlp_endpoint` (`http://localhost:4317`) matches both setups above, so you don't need to change it when running everything on the same host.
@@ -96,4 +93,4 @@ Dolos logs an error at startup if the OTLP exporter cannot reach the configured 
 
 ## Relation to Logging
 
-Tracing is independent of the [`[logging]`](../operations/logging) configuration. Both can be active simultaneously. When telemetry is disabled (the default), there is zero runtime overhead — no spans are exported and no collector connection is attempted.
+Tracing is independent of the [`[logging]`](../operations/logging) configuration. Both can be active simultaneously. Without a `[telemetry]` section (the default), there is zero runtime overhead — no spans are exported and no collector connection is attempted.
