@@ -1174,6 +1174,131 @@ fn a_reproduction_rebuilds_the_dump_it_cuts_and_trusts_the_ones_it_inherits() {
     assert_eq!(verified, followed);
 }
 
+/// A predecessor that lends every inheritable layer of an earlier stele, as a
+/// registry's chained publish does, and counts what it is asked for.
+struct Lending {
+    following: export::Following,
+    layers: Vec<stelae::inscription::LayerDescriptor>,
+    asked: std::sync::Mutex<Vec<(String, u64)>>,
+}
+
+impl export::Predecessor for Lending {
+    fn history(&self) -> &[stelae::inscription::HistoryEntry] {
+        self.following.history()
+    }
+
+    fn adopt(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<Option<stelae::inscription::LayerDescriptor>, stelae_driver::Error> {
+        if let Some(epoch) = scope.get("epoch").and_then(serde_json::Value::as_u64) {
+            self.asked.lock().unwrap().push((kind.to_owned(), epoch));
+        }
+
+        Ok(self
+            .layers
+            .iter()
+            .find(|layer| layer.kind == kind && &layer.scope == scope)
+            .filter(|_| dolos_snapshot::is_inheritable(kind, scope))
+            .cloned())
+    }
+}
+
+/// Finding 1 of the QA review of dolos#1499: a stele cut at 2 carries window
+/// 1's account rows as ESTART wrote them, stake leg alone; the EWRAP closing 2
+/// rewrites them in full before 3 is cut. The publish at 3 builds that window's
+/// layer from the stores rather than adopt the stale one, and still adopts
+/// window 0's, so a chained publish equals one with nothing to inherit.
+#[test]
+fn a_chained_publish_rebuilds_the_account_rows_ewrap_rewrote() {
+    let domain: ToyDomain<MemoryStores> = harness();
+    let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
+
+    let account = dolos_cardano::AccountKey::from(
+        dolos_cardano::pallas::ledger::primitives::StakeCredential::AddrKeyhash([0x51; 28].into()),
+    );
+    let slot = summary.epoch_start(1);
+
+    let write_row = |row: dolos_cardano::AccountEpochLog| {
+        let writer = domain.archive().start_writer().unwrap();
+        writer.write_log_typed(slot, &account, &row).unwrap();
+        writer.commit().unwrap();
+    };
+
+    let stake_only = dolos_cardano::AccountEpochLog {
+        active_stake: Some(2_000),
+        pool_id: Some([0x52; 28].into()),
+        ..Default::default()
+    };
+
+    write_row(stake_only.clone());
+
+    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
+    let predecessor = export::reproduce(
+        &cut_at_2,
+        domain.archive(),
+        domain.state(),
+        None,
+        &export::First,
+    )
+    .unwrap();
+
+    write_row(dolos_cardano::AccountEpochLog {
+        member_reward: Some(7),
+        ..stake_only
+    });
+
+    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
+    let canonical = predecessor.canonicalize().unwrap();
+
+    let lending = Lending {
+        following: export::Following::read(&canonical, &cut_at_3).unwrap(),
+        layers: predecessor.layers.clone(),
+        asked: Default::default(),
+    };
+
+    let chained =
+        export::reproduce(&cut_at_3, domain.archive(), domain.state(), None, &lending).unwrap();
+
+    let fresh = export::reproduce(
+        &cut_at_3,
+        domain.archive(),
+        domain.state(),
+        None,
+        &export::First,
+    )
+    .unwrap();
+
+    assert_eq!(chained.layers, fresh.layers);
+
+    let account_layer = |inscription: &stelae::inscription::Inscription, epoch: u64| {
+        inscription
+            .layers
+            .iter()
+            .find(|layer| {
+                layer.kind == "log-account-epochs"
+                    && layer.scope.get("epoch").and_then(serde_json::Value::as_u64) == Some(epoch)
+            })
+            .cloned()
+            .unwrap()
+    };
+
+    // Window 1 really changed, and window 0 really was lent.
+    assert_ne!(account_layer(&chained, 1), account_layer(&predecessor, 1));
+    assert_eq!(account_layer(&chained, 0), account_layer(&predecessor, 0));
+
+    let asked = lending.asked.lock().unwrap();
+    let account_windows: Vec<u64> = asked
+        .iter()
+        .filter(|(kind, _)| kind == "log-account-epochs")
+        .map(|(_, epoch)| *epoch)
+        .collect();
+
+    assert_eq!(account_windows, vec![0]);
+    assert!(asked.contains(&("log-epochs".to_owned(), 1)), "{asked:?}");
+}
+
 /// The whole skeleton document, so a change to a key spelling, a scope shape or
 /// the order layers are listed in reads as text in the diff rather than only as
 /// a moved hash.

@@ -558,6 +558,10 @@ impl dolos_core::ChainLogic for CardanoLogic {
         })
     }
 
+    fn rolling_back<D: Domain>(domain: &D, to: &ChainPoint) {
+        estart::stake::warn_on_dropped_rows(domain, to);
+    }
+
     fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError> {
         let out = OwnedMultiEraOutput::decode(utxo)?;
 

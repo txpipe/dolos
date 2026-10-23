@@ -13,8 +13,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{
-    sync::execute_work_unit, ArchiveStore as _, BlockSlot, Domain, DomainError, Genesis,
-    StateStore as _, StateWriter as _,
+    sync::execute_work_unit, ArchiveStore as _, ArchiveWriter as _, BlockSlot, Domain, DomainError,
+    Genesis, StateStore as _, StateWriter as _,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
@@ -334,10 +334,37 @@ fn stake_legs(rows: &Rows) -> BTreeMap<&StakeCredential, (Option<u64>, Option<Po
         .collect()
 }
 
+/// A row neither writer produces. EWRAP skips an account it has nothing
+/// for rather than delete its row, so ESTART's rows overwritten with this
+/// before EWRAP runs leave every row read afterwards EWRAP's own: a stake leg
+/// EWRAP dropped, or an account only ESTART wrote, shows as this row.
+fn overwritten() -> AccountEpochLog {
+    AccountEpochLog {
+        active_stake: Some(u64::MAX),
+        ..Default::default()
+    }
+}
+
+fn overwrite(domain: &ToyDomain, epoch: Epoch, rows: &Rows) {
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let slot = summary.epoch_start(epoch);
+    let writer = domain.archive().start_writer().unwrap();
+
+    for credential in rows.keys() {
+        writer
+            .write_log_typed(slot, &AccountKey::from(credential), &overwritten())
+            .unwrap();
+    }
+
+    writer.commit().unwrap();
+}
+
 /// One epoch of boundary work in the node's order (RUPD inside the epoch,
 /// then EWRAP closing it and ESTART opening the next), checking each side's
 /// rows as it writes them: ESTART's against the snapshots, and EWRAP's stake
 /// legs against the rows ESTART wrote for the same epoch one boundary before.
+/// EWRAP runs over [`overwritten`] rows, so the comparison reads what it
+/// wrote and not what ESTART left.
 fn cross_boundary(
     domain: &ToyDomain,
     written_by_estart: &mut BTreeMap<Epoch, Rows>,
@@ -345,14 +372,21 @@ fn cross_boundary(
 ) {
     let closing = epoch_state(domain).number;
 
-    rupd(domain);
-    ewrap(domain);
-
     // EWRAP closing c writes the full rows of c - 1.
-    if let Some(estart_rows) = closing
+    let replaced = closing
         .checked_sub(1)
         .and_then(|e| written_by_estart.get(&e))
-    {
+        .cloned();
+
+    rupd(domain);
+
+    if let Some(estart_rows) = &replaced {
+        overwrite(domain, closing - 1, estart_rows);
+    }
+
+    ewrap(domain);
+
+    if let Some(estart_rows) = &replaced {
         let ewrap_rows = logged(domain).remove(&(closing - 1)).unwrap_or_default();
 
         assert_eq!(

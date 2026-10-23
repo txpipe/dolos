@@ -13,8 +13,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{
-    sync::execute_work_unit, ArchiveStore as _, BrokenInvariant, ChainError, Domain, DomainError,
-    Genesis, StateStore as _, StateWriter as _,
+    sync::execute_work_unit, ArchiveStore as _, ArchiveWriter as _, BrokenInvariant, ChainError,
+    Domain, DomainError, Genesis, StateStore as _, StateWriter as _,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
@@ -760,13 +760,42 @@ fn account_epoch_logs(
         .collect()
 }
 
+/// Overwrite `epoch`'s account rows, which ESTART wrote, with a row neither
+/// writer produces. EWRAP skips an account it has nothing for rather than
+/// delete its row, so an EWRAP run after this leaves the row in place only
+/// where it wrote nothing, and every other row read afterwards is its own.
+fn overwrite_estarts_rows(domain: &ToyDomain, epoch: Epoch) {
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let slot = summary.epoch_start(epoch);
+    let rows = account_epoch_logs(domain, epoch);
+    assert!(!rows.is_empty(), "ESTART wrote no rows for epoch {epoch}");
+
+    let writer = domain.archive().start_writer().unwrap();
+
+    for credential in rows.keys() {
+        writer
+            .write_log_typed(slot, &AccountKey::from(credential), &overwritten())
+            .unwrap();
+    }
+
+    writer.commit().unwrap();
+}
+
+fn overwritten() -> AccountEpochLog {
+    AccountEpochLog {
+        active_stake: Some(u64::MAX),
+        ..Default::default()
+    }
+}
+
 /// The first stake epoch (`first_shelley + 2`) logs the distribution of the
 /// first Shelley epoch, genesis pools included, as every later epoch logs
 /// its own: a `PoolEpochLog` per pool with rewards 0, and the stake leg of
 /// each delegator's `AccountEpochLog`. No reward is computed for it. RUPD
 /// runs in every epoch and ESTART at every boundary; EWRAP runs at the one
 /// that closes the RUPD epoch of the first stake epoch, since the store's
-/// pots do not fund its accounts and pools.
+/// pots do not fund its accounts and pools, over ESTART's rows overwritten so
+/// that the rows checked are EWRAP's.
 #[test]
 fn the_first_stake_epoch_logs_its_distribution() {
     let domain = seeded(devnet_with_genesis_pool());
@@ -808,6 +837,7 @@ fn the_first_stake_epoch_logs_its_distribution() {
         .count();
     assert_eq!(pending, 0, "rewards computed against the genesis snapshot");
 
+    overwrite_estarts_rows(&domain, first_stake);
     wrap_the_epoch(&domain);
 
     let expected = first_stake_distribution.unwrap();
@@ -849,7 +879,8 @@ fn the_first_stake_epoch_logs_its_distribution() {
 /// alone, from the first Shelley epoch's snapshot, and the EWRAP closing the
 /// epoch after it writes the same rows under the same keys: the first stake
 /// epoch carries no reward, so its full rows are the stake-only ones, account
-/// for account, genesis delegator included.
+/// for account, genesis delegator included. EWRAP runs over ESTART's rows
+/// overwritten, so the two sides are compared and not one with itself.
 #[test]
 fn estart_writes_the_first_stake_epochs_rows_as_ewrap_does() {
     let domain = seeded(devnet_with_genesis_pool());
@@ -885,6 +916,7 @@ fn estart_writes_the_first_stake_epochs_rows_as_ewrap_does() {
         .values()
         .all(|row| row.member_reward.is_none() && row.leader_rewards.is_empty()));
 
+    overwrite_estarts_rows(&domain, first_stake);
     wrap_the_epoch(&domain);
 
     assert_eq!(account_epoch_logs(&domain, first_stake), estart_rows);

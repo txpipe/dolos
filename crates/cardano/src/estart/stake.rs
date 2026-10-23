@@ -15,14 +15,17 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use dolos_core::{ChainError, Domain, StateStore};
+use dolos_core::{
+    ArchiveStore as _, BlockSlot, ChainError, ChainPoint, Domain, LogRangeOf, StateStore,
+};
 use pallas::ledger::primitives::{Epoch, StakeCredential};
+use tracing::warn;
 
 use crate::{
     estart::{ShardInputs, WorkContext},
     ewrap::stake::{admits_pool, stake_leg, stake_snapshot_of},
-    pallas_extras, AccountEpochLog, AccountState, ChainSummary, EpochState, EraKey, PoolHash,
-    PoolState, PoolTally,
+    load_era_summary, pallas_extras, AccountEpochLog, AccountKey, AccountState, ChainSummary,
+    EpochState, EraKey, PoolHash, PoolState, PoolTally,
 };
 
 /// Owner credential → the pools it owns.
@@ -68,6 +71,42 @@ pub fn shard_inputs<D: Domain>(
     }
 
     Ok(inputs)
+}
+
+/// Warn when a rollback to `to` is about to cut account-epoch rows ESTART
+/// wrote: they key at the opening epoch's start, the archive drops every row
+/// at or after `to`'s slot, and ESTART does not run again for a boundary
+/// already crossed. The epoch pages an empty or partial distribution until
+/// the EWRAP closing the epoch after it writes the full rows.
+pub fn warn_on_dropped_rows<D: Domain>(domain: &D, to: &ChainPoint) {
+    let first = || -> Result<Option<BlockSlot>, ChainError> {
+        let range = LogRangeOf::<AccountKey>::slots(to.slot()..BlockSlot::MAX);
+        let mut rows = domain
+            .archive()
+            .iter_logs_typed::<AccountEpochLog>(Some(range))?;
+
+        Ok(rows.next().transpose()?.map(|(slot, _, _)| slot))
+    };
+
+    match first() {
+        Ok(None) => (),
+        Ok(Some(slot)) => {
+            let epoch = load_era_summary::<D>(domain.state())
+                .map(|chain| chain.slot_epoch(slot).0)
+                .ok();
+
+            warn!(
+                rollback_to = %to,
+                slot,
+                ?epoch,
+                "rollback drops the stake rows ESTART logged for the epoch; its stakes page \
+                 stays incomplete until the EWRAP closing the next epoch writes the full rows"
+            );
+        }
+        Err(error) => {
+            warn!(rollback_to = %to, %error, "could not check the rollback for ESTART's stake rows")
+        }
+    }
 }
 
 /// The protocol the distribution of the closing epoch counts stake under:

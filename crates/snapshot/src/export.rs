@@ -1403,7 +1403,12 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
 ) -> Result<Option<LayerDescriptor>, Error> {
     let scope = window.scope(plan.network.magic());
 
-    let (spec, adopted) = inherit(&scope, kind, previous)?;
+    // Asked before `adopt`, which already arranges the blob it answers with.
+    let (spec, adopted) = if crate::is_settled(kind, window.epoch, plan.sequence) {
+        inherit(&scope, kind, previous)?
+    } else {
+        (scope.layer_spec(kind)?, None)
+    };
 
     if let Some(descriptor) = adopted {
         let at = cursor.open(kind, &spec.scope);
@@ -1511,7 +1516,10 @@ pub(crate) fn log_layers<A: ArchiveStore>(
         for (kind, ns) in LOG_KINDS {
             let spec = scope.layer_spec(kind)?;
 
-            let present = previous.carried_forward(kind, &spec.scope)?
+            let carried = crate::is_settled(kind, window.epoch, plan.sequence)
+                && previous.carried_forward(kind, &spec.scope)?;
+
+            let present = carried
                 || archive
                     .iter_logs(ns, range.clone())?
                     .next()

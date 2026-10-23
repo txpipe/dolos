@@ -27,10 +27,13 @@ pub async fn by_number_stakes<D: Domain>(
 
     let (chain, current) = current_epoch(&domain)?;
 
-    // Blockfrost 404s future epochs. Every other epoch pages its logged
-    // distribution, the current and previous ones included (ESTART logs them
-    // as it opens each), and an epoch before the first stake epoch has none:
-    // an empty page.
+    // Blockfrost 404s future epochs. Every other epoch pages the distribution
+    // logged for it, the current and previous ones from the rows ESTART
+    // writes as it opens each. A page is empty before the first stake epoch,
+    // and empty or partial for the two latest epochs while ESTART's rows are
+    // missing: on a store upgraded mid-epoch, or after a rollback to the
+    // epoch's start or a restart after a crash mid-ESTART (the node warns).
+    // Those heal when EWRAP writes the full rows one boundary later.
     if epoch > current {
         return Err(StatusCode::NOT_FOUND.into());
     }

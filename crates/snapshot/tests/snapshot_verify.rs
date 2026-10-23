@@ -48,10 +48,11 @@ use stelae::Digest;
 use node::Node;
 use registry_fixture::{Fixture, Unanswered};
 
-/// Layers epoch 0 contributes, and therefore what sequence 2 inherits:
-/// `blocks`, `indexes`, and the two log layers the harness seeds. The other
-/// log kinds have no records in the window, so they have no layer.
-const EPOCH_0: usize = 4;
+/// Layers of epoch 0 that sequence 2 inherits: `blocks`, `indexes` and
+/// `log-epochs`. The harness also seeds `log-account-epochs`, which a publish
+/// builds again until its window has settled (`dolos_snapshot::is_settled`).
+/// The other log kinds have no records in the window, so they have no layer.
+const EPOCH_0: usize = 3;
 
 // ---------------------------------------------------------------------------
 // Done criterion 3: verify --repo

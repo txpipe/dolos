@@ -34,7 +34,9 @@
 //! ## A reused layer is attested without being reproduced
 //!
 //! The layers of an epoch that has closed cannot change, so a publish that
-//! already published them has no reason to build them again: it points its
+//! already published them has no reason to build them again. The one
+//! exception is `log-account-epochs`, whose rows settle one boundary after the
+//! window closes ([`crate::is_settled`]). Otherwise the publish points its
 //! manifest at the blobs the previous manifest pointed at and never opens the
 //! store. That is worth a plain sentence, because it changes what a publish
 //! asserts. The new inscription describes those layers, and this node did not
@@ -777,7 +779,9 @@ pub fn preview<A: ArchiveStore, S: StateStore>(
         for kind in EPOCH_KINDS {
             let spec = scope.layer_spec(kind)?;
 
-            if previous.carried_forward(kind, &spec.scope)? {
+            if crate::is_settled(kind, window.epoch, plan.sequence)
+                && previous.carried_forward(kind, &spec.scope)?
+            {
                 layers_reused += 1;
             }
         }

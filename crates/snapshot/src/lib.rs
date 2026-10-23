@@ -413,6 +413,24 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
             .is_some()
 }
 
+/// Whether a publish at `sequence` may carry forward its predecessor's layer of
+/// `kind` for the window of `epoch`, where [`is_inheritable`] admits the kind.
+///
+/// Every closed window's layer is final when it is first published, except
+/// `log-account-epochs`. ESTART opening an epoch writes its rows with the stake
+/// leg alone, and the EWRAP closing the epoch after it rewrites them in full
+/// under the same keys, at the boundary into `epoch + 2`. The predecessor, at
+/// `sequence - 1`, therefore published that window's final rows only if
+/// `epoch + 2 <= sequence - 1`; a younger window is built again from the
+/// stores, which hold the full rows by now.
+pub fn is_settled(kind: &str, epoch: u64, sequence: u64) -> bool {
+    let late = LOG_KINDS
+        .iter()
+        .any(|(log, ns)| *log == kind && *ns == AccountEpochLog::NS);
+
+    !late || epoch + 3 <= sequence
+}
+
 /// The epoch kinds a window always produces a layer for.
 ///
 /// The log kinds are the exception, and the only one: a log layer exists if and
@@ -1721,5 +1739,23 @@ mod tests {
         // A kind this profile does not define never inherits, whatever its
         // scope claims.
         assert!(!is_inheritable("state", &json!({"epoch": 4, "shard": 0})));
+    }
+
+    /// The predecessor at 9 published window 8's account rows as ESTART wrote
+    /// them, and the EWRAP closing 9 rewrote them before 10 was cut; window
+    /// 7's were already EWRAP's. Every other kind is final once its window
+    /// closes.
+    #[test]
+    fn only_a_settled_windows_account_rows_are_carried_forward() {
+        assert!(is_settled("log-account-epochs", 7, 10));
+        assert!(!is_settled("log-account-epochs", 8, 10));
+        assert!(!is_settled("log-account-epochs", 9, 10));
+
+        for kind in EPOCH_KINDS
+            .into_iter()
+            .filter(|kind| *kind != "log-account-epochs")
+        {
+            assert!(is_settled(kind, 9, 10), "{kind}");
+        }
     }
 }

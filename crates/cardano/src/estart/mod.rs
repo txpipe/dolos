@@ -154,10 +154,13 @@ impl WorkContext {
     /// start, which is where the EWRAP closing the epoch after it writes the
     /// full rows.
     ///
-    /// A rollback to a block at that very slot drops the rows (the archive
-    /// cuts log rows at the rollback slot), and ESTART does not run again for
-    /// a boundary already crossed. The epoch then has no rows until that
-    /// EWRAP writes them.
+    /// Any rollback to that slot or before it drops the rows, since the
+    /// archive cuts every log row at or after the rollback slot: an orphaned
+    /// first block of the epoch, a reconnect while the tip sits on that slot,
+    /// and the rollback a restart runs after a crash mid-ESTART, which keeps
+    /// only the shards still to run. ESTART does not run again for a boundary
+    /// already crossed, so the epoch lacks those rows until that EWRAP writes
+    /// them (`stake::warn_on_dropped_rows` says so).
     pub fn account_epoch_slot(&self) -> BlockSlot {
         self.chain_summary.epoch_start(self.starting_epoch_no())
     }
