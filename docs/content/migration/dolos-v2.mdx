@@ -63,6 +63,7 @@ The node checks the file's `compatibility` declaration before anything else, and
 | `snapshot.state_epochs` | `--state-epochs` or `--state-epochs-file` on `dolos snapshot digest` and `verify --reproduce`; the Stelae publisher's own `stateEpochs` |
 | `sync.sync_limit`, `chain.stop_epoch` | `--until-tip`, `--max-blocks`, `--stop-epoch` on `dolos daemon` and `dolos sync` |
 | the query limit, fixed at 32 | `serve.max_concurrent_queries`, from 1 to 64 |
+| `serve.grpc.tls_client_ca_root` | removed, and refused on load: the endpoint serves plaintext gRPC, so terminate TLS, mutual TLS included, at a reverse proxy |
 | `serve.minibf.url`, `serve.trp.extra_fees` | `serve.minibf.public_url`, `serve.trp.extra_fees_lovelace` |
 | `logging.max_level`, `include_*` | `logging.level` and `logging.filter` (see [logging](#logging)) |
 | `telemetry.enabled` | the `[telemetry]` table's presence |
