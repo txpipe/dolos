@@ -695,14 +695,20 @@ mod tests {
     /// indexes. Two configured UTxOs on the address, one hashing below and one
     /// above every tx, give the no-position rows a ref order to keep.
     fn chain_with_configured_rows() -> TestApp {
+        chain_with_configured_rows_over(4)
+    }
+
+    /// [`chain_with_configured_rows`] over `block_count` blocks. Each block
+    /// adds one row that holds the vectors' asset.
+    fn chain_with_configured_rows_over(block_count: usize) -> TestApp {
         let base = SyntheticBlockConfig::default();
         let address = Address::from_bech32(&base.address)
             .expect("bech32 address")
             .to_vec();
         let cfg = SyntheticBlockConfig {
-            block_count: 4,
+            block_count,
             txs_per_block: 3,
-            extra_outputs_by_block: vec![vec![vec![address.clone(), address]; 3]; 4],
+            extra_outputs_by_block: vec![vec![vec![address.clone(), address]; 3]; block_count],
             ..base
         };
 
@@ -1025,7 +1031,7 @@ mod tests {
     /// windows a schedule that doubled past it would read.
     #[tokio::test]
     async fn asset_listings_read_both_tags_within_the_window() {
-        let app = chain_with_configured_rows();
+        let app = chain_with_configured_rows_over(2 * (FIRST_WINDOW + MAX_WINDOW));
         let address = app.vectors().address.clone();
         let unit = app.vectors().asset_unit.clone();
 
