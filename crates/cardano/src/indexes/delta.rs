@@ -1483,12 +1483,13 @@ mod tests {
         }
     }
 
-    /// What `undo_utxo_tags` does to the stored keys.
+    /// What `undo_utxo_tags` does to the stored keys: consumed entries come
+    /// back first, so an output its own block spent ends up removed.
     fn undo(keys: &mut BTreeSet<TagKey>, delta: &UtxoIndexDelta) {
+        keys.extend(tag_keys(&delta.consumed));
         for key in tag_keys(&delta.produced) {
             keys.remove(&key);
         }
-        keys.extend(tag_keys(&delta.consumed));
     }
 
     fn value(address: dolos_testing::TestAddress, position: Option<(u64, u16)>) -> Arc<UtxoValue> {
@@ -1533,9 +1534,18 @@ mod tests {
             ..Default::default()
         };
 
+        // its second tx spends an output of its first, so that output is both
+        // produced and consumed, as `compute_apply_delta` names it
         let block_b = UtxoSetDelta {
-            consumed_utxo: map(&[(txo(11, 1), value(Bob, Some((10, 1))))]),
-            produced_utxo: map(&[(txo(20, 0), value(Bob, Some((20, 0))))]),
+            consumed_utxo: map(&[
+                (txo(11, 1), value(Bob, Some((10, 1)))),
+                (txo(20, 1), value(Alice, Some((20, 0)))),
+            ]),
+            produced_utxo: map(&[
+                (txo(20, 0), value(Bob, Some((20, 0)))),
+                (txo(20, 1), value(Alice, Some((20, 0)))),
+                (txo(21, 0), value(Alice, Some((20, 1)))),
+            ]),
             ..Default::default()
         };
 
@@ -1565,10 +1575,12 @@ mod tests {
         builder.add_consumed_utxos(&undo_b.recovered_stxi);
         undo(&mut keys, &builder.into_parts().0);
 
+        // what `apply_utxoset` does with a rollback: recovered UTxOs are put
+        // back before undone ones are deleted
+        set.extend(undo_b.recovered_stxi.clone());
         for txo in undo_b.undone_utxo.keys() {
             set.remove(txo);
         }
-        set.extend(undo_b.recovered_stxi.clone());
 
         let rebuilt = utxo_index_delta_from_utxo_delta(&UtxoSetDelta {
             produced_utxo: set,
@@ -1584,5 +1596,9 @@ mod tests {
             .iter()
             .any(|(_, _, order, txo)| *txo == TxoRef(Hash::from([11; 32]), 1)
                 && *order == UtxoPosition::tag_order(Some(UtxoPosition::new(10, 1)))));
+
+        // and the output block B spent itself left no key behind
+        let spent_in_block = txo(20, 1);
+        assert!(keys.iter().all(|(_, _, _, key)| *key != spent_in_block));
     }
 }

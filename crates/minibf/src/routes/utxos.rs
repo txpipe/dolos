@@ -15,9 +15,11 @@ use crate::{
 /// [`MAX_WINDOW`]. Tests take two, so a fixture of a few rows crosses windows.
 const FIRST_WINDOW: usize = if cfg!(test) { 2 } else { 256 };
 
-/// The most tag entries, probes or UTxO values one blocking task reads, so a
+/// The most tag entries, probes or UTxO values one blocking task returns, so a
 /// walk holds a query permit for a few milliseconds at a time, as the scans
-/// do. Tests take four, so a fixture walk reaches it.
+/// do. The one exception is a plain listing's first read, which also steps
+/// over the page's offset in its task, a tag key per skipped row. Tests take
+/// four, so a fixture walk reaches it.
 const MAX_WINDOW: usize = if cfg!(test) { 4 } else { 1024 };
 
 /// The tag order a page order walks.
@@ -39,6 +41,8 @@ async fn tag_page<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    debug_assert!(count <= MAX_WINDOW);
+
     let tag = tag.clone();
 
     domain
@@ -132,10 +136,12 @@ impl Walk {
 /// A page's rows, gathered in walk order.
 ///
 /// A ref counts once: a fork that re-creates a UTxO at a later position
-/// between two reads puts its entry ahead of the walk a second time.
+/// between two reads puts its entry ahead of the walk a second time. It counts
+/// once its value loads, so an entry whose UTxO a rollback removed before the
+/// value read leaves the ref to the entry the fork block writes.
 struct Rows {
     rows: Vec<(TxoRef, Arc<UtxoValue>)>,
-    seen: HashSet<TxoRef>,
+    counted: HashSet<TxoRef>,
     count: usize,
 }
 
@@ -143,7 +149,7 @@ impl Rows {
     fn new(count: usize) -> Self {
         Self {
             rows: Vec::with_capacity(count),
-            seen: HashSet::new(),
+            counted: HashSet::new(),
             count,
         }
     }
@@ -156,12 +162,39 @@ impl Rows {
         self.count.saturating_sub(self.rows.len())
     }
 
-    /// The entries the walk reaches for the first time.
-    fn first_visits(&mut self, entries: Vec<TagEntry>) -> Vec<TagEntry> {
+    /// The entries whose ref the walk has not counted, each ref once.
+    fn uncounted(&self, entries: Vec<TagEntry>) -> Vec<TagEntry> {
+        let mut refs = HashSet::new();
+
         entries
             .into_iter()
-            .filter(|entry| self.seen.insert(entry.txo.clone()))
+            .filter(|entry| !self.counted.contains(&entry.txo) && refs.insert(entry.txo.clone()))
             .collect()
+    }
+
+    /// Counts the refs of `entries`.
+    fn count_entries(&mut self, entries: &[TagEntry]) {
+        self.counted
+            .extend(entries.iter().map(|entry| entry.txo.clone()));
+    }
+
+    /// Loads the UTxOs behind the uncounted entries of `entries`, as
+    /// [`load_values`] does, and counts the ones that load.
+    async fn load<D>(
+        &mut self,
+        domain: &Facade<D>,
+        entries: Vec<TagEntry>,
+        ada_only: bool,
+    ) -> Result<Vec<(TxoRef, Arc<UtxoValue>)>, StatusCode>
+    where
+        D: Domain + Clone + Send + Sync + 'static,
+    {
+        let loaded = load_values(domain, self.uncounted(entries), ada_only).await?;
+
+        self.counted
+            .extend(loaded.iter().map(|(txo, _)| txo.clone()));
+
+        Ok(loaded)
     }
 }
 
@@ -169,7 +202,8 @@ impl Rows {
 /// index, output index, ascending or descending.
 ///
 /// The tag is read from the page's offset, and only the page's UTxOs and their
-/// blocks after that. A UTxO spent between the tag read and its value read
+/// blocks after that. The first read steps over the offset itself, a tag key
+/// per skipped row. A UTxO spent between the tag read and its value read
 /// leaves a gap that the next entries fill, so only the last page is short.
 pub async fn load_tag_page<D, T>(
     domain: &Facade<D>,
@@ -192,8 +226,8 @@ where
             break;
         }
 
-        let entries = rows.first_visits(entries);
-        rows.rows.extend(load_values(domain, entries, false).await?);
+        let loaded = rows.load(domain, entries, false).await?;
+        rows.rows.extend(loaded);
     }
 
     into_models(domain, rows.rows).await
@@ -249,9 +283,7 @@ where
         window = window.saturating_mul(2).min(MAX_WINDOW);
 
         let Some(other) = &other else {
-            let entries = rows.first_visits(entries);
-
-            for row in load_values(domain, entries, true).await? {
+            for row in rows.load(domain, entries, true).await? {
                 matched = true;
 
                 if skip > 0 {
@@ -271,22 +303,27 @@ where
         let held = probe(domain, other, entries).await?;
         matched |= !held.is_empty();
 
-        let mut held = rows.first_visits(held);
+        // a row before the page counts on the probe's word, its value unread
+        let mut held = rows.uncounted(held);
         let skipped = skip.min(held.len());
         skip -= skipped;
 
+        let page = held.split_off(skipped);
+        rows.count_entries(&held);
+
         // the page's values only, a UTxO spent since the probe giving its
         // place to the next entry
-        let mut held = held.split_off(skipped).into_iter();
+        let mut page = page.into_iter();
 
         while !rows.full() {
-            let page: Vec<_> = held.by_ref().take(rows.missing()).collect();
+            let window: Vec<_> = page.by_ref().take(rows.missing()).collect();
 
-            if page.is_empty() {
+            if window.is_empty() {
                 break;
             }
 
-            rows.rows.extend(load_values(domain, page, false).await?);
+            let loaded = rows.load(domain, window, false).await?;
+            rows.rows.extend(loaded);
         }
     }
 
@@ -608,12 +645,12 @@ mod tests {
             .collect()
     }
 
-    /// Writes `outputs` as UTxOs no block produced, with their tags.
-    fn configure(domain: &dolos_testing::toy_domain::ToyDomain, outputs: Vec<(TxoRef, EraCbor)>) {
+    /// Writes `utxos` with their tags, as a block that produces them does.
+    fn produce<D: Domain>(domain: &D, utxos: Vec<(TxoRef, UtxoValue)>) {
         let delta = UtxoSetDelta {
-            produced_utxo: outputs
+            produced_utxo: utxos
                 .into_iter()
-                .map(|(txo, output)| (txo, Arc::new(UtxoValue::new(output, None))))
+                .map(|(txo, value)| (txo, Arc::new(value)))
                 .collect(),
             ..Default::default()
         };
@@ -624,6 +661,16 @@ mod tests {
             .apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&delta))
             .expect("apply tags");
         writer.commit().expect("commit");
+    }
+
+    /// Writes `outputs` as UTxOs no block produced, with their tags.
+    fn configure(domain: &dolos_testing::toy_domain::ToyDomain, outputs: Vec<(TxoRef, EraCbor)>) {
+        let utxos = outputs
+            .into_iter()
+            .map(|(txo, output)| (txo, UtxoValue::new(output, None)))
+            .collect();
+
+        produce(domain, utxos);
     }
 
     fn asset_output(address: TestAddress, policy: &str, name: &str) -> EraCbor {
@@ -827,8 +874,15 @@ mod tests {
             let facade = app.facade();
             let tag = address_tag(&app);
 
-            let all = tag_page(&facade, &tag, order, TagStart::Skip(0), usize::MAX)
-                .await
+            let all = facade
+                .state()
+                .utxos_by_tag_page(
+                    tag.dimension,
+                    &tag.key,
+                    order,
+                    TagStart::Skip(0),
+                    usize::MAX,
+                )
                 .expect("whole tag");
             assert!(all.len() > 6, "the fixture lists too few rows");
 
@@ -914,6 +968,85 @@ mod tests {
         let path = format!("/addresses/{address}/utxos?order=asc&count=100");
         assert_eq!(without_units(page_rows(&app, &path).await), asc);
         assert_eq!(page_rows(&app, &lovelace_path).await, lovelace);
+    }
+
+    /// A ref counts once its value loads. A rollback that removes a UTxO
+    /// between its tag read and its value read leaves the ref uncounted, so
+    /// the entry the fork block writes for it further on is a row.
+    #[tokio::test]
+    async fn a_ref_counts_once_its_value_loads() {
+        let app = chain_with_configured_rows();
+        let facade = app.facade();
+
+        let mut walk = Walk::tag(address_tag(&app), TagOrder::Asc, TagStart::Skip(0));
+        let mut rows = Rows::new(100);
+
+        let first = walk.next(&facade, MAX_WINDOW).await.expect("first read");
+        let gone = first
+            .iter()
+            .find(|entry| entry.order != UtxoPosition::tag_order(None))
+            .expect("a block row in the first read")
+            .txo
+            .clone();
+        let value = value_of(&app, &gone.to_string());
+
+        spend(&facade.inner, &gone);
+
+        let loaded = rows
+            .load(&facade, first, false)
+            .await
+            .expect("first values");
+        assert!(loaded.iter().all(|(txo, _)| *txo != gone));
+
+        let position = Some(UtxoPosition::new(u64::MAX, 0));
+        produce(
+            &facade.inner,
+            vec![(gone.clone(), UtxoValue::new(value.output, position))],
+        );
+
+        let mut listed = false;
+
+        loop {
+            let next = walk.next(&facade, MAX_WINDOW).await.expect("next read");
+
+            if next.is_empty() {
+                break;
+            }
+
+            let loaded = rows.load(&facade, next, false).await.expect("next values");
+            listed |= loaded.iter().any(|(txo, _)| *txo == gone);
+        }
+
+        assert!(listed, "the re-created UTxO is no row");
+    }
+
+    /// Both of an asset listing's tags are read a window at a time, each read
+    /// within [`MAX_WINDOW`], which `tag_page` asserts: these tags outlast the
+    /// windows a schedule that doubled past it would read.
+    #[tokio::test]
+    async fn asset_listings_read_both_tags_within_the_window() {
+        let app = chain_with_configured_rows();
+        let address = app.vectors().address.clone();
+        let unit = app.vectors().asset_unit.clone();
+
+        let rows = walk(&app, &format!("/addresses/{address}/utxos"), "asc", 100).await;
+        let with_asset: Vec<Row> = rows
+            .iter()
+            .filter(|row| row.units.contains(&unit))
+            .cloned()
+            .collect();
+
+        let past_the_cap = FIRST_WINDOW + MAX_WINDOW;
+        assert!(
+            with_asset.len() > past_the_cap,
+            "the asset tag is too small"
+        );
+        assert!(rows.len() > past_the_cap, "the address tag is too small");
+
+        for count in [1, 100] {
+            let path = format!("/addresses/{address}/utxos/{unit}");
+            assert_eq!(walk(&app, &path, "asc", count).await, with_asset);
+        }
     }
 
     /// Listings read the confirmed set, as Blockfrost's do: a pending tx that

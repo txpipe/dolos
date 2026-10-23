@@ -141,6 +141,11 @@ macro_rules! conformance_suite {
             }
 
             #[test]
+            fn resumed_tag_walks_stay_inside_their_lookup_key() {
+                super::resumed_tag_walks_stay_inside_their_lookup_key::<$backend>();
+            }
+
+            #[test]
             fn utxos_with_tag_probes_the_full_key() {
                 super::utxos_with_tag_probes_the_full_key::<$backend>();
             }
@@ -445,6 +450,37 @@ fn tag_reads_skip_longer_lookup_keys<B: Backend>() {
 
     assert!(entries(&store, TagOrder::Asc, TagStart::After(start), usize::MAX).is_empty());
     assert!(entries(&store, TagOrder::Desc, TagStart::After(before), usize::MAX).is_empty());
+}
+
+/// A walk resumed past the last entry of a lookup key, or before its first,
+/// ends there: the neighbouring lookup keys of the same length, whose entries
+/// sort just after and just before it, are not its rows.
+fn resumed_tag_walks_stay_inside_their_lookup_key<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![
+                tagged(1, 0, &[(ADDRESS, 0)]),
+                tagged(2, 0, &[(ADDRESS, 1)]),
+                tagged(3, 0, &[(ADDRESS, 1)]),
+                tagged(4, 0, &[(ADDRESS, 2)]),
+            ],
+            consumed: vec![],
+        },
+    );
+
+    let first = entry_at(txo(2, 0), Some((2, 0)));
+    let last = entry_at(txo(3, 0), Some((3, 0)));
+
+    assert_eq!(
+        entries(&store, TagOrder::Asc, TagStart::Skip(0), usize::MAX),
+        vec![first.clone(), last.clone()]
+    );
+
+    assert!(entries(&store, TagOrder::Asc, TagStart::After(last), usize::MAX).is_empty());
+    assert!(entries(&store, TagOrder::Desc, TagStart::After(first), usize::MAX).is_empty());
 }
 
 /// A probe answers which of the given entries the tag holds, in the order
