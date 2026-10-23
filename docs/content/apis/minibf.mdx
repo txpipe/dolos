@@ -80,7 +80,7 @@ The `serve.minibf` section controls the options for the MiniBF endpoint that can
 - `public_url`: the URL clients reach the API at, reported by the `/` root response.
 - `token_registry_url`: token registry base URL used for off-chain asset metadata.
 - `max_scan_items`: caps page-based scans for heavy endpoints.
-- `route_prefix`: a URL path every endpoint is served under, `/health` and `/metrics` included; set `"/api/v0"` to match the Blockfrost server URL. It starts with `/`, its segments use only letters, digits, `-`, `.`, `_` and `~`, and `.` and `..` segments are refused; a trailing `/` is dropped. A path outside the prefix answers like any unknown path. Unset, the endpoints are served at the root.
+- `route_prefix`: a URL path every endpoint is served under, `/health` and `/metrics` included; set `"/api/v0"` to match the Blockfrost server URL. It starts with `/` and names at least one segment, none of them empty; its segments use only letters, digits, `-`, `.`, `_` and `~`, and `.` and `..` segments are refused; a trailing `/` is dropped. A path outside the prefix answers like any unknown path. Unset, the endpoints are served at the root.
 - `ipfs_gateways`: the gateways that resolve `ipfs://` governance-anchor URLs, tried in order; an empty list turns IPFS resolution off.
 
 This is an example of the `serve.minibf` fragment with a `dolos.toml` configuration file.
