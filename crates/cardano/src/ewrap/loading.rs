@@ -1231,6 +1231,7 @@ impl BoundaryWork {
                 key,
                 id: proposal.gov_action_id(),
                 action: proposal.action.clone(),
+                cost_models_present: proposal.cost_models_present,
                 parent: proposal.parent.clone(),
                 expires_after,
                 order: (proposal.slot, proposal.tx, proposal.idx),
@@ -1441,6 +1442,7 @@ impl BoundaryWork {
                 key,
                 id: proposal.gov_action_id(),
                 action: proposal.action.clone(),
+                cost_models_present: proposal.cost_models_present,
                 parent: proposal.parent.clone(),
                 expires_after: proposal.max_epoch.unwrap_or(closing),
                 order: (proposal.slot, proposal.tx, proposal.idx),
@@ -1964,6 +1966,7 @@ mod tests {
             tx: [7u8; 32].into(),
             idx: 0,
             action: crate::ProposalAction::Info,
+            cost_models_present: false,
             max_epoch: None,
             ratified_epoch: None,
             canceled_epoch: None,
@@ -2113,6 +2116,7 @@ mod tests {
             tx: [0u8; 32].into(),
             idx: 0,
             action: crate::ProposalAction::Info,
+            cost_models_present: false,
             max_epoch: None,
             ratified_epoch: None,
             canceled_epoch: None,
@@ -3318,6 +3322,7 @@ mod ratification_tests {
             tx: [tx; 32].into(),
             idx: 0,
             action: ProposalAction::TreasuryWithdrawal(vec![(beneficiary(), WITHDRAWAL)]),
+            cost_models_present: false,
             max_epoch: Some(expires_after),
             ratified_epoch: None,
             canceled_epoch: None,
@@ -3479,6 +3484,40 @@ mod ratification_tests {
             .unwrap();
 
         boundary
+    }
+
+    #[test]
+    fn stored_cost_models_presence_reaches_snapshot_and_live_forest() {
+        for present in [false, true] {
+            let mut snapshot = withdrawal(1, None, CLOSING + 10);
+            snapshot.action = ProposalAction::ParamChange(PParamsSet::default());
+            snapshot.cost_models_present = present;
+            let mut current = snapshot.clone();
+            current.tx = [2; 32].into();
+            current.proposed_in = Some(CLOSING);
+            let domain = seed(&[snapshot.clone(), current.clone()]);
+            let boundary =
+                BoundaryWork::new_empty::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+            let input = boundary
+                .build_ratify_input::<ToyDomain>(domain.state())
+                .unwrap()
+                .unwrap();
+            assert_eq!(input.proposals.len(), 1);
+            assert_eq!(input.proposals[0].key, snapshot.key());
+            assert_eq!(input.proposals[0].cost_models_present, present);
+            let forest = boundary
+                .live_forest::<ToyDomain>(domain.state(), &input)
+                .unwrap();
+            assert_eq!(forest.len(), 2);
+            assert_eq!(
+                forest
+                    .iter()
+                    .find(|p| p.key == current.key())
+                    .unwrap()
+                    .cost_models_present,
+                present
+            );
+        }
     }
 
     /// Certificates after the snapshot boundary leave the tally closing this
