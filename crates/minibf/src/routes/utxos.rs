@@ -17,9 +17,16 @@ const FIRST_WINDOW: usize = if cfg!(test) { 2 } else { 256 };
 
 /// The most tag entries, probes or UTxO values one blocking task returns, so a
 /// walk holds a query permit for a few milliseconds at a time, as the scans
-/// do. The one exception is a plain listing's first read, which also steps
-/// over the page's offset in its task, a tag key per skipped row. Tests take
-/// four, so a fixture walk reaches it.
+/// do. A tag read can still step over more keys than it returns, in its task:
+///
+/// - a plain listing's first read also steps over the page's offset, a tag key
+///   per skipped row;
+/// - a read under a lookup key that prefixes longer ones steps over theirs, as
+///   [`StateStore::utxos_by_tag_page`](dolos_core::StateStore::utxos_by_tag_page)
+///   says: an asset with an empty name over its policy's named assets, or
+///   `SpaceBud1` over `SpaceBud10`.
+///
+/// Tests take four, so a fixture walk reaches it.
 const MAX_WINDOW: usize = if cfg!(test) { 4 } else { 1024 };
 
 /// The tag order a page order walks.
