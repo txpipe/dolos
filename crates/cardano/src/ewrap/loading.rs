@@ -4365,7 +4365,6 @@ mod ratification_tests {
         let wrapped = crate::load_epoch::<ToyDomain>(domain.state()).unwrap();
         let end = wrapped.end.as_ref().expect("EWRAP stamped end stats");
         assert_eq!(end.treasury_withdrawals, WITHDRAWAL);
-        assert_eq!(end.invalid_treasury_withdrawals, 0);
 
         // the beneficiary's live stake got the withdrawal credit (the
         // deposit refund is scheduled for the opening epoch instead)

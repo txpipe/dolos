@@ -2,9 +2,17 @@
 
 This example demonstrates how run a custom network with Dolos. This example folder contains config and genesis files for a custom network which were generated using [Yaci DevKit](https://github.com/bloxbean/yaci-devkit).
 
+`dolos.toml` names the network's magic (`42`, the Shelley genesis's `networkMagic`) and its genesis files, which resolve against the configuration file's directory. It adds two outputs to the genesis UTxO set with `custom_utxos`, and uses the built-in emulator as its upstream, which produces a block from the mempool every 10 seconds, so the network needs no other node.
+
 ## Procedure
 
-To run this example, first you need to "bootstrap" the instance by running the following command:
+First check the configuration, run from this folder:
+
+```bash
+cargo run -- config check
+```
+
+Then "bootstrap" the instance:
 
 ```bash
 cargo run -- bootstrap relay
@@ -18,9 +26,7 @@ Once the instance is bootstrapped, you can start the node by running the followi
 cargo run -- daemon
 ```
 
-This will start the node and you'll be able to query the node using the different APIs (gRPC or Ouroboros).
-
-Note that since there's no upstream node to support the custom network, the node will keep trying to connect to the upstream node and will keep failing. You can ignore the errors and the node will keep running.
+This will start the node and you'll be able to query the node using the different APIs (gRPC, Ouroboros or TRP).
 
 ## Example Query
 

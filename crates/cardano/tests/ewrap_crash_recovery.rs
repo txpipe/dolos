@@ -181,7 +181,6 @@ fn seeded() -> ToyDomain {
     for (byte, total_rewards) in computed {
         let log = PoolEpochLog {
             total_rewards,
-            operator_share: LEADER_REWARD,
             ..Default::default()
         };
 
@@ -310,15 +309,15 @@ fn clean_run() -> Outcome {
     let settled: Vec<_> = expected
         .pool_epochs
         .iter()
-        .map(|(_, pool, log)| (pool.0[0], log.total_rewards, log.operator_share))
+        .map(|(_, pool, log)| (pool.0[0], log.total_rewards))
         .collect();
 
-    let paid: Vec<_> = [(UNPAID, 0, 0)]
+    let paid: Vec<_> = [(UNPAID, 0)]
         .into_iter()
         .chain(
             ACCOUNTS
                 .into_iter()
-                .map(|byte| (byte, u64::from(byte) + LEADER_REWARD, LEADER_REWARD)),
+                .map(|byte| (byte, u64::from(byte) + LEADER_REWARD)),
         )
         .collect();
 

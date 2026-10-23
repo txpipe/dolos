@@ -105,17 +105,9 @@ pub struct PoolEpochLog {
     #[n(6)]
     pub live_pledge: u64,
 
-    /// Declared pledge
-    #[n(7)]
-    pub declared_pledge: u64,
-
     /// Total rewards for epoch
     #[n(8)]
     pub total_rewards: u64,
-
-    /// Total fees for epoch
-    #[n(9)]
-    pub operator_share: u64,
 
     /// Fixed cost
     #[n(10)]

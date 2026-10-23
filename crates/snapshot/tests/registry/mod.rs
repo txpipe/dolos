@@ -227,7 +227,9 @@ pub fn registry() -> Vec<Entry> {
             // the value is unchanged. Revision 4 appends the epoch's active
             // stake and the ESTART shards' carried tally. Field 20, the EWRAP
             // finalize mark, joins revision 4 in place: the v2 freeze resets
-            // every revision to 1.
+            // every revision to 1. The rolling and end stats fields no reader
+            // used, and the `set` and `go` copies of `rolling` and `pparams`,
+            // leave revision 4 in place for the same reason.
             &[
                 Pinned {
                     rev: 1,
@@ -523,6 +525,8 @@ pub fn registry() -> Vec<Entry> {
             enc_scripts,
             ScriptState,
             canaries::script_state,
+            // `tx_index` and `order` leave revision 1 in place: the v2 freeze
+            // resets every revision to 1.
             &[Pinned {
                 rev: 1,
                 hex: include_str!("goldens/scripts.rev1.hex"),
@@ -533,7 +537,9 @@ pub fn registry() -> Vec<Entry> {
             PoolEpochLog,
             canaries::pool_epoch_log,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
+            // the value is unchanged. `declared_pledge` and `operator_share`
+            // leave revision 2 in place: the v2 freeze resets every revision
+            // to 1.
             &[
                 Pinned {
                     rev: 1,
