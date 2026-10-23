@@ -73,6 +73,12 @@ where
 /// Each read of a tag resumes just past the last entry the walk read, not at
 /// a count of entries, so a UTxO spent or rolled back between two reads shifts
 /// none of the entries still ahead.
+///
+/// Reads are not one snapshot, so a fork during the walk can hide a live row
+/// from one response. When a rollback and a fork block re-include a
+/// transaction at a position the walk has already passed, its UTxOs' entries
+/// land behind the walk and no later read reaches them. The next request lists
+/// them. A response never lists a UTxO that was spent when its value was read.
 struct Walk {
     source: Source,
     order: TagOrder,
@@ -242,6 +248,11 @@ pub enum UtxoWalk {
     /// The UTxOs of `entries`, one tag read whole, that the tag `other` also
     /// holds. Each entry is probed in `other` by its full key, so a row that
     /// does not match costs a key read, not a value read.
+    ///
+    /// The probe looks for the position `entries` was read at. When a rollback
+    /// and a fork block re-include a row's transaction at another position in
+    /// between, the probe misses it and one response leaves the live row out,
+    /// as a walk does for a row the fork moves behind it.
     Intersection { entries: Vec<TagEntry>, other: Tag },
 }
 
@@ -361,7 +372,8 @@ where
 /// tag and the other.
 ///
 /// Neither tag is read much past the smaller one's end, and every read takes
-/// at most [`MAX_WINDOW`] entries.
+/// at most [`MAX_WINDOW`] entries. The entries are read before any probe, so a
+/// fork in between can hide a row, as [`UtxoWalk::Intersection`] says.
 pub async fn smaller_tag<D>(
     domain: &Facade<D>,
     first: Tag,
