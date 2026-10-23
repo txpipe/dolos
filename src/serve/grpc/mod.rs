@@ -116,7 +116,7 @@ where
 
         let builder = apply_http2_tuning(Server::builder().accept_http1(true), &cfg);
 
-        let server = builder.layer(cors_layer);
+        let mut server = builder.layer(cors_layer);
 
         info!("serving via gRPC on address: {}", cfg.listen_address);
 
