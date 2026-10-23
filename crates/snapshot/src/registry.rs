@@ -110,8 +110,8 @@
 //!   if anything the bytes depend on has moved ([`Origin`]). The one kind it
 //!   does not hold for is `log-account-epochs`, whose window settles one
 //!   boundary after it closes, and the record does not say at which sequence it
-//!   built a layer. A publish with no predecessor manifest therefore never
-//!   takes that kind from a record ([`crate::is_settled`]);
+//!   built a layer. A publish therefore never takes that kind from a record,
+//!   only from the predecessor manifest ([`export::Settling`]);
 //! - **`--rebuild` ignores it wholesale**, exactly as it already ignores
 //!   inheritance, and overwrites it rather than reading it;
 //! - **the manifest remains the only statement of what the repository holds.**
@@ -168,7 +168,7 @@ pub use stelae::oci::{Auth, Registry, Repository, DEFAULT_CONCURRENCY, SCHEME};
 use stelae_driver::publish::Chained;
 
 use crate::{
-    export::{self, Plan, Predecessor as _, Standing},
+    export::{self, Plan, Predecessor as _, Settling, Standing},
     layers::digests,
     restore::{Outlook, Restoring, Summary, Target},
     DolosProfile, Error,
@@ -693,7 +693,8 @@ where
 
     let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
-    let previous = chained(publishing, latest.as_ref(), plan)?;
+    let settling = chained(publishing, latest.as_ref(), plan)?;
+    let previous = settling.inner();
 
     // Reset before the export, so what comes back is this publish's cost and
     // not a total carried over from an earlier one through the same transport.
@@ -705,7 +706,7 @@ where
         archive,
         state,
         digest_records,
-        &previous,
+        &settling,
         observer,
     )?;
 
@@ -753,8 +754,9 @@ pub fn preview<A: ArchiveStore, S: StateStore>(
 
     let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
-    let previous = chained(publishing, latest.as_ref(), plan)?;
-    let forecast = export::forecast(plan, archive, &previous, digest_records)?;
+    let settling = chained(publishing, latest.as_ref(), plan)?;
+    let previous = settling.inner();
+    let forecast = export::forecast(plan, archive, &settling, digest_records)?;
 
     Ok(Preview {
         sequence: plan.sequence,
@@ -774,11 +776,12 @@ pub fn preview<A: ArchiveStore, S: StateStore>(
 /// the driver takes are the ones this profile composes — the sequence, the
 /// `position` document, the [`Origin`] a record is filed under, and the
 /// record's path, which is [`record_path_in`]'s and never derived down there.
+/// [`export::Settling`] keeps the record from supplying `log-account-epochs`.
 fn chained<'a>(
     publishing: Publishing<'a>,
     latest: Option<&'a Stele>,
     plan: &Plan,
-) -> Result<Chained<'a>, Error> {
+) -> Result<Settling<Chained<'a>>, Error> {
     // This profile identifies a dataset by its network magic; the driver holds
     // the number and never reads it.
     let origin = Origin::of(
@@ -788,14 +791,17 @@ fn chained<'a>(
         crate::compression(),
     );
 
-    Ok(Chained::new(
+    let chained = Chained::new(
         &DolosProfile,
         publishing,
         latest,
         plan.sequence,
         &plan.position()?,
         origin,
-    )?)
+    )?;
+    let manifest = latest.map(Stele::read_inscription).transpose()?;
+
+    Settling::new(chained, manifest.as_ref())
 }
 
 #[cfg(test)]

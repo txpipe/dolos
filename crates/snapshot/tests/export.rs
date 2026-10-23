@@ -1411,6 +1411,69 @@ fn a_resumed_first_publish_builds_every_account_window() {
     resuming.forecast_matches(&cut_at_4, &domain, &resumed);
 }
 
+/// Finding E of the third QA review of dolos#1499: a host's publish at 2 was
+/// interrupted after it recorded window 1's stake-only account rows. Another
+/// host published 2, then 3 restricted to fewer epochs, so the manifest at 3
+/// lacks window 1. The first host's publish at 4 finds window 1 settled and the
+/// manifest silent, and the record would lend the stale layer. Held to the
+/// manifest, it builds the window from its stores instead.
+#[test]
+fn a_record_never_supplies_an_account_window_the_manifest_lacks() {
+    let domain: ToyDomain<MemoryStores> = harness();
+
+    write_account_row(&domain, 1, stake_only());
+
+    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
+    let interrupted = reproduce_fresh(&cut_at_2, &domain);
+
+    write_account_row(&domain, 1, settled());
+
+    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
+    let mut restricted = reproduce_fresh(&cut_at_3, &domain);
+    let window_1 = account_layer(&restricted, 1);
+    restricted.layers.retain(|layer| *layer != window_1);
+
+    let cut_at_4 = plan_at_boundary(&domain, 4, RetainedEpochs::default());
+    let lending_record = || {
+        let mut lending = Lending::following(&restricted, &cut_at_4);
+        lending.layers.push(account_layer(&interrupted, 1));
+        lending
+    };
+
+    // Without the manifest's word, the record's stake-only rows ride along.
+    let unheld = export::reproduce(
+        &cut_at_4,
+        domain.archive(),
+        domain.state(),
+        None,
+        &lending_record(),
+    )
+    .unwrap();
+    assert_eq!(account_layer(&unheld, 1), account_layer(&interrupted, 1));
+
+    let settling = export::Settling::new(lending_record(), Some(&restricted)).unwrap();
+    let held =
+        export::reproduce(&cut_at_4, domain.archive(), domain.state(), None, &settling).unwrap();
+
+    assert_eq!(held.layers, reproduce_fresh(&cut_at_4, &domain).layers);
+    assert_eq!(account_layer(&held, 1), window_1);
+
+    // Window 0 is in the manifest and still lent; window 1 never reached the
+    // record's lender.
+    assert_eq!(settling.inner().account_windows(), vec![0]);
+
+    let forecast = export::forecast(&cut_at_4, domain.archive(), &settling, None).unwrap();
+    let lent = settling.inner().lent.load(Ordering::Relaxed);
+
+    assert_eq!(
+        forecast,
+        export::Forecast {
+            layers_built: held.layers.len() - lent,
+            layers_reused: lent,
+        }
+    );
+}
+
 /// Finding C of the second QA review of dolos#1499: the forecast asks the
 /// settling rule too. The predecessor at 2 holds window 1's stake-only account
 /// rows, and these stores, cut at 3, hold none there, so the publish writes no

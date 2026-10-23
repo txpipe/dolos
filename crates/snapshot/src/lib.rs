@@ -425,18 +425,23 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
 /// if `epoch + 2` is at or below its sequence; a younger window is built again
 /// from the stores, which hold the full rows by now.
 ///
-/// With no predecessor the only source left is an interrupted publish's
-/// resumption record, which does not say which sequence built a layer, so a
-/// first publish builds every window of this kind.
+/// With no predecessor no window of this kind is settled. Nor does a
+/// resumption record ever supply one, since it does not say which sequence
+/// built a layer: [`export::Settling`] holds a publish to the predecessor's
+/// manifest for this kind.
 pub fn is_settled(kind: &str, epoch: u64, history: &[HistoryEntry]) -> bool {
-    let late = LOG_KINDS
-        .iter()
-        .any(|(log, ns)| *log == kind && *ns == AccountEpochLog::NS);
-
-    !late
+    !settles_late(kind)
         || history
             .last()
             .is_some_and(|built| epoch + 2 <= built.sequence)
+}
+
+/// Whether a closed window's layer of `kind` can still change: only
+/// `log-account-epochs`, see [`is_settled`].
+pub(crate) fn settles_late(kind: &str) -> bool {
+    LOG_KINDS
+        .iter()
+        .any(|(log, ns)| *log == kind && *ns == AccountEpochLog::NS)
 }
 
 /// The epoch kinds a window always produces a layer for.
@@ -1751,9 +1756,9 @@ mod tests {
 
     /// The predecessor at 9 published window 8's account rows as ESTART wrote
     /// them, and the EWRAP closing 9 rewrote them before 10 was cut; window
-    /// 7's were already EWRAP's. Without a predecessor nothing says when a
-    /// window's rows were built. Every other kind is final once its window
-    /// closes.
+    /// 7's were already EWRAP's. The predecessor is the history's last entry,
+    /// never an earlier one. Without a predecessor nothing says when a window's
+    /// rows were built. Every other kind is final once its window closes.
     #[test]
     fn only_a_settled_windows_account_rows_are_carried_forward() {
         let after_9 = [HistoryEntry {
@@ -1765,6 +1770,16 @@ mod tests {
         assert!(!is_settled("log-account-epochs", 8, &after_9));
         assert!(!is_settled("log-account-epochs", 9, &after_9));
         assert!(!is_settled("log-account-epochs", 0, &[]));
+
+        let up_to_9: Vec<_> = (1..=9)
+            .map(|sequence| HistoryEntry {
+                sequence,
+                inscription_digest: stelae::digest::Digest::from_bytes([sequence as u8; 32]),
+            })
+            .collect();
+
+        assert!(is_settled("log-account-epochs", 7, &up_to_9));
+        assert!(!is_settled("log-account-epochs", 8, &up_to_9));
 
         for kind in EPOCH_KINDS
             .into_iter()

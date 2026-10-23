@@ -58,7 +58,7 @@
 //! check, which is publisher plumbing. No restore, no signatures.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
     ops::Range,
     sync::{atomic::AtomicBool, Mutex},
@@ -648,6 +648,74 @@ fn retained_dumps(
             ))
         })
         .collect()
+}
+
+/// A predecessor held to its manifest for `log-account-epochs`.
+///
+/// A registry's chained publish carries a layer forward out of the manifest it
+/// follows or, failing that, out of an interrupted publish's resumption record.
+/// The record names the layers that publish uploaded, not the sequence that
+/// built them, and a window of this kind settles one boundary after it closes
+/// ([`crate::is_settled`]): a record can hold a window's stake-only rows that
+/// the manifest lacks, say because that publish was restricted to fewer
+/// epochs. This answers for such a window only where the manifest holds it,
+/// and leaves every other kind to `inner`.
+pub struct Settling<P> {
+    inner: P,
+    published: BTreeSet<(String, String)>,
+}
+
+impl<P: Predecessor> Settling<P> {
+    /// `inner`, carrying the account windows `manifest` holds and no others.
+    /// `None` is a repository with no stele yet.
+    pub fn new(inner: P, manifest: Option<&Inscription>) -> Result<Self, Error> {
+        let published = manifest
+            .into_iter()
+            .flat_map(|manifest| &manifest.layers)
+            .filter(|layer| crate::settles_late(&layer.kind))
+            .map(|layer| crate::scope_key(&layer.kind, &layer.scope))
+            .collect::<Result<_, _>>()?;
+
+        Ok(Self { inner, published })
+    }
+
+    pub fn inner(&self) -> &P {
+        &self.inner
+    }
+
+    fn admits(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, stelae_driver::Error> {
+        Ok(!crate::settles_late(kind) || self.published.contains(&crate::scope_key(kind, scope)?))
+    }
+}
+
+impl<P: Predecessor> Predecessor for Settling<P> {
+    fn history(&self) -> &[HistoryEntry] {
+        self.inner.history()
+    }
+
+    fn adopt(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<Option<LayerDescriptor>, stelae_driver::Error> {
+        if !self.admits(kind, scope)? {
+            return Ok(None);
+        }
+
+        self.inner.adopt(kind, scope)
+    }
+
+    fn carried_forward(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<bool, stelae_driver::Error> {
+        Ok(self.admits(kind, scope)? && self.inner.carried_forward(kind, scope)?)
+    }
+
+    fn landed(&self, descriptor: &LayerDescriptor) -> Result<(), stelae_driver::Error> {
+        self.inner.landed(descriptor)
+    }
 }
 
 /// The history rule, which is [`stelae::inscription::history_for`]: it reads a
