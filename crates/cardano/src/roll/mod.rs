@@ -1061,9 +1061,6 @@ mod tests {
         assert_eq!(stats.drep_refunds, 0);
         assert_eq!(stats.proposal_deposits, 0);
         assert_eq!(stats.withdrawals, 0);
-        assert_eq!(stats.reserve_mirs, 0);
-        assert_eq!(stats.treasury_mirs, 0);
-        assert!(stats.registered_pools.is_empty());
 
         // The transaction is still counted and its collateral still priced.
         assert_eq!(stats.tx_count, 1);
@@ -1213,7 +1210,6 @@ mod tests {
         assert!(stats.drep_deposits > 0);
         assert!(stats.proposal_deposits > 0);
         assert!(stats.withdrawals > 0);
-        assert!(!stats.registered_pools.is_empty());
         assert_eq!(stats.tx_count, 1);
     }
 }

@@ -24,27 +24,25 @@ use crate::{
     ProposalState,
 };
 
-/// What each pool paid out at the boundary, summed from the merged account
-/// rows of the epoch: `(total, operator share)`, the leader rewards being the
-/// operator's share.
+/// What each pool paid out at the boundary, member and leader rewards, summed
+/// from the merged account rows of the epoch.
 #[derive(Debug, Default)]
-struct PaidRewards(HashMap<PoolHash, (u64, u64)>);
+struct PaidRewards(HashMap<PoolHash, u64>);
 
 impl PaidRewards {
     fn add(&mut self, row: &AccountEpochLog) {
         if let (Some(pool), Some(amount)) = (row.pool_id, row.member_reward) {
-            let (total, _) = self.0.entry(pool).or_default();
+            let total = self.0.entry(pool).or_default();
             *total = total.saturating_add(amount);
         }
 
         for (pool, amount) in &row.leader_rewards {
-            let (total, operator) = self.0.entry(*pool).or_default();
+            let total = self.0.entry(*pool).or_default();
             *total = total.saturating_add(*amount);
-            *operator = operator.saturating_add(*amount);
         }
     }
 
-    fn of(&self, pool: &PoolHash) -> (u64, u64) {
+    fn of(&self, pool: &PoolHash) -> u64 {
         self.0.get(pool).copied().unwrap_or_default()
     }
 }
@@ -71,11 +69,10 @@ fn settle_stake_logs<A: ArchiveStore>(
 
     for entry in archive.iter_logs_typed::<PoolEpochLog>(Some(LogRangeOf::slot(slot)))? {
         let (_, pool, mut log) = entry?;
-        let (total, operator) = paid.of(&pool.0);
+        let total = paid.of(&pool.0);
 
-        if (log.total_rewards, log.operator_share) != (total, operator) {
+        if log.total_rewards != total {
             log.total_rewards = total;
-            log.operator_share = operator;
             writer.write_log_typed(slot, &pool, &log)?;
         }
     }
@@ -318,10 +315,9 @@ mod tests {
         AccountKey(StakeCredential::AddrKeyhash([byte; 28].into()))
     }
 
-    fn stake_log(total_rewards: u64, operator_share: u64) -> PoolEpochLog {
+    fn stake_log(total_rewards: u64) -> PoolEpochLog {
         PoolEpochLog {
             total_rewards,
-            operator_share,
             ..Default::default()
         }
     }
@@ -348,7 +344,7 @@ mod tests {
             .expect("missing stake log")
     }
 
-    /// RUPD computed 100 for pool 1 (30 to the operator) and 40 for pool 2,
+    /// RUPD computed 100 for pool 1 and 40 for pool 2,
     /// but a delegator of pool 1 deregistered and forfeited its 20, and pool 2
     /// paid nothing. The logs end up holding what the boundary paid; the
     /// next epoch's log is left alone.
@@ -359,13 +355,13 @@ mod tests {
 
         let writer = domain.archive().start_writer().unwrap();
         writer
-            .write_log_typed(SLOT, &PoolKey(first), &stake_log(100, 30))
+            .write_log_typed(SLOT, &PoolKey(first), &stake_log(100))
             .unwrap();
         writer
-            .write_log_typed(SLOT, &PoolKey(second), &stake_log(40, 0))
+            .write_log_typed(SLOT, &PoolKey(second), &stake_log(40))
             .unwrap();
         writer
-            .write_log_typed(SLOT + 1, &PoolKey(first), &stake_log(7, 7))
+            .write_log_typed(SLOT + 1, &PoolKey(first), &stake_log(7))
             .unwrap();
 
         // the operator's reward account also delegates to pool 1
@@ -383,18 +379,13 @@ mod tests {
         settle_stake_logs(domain.archive(), &writer, SLOT).unwrap();
         writer.commit().unwrap();
 
-        let settled = read(&domain, SLOT, first);
-        assert_eq!((settled.total_rewards, settled.operator_share), (80, 30));
-
-        let settled = read(&domain, SLOT, second);
-        assert_eq!((settled.total_rewards, settled.operator_share), (0, 0));
-
-        let untouched = read(&domain, SLOT + 1, first);
-        assert_eq!((untouched.total_rewards, untouched.operator_share), (7, 7));
+        assert_eq!(read(&domain, SLOT, first).total_rewards, 80);
+        assert_eq!(read(&domain, SLOT, second).total_rewards, 0);
+        assert_eq!(read(&domain, SLOT + 1, first).total_rewards, 7);
     }
 
     #[test]
-    fn paid_rewards_split_out_the_operator_share() {
+    fn paid_rewards_sum_member_and_leader_rewards() {
         let (first, second) = (pool(1), pool(2));
         let mut paid = PaidRewards::default();
 
@@ -402,8 +393,8 @@ mod tests {
         paid.add(&row(Some(second), Some(1), vec![]));
         paid.add(&row(None, None, vec![]));
 
-        assert_eq!(paid.of(&first), (14, 4));
-        assert_eq!(paid.of(&second), (7, 6));
-        assert_eq!(paid.of(&pool(3)), (0, 0));
+        assert_eq!(paid.of(&first), 14);
+        assert_eq!(paid.of(&second), 7);
+        assert_eq!(paid.of(&pool(3)), 0);
     }
 }

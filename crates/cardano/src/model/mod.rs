@@ -942,22 +942,14 @@ mod wal_tests {
             (71, MetadataLabelTxInc::new(674, 1).into()),
             (
                 72,
-                ScriptFirstSeen::new(
-                    [0x55; 28].into(),
-                    ScriptState {
-                        slot: 100,
-                        tx_index: 0,
-                        order: 0,
-                    },
-                )
-                .into(),
+                ScriptFirstSeen::new([0x55; 28].into(), ScriptState { slot: 100 }).into(),
             ),
             (
                 73,
                 StageFirstScript::new(
                     7,
                     [0x55; 28].into(),
-                    ScriptState {
+                    FirstScriptSet {
                         slot: 100,
                         tx_index: 0,
                         order: 0,

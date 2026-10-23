@@ -155,7 +155,7 @@ mod tests {
                 let cursor = domain.state().read_cursor().unwrap().unwrap().slot();
                 let (epoch, _) = chain.slot_epoch(cursor);
 
-                let first = ScriptState {
+                let first = FirstScriptSet {
                     slot: cursor + 1,
                     tx_index: 0,
                     order: 0,
@@ -163,7 +163,7 @@ mod tests {
 
                 let writer = domain.state().start_writer().unwrap();
                 writer
-                    .write_entity_typed(&ScriptKey(phantom), &first)
+                    .write_entity_typed(&ScriptKey(phantom), &ScriptState::from(first))
                     .unwrap();
                 writer
                     .write_entity_typed(
@@ -172,7 +172,7 @@ mod tests {
                             epoch,
                             member: ScriptKey(phantom),
                         },
-                        &FirstScriptSet::from(first),
+                        &first,
                     )
                     .unwrap();
                 writer.commit().unwrap();
