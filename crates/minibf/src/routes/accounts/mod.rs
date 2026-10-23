@@ -45,7 +45,7 @@ use crate::{
     error::Error,
     inputs::{for_each_touched_output, InputDeps, InputResolver},
     mapping::{
-        self, address_stats::AccountAddressesTotalBody, bech32_drep, bech32_pool,
+        self, accounts::AccountModelBuilder, address_stats::AccountAddressesTotalBody, bech32_pool,
         direct_json::DirectJson, IntoModel,
     },
     pagination::{Order, Pagination, PaginationParameters},
@@ -111,85 +111,6 @@ fn parse_account_key_param(address: &str, network: Network) -> Result<AccountKey
     ));
 
     Ok(AccountKeyParam { address, account })
-}
-
-struct AccountModelBuilder<'a> {
-    account_state: dolos_cardano::model::AccountState,
-    stake_address: Option<StakeAddress>,
-    tip_slot: Option<u64>,
-    chain: Option<&'a ChainSummary>,
-}
-
-impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<AccountContent, StatusCode> {
-        let tip_slot = self.tip_slot.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let chain = self.chain.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let stake_address = self
-            .stake_address
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-            .to_bech32()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let (current_epoch, _) = chain.slot_epoch(tip_slot);
-
-        let active_epoch = self
-            .account_state
-            .registered_at
-            .or(self.account_state.deregistered_at)
-            .map(|x| chain.slot_epoch(x))
-            .map(|(x, _)| x);
-
-        let pool_id = self
-            .account_state
-            .delegated_pool_at(current_epoch)
-            .or(self.account_state.retired_pool.as_ref())
-            .map(bech32_pool)
-            .transpose()?;
-
-        let drep_id = self
-            .account_state
-            .delegated_drep_at(current_epoch)
-            .map(bech32_drep)
-            .transpose()?;
-
-        let active = pool_id.is_some();
-
-        let stake = self.account_state.stake.live().cloned().unwrap_or_default();
-
-        let out = AccountContent {
-            stake_address,
-            active,
-            registered: self.account_state.is_registered(),
-            active_epoch: active_epoch.map(|x| x as i32),
-            controlled_amount: stake.total().to_string(),
-            rewards_sum: stake.rewards_sum.to_string(),
-            withdrawals_sum: stake.withdrawals_sum.to_string(),
-            reserves_sum: "0".to_string(),
-            treasury_sum: "0".to_string(),
-            withdrawable_amount: stake.withdrawable().to_string(),
-            pool_id,
-            drep_id,
-        };
-
-        Ok(out)
-    }
-}
-
-impl<'a> IntoModel<Vec<AccountAddressesContentInner>> for AccountModelBuilder<'a> {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<Vec<AccountAddressesContentInner>, StatusCode> {
-        let out: Vec<_> = vec![]
-            .into_iter()
-            .map(|x| AccountAddressesContentInner { address: x })
-            .collect();
-
-        Ok(out)
-    }
 }
 
 pub async fn by_stake<D>(
