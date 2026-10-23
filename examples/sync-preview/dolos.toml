@@ -1,37 +1,21 @@
-[upstream]
-peer_address = "relay.cnode-m1.demeter.run:3002"
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "preview"
 
 [storage]
-version = "v4"
 path = "data"
 
-[genesis]
-byron_path = "byron.json"
-shelley_path = "shelley.json"
-alonzo_path = "alonzo.json"
-conway_path = "conway.json"
-force_protocol = 6
+[storage.state]
+type = "fjall"
 
-[sync]
-max_history = 2592000
-max_rollback = 25920
+[storage.archive]
+type = "fjall"
 
-[submit]
-prune_height = 200
-
-[serve.grpc]
-listen_address = "[::]:50051"
-
-[serve.ouroboros]
-listen_path = "dolos.socket"
+[history]
+mode = "rolling"
+window = { unit = "slot", value = 2592000 }
 
 [serve.minibf]
 listen_address = "[::]:3000"
-
-[chain]
-type = "cardano"
-magic = 2
-is_testnet = true
-
-[logging]
-max_level = "DEBUG"

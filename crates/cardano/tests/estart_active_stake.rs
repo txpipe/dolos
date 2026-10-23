@@ -828,7 +828,6 @@ fn the_first_stake_epoch_logs_its_distribution() {
         assert_eq!(log.delegators_count, tally.delegators, "pool {pool}");
         assert_eq!(log.live_pledge, tally.live_pledge, "pool {pool}");
         assert_eq!(log.total_rewards, 0, "pool {pool}");
-        assert_eq!(log.operator_share, 0, "pool {pool}");
     }
 
     let account_logs = account_epoch_logs(&domain, first_stake);

@@ -132,7 +132,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 ### `finalize()` — Rupd global pass
 
 - Direct write: `EpochState.incentives = Some(work.incentives)` and `EpochState.rupd_progress = None`. Single one-shot write so concurrent shard commits can't race.
-- Direct writes: per-pool `PoolEpochLog` archive entries from the shard-accumulator (`total_rewards`, `operator_share`, `delegators_count` rolled up across shards; `blocks_minted`, `total_stake`, `relative_size`, `declared_pledge`, `fixed_cost`, `margin_cost` from globals).
+- Direct writes: per-pool `PoolEpochLog` archive entries from the shard-accumulator (`total_rewards`, `delegators_count` rolled up across shards; `blocks_minted`, `total_stake`, `relative_size`, `fixed_cost`, `margin_cost` from globals).
 - No deltas emitted in finalize.
 
 `PendingRewardState` writes are overwrite-by-key, so true mid-shard resume is safe (rerunning a shard rewrites the same credentials with identical data).
