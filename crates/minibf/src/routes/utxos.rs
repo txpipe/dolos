@@ -481,6 +481,13 @@ where
 /// The models of a page's rows, in the rows' order. The block hash comes from
 /// the block at each row's creation position; a row without one (genesis,
 /// configured) or whose block was pruned gets none.
+///
+/// The lookup and the value read are not one snapshot. When a rollback removes
+/// a row's block after its value was read, the lookup finds no block carrying
+/// its transaction at that position, so the row lists without a block hash for
+/// one response, whether or not a fork block has re-included the transaction
+/// elsewhere. A request after the fork reads the row's new position and its
+/// block.
 async fn into_models<D, T>(
     domain: &Facade<D>,
     rows: Vec<(TxoRef, Arc<UtxoValue>)>,
