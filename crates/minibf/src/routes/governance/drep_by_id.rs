@@ -113,8 +113,9 @@ mod tests {
         let expected = DrepModel {
             drep_id,
             hex: hex::encode(&payload),
-            // the ledger's drep_distr counts the DRep's own deposit
-            amount: "7777".to_string(),
+            // registered after the last completed distribution, so in none
+            // yet: Blockfrost serves 0, not the deposit
+            amount: "0".to_string(),
             active: true,
             active_epoch: Some(2),
             has_script: false,

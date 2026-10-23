@@ -11,7 +11,7 @@ use dolos_cardano::{
     indexes::{CardanoArchiveIndexExt as _, PoolCert},
     pool_history, AccountKey, AccountState, CardanoWorkUnit, DRepDelegation, DRepEpochLog,
     DRepExpiry, DRepKey, DRepState, EpochValue, PoolDelegation, PoolEpochLog, PoolHash, PoolKey,
-    Stake,
+    PoolState, Stake,
 };
 use dolos_core::{
     sync::{execute_work_unit, SyncExt as _},
@@ -196,7 +196,17 @@ async fn cached_first_registrations_equal_the_archive() {
         .unwrap();
 
     let entry = pool_history::RegistrationsEntry::decode(&value).unwrap();
-    assert_eq!(entry.first.len(), 3, "P, Q and R are in state");
+    // the synthetic chain registers its own block issuer's pool beside them
+    let in_state = domain
+        .state()
+        .iter_entities_typed::<PoolState>(None)
+        .unwrap()
+        .count();
+    assert_eq!(entry.first.len(), in_state, "every pool in state");
+
+    for pool in [P, Q, R] {
+        assert!(entry.first.contains_key(&PoolHash::from(pool)));
+    }
 
     assert_eq!(
         pool_history::first_registrations(&domain, pools)

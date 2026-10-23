@@ -145,7 +145,7 @@ pub async fn first_registrations<D: Domain>(
     domain: &D,
     pools: Vec<PoolHash>,
 ) -> Result<Vec<Option<CertPosition>>, DomainError> {
-    let tip = blocking(domain, |domain| Ok(tip_slot(domain)?)).await?;
+    let tip = blocking(domain, |domain| tip_slot(domain)).await?;
     let watermark = immutable_slot(domain, tip);
 
     let fill = {

@@ -21,7 +21,7 @@ use pallas::ledger::primitives::{
 
 use crate::{
     ewrap::stake::{admits_pool, stake_snapshot_of},
-    ewrap::{AccountId, BoundaryVisitor as _, BoundaryWork, DRepId, ProposalId},
+    ewrap::{AccountId, BoundaryVisitor as _, BoundaryWork, ProposalId},
     load_era_summary, load_gov, pallas_extras,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,

@@ -620,7 +620,8 @@ where
 
     let chain = domain.get_chain_summary()?;
     let blocks_minted = pool_history::blocks_minted(&domain.inner, &chain, vec![pool.clone()])
-        .await?
+        .await
+        .map_err(log_and_500("failed to derive a pool's lifetime blocks"))?
         .pop()
         .unwrap_or_default();
     let calidus_key = match &pool.calidus {
@@ -849,7 +850,9 @@ async fn listing_order<D: Domain>(
     domain: &Facade<D>,
     pools: &[PoolHash],
 ) -> Result<Vec<(BlockSlot, PoolHash)>, Error> {
-    let positions = pool_history::first_registrations(&domain.inner, pools.to_vec()).await?;
+    let positions = pool_history::first_registrations(&domain.inner, pools.to_vec())
+        .await
+        .map_err(log_and_500("failed to read the pools' first registrations"))?;
 
     Ok(positions
         .into_iter()
@@ -989,7 +992,8 @@ where
         &chain,
         pools.iter().map(|(_, pool)| pool.clone()).collect(),
     )
-    .await?;
+    .await
+    .map_err(log_and_500("failed to derive the pools' lifetime blocks"))?;
 
     let metadata_futures: Vec<_> = pools
         .iter()
