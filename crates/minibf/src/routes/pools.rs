@@ -1586,38 +1586,59 @@ where
     Ok(Json(mapped))
 }
 
-// HACK: blockfrost dbsync version computes fees at the SQL query level using
-// the formula: `FLOOR(fee + (rewards - fee) * margin)`.
-//
-// This is not strictly correct, as the operator share has much more involved
-// formula. This method is a workaround to make the data compatible with the
-// blockfrost dbsync version.
+/// A pool margin as db-sync stores it: a `float8` holding the ratio rounded
+/// to the nearest double.
+///
+/// Two operands up to 2^53 convert exactly, so their quotient is that nearest
+/// double. Larger ones go through a decimal expansion, which `parse` rounds
+/// correctly as long as the cut leaves the quotient on its side of every
+/// midpoint between doubles. 64 decimals do: a quotient that is a midpoint
+/// has a power-of-two denominator below 2^64 and ends within 63 decimals, and
+/// one that is not lies more than 2^-181 from any midpoint.
+fn margin_f64(numerator: u64, denominator: u64) -> f64 {
+    const EXACT: u64 = 1 << 53;
+
+    if denominator == 0 {
+        return 0.0;
+    }
+
+    if numerator <= EXACT && denominator <= EXACT {
+        return numerator as f64 / denominator as f64;
+    }
+
+    let divisor = denominator as u128;
+    let mut remainder = numerator as u128 % divisor;
+    let mut text = format!("{}.", numerator as u128 / divisor);
+
+    for _ in 0..64 {
+        remainder *= 10;
+        text.push(char::from(b'0' + (remainder / divisor) as u8));
+        remainder %= divisor;
+    }
+
+    text.parse().unwrap_or_default()
+}
+
+// HACK: Blockfrost does not derive the operator share. Its SQL reports
+// `FLOOR(fee + (rewards - fee) * margin)`, and `rewards` when they fall short
+// of the fixed cost. db-sync keeps the margin as a `float8`, so Postgres runs
+// the whole expression in `float8`; this does the same, operation for
+// operation.
 fn bf_compatible_fees(log: &PoolEpochLog) -> u64 {
+    let rewards = log.total_rewards;
+    let fixed = log.fixed_cost;
+
+    if rewards < fixed {
+        return rewards;
+    }
+
     let margin = log
         .margin_cost
         .as_ref()
-        .map(
-            |pallas::ledger::primitives::RationalNumber {
-                 numerator,
-                 denominator,
-             }| num_rational::Rational64::new(*numerator as i64, *denominator as i64),
-        )
-        .unwrap_or(num_rational::Rational64::from_integer(0));
+        .map(|margin| margin_f64(margin.numerator, margin.denominator))
+        .unwrap_or_default();
 
-    let rewards = num_rational::Rational64::from_integer(log.total_rewards as i64);
-    let fixed_cost = num_rational::Rational64::from_integer(log.fixed_cost as i64);
-
-    let variable_fees = (rewards - fixed_cost) * margin;
-    let fixed_fees = fixed_cost;
-
-    let fees = variable_fees + fixed_fees;
-    let fees = fees.to_integer() as u64;
-
-    if fees > log.total_rewards {
-        log.total_rewards
-    } else {
-        fees
-    }
+    (fixed as f64 + (rewards - fixed) as f64 * margin).floor() as u64
 }
 
 pub async fn by_id_history<D: Domain>(
@@ -3877,6 +3898,116 @@ mod tests {
                 String::from_utf8_lossy(&bytes)
             )
         })
+    }
+
+    fn fee_log(total_rewards: u64, fixed_cost: u64, margin: Option<(u64, u64)>) -> PoolEpochLog {
+        PoolEpochLog {
+            total_rewards,
+            fixed_cost,
+            margin_cost: margin.map(|(numerator, denominator)| {
+                pallas::ledger::primitives::RationalNumber {
+                    numerator,
+                    denominator,
+                }
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn bf_fees_fall_back_to_the_rewards_below_the_fixed_cost() {
+        assert_eq!(
+            bf_compatible_fees(&fee_log(0, 340_000_000, Some((1, 100)))),
+            0
+        );
+        assert_eq!(
+            bf_compatible_fees(&fee_log(1_000, 340_000_000, Some((1, 100)))),
+            1_000
+        );
+        assert_eq!(
+            bf_compatible_fees(&fee_log(25_816_995_192, 340_000_000, Some((0, 1)))),
+            340_000_000
+        );
+        assert_eq!(bf_compatible_fees(&fee_log(500, 100, None)), 100);
+    }
+
+    /// Blockfrost runs the formula in `float8`, and so floors one lovelace
+    /// below the exact `floor(940189878034 * 3 / 11) = 256415421282` here.
+    #[test]
+    fn bf_fees_round_like_float8() {
+        assert_eq!(
+            bf_compatible_fees(&fee_log(940_189_878_034, 0, Some((3, 11)))),
+            256_415_421_281
+        );
+        assert_eq!(
+            bf_compatible_fees(&fee_log(905_252_471_403, 500_000_000, Some((3, 11)))),
+            247_250_674_018
+        );
+    }
+
+    /// The `Rational64` arithmetic this replaced cast the margin into `i64`, so
+    /// a denominator near `u64::MAX` came out negative or overflowed. The
+    /// ledger accepts an unreduced margin, and a 100% one past 2^53 keeps its
+    /// integer part.
+    #[test]
+    fn bf_fees_take_any_margin() {
+        let fees = bf_compatible_fees(&fee_log(
+            10_000_000_000_000,
+            340_000_000,
+            Some((u64::MAX / 4, u64::MAX - 1)),
+        ));
+        assert_eq!(fees, 340_000_000 + (10_000_000_000_000 - 340_000_000) / 4);
+
+        assert_eq!(margin_f64(u64::MAX / 4, u64::MAX - 1), 0.25);
+        assert_eq!(margin_f64(1, 0), 0.0);
+
+        let full = (1 << 60, 1 << 60);
+
+        assert_eq!(margin_f64(full.0, full.1), 1.0);
+        assert_eq!(
+            bf_compatible_fees(&fee_log(1_000_000_000_000, 340_000_000, Some(full))),
+            1_000_000_000_000
+        );
+    }
+
+    /// Margins past 2^53 go through the decimal expansion. The first sits
+    /// exactly on a midpoint between two doubles, which a 60-decimal cut
+    /// rounded down, one lovelace short in `fees`. The second is a double
+    /// away from the plain `f64` division of its operands, and so is the
+    /// third, whose numerator is within 2^53 and whose odd denominator is just
+    /// past it, down to 2^53 + 1.
+    #[test]
+    fn bf_fees_round_wide_margins_to_the_nearest_double() {
+        let midpoint = (12_777_994_273_690_747, 1 << 63);
+
+        assert_eq!(
+            margin_f64(midpoint.0, midpoint.1),
+            12777994273690747f64 / 9223372036854775808f64
+        );
+        assert_eq!(
+            bf_compatible_fees(&fee_log(446_511_071_931, 340_000_000, Some(midpoint))),
+            958_122_242
+        );
+
+        let (numerator, denominator) = (3_071_691_459_605_072_764, 15_394_439_036_360_229_302);
+
+        assert_eq!(margin_f64(numerator, denominator), 0.19953253589494388);
+        assert_ne!(numerator as f64 / denominator as f64, 0.19953253589494388);
+
+        let narrow = (675_963_839_381_191, 9_007_199_254_746_239);
+
+        assert_eq!(margin_f64(narrow.0, narrow.1), 0.07504706182945822);
+        assert_ne!(narrow.0 as f64 / narrow.1 as f64, 0.07504706182945822);
+        assert_eq!(
+            bf_compatible_fees(&fee_log(73_496_656_964_163, 340_000_000, Some(narrow))),
+            5_516_022_643_447
+        );
+
+        assert_eq!(margin_f64(narrow.0, (1 << 53) + 1), 0.07504706182950192);
+        assert_ne!(
+            narrow.0 as f64 / ((1u64 << 53) + 1) as f64,
+            0.07504706182950192
+        );
     }
 
     #[tokio::test]

@@ -7,7 +7,8 @@
 //!
 //! State is organized into four keyspaces based on access patterns:
 //!
-//! 1. **`state-cursor`**: Chain position tracking (single key-value)
+//! 1. **`state-cursor`**: Chain position tracking, and the compatibility
+//!    identity the store recorded when it was created
 //!
 //! 2. **`state-utxos`**: UTxO set storage Key: `[tx_hash:32][index:4]` (36
 //!    bytes) Value: `[era:2][cbor:...]`
@@ -60,17 +61,20 @@ mod keyspace_names {
 /// Key for the cursor entry
 const CURSOR_KEY: &[u8] = &[0u8];
 
+/// Key for the compatibility identity, beside the cursor
+const IDENTITY_KEY: &[u8] = b"identity";
+
 /// Fjall-based state store implementation with unified entities keyspace.
 ///
 /// Uses 4 keyspaces:
-/// - `cursor`: Chain position tracking
+/// - `cursor`: Chain position tracking and the compatibility identity
 /// - `utxos`: UTxO set storage
 /// - `entities`: All entity types with namespace hash prefixes
 /// - `tags`: Live-UTxO tags, a projection of `utxos`
 #[derive(Clone)]
 pub struct StateStore {
     db: Database,
-    /// Cursor keyspace (chain position)
+    /// Cursor keyspace (chain position and compatibility identity)
     cursor: Keyspace,
     /// UTxO set keyspace
     utxos: Keyspace,
@@ -125,6 +129,36 @@ impl StateStore {
     /// Get a reference to the entities keyspace
     pub fn entities_keyspace(&self) -> &Keyspace {
         &self.entities
+    }
+
+    /// The compatibility identity the store recorded when it was created.
+    pub fn identity(&self) -> Result<Option<String>, Error> {
+        let value = self.cursor.get(IDENTITY_KEY)?;
+
+        Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
+    /// Record the compatibility identity, synced to disk before it returns.
+    pub fn record_identity(&self, identity: &str) -> Result<(), Error> {
+        self.cursor.insert(IDENTITY_KEY, identity.as_bytes())?;
+        self.db.persist(PersistMode::SyncAll)?;
+
+        Ok(())
+    }
+
+    /// Whether the store holds a cursor or any row.
+    pub fn holds_data(&self) -> Result<bool, Error> {
+        if self.cursor.contains_key(CURSOR_KEY)? {
+            return Ok(true);
+        }
+
+        for keyspace in [&self.utxos, &self.entities, &self.tags] {
+            if !keyspace.is_empty()? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Per-keyspace disk footprint: `(name, bytes, path)`.

@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use dolos_core::config::RootConfig;
 use miette::{bail, IntoDiagnostic};
@@ -71,21 +71,18 @@ fn format_paths(paths: &[PathBuf]) -> String {
 }
 
 fn stores_outside_root(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
-    let cwd = std::env::current_dir()?;
     let storage = &config.storage;
-    let root = normalize(&cwd, &storage.path);
 
-    Ok([
-        config.wal_path(),
-        storage.state_path(),
-        storage.archive_path(),
-        storage.blocks_path(),
-        config.mempool_path(),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|path| !normalize(&cwd, path).starts_with(&root))
-    .collect())
+    dolos::storage::outside_storage_root(
+        config,
+        [
+            config.wal_path(),
+            storage.state_path(),
+            storage.archive_path(),
+            storage.blocks_path(),
+            config.mempool_path(),
+        ],
+    )
 }
 
 fn symlinks_under(root: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -122,28 +119,6 @@ fn symlinks_under(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     found.sort();
 
     Ok(found)
-}
-
-fn normalize(cwd: &Path, path: &Path) -> PathBuf {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-
-    let mut normalized = PathBuf::new();
-
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-
-    normalized
 }
 
 #[cfg(test)]
