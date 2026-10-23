@@ -61,8 +61,8 @@ use dolos_testing::{
     toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
 };
 use node::{
-    export_plan, export_to, extend_archive_past_cursor, harness, plan_at_boundary, plan_for,
-    step_past_boundary,
+    account_layer, export_plan, export_to, extend_archive_past_cursor, harness, plan_at_boundary,
+    plan_for, settled, stake_only, step_past_boundary, write_account_row,
 };
 use stelae::{
     dir::SteleDir,
@@ -1182,6 +1182,7 @@ struct Lending {
     layers: Vec<stelae::inscription::LayerDescriptor>,
     asked: std::sync::Mutex<Vec<(String, u64)>>,
     lent: AtomicUsize,
+    landed: std::sync::Mutex<Vec<stelae::inscription::LayerDescriptor>>,
 }
 
 impl Lending {
@@ -1208,6 +1209,7 @@ impl Lending {
             layers: lender.layers.clone(),
             asked: Default::default(),
             lent: AtomicUsize::new(0),
+            landed: Default::default(),
         }
     }
 
@@ -1283,56 +1285,15 @@ impl export::Predecessor for Lending {
     ) -> Result<bool, stelae_driver::Error> {
         Ok(self.find(kind, scope).is_some())
     }
-}
 
-/// An account's row of `window`, written straight to `domain`'s archive.
-fn write_account_row(
-    domain: &ToyDomain<MemoryStores>,
-    window: u64,
-    row: dolos_cardano::AccountEpochLog,
-) {
-    let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
-    let account = dolos_cardano::AccountKey::from(
-        dolos_cardano::pallas::ledger::primitives::StakeCredential::AddrKeyhash([0x51; 28].into()),
-    );
+    fn landed(
+        &self,
+        descriptor: &stelae::inscription::LayerDescriptor,
+    ) -> Result<(), stelae_driver::Error> {
+        self.landed.lock().unwrap().push(descriptor.clone());
 
-    let writer = domain.archive().start_writer().unwrap();
-    writer
-        .write_log_typed(summary.epoch_start(window), &account, &row)
-        .unwrap();
-    writer.commit().unwrap();
-}
-
-/// A row as ESTART writes it: the stake leg alone.
-fn stake_only() -> dolos_cardano::AccountEpochLog {
-    dolos_cardano::AccountEpochLog {
-        active_stake: Some(2_000),
-        pool_id: Some([0x52; 28].into()),
-        ..Default::default()
+        Ok(())
     }
-}
-
-/// The same row as the EWRAP that settles it rewrites it.
-fn settled() -> dolos_cardano::AccountEpochLog {
-    dolos_cardano::AccountEpochLog {
-        member_reward: Some(7),
-        ..stake_only()
-    }
-}
-
-fn account_layer(
-    inscription: &stelae::inscription::Inscription,
-    epoch: u64,
-) -> stelae::inscription::LayerDescriptor {
-    inscription
-        .layers
-        .iter()
-        .find(|layer| {
-            layer.kind == "log-account-epochs"
-                && layer.scope.get("epoch").and_then(serde_json::Value::as_u64) == Some(epoch)
-        })
-        .cloned()
-        .unwrap()
 }
 
 fn reproduce_fresh(
@@ -1472,6 +1433,48 @@ fn a_record_never_supplies_an_account_window_the_manifest_lacks() {
             layers_reused: lent,
         }
     );
+}
+
+/// Finding H of the fourth QA review of dolos#1499: the settling wrapper hands
+/// every layer that lands to the predecessor it wraps, which is where a
+/// registry publish writes its resumption record.
+#[test]
+fn a_settling_predecessor_passes_each_landed_layer_on() {
+    let domain: ToyDomain<MemoryStores> = harness();
+
+    let cut_at_2 = plan_at_boundary(&domain, 2, RetainedEpochs::default());
+    let predecessor = reproduce_fresh(&cut_at_2, &domain);
+
+    let cut_at_3 = plan_at_boundary(&domain, 3, RetainedEpochs::default());
+    let landed = |predecessor: &dyn export::Predecessor| {
+        export::reproduce(
+            &cut_at_3,
+            domain.archive(),
+            domain.state(),
+            None,
+            predecessor,
+        )
+        .unwrap()
+    };
+
+    let bare = Lending::following(&predecessor, &cut_at_3);
+    landed(&bare);
+
+    let settling = export::Settling::new(
+        Lending::following(&predecessor, &cut_at_3),
+        Some(&predecessor),
+    )
+    .unwrap();
+    landed(&settling);
+
+    let sorted = |lending: &Lending| {
+        let mut layers = lending.landed.lock().unwrap().clone();
+        layers.sort_by_key(|layer| (layer.kind.clone(), layer.scope.to_string()));
+        layers
+    };
+
+    assert!(!sorted(&bare).is_empty());
+    assert_eq!(sorted(settling.inner()), sorted(&bare));
 }
 
 /// Finding C of the second QA review of dolos#1499: the forecast asks the
