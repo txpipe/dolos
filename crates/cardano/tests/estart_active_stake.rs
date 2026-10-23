@@ -86,8 +86,6 @@ fn pool(operator: u8, owners: &[u8], is_retired: bool, epoch: Epoch) -> PoolStat
     PoolState {
         operator: pool_hash(operator),
         snapshot: EpochValue::with_live(epoch, snapshot),
-        blocks_minted_total: 0,
-        register_slot: 0,
         retiring_epoch: None,
         deposit: 0,
         calidus: None,
@@ -1099,4 +1097,91 @@ fn a_crash_at_any_commit_freezes_the_same_distribution() {
         crash_after > 1,
         "the boundary committed too little to crash between shards"
     );
+}
+
+/// A pool's lifetime blocks as minibf derives them, uncached and through the
+/// cache, after the cached entry has been filled at the same tip.
+fn lifetime_blocks(domain: &ToyDomain, operator: u8) -> (u64, u64) {
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let pool = pools(domain).remove(&pool_hash(operator)).unwrap();
+
+    let uncached = dolos_cardano::pool_history::unsealed_blocks(domain, &chain, &pool, 0).unwrap();
+
+    let cached = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(dolos_cardano::pool_history::blocks_minted(
+            domain,
+            &chain,
+            vec![pool],
+        ))
+        .unwrap();
+
+    (uncached, cached[0])
+}
+
+/// A pool's lifetime blocks count every block it minted, read at both sides
+/// of every RUPD. RUPD writes the closed epoch's `pool-epochs` row a while
+/// into the next epoch, and ESTART has already moved that epoch's count from
+/// `live` to `mark`, so from ESTART until RUPD the count is in `mark` alone.
+#[test]
+fn lifetime_blocks_count_every_minted_block_around_rupd() {
+    let domain = seeded(devnet());
+    dolos_cardano::pool_history::register_pool_caches(&domain).unwrap();
+
+    let whale = account(key(0x30), Some(OWNED), 1_000_000_000_000_000, 0, 0);
+    write(&domain, |writer| {
+        writer
+            .write_entity_typed(&AccountKey::from(&whale.credential), &whale)
+            .unwrap();
+    });
+
+    let first_shelley = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+        .unwrap()
+        .first_shelley_epoch();
+    let first_stake = first_shelley + 2;
+
+    let mut minted = 0;
+    let mut read_in_mark = 0;
+
+    loop {
+        let epoch = epoch_state(&domain).number;
+        let unlogged = pools(&domain)[&pool_hash(OWNED)]
+            .snapshot
+            .mark()
+            .is_some_and(|mark| mark.blocks_minted > 0);
+
+        assert_eq!(
+            lifetime_blocks(&domain, OWNED),
+            (minted, minted),
+            "after ESTART into {epoch}"
+        );
+
+        if unlogged {
+            read_in_mark += 1;
+        }
+
+        run_rupd(&domain);
+
+        assert_eq!(
+            lifetime_blocks(&domain, OWNED),
+            (minted, minted),
+            "after RUPD of {epoch}"
+        );
+
+        if epoch == first_stake + 4 {
+            break;
+        }
+
+        if epoch >= first_stake {
+            let blocks = 3 + 2 * (epoch - first_stake) as u32;
+            mint(&domain, Some(OWNED), blocks);
+            minted += u64::from(blocks);
+        }
+
+        open_next_epoch(&domain).unwrap();
+    }
+
+    assert!(read_in_mark > 0, "no read between ESTART and RUPD");
 }

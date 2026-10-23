@@ -200,7 +200,9 @@ pub fn registry() -> Vec<Entry> {
             DRepState,
             canaries::drep_state,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
+            // the value is unchanged. `voting_power` and `anchor`, which
+            // minibf now derives, leave revision 2 in place and `expiry`
+            // stops being optional: the v2 freeze resets every revision to 1.
             &[
                 Pinned {
                     rev: 1,
@@ -359,8 +361,10 @@ pub fn registry() -> Vec<Entry> {
             // Revision 2 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged. Revision 3 appends the stake,
             // delegators and live pledge each snapshot freezes with. Field
-            // 17, the calidus key, joins revision 3 in place: the v2 freeze
-            // resets every revision to 1.
+            // 17, the calidus key, joins revision 3 in place, and
+            // `blocks_minted_total` and `register_slot`, which minibf now
+            // derives, leave it in place: the v2 freeze resets every revision
+            // to 1.
             &[
                 Pinned {
                     rev: 1,

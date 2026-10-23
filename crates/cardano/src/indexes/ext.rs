@@ -5,10 +5,52 @@
 //! history lookups to any `ArchiveStore`.
 
 use dolos_core::{keys, ArchiveError, ArchiveStore, BlockSlot, StateError, StateStore, UtxoSet};
-use pallas::ledger::primitives::StakeCredential;
+use pallas::ledger::{
+    primitives::{Epoch, StakeCredential},
+    traverse::MultiEraBlock,
+};
 
 use super::dimensions::{archive, utxo};
-use crate::ProposalKey;
+use crate::{pallas_extras, CertPosition, PoolHash, ProposalKey};
+
+/// What a pool certificate did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolCert {
+    /// A registration, or an update of a registered pool's parameters.
+    Registration,
+    /// A retirement taking effect at the start of the epoch it names.
+    Retirement(Epoch),
+}
+
+/// The certificates of `operator` in the valid transactions of `block`, in
+/// chain order.
+fn pool_certs_in(block: &MultiEraBlock, operator: &PoolHash) -> Vec<(CertPosition, PoolCert)> {
+    let mut out = Vec::new();
+
+    for (tx_index, tx) in block.txs().iter().enumerate() {
+        if !tx.is_valid() {
+            continue;
+        }
+
+        for (cert_index, cert) in tx.certs().iter().enumerate() {
+            let at = (block.slot(), tx_index, cert_index);
+
+            if let Some(reg) = pallas_extras::cert_as_pool_registration(cert) {
+                if reg.operator == *operator {
+                    out.push((at, PoolCert::Registration));
+                }
+            }
+
+            if let Some(retire) = pallas_extras::cert_as_pool_retirement(cert) {
+                if retire.operator == *operator {
+                    out.push((at, PoolCert::Retirement(retire.epoch)));
+                }
+            }
+        }
+    }
+
+    out
+}
 
 /// Extension trait providing Cardano-specific live-UTxO queries.
 ///
@@ -168,6 +210,58 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
         end: BlockSlot,
     ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::POOL_CERTS, pool, start, end)
+    }
+
+    /// Where `operator` first registered, in a valid transaction. The
+    /// `pool_certs` tag is written for phase-2-invalid transactions too, so
+    /// each tagged block is decoded until one holds a valid registration.
+    fn pool_first_registration(
+        &self,
+        operator: &PoolHash,
+    ) -> Result<Option<CertPosition>, ArchiveError> {
+        for slot in self.slots_by_pool_certs(operator.as_ref(), 0, BlockSlot::MAX)? {
+            let Some(body) = self.get_block_by_slot(&slot?)? else {
+                continue;
+            };
+
+            let block = MultiEraBlock::decode(&body)?;
+
+            let first = pool_certs_in(&block, operator)
+                .into_iter()
+                .find(|(_, cert)| *cert == PoolCert::Registration);
+
+            if let Some((at, _)) = first {
+                return Ok(Some(at));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// The newest certificate of `operator` in a valid transaction of a block
+    /// before `slot`: what the pool was at the end of the previous block.
+    fn pool_cert_before(
+        &self,
+        operator: &PoolHash,
+        slot: BlockSlot,
+    ) -> Result<Option<PoolCert>, ArchiveError> {
+        let Some(end) = slot.checked_sub(1) else {
+            return Ok(None);
+        };
+
+        for slot in self.slots_by_pool_certs(operator.as_ref(), 0, end)?.rev() {
+            let Some(body) = self.get_block_by_slot(&slot?)? else {
+                continue;
+            };
+
+            let block = MultiEraBlock::decode(&body)?;
+
+            if let Some((_, cert)) = pool_certs_in(&block, operator).pop() {
+                return Ok(Some(cert));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Iterate over slots of blocks containing certificates for a DRep.

@@ -61,8 +61,6 @@ fn parse_pool(dto: &ConfigPool) -> PoolState {
 
     PoolState {
         snapshot: EpochValue::with_live(0, snapshot),
-        blocks_minted_total: 0,
-        register_slot: 0,
         retiring_epoch: None,
         operator,
         deposit: 0,

@@ -14,8 +14,8 @@ use crate::{
     owned::OwnedMultiEraOutput,
     pallas_extras::{self, stake_cred_to_drep},
     roll::BlockVisitor,
-    DRepActivity, DRepAnchorUpdate, DRepDormancyRelease, DRepExpiryUpdate, DRepKey,
-    DRepRegistration, DRepSighting, DRepUnRegistration, GovDormancyReset, PParamsSet,
+    DRepActivity, DRepDormancyRelease, DRepExpiry, DRepExpiryUpdate, DRepKey, DRepRegistration,
+    DRepSighting, DRepUnRegistration, GovDormancyReset, PParamsSet,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -130,14 +130,17 @@ impl DRepStateVisitor {
 
     /// Expiry stamped by `RegDRepCert`. During the PV9 bootstrap phase the
     /// dormancy credit is (incorrectly, but consensus-relevantly) ignored —
-    /// `computeDRepExpiryVersioned` in the Haskell ledger.
-    fn registration_expiry(&self) -> Option<Epoch> {
-        let activity = self.drep_activity?;
+    /// `computeDRepExpiryVersioned` in the Haskell ledger. Every registration
+    /// stamps one: `drepActivity` arrives with Conway, as DRep certificates
+    /// do, and a chain carrying the certificate without it (a synthetic one)
+    /// counts it as 0.
+    fn registration_expiry(&self) -> Epoch {
+        let activity = self.drep_activity.unwrap_or_default();
 
         if self.protocol == 9 {
-            Some(self.current_epoch + activity)
+            self.current_epoch + activity
         } else {
-            self.refresh_expiry()
+            (self.current_epoch + activity).saturating_sub(self.dormancy.dormant_epochs)
         }
     }
 }
@@ -269,25 +272,23 @@ impl BlockVisitor for DRepStateVisitor {
 
         if let MultiEraCert::Conway(conway) = &cert {
             match conway.deref().deref() {
-                conway::Certificate::RegDRepCert(_, deposit, anchor) => {
+                conway::Certificate::RegDRepCert(_, deposit, _) => {
+                    let expiry = self.registration_expiry();
+
                     deltas.add_for_entity(DRepRegistration::new(
                         drep.clone(),
                         block.slot(),
                         *order,
                         *deposit,
-                        anchor.clone(),
+                        DRepExpiry::new(expiry, self.current_epoch),
                     ));
 
-                    deltas.add_for_entity(DRepAnchorUpdate::new(drep.clone(), anchor.clone()));
-
-                    if let Some(expiry) = self.registration_expiry() {
-                        deltas.add_for_entity(DRepExpiryUpdate::new(
-                            drep.clone(),
-                            expiry,
-                            self.current_epoch,
-                            false,
-                        ));
-                    }
+                    deltas.add_for_entity(DRepExpiryUpdate::new(
+                        drep.clone(),
+                        expiry,
+                        self.current_epoch,
+                        false,
+                    ));
 
                     // While a dormant stretch is open, a registration creates
                     // a row the batch-start snapshot doesn't have — remember
@@ -307,9 +308,7 @@ impl BlockVisitor for DRepStateVisitor {
                         *order,
                     ));
                 }
-                conway::Certificate::UpdateDRepCert(_, anchor) => {
-                    deltas.add_for_entity(DRepAnchorUpdate::new(drep.clone(), anchor.clone()));
-
+                conway::Certificate::UpdateDRepCert(_, _) => {
                     if let Some(expiry) = self.refresh_expiry() {
                         deltas.add_for_entity(DRepExpiryUpdate::new(
                             drep.clone(),

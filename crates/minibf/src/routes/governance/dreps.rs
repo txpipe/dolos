@@ -1,4 +1,8 @@
-use std::{collections::HashMap, future::Future, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    future::Future,
+    time::Duration,
+};
 
 use axum::{
     extract::{Query, State},
@@ -12,19 +16,19 @@ use dolos_cardano::{
 };
 use dolos_core::{BlockSlot, Domain};
 use futures::{stream, FutureExt as _, StreamExt as _};
-use pallas::ledger::primitives::conway::Anchor;
+use pallas::ledger::primitives::conway::{Anchor, DRep};
 use serde::Deserialize;
 
 use crate::{
     error::Error,
-    mapping::governance::dreps::{drep_is_expired, drep_is_retired, drep_list_item},
+    mapping::governance::dreps::{drep_amount, drep_is_expired, drep_is_retired, drep_list_item},
     offchain::{cached_drep_metadata, fetch_drep_metadata, unfetched, OnOverload},
     pagination::{Order, Pagination, PaginationParameters},
     scan::{EntityScan, ENTITY_CHUNK},
     Facade,
 };
 
-use super::chain_context;
+use super::{chain_context, drep_distribution};
 
 /// How many anchors one page loads at a time. A page asks for up to 100 rows
 /// and every miss costs a round trip capped at the fetch timeout, so the bound
@@ -166,11 +170,8 @@ impl DrepRow {
         (self.sighting.first_seen, &self.key)
     }
 
-    fn amount(&self) -> u64 {
-        self.state
-            .as_ref()
-            .map(|state| state.voting_power)
-            .unwrap_or_default()
+    fn amount(&self, distribution: &BTreeMap<DRep, u64>) -> u64 {
+        drep_amount(&self.key.0, self.state.as_ref(), distribution)
     }
 }
 
@@ -181,6 +182,7 @@ struct DrepsPage {
     chain: ChainSummary,
     tip: BlockSlot,
     pparams: PParamsSet,
+    distribution: BTreeMap<DRep, u64>,
 }
 
 /// Every DRep a certificate has named, in key order.
@@ -271,6 +273,7 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let (chain, tip, pparams) = chain_context(domain)?;
+    let distribution = drep_distribution(domain)?;
 
     let mut sightings = load_drep_sightings(domain, ENTITY_CHUNK).await?;
 
@@ -295,6 +298,7 @@ where
             chain,
             tip,
             pparams,
+            distribution,
         });
     }
 
@@ -317,9 +321,11 @@ where
         // `order` flips only the amount; the appearance order stays the
         // ascending tie-breaker, like Blockfrost's `ORDER BY amount, id ASC`.
         rows.sort_by(|a, b| {
+            let (a_amount, b_amount) = (a.amount(&distribution), b.amount(&distribution));
+
             let amounts = match pagination.order {
-                Order::Desc => b.amount().cmp(&a.amount()),
-                Order::Asc => a.amount().cmp(&b.amount()),
+                Order::Desc => b_amount.cmp(&a_amount),
+                Order::Asc => a_amount.cmp(&b_amount),
             };
 
             amounts.then_with(|| a.appearance().cmp(&b.appearance()))
@@ -343,6 +349,7 @@ where
         chain,
         tip,
         pparams,
+        distribution,
     })
 }
 
@@ -365,6 +372,7 @@ where
         chain,
         tip,
         pparams,
+        distribution,
     } = drep_page(&domain, retired, expired, order_by_amount, &pagination).await?;
 
     let cache = domain.inner.cache();
@@ -394,7 +402,9 @@ where
         .into_iter()
         .map(|row| {
             let has_anchor = row.sighting.anchor.is_some();
-            let mut model = drep_list_item(row.key.into(), row.state, &pparams, &chain, tip)?;
+            let amount = row.amount(&distribution);
+            let mut model =
+                drep_list_item(row.key.into(), row.state, amount, &pparams, &chain, tip)?;
 
             // `anchors` keeps the anchored rows in page order
             model.metadata = has_anchor.then(|| metadata.next()).flatten().map(Box::new);
@@ -569,8 +579,9 @@ mod tests {
             vec![DrepsInner {
                 drep_id,
                 hex: hex::encode(&payload),
-                // the ledger's drep_distr counts the DRep's own deposit
-                amount: "7777".to_string(),
+                // registered after the last completed distribution, so in
+                // none yet: Blockfrost serves 0, not the deposit
+                amount: "0".to_string(),
                 has_script: false,
                 retired: false,
                 expired: false,
@@ -658,6 +669,8 @@ mod tests {
     /// each direction names a different row first.
     fn amount_app() -> TestApp {
         TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+            let mut distribution = BTreeMap::new();
+
             let writer = domain
                 .state()
                 .start_writer()
@@ -668,19 +681,21 @@ mod tests {
             for (byte, power, seen) in [(0xa1u8, 300u64, 10u64), (0xb2, 100, 20), (0xc3, 200, 30)] {
                 let identifier = DRep::Key([byte; 28].into());
 
-                let mut state = DRepState::new(identifier.clone());
+                let mut state = DRepState::new(identifier.clone(), DRepExpiry::new(u64::MAX, 0));
                 state.registered_at = Some((seen, 0));
-                state.voting_power = power;
-                state.expiry = Some(DRepExpiry::new(u64::MAX, 0));
 
                 writer
                     .write_entity_typed(&DRepKey::from(&identifier), &state)
                     .expect("failed to write drep");
 
                 write_sighting(&writer, &identifier, (seen, 0, 0), None);
+
+                distribution.insert(identifier, power);
             }
 
             writer.commit().expect("failed to commit dreps");
+
+            seed_distribution(domain, distribution);
         })
     }
 
@@ -887,13 +902,20 @@ mod tests {
     }
 
     /// The special DReps are listed where a delegation first names them,
-    /// with an empty `hex`, as Blockfrost lists them.
+    /// with an empty `hex` and their distribution entries, as Blockfrost lists
+    /// them.
     #[tokio::test]
     async fn governance_dreps_list_includes_the_special_dreps() {
-        let app = TestApp::new_with_cfg(sighted::config());
+        let app = TestApp::new_with_cfg_and_setup(sighted::config(), |domain, _| {
+            seed_distribution(
+                domain,
+                [(DRep::Abstain, 40), (DRep::NoConfidence, 50)].into(),
+            );
+        });
+
         let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
 
-        for drep in [DRep::Abstain, DRep::NoConfidence] {
+        for (drep, amount) in [(DRep::Abstain, 40), (DRep::NoConfidence, 50)] {
             let drep_id = sighted::id(&drep);
 
             let listed = models
@@ -902,6 +924,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{drep_id} is not listed"));
 
             assert_eq!(listed.hex, "");
+            assert_eq!(listed.amount, amount.to_string());
             assert!(!listed.has_script);
             assert!(!listed.retired);
             assert!(!listed.expired);
@@ -910,20 +933,13 @@ mod tests {
         }
     }
 
-    /// An update without an anchor clears the ledger's anchor, but the list
-    /// serves the one the registration carried, as Blockfrost does.
+    /// An update without an anchor leaves the list on the one the
+    /// registration carried, as Blockfrost does.
     #[tokio::test]
     async fn governance_dreps_list_keeps_the_anchor_an_update_omits() {
         let app = TestApp::new_with_cfg(sighted::config());
         let drep = sighted::drep(sighted::REGISTERED_FIRST);
         let registered = sighted::anchor(0x51);
-
-        let ledger_row = app
-            .facade()
-            .read_cardano_entity::<DRepState>(&DRepKey::from(&drep))
-            .expect("drep read")
-            .expect("drep state");
-        assert_eq!(ledger_row.anchor, None, "the update cleared the ledger's");
 
         let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
         let metadata = models
@@ -957,8 +973,7 @@ mod tests {
 
                 // seen at the very first slot and silent ever since, with the
                 // ledger expiry the boundary would have long since tripped
-                let mut state = DRepState::new(identifier.clone());
-                state.expiry = Some(DRepExpiry::new(0, 0));
+                let mut state = DRepState::new(identifier.clone(), DRepExpiry::new(0, 0));
                 state.expired = true;
 
                 writer
@@ -1087,8 +1102,8 @@ mod tests {
                     .expect("drep rows")
                     .into_iter()
                     .map(|row| {
-                        let power = row.state.map(|state| state.voting_power);
-                        (row.sighting.first_seen, row.key, power)
+                        let registered = row.state.map(|state| state.registered_at);
+                        (row.sighting.first_seen, row.key, registered)
                     })
                     .collect::<Vec<_>>()
             }
