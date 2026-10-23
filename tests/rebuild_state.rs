@@ -280,12 +280,42 @@ fn target_and_ephemeral_leave_the_instance_untouched() {
     let after = InstanceContents::read(&node);
     assert_eq!(after, before);
 
-    // And the alternate-path rebuild is the same state the instance holds.
+    // And the alternate-path rebuild is the same state the instance holds,
+    // in a store recording this release's identity.
     let rebuilt =
         dolos::storage::StateStoreBackend::open_fjall(&target, dolos_fjall::Preset::Standard)
             .unwrap();
 
     assert_eq!(StateContents::read(&rebuilt), before.state);
+    assert_eq!(
+        rebuilt.identity().unwrap().as_deref(),
+        Some(dolos_core::config::Compatibility::current().as_str())
+    );
+}
+
+/// A `--target` holding a state store a release that predates store
+/// identities wrote is refused, and left as it was.
+#[test]
+fn a_target_holding_an_unmarked_store_is_refused() {
+    use dolos_core::StateWriter as _;
+
+    let node = Node::new();
+    node.sync();
+
+    let target = node.root.path().join("rebuilt-state");
+    let unmarked = dolos_fjall::StateStore::open(&target, dolos_fjall::Preset::Standard).unwrap();
+    let writer = unmarked.start_writer().unwrap();
+    writer.set_cursor(ChainPoint::Origin).unwrap();
+    writer.commit().unwrap();
+    unmarked.shutdown().unwrap();
+    drop(unmarked);
+
+    let output = rebuild(&node, &["--target", &target.display().to_string()]);
+    assert!(!output.status.success());
+
+    let unmarked = dolos_fjall::StateStore::open(&target, dolos_fjall::Preset::Standard).unwrap();
+    assert_eq!(unmarked.identity().unwrap(), None);
+    assert_eq!(unmarked.read_cursor().unwrap(), Some(ChainPoint::Origin));
 }
 
 /// The in-place wipe asks first. With no terminal attached there is nobody to

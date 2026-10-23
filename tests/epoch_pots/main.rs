@@ -469,7 +469,7 @@ fn run_epoch_pots_test(
                 CardanoWorkUnit::Rupd(rupd) => {
                     // Dump delegation and stake from RUPD (snapshot-based data)
                     if let Some(w) = rupd.work() {
-                        if let Some((_, performance_epoch)) = w.relevant_epochs() {
+                        if let Some((_, performance_epoch)) = w.stake_epochs() {
                             if let Err(e) =
                                 dump_delegation_csv(&w.snapshot, &dumps_dir, performance_epoch)
                             {

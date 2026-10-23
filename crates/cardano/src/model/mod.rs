@@ -165,6 +165,7 @@ pub enum CardanoEntity {
     PendingMirState(Box<PendingMirState>),
     GovState(Box<GovState>),
     AccountEpochLog(Box<AccountEpochLog>),
+    DRepEpochLog(Box<DRepEpochLog>),
     FirstMintSet(Box<FirstMintSet>),
     FirstMintChunk(Box<FirstMintChunk>),
     PolicyMintChunk(Box<PolicyMintChunk>),
@@ -216,6 +217,7 @@ variant_boilerplate!(PendingRewardState);
 variant_boilerplate!(PendingMirState);
 variant_boilerplate!(GovState);
 variant_boilerplate!(AccountEpochLog);
+variant_boilerplate!(DRepEpochLog);
 variant_boilerplate!(FirstMintSet);
 variant_boilerplate!(FirstMintChunk);
 variant_boilerplate!(PolicyMintChunk);
@@ -250,6 +252,7 @@ impl dolos_core::Entity for CardanoEntity {
             PendingMirState::NS => PendingMirState::decode_entity(ns, value).map(Into::into),
             GovState::NS => GovState::decode_entity(ns, value).map(Into::into),
             AccountEpochLog::NS => AccountEpochLog::decode_entity(ns, value).map(Into::into),
+            DRepEpochLog::NS => DRepEpochLog::decode_entity(ns, value).map(Into::into),
             FirstMintSet::NS => FirstMintSet::decode_entity(ns, value).map(Into::into),
             FirstMintChunk::NS => FirstMintChunk::decode_entity(ns, value).map(Into::into),
             PolicyMintChunk::NS => PolicyMintChunk::decode_entity(ns, value).map(Into::into),
@@ -290,6 +293,7 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PendingMirState(x) => PendingMirState::encode_entity(x),
             Self::GovState(x) => GovState::encode_entity(x),
             Self::AccountEpochLog(x) => AccountEpochLog::encode_entity(x),
+            Self::DRepEpochLog(x) => DRepEpochLog::encode_entity(x),
             Self::FirstMintSet(x) => FirstMintSet::encode_entity(x),
             Self::FirstMintChunk(x) => FirstMintChunk::encode_entity(x),
             Self::PolicyMintChunk(x) => PolicyMintChunk::encode_entity(x),
@@ -355,6 +359,7 @@ pub fn build_log_schema() -> StateSchema {
     register_log::<EpochState>(&mut schema);
     register_log::<PoolEpochLog>(&mut schema);
     register_log::<AccountEpochLog>(&mut schema);
+    register_log::<DRepEpochLog>(&mut schema);
     register_log::<FirstMintChunk>(&mut schema);
     register_log::<PolicyMintChunk>(&mut schema);
     register_log::<FirstScriptChunk>(&mut schema);
@@ -378,6 +383,7 @@ mod schema_tests {
         for ns in [
             AccountEpochLog::NS,
             PoolEpochLog::NS,
+            DRepEpochLog::NS,
             AccountAddressChunk::NS,
             PaymentAddressChunk::NS,
             PolicyMintChunk::NS,

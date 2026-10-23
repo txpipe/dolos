@@ -103,8 +103,7 @@ The `storage` section controls how Dolos stores data in the local file system. E
   stores independently compressed zstd-3 block frames using the bundled
   dictionary and keeps indexes in the state and archive stores; there are no
   compression settings. Run `dolos init` and
-  [bootstrap](../bootstrap) to replace data in another format. Relabelling a
-  data directory as `v4` is unsupported and is not detected.
+  [bootstrap](../bootstrap) to replace data in another format.
 
 Besides the stores, this directory holds `scratch/`, where `dolos bootstrap
 stelae` and `dolos snapshot verify` stage layers moved over an OCI registry.
@@ -173,8 +172,7 @@ The dictionary is part of the storage format, not a setting: every build carries
 
 Dolos opens only storage declared as `v4`. Run `dolos init` and bootstrap with
 Mithril, a relay, or a compatible Stelae snapshot to create the required
-layout. The version check applies to the configuration; relabelling data in
-another format as `v4` is unsupported and is not detected.
+layout.
 
 ### `storage.mempool` section
 
@@ -319,12 +317,14 @@ The `serve.minibf` section controls the options for the HTTP endpoint that hosts
 | token_registry_url    | string  | "https://token-registry.io" |
 | url                   | string  | "https://minibf.local"      |
 | max_scan_items        | integer | 3000                        |
+| route_prefix          | string  | "/api/v0"                   |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin (defaults to `true`).
 - `token_registry_url`: optional token registry base URL used for off-chain asset metadata.
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
+- `route_prefix`: a URL path every endpoint is served under, `/health` and `/metrics` included; set `"/api/v0"` to match the Blockfrost server URL. It starts with `/`, its segments use only letters, digits, `-`, `.`, `_` and `~`, and `.` and `..` segments are refused. A path outside the prefix answers like any unknown path. Unset, the endpoints are served at the root.
 
 ## `serve.minikupo` section
 

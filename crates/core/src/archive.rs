@@ -88,6 +88,9 @@ pub enum ArchiveError {
     /// records fails instead of reporting success.
     #[error("{0} is not supported on this storage backend")]
     Unsupported(&'static str),
+
+    #[error(transparent)]
+    IncompatibleStore(#[from] crate::compat::IncompatibleStore),
 }
 
 /// Iterator used by backends that do not implement

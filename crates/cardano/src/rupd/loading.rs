@@ -1,5 +1,5 @@
 use dolos_core::{BrokenInvariant, ChainError, Domain, Genesis, RangeOf, StateStore};
-use pallas::ledger::primitives::StakeCredential;
+use pallas::ledger::primitives::{Epoch, StakeCredential};
 use tracing::{debug, trace};
 
 use crate::{
@@ -273,24 +273,43 @@ impl std::fmt::Display for StakeSnapshot {
 pub type SnapshotEpoch = u64;
 pub type PerformanceEpoch = u64;
 
+/// The stake snapshot the RUPD of `epoch`, and the EWRAP closing it, read:
+/// the distribution of `epoch - 3`, from the first Shelley epoch's on.
+/// It feeds the logs of the epoch the distribution is active in.
+pub fn stake_snapshot_epoch(epoch: Epoch, first_shelley: Epoch) -> Option<SnapshotEpoch> {
+    epoch
+        .checked_sub(3)
+        .filter(|snapshot_epoch| *snapshot_epoch >= first_shelley)
+}
+
+/// The stake snapshot the rewards of `epoch` are computed against. Dolos
+/// computes no rewards while the snapshot epoch is still the first Shelley
+/// epoch. This is a Dolos rule, not a ledger one: the ledger pays pools that
+/// minted against that snapshot, but on the shipped networks those rewards
+/// are zero for other reasons (`d = 1` on mainnet, the pre-Babbage reward
+/// prefilter on preview and preprod), and the rule matches their history.
+pub fn reward_snapshot_epoch(epoch: Epoch, first_shelley: Epoch) -> Option<SnapshotEpoch> {
+    stake_snapshot_epoch(epoch, first_shelley)
+        .filter(|snapshot_epoch| *snapshot_epoch > first_shelley)
+}
+
 impl RupdWork {
-    pub fn relevant_epochs(&self) -> Option<(SnapshotEpoch, PerformanceEpoch)> {
-        if self.current_epoch < 4 {
-            return None;
-        }
-
-        let snapshot_epoch = self.current_epoch - 3;
-        let performance_epoch = self.current_epoch - 1;
-
-        // The Cardano node doesn't compute rewards until the snapshot epoch is
-        // past the first Shelley epoch. The genesis-initialized snapshot at the
-        // first Shelley epoch itself is not used for reward computation.
+    /// The snapshot and performance epochs, when a stake snapshot exists
+    /// ([`stake_snapshot_epoch`]).
+    pub fn stake_epochs(&self) -> Option<(SnapshotEpoch, PerformanceEpoch)> {
         let first_shelley = self.chain.first_shelley_epoch();
-        if snapshot_epoch <= first_shelley {
-            return None;
-        }
+        let snapshot_epoch = stake_snapshot_epoch(self.current_epoch, first_shelley)?;
 
-        Some((snapshot_epoch, performance_epoch))
+        Some((snapshot_epoch, self.current_epoch - 1))
+    }
+
+    /// The snapshot and performance epochs, when rewards are computed
+    /// ([`reward_snapshot_epoch`]).
+    pub fn reward_epochs(&self) -> Option<(SnapshotEpoch, PerformanceEpoch)> {
+        let first_shelley = self.chain.first_shelley_epoch();
+        let snapshot_epoch = reward_snapshot_epoch(self.current_epoch, first_shelley)?;
+
+        Some((snapshot_epoch, self.current_epoch - 1))
     }
 
     #[cfg(test)]
@@ -360,7 +379,7 @@ impl RupdWork {
             shard_ranges: None,
         };
 
-        if let Some((snapshot_epoch, performance_epoch)) = work.relevant_epochs() {
+        if let Some((snapshot_epoch, performance_epoch)) = work.stake_epochs() {
             work.snapshot = StakeSnapshot::load_globals::<D>(state, current_epoch, snapshot_epoch)?;
 
             debug!(
@@ -385,7 +404,7 @@ impl RupdWork {
         state: &D::State,
         ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<(), ChainError> {
-        if let Some((snapshot_epoch, _)) = self.relevant_epochs() {
+        if let Some((snapshot_epoch, _)) = self.stake_epochs() {
             // The snapshot data was "live" at snapshot_epoch and becomes the
             // "mark" snapshot at snapshot_epoch + 1. The Haskell ledger
             // computes the mark snapshot under the entering epoch's protocol
@@ -411,7 +430,7 @@ impl RupdWork {
     pub fn load<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<RupdWork, ChainError> {
         let mut work = Self::load_globals::<D>(state, genesis)?;
 
-        if work.relevant_epochs().is_some() {
+        if work.stake_epochs().is_some() {
             // Cover the entire credential-key space with a single range so
             // every account flows through `merge_shard` and lands in the
             // per-account maps. `shard_ranges` is then the whole key space,
