@@ -281,18 +281,36 @@ pub fn payment_stats() -> PaymentStats {
     PaymentStats { tx_count: 23 }
 }
 
-/// A mint and a burn, so both signs of the amount are pinned.
+/// A flagged mint, a plain mint and a burn, so the flag and both signs of
+/// the amount are pinned.
 pub fn asset_mint_chunk() -> AssetMintChunk {
     AssetMintChunk {
         count: 259,
-        mints: vec![(hash32(0xd0), 1_000_000), (hash32(0xd1), -42)],
+        mints: vec![
+            AssetMintSet {
+                tx_hash: hash32(0xd0),
+                amount: 1_000_000,
+                names_asset: true,
+            },
+            AssetMintSet {
+                tx_hash: hash32(0xd3),
+                amount: 1,
+                names_asset: false,
+            },
+            AssetMintSet {
+                tx_hash: hash32(0xd1),
+                amount: -42,
+                names_asset: false,
+            },
+        ],
     }
 }
 
 pub fn asset_mint_set() -> AssetMintSet {
     AssetMintSet {
         tx_hash: hash32(0xd2),
-        amount: -7,
+        amount: 7,
+        names_asset: true,
     }
 }
 

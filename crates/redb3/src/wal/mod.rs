@@ -200,9 +200,11 @@ const WAL_METADATA_VERSION_KEY: &str = "version";
 /// 2: deltas carry typed, variable-length entity keys (decision 0051).
 /// 3: `EpochStatsUpdate` and `ScriptFirstSeen` drop the fields nothing reads.
 /// 4: inputs carry each UTxO's creation position beside its output.
-/// 5: the DRep and pool deltas drop the fields minibf now derives, and
+/// 5: staged asset mints carry whether their tx's CIP-25 metadata names the
+///    asset.
+/// 6: the DRep and pool deltas drop the fields minibf now derives, and
 ///    `DRepAnchorUpdate` and `DRepPowerUpdate` retire.
-pub const CURRENT_WAL_VERSION: u32 = 5;
+pub const CURRENT_WAL_VERSION: u32 = 6;
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 
@@ -968,11 +970,9 @@ mod tests {
         assert!(store.data_table_is_empty().unwrap());
     }
 
-    /// A version-4 WAL holds DRep and pool deltas with the fields that left
-    /// the records, so it cannot be read as version 5: opening it wipes the
-    /// entries and stamps 5.
-    #[test]
-    fn a_version_4_wal_is_wiped_on_open() {
+    /// Open a WAL stamped `version` that holds an entry, and check the open
+    /// wiped it and stamped the current version.
+    fn assert_wiped_on_open(version: u32) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal.redb");
 
@@ -981,7 +981,7 @@ mod tests {
             let wx = db.begin_write().unwrap();
             {
                 let mut metadata = wx.open_table(WAL_METADATA).unwrap();
-                metadata.insert(WAL_METADATA_VERSION_KEY, 4).unwrap();
+                metadata.insert(WAL_METADATA_VERSION_KEY, version).unwrap();
 
                 let mut table = wx.open_table(WAL).unwrap();
                 let key = DbChainPoint::from(ChainPoint::Specific(42, [1u8; 32].into()));
@@ -991,8 +991,29 @@ mod tests {
         }
 
         let store = open_test_store(&path).unwrap();
-        assert_eq!(store.read_version().unwrap(), Some(5));
+        assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
         assert!(store.data_table_is_empty().unwrap());
+    }
+
+    /// A version-3 WAL holds inputs without their creation position, so
+    /// opening it wipes the entries.
+    #[test]
+    fn a_version_3_wal_is_wiped_on_open() {
+        assert_wiped_on_open(3);
+    }
+
+    /// A version-4 WAL holds staged asset mints without their CIP-25 flag, so
+    /// opening it wipes the entries.
+    #[test]
+    fn a_version_4_wal_is_wiped_on_open() {
+        assert_wiped_on_open(4);
+    }
+
+    /// A version-5 WAL holds DRep and pool deltas with the fields that left
+    /// the records, so opening it wipes the entries.
+    #[test]
+    fn a_version_5_wal_is_wiped_on_open() {
+        assert_wiped_on_open(5);
     }
 
     #[test]
