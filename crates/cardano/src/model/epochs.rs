@@ -1605,6 +1605,56 @@ mod tests {
     use dolos_core::EntityDelta;
 
     use super::*;
+    use crate::PParamValue;
+
+    #[test]
+    fn pparams_update_cost_models_sentinel_preserves_models_and_undo() {
+        let current = PParamsSet::default()
+            .with(PParamValue::CostModelsPlutusV1(vec![1]))
+            .with(PParamValue::CostModelsPlutusV2(vec![2]))
+            .with(PParamValue::CostModelsPlutusV3(vec![3]))
+            .with(PParamValue::CostModelsUnknown(BTreeMap::from([(
+                7,
+                vec![4, -5],
+            )])))
+            .with(PParamValue::MinFeeA(44));
+        let update = PParamsSet::default()
+            .with(PParamValue::CostModelsUnknown(BTreeMap::new()))
+            .with(PParamValue::MinFeeA(45));
+
+        for scheduled in [None, Some(current.clone().with(PParamValue::MinFeeB(10)))] {
+            let mut pparams = EpochValue::with_live(0, current.clone());
+            pparams.schedule(0, scheduled.clone());
+            let mut entity = Some(EpochState {
+                pparams,
+                ..Default::default()
+            });
+            let before = entity.clone();
+            let mut delta = PParamsUpdate::new(update.clone());
+            delta.apply(&mut entity);
+
+            let pparams = &entity.as_ref().unwrap().pparams;
+            assert_eq!(pparams.live(), Some(&current));
+            assert_eq!(
+                pparams.next(),
+                Some(
+                    &scheduled
+                        .unwrap_or_else(|| current.clone())
+                        .with(PParamValue::MinFeeA(45))
+                )
+            );
+            assert_eq!(delta.to_update, update);
+
+            let applied = entity.clone();
+            let bytes = bincode::serialize(&delta).unwrap();
+            let mut delta: PParamsUpdate = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(delta.to_update, update);
+            delta.undo(&mut entity);
+            assert_eq!(entity, before);
+            delta.apply(&mut entity);
+            assert_eq!(entity, applied);
+        }
+    }
 
     #[test]
     fn epoch_stats_preserve_first_slot_across_apply_undo_and_reapply() {
