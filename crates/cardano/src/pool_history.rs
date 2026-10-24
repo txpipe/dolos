@@ -34,7 +34,7 @@ pub const POOL_REGISTRATIONS: CacheNamespace = CacheNamespace::immutable("pool-r
 /// The cache namespace of lifetime blocks: one entry, under [`ENTRY`].
 pub const POOL_BLOCKS: CacheNamespace = CacheNamespace::immutable("pool-blocks", 1);
 
-/// Each namespace holds one entry for every pool.
+/// The key of each namespace's single entry, which covers every pool.
 pub const ENTRY: &[u8] = b"";
 
 /// Register both namespaces, unless rolling history prunes the archive they
@@ -385,8 +385,10 @@ pub fn unsealed_blocks<D: Domain>(
         return Ok(0);
     };
 
+    // no epoch before the unlogged ones ends has a row
+    let first_row = from.max(unlogged_epochs(chain).end);
     let previous = live_epoch.checked_sub(1);
-    let epochs: Vec<Epoch> = (from..live_epoch).chain(previous).collect();
+    let epochs: Vec<Epoch> = (first_row..live_epoch).chain(previous).collect();
 
     let rows = read_sealed::<_, PoolEpochLog>(domain.archive(), chain, epochs, |_| {
         PoolKey(pool.operator)
@@ -580,8 +582,8 @@ mod tests {
 
     /// A store with its tip in [`TIP`], `POOL`'s live snapshot there with
     /// `live` blocks and its `mark` with `mark`, and a `pool-epochs` row of
-    /// `epoch % 7` blocks for each of `logged`. Answers the pool's lifetime
-    /// blocks.
+    /// `epoch % 7` blocks for each of `logged` past the [`unlogged_epochs`],
+    /// which RUPD never logs. Answers the pool's lifetime blocks.
     fn seeded(logged: std::ops::Range<Epoch>, mark: u32, live: u32) -> (ToyDomain, u64) {
         seeded_with(None, logged, mark, live)
     }
@@ -595,6 +597,7 @@ mod tests {
     ) -> (ToyDomain, u64) {
         let domain = ToyDomain::new(None, storage);
         let chain = crate::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+        let logged = logged.start.max(unlogged_epochs(&chain).end)..logged.end;
 
         let pool = PoolState {
             operator: POOL.into(),
@@ -702,7 +705,17 @@ mod tests {
 
         assert!(!register_pool_caches(&domain).unwrap());
         assert_eq!(read(&domain).await, (total, total));
-        assert!(domain.cache().get(POOL_BLOCKS.name, ENTRY).is_none());
+
+        for ns in [POOL_REGISTRATIONS, POOL_BLOCKS] {
+            let fill = || Ok::<_, ChainError>(CacheEntry::new(vec![], 1));
+            let res = domain.cache().get_or_fill(ns.name, ENTRY, fill).await;
+
+            assert!(
+                matches!(res, Err(CacheError::UnknownNamespace(_))),
+                "{} registered",
+                ns.name
+            );
+        }
     }
 
     /// An entry extends from its own watermark, scanning only the rows after

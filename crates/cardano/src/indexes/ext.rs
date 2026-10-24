@@ -24,7 +24,7 @@ pub enum PoolCert {
 
 /// The certificates of `operator` in the valid transactions of `block`, in
 /// chain order.
-fn pool_certs_in(block: &MultiEraBlock, operator: &PoolHash) -> Vec<(CertPosition, PoolCert)> {
+pub fn pool_certs_in(block: &MultiEraBlock, operator: &PoolHash) -> Vec<(CertPosition, PoolCert)> {
     let mut out = Vec::new();
 
     for (tx_index, tx) in block.txs().iter().enumerate() {

@@ -151,14 +151,19 @@ mod tests {
     }
 
     /// What `/txs/{hash}` and `/txs/{hash}/pool_updates` make of the pool
-    /// certificates in the first tx of each block: `active_epoch` less the
-    /// tx's epoch for each of `pools`, and the tx `deposit`.
-    async fn pool_updates_of(app: &TestApp, block: usize, pools: &[[u8; 28]]) -> (Vec<i32>, i64) {
+    /// certificates in tx `tx` of `block`: `active_epoch` less the tx's epoch
+    /// for each certificate of `pools`, in order, and the tx `deposit`.
+    async fn pool_updates_of(
+        app: &TestApp,
+        block: usize,
+        tx: usize,
+        pools: &[[u8; 28]],
+    ) -> (Vec<i32>, i64) {
         use blockfrost_openapi::models::tx_content::TxContent;
 
         use crate::mapping::bech32_pool;
 
-        let tx = app.vectors().blocks[block].tx_hashes[0].clone();
+        let tx = app.vectors().blocks[block].tx_hashes[tx].clone();
         let chain = app.facade().get_chain_summary().unwrap();
 
         let content: TxContent = get_ok(app, &format!("/txs/{tx}")).await;
@@ -167,13 +172,12 @@ mod tests {
         let updates: Vec<TxContentPoolCertsInner> =
             get_ok(app, &format!("/txs/{tx}/pool_updates")).await;
 
-        let active = pools
+        let pool_ids: Vec<String> = pools.iter().map(|x| bech32_pool(*x).unwrap()).collect();
+
+        let active = updates
             .iter()
-            .map(|operator| {
-                let pool_id = bech32_pool(*operator).unwrap();
-                let update = updates.iter().find(|x| x.pool_id == pool_id).unwrap();
-                update.active_epoch - epoch as i32
-            })
+            .filter(|x| pool_ids.contains(&x.pool_id))
+            .map(|x| x.active_epoch - epoch as i32)
             .collect();
 
         (active, content.deposit.parse().unwrap())
@@ -231,8 +235,8 @@ mod tests {
             .with_genesis_pool(GENESIS)
             .build();
 
-        let (active, deposit) = pool_updates_of(&app, 1, &[GENESIS, FRESH]).await;
-        let (_, baseline) = pool_updates_of(&app, 2, &[]).await;
+        let (active, deposit) = pool_updates_of(&app, 1, 0, &[GENESIS, FRESH]).await;
+        let (_, baseline) = pool_updates_of(&app, 2, 0, &[]).await;
 
         assert_eq!(active, [3, 2]);
         assert_eq!(
@@ -292,15 +296,53 @@ mod tests {
             "block 3 opens the retiring epoch"
         );
 
-        let (_, baseline) = pool_updates_of(&app, 5, &[]).await;
+        let (_, baseline) = pool_updates_of(&app, 5, 0, &[]).await;
 
-        let (active, deposit) = pool_updates_of(&app, 3, &[FIRST]).await;
+        let (active, deposit) = pool_updates_of(&app, 3, 0, &[FIRST]).await;
         assert_eq!(active, [3], "still registered at the previous block");
         assert_eq!(deposit - baseline, pool_deposit(&app), "reaped by the tick");
 
-        let (active, deposit) = pool_updates_of(&app, 4, &[LATER]).await;
+        let (active, deposit) = pool_updates_of(&app, 4, 0, &[LATER]).await;
         assert_eq!(active, [2]);
         assert_eq!(deposit - baseline, pool_deposit(&app));
+    }
+
+    /// The ledger applies a block's certificates one after another, and
+    /// db-sync counts an update stored earlier in the block. A pool's second
+    /// certificate in a block, in a later tx or the same one, is an update,
+    /// active three epochs on, with no deposit.
+    #[tokio::test]
+    async fn txs_pool_updates_after_an_earlier_certificate_in_the_block() {
+        use dolos_testing::synthetic::SyntheticBlockConfig;
+
+        const ACROSS: [u8; 28] = [0x7a; 28];
+        const WITHIN: [u8; 28] = [0x7b; 28];
+
+        // block 2 carries the synthetic certificates alone, in both txs
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 3,
+            extra_certs_by_block: vec![
+                vec![vec![]],
+                vec![
+                    vec![register(ACROSS), register(WITHIN), register(WITHIN)],
+                    vec![register(ACROSS)],
+                ],
+                vec![vec![]],
+            ],
+            ..Default::default()
+        });
+
+        let (_, baseline) = pool_updates_of(&app, 2, 0, &[]).await;
+
+        let (active, deposit) = pool_updates_of(&app, 1, 0, &[ACROSS, WITHIN]).await;
+        assert_eq!(active, [2, 2, 3]);
+        assert_eq!(deposit - baseline, 2 * pool_deposit(&app), "once a pool");
+
+        let (_, baseline) = pool_updates_of(&app, 2, 1, &[]).await;
+
+        let (active, deposit) = pool_updates_of(&app, 1, 1, &[ACROSS]).await;
+        assert_eq!(active, [3]);
+        assert_eq!(deposit, baseline);
     }
 
     #[tokio::test]

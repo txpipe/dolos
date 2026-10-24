@@ -26,8 +26,9 @@ use pallas::ledger::primitives::{conway::RationalNumber, Epoch, StakeCredential}
 use dolos_cardano::{
     estart::EstartWorkUnit, ewrap::EwrapWorkUnit, indexes::archive_dimensions, rupd::RupdWorkUnit,
     rupd::StakeSnapshot, AccountEpochLog, AccountKey, AccountState, CardanoWorkUnit,
-    DRepDelegation, EndStats, EpochState, EpochValue, EraKey, PendingRewardState, PoolDelegation,
-    PoolEpochLog, PoolHash, PoolKey, PoolParams, PoolSnapshot, PoolState, PoolTally, Stake,
+    DRepDelegation, EndStats, EpochState, EpochValue, EraBoundary, EraKey, EraState,
+    PendingRewardState, PoolDelegation, PoolEpochLog, PoolHash, PoolKey, PoolParams, PoolSnapshot,
+    PoolState, PoolTally, Stake,
 };
 
 fn key(byte: u8) -> StakeCredential {
@@ -1157,25 +1158,67 @@ fn lifetime_blocks_count_every_minted_block_around_rupd() {
             .unwrap()
             .first_shelley_epoch();
 
-    assert_lifetime_blocks_around_rupd(first_shelley + 2);
+    assert_lifetime_blocks_around_rupd(seeded(devnet()), first_shelley + 2);
 }
 
 /// The blocks of the first Shelley epochs count too, though RUPD logs no
-/// `pool-epochs` row for an epoch before the first stake snapshot.
+/// `pool-epochs` row for an epoch before the first stake snapshot, on a
+/// chain that opens in Shelley and on one with Byron epochs before it.
 #[test]
 fn lifetime_blocks_count_the_blocks_of_the_first_shelley_epochs() {
-    let chain =
-        dolos_cardano::eras::load_era_summary::<ToyDomain>(seeded(devnet()).state()).unwrap();
-    let unlogged = dolos_cardano::pool_history::unlogged_epochs(&chain);
+    for byron_epochs in [0, 4] {
+        let domain = seeded(devnet());
+        prefix_byron_epochs(&domain, byron_epochs);
 
-    assert!(!unlogged.is_empty(), "some epoch has no row");
-    assert_lifetime_blocks_around_rupd(unlogged.start);
+        let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+        let unlogged = dolos_cardano::pool_history::unlogged_epochs(&chain);
+
+        assert_eq!(unlogged.start, byron_epochs, "the first Shelley epoch");
+        assert!(!unlogged.is_empty(), "some epoch has no row");
+        assert_lifetime_blocks_around_rupd(domain, unlogged.start);
+    }
+}
+
+/// Rewrite the store's eras so that `epochs` Byron epochs open the chain,
+/// as on preprod: Byron, then one Shelley epoch, then the devnet's protocol,
+/// all at the devnet's epoch and slot lengths.
+fn prefix_byron_epochs(domain: &ToyDomain, epochs: Epoch) {
+    if epochs == 0 {
+        return;
+    }
+
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let edge = chain.edge().clone();
+
+    let boundary = |epoch: Epoch| EraBoundary {
+        epoch,
+        slot: epoch * edge.epoch_length,
+        timestamp: edge.start.timestamp + epoch * edge.epoch_length * edge.slot_length,
+    };
+
+    let era = |protocol: u16, start: Epoch, end: Option<Epoch>| EraState {
+        start: boundary(start),
+        end: end.map(boundary),
+        protocol,
+        ..edge.clone()
+    };
+
+    write(domain, |writer| {
+        for (protocol, era) in [
+            (1, era(1, 0, Some(epochs))),
+            (2, era(2, epochs, Some(epochs + 1))),
+            (edge.protocol, era(edge.protocol, epochs + 1, None)),
+        ] {
+            writer
+                .write_entity_typed(&EraKey::from(protocol), &era)
+                .unwrap();
+        }
+    });
 }
 
 /// Mints blocks to `OWNED` in every epoch from `first_minted` on, reading
 /// its lifetime blocks after each ESTART and each RUPD.
-fn assert_lifetime_blocks_around_rupd(first_minted: Epoch) {
-    let domain = seeded(devnet());
+fn assert_lifetime_blocks_around_rupd(domain: ToyDomain, first_minted: Epoch) {
     dolos_cardano::pool_history::register_pool_caches(&domain).unwrap();
 
     let whale = account(key(0x30), Some(OWNED), 1_000_000_000_000_000, 0, 0);
