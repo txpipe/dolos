@@ -13,8 +13,9 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{
-    sync::execute_work_unit, ArchiveStore as _, ArchiveWriter as _, BrokenInvariant, ChainError,
-    Domain, DomainError, Genesis, StateStore as _, StateWriter as _,
+    sync::execute_work_unit, ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _,
+    BrokenInvariant, ChainError, Domain, DomainError, Genesis, StateStore as _, StateWriter as _,
+    Tag,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
@@ -23,10 +24,10 @@ use dolos_testing::{
 use pallas::ledger::primitives::{conway::RationalNumber, Epoch, StakeCredential};
 
 use dolos_cardano::{
-    estart::EstartWorkUnit, ewrap::EwrapWorkUnit, rupd::RupdWorkUnit, rupd::StakeSnapshot,
-    AccountEpochLog, AccountKey, AccountState, CardanoWorkUnit, DRepDelegation, EndStats,
-    EpochState, EpochValue, EraKey, PendingRewardState, PoolDelegation, PoolEpochLog, PoolHash,
-    PoolKey, PoolParams, PoolSnapshot, PoolState, PoolTally, Stake,
+    estart::EstartWorkUnit, ewrap::EwrapWorkUnit, indexes::archive_dimensions, rupd::RupdWorkUnit,
+    rupd::StakeSnapshot, AccountEpochLog, AccountKey, AccountState, CardanoWorkUnit,
+    DRepDelegation, EndStats, EpochState, EpochValue, EraKey, PendingRewardState, PoolDelegation,
+    PoolEpochLog, PoolHash, PoolKey, PoolParams, PoolSnapshot, PoolState, PoolTally, Stake,
 };
 
 fn key(byte: u8) -> StakeCredential {
@@ -924,11 +925,38 @@ fn estart_writes_the_first_stake_epochs_rows_as_ewrap_does() {
 /// and, when `operator` minted them, that pool's. Without an operator they
 /// are blocks no registered pool minted, which the reward calculation pays
 /// no one for.
+/// Credit `blocks` blocks of the current epoch to `operator`, or to no pool,
+/// as the roll does: in the epoch's and the pool's live counts, and in the
+/// archive's `pool_blocks` tags.
 fn mint(domain: &ToyDomain, operator: Option<u8>, blocks: u32) {
     let mut epoch = epoch_state(domain);
     let rolling = epoch.rolling.unwrap_live_mut();
+    let earlier = rolling.blocks_minted;
     rolling.blocks_minted += blocks;
     rolling.non_overlay_blocks_minted += blocks;
+
+    if let Some(operator) = operator {
+        let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+        // past the slot RUPD runs at
+        let first = chain.epoch_start(epoch.number) + 2 + u64::from(earlier);
+
+        let deltas: Vec<_> = (first..first + u64::from(blocks))
+            .map(|slot| ArchiveIndexDelta {
+                slot,
+                block_hash: [&slot.to_be_bytes()[..], &[0; 24]].concat(),
+                block_number: Some(slot),
+                tx_hashes: vec![],
+                tags: vec![Tag::new(
+                    archive_dimensions::POOL_BLOCKS,
+                    pool_hash(operator).to_vec(),
+                )],
+            })
+            .collect();
+
+        let writer = domain.archive().start_writer().unwrap();
+        writer.apply_index(&deltas).unwrap();
+        writer.commit().unwrap();
+    }
 
     let pool = operator.map(|operator| {
         let mut pool = pools(domain).remove(&pool_hash(operator)).unwrap();
@@ -1127,6 +1155,29 @@ fn lifetime_blocks(domain: &ToyDomain, operator: u8) -> (u64, u64) {
 /// `live` to `mark`, so from ESTART until RUPD the count is in `mark` alone.
 #[test]
 fn lifetime_blocks_count_every_minted_block_around_rupd() {
+    let first_shelley =
+        dolos_cardano::eras::load_era_summary::<ToyDomain>(seeded(devnet()).state())
+            .unwrap()
+            .first_shelley_epoch();
+
+    assert_lifetime_blocks_around_rupd(first_shelley + 2);
+}
+
+/// The blocks of the first Shelley epochs count too, though RUPD logs no
+/// `pool-epochs` row for an epoch before the first stake snapshot.
+#[test]
+fn lifetime_blocks_count_the_blocks_of_the_first_shelley_epochs() {
+    let chain =
+        dolos_cardano::eras::load_era_summary::<ToyDomain>(seeded(devnet()).state()).unwrap();
+    let unlogged = dolos_cardano::pool_history::unlogged_epochs(&chain);
+
+    assert!(!unlogged.is_empty(), "some epoch has no row");
+    assert_lifetime_blocks_around_rupd(unlogged.start);
+}
+
+/// Mints blocks to `OWNED` in every epoch from `first_minted` on, reading
+/// its lifetime blocks after each ESTART and each RUPD.
+fn assert_lifetime_blocks_around_rupd(first_minted: Epoch) {
     let domain = seeded(devnet());
     dolos_cardano::pool_history::register_pool_caches(&domain).unwrap();
 
@@ -1174,8 +1225,8 @@ fn lifetime_blocks_count_every_minted_block_around_rupd() {
             break;
         }
 
-        if epoch >= first_stake {
-            let blocks = 3 + 2 * (epoch - first_stake) as u32;
+        if epoch >= first_minted {
+            let blocks = 3 + 2 * (epoch - first_minted) as u32;
             mint(&domain, Some(OWNED), blocks);
             minted += u64::from(blocks);
         }

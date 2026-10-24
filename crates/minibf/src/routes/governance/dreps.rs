@@ -669,34 +669,38 @@ mod tests {
     /// each direction names a different row first.
     fn amount_app() -> TestApp {
         TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
-            let mut distribution = BTreeMap::new();
-
-            let writer = domain
-                .state()
-                .start_writer()
-                .expect("failed to start writer");
-
-            // seen in this order, so appearance order is a, b, c while the
-            // amounts run the other way
-            for (byte, power, seen) in [(0xa1u8, 300u64, 10u64), (0xb2, 100, 20), (0xc3, 200, 30)] {
-                let identifier = DRep::Key([byte; 28].into());
-
-                let mut state = DRepState::new(identifier.clone(), DRepExpiry::new(u64::MAX, 0));
-                state.registered_at = Some((seen, 0));
-
-                writer
-                    .write_entity_typed(&DRepKey::from(&identifier), &state)
-                    .expect("failed to write drep");
-
-                write_sighting(&writer, &identifier, (seen, 0, 0), None);
-
-                distribution.insert(identifier, power);
-            }
-
-            writer.commit().expect("failed to commit dreps");
-
-            seed_distribution(domain, distribution);
+            seed_amounts(domain)
         })
+    }
+
+    fn seed_amounts(domain: &ToyDomain) {
+        let mut distribution = BTreeMap::new();
+
+        let writer = domain
+            .state()
+            .start_writer()
+            .expect("failed to start writer");
+
+        // seen in this order, so appearance order is a, b, c while the
+        // amounts run the other way
+        for (byte, power, seen) in [(0xa1u8, 300u64, 10u64), (0xb2, 100, 20), (0xc3, 200, 30)] {
+            let identifier = DRep::Key([byte; 28].into());
+
+            let mut state = DRepState::new(identifier.clone(), DRepExpiry::new(u64::MAX, 0));
+            state.registered_at = Some((seen, 0));
+
+            writer
+                .write_entity_typed(&DRepKey::from(&identifier), &state)
+                .expect("failed to write drep");
+
+            write_sighting(&writer, &identifier, (seen, 0, 0), None);
+
+            distribution.insert(identifier, power);
+        }
+
+        writer.commit().expect("failed to commit dreps");
+
+        seed_distribution(domain, distribution);
     }
 
     /// The seeded DReps in the order they first appeared, which is the
@@ -743,6 +747,34 @@ mod tests {
         )
         .await;
         assert_eq!(listed_ids(&models, &seeded), vec![a, c, b]);
+    }
+
+    /// `amount` and `order_by=amount` follow the last completed distribution
+    /// while the next boundary's shards build one that orders them otherwise.
+    #[tokio::test]
+    async fn governance_dreps_list_amount_ignores_the_partial_distribution() {
+        let app = TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+            seed_amounts(domain);
+
+            let partial = [(0xa1u8, 100u64), (0xb2, 300), (0xc3, 200)]
+                .map(|(byte, power)| (DRep::Key([byte; 28].into()), power));
+            seed_partial_distribution(domain, partial.into());
+        });
+
+        let seeded = seeded_ids();
+        let models = get_dreps_list(&app, "/governance/dreps?count=100&order_by=amount").await;
+
+        assert_eq!(
+            listed_ids(&models, &seeded),
+            vec![seeded[1].clone(), seeded[2].clone(), seeded[0].clone()]
+        );
+
+        let amounts: Vec<_> = models
+            .iter()
+            .filter(|x| seeded.contains(&x.drep_id))
+            .map(|x| x.amount.as_str())
+            .collect();
+        assert_eq!(amounts, ["100", "200", "300"]);
     }
 
     /// DReps the synthetic chain's first tx names after its own DRep, whose

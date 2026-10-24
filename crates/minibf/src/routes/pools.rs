@@ -844,8 +844,8 @@ async fn fetch_pool_metadata_with_error(
 
 /// The listing order of `/pools` and `/pools/extended`: the slot of each
 /// pool's first registration, as db-sync's `pool_hash.id` orders them, the
-/// operator breaking ties. A pool whose registration the archive no longer
-/// holds lists last.
+/// operator breaking ties. A pool the Shelley genesis stakes lists first, and
+/// one whose registration the archive no longer holds last.
 async fn listing_order<D: Domain>(
     domain: &Facade<D>,
     pools: &[PoolHash],
@@ -2549,6 +2549,22 @@ mod tests {
         let extended_ids: Vec<String> = extended.into_iter().map(|pool| pool.pool_id).collect();
 
         assert_eq!(pools, extended_ids);
+    }
+
+    /// A pool the Shelley genesis stakes registered before any certificate,
+    /// so it lists before the pools the chain registers.
+    #[tokio::test]
+    async fn pools_list_a_genesis_pool_first() {
+        const GENESIS: [u8; 28] = [0xff; 28];
+
+        let app = TestApp::builder().with_genesis_pool(GENESIS).build();
+        let (status, bytes) = app.get_bytes("/pools?count=100").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+
+        assert!(pools.len() > 1, "the chain registers pools of its own");
+        assert_eq!(pools[0], crate::mapping::bech32_pool(GENESIS).unwrap());
     }
 
     #[tokio::test]

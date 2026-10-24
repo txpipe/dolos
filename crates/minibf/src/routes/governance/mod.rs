@@ -295,6 +295,23 @@ pub(super) mod testing {
         seed_gov(domain, gov);
     }
 
+    /// Makes `distribution` the partial DRep distribution of a boundary whose
+    /// shards are still running, beside the last completed one.
+    pub fn seed_partial_distribution(domain: &ToyDomain, distribution: BTreeMap<DRep, u64>) {
+        let mut gov = domain
+            .state()
+            .read_entity_typed::<GovState>(&())
+            .expect("The state store cannot read the governance state.")
+            .unwrap_or_default();
+
+        let mut distr = GovDistr::new(1, 2);
+        distr.committed_shards = 1;
+        distr.drep_distr = distribution;
+        gov.distr = Some(distr);
+
+        seed_gov(domain, gov);
+    }
+
     /// This function overwrites the governance singleton with the given state.
     pub fn seed_gov(domain: &ToyDomain, state: GovState) {
         let writer = domain

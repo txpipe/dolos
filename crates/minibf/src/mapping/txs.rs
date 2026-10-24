@@ -43,9 +43,9 @@ use blockfrost_openapi::models::{
 
 use dolos_cardano::{
     indexes::{CardanoArchiveIndexExt as _, PoolCert},
-    pallas_extras, AccountState, ChainSummary, DRepState, PParamsSet, PoolHash,
+    pallas_extras, pool_history, AccountState, ChainSummary, DRepState, PParamsSet, PoolHash,
 };
-use dolos_core::{Domain, EraCbor, TxHash, TxOrder, TxoRef};
+use dolos_core::{ArchiveStore as _, Domain, EraCbor, TxHash, TxOrder, TxoRef};
 
 use super::{
     bech32_pool, list_assets, pool_offchain_metadata, rational_to_f64, redeemer_fee,
@@ -177,17 +177,14 @@ impl<'a> TxModelBuilder<'a> {
         }
     }
 
-    /// db-sync's rule for a pool certificate (`isPoolRegistration`): a
-    /// registration, which takes the deposit and is active two epochs on,
-    /// when the pool was not registered at the end of the previous block,
-    /// because it never registered or its retirement had taken effect.
-    /// Otherwise an update, active three epochs on, which cancels a pending
-    /// retirement.
-    fn is_pool_registration<D: Domain>(
+    /// The newest certificate of `operator` before this block, `None` if it
+    /// never registered. A pool the Shelley genesis stakes is registered from
+    /// the start.
+    fn previous_pool_cert<D: Domain>(
         &self,
         facade: &Facade<D>,
         operator: &PoolHash,
-    ) -> Result<bool, StatusCode> {
+    ) -> Result<Option<PoolCert>, StatusCode> {
         let previous = facade
             .archive()
             .pool_cert_before(operator, self.block.slot())
@@ -195,10 +192,61 @@ impl<'a> TxModelBuilder<'a> {
                 "failed to read a pool's previous certificate",
             ))?;
 
-        Ok(match previous {
+        if previous.is_none() && pool_history::genesis_pools(&facade.genesis()).contains(operator) {
+            return Ok(Some(PoolCert::Registration));
+        }
+
+        Ok(previous)
+    }
+
+    /// The epoch of the block before this one, or this block's where the
+    /// archive no longer holds it.
+    fn previous_block_epoch<D: Domain>(&self, facade: &Facade<D>) -> Result<Epoch, StatusCode> {
+        let previous = facade
+            .archive()
+            .get_range(None, Some(self.block.slot()))
+            .map_err(crate::log_and_500("failed to read the previous block"))?
+            .next_back();
+
+        match previous {
+            Some((slot, _)) => Ok(self.chain_or_500()?.slot_epoch(slot).0),
+            None => self.tx_epoch(),
+        }
+    }
+
+    /// Whether a certificate of `operator` takes the pool deposit: when the
+    /// pool is not registered as the ledger applies the block, because it
+    /// never registered or its retirement took effect by the block's epoch.
+    fn takes_pool_deposit<D: Domain>(
+        &self,
+        facade: &Facade<D>,
+        operator: &PoolHash,
+    ) -> Result<bool, StatusCode> {
+        Ok(match self.previous_pool_cert(facade, operator)? {
             None => true,
             Some(PoolCert::Registration) => false,
             Some(PoolCert::Retirement(retiring)) => self.tx_epoch()? >= retiring,
+        })
+    }
+
+    /// db-sync's rule for a pool certificate (`isPoolRegistration`): a
+    /// registration, active two epochs on, when the pool was not registered
+    /// at the end of the previous block, because it never registered or its
+    /// retirement had taken effect. Otherwise an update, active three epochs
+    /// on, which cancels a pending retirement.
+    ///
+    /// It reads the pools before the ledger ticks into the block's epoch, so
+    /// in the first block of the epoch a retirement takes effect in, the
+    /// certificate takes the deposit and is still an update.
+    fn is_pool_registration<D: Domain>(
+        &self,
+        facade: &Facade<D>,
+        operator: &PoolHash,
+    ) -> Result<bool, StatusCode> {
+        Ok(match self.previous_pool_cert(facade, operator)? {
+            None => true,
+            Some(PoolCert::Registration) => false,
+            Some(PoolCert::Retirement(retiring)) => self.previous_block_epoch(facade)? >= retiring,
         })
     }
 
@@ -299,7 +347,7 @@ impl<'a> TxModelBuilder<'a> {
 
             if let Some(reg) = pallas_extras::cert_as_pool_registration(&cert) {
                 if repeated.insert((1, reg.operator.to_vec()))
-                    && self.is_pool_registration(facade, &reg.operator)?
+                    && self.takes_pool_deposit(facade, &reg.operator)?
                 {
                     out += pool_deposit;
                 }

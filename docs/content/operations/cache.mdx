@@ -10,16 +10,18 @@ Dolos keeps a cache of answers it derives from its other stores, so that an expe
 
 The cache is split into namespaces, one per use. Each namespace has a format version; an upgrade that changes a namespace's encoding bumps it, and the entries kept under the old version are wiped when the node starts.
 
-| namespace           | validity   | serves                                                                                                        |
-| ------------------- | ---------- | ------------------------------------------------------------------------------------------------------------- |
-| `totals`            | immutable  | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total`           |
-| `network`           | tip-scoped | the `/network` body, for 30 seconds                                                                           |
-| `offchain`          | immutable  | the verified DRep metadata of `/governance/dreps` and `/governance/dreps/{drep_id}/metadata`, by content hash |
-| `offchain-failures` | tip-scoped | failed metadata fetches, for 10 minutes, so a dead host is not asked again on every request                   |
+| namespace            | validity   | serves                                                                                                        |
+| -------------------- | ---------- | ------------------------------------------------------------------------------------------------------------- |
+| `totals`             | immutable  | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total`           |
+| `network`            | tip-scoped | the `/network` body, for 30 seconds                                                                           |
+| `offchain`           | immutable  | the verified DRep metadata of `/governance/dreps` and `/governance/dreps/{drep_id}/metadata`, by content hash |
+| `offchain-failures`  | tip-scoped | failed metadata fetches, for 10 minutes, so a dead host is not asked again on every request                   |
+| `pool-registrations` | immutable  | where each pool first registered, for the order of `/pools` and `/pools/extended`                             |
+| `pool-blocks`        | immutable  | each pool's lifetime blocks, for `blocks_minted` in `/pools/extended` and `/pools/{pool_id}`                  |
 
 A namespace has one of two validity models:
 
-- **Immutable** entries are never stale. An `offchain` body is pinned by its anchor's content hash, which every read checks again. The other immutable entries are built from sealed data only, so they are at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
+- **Immutable** entries are never stale. An `offchain` body is pinned by its anchor's content hash, which every read checks again. The other immutable entries are built from sealed data only, so they are at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. The `pool-registrations` and `pool-blocks` namespaces each hold one entry for every pool, up to the last slot or epoch no rollback can undo, and a read adds what came after. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
 - **Tip-scoped** entries are valid for a while. After that, a `network` entry is served stale while one rebuild replaces it, and an `offchain-failures` entry is ignored, so the next request fetches again. They are kept in memory only.
 
 The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file found corrupt, cut short, or laid out by another release, such as one you rolled back from, is recreated empty; one that fails to open for another reason, such as its permissions, is an error and the node does not start.
@@ -90,3 +92,5 @@ The cache records OpenTelemetry metrics under the `dolos-cache` meter:
 ## Pruned nodes
 
 The `totals` namespace sums sealed per-epoch stats from the archive, which a node with `history.mode = "rolling"` prunes. On such a node the namespace is off: the totals routes compute every answer without the cache, and `warm` and `verify` refuse it. Entries an earlier, unpruned run left on disk stay there until cleared: `stats` reports the namespace as off with their count, and `clear --namespace totals` or `clear --all` wipes them.
+
+The `pool-registrations` and `pool-blocks` namespaces are built from the archive's certificates and per-epoch pool logs, and are off on such a node in the same way. They are off too while `storage.cache.enabled = false`, since an entry that is never kept would be rebuilt for every pool on every request: the pool routes then read the archive for the pools they answer about.

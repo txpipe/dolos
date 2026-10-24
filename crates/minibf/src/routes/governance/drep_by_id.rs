@@ -162,6 +162,20 @@ mod tests {
         }
     }
 
+    /// A regular DRep serves its entry in the last completed distribution,
+    /// never the partial one the next boundary's shards are building.
+    #[tokio::test]
+    async fn governance_drep_amount_is_the_completed_distribution_entry() {
+        let app = TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+            seed_distribution(domain, [(synthetic_drep(), 1_234)].into());
+            seed_partial_distribution(domain, [(synthetic_drep(), 9_999)].into());
+        });
+
+        let model = get_drep(&app, &app.vectors().drep_id.clone()).await;
+
+        assert_eq!(model.amount, "1234");
+    }
+
     #[tokio::test]
     async fn governance_drep_by_id_accepts_legacy_encodings() {
         let app = TestApp::new();

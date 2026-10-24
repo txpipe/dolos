@@ -4,24 +4,28 @@
 //! of them for the list routes.
 //!
 //! - [`POOL_REGISTRATIONS`] maps each pool to its first registration in a valid
-//!   transaction, for every pool first registered before the immutable slot the
-//!   entry records.
+//!   transaction, or the Shelley genesis, for every pool first registered
+//!   before the immutable slot the entry records.
 //! - [`POOL_BLOCKS`] maps each pool to the sum of its `pool-epochs` rows up to
-//!   the epoch the entry records. A read adds the rows after it and the pool's
-//!   snapshots.
+//!   the epoch the entry records. A read adds the rows after it, the pool's
+//!   snapshots and the blocks of the first Shelley epochs, which no row covers.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashSet},
+    ops::Range,
+};
 
 use dolos_core::{
     config::HistoryMode, ArchiveStore as _, CacheEntry, CacheError, CacheNamespace,
-    CacheStore as _, ChainError, Domain, DomainError, Entity as _, FixedNamespace as _, LogRangeOf,
-    StateStore as _,
+    CacheStore as _, ChainError, Domain, DomainError, Entity as _, FixedNamespace as _, Genesis,
+    LogRangeOf, StateStore as _,
 };
 use pallas::{codec::minicbor, ledger::primitives::Epoch};
 
 use crate::{
-    indexes::CardanoArchiveIndexExt as _, periods::read_sealed, CertPosition, ChainSummary,
-    PoolEpochLog, PoolHash, PoolKey, PoolState,
+    indexes::CardanoArchiveIndexExt as _, periods::read_sealed,
+    rupd::loading::stake_snapshot_epoch, CertPosition, ChainSummary, PoolEpochLog, PoolHash,
+    PoolKey, PoolState,
 };
 
 /// The cache namespace of first registrations: one entry, under [`ENTRY`].
@@ -34,10 +38,13 @@ pub const POOL_BLOCKS: CacheNamespace = CacheNamespace::immutable("pool-blocks",
 pub const ENTRY: &[u8] = b"";
 
 /// Register both namespaces, unless rolling history prunes the archive they
-/// are built from: there every read goes to the archive. Answers whether it
-/// registered.
+/// are built from, or the cache is off and would keep no entry: there every
+/// read goes to the archive, for the pools it asks about only. Answers
+/// whether it registered.
 pub fn register_pool_caches<D: Domain>(domain: &D) -> Result<bool, CacheError> {
-    if domain.history_config().mode == HistoryMode::Rolling {
+    if domain.history_config().mode == HistoryMode::Rolling
+        || !domain.storage_config().cache.enabled
+    {
         return Ok(false);
     }
 
@@ -45,6 +52,39 @@ pub fn register_pool_caches<D: Domain>(domain: &D) -> Result<bool, CacheError> {
     domain.cache().register(POOL_BLOCKS)?;
 
     Ok(true)
+}
+
+/// Where the pools the Shelley genesis stakes register: before every block,
+/// since no certificate registers them.
+pub const GENESIS_POSITION: CertPosition = (0, 0, 0);
+
+/// The pools the Shelley genesis stakes.
+pub fn genesis_pools(genesis: &Genesis) -> HashSet<PoolHash> {
+    let pools = genesis
+        .shelley
+        .staking
+        .as_ref()
+        .and_then(|staking| staking.pools.as_ref());
+
+    pools
+        .into_iter()
+        .flat_map(|pools| pools.values())
+        .filter_map(|pool| pool.public_key.parse().ok())
+        .collect()
+}
+
+/// Where `pool` first registered: at [`GENESIS_POSITION`] for one of
+/// `genesis`, else in its first valid registration the archive holds.
+fn first_registration<D: Domain>(
+    domain: &D,
+    genesis: &HashSet<PoolHash>,
+    pool: &PoolHash,
+) -> Result<Option<CertPosition>, ChainError> {
+    if genesis.contains(pool) {
+        return Ok(Some(GENESIS_POSITION));
+    }
+
+    Ok(domain.archive().pool_first_registration(pool)?)
 }
 
 /// The last slot no rollback can undo with the tip at `tip`.
@@ -112,6 +152,7 @@ fn extend_registrations<D: Domain>(
     mut entry: RegistrationsEntry,
     watermark: u64,
 ) -> Result<CacheEntry, ChainError> {
+    let genesis = genesis_pools(&domain.genesis());
     let mut seeks = 0;
 
     for pool in domain.state().iter_entities_typed::<PoolState>(None)? {
@@ -123,7 +164,7 @@ fn extend_registrations<D: Domain>(
 
         seeks += 1;
 
-        match domain.archive().pool_first_registration(&pool)? {
+        match first_registration(domain, &genesis, &pool)? {
             Some(at) if at.0 <= watermark => entry.insert(pool, at),
             _ => (),
         }
@@ -177,6 +218,7 @@ pub async fn first_registrations<D: Domain>(
             .map(RegistrationsEntry::decode)
             .transpose()?;
 
+        let genesis = genesis_pools(&domain.genesis());
         let mut stale = None;
 
         let positions = pools
@@ -186,7 +228,7 @@ pub async fn first_registrations<D: Domain>(
                     return Ok(Some(at));
                 }
 
-                let at = domain.archive().pool_first_registration(pool)?;
+                let at = first_registration(domain, &genesis, pool)?;
 
                 if let (Some(entry), Some(at)) = (&entry, at) {
                     if at.0 <= watermark && entry.watermark < watermark {
@@ -285,9 +327,54 @@ fn extend_blocks<D: Domain>(
     Ok(entry.into_cache_entry(rows))
 }
 
+/// The Shelley epochs no `pool-epochs` row covers: RUPD logs an epoch only
+/// once a stake snapshot exists for it ([`stake_snapshot_epoch`]).
+pub fn unlogged_epochs(chain: &ChainSummary) -> Range<Epoch> {
+    let first_shelley = chain.first_shelley_epoch();
+
+    let first_logged = (first_shelley..)
+        .find(|epoch| stake_snapshot_epoch(epoch + 1, first_shelley).is_some())
+        .expect("a stake snapshot exists from some epoch on");
+
+    first_shelley..first_logged
+}
+
+/// The blocks `pool` minted in the [`unlogged_epochs`] before `end`, by the
+/// archive's `pool_blocks` tags.
+fn unlogged_blocks<D: Domain>(
+    domain: &D,
+    chain: &ChainSummary,
+    pool: &PoolHash,
+    end: Epoch,
+) -> Result<u64, ChainError> {
+    let epochs = unlogged_epochs(chain);
+    let end = end.min(epochs.end);
+
+    if epochs.start >= end {
+        return Ok(0);
+    }
+
+    let slots = domain.archive().slots_by_pool_blocks(
+        pool.as_ref(),
+        chain.epoch_start(epochs.start),
+        chain.epoch_start(end) - 1,
+    )?;
+
+    let mut blocks = 0;
+
+    for slot in slots {
+        slot?;
+        blocks += 1;
+    }
+
+    Ok(blocks)
+}
+
 /// The blocks `pool` minted from epoch `from` on: its `pool-epochs` rows up
 /// to the epoch before its live snapshot, the `mark` snapshot's count while
 /// that epoch has no row yet (between ESTART and RUPD), and the live count.
+/// The [`unlogged_epochs`] neither snapshot holds come from the archive
+/// whatever `from` is, since no entry sums them either.
 pub fn unsealed_blocks<D: Domain>(
     domain: &D,
     chain: &ChainSummary,
@@ -329,7 +416,12 @@ pub fn unsealed_blocks<D: Domain>(
         .map(|snapshot| u64::from(snapshot.blocks_minted))
         .unwrap_or_default();
 
-    Ok(logged + mark + live)
+    let unlogged = match previous {
+        Some(previous) => unlogged_blocks(domain, chain, &pool.operator, previous)?,
+        None => 0,
+    };
+
+    Ok(logged + mark + live + unlogged)
 }
 
 /// The blocks each of `pools` minted over its life.
@@ -449,7 +541,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use dolos_core::{ArchiveWriter as _, ChainPoint, StateWriter as _};
+    use dolos_core::{
+        config::{CacheConfig, StorageConfig},
+        ArchiveWriter as _, ChainPoint, StateWriter as _,
+    };
     use dolos_testing::toy_domain::ToyDomain;
     use pallas::ledger::primitives::conway::RationalNumber;
 
@@ -488,7 +583,17 @@ mod tests {
     /// `epoch % 7` blocks for each of `logged`. Answers the pool's lifetime
     /// blocks.
     fn seeded(logged: std::ops::Range<Epoch>, mark: u32, live: u32) -> (ToyDomain, u64) {
-        let domain = ToyDomain::new(None, None);
+        seeded_with(None, logged, mark, live)
+    }
+
+    /// [`seeded`] on a store configured by `storage`.
+    fn seeded_with(
+        storage: Option<StorageConfig>,
+        logged: std::ops::Range<Epoch>,
+        mark: u32,
+        live: u32,
+    ) -> (ToyDomain, u64) {
+        let domain = ToyDomain::new(None, storage);
         let chain = crate::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
 
         let pool = PoolState {
@@ -578,6 +683,26 @@ mod tests {
             );
             assert!(entry.watermark < TIP - 1, "the tail is read from the rows");
         }
+    }
+
+    /// With the cache off no entry would be kept, so every request would
+    /// rebuild one for every pool: the namespaces stay unregistered, and a
+    /// read sums the pool's own rows.
+    #[tokio::test]
+    async fn the_namespaces_stay_unregistered_while_the_cache_is_off() {
+        let storage = StorageConfig {
+            cache: CacheConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let (domain, total) = seeded_with(Some(storage), 0..TIP - 1, 5, 3);
+
+        assert!(!register_pool_caches(&domain).unwrap());
+        assert_eq!(read(&domain).await, (total, total));
+        assert!(domain.cache().get(POOL_BLOCKS.name, ENTRY).is_none());
     }
 
     /// An entry extends from its own watermark, scanning only the rows after
