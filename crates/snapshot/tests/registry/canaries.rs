@@ -378,18 +378,16 @@ pub fn drep_sighting_state() -> DRepSightingState {
 pub fn drep_state() -> DRepState {
     DRepState {
         registered_at: Some((55_555, 3)),
-        voting_power: 777_000_000,
         last_active_slot: Some(66_666),
         unregistered_at: Some((77_777, 11)),
         expired: true,
         deposit: 500_000_000,
         identifier: DRep::Key(hash28(0xa0)),
-        anchor: Some(anchor(0xa1)),
-        expiry: Some(DRepExpiry {
+        expiry: DRepExpiry {
             current: 412,
             updated_in: 409,
             prev: Some(400),
-        }),
+        },
     }
 }
 
@@ -725,8 +723,6 @@ pub fn pool_state() -> PoolState {
                 pool_snapshot(0x05),
             ],
         ),
-        blocks_minted_total: 4_242,
-        register_slot: 55_555_555,
         retiring_epoch: Some(777),
         deposit: 500_000_000,
         calidus: Some(CalidusRegistration {
