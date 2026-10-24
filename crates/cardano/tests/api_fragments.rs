@@ -31,10 +31,6 @@ use pallas::ledger::{
     traverse::MultiEraBlock,
 };
 
-// ---------------------------------------------------------------------------
-// Pool certificates
-// ---------------------------------------------------------------------------
-
 fn register_pool(operator: [u8; 28]) -> Certificate {
     Certificate::PoolRegistration {
         operator: operator.into(),
@@ -215,10 +211,6 @@ async fn cached_first_registrations_equal_the_archive() {
         uncached
     );
 }
-
-// ---------------------------------------------------------------------------
-// DRep voting power across boundaries
-// ---------------------------------------------------------------------------
 
 const CLOSING_EPOCH: u64 = 5;
 const ACCOUNTS: [u8; 3] = [0x10, 0x80, 0xf0];
