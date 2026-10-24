@@ -921,13 +921,10 @@ fn estart_writes_the_first_stake_epochs_rows_as_ewrap_does() {
     assert_eq!(account_epoch_logs(&domain, first_stake), estart_rows);
 }
 
-/// What `blocks` minted in the live epoch leave behind: the epoch's counts
-/// and, when `operator` minted them, that pool's. Without an operator they
-/// are blocks no registered pool minted, which the reward calculation pays
-/// no one for.
 /// Credit `blocks` blocks of the current epoch to `operator`, or to no pool,
 /// as the roll does: in the epoch's and the pool's live counts, and in the
-/// archive's `pool_blocks` tags.
+/// archive's `pool_blocks` tags. Without an operator they are blocks no
+/// registered pool minted, which the reward calculation pays no one for.
 fn mint(domain: &ToyDomain, operator: Option<u8>, blocks: u32) {
     let mut epoch = epoch_state(domain);
     let rolling = epoch.rolling.unwrap_live_mut();
