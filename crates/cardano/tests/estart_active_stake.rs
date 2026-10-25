@@ -1180,10 +1180,12 @@ fn lifetime_blocks_count_the_blocks_of_the_first_shelley_epochs() {
 }
 
 /// Rewrite the store's eras so that `epochs` Byron epochs open the chain,
-/// as on preprod: Byron, with a twentieth of the devnet's epoch length and
-/// twenty times its slot length, then one Shelley epoch, then the devnet's
-/// protocol, at the devnet's lengths. Unequal lengths make an era-unaware
-/// slot bound miss the first Shelley epochs.
+/// as on preprod: Byron, with half the devnet's epoch length and twice its
+/// slot length, then one Shelley epoch, then the devnet's protocol, at the
+/// devnet's lengths. Unequal lengths make an era-unaware slot bound miss the
+/// first Shelley epochs. Preprod's twentieth would put the first boundaries
+/// inside the devnet protocol's nonce stability window, which `strict`
+/// refuses.
 fn prefix_byron_epochs(domain: &ToyDomain, epochs: Epoch) {
     if epochs == 0 {
         return;
@@ -1199,8 +1201,8 @@ fn prefix_byron_epochs(domain: &ToyDomain, epochs: Epoch) {
             timestamp: edge.start.timestamp,
         },
         end: None,
-        epoch_length: edge.epoch_length / 20,
-        slot_length: edge.slot_length * 20,
+        epoch_length: edge.epoch_length / 2,
+        slot_length: edge.slot_length * 2,
         protocol: 1,
     };
     byron.define_end(epochs);
