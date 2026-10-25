@@ -747,9 +747,11 @@ mod tests {
         let credential = StakeCredential::AddrKeyhash([7; 28].into());
         let pool = PoolHash::from([3; 28]);
 
-        for as_leader in [true, false] {
+        for (as_leader, is_spendable) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
             let reward = Reward::PreAllegra(PreAllegraReward {
-                is_spendable: false,
+                is_spendable,
                 as_leader,
                 pool,
                 value: 500,
@@ -764,7 +766,7 @@ mod tests {
 
             assert_eq!(role, &vec![(pool, 500)]);
             assert!(other.is_empty());
-            assert!(!row.is_spendable);
+            assert_eq!(row.is_spendable, is_spendable);
             assert_eq!(row.credential, credential);
         }
     }
