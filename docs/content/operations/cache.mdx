@@ -94,3 +94,12 @@ The cache records OpenTelemetry metrics under the `dolos-cache` meter:
 The `totals` namespace sums sealed per-epoch stats from the archive, which a node with `history.mode = "rolling"` prunes. On such a node the namespace is off: the totals routes compute every answer without the cache, and `warm` and `verify` refuse it. Entries an earlier, unpruned run left on disk stay there until cleared: `stats` reports the namespace as off with their count, and `clear --namespace totals` or `clear --all` wipes them.
 
 The `pool-registrations` and `pool-blocks` namespaces are built from the archive's certificates and per-epoch pool logs, and are off on such a node in the same way. They are off too while `storage.cache.enabled = false`, since an entry that is never kept would be rebuilt for every pool on every request: the pool routes then read the archive for the pools they answer about.
+
+That makes the pool lists slower with the cache off, since `/pools` and `/pools/extended` order every pool by its first registration and read each one from the archive on every request. Measured on preprod, with 557 pools, at commit `7b842a05`:
+
+| route                       | cache on | cache off, warm | cache off, first call |
+| --------------------------- | -------- | --------------- | --------------------- |
+| `/pools?count=100`          | 2.3 ms   | 26.7 ms         | 158 ms                |
+| `/pools/extended?count=100` | 5.32 s   | 5.45 s          | 5.53 s                |
+
+The cost grows with the number of pools, so on mainnet it is several times larger. `/pools/{pool_id}` reads only its own pool and is not affected.
