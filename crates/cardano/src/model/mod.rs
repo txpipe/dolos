@@ -482,7 +482,7 @@ pub enum CardanoDelta {
     StagePaymentStats(Box<StagePaymentStats>),
     StageAccountStats(Box<StageAccountStats>),
     MetadataLabelTxInc(Box<MetadataLabelTxInc>),
-    /// `ScriptFirstSeen`, which wrote the `scripts` witness the `script` tag
+    /// `ScriptFirstSeen`, which wrote the `scripts` witness the entity index
     /// replaced.
     RetiredScriptFirstSeen(Retired),
     StageFirstScript(Box<StageFirstScript>),
@@ -1008,5 +1008,17 @@ mod wal_tests {
     #[test]
     fn retired_variants_hold_their_index() {
         assert!(bincode::deserialize::<CardanoDelta>(&72u32.to_le_bytes()).is_err());
+
+        // `ScriptFirstSeen` as WAL v5 wrote it: the variant index, the script
+        // hash as a length-prefixed hex string, the `ScriptState` slot and
+        // `was_new`
+        let hash = [0x44u8; 28];
+        let mut encoded = 72u32.to_le_bytes().to_vec();
+        encoded.extend_from_slice(&56u64.to_le_bytes());
+        encoded.extend_from_slice(hex::encode(hash).as_bytes());
+        encoded.extend_from_slice(&100u64.to_le_bytes());
+        encoded.push(1);
+
+        assert!(bincode::deserialize::<CardanoDelta>(&encoded).is_err());
     }
 }

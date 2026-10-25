@@ -208,9 +208,8 @@ impl CardanoIndexDeltaBuilder {
     ///
     /// With the produced outputs' reference scripts, tagged with them (see
     /// [`utxo_tags`]), the `script` tag marks exactly what `/scripts` counts
-    /// (`roll::scripts::tx_script_hashes`). The roll reads the first tag as
-    /// the script's first sighting and `script_by_hash` finds the script
-    /// there.
+    /// (`roll::scripts::tx_script_hashes`), and a script's first tag is the
+    /// block its staged row names.
     pub fn add_tx_scripts(&mut self, tx: &MultiEraTx) {
         use pallas::ledger::traverse::{ComputeHash as _, OriginalHash as _};
 

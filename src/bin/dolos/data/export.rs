@@ -224,7 +224,7 @@ pub fn run(
     let mut archive = Builder::new(encoder);
 
     match &mut stores.archive {
-        ArchiveStoreBackend::LogsOnly(_) | ArchiveStoreBackend::TagReads(_)
+        ArchiveStoreBackend::LogsOnly(_) | ArchiveStoreBackend::EntityReads(_)
             if !args.skip_sanitization =>
         {
             bail!("archive sanitization needs exclusive access to the archive database")
@@ -243,7 +243,7 @@ pub fn run(
         }
         ArchiveStoreBackend::Memory(_)
         | ArchiveStoreBackend::LogsOnly(_)
-        | ArchiveStoreBackend::TagReads(_)
+        | ArchiveStoreBackend::EntityReads(_)
         | ArchiveStoreBackend::Fjall(_) => {}
         ArchiveStoreBackend::NoOp(_) => {
             bail!("`history.mode = \"none\"` keeps no archive to export")

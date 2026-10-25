@@ -293,6 +293,113 @@ fn target_and_ephemeral_leave_the_instance_untouched() {
     );
 }
 
+/// A node synced over devnet's genesis with 700-slot epochs and `k` = 10,
+/// starting at Alonzo, so ESTART seals an epoch two boundaries after it.
+/// Every block's first tx carries the same three scripts.
+fn sync_across_sealed_epochs() -> Node {
+    let node = Node::new();
+    let root = node.root.path();
+    dolos_cardano::include::devnet::save(root).unwrap();
+
+    let patch = |file: &str, edit: &dyn Fn(&mut serde_json::Value)| {
+        let path = root.join(file);
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        edit(&mut json);
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+    };
+
+    patch("shelley.json", &|json| {
+        json["epochLength"] = 700.into();
+        json["securityParam"] = 10.into();
+    });
+    patch("byron.json", &|json| {
+        json["protocolConsts"]["k"] = 10.into()
+    });
+
+    let files = dolos_core::config::GenesisConfig {
+        force_protocol: Some(6),
+        ..dolos_core::config::GenesisConfig::in_dir(root)
+    };
+
+    let genesis = dolos_core::Genesis::from_file_paths(
+        &files.byron_path,
+        &files.shelley_path,
+        &files.alonzo_path,
+        &files.conway_path,
+        files.force_protocol,
+    )
+    .unwrap();
+
+    // plain, balanced txs, as the period-log seal tests run them
+    node.sync_chain(
+        std::sync::Arc::new(genesis),
+        files,
+        dolos_testing::synthetic::SyntheticBlockConfig {
+            block_count: 16,
+            txs_per_block: 1,
+            slot: 350,
+            slot_step: 350,
+            plain_txs: true,
+            seed_amount: dolos_testing::MIN_UTXO_AMOUNT + 7,
+            asset_names_by_block: (0..16).map(|i| format!("M{i:03}")).collect(),
+            ..Default::default()
+        },
+    );
+
+    node
+}
+
+/// The script entries of an archive's entity index.
+fn script_entries(archive: &dolos::storage::ArchiveStoreBackend) -> Vec<(Vec<u8>, u64)> {
+    archive
+        .iter_entity_records(&[dolos_cardano::indexes::entities::SCRIPT], 0..u64::MAX)
+        .unwrap()
+        .map(|record| {
+            let record = record.unwrap();
+            (record.key().to_vec(), record.slot)
+        })
+        .collect()
+}
+
+/// `--target` over an archive whose seals indexed every script: the roll's
+/// witness reads the source archive's entity index below each batch, so the
+/// scripts every block repeats are staged once, in the epoch of their first
+/// carrier, long sealed when the replay reaches the later blocks. A witness
+/// that read no index, or the index without the batch bound, would stage
+/// them again in the unsealed epochs and the rebuilt state would differ.
+#[test]
+fn a_target_rebuild_reads_the_source_entity_index_across_sealed_epochs() {
+    let node = sync_across_sealed_epochs();
+    let before = InstanceContents::read(&node);
+
+    {
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+        let entries = script_entries(&stores.archive);
+
+        assert_eq!(entries.len(), 3, "the seal indexed {entries:?}");
+        assert!(entries.iter().all(|(_, slot)| *slot == 350));
+    }
+
+    assert!(
+        before.state.entities["first-scripts"].is_empty(),
+        "the first carrier's epoch was not sealed"
+    );
+
+    let target = node.root.path().join("rebuilt-state");
+    assert_ok(&rebuild(
+        &node,
+        &["--target", &target.display().to_string()],
+    ));
+
+    let rebuilt =
+        dolos::storage::StateStoreBackend::open_fjall(&target, dolos_fjall::Preset::Standard)
+            .unwrap();
+
+    assert_eq!(StateContents::read(&rebuilt), before.state);
+}
+
 /// A `--target` holding a state store a release that predates store
 /// identities wrote is refused, and left as it was.
 #[test]

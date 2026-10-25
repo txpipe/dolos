@@ -586,9 +586,9 @@ mod tests {
         assert!(item.json.is_some());
     }
 
-    /// A script a phase-2-invalid tx carried first among its witnesses has
-    /// its first `script` tag at the first valid carrier, the block that
-    /// counts it, and resolves there.
+    /// A script a phase-2-invalid tx carried first among its witnesses is
+    /// staged at the first valid carrier, the block that counts it and its
+    /// first `script` tag, and resolves there.
     #[tokio::test]
     async fn scripts_by_hash_first_tag_is_the_counting_block() {
         use dolos_cardano::indexes::archive_dimensions::SCRIPT;

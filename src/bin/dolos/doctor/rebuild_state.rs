@@ -2,8 +2,8 @@
 //! archive.
 //!
 //! The archive holds the full raw chain, and state computation reads nothing
-//! of it but the `script` tags below each batch, which a replay leaves as
-//! they were, so a synced instance can rebuild its state store offline by
+//! of it but the entity index below each batch, which a replay leaves as it
+//! was, so a synced instance can rebuild its state store offline by
 //! replaying its own archive through the import lifecycle: no network, no
 //! snapshot re-import, no re-writing of the archive. This is the
 //! debugging loop for state-math fixes — a full replay re-writes every store
@@ -27,6 +27,11 @@
 //! cursor only after the replay completes. A crash mid-rebuild therefore
 //! leaves WAL(origin) behind a partial state cursor, which the next startup
 //! refuses loudly (`InconsistentState`); re-running this command recovers.
+//!
+//! An archive written before the entity index existed holds no entries, so
+//! `--target` and `--ephemeral` over it would take every script a sealed
+//! epoch saw for a new one. Rebuild such an archive in place with
+//! `--rewrite-logs` first: its seals write the index as the replay goes.
 
 use std::io::IsTerminal as _;
 use std::path::PathBuf;
@@ -219,10 +224,10 @@ fn preflight(archive: &ArchiveStoreBackend) -> miette::Result<ChainPoint> {
 
 /// Assemble the rebuild domain: the fresh state store, an empty in-memory WAL
 /// (the import lifecycle skips `commit_wal`, so it stays empty), the given
-/// archive backend (the tag-read view, or the write-gated view under
+/// archive backend (the entity-read view, or the write-gated view under
 /// `--rewrite-logs`) and an ephemeral mempool. Genesis fires automatically on
 /// the first imported block; the archive entries it projects are discarded by
-/// the tag-read view, which is correct — the live archive already carries
+/// the entity-read view, which is correct — the live archive already carries
 /// them.
 fn build_domain(
     config: &RootConfig,
@@ -402,7 +407,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let tip = preflight(&archive)?;
 
-    // the roll reads the source archive's `script` tags as its witness of
+    // the roll reads the source archive's entity index as its witness of
     // first sightings, whatever the replay writes
     let domain_archive = if args.rewrite_logs {
         archive
@@ -410,7 +415,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
             .ok_or_else(|| miette::miette!("--rewrite-logs needs a persistent archive"))?
     } else {
         archive
-            .tag_reads()
+            .entity_reads()
             .ok_or_else(|| miette::miette!("rebuilding state needs an archive"))?
     };
 

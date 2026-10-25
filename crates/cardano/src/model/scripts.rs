@@ -3,10 +3,10 @@
 //!
 //! Nothing else enumerates scripts. They are not ledger state, and the archive
 //! index keeps a hash of the script hash, so it answers "where is this script"
-//! but not "which scripts are there". The `script` tag follows phase-2
-//! validity, so a script's first tag is its first sighting: the roll seeks it
-//! to tell a new script from a repeat, and `/scripts/{hash}` reads the script
-//! there. Two namespaces list them:
+//! but not "which scripts are there". The archive's entity index (sealed
+//! epochs) and the staged rows (unsealed ones) give a script's first
+//! sighting: the roll reads them to tell a new script from a repeat, and
+//! `/scripts/{hash}` reads the script there. Two namespaces list them:
 //!
 //! - `first-scripts`, a `Set` keyed `epoch ‖ script hash`: the scripts an
 //!   unsealed epoch saw first.
