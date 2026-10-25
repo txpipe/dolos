@@ -7,6 +7,7 @@ use std::{
 };
 
 use dolos_cardano::{
+    indexes::{archive_dimensions::SCRIPT, AsyncCardanoQueryExt as _},
     model::{
         AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, AssetState,
         FirstMintChunk, FirstMintSet, FirstScriptSet,
@@ -15,14 +16,15 @@ use dolos_cardano::{
     AccountKey, AssetKey, CardanoDelta,
 };
 use dolos_core::{
-    import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ChainPoint, Domain as _,
-    Genesis, RangeOf, StateStore as _, WalStore as _,
+    import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, AsyncQueryFacade, ChainPoint,
+    Domain as _, Genesis, RangeOf, StateStore as _, WalStore as _,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, sample_alonzo_block, SyntheticBlockConfig},
     toy_domain::ToyDomain,
     MIN_UTXO_AMOUNT,
 };
+use pallas::crypto::hash::Hash;
 use pallas::ledger::{
     addresses::{Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart},
     primitives::{alonzo, StakeCredential, TransactionInput},
@@ -379,6 +381,50 @@ fn rollback_removes_the_script_rows_of_the_block_that_first_carried_them() {
 
     domain.rollback(&points[0]).unwrap();
     assert_eq!(scripts(&domain), none);
+}
+
+/// `script_by_hash` finds a script at its first tagged block, which is the
+/// block that counts it: the invalid tx that carried it earlier left no tag.
+#[tokio::test]
+async fn script_by_hash_finds_a_script_at_its_counting_block() {
+    let cfg = SyntheticBlockConfig {
+        block_count: 3,
+        txs_per_block: 1,
+        invalid_txs_by_block: vec![vec![0], vec![], vec![]],
+        ..Default::default()
+    };
+
+    let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+    let mut slots = Vec::new();
+
+    for block in &blocks {
+        domain.roll_forward(block.clone()).unwrap();
+        slots.push(MultiEraBlock::decode(block).unwrap().slot());
+    }
+
+    let staged = scripts(&domain);
+    assert_eq!(staged.len(), 3);
+
+    let query = AsyncQueryFacade::new(domain.clone());
+
+    for (_, hash, slot) in staged {
+        let first = domain
+            .archive()
+            .slots_by_tag(SCRIPT, &hash, 0, slots[2])
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first, slots[1], "first tag is not the counting block");
+        assert_eq!(slot, slots[1]);
+
+        let found = query.script_by_hash(&Hash::from(hash)).await.unwrap();
+        assert!(found.is_some_and(|x| !x.script.is_empty()));
+    }
 }
 
 /// A copy of the devnet genesis with `epoch_length`-slot epochs, security
