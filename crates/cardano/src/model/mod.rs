@@ -964,6 +964,7 @@ mod wal_tests {
                     (100, 0),
                     [0x77; 32].into(),
                     -5,
+                    false,
                 )
                 .into(),
             ),

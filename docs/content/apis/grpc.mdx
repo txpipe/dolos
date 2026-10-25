@@ -30,7 +30,7 @@ No changes are required in Dolos to support web access, the same port that accep
 
 ## Authentication Mechanism
 
-The endpoint accepts any connection. TLS client authentication does not work in this release: the `serve.grpc.tls_client_ca_root` field is accepted, but the endpoint has no server certificate to present, and when the field is set gRPC fails as it starts and stops the whole node with it. Leave it out, and put the endpoint behind a proxy that authenticates clients when it needs to be restricted. See [`serve.grpc`](../configuration/schema#servegrpc).
+The endpoint serves plaintext gRPC and accepts any connection. Dolos does not terminate TLS itself: when the endpoint needs TLS, or must authenticate clients (mutual TLS included), put it behind a reverse proxy that does. See [`serve.grpc`](../configuration/schema#servegrpc).
 
 ## Available Operations
 

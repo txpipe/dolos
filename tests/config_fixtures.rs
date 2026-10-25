@@ -148,7 +148,6 @@ fn the_full_reference_parses() {
 
     let grpc = serve.grpc.as_ref().unwrap();
     assert_eq!(grpc.listen_address, "[::]:50051");
-    assert_eq!(grpc.tls_client_ca_root, None);
     assert!(grpc.permissive_cors());
     assert!(!grpc.http2_adaptive_window());
     assert_eq!(grpc.http2_initial_stream_window_size, Some(8_388_608));
@@ -1699,7 +1698,7 @@ fn a_table_and_a_key_in_it_are_not_overridden_together() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dolos.toml");
     let config = std::fs::read_to_string(fixture("minimal.toml")).unwrap()
-        + "\n[serve.grpc]\nlisten_address = \"[::]:50051\"\ntls_client_ca_root = \"missing-ca.pem\"\n";
+        + "\n[serve.grpc]\nlisten_address = \"[::]:50051\"\npermissive_cors = false\n";
     std::fs::write(&path, config).unwrap();
 
     let overlapping = variables(&[
@@ -1716,6 +1715,28 @@ fn a_table_and_a_key_in_it_are_not_overridden_together() {
             "{error}"
         );
     }
+}
+
+/// `serve.grpc.tls_client_ca_root` is removed: TLS is terminated at a proxy.
+/// A file that still sets it is refused, naming the field.
+#[test]
+#[serial]
+fn a_grpc_tls_client_ca_root_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dolos.toml");
+    let config = std::fs::read_to_string(fixture("minimal.toml")).unwrap()
+        + "\n[serve.grpc]\nlisten_address = \"[::]:50051\"\ntls_client_ca_root = \"ca.pem\"\n";
+    std::fs::write(&path, config).unwrap();
+
+    let error = load_with_env(&path, &[]).unwrap_err();
+
+    assert!(matches!(error, ConfigError::Read { .. }), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown field `tls_client_ca_root`"),
+        "{error}"
+    );
 }
 
 /// The environment is read in lowercase, so two variables that differ only in

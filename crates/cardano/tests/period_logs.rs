@@ -1,19 +1,22 @@
 //! Period logs through the real pipeline: staging rolls back with its block,
 //! and ESTART seals short epochs.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use dolos_cardano::{
     model::{
-        AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, FirstMintChunk,
-        FirstMintSet, FirstScriptSet,
+        AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, AssetState,
+        FirstMintChunk, FirstMintSet, FirstScriptSet,
     },
     periods::is_sealable,
-    AccountKey, CardanoDelta,
+    AccountKey, AssetKey, CardanoDelta,
 };
 use dolos_core::{
     import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ChainPoint, Domain as _,
-    Genesis, StateStore as _, WalStore as _,
+    Genesis, RangeOf, StateStore as _, WalStore as _,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, sample_alonzo_block, SyntheticBlockConfig},
@@ -488,4 +491,210 @@ fn epochs_too_short_for_rupd_seal() {
 #[test]
 fn short_devnet_epochs_seal() {
     assert_epochs_seal(genesis_with(500, 5, 9), 14, 250);
+}
+
+/// A policy whose CIP-25 entry uses v1 text keys: the policy id in hex and
+/// the asset name as UTF-8.
+const TEXT_KEYS: [u8; 28] = [0x51; 28];
+
+/// A policy whose CIP-25 entry uses v2 byte-string keys.
+const BYTE_KEYS: [u8; 28] = [0x52; 28];
+
+/// Label 721 naming `A` under [`TEXT_KEYS`] and `C` under [`BYTE_KEYS`], and
+/// no other asset.
+fn label_721() -> (u64, alonzo::Metadatum) {
+    use alonzo::Metadatum;
+    use pallas::codec::utils::KeyValuePairs;
+
+    let nft = || {
+        Metadatum::Map(KeyValuePairs::from(vec![
+            (Metadatum::Text("name".into()), Metadatum::Text("x".into())),
+            (
+                Metadatum::Text("image".into()),
+                Metadatum::Text("ipfs://x".into()),
+            ),
+        ]))
+    };
+
+    let assets = |key: Metadatum| Metadatum::Map(KeyValuePairs::from(vec![(key, nft())]));
+
+    let policies = KeyValuePairs::from(vec![
+        (
+            Metadatum::Text(hex::encode(TEXT_KEYS)),
+            assets(Metadatum::Text("A".into())),
+        ),
+        (
+            Metadatum::Bytes(BYTE_KEYS.to_vec().into()),
+            assets(Metadatum::Bytes(b"C".to_vec().into())),
+        ),
+    ]);
+
+    (721, Metadatum::Map(policies))
+}
+
+fn asset(policy: [u8; 28], name: &str) -> AssetKey {
+    AssetKey::of_parts(&policy, name.as_bytes())
+}
+
+/// The staged `(amount, names_asset)` of each asset, in chain order.
+fn staged_flags(domain: &ToyDomain) -> HashMap<AssetKey, Vec<(i64, bool)>> {
+    let mut out: HashMap<_, Vec<_>> = HashMap::new();
+
+    for row in domain
+        .state()
+        .iter_entities_typed::<AssetMintSet>(None)
+        .unwrap()
+    {
+        let (key, row) = row.unwrap();
+        out.entry(key.group)
+            .or_default()
+            .push((row.amount, row.names_asset));
+    }
+
+    out
+}
+
+/// A mint is flagged exactly when it sets `metadata_tx`: its tx's label 721
+/// names the asset, by text or byte-string keys, and it is not a burn.
+#[test]
+fn mint_flags_follow_the_cip25_predicate() {
+    let mint = |policy, name: &str, amount| (policy, name.to_string(), amount);
+
+    let mints_by_block = vec![
+        vec![
+            vec![
+                mint(TEXT_KEYS, "A", 1),
+                // the same policy's entry, which names A alone
+                mint(TEXT_KEYS, "B", 1),
+                mint(BYTE_KEYS, "C", 1),
+            ],
+            // a burn of a named asset
+            vec![mint(TEXT_KEYS, "A", -1)],
+        ],
+        vec![vec![mint(TEXT_KEYS, "A", 2)], vec![]],
+        // a burn by a tx whose label 721 names the asset
+        vec![vec![mint(TEXT_KEYS, "A", -1)], vec![]],
+    ];
+
+    let build = |metadata_entries| {
+        let cfg = plain(SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            mints_by_block: mints_by_block.clone(),
+            metadata_entries,
+            ..Default::default()
+        });
+
+        let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
+        let genesis = Arc::new(dolos_cardano::include::preview::load());
+        let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+        for block in blocks {
+            domain.roll_forward(block).unwrap();
+        }
+
+        staged_flags(&domain)
+    };
+
+    let named = build(vec![label_721()]);
+
+    assert_eq!(
+        named[&asset(TEXT_KEYS, "A")],
+        [(1, true), (-1, false), (2, true), (-1, false)]
+    );
+    assert_eq!(named[&asset(TEXT_KEYS, "B")], [(1, false)]);
+    assert_eq!(named[&asset(BYTE_KEYS, "C")], [(1, true)]);
+
+    // the default chain's txs carry label 1990 and no 721
+    let unnamed = build(vec![]);
+
+    assert_eq!(
+        unnamed[&asset(TEXT_KEYS, "A")],
+        [(1, false), (-1, false), (2, false), (-1, false)]
+    );
+    assert_eq!(unnamed[&asset(BYTE_KEYS, "C")], [(1, false)]);
+}
+
+/// Across sealed chunks and staged rows, an asset's newest flagged mint is
+/// the `metadata_tx` its state holds, and an asset never flagged holds none.
+#[test]
+fn the_newest_flagged_mint_is_the_metadata_tx() {
+    let genesis = genesis_with(500, 5, 9);
+    let mint = |policy, name: &str, amount| (policy, name.to_string(), amount);
+
+    let blocks = 14;
+    let mints_by_block = (0..blocks)
+        .map(|i| {
+            // A ends on a burn, which never moves its metadata tx
+            let a = if i % 3 == 1 { -1 } else { 1 };
+            let mut mints = vec![mint(TEXT_KEYS, "A", a), mint(TEXT_KEYS, "B", 1)];
+
+            if i % 2 == 0 {
+                mints.push(mint(BYTE_KEYS, "C", 1));
+            }
+
+            vec![mints]
+        })
+        .collect();
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: blocks,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        mints_by_block,
+        metadata_entries: vec![label_721()],
+        ..Default::default()
+    });
+
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    domain.import_blocks(raw).unwrap();
+
+    let sealed: Vec<(AssetKey, AssetMintSet)> = domain
+        .archive()
+        .iter_logs_typed::<AssetMintChunk>(None)
+        .unwrap()
+        .flat_map(|row| {
+            let (_, (key, _), chunk) = row.unwrap();
+            chunk.mints.into_iter().map(move |x| (key, x))
+        })
+        .collect();
+
+    assert!(!sealed.is_empty(), "nothing sealed");
+
+    for (key, flagged) in [
+        (asset(TEXT_KEYS, "A"), true),
+        (asset(TEXT_KEYS, "B"), false),
+        (asset(BYTE_KEYS, "C"), true),
+    ] {
+        let staged = domain
+            .state()
+            .iter_entities_typed::<AssetMintSet>(Some(RangeOf::prefix(&key)))
+            .unwrap()
+            .map(|row| row.unwrap().1);
+
+        let mints: Vec<AssetMintSet> = sealed
+            .iter()
+            .filter(|(x, _)| *x == key)
+            .map(|(_, row)| row.clone())
+            .chain(staged)
+            .collect();
+
+        let newest = mints
+            .iter()
+            .rev()
+            .find(|x| x.names_asset)
+            .map(|x| x.tx_hash);
+
+        let state = domain
+            .state()
+            .read_entity_typed::<AssetState>(&key)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(newest.is_some(), flagged);
+        assert_eq!(newest, state.metadata_tx);
+        assert!(mints.last().is_some_and(|x| x.amount < 0) || key != asset(TEXT_KEYS, "A"));
+    }
 }

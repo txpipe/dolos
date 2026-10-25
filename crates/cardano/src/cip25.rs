@@ -80,6 +80,18 @@ pub fn cip25_metadata_has_asset(
         .any(|(key, _)| key_matches_asset(key, asset_name, asset_utf8, &asset_hex))
 }
 
+/// Whether a mint of `quantity` by a tx carrying `metadata` (its label-721
+/// entry) sets the asset's `metadata_tx`: a mint, never a burn, whose CIP-25
+/// metadata names the asset.
+pub fn cip25_mint_names_asset(
+    metadata: Option<&Metadatum>,
+    policy: &Hash<28>,
+    asset_name: &[u8],
+    quantity: i64,
+) -> bool {
+    quantity > 0 && metadata.is_some_and(|x| cip25_metadata_has_asset(x, policy, asset_name))
+}
+
 fn key_matches_policy(key: &Metadatum, policy_bytes: &[u8], policy_hex: &str) -> bool {
     match key {
         Metadatum::Bytes(bytes) => bytes.as_slice() == policy_bytes,
