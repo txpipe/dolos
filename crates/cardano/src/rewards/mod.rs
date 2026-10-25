@@ -741,4 +741,31 @@ mod tests {
             pallas::codec::minicbor::to_vec(&b).unwrap()
         );
     }
+
+    #[test]
+    fn pre_allegra_pending_row_keeps_role() {
+        let credential = StakeCredential::AddrKeyhash([7; 28].into());
+        let pool = PoolHash::from([3; 28]);
+
+        for as_leader in [true, false] {
+            let reward = Reward::PreAllegra(PreAllegraReward {
+                is_spendable: false,
+                as_leader,
+                pool,
+                value: 500,
+            });
+
+            let row = reward.to_pending_state(&credential);
+            let (role, other) = if as_leader {
+                (&row.as_leader, &row.as_delegator)
+            } else {
+                (&row.as_delegator, &row.as_leader)
+            };
+
+            assert_eq!(role, &vec![(pool, 500)]);
+            assert!(other.is_empty());
+            assert!(!row.is_spendable);
+            assert_eq!(row.credential, credential);
+        }
+    }
 }
