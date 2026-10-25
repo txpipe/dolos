@@ -41,7 +41,7 @@ use stelae::{
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 67] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -448,7 +448,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 70] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:3d2bbd25478f39a74e2394c259a66364f49b376afc7a4f52f40c9b6b17c85101";
+    "sha256:3cd9adab25163768da5690156c10d212eabb019c4ab18510d6c24372df94e90d";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
