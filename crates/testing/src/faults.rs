@@ -366,6 +366,7 @@ impl ArchiveStore for FaultyArchiveStore {
     type SlotIter = <MemoryArchiveStore as ArchiveStore>::SlotIter;
     type TagIter = <MemoryArchiveStore as ArchiveStore>::TagIter;
     type ExactIter = <MemoryArchiveStore as ArchiveStore>::ExactIter;
+    type EntityRecordIter = <MemoryArchiveStore as ArchiveStore>::EntityRecordIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         if self.should_fault() {
@@ -480,6 +481,17 @@ impl ArchiveStore for FaultyArchiveStore {
         self.inner.slot_by_tx_hash(hash)
     }
 
+    fn entity_slots(
+        &self,
+        kind: dolos_core::EntityKind,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<BlockSlot>>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.entity_slots(kind, keys)
+    }
+
     fn slots_by_tag(
         &self,
         dimension: TagDimension,
@@ -512,6 +524,17 @@ impl ArchiveStore for FaultyArchiveStore {
             return Err(self.fault_err());
         }
         self.inner.iter_exact_records(slots)
+    }
+
+    fn iter_entity_records(
+        &self,
+        kinds: &[dolos_core::EntityKind],
+        slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::EntityRecordIter, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.iter_entity_records(kinds, slots)
     }
 }
 
@@ -552,6 +575,15 @@ impl ArchiveWriter for FaultyArchiveWriter {
 
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
         self.inner.undo(point)
+    }
+
+    fn write_entity(
+        &self,
+        kind: dolos_core::EntityKind,
+        key: &[u8],
+        slot: BlockSlot,
+    ) -> Result<(), ArchiveError> {
+        self.inner.write_entity(kind, key, slot)
     }
 
     fn commit(self) -> Result<(), ArchiveError> {

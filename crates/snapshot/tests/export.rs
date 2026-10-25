@@ -46,15 +46,16 @@ use dolos_cardano::{
 use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
     ArchiveError, ArchiveStore, ArchiveWriter as _, BlockBody, BlockSlot, ChainPoint, Domain,
-    ExactRecord, IndexRecord, KeyRange, LogKey, Namespace, StateStore, StateWriter as _, TagRecord,
+    EntityRecord, ExactRecord, IndexRecord, KeyRange, LogKey, Namespace, StateStore,
+    StateWriter as _, TagRecord,
 };
 use dolos_snapshot::{
     boundary::Ineligible,
     export::{self, EpochWindow, Plan, Predecessor as _},
     facade::{Selection, SnapshotSource as _, StoreSnapshot},
-    layers::{blocks, indexes, logs, state},
-    state_layer_count, state_ns_for, DolosProfile, Network, RetainedEpochs, BLOCKS, INDEXES,
-    LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
+    layers::{blocks, entities, indexes, logs, state},
+    state_layer_count, state_ns_for, DolosProfile, Network, RetainedEpochs, BLOCKS, ENTITY_KINDS,
+    INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::{
     blocks::make_conway_block_with_prev,
@@ -74,7 +75,7 @@ use watcher::Watcher;
 
 /// The identity of an export over the skeleton store set.
 const GOLDEN_SKELETON: &str =
-    "sha256:d9512761e4c395050b008e9d5d39ba61b88e01f47cf7fe05f93da77523c1a2d6";
+    "sha256:6d660f521113a7463715c4125d2387b475bb71ed0c7637166a141d1ec349c876";
 
 /// Where the skeleton fixture stands: on the first block of epoch 2 under
 /// [`skeleton_summary`], after fifty empty slots, so the export covers three
@@ -1602,6 +1603,7 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:fa3101937f3491ae614180384787cfeb1d2ffb7e522c4c731b60208472573917","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:e59d8b7ec7144216a9caab188b2de8d09d98c7c419e228a41131722796b81711","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":46}"#,
     r#"],"parameters":{"#,
+    r#""entities":{"asset":32,"script":28},"#,
     r#""indexKeyHash":"xxh3-64","#,
     r#""schemas":{"account-address-chunks":1,"account-addresses":1,"account-epochs":1,"account-stakes":0,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"assets":1,"datums":1,"drep-epochs":1,"drep-sightings":1,"dreps":2,"epochs":4,"eras":2,"first-mint-chunks":2,"first-mints":2,"first-script-chunks":1,"first-scripts":1,"gov":4,"leader-rewards":0,"member-rewards":0,"metadata-labels":2,"payment-address-chunks":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-mint-chunks":1,"pool-deposit-refunds":0,"pool-epochs":2,"pools":3,"proposals":4,"utxos":1},"#,
     r#""shards":{"account-addresses":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"assets":16,"datums":16,"drep-sightings":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"utxos":16},"#,
@@ -2162,6 +2164,7 @@ struct Counted<S> {
     inner: S,
     tags: Arc<AtomicUsize>,
     exacts: Arc<AtomicUsize>,
+    entities: Arc<AtomicUsize>,
 }
 
 impl<S: ArchiveStore> Counted<S> {
@@ -2170,7 +2173,13 @@ impl<S: ArchiveStore> Counted<S> {
             inner,
             tags: Arc::default(),
             exacts: Arc::default(),
+            entities: Arc::default(),
         }
+    }
+
+    /// Entity index traversals built over the store.
+    fn entity_traversals(&self) -> usize {
+        self.entities.load(Ordering::Relaxed)
     }
 
     /// Traversals built over the store: tag runs and exact runs separately,
@@ -2191,6 +2200,7 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
     type SlotIter = S::SlotIter;
     type TagIter = S::TagIter;
     type ExactIter = S::ExactIter;
+    type EntityRecordIter = S::EntityRecordIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         self.inner.start_writer()
@@ -2262,6 +2272,14 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
         self.inner.slot_by_tx_hash(hash)
     }
 
+    fn entity_slots(
+        &self,
+        kind: dolos_core::EntityKind,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<BlockSlot>>, ArchiveError> {
+        self.inner.entity_slots(kind, keys)
+    }
+
     fn slots_by_tag(
         &self,
         dimension: dolos_core::TagDimension,
@@ -2289,6 +2307,16 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
         self.exacts.fetch_add(1, Ordering::Relaxed);
 
         self.inner.iter_exact_records(slots)
+    }
+
+    fn iter_entity_records(
+        &self,
+        kinds: &[dolos_core::EntityKind],
+        slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::EntityRecordIter, ArchiveError> {
+        self.entities.fetch_add(1, Ordering::Relaxed);
+
+        self.inner.iter_entity_records(kinds, slots)
     }
 }
 
@@ -2418,6 +2446,321 @@ fn banding_moves_no_bytes() {
             "a band of {band} produced a different document",
         );
     }
+}
+
+// --------------------------------------------------------------------------
+// The entity index layers
+// --------------------------------------------------------------------------
+
+/// Entity index entries across the skeleton's windows, written as a seal
+/// writes them: assets first seen in epochs 0 and 2, in an id order that is
+/// not their slot order, a script in epoch 1, and one asset past the cursor
+/// that no window covers.
+fn entities_across_the_skeleton() -> MemoryArchiveStore {
+    let store = MemoryArchiveStore::new(dolos_cardano::model::build_log_schema());
+    let writer = store.start_writer().unwrap();
+
+    let (_, asset) = ENTITY_KINDS[0];
+    let (_, script) = ENTITY_KINDS[1];
+
+    for (kind, byte, slot) in [
+        (asset, 0x03, 10),
+        (asset, 0x01, 50),
+        (asset, 0x02, 220),
+        (script, 0x09, 150),
+        (asset, 0x04, SKELETON_SLOT + 10),
+    ] {
+        writer
+            .write_entity(kind, &vec![byte; kind.key_len()], slot)
+            .unwrap();
+    }
+
+    writer.commit().unwrap();
+
+    store
+}
+
+fn skeleton_plan() -> Plan {
+    Plan::new(
+        &skeleton_summary(),
+        Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
+        skeleton_point(),
+        Default::default(),
+    )
+    .unwrap()
+}
+
+/// An entity layer exists for a window exactly when its kind has an entry
+/// first seen in it, holds that window's entries in id order, and carries
+/// nothing past the cursor.
+#[test]
+fn entity_layers_exist_only_where_an_entity_was_first_seen() {
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let archive = with_skeleton_blocks(entities_across_the_skeleton());
+    let state = skeleton_state();
+    let plan = skeleton_plan();
+
+    let inscription = export::export(
+        &stele,
+        &plan,
+        &archive,
+        &state,
+        None,
+        &export::First,
+        &Observer::silent(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        inscription.layers.len(),
+        3 * 2 + 3 + state_layer_count(),
+        "three windows of blocks and indexes, three entity layers and the tip"
+    );
+
+    let index = stele.blob_index().unwrap();
+    let (asset_layer, asset) = ENTITY_KINDS[0];
+    let (script_layer, script) = ENTITY_KINDS[1];
+
+    let read = |kind: &str, entity| -> Vec<(u64, Vec<EntityRecord>)> {
+        inscription
+            .layers_of_kind(kind)
+            .map(|descriptor| {
+                assert_eq!(
+                    descriptor.media_type,
+                    format!("application/vnd.dolos.stele.{kind}.v1+zstd")
+                );
+
+                let epoch = descriptor.scope["epoch"].as_u64().unwrap();
+                let records = read_both_ways(&stele, &index, descriptor)
+                    .iter()
+                    .map(|bytes| entities::decode(entity, bytes).unwrap())
+                    .collect();
+
+                (epoch, records)
+            })
+            .collect()
+    };
+
+    let entry = |kind: dolos_core::EntityKind, byte: u8, slot| {
+        EntityRecord::new(kind, &vec![byte; kind.key_len()], slot).unwrap()
+    };
+
+    assert_eq!(
+        read(asset_layer, asset),
+        [
+            (0, vec![entry(asset, 0x01, 50), entry(asset, 0x03, 10)]),
+            (2, vec![entry(asset, 0x02, 220)]),
+        ]
+    );
+    assert_eq!(
+        read(script_layer, script),
+        [(1, vec![entry(script, 0x09, 150)])]
+    );
+
+    // Kind-major after the logs, ascending epoch within a kind.
+    let kinds: Vec<&str> = inscription
+        .layers
+        .iter()
+        .map(|layer| layer.kind.as_str())
+        .filter(|kind| kind.starts_with("entity-"))
+        .collect();
+    assert_eq!(kinds, [asset_layer, asset_layer, script_layer]);
+
+    // The parameters declare every kind the publisher writes, layers or not.
+    assert_eq!(
+        inscription.parameters["entities"],
+        serde_json::json!({"asset": 32, "script": 28})
+    );
+}
+
+/// Export the entity skeleton at `band` through `previous`, storing nothing,
+/// and report the entity index traversals it took and the document.
+fn export_entities(band: usize, previous: &dyn export::Predecessor) -> (usize, Vec<u8>) {
+    let archive = Counted::new(with_skeleton_blocks(entities_across_the_skeleton()));
+    let state = skeleton_state();
+    let plan = skeleton_plan().with_band(export::IndexBand::new(band.try_into().unwrap()));
+
+    let watcher = Arc::new(Watcher::default());
+
+    let inscription = export::export(
+        &Discarding,
+        &plan,
+        &archive,
+        &state,
+        None,
+        previous,
+        &watcher.observer(),
+    )
+    .unwrap();
+
+    watcher.assert_well_formed(inscription.layers.len());
+
+    (
+        archive.entity_traversals(),
+        inscription.canonicalize().unwrap(),
+    )
+}
+
+/// An entity layer is a scan of its kind's index, so the export takes one
+/// presence scan for every window and kind, then one scan per kind per band
+/// that has a layer to build — never one per window.
+#[test]
+fn an_entity_band_costs_one_traversal_however_many_epochs_it_covers() {
+    // Band 1: assets build windows 0 and 2 in two bands, the script window 1
+    // in one. Band 2: assets' windows 0 and 2 fall in two bands. Band 3 and
+    // up: one band per kind.
+    for (band, traversals) in [(1usize, 1 + 3), (2, 1 + 3), (3, 1 + 2), (64, 1 + 2)] {
+        let (counted, _) = export_entities(band, &export::First);
+
+        assert_eq!(counted, traversals, "a band of {band} over three epochs");
+    }
+}
+
+#[test]
+fn entity_banding_moves_no_bytes() {
+    let (_, unbanded) = export_entities(1, &export::First);
+
+    for band in [2usize, 3, 64] {
+        let (_, banded) = export_entities(band, &export::First);
+
+        assert_eq!(
+            String::from_utf8(banded).unwrap(),
+            String::from_utf8(unbanded.clone()).unwrap(),
+            "a band of {band} produced a different document",
+        );
+    }
+}
+
+/// A closed window's entity layer is inherited per `(kind, scope)` like every
+/// immutable epoch layer: a publish whose predecessor carries every entity
+/// layer builds none and scans the index once, for the count.
+#[test]
+fn an_entity_layer_a_predecessor_carries_is_inherited_and_not_rebuilt() {
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let archive = with_skeleton_blocks(entities_across_the_skeleton());
+    let state = skeleton_state();
+    let plan = skeleton_plan();
+
+    let first = export::export(
+        &stele,
+        &plan,
+        &archive,
+        &state,
+        None,
+        &export::First,
+        &Observer::silent(),
+    )
+    .unwrap();
+
+    let lending = Lending::resuming(&first);
+    let (traversals, document) = export_entities(64, &lending);
+
+    assert_eq!(traversals, 1, "an inherited entity layer was rebuilt");
+    assert_eq!(
+        String::from_utf8(document).unwrap(),
+        String::from_utf8(first.canonicalize().unwrap()).unwrap()
+    );
+
+    let lent: Vec<(String, u64)> = lending
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(kind, _)| kind.starts_with("entity-"))
+        .cloned()
+        .collect();
+
+    // Asked for every window of every kind, the empty ones included: a
+    // predecessor could carry a layer this store no longer has entries for.
+    assert_eq!(lent.len(), 3 * ENTITY_KINDS.len());
+}
+
+/// Finding T1 of the first QA review of dolos#1511: a dry run counts the
+/// entity layers a publish builds and the ones it inherits, so the forecast
+/// and the publish that follows it agree.
+#[test]
+fn the_forecast_counts_the_entity_layers_a_publish_builds_and_inherits() {
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let archive = with_skeleton_blocks(entities_across_the_skeleton());
+    let state = skeleton_state();
+    let plan = skeleton_plan();
+
+    let first = export::export(
+        &stele,
+        &plan,
+        &archive,
+        &state,
+        None,
+        &export::First,
+        &Observer::silent(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        export::forecast(&plan, &archive, &export::First, None).unwrap(),
+        export::Forecast {
+            layers_built: first.layers.len(),
+            layers_reused: 0,
+        }
+    );
+
+    let lending = Lending::resuming(&first);
+
+    let carried = export::export(
+        &Discarding,
+        &plan,
+        &archive,
+        &state,
+        None,
+        &lending,
+        &Observer::silent(),
+    )
+    .unwrap();
+
+    let lent = lending.lent.load(Ordering::Relaxed);
+
+    assert_eq!(
+        export::forecast(&plan, &archive, &lending, None).unwrap(),
+        export::Forecast {
+            layers_built: carried.layers.len() - lent,
+            layers_reused: lent,
+        }
+    );
+
+    // A layer the predecessor carries counts where this store holds no entry
+    // for it, as the publish adopts it.
+    let bare = with_skeleton_blocks(MemoryArchiveStore::new(
+        dolos_cardano::model::build_log_schema(),
+    ));
+    let lender = Lending::resuming(&first);
+
+    let adopted = export::export(
+        &Discarding,
+        &plan,
+        &bare,
+        &state,
+        None,
+        &lender,
+        &Observer::silent(),
+    )
+    .unwrap();
+
+    let lent = lender.lent.load(Ordering::Relaxed);
+
+    assert_eq!(adopted.layers.len(), first.layers.len());
+    assert_eq!(
+        export::forecast(&plan, &bare, &lender, None).unwrap(),
+        export::Forecast {
+            layers_built: adopted.layers.len() - lent,
+            layers_reused: lent,
+        }
+    );
 }
 
 /// The supported facade keeps planning, directory encoding, digest and

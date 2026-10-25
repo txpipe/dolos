@@ -373,7 +373,7 @@ and for each keyspace, all with leveled compaction, a 64 MiB table target and a 
 | `state-cursor`, `state-utxos`, `state-entities` | 64 MiB | 4 |
 | `state-tags` | 128 MiB | 8 |
 | `archive-blocks`, `archive-logs` | 64 MiB | 4 |
-| `archive-tags`, `index-exact` | 128 MiB | 8 |
+| `archive-tags`, `index-exact`, `index-entity` | 128 MiB | 8 |
 
 The database row applies at every open. Fjall records a keyspace's memtable and compaction when it creates the keyspace, so the keyspace rows govern stores created from now on, and a store keeps the keyspace settings it was created with. Each store logs its tuning when it opens, and `dolos data stats` reports it.
 

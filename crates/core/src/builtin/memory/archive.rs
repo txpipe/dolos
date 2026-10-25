@@ -18,7 +18,9 @@
 //!   keyed `(kind, key)`. The disk backend encodes `[dim_hash][key][slot]`
 //!   triples into a flat keyspace and can only reach the contract's order by
 //!   walking a caller-supplied dimension list in name order; keyed on the
-//!   triple, that order is the map's own and holds by construction.
+//!   triple, that order is the map's own and holds by construction;
+//! - the entity index lives in one map keyed `(kind name, id)`, the order the
+//!   record traversal promises within a kind.
 //!
 //! ## Stored key form
 //!
@@ -44,10 +46,10 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use pallas::ledger::traverse::MultiEraBlock;
 
-use crate::archive::{ArchiveError, ArchiveStore, ArchiveWriter, Skippable};
+use crate::archive::{check_entity_key, ArchiveError, ArchiveStore, ArchiveWriter, Skippable};
 use crate::indexes::{
-    key_hash, ArchiveIndexDelta, ExactKind, ExactRecord, IndexRecord, KeyHash, TagDimension,
-    TagRecord, MAX_EXACT_KEY_LEN,
+    key_hash, ArchiveIndexDelta, EntityKind, EntityRecord, ExactKind, ExactRecord, IndexRecord,
+    KeyHash, TagDimension, TagRecord, MAX_EXACT_KEY_LEN,
 };
 use crate::{
     BlockBody, BlockSlot, ChainPoint, EntityValue, KeyBytes, KeyRange, LogKey, Namespace, RawBlock,
@@ -94,6 +96,9 @@ struct Tables {
     /// Keyed on the record's own inline key rather than a `Vec`, so
     /// `iter_exact_records` copies rather than allocates per record.
     exact: BTreeMap<(ExactKind, ExactKey), BlockSlot>,
+    /// The entity index, keyed by kind name as the disk backend keys it by
+    /// the name's hash, and by the id verbatim.
+    entities: BTreeMap<(&'static str, Vec<u8>), BlockSlot>,
 }
 
 /// A single mutation, recorded by a writer and replayed at commit.
@@ -109,6 +114,7 @@ enum Op {
     RemoveArchiveTag(ArchiveTag),
     InsertExact(ExactKind, ExactKey, BlockSlot),
     RemoveExact(ExactKind, ExactKey),
+    InsertEntity(&'static str, Vec<u8>, BlockSlot),
 }
 
 fn poisoned() -> ArchiveError {
@@ -313,6 +319,17 @@ impl ArchiveWriter for MemoryArchiveWriter {
         self.push(Op::Undo(point.clone()))
     }
 
+    fn write_entity(
+        &self,
+        kind: EntityKind,
+        key: &[u8],
+        slot: BlockSlot,
+    ) -> Result<(), ArchiveError> {
+        check_entity_key(kind, key)?;
+
+        self.push(Op::InsertEntity(kind.name(), key.to_vec(), slot))
+    }
+
     fn commit(self) -> Result<(), ArchiveError> {
         let ops = self.ops.into_inner().map_err(|_| poisoned())?;
 
@@ -363,6 +380,9 @@ impl ArchiveWriter for MemoryArchiveWriter {
                 Op::RemoveExact(kind, key) => {
                     tables.exact.remove(&(kind, key));
                 }
+                Op::InsertEntity(kind, key, slot) => {
+                    tables.entities.insert((kind, key), slot);
+                }
             }
         }
 
@@ -403,6 +423,17 @@ pub struct MemoryExactIter(std::vec::IntoIter<ExactRecord>);
 
 impl Iterator for MemoryExactIter {
     type Item = Result<ExactRecord, ArchiveError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(Ok)
+    }
+}
+
+/// Entity index record iterator over a materialized range.
+pub struct MemoryEntityRecordIter(std::vec::IntoIter<EntityRecord>);
+
+impl Iterator for MemoryEntityRecordIter {
+    type Item = Result<EntityRecord, ArchiveError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next().map(Ok)
@@ -476,6 +507,7 @@ impl ArchiveStore for MemoryArchiveStore {
     type SlotIter = MemorySlotIter;
     type TagIter = MemoryTagIter;
     type ExactIter = MemoryExactIter;
+    type EntityRecordIter = MemoryEntityRecordIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         Ok(MemoryArchiveWriter {
@@ -654,6 +686,7 @@ impl ArchiveStore for MemoryArchiveStore {
             .archive_tags
             .retain(|(_, _, slot)| *slot >= prune_before);
         tables.exact.retain(|_, slot| *slot >= prune_before);
+        tables.entities.retain(|_, slot| *slot >= prune_before);
 
         Ok(done)
     }
@@ -704,6 +737,23 @@ impl ArchiveStore for MemoryArchiveStore {
 
         let tables = self.tables.read().map_err(|_| poisoned())?;
         Ok(tables.exact.get(&(ExactKind::TxHash, key)).copied())
+    }
+
+    fn entity_slots(
+        &self,
+        kind: EntityKind,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<BlockSlot>>, ArchiveError> {
+        for key in keys {
+            check_entity_key(kind, key)?;
+        }
+
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        Ok(keys
+            .iter()
+            .map(|key| tables.entities.get(&(kind.name(), key.to_vec())).copied())
+            .collect())
     }
 
     fn slots_by_tag(
@@ -776,5 +826,40 @@ impl ArchiveStore for MemoryArchiveStore {
             .collect::<Result<_, _>>()?;
 
         Ok(MemoryExactIter(records.into_iter()))
+    }
+
+    fn iter_entity_records(
+        &self,
+        kinds: &[EntityKind],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::EntityRecordIter, ArchiveError> {
+        let mut kinds = kinds.to_vec();
+        kinds.sort_unstable();
+        kinds.dedup();
+
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let mut records = Vec::new();
+
+        for kind in kinds {
+            let low = Bound::Included((kind.name(), Vec::new()));
+
+            let entries = tables
+                .entities
+                .range((low, Bound::Unbounded))
+                .take_while(|((name, _), _)| *name == kind.name())
+                .filter(|(_, slot)| slots.contains(slot));
+
+            // A stored id of another width under this name is a malformed
+            // entry, as the disk backend decides it.
+            for ((_, key), slot) in entries {
+                let record = EntityRecord::new(kind, key, *slot)
+                    .map_err(|e| ArchiveError::InternalError(e.to_string()))?;
+
+                records.push(record);
+            }
+        }
+
+        Ok(MemoryEntityRecordIter(records.into_iter()))
     }
 }

@@ -32,7 +32,8 @@
 //!   [`stelae::frame::encode`], so it is canonical by construction.
 //! - **Vocabulary has one definition.** Dimension names come from
 //!   `dolos_cardano::indexes::archive_dimensions::ALL`, exact-record kind names
-//!   from [`dolos_core::ExactKind::as_str`], state namespaces from the entity
+//!   from [`dolos_core::ExactKind::as_str`], entity index kinds from
+//!   `dolos_cardano::indexes::entities`, state namespaces from the entity
 //!   types' own `FixedNamespace::NS`. This crate spells none of them again.
 //! - **Decoding fails closed.** A dimension, namespace or exact kind this
 //!   profile does not define is an error, never a record passed through on the
@@ -106,6 +107,7 @@ pub use stelae::progress;
 /// joins the list rather than justifying a second dependency edge.
 pub use stelae::{dir, inscription, transport, SteleReader};
 
+use dolos_cardano::indexes::entities;
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
     AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepEpochLog, DRepSightingState,
@@ -114,7 +116,7 @@ use dolos_cardano::model::{
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
     PoolEpochLog, PoolState, ProposalState,
 };
-use dolos_core::{ChainPoint, Namespace};
+use dolos_core::{ChainPoint, EntityKind, Namespace};
 use serde_json::json;
 use stelae::{
     dir::LayerSpec,
@@ -187,6 +189,59 @@ pub const LOG_KINDS: [(&str, Namespace); 12] = [
     ("log-policy-mint-chunks", PolicyMintChunk::NS),
     ("log-pool-epochs", PoolEpochLog::NS),
 ];
+
+/// The entity index layer kinds and the kind each carries, in inscription
+/// order.
+///
+/// One kind per entity kind the chain declares (decision 0064), for the reason
+/// [`LOG_KINDS`] is one per namespace: the kind is the layer, so a record
+/// carries no kind, and a reader skips a kind it does not register at the
+/// transport. The token is `entity-` followed by the kind's name, *spelled
+/// out* here and held to the name by `entity_kinds_derive_from_their_names`
+/// in `tests/coverage.rs`.
+///
+/// Epoch `e`'s entries are written by the seal at the boundary opening
+/// `e + 2`, so the first stele whose `e` window carries one is cut there,
+/// exactly as for `log-first-script-chunks`.
+pub const ENTITY_KINDS: [(&str, EntityKind); 2] = [
+    ("entity-asset", entities::ASSET),
+    ("entity-script", entities::SCRIPT),
+];
+
+/// The entity kinds alone, in [`ENTITY_KINDS`] order: what an export walks
+/// the archive's entity index for.
+pub const ENTITY_INDEX_KINDS: [EntityKind; ENTITY_KINDS.len()] = {
+    let mut kinds = [entities::ASSET; ENTITY_KINDS.len()];
+    let mut i = 0;
+
+    while i < ENTITY_KINDS.len() {
+        kinds[i] = ENTITY_KINDS[i].1;
+        i += 1;
+    }
+
+    kinds
+};
+
+/// The layer kind carrying `kind`'s entries, or `None` where this profile
+/// does not carry the kind.
+pub fn entity_layer_for(kind: EntityKind) -> Option<&'static str> {
+    ENTITY_KINDS
+        .into_iter()
+        .find(|(_, known)| *known == kind)
+        .map(|(layer, _)| layer)
+}
+
+/// The entity kind a layer of `kind` carries, or `None` where the layer is
+/// not an entity layer.
+///
+/// The reader's half, as [`log_ns_for`] is for the logs: a restore learns
+/// which kind a layer's records are from its kind.
+pub fn entity_kind_for(kind: &str) -> Option<EntityKind> {
+    ENTITY_KINDS
+        .into_iter()
+        .find(|(known, _)| *known == kind)
+        .map(|(_, entity)| entity)
+}
 
 /// The state layer kinds: the namespace each carries and the shard count its
 /// tip is published in, in inscription order.
@@ -445,11 +500,13 @@ pub(crate) fn settles_late(kind: &str) -> bool {
 
 /// The epoch kinds a window always produces a layer for.
 ///
-/// The log kinds are the exception, and the only one: a log layer exists if and
-/// only if its namespace has at least one record in the window, so an epoch
-/// contributes these plus one layer per log namespace it has records for. Split
-/// out because the two arities are what the layer arithmetic in
-/// [`export::export`] and [`registry::preview`] is made of.
+/// The log and entity kinds are the exception, and the only ones: a log layer
+/// exists if and only if its namespace has at least one record in the window,
+/// and an entity layer if and only if its kind has an entry first seen in it,
+/// so an epoch contributes these plus one layer per log namespace and entity
+/// kind it has records for. Split out because the two arities are what the
+/// layer arithmetic in [`export::export`] and [`registry::preview`] is made
+/// of.
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
 /// Every layer kind, in the order the inscription lists them.
@@ -467,14 +524,24 @@ pub const KINDS: [&str; EPOCH_KINDS.len() + STATE_KIND_NAMES.len() + 1] = {
 ///
 /// The namespace lives in the kind rather than in the scope, so a log layer
 /// wears the same [`EpochScope`] as `blocks` and `indexes` do — which is what
-/// keeps per-(kind, scope) inheritance working across the split.
-pub const EPOCH_KINDS: [&str; DENSE_EPOCH_KINDS.len() + LOG_KINDS.len()] = {
-    let mut kinds = [""; DENSE_EPOCH_KINDS.len() + LOG_KINDS.len()];
-    let at = fill(&mut kinds, 0, &DENSE_EPOCH_KINDS);
+/// keeps per-(kind, scope) inheritance working across the split. The entity
+/// layers wear it too, after the logs.
+pub const EPOCH_KINDS: [&str; DENSE_EPOCH_KINDS.len() + LOG_KINDS.len() + ENTITY_KINDS.len()] = {
+    let mut kinds = [""; DENSE_EPOCH_KINDS.len() + LOG_KINDS.len() + ENTITY_KINDS.len()];
+    let mut at = fill(&mut kinds, 0, &DENSE_EPOCH_KINDS);
     let mut i = 0;
 
     while i < LOG_KINDS.len() {
-        kinds[at + i] = LOG_KINDS[i].0;
+        kinds[at] = LOG_KINDS[i].0;
+        at += 1;
+        i += 1;
+    }
+
+    i = 0;
+
+    while i < ENTITY_KINDS.len() {
+        kinds[at] = ENTITY_KINDS[i].0;
+        at += 1;
         i += 1;
     }
 
@@ -639,6 +706,32 @@ pub enum Error {
 
     #[error("{0:?} is not an exact-record kind this profile defines")]
     UnknownExactKind(String),
+
+    /// An entity kind this build registers that the stele does not declare in
+    /// `parameters.entities`.
+    ///
+    /// The first-seen witness reads the kind's entries, and a node restored
+    /// without them would take every repeat for a first sighting with nothing
+    /// to show it. Absent layers cannot say this — an entity layer exists only
+    /// when it holds a record — so the declaration does, and a restore refuses
+    /// before a store is opened.
+    #[error(
+        "this stele does not declare entity kind {kind:?}, which this build indexes; restoring \
+         it would leave that kind's first sightings silently empty"
+    )]
+    UndeclaredEntityKind { kind: &'static str },
+
+    /// An entity kind the stele declares at a different id width than this
+    /// build registers: its ids could not be the ids this build looks up.
+    #[error(
+        "this stele declares entity kind {kind:?} with {declared}-byte ids, and this build \
+         registers {registered}-byte ids"
+    )]
+    EntityWidthMismatch {
+        kind: &'static str,
+        declared: u64,
+        registered: usize,
+    },
 
     #[error("layer kind {kind:?} does not take {scope}")]
     ScopeMismatch { kind: String, scope: &'static str },
@@ -1155,6 +1248,12 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
 /// (ADR-0027). Both maps are keyed by namespace — JCS sorts the keys, so the
 /// maps render in the byte order the tables are kept in.
 ///
+/// `entities` declares every entity index kind the publisher writes, with its
+/// id width ([`ENTITY_KINDS`]). An entity layer exists only when it holds a
+/// record, so its absence cannot tell a reader that the publisher does not
+/// carry the kind; the declaration does, and a restore refuses a stele that
+/// does not declare a kind the reader registers.
+///
 /// `stateEpochs` is the one value here that is not a consequence of code:
 /// which epochs a publisher retains a dump of is an operational choice, so it
 /// is configuration ([`RetainedEpochs`]) rather than a table. Echoing it here
@@ -1178,7 +1277,13 @@ pub fn parameters(retained: &RetainedEpochs) -> serde_json::Value {
         .map(|(ns, rev)| (ns.to_owned(), json!(rev)))
         .collect();
 
+    let entities: serde_json::Map<String, serde_json::Value> = ENTITY_KINDS
+        .into_iter()
+        .map(|(_, kind)| (kind.name().to_owned(), json!(kind.key_len())))
+        .collect();
+
     json!({
+        "entities": entities,
         "indexKeyHash": INDEX_KEY_HASH,
         "shards": shards,
         "schemas": schemas,
@@ -1194,7 +1299,8 @@ pub fn compression() -> Compression {
     }
 }
 
-/// Scope of a per-epoch layer: `blocks`, `indexes` and `logs`.
+/// Scope of a per-epoch layer: `blocks`, `indexes`, `log-{ns}` and
+/// `entity-{kind}`.
 ///
 /// The slot bounds are inclusive and describe the blocks the layer covers, not
 /// a half-open range — they are what a reader prints, not what it iterates.
