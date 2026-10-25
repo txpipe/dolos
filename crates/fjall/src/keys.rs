@@ -10,6 +10,7 @@
 //!   `[dim_hash:8][lookup_key:var][tag_order:10][txo_ref:36]`
 //! - **Block tag** (archive store): `[dim_hash:8][xxh3(tag_key):8][slot:8]`
 //! - **Exact lookup** (archive store): `[dim_hash:8][key_data:var]`
+//! - **Entity index** (archive store): `[kind_hash:8][id:kind width]`
 //!
 //! ## State Store Keys
 //!
@@ -53,6 +54,8 @@ pub mod dim_prefix {
     pub const BLOCK: &str = "block";
     /// Prefix for exact lookup dimensions (point queries)
     pub const EXACT: &str = "exact";
+    /// Prefix for entity index kinds (first-seen slots)
+    pub const ENTITY: &str = "entity";
 }
 
 /// Hash a qualified dimension string to 8 bytes.
