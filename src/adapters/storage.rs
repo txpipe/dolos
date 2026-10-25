@@ -2979,6 +2979,34 @@ mod tests {
             .append_prehashed([])
             .expect("append_prehashed must be supported");
     }
+
+    /// Finding T2 of the first QA review of dolos#1511: a replay through the
+    /// `LogsOnly` gate re-runs every seal, so the gate passes entity index
+    /// writes and reads through rather than discarding them as it does
+    /// block appends.
+    #[test]
+    fn the_logs_only_gate_passes_the_entity_index_through() {
+        let store = ArchiveStoreBackend::in_memory(StateSchema::default()).unwrap();
+        let gate = store.logs_only().unwrap();
+
+        let kind = EntityKind::new("toy", 4);
+        let id: &[u8] = &[7; 4];
+
+        let writer = gate.start_writer().unwrap();
+        writer.write_entity(kind, id, 10).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(store.entity_slots(kind, &[id]).unwrap(), [Some(10)]);
+        assert_eq!(gate.entity_slots(kind, &[id]).unwrap(), [Some(10)]);
+
+        let records = gate
+            .iter_entity_records(&[kind], 0..u64::MAX)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(records, [EntityRecord::new(kind, id, 10).unwrap()]);
+    }
 }
 
 #[cfg(test)]

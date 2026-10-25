@@ -2695,6 +2695,61 @@ fn an_entity_layer_a_predecessor_carries_is_inherited_and_not_rebuilt() {
     assert_eq!(lent.len(), 3 * ENTITY_KINDS.len());
 }
 
+/// Finding T1 of the first QA review of dolos#1511: a dry run counts the
+/// entity layers a publish builds and the ones it inherits, so the forecast
+/// and the publish that follows it agree.
+#[test]
+fn the_forecast_counts_the_entity_layers_a_publish_builds_and_inherits() {
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let archive = with_skeleton_blocks(entities_across_the_skeleton());
+    let state = skeleton_state();
+    let plan = skeleton_plan();
+
+    let first = export::export(
+        &stele,
+        &plan,
+        &archive,
+        &state,
+        None,
+        &export::First,
+        &Observer::silent(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        export::forecast(&plan, &archive, &export::First, None).unwrap(),
+        export::Forecast {
+            layers_built: first.layers.len(),
+            layers_reused: 0,
+        }
+    );
+
+    let lending = Lending::resuming(&first);
+
+    let carried = export::export(
+        &Discarding,
+        &plan,
+        &archive,
+        &state,
+        None,
+        &lending,
+        &Observer::silent(),
+    )
+    .unwrap();
+
+    let lent = lending.lent.load(Ordering::Relaxed);
+
+    assert_eq!(
+        export::forecast(&plan, &archive, &lending, None).unwrap(),
+        export::Forecast {
+            layers_built: carried.layers.len() - lent,
+            layers_reused: lent,
+        }
+    );
+}
+
 /// The supported facade keeps planning, directory encoding, digest and
 /// reproduction on one store view and one plan.
 #[test]
