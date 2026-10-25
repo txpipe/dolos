@@ -1180,8 +1180,10 @@ fn lifetime_blocks_count_the_blocks_of_the_first_shelley_epochs() {
 }
 
 /// Rewrite the store's eras so that `epochs` Byron epochs open the chain,
-/// as on preprod: Byron, then one Shelley epoch, then the devnet's protocol,
-/// all at the devnet's epoch and slot lengths.
+/// as on preprod: Byron, with a twentieth of the devnet's epoch length and
+/// twenty times its slot length, then one Shelley epoch, then the devnet's
+/// protocol, at the devnet's lengths. Unequal lengths make an era-unaware
+/// slot bound miss the first Shelley epochs.
 fn prefix_byron_epochs(domain: &ToyDomain, epochs: Epoch) {
     if epochs == 0 {
         return;
@@ -1190,27 +1192,37 @@ fn prefix_byron_epochs(domain: &ToyDomain, epochs: Epoch) {
     let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
     let edge = chain.edge().clone();
 
-    let boundary = |epoch: Epoch| EraBoundary {
-        epoch,
-        slot: epoch * edge.epoch_length,
-        timestamp: edge.start.timestamp + epoch * edge.epoch_length * edge.slot_length,
+    let mut byron = EraState {
+        start: EraBoundary {
+            epoch: 0,
+            slot: 0,
+            timestamp: edge.start.timestamp,
+        },
+        end: None,
+        epoch_length: edge.epoch_length / 20,
+        slot_length: edge.slot_length * 20,
+        protocol: 1,
     };
+    byron.define_end(epochs);
 
-    let era = |protocol: u16, start: Epoch, end: Option<Epoch>| EraState {
-        start: boundary(start),
-        end: end.map(boundary),
-        protocol,
+    let mut shelley = EraState {
+        start: byron.end.clone().unwrap(),
+        end: None,
+        protocol: 2,
+        ..edge.clone()
+    };
+    shelley.define_end(epochs + 1);
+
+    let current = EraState {
+        start: shelley.end.clone().unwrap(),
+        end: None,
         ..edge.clone()
     };
 
     write(domain, |writer| {
-        for (protocol, era) in [
-            (1, era(1, 0, Some(epochs))),
-            (2, era(2, epochs, Some(epochs + 1))),
-            (edge.protocol, era(edge.protocol, epochs + 1, None)),
-        ] {
+        for (protocol, era) in [(1, &byron), (2, &shelley), (edge.protocol, &current)] {
             writer
-                .write_entity_typed(&EraKey::from(protocol), &era)
+                .write_entity_typed(&EraKey::from(protocol), era)
                 .unwrap();
         }
     });
