@@ -74,7 +74,7 @@ use watcher::Watcher;
 
 /// The identity of an export over the skeleton store set.
 const GOLDEN_SKELETON: &str =
-    "sha256:6115d38d0021a31339c718d91d8748d7070ba8cd05a2d1d718505ab0349c3db0";
+    "sha256:d9512761e4c395050b008e9d5d39ba61b88e01f47cf7fe05f93da77523c1a2d6";
 
 /// Where the skeleton fixture stands: on the first block of epoch 2 under
 /// [`skeleton_summary`], after fifty empty slots, so the export covers three

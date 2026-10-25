@@ -156,7 +156,7 @@ mod tests {
     use crate::model::testing::{
         self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
     };
-    use dolos_core::{EntityDelta as _, KeyCodec as _};
+    use dolos_core::KeyCodec as _;
     use proptest::prelude::*;
 
     #[test]

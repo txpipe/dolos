@@ -1007,8 +1007,6 @@ mod wal_tests {
     /// theirs, and a row carrying it is refused rather than read as another.
     #[test]
     fn retired_variants_hold_their_index() {
-        for index in [72u32] {
-            assert!(bincode::deserialize::<CardanoDelta>(&index.to_le_bytes()).is_err());
-        }
+        assert!(bincode::deserialize::<CardanoDelta>(&72u32.to_le_bytes()).is_err());
     }
 }
