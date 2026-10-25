@@ -2748,6 +2748,35 @@ fn the_forecast_counts_the_entity_layers_a_publish_builds_and_inherits() {
             layers_reused: lent,
         }
     );
+
+    // A layer the predecessor carries counts where this store holds no entry
+    // for it, as the publish adopts it.
+    let bare = with_skeleton_blocks(MemoryArchiveStore::new(
+        dolos_cardano::model::build_log_schema(),
+    ));
+    let lender = Lending::resuming(&first);
+
+    let adopted = export::export(
+        &Discarding,
+        &plan,
+        &bare,
+        &state,
+        None,
+        &lender,
+        &Observer::silent(),
+    )
+    .unwrap();
+
+    let lent = lender.lent.load(Ordering::Relaxed);
+
+    assert_eq!(adopted.layers.len(), first.layers.len());
+    assert_eq!(
+        export::forecast(&plan, &bare, &lender, None).unwrap(),
+        export::Forecast {
+            layers_built: adopted.layers.len() - lent,
+            layers_reused: lent,
+        }
+    );
 }
 
 /// The supported facade keeps planning, directory encoding, digest and
