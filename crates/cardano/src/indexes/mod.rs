@@ -6,9 +6,11 @@
 //! - Dimension constants for UTxO filter and archive indexes
 //! - Extension traits for convenient Cardano-specific index queries
 //! - Delta builders for constructing index deltas from Cardano block data
+//! - The entity kinds Cardano declares for the archive's entity index
 
 mod delta;
 mod dimensions;
+pub mod entities;
 mod ext;
 mod query;
 

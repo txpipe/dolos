@@ -13,7 +13,12 @@
 //! - the archive tags and the exact lookups project the block history and live
 //!   in the archive store (`ArchiveStore::slots_by_tag`,
 //!   `ArchiveStore::slot_by_*`, written through `ArchiveWriter::apply_index`),
-//!   where the `indexes` stele layer is produced from and restored into.
+//!   where the `indexes` stele layer is produced from and restored into;
+//! - the entity index maps an entity's id to the slot it was first seen at, for
+//!   the kinds the chain declares ([`EntityKind`]). It lives in the archive
+//!   store too (`ArchiveStore::entity_slots`, written through
+//!   `ArchiveWriter::write_entity` by the seal of an immutable epoch) and
+//!   travels in one `entity-{kind}` stele layer per kind and epoch.
 
 use std::borrow::Cow;
 
@@ -272,6 +277,103 @@ impl std::fmt::Debug for ExactRecord {
     }
 }
 
+/// A kind of entity whose first-seen slot the archive's entity index keeps.
+///
+/// The chain declares its kinds and core names none. An id is fixed-width per
+/// kind, at most [`MAX_EXACT_KEY_LEN`] bytes, and stored verbatim, so a
+/// lookup answers for exactly the id it was given.
+///
+/// The fields are private so [`EntityKind::new`] is the only way in, which is
+/// what keeps the width within an [`EntityRecord`]'s inline key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntityKind {
+    name: &'static str,
+    key_len: usize,
+}
+
+impl EntityKind {
+    /// A kind named `name` whose ids are `key_len` bytes.
+    ///
+    /// Panics on an empty name or a width outside `1..=MAX_EXACT_KEY_LEN`,
+    /// which for a `const` declaration is a compile error.
+    pub const fn new(name: &'static str, key_len: usize) -> Self {
+        assert!(!name.is_empty(), "an entity kind needs a name");
+        assert!(
+            key_len > 0 && key_len <= MAX_EXACT_KEY_LEN,
+            "an entity id is 1 to MAX_EXACT_KEY_LEN bytes"
+        );
+
+        Self { name, key_len }
+    }
+
+    /// The stored kind name. It is hashed into on-disk keys and names the
+    /// kind's stele layer, so renaming one is a storage migration.
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The exact byte length of an id of this kind.
+    pub const fn key_len(&self) -> usize {
+        self.key_len
+    }
+}
+
+impl std::fmt::Display for EntityKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name)
+    }
+}
+
+/// One entity index entry: an id and the slot its entity was first seen at.
+///
+/// The key is held inline, as [`ExactRecord`]'s is, because a stele export
+/// makes one record per entry in the store.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntityRecord {
+    pub kind: EntityKind,
+    /// Zero-padded to [`MAX_EXACT_KEY_LEN`]; [`EntityRecord::key`] trims it.
+    /// Private so [`EntityRecord::new`] is the only way in.
+    key: [u8; MAX_EXACT_KEY_LEN],
+    pub slot: BlockSlot,
+}
+
+impl EntityRecord {
+    /// Build a record, checking the id against its kind's width.
+    pub fn new(kind: EntityKind, key: &[u8], slot: BlockSlot) -> Result<Self, IndexError> {
+        if key.len() != kind.key_len() {
+            return Err(IndexError::CodecError(format!(
+                "entity record of kind {kind} has a {}-byte id, expected {}",
+                key.len(),
+                kind.key_len(),
+            )));
+        }
+
+        let mut buf = [0u8; MAX_EXACT_KEY_LEN];
+        buf[..key.len()].copy_from_slice(key);
+
+        Ok(Self {
+            kind,
+            key: buf,
+            slot,
+        })
+    }
+
+    /// The stored id, trimmed to its kind's width.
+    pub fn key(&self) -> &[u8] {
+        &self.key[..self.kind.key_len()]
+    }
+}
+
+impl std::fmt::Debug for EntityRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EntityRecord")
+            .field("kind", &self.kind.name())
+            .field("key", &self.key())
+            .field("slot", &self.slot)
+            .finish()
+    }
+}
+
 /// Either archive record, as consumed by
 /// `ArchiveWriter::append_prehashed`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -379,6 +481,36 @@ mod tests {
         assert!(low < high, "key dominates slot");
         assert!(high < other_kind, "kind dominates key");
         assert_eq!(low.key(), &1u64.to_be_bytes());
+    }
+
+    #[test]
+    fn entity_record_rejects_a_wrong_width_id() {
+        let kind = EntityKind::new("toy", 4);
+
+        assert!(EntityRecord::new(kind, &[0u8; 4], 1).is_ok());
+        assert!(EntityRecord::new(kind, &[0u8; 3], 1).is_err());
+        assert!(EntityRecord::new(kind, &[0u8; 5], 1).is_err());
+        assert!(EntityRecord::new(kind, &[], 1).is_err());
+    }
+
+    #[test]
+    fn entity_record_ord_is_kind_then_id() {
+        let a = EntityKind::new("a", 4);
+        let b = EntityKind::new("b", 2);
+
+        let low = EntityRecord::new(a, &[0, 0, 0, 1], 9).unwrap();
+        let high = EntityRecord::new(a, &[0, 0, 0, 2], 0).unwrap();
+        let other_kind = EntityRecord::new(b, &[0, 0], 0).unwrap();
+
+        assert!(low < high, "id dominates slot");
+        assert!(high < other_kind, "kind name dominates id");
+        assert_eq!(low.key(), &[0, 0, 0, 1]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn an_entity_kind_wider_than_an_inline_key_is_refused() {
+        EntityKind::new("wide", MAX_EXACT_KEY_LEN + 1);
     }
 
     #[test]

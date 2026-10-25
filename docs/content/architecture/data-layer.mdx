@@ -66,7 +66,7 @@ The three storage modes are the values of `history.mode`:
 
 `history.mode = "none"` is the ledger-only switch, and it drops the historical lookups with the archive that hosts them. The live-UTxO tags are not affected: they project the UTxO set, so they stay in the state store in every mode (about 3.5 GB on mainnet).
 
-Pruning is driven by `prune_history()` on the WAL and archive stores. The WAL is always pruned to the protocol's rollback window. In the archive, pruning covers the block bodies, the logs, and the `archive-tags` and `index-exact` keyspaces, so a sliding-history node's index footprint is window-sized too. See the [configuration schema](../configuration/schema#storage) for the exact keys, and for which store types combine.
+Pruning is driven by `prune_history()` on the WAL and archive stores. The WAL is always pruned to the protocol's rollback window. In the archive, pruning covers the block bodies, the logs, and the `archive-tags`, `index-exact` and `index-entity` keyspaces, so a sliding-history node's index footprint is window-sized too. A sliding-history node therefore keeps the first sightings of its window only, and a stele publisher keeps full history. See the [configuration schema](../configuration/schema#storage) for the exact keys, and for which store types combine.
 
 ## Data model primitives
 
@@ -81,13 +81,14 @@ A few concepts recur across the stores:
 - **Metadata label counts.** `metadata-labels` (`MetadataLabelState`) holds one state row per transaction metadata label: the number of valid transactions that carry it, raised per block by a delta that a rollback undoes. The key is the label as 8 big-endian bytes, so a scan returns labels in numeric order up to 2^64 − 1. A phase-2-invalid transaction adds nothing, as db-sync writes no metadata row for one. The counts are all-time, so pruning leaves them, and they never seal into the archive. `/metadata/txs/labels` pages through the namespace. On mainnet it is 3,199 rows, 25.1 kB on disk, carried in every stele's state tip. Source: `crates/cardano/src/model/metadata_labels.rs`.
 - **API-only state.** A fact the API serves that the ledger rules never read lives in its own state namespace, so a ledger namespace holds only what the ledger knows. `drep-sightings` (`DRepSightingState`, keyed by `DRepKey`) holds one row per DRep a certificate of a valid tx has named, vote delegations and the special DReps included: the position of the first such certificate, down to its place in the tx, and the latest anchor a registration or update carried. `/governance/dreps` lists DReps in that order with that anchor, which is db-sync's order and metadata, and reads the page's `DRepState` rows for the rest. The ledger's own anchor is cleared by an update without one, and a DRep only a vote delegation named has no `DRepState` row. Its deltas undo through the WAL, and its rows are never pruned. On mainnet it holds 1,700 rows, 128 kB on disk.
 - **Index dimensions.** Tag multimaps keyed by address, payment credential, stake credential, policy id, and asset id. The live ones point at the matching UTxOs and live in the state store's `state-tags` keyspace, written in the same batch as the UTxO set; the historical ones point at slots and live in the archive store's `archive-tags` keyspace, beside the `index-exact` keyspace that resolves a block hash, block number or transaction hash to its slot — both written in the same batch as the blocks they project.
+- **Entity index.** The `index-entity` keyspace maps an entity's id to the slot it was first seen at, for the entity kinds the chain declares; Cardano declares `asset` (its 32-byte `AssetKey`) and `script` (its 28-byte hash). Core names no kind. The seal of an immutable epoch writes it in the same commit as the epoch's sealed logs, nothing undoes it because no rollback reaches a sealed epoch, and a prune sweeps it by slot. Steles carry it as one `entity-{kind}` layer per kind and epoch, available from the stele cut two boundaries after the epoch. Source: `crates/core/src/{indexes,archive}.rs`, `crates/fjall/src/archive/entity.rs`, `crates/cardano/src/indexes/entities.rs`.
 
 The two fjall databases and their keyspaces:
 
 | Store | Keyspaces | One batch commits |
 |---|---|---|
 | state | `state-cursor`, `state-utxos`, `state-entities`, `state-tags` | entities + UTxO set + live-UTxO tags + cursor |
-| archive | `archive-blocks`, `archive-logs`, `archive-tags`, `index-exact`, `archive-meta` | block locations + logs + archive tags + exact lookups |
+| archive | `archive-blocks`, `archive-logs`, `archive-tags`, `index-exact`, `index-entity`, `archive-meta` | block locations + logs + archive tags + exact lookups + entity index entries |
 
 The [store identity](#store-identity) is written once, when the store is created, beside the cursor in `state-cursor` and alone in `archive-meta`.
 

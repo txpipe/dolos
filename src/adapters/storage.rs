@@ -28,9 +28,9 @@ use dolos_core::{
         StateStoreConfig, StoreType,
     },
     ArchiveIndexDelta, BlockBody, BlockSlot, CacheDiskTier, CacheEntry, CacheError, ChainPoint,
-    EntityDelta, EntityKey, EntityValue, ExactRecord, IndexRecord, KeyRange, LogEntry, LogKey,
-    LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace, QueryLimiter,
-    RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
+    EntityDelta, EntityKey, EntityKind, EntityRecord, EntityValue, ExactRecord, IndexRecord,
+    KeyRange, LogEntry, LogKey, LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx,
+    Namespace, QueryLimiter, RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
     StateWriter as CoreStateWriter, TagDimension, TagEntry, TagOrder, TagRecord, TagStart,
     TieredCache, TxHash, TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet,
     UtxoSetDelta, WalError, WalStore,
@@ -1107,8 +1107,8 @@ impl CoreStateStore for StateStoreBackend {
 pub enum ArchiveStoreBackend {
     Memory(MemoryArchiveStore),
     /// Write-gated view over an already-open archive: reads, derived-log
-    /// writes and index applies pass through, block appends and undos are
-    /// discarded.
+    /// writes, index applies and entity index writes pass through, block
+    /// appends and undos are discarded.
     ///
     /// This exists for replays over an archive that already holds the chain
     /// (`dolos doctor rebuild-state --rewrite-logs`): block appends are not
@@ -1118,7 +1118,9 @@ pub enum ArchiveStoreBackend {
     /// overwrite the originals in place. Index entries are keyed by what they
     /// project and the slot, so a replay re-writes the ones the archive holds
     /// and adds the ones an older indexer never emitted (the auxiliary-data
-    /// script tags `script_by_hash` falls back on).
+    /// script tags `script_by_hash` falls back on). The replay re-runs every
+    /// seal, so it writes the entity index again with the sealed logs; an
+    /// entry is keyed by its id, so the rewrite lands in place.
     ///
     /// [`Self::logs_only`] is the sole constructor, and it never nests one
     /// gate inside another.
@@ -1231,7 +1233,8 @@ impl ArchiveStoreBackend {
 
 pub enum ArchiveWriterBackend {
     Memory(Box<<MemoryArchiveStore as CoreArchiveStore>::Writer>),
-    /// Delegates `write_log`, `apply_index` and `commit`; discards `apply`,
+    /// Delegates `write_log`, `apply_index`, `write_entity` and `commit`;
+    /// discards `apply`,
     /// `undo`, `undo_index` and `append_prehashed`. See
     /// [`ArchiveStoreBackend::LogsOnly`].
     LogsOnly(Box<ArchiveWriterBackend>),
@@ -1299,6 +1302,20 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
             Self::LogsOnly(_) => Ok(()),
             Self::Fjall(w) => w.append_prehashed(records),
             Self::NoOp(w) => w.append_prehashed(records),
+        }
+    }
+
+    fn write_entity(
+        &self,
+        kind: EntityKind,
+        key: &[u8],
+        slot: BlockSlot,
+    ) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(w) => w.write_entity(kind, key, slot),
+            Self::LogsOnly(w) => w.write_entity(kind, key, slot),
+            Self::Fjall(w) => w.write_entity(kind, key, slot),
+            Self::NoOp(w) => w.write_entity(kind, key, slot),
         }
     }
 
@@ -1452,6 +1469,23 @@ impl Iterator for ArchiveExactIterBackend {
     }
 }
 
+pub enum ArchiveEntityRecordIterBackend {
+    Memory(<MemoryArchiveStore as CoreArchiveStore>::EntityRecordIter),
+    Fjall(<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::EntityRecordIter),
+    NoOp(<NoOpArchiveStore as CoreArchiveStore>::EntityRecordIter),
+}
+
+impl Iterator for ArchiveEntityRecordIterBackend {
+    type Item = Result<EntityRecord, ArchiveError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Memory(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
+            Self::NoOp(iter) => iter.next(),
+        }
+    }
+}
+
 impl CoreArchiveStore for ArchiveStoreBackend {
     type BlockIter<'a> = ArchiveBlockIterBackend;
     type Writer = ArchiveWriterBackend;
@@ -1460,6 +1494,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     type SlotIter = ArchiveSlotIterBackend;
     type TagIter = ArchiveTagIterBackend;
     type ExactIter = ArchiveExactIterBackend;
+    type EntityRecordIter = ArchiveEntityRecordIterBackend;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         match self {
@@ -1613,6 +1648,19 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         }
     }
 
+    fn entity_slots(
+        &self,
+        kind: EntityKind,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<BlockSlot>>, ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::entity_slots(s, kind, keys),
+            Self::LogsOnly(inner) => CoreArchiveStore::entity_slots(inner.as_ref(), kind, keys),
+            Self::Fjall(s) => CoreArchiveStore::entity_slots(s, kind, keys),
+            Self::NoOp(s) => CoreArchiveStore::entity_slots(s, kind, keys),
+        }
+    }
+
     fn slots_by_tag(
         &self,
         dimension: TagDimension,
@@ -1663,6 +1711,24 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::NoOp(s) => {
                 CoreArchiveStore::iter_exact_records(s, slots).map(ArchiveExactIterBackend::NoOp)
             }
+        }
+    }
+
+    fn iter_entity_records(
+        &self,
+        kinds: &[EntityKind],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::EntityRecordIter, ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::iter_entity_records(s, kinds, slots)
+                .map(ArchiveEntityRecordIterBackend::Memory),
+            Self::LogsOnly(inner) => {
+                CoreArchiveStore::iter_entity_records(inner.as_ref(), kinds, slots)
+            }
+            Self::Fjall(s) => CoreArchiveStore::iter_entity_records(s, kinds, slots)
+                .map(ArchiveEntityRecordIterBackend::Fjall),
+            Self::NoOp(s) => CoreArchiveStore::iter_entity_records(s, kinds, slots)
+                .map(ArchiveEntityRecordIterBackend::NoOp),
         }
     }
 }
@@ -2912,6 +2978,34 @@ mod tests {
             .expect("start_writer failed")
             .append_prehashed([])
             .expect("append_prehashed must be supported");
+    }
+
+    /// Finding T2 of the first QA review of dolos#1511: a replay through the
+    /// `LogsOnly` gate re-runs every seal, so the gate passes entity index
+    /// writes and reads through rather than discarding them as it does
+    /// block appends.
+    #[test]
+    fn the_logs_only_gate_passes_the_entity_index_through() {
+        let store = ArchiveStoreBackend::in_memory(StateSchema::default()).unwrap();
+        let gate = store.logs_only().unwrap();
+
+        let kind = EntityKind::new("toy", 4);
+        let id: &[u8] = &[7; 4];
+
+        let writer = gate.start_writer().unwrap();
+        writer.write_entity(kind, id, 10).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(store.entity_slots(kind, &[id]).unwrap(), [Some(10)]);
+        assert_eq!(gate.entity_slots(kind, &[id]).unwrap(), [Some(10)]);
+
+        let records = gate
+            .iter_entity_records(&[kind], 0..u64::MAX)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(records, [EntityRecord::new(kind, id, 10).unwrap()]);
     }
 }
 

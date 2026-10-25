@@ -18,7 +18,7 @@
 //!    Selection is profile-side by necessity: a layer's `scope` is opaque to
 //!    the protocol, so nothing but this crate can read an epoch out of one.
 //! 3. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
-//!    `indexes` — all three into the archive store.
+//!    its `entity-{kind}` layers, then `indexes` — all into the archive store.
 //! 4. The state tip — every shard of every `state-{ns}` kind. Derive the
 //!    live-UTxO tags from each incoming UTxO chunk and commit them with the
 //!    set. They are never shipped — ADR-004's Amendment 2.
@@ -87,8 +87,8 @@
 //! resume reads it again from its first record — over chunks that were already
 //! committed. Every write path this driver drives is keyed, so that is a
 //! rewrite and not a duplication: blocks by slot, logs by namespace and key,
-//! index records by their own stored key, entities by namespace and key, UTxOs
-//! by their `TxoRef`.
+//! index records by their own stored key, entity index entries by kind and id,
+//! entities by namespace and key, UTxOs by their `TxoRef`.
 //!
 //! One cost is real and worth stating rather than discovering. The fjall
 //! archive appends block bodies to flat files and keeps a slot-keyed table of
@@ -139,8 +139,8 @@ use std::{
 
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, IndexRecord, Namespace, StateStore,
-    StateWriter, UtxoSetDelta,
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EntityKind, EntityRecord, IndexRecord,
+    Namespace, StateStore, StateWriter, UtxoSetDelta,
 };
 use stelae::{
     frame::Limits,
@@ -153,11 +153,12 @@ use stelae::{
 use tracing::info;
 
 use crate::{
-    layers::{blocks, indexes, logs, state},
+    entity_kind_for,
+    layers::{blocks, entities, indexes, logs, state},
     log_ns_for, preflight, read_position,
     reporting::Cursor,
-    state_ns_for, DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, NAMESPACES,
-    RETIRED_SCHEMA_REV, SCOPE_REQUIRED, STATE_KINDS, UTXOS,
+    state_ns_for, DolosProfile, Error, Position, BLOCKS, DIGESTS, ENTITY_KINDS, INDEXES,
+    NAMESPACES, RETIRED_SCHEMA_REV, SCOPE_REQUIRED, STATE_KINDS, UTXOS,
 };
 
 pub use stelae_driver::restore::{Budget, Checkpoint, Outlook};
@@ -200,6 +201,10 @@ pub struct EpochLayers {
     /// for it, so "not there" is the ordinary case and not a defect to report.
     /// Ordered by namespace, which is the order the kinds are listed in.
     pub logs: BTreeMap<Namespace, LayerDescriptor>,
+    /// The `entity-{kind}` layers this epoch carries, by the entity kind their
+    /// layer kind names — at most one per kind, and none for an epoch that
+    /// first saw no entity of a kind, exactly as for [`EpochLayers::logs`].
+    pub entities: BTreeMap<EntityKind, LayerDescriptor>,
     pub indexes: Option<LayerDescriptor>,
 }
 
@@ -208,6 +213,7 @@ impl EpochLayers {
         self.blocks
             .iter()
             .chain(self.logs.values())
+            .chain(self.entities.values())
             .chain(self.indexes.iter())
     }
 }
@@ -521,6 +527,7 @@ pub fn plan<R: SteleReader>(
     // The other half of the compatibility rule: `check_profile` decides about
     // kinds the stele *carries*, and this decides about the ones it does not.
     check_namespaces(&inscription)?;
+    check_entities(&inscription)?;
 
     let skipped_unknown = unknown_layers(&inscription)?;
     let position = read_position(&inscription.position)?;
@@ -595,6 +602,51 @@ fn check_namespaces(inscription: &Inscription) -> Result<(), Error> {
     Ok(())
 }
 
+/// Refuse a stele that does not declare an entity kind this build registers,
+/// or declares one at another id width.
+///
+/// `parameters.entities` is the publisher's statement of the entity index
+/// kinds it writes. An entity layer exists only when it holds a record, so a
+/// stele whose publisher never wrote a kind looks, layer by layer, like one
+/// whose epochs first saw nothing of it — and the first-seen witness reads
+/// that kind's entries. So a kind this build registers has to be declared,
+/// and at its width, before a store is opened.
+///
+/// A declared kind this build does not register is not a refusal: its layers
+/// are of a kind this build does not implement, which [`unknown_layers`]
+/// skips and reports, and nothing here reads it.
+fn check_entities(inscription: &Inscription) -> Result<(), Error> {
+    let declared =
+        match inscription.parameters.get("entities") {
+            None => None,
+            Some(value) => Some(value.as_object().ok_or_else(|| {
+                Error::malformed_inscription("parameters.entities", "not an object")
+            })?),
+        };
+
+    for (_, kind) in ENTITY_KINDS {
+        let width = match declared.and_then(|map| map.get(kind.name())) {
+            None => return Err(Error::UndeclaredEntityKind { kind: kind.name() }),
+            Some(value) => value.as_u64().ok_or_else(|| {
+                Error::malformed_inscription(
+                    format!("parameters.entities.{}", kind.name()),
+                    "not an id width",
+                )
+            })?,
+        };
+
+        if usize::try_from(width).ok() != Some(kind.key_len()) {
+            return Err(Error::EntityWidthMismatch {
+                kind: kind.name(),
+                declared: width,
+                registered: kind.key_len(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 /// The layers this build has no kind for, once any required one has refused.
 ///
 /// The profile's half of the rule decision 0026 sets. The protocol reports
@@ -630,11 +682,12 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
     for descriptor in &inscription.layers {
         let kind = descriptor.kind.as_str();
         let log_ns = log_ns_for(kind);
+        let entity = entity_kind_for(kind);
 
         // The tip kinds and `digests`, which are not epoch-scoped, plus any
         // kind this build does not define — `plan` has already collected those
         // into `Plan.skipped_unknown` and refused the required ones.
-        if log_ns.is_none() && !matches!(kind, BLOCKS | INDEXES) {
+        if log_ns.is_none() && entity.is_none() && !matches!(kind, BLOCKS | INDEXES) {
             continue;
         }
 
@@ -648,6 +701,7 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
             end_slot,
             blocks: None,
             logs: BTreeMap::new(),
+            entities: BTreeMap::new(),
             indexes: None,
         });
 
@@ -666,6 +720,17 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
 
         if let Some(ns) = log_ns {
             if entry.logs.insert(ns, descriptor.clone()).is_some() {
+                return Err(Error::malformed_inscription(
+                    format!("layers[{kind}].scope"),
+                    format!("epoch {epoch} is described twice"),
+                ));
+            }
+
+            continue;
+        }
+
+        if let Some(entity) = entity {
+            if entry.entities.insert(entity, descriptor.clone()).is_some() {
                 return Err(Error::malformed_inscription(
                     format!("layers[{kind}].scope"),
                     format!("epoch {epoch} is described twice"),
@@ -845,6 +910,8 @@ pub struct Summary {
     pub blocks: u64,
     pub logs: u64,
     pub index_records: u64,
+    /// Entity index entries, from the `entity-{kind}` layers.
+    pub entity_index: u64,
     pub entities: u64,
     pub utxos: u64,
 
@@ -997,6 +1064,19 @@ where
             cursor.close(at, kind, outcome);
             summary.count(outcome);
             summary.logs += count;
+        }
+
+        for (entity, descriptor) in &epoch.entities {
+            let kind = descriptor.kind.as_str();
+            let at = cursor.open(kind, &descriptor.scope);
+
+            let (count, outcome) = checkpoint.fetch(descriptor, || {
+                restore_entities(&reader, descriptor, archive, *entity)
+            })?;
+
+            cursor.close(at, kind, outcome);
+            summary.count(outcome);
+            summary.entity_index += count;
         }
 
         if let Some(descriptor) = &epoch.indexes {
@@ -1361,6 +1441,36 @@ fn restore_logs<R: SteleReader, A: ArchiveStore>(
 
             for record in chunk {
                 writer.write_log(ns, &record.key, &record.value)?;
+            }
+
+            writer.commit()?;
+
+            Ok(())
+        },
+    )
+}
+
+/// One epoch's entity index entries for one kind, written through
+/// `write_entity`.
+///
+/// `kind` comes from the layer's kind, as a log layer's namespace does, and
+/// the codec holds every id to its width. An entry is keyed by its id, so a
+/// redone layer rewrites the entries it wrote before.
+fn restore_entities<R: SteleReader, A: ArchiveStore>(
+    reader: &Reader<'_, R>,
+    descriptor: &LayerDescriptor,
+    archive: &A,
+    kind: EntityKind,
+) -> Result<u64, Error> {
+    reader.drain(
+        descriptor,
+        |bytes: &[u8]| entities::decode(kind, bytes),
+        |_| std::mem::size_of::<EntityRecord>(),
+        |chunk| {
+            let writer = archive.start_writer()?;
+
+            for record in chunk {
+                writer.write_entity(record.kind, record.key(), record.slot)?;
             }
 
             writer.commit()?;
@@ -1853,6 +1963,7 @@ mod tests {
                 end_slot: epoch * 100 + 99,
                 blocks: None,
                 logs: BTreeMap::new(),
+                entities: BTreeMap::new(),
                 indexes: None,
             })
             .collect();
@@ -2153,6 +2264,129 @@ mod tests {
     #[test]
     fn the_profiles_own_parameters_satisfy_the_rule() {
         check_namespaces(&inscription(state_layers())).unwrap();
+        check_entities(&inscription(state_layers())).unwrap();
+    }
+
+    /// A stele that does not declare a kind this build indexes is refused
+    /// naming the kind: its entity layers being absent would read as epochs
+    /// that first saw nothing.
+    #[test]
+    fn an_undeclared_entity_kind_refuses_the_restore() {
+        let (_, kind) = ENTITY_KINDS[1];
+
+        let mut declared = inscription(state_layers());
+        declared.parameters["entities"]
+            .as_object_mut()
+            .unwrap()
+            .remove(kind.name());
+
+        assert!(matches!(
+            check_entities(&declared),
+            Err(Error::UndeclaredEntityKind { kind: refused }) if refused == kind.name()
+        ));
+
+        // A stele published before the declaration existed carries none.
+        let mut older = inscription(state_layers());
+        older.parameters.as_object_mut().unwrap().remove("entities");
+
+        assert!(matches!(
+            check_entities(&older),
+            Err(Error::UndeclaredEntityKind { .. })
+        ));
+
+        // And `plan` asks before a store could be opened.
+        let mut bare = inscription(vec![]);
+        bare.parameters.as_object_mut().unwrap().remove("entities");
+
+        let temp = tempfile::tempdir().unwrap();
+        let stele = stelae::dir::SteleDir::create(temp.path()).unwrap();
+        stelae::SteleWriter::seal(&stele, &DolosProfile, &bare).unwrap();
+
+        assert!(matches!(
+            plan(&stele, MAINNET_MAGIC, None),
+            Err(Error::UndeclaredEntityKind { .. })
+        ));
+    }
+
+    #[test]
+    fn a_declared_width_other_than_the_registered_one_refuses_the_restore() {
+        let (_, kind) = ENTITY_KINDS[0];
+
+        let mut inscription = inscription(state_layers());
+        inscription.parameters["entities"][kind.name()] = json!(kind.key_len() + 1);
+
+        let err = check_entities(&inscription).unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                Error::EntityWidthMismatch { kind: refused, declared, registered }
+                    if refused == kind.name()
+                        && declared == kind.key_len() as u64 + 1
+                        && registered == kind.key_len()
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// A kind this build does not register is the publisher's business: its
+    /// layers are skipped and reported as a kind this build does not
+    /// implement.
+    #[test]
+    fn a_declared_kind_this_build_does_not_register_is_not_a_refusal() {
+        let mut inscription = inscription(state_layers());
+        inscription.parameters["entities"]["datum"] = json!(32);
+
+        check_entities(&inscription).unwrap();
+    }
+
+    #[test]
+    fn a_malformed_entity_declaration_is_malformed_rather_than_undeclared() {
+        let mut not_a_map = inscription(state_layers());
+        not_a_map.parameters["entities"] = json!(["asset", "script"]);
+
+        let mut not_a_width = inscription(state_layers());
+        not_a_width.parameters["entities"][ENTITY_KINDS[0].1.name()] = json!("32");
+
+        for inscription in [not_a_map, not_a_width] {
+            let err = check_entities(&inscription).unwrap_err();
+            assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
+        }
+    }
+
+    /// Entity layers group by epoch beside the logs, keyed by the entity kind
+    /// their layer kind names.
+    #[test]
+    fn entity_layers_group_by_epoch_and_kind() {
+        let (asset_layer, asset) = ENTITY_KINDS[0];
+        let (script_layer, script) = ENTITY_KINDS[1];
+
+        let layers = vec![
+            epoch_descriptor(asset_layer, 4, 1),
+            epoch_descriptor(asset_layer, 5, 2),
+            epoch_descriptor(script_layer, 5, 3),
+        ];
+
+        let epochs = select_epochs(&inscription(layers)).unwrap();
+
+        assert_eq!(epochs.len(), 2);
+        assert_eq!(
+            epochs[0].entities.keys().copied().collect::<Vec<_>>(),
+            [asset]
+        );
+        assert_eq!(
+            epochs[1].entities.keys().copied().collect::<Vec<_>>(),
+            [asset, script]
+        );
+        assert_eq!(epochs[1].entities[&script].kind, script_layer);
+
+        let twice = vec![
+            epoch_descriptor(asset_layer, 4, 1),
+            epoch_descriptor(asset_layer, 4, 2),
+        ];
+
+        let err = select_epochs(&inscription(twice)).unwrap_err();
+        assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
     /// The preflight is a refusal for a doomed run, not a promise about a

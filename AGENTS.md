@@ -16,7 +16,7 @@ Dolos keeps its data in distinct stores, each serving a specific purpose:
 
 ### ArchiveStore
 - **Purpose**: Historical block storage with temporal indexing
-- **Contents**: Block bodies indexed by slot (one zstd frame per body in flat segment files, compressed with the dictionary bundled in `dolos-flatfiles`), entity logs keyed by `LogKey` (slot + typed key), and the lookups over them: archive tags (by address, payment, stake, policy, asset, datum, …) and exact lookups (by block hash, block number, tx hash), written in the same batch as the blocks they project
+- **Contents**: Block bodies indexed by slot (one zstd frame per body in flat segment files, compressed with the dictionary bundled in `dolos-flatfiles`), entity logs keyed by `LogKey` (slot + typed key), and the lookups over them: archive tags (by address, payment, stake, policy, asset, datum, …) and exact lookups (by block hash, block number, tx hash), written in the same batch as the blocks they project; and the entity index (an entity's id → the slot it was first seen at, for the kinds the chain declares), written by the seal of an immutable epoch and never undone
 - **Traits**: `ArchiveStore` (reads) + `ArchiveWriter` (batched writes)
 - **Database**: `<storage.path>/archive` (index plus flat block segment files)
 
@@ -37,6 +37,7 @@ There is no standalone index store. Every index is a projection and lives in
 the store that holds what it projects:
 - the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag` for the whole set, `StateStore::utxos_by_tag_page` for one page in creation order, `StateStore::utxos_with_tag` to probe entries by their full key, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
 - the archive tags and the exact lookups (by block hash, block number, tx hash) project the block history and live in the `ArchiveStore` (`ArchiveStore::slots_by_tag` / `slot_by_*`, written through `ArchiveWriter::apply_index` in the same batch as the blocks)
+- the entity index maps an entity's id to the slot it was first seen at, for the `EntityKind`s the chain declares (Cardano: `dolos_cardano::indexes::entities`); it lives in the `ArchiveStore` (`ArchiveStore::entity_slots`, batched), written through `ArchiveWriter::write_entity` by the seal of an immutable epoch with the epoch's sealed logs, swept by a prune and never undone (decision 0064)
 
 ### Store identity
 Every on-disk state and archive store records the compatibility identifier it was created under (the current entry of `dolos_core::compat::SUPPORTED_CONTRACTS`): under the key `identity` in `state-cursor`, and in the archive's `archive-meta` keyspace. The adapters' `open_fjall` constructors (`src/adapters/storage.rs`) are the one gate: a supported identity opens, an empty store without one records the current identity before its first write, and a store holding data without one, or recording an unsupported one, is refused with `IncompatibleStore`. Nothing in the configuration enters the check. The WAL keeps its own version; the mempool and cache are outside it.
@@ -78,7 +79,7 @@ The project follows a modular workspace architecture with clear separation of co
   - `state`: `StateStore` and `StateWriter` traits, entity system
   - `keys`: typed key codecs (`KeyCodec`, `FixedKey`, `KeyPrefix`), the variable-length `EntityKey` and `LogKey`, and the ranges over them (`KeyRange`, and the typed `Ranged` behind `RangeOf` and `LogRangeOf`)
   - `archive`: `ArchiveStore` and `ArchiveWriter` traits, `SlotTags` for indexing metadata
-  - `indexes`: the chain-agnostic index record types (`Tag`, `UtxoIndexDelta`, `ArchiveIndexDelta`, `TagRecord`, `ExactRecord`, `IndexRecord`) the state and archive stores consume
+  - `indexes`: the chain-agnostic index record types (`Tag`, `UtxoIndexDelta`, `ArchiveIndexDelta`, `TagRecord`, `ExactRecord`, `IndexRecord`, `EntityKind`, `EntityRecord`) the state and archive stores consume
   - `wal`: `WalStore` trait for write-ahead logging
   - `cache`: `CacheStore` and `CacheDiskTier` traits, and `TieredCache`, the store over them
   - `batch`: `WorkBatch`, `WorkBlock`, `WorkDeltas` for batch processing pipeline
@@ -123,6 +124,7 @@ The project follows a modular workspace architecture with clear separation of co
     - **`archive-logs`**: All log namespaces with `[ns_hash:8][slot:8][key:var]` keys
     - **`archive-tags`**: Tag-based prefix scans for block tags with `[dim_hash:8][key_hash:8][slot:8]` keys
     - **`index-exact`**: Exact-match lookups with `[dim_hash:8][key_data:var]` -> `[slot:8]`
+    - **`index-entity`**: The entity index with `[xxh3("entity:"+kind):8][id:kind width]` -> `[slot:8]`
     - **`archive-meta`**: The compatibility identity the store recorded at creation
   - `keys`: Shared key encoding utilities
 - **Key Advantages**:
