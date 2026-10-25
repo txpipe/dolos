@@ -1,4 +1,7 @@
-use std::{collections::HashMap, marker::PhantomData};
+use std::{
+    collections::{BTreeMap, HashMap},
+    marker::PhantomData,
+};
 
 use dolos_core::ChainError;
 use pallas::ledger::primitives::StakeCredential;
@@ -22,8 +25,10 @@ pub type OperatorShare = u64;
 #[derive(Debug, Clone)]
 pub struct MultiPoolReward {
     is_spendable: bool,
-    as_leader: HashMap<PoolHash, u64>,
-    as_delegator: HashMap<PoolHash, u64>,
+    // Ordered by pool, so every listing of the pairs (and the pending row
+    // built from them) comes out the same whatever the merge order.
+    as_leader: BTreeMap<PoolHash, u64>,
+    as_delegator: BTreeMap<PoolHash, u64>,
 }
 
 impl MultiPoolReward {
@@ -139,14 +144,14 @@ impl Reward {
         } else if as_leader {
             Self::MultiPool(MultiPoolReward {
                 is_spendable: ctx.is_account_registered(account),
-                as_leader: HashMap::from([(from_pool, reward_value)]),
-                as_delegator: HashMap::new(),
+                as_leader: BTreeMap::from([(from_pool, reward_value)]),
+                as_delegator: BTreeMap::new(),
             })
         } else {
             Self::MultiPool(MultiPoolReward {
                 is_spendable: ctx.is_account_registered(account),
-                as_leader: HashMap::new(),
-                as_delegator: HashMap::from([(from_pool, reward_value)]),
+                as_leader: BTreeMap::new(),
+                as_delegator: BTreeMap::from([(from_pool, reward_value)]),
             })
         }
     }
@@ -189,6 +194,32 @@ impl Reward {
             as_leader: state.as_leader.iter().cloned().collect(),
             as_delegator: state.as_delegator.iter().cloned().collect(),
         })
+    }
+
+    /// The pending row RUPD persists for `credential`, its pairs ordered by
+    /// pool.
+    pub fn to_pending_state(&self, credential: &StakeCredential) -> crate::PendingRewardState {
+        let (as_leader, as_delegator) = match self {
+            Self::MultiPool(r) => (
+                r.leader_rewards().collect(),
+                r.delegator_rewards().collect(),
+            ),
+            Self::PreAllegra(r) => {
+                let (pool, value) = r.pool_and_value();
+                if r.is_leader() {
+                    (vec![(pool, value)], vec![])
+                } else {
+                    (vec![], vec![(pool, value)])
+                }
+            }
+        };
+
+        crate::PendingRewardState {
+            credential: credential.clone(),
+            is_spendable: self.is_spendable(),
+            as_leader,
+            as_delegator,
+        }
     }
 }
 
@@ -672,5 +703,42 @@ mod tests {
         let unspendable = reward_map.applied_unspendable();
 
         assert_eq!(unspendable, 295063003292);
+    }
+
+    fn single(pool: u8, value: u64, as_leader: bool) -> Reward {
+        let entry = BTreeMap::from([(PoolHash::from([pool; 28]), value)]);
+        let (leader, delegator) = if as_leader {
+            (entry, BTreeMap::new())
+        } else {
+            (BTreeMap::new(), entry)
+        };
+
+        Reward::MultiPool(MultiPoolReward {
+            is_spendable: true,
+            as_leader: leader,
+            as_delegator: delegator,
+        })
+    }
+
+    #[test]
+    fn pending_row_encoding_ignores_merge_order() {
+        let credential = StakeCredential::AddrKeyhash([7; 28].into());
+
+        let parts: Vec<_> = (0u8..16)
+            .map(|i| single(i.wrapping_mul(37), 1_000 + u64::from(i), i % 4 != 0))
+            .collect();
+
+        let forward = parts.iter().cloned().reduce(Reward::merge).unwrap();
+        let backward = parts.iter().rev().cloned().reduce(Reward::merge).unwrap();
+
+        let a = forward.to_pending_state(&credential);
+        let b = backward.to_pending_state(&credential);
+
+        assert!(a.as_leader.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(a.as_delegator.windows(2).all(|w| w[0].0 < w[1].0));
+        assert_eq!(
+            pallas::codec::minicbor::to_vec(&a).unwrap(),
+            pallas::codec::minicbor::to_vec(&b).unwrap()
+        );
     }
 }
