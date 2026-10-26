@@ -46,7 +46,7 @@ pub use routes::network::register_cache as register_network_cache;
 
 /// Registers the off-chain metadata namespaces, as the router does, for tools
 /// that work on the cache without serving.
-pub use offchain::register as register_governance_caches;
+pub use offchain::register as register_offchain_caches;
 
 pub(crate) fn log_and_500<E: std::fmt::Debug>(context: &str) -> impl Fn(E) -> StatusCode + '_ {
     move |err| {
