@@ -260,14 +260,21 @@ fn proposal_votes_in_block(block: &MultiEraBlock, action: &GovActionId) -> Vec<P
     out
 }
 
+/// How many of a voter's tagged slots in a row, none of them an action slot,
+/// the walk reads before it seeks the voter's tag at the next action slot.
+/// A seek opens a store iterator and costs about as much as reading a run
+/// of entries from an open one.
+const MISSES_BEFORE_SEEK: usize = 16;
+
 /// The first slot at or after `from` that both `action_slots` and a voter's
 /// `voter_votes` tag name, where `voter_slots(start, end)` reads that tag.
 ///
-/// The two walk in step. A seek of the voter's tag at the next action slot
-/// either lands on it or finds a later voter slot, and the action slots below
-/// that one are skipped. Each seek passes at least one action slot, and the
-/// seeks end at the last one, so a voter costs at most the action's own vote
-/// blocks ahead, however often it votes on other actions.
+/// The voter's tag is read from the next action slot up to the last one, so
+/// nothing outside the action's own votes ahead is read. A run of
+/// [`MISSES_BEFORE_SEEK`] voter slots that the action does not name ends in a
+/// seek at the next action slot. Each seek passes at least one action slot,
+/// so a voter costs at most that many reads per vote block of the action
+/// ahead, however often it votes on other actions.
 fn next_shared_slot<I>(
     action_slots: &BTreeSet<BlockSlot>,
     mut from: BlockSlot,
@@ -280,18 +287,23 @@ where
         return Ok(None);
     };
 
-    while let Some(&next) = action_slots.range(from..).next() {
-        let found = voter_slots(next, last)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .next()
-            .transpose()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    'seek: while let Some(&next) = action_slots.range(from..).next() {
+        let voter = voter_slots(next, last).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        match found {
-            None => return Ok(None),
-            Some(slot) if slot == next => return Ok(Some(slot)),
-            Some(slot) => from = slot,
+        for (read, slot) in voter.enumerate() {
+            let slot = slot.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            if action_slots.contains(&slot) {
+                return Ok(Some(slot));
+            }
+
+            if read + 1 == MISSES_BEFORE_SEEK {
+                from = slot;
+                continue 'seek;
+            }
         }
+
+        return Ok(None);
     }
 
     Ok(None)
@@ -1752,8 +1764,9 @@ mod tests {
         (shared, seeks.get(), pulled.get())
     }
 
-    /// A voter's walk costs at most the action's own vote blocks ahead, never
-    /// its votes on other actions.
+    /// A voter's walk reads its tag only over the action's own vote blocks
+    /// ahead, at most [`MISSES_BEFORE_SEEK`] entries per block, never its
+    /// votes on other actions before or after them.
     #[test]
     fn next_shared_slot_walks_the_action_slots() {
         let others = (2..=11).collect_vec();
@@ -1762,20 +1775,32 @@ mod tests {
         assert_eq!(shared_slots(&[], &others), (vec![], 0, 0));
 
         // one action slot past ten votes on other actions: one seek, which
-        // finds nothing up to that slot
+        // finds nothing from that slot on
         assert_eq!(shared_slots(&[12], &others), (vec![], 1, 0));
 
-        // the voter's slots between the action's are skipped by seeking
-        assert_eq!(shared_slots(&[2, 5, 9], &[3, 4, 9]), (vec![9], 3, 3));
+        // the voter's slots between the action's are read in one pass
+        assert_eq!(shared_slots(&[2, 5, 9], &[3, 4, 9]), (vec![9], 1, 3));
 
         // a dense action and a sparse voter: the voter's slots bound the walk
         let dense = (1..=100).collect_vec();
-        assert_eq!(shared_slots(&dense, &[50, 150]), (vec![50], 3, 2));
+        assert_eq!(shared_slots(&dense, &[50, 150]), (vec![50], 2, 1));
 
         // every shared slot, in order
         assert_eq!(
             shared_slots(&[1, 2, 3, 7], &[2, 3, 4, 7]),
-            (vec![2, 3, 7], 4, 4)
+            (vec![2, 3, 7], 3, 3)
+        );
+
+        // a long run of votes on other actions between two action slots ends
+        // in a seek at the next one, whatever the run's length
+        let run = (11..=999).collect_vec();
+        let misses = MISSES_BEFORE_SEEK;
+        assert_eq!(shared_slots(&[10, 1000], &run), (vec![], 2, misses));
+
+        let run_then_vote = (11..=1000).collect_vec();
+        assert_eq!(
+            shared_slots(&[10, 1000], &run_then_vote),
+            (vec![1000], 2, misses + 1)
         );
     }
 
