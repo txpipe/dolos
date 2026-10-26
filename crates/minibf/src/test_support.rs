@@ -524,6 +524,8 @@ impl TestApp {
                 ..Default::default()
             },
             force_protocol: None,
+            fault: None,
+            setup: None,
             genesis_pools: Vec::new(),
         }
     }
@@ -894,9 +896,13 @@ fn genesis_staking(pools: &[[u8; 28]]) -> pallas::interop::hardano::configs::she
         .expect("a valid staking section")
 }
 
+type TestAppSetup = Box<dyn FnOnce(&ToyDomain, &SyntheticVectors)>;
+
 pub struct TestAppBuilder {
     cfg: SyntheticBlockConfig,
     force_protocol: Option<usize>,
+    fault: Option<TestFault>,
+    setup: Option<TestAppSetup>,
     genesis_pools: Vec<[u8; 28]>,
 }
 
@@ -908,6 +914,20 @@ impl TestAppBuilder {
 
     pub fn with_protocol(mut self, protocol: usize) -> Self {
         self.force_protocol = Some(protocol);
+        self
+    }
+
+    pub fn with_fault(mut self, fault: TestFault) -> Self {
+        self.fault = Some(fault);
+        self
+    }
+
+    /// Runs `setup` over the built chain before the app wraps it.
+    pub fn with_setup(
+        mut self,
+        setup: impl FnOnce(&ToyDomain, &SyntheticVectors) + 'static,
+    ) -> Self {
+        self.setup = Some(Box::new(setup));
         self
     }
 
@@ -934,7 +954,11 @@ impl TestAppBuilder {
             })
             .finish();
 
+        if let Some(setup) = self.setup {
+            setup(&domain, &vectors);
+        }
+
         let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        TestApp::from_domain(domain, vectors, None, minibf)
+        TestApp::from_domain(domain, vectors, self.fault, minibf)
     }
 }
