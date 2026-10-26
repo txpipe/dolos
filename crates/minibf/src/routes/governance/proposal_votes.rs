@@ -952,11 +952,10 @@ mod tests {
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
-    /// Two txs of one block carry a vote of the same DRep on the same
-    /// proposal. Both rows are listed, and only the later one counts.
-    #[tokio::test]
-    async fn governance_proposal_votes_revote_in_one_block() {
-        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+    /// Block 0 proposes an action, and the two txs of block 1 each carry a
+    /// vote of the same DRep on it.
+    fn revote_in_one_block_cfg() -> SyntheticBlockConfig {
+        SyntheticBlockConfig {
             block_count: 2,
             txs_per_block: 2,
             gov_actions_by_block: vec![vec![vec![GovAction::Information], vec![]], vec![]],
@@ -968,7 +967,14 @@ mod tests {
                 ],
             ],
             ..Default::default()
-        });
+        }
+    }
+
+    /// Two txs of one block carry a vote of the same DRep on the same
+    /// proposal. Both rows are listed, and only the later one counts.
+    #[tokio::test]
+    async fn governance_proposal_votes_revote_in_one_block() {
+        let app = TestApp::new_with_cfg(revote_in_one_block_cfg());
 
         let proposal_tx = tx_hash_of_block(&app, 0);
         let path = format!("/governance/proposals/{proposal_tx}/0/votes");
@@ -986,6 +992,32 @@ mod tests {
                 (txs[0].clone(), proposal_votes_inner::Vote::Yes, false),
                 (txs[1].clone(), proposal_votes_inner::Vote::No, true),
             ]
+        );
+    }
+
+    /// The re-vote of the test above on a resolved proposal: the walk orders
+    /// the DRep's two rows by tx within the block, as the vote map did.
+    #[tokio::test]
+    async fn governance_proposal_votes_revote_in_one_block_of_a_resolved_proposal() {
+        let app = |moved| {
+            TestApp::new_with_cfg_and_setup(revote_in_one_block_cfg(), move |domain, _| {
+                enact_proposals(domain, moved)
+            })
+        };
+        let (live, moved) = (app(false), app(true));
+
+        let proposal_tx = tx_hash_of_block(&live, 0);
+        let base = format!("/governance/proposals/{proposal_tx}/0/votes");
+
+        for path in [base.clone(), format!("{base}?order=desc")] {
+            let rows = get_votes(&moved, &path).await;
+            assert_eq!(rows, get_votes(&live, &path).await, "{path}");
+        }
+
+        let rows = get_votes(&moved, &base).await;
+        assert_eq!(
+            rows.iter().map(|row| row.counted).collect_vec(),
+            [false, true]
         );
     }
 
@@ -1969,6 +2001,66 @@ mod tests {
         assert_eq!(
             rows.iter().map(|row| row.counted).collect_vec(),
             [true, false]
+        );
+    }
+
+    /// Block 0 proposes an action. One tx of block 1 holds the DRep's and the
+    /// pool's votes on it, and one tx of block 2 holds both their re-votes.
+    fn shared_revote_cfg() -> SyntheticBlockConfig {
+        let both = |vote: Vote| {
+            vec![vec![
+                synthetic_vote(drep_key_voter(), 0, 0, 0, vote.clone()),
+                synthetic_vote(spo_voter(), 0, 0, 0, vote),
+            ]]
+        };
+
+        SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![]],
+            votes_by_block: vec![vec![], both(Vote::Yes), both(Vote::No)],
+            ..Default::default()
+        }
+    }
+
+    /// The rows of one page share the blocks their walks read. An
+    /// oldest-first page over block 1 holds the DRep's and the pool's votes,
+    /// and both walks find a re-vote in block 2, which the page reads and
+    /// charges once: two blocks with the listing's one.
+    #[test]
+    fn governance_proposal_votes_walks_of_one_page_read_a_block_once() {
+        let domain = |moved| {
+            let (domain, vectors) =
+                TestDomainBuilder::new_with_synthetic(shared_revote_cfg()).finish();
+            enact_proposals(&domain, moved);
+            (domain, vectors)
+        };
+
+        let (moved, vectors) = domain(true);
+        let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
+            .parse()
+            .expect("failed to parse the proposal tx");
+        let page = Pagination {
+            count: 2,
+            ..Default::default()
+        };
+
+        let rows = read_votes(&moved, tx, 0, &page, 2).expect("the page fits the budget");
+        assert_eq!(
+            rows.iter().map(|row| row.counted).collect_vec(),
+            [false, false]
+        );
+
+        assert!(matches!(
+            read_votes(&moved, tx, 0, &page, 1),
+            Err(Error::ScanBudgetExceeded)
+        ));
+
+        let (live, _) = domain(false);
+        let rows = read_votes(&live, tx, 0, &page, 1).expect("the page fits the budget");
+        assert_eq!(
+            rows.iter().map(|row| row.counted).collect_vec(),
+            [false, false]
         );
     }
 }

@@ -624,6 +624,21 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+
+        // an account that no proposal names stays unknown
+        let unnamed = StakeAddress::new(
+            Network::Testnet,
+            StakePayload::Stake(Hash::from([0x94; 28])),
+        )
+        .to_bech32()
+        .unwrap();
+        for path in [
+            format!("/accounts/{unnamed}"),
+            format!("/accounts/{unnamed}/registrations"),
+        ] {
+            let (status, _) = app.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        }
     }
 
     #[tokio::test]
