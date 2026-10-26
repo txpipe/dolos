@@ -447,6 +447,15 @@ fn a_stopped_target_rebuild_stages_the_first_carrier() {
 fn a_stopped_target_rebuild_bounds_the_witness_at_the_batch_start() {
     let node = sync_across_sealed_epochs_from(100, 200, vec![vec![0]]);
 
+    {
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+        let entries = script_entries(&stores.archive);
+
+        assert_eq!(entries.len(), 3, "the seal indexed {entries:?}");
+        assert!(entries.iter().all(|(_, slot)| *slot == 300));
+    }
+
     let target = node.root.path().join("rebuilt-state");
     assert_ok(&rebuild(
         &node,
