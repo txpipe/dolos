@@ -18,7 +18,10 @@ use std::{
 
 use bytes::Bytes;
 use clap::{ArgGroup, Parser, Subcommand};
-use dolos_cardano::periods::stats::{register_totals_cache, TOTALS};
+use dolos_cardano::{
+    periods::stats::{register_totals_cache, TOTALS},
+    pool_history::{register_pool_caches, POOL_BLOCKS, POOL_REGISTRATIONS},
+};
 use dolos_core::{
     cache::{Cost, FillError},
     config::{RootConfig, StorageConfig},
@@ -236,6 +239,15 @@ pub fn register<D: Domain>(domain: &D) -> miette::Result<Namespaces<D>> {
             name: TOTALS.name,
             why: "rolling history prunes the archive",
         });
+    }
+
+    if !register_pool_caches(domain).into_diagnostic()? {
+        for ns in [POOL_REGISTRATIONS, POOL_BLOCKS] {
+            namespaces.off.push(Off {
+                name: ns.name,
+                why: "rolling history prunes the archive",
+            });
+        }
     }
 
     Ok(namespaces)
@@ -1400,10 +1412,13 @@ mod tests {
         let stats = stats(&domain, &namespaces).unwrap();
         assert!(stats.namespaces.iter().all(|ns| ns.name != TOTALS.name));
 
-        let [totals] = &stats.off[..] else {
-            panic!("{:?}", stats.off);
-        };
-        assert_eq!(totals.name, TOTALS.name);
+        let off: Vec<_> = stats.off.iter().map(|ns| ns.name).collect();
+        assert_eq!(
+            off,
+            [TOTALS.name, POOL_REGISTRATIONS.name, POOL_BLOCKS.name]
+        );
+
+        let totals = &stats.off[0];
         assert_eq!(totals.entries, 2);
         assert_eq!(
             totals.bytes,
@@ -1423,6 +1438,24 @@ mod tests {
         let disk = domain.cache().disk();
         assert_eq!(disk.entries(TOTALS.name).unwrap(), 0);
         assert_eq!(disk.previous_keys(TOTALS.name).unwrap().len(), 2);
+    }
+
+    /// The pool namespaces a node registers are registered here too, so
+    /// `stats` reports them and `clear` wipes them by name.
+    #[tokio::test]
+    async fn the_pool_namespaces_are_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (domain, _) = domain(dir.path(), 0);
+        let namespaces = register(&domain).unwrap();
+
+        let stats = stats(&domain, &namespaces).unwrap();
+        for name in [POOL_REGISTRATIONS.name, POOL_BLOCKS.name] {
+            assert!(stats.namespaces.iter().any(|ns| ns.name == name), "{name}");
+            assert!(stats.off.iter().all(|ns| ns.name != name), "{name}");
+
+            let wiped = clear(&domain, &namespaces, &Target::One(name)).unwrap();
+            assert_eq!(wiped, [(name, 0)]);
+        }
     }
 
     #[tokio::test]

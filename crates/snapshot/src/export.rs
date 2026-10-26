@@ -68,7 +68,8 @@ use dolos_cardano::{
     eras::ChainSummary, indexes::archive_dimensions, pallas::ledger::traverse::MultiEraBlock,
 };
 use dolos_core::{
-    ArchiveError, ArchiveStore, BlockSlot, ChainPoint, IndexRecord, KeyRange, Namespace, StateStore,
+    ArchiveError, ArchiveStore, BlockSlot, ChainPoint, EntityKind, IndexRecord, KeyRange,
+    Namespace, StateStore,
 };
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
@@ -77,12 +78,12 @@ use stelae::{
 };
 
 use crate::{
-    layers::{blocks, digests, indexes, logs, state},
+    layers::{blocks, digests, entities, indexes, logs, state},
     namespaces::NAMESPACES,
     reporting::{Cursor, Records},
     state_layer_count, DigestsScope, DolosProfile, EpochScope, Error, Network, RetainedEpochs,
-    Scope, StateScope, BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, EPOCH_KINDS, INDEXES,
-    LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
+    Scope, StateScope, BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, ENTITY_INDEX_KINDS,
+    ENTITY_KINDS, EPOCH_KINDS, INDEXES, LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
 };
 
 /// The slot window one epoch layer covers.
@@ -795,11 +796,18 @@ where
         refuse_uncovered_logs(archive, window)?;
     }
 
+    // One scan of the entity index, read by the count below and by the jobs
+    // that build the entity layers, so the two cannot disagree.
+    let presence = entity_presence(plan, archive)?;
+    let presence = &presence;
+
     // The same arithmetic `crate::registry::preview` reports a dry run with, so
-    // "layer 12 of 52" and "build: 52 layers" cannot disagree — `log_layers` on
-    // both sides, since an empty log kind produces no layer to multiply.
+    // "layer 12 of 52" and "build: 52 layers" cannot disagree — `log_layers`
+    // and `entity_layers` on both sides, since an empty log or entity kind
+    // produces no layer to multiply.
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + log_layers(plan, archive, previous)?
+        + entity_layers(plan, presence, previous)?
         + state_layers(plan, previous)?
         + usize::from(digest_records.is_some());
 
@@ -846,6 +854,19 @@ where
                     }
                     None => Ok(Vec::new()),
                 }
+            }));
+        }
+    }
+
+    // Kind-major again, after the logs. An entity layer is a scan of its kind's
+    // whole index, as an index layer is a scan of the whole store, so these are
+    // banded and run on the band lane. See [`write_entities`].
+    for (kind, entity) in ENTITY_KINDS {
+        for band in plan.epochs.chunks(plan.band.epochs()) {
+            jobs.push(Job::band(move || {
+                write_entities(
+                    stele, plan, archive, band, kind, entity, presence, previous, cursor,
+                )
             }));
         }
     }
@@ -1597,8 +1618,11 @@ pub fn forecast<A: ArchiveStore>(
     // contributes every shard of every kind however the epochs were restricted,
     // the retained dumps contribute what `state_layers` counts, and the digests
     // layer is there exactly when its records are.
+    let presence = entity_presence(plan, archive)?;
+
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + log_layers(plan, archive, previous)?
+        + entity_layers(plan, &presence, previous)?
         + state_layers(plan, previous)?
         + usize::from(digest_records.is_some());
 
@@ -1625,7 +1649,8 @@ pub fn forecast<A: ArchiveStore>(
     }
 
     // A layer carried forward is a layer that exists, so `total` counted it
-    // too — see `log_layers`, which asks the predecessor first.
+    // too — see `log_layers` and `entity_layers`, which ask the predecessor
+    // first.
     Ok(Forecast {
         layers_built: total - layers_reused,
         layers_reused,
@@ -1661,6 +1686,185 @@ fn log_layers<A: ArchiveStore>(
     }
 
     Ok(total)
+}
+
+/// The windows of a plan each entity kind holds an entry in.
+#[derive(Debug, Default)]
+struct EntityPresence(BTreeMap<EntityKind, BTreeSet<u64>>);
+
+impl EntityPresence {
+    fn holds(&self, kind: EntityKind, epoch: u64) -> bool {
+        self.0
+            .get(&kind)
+            .is_some_and(|epochs| epochs.contains(&epoch))
+    }
+}
+
+/// Which of `plan`'s windows hold an entity index entry, per kind: one scan
+/// of the index over the plan's span.
+///
+/// An entry's slot is its value, so no traversal can seek to a window, and
+/// asking per window would scan the index once per epoch. One scan answers
+/// for every window and kind at once; a mainnet index of 11.5 M entries
+/// scanned in 2.6 s in the research.
+fn entity_presence<A: ArchiveStore>(plan: &Plan, archive: &A) -> Result<EntityPresence, Error> {
+    let mut presence = EntityPresence::default();
+
+    let (Some(first), Some(last)) = (plan.epochs.first(), plan.epochs.last()) else {
+        return Ok(presence);
+    };
+
+    let span = first.start_slot..last.slots().end;
+
+    for record in archive.iter_entity_records(&ENTITY_INDEX_KINDS, span)? {
+        let record = record?;
+
+        if let Some(window) = window_of(&plan.epochs, record.slot) {
+            presence
+                .0
+                .entry(record.kind)
+                .or_default()
+                .insert(window.epoch);
+        }
+    }
+
+    Ok(presence)
+}
+
+/// The window among `windows` (ascending and disjoint) whose slots hold
+/// `slot`, if any: a restricted plan can leave gaps.
+fn window_of(windows: &[EpochWindow], slot: BlockSlot) -> Option<&EpochWindow> {
+    let above = windows.partition_point(|window| window.start_slot <= slot);
+
+    above
+        .checked_sub(1)
+        .map(|at| &windows[at])
+        .filter(|window| window.slots().contains(&slot))
+}
+
+/// How many entity layers a publish of `plan` will produce: one per (window,
+/// kind) pair the predecessor carries forward or the index holds an entry
+/// in, the two questions [`write_entities`] asks.
+fn entity_layers(
+    plan: &Plan,
+    presence: &EntityPresence,
+    previous: &dyn Predecessor,
+) -> Result<usize, Error> {
+    let mut total = 0;
+
+    for window in &plan.epochs {
+        let scope = window.scope(plan.network.magic());
+
+        for (kind, entity) in ENTITY_KINDS {
+            let spec = scope.layer_spec(kind)?;
+
+            let carried = crate::is_settled(kind, window.epoch, previous.history())
+                && previous.carried_forward(kind, &spec.scope)?;
+
+            total += usize::from(carried || presence.holds(entity, window.epoch));
+        }
+    }
+
+    Ok(total)
+}
+
+/// One band of epochs' entity layers for one kind, ascending id within each,
+/// from one scan of the kind's index.
+///
+/// Banded for the reason [`write_indexes`] is: the slot is an entry's value,
+/// so filling one window costs a scan of the whole kind, and one scan per
+/// window would make a first publish quadratic. A routine publish builds one
+/// window per kind, the one whose epoch the boundary just sealed (`E - 2`),
+/// and inherits the rest.
+///
+/// A window gets a layer only where its kind has an entry first seen in it
+/// ([`entity_presence`]): an entity layer, like a log layer, exists if and
+/// only if it holds a record. The scan yields a kind's records in id order,
+/// and routing one ascending run into windows by slot keeps that order in
+/// each, so a window's layer is the one a scan of its epoch alone would
+/// write.
+///
+/// Each layer is recorded through [`Predecessor::landed`] as it exists, as
+/// [`write_indexes`] records its own.
+#[allow(clippy::too_many_arguments)]
+fn write_entities<W: SteleWriter, A: ArchiveStore>(
+    stele: &W,
+    plan: &Plan,
+    archive: &A,
+    band: &[EpochWindow],
+    kind: &'static str,
+    entity: EntityKind,
+    presence: &EntityPresence,
+    previous: &dyn Predecessor,
+    cursor: &Cursor<'_>,
+) -> Result<Vec<LayerDescriptor>, Error> {
+    let mut descriptors: Vec<Option<LayerDescriptor>> = Vec::with_capacity(band.len());
+    let mut building = Vec::new();
+
+    for window in band {
+        let scope = window.scope(plan.network.magic());
+
+        let (spec, adopted) = if crate::is_settled(kind, window.epoch, previous.history()) {
+            inherit(&scope, kind, previous)?
+        } else {
+            (scope.layer_spec(kind)?, None)
+        };
+
+        if let Some(descriptor) = adopted {
+            let at = cursor.open(kind, &spec.scope);
+            cursor.close(at, kind, Outcome::Inherited);
+
+            previous.landed(&descriptor)?;
+            descriptors.push(Some(descriptor));
+
+            continue;
+        }
+
+        if !presence.holds(entity, window.epoch) {
+            continue;
+        }
+
+        let at = cursor.open(kind, &spec.scope);
+
+        building.push(Building {
+            slots: window.slots(),
+            at,
+            position: descriptors.len(),
+            sink: sink(stele, &spec)?,
+            order: entities::OrderCheck::default(),
+        });
+
+        descriptors.push(None);
+    }
+
+    if let (Some(first), Some(last)) = (building.first(), building.last()) {
+        let slots = first.slots.start..last.slots.end;
+        let mut records = cursor.records();
+
+        for record in archive.iter_entity_records(&[entity], slots)? {
+            let record = record?;
+
+            let Some(layer) = layer_for(&mut building, record.slot) else {
+                continue;
+            };
+
+            layer.order.check(&record)?;
+            layer.sink.write_record(&entities::encode(&record)?)?;
+            records.tick();
+        }
+
+        records.flush();
+    }
+
+    for layer in building {
+        let descriptor = layer.sink.finish()?.descriptor;
+        cursor.close(layer.at, kind, Outcome::Transferred);
+
+        previous.landed(&descriptor)?;
+        descriptors[layer.position] = Some(descriptor);
+    }
+
+    Ok(descriptors.into_iter().flatten().collect())
 }
 
 /// Refuse a window holding logs under a namespace no `log-{ns}` kind carries.
@@ -1835,8 +2039,9 @@ fn write_indexes<W: SteleWriter, A: ArchiveStore>(
     Ok(descriptors.into_iter().flatten().collect())
 }
 
-/// One `indexes` layer being filled by a band's traversal.
-struct Building<K> {
+/// One layer being filled by a band's traversal: an `indexes` layer, or an
+/// entity layer with the entity codec's order check.
+struct Building<K, O = indexes::OrderCheck> {
     /// The half-open slot range this layer's epoch covers — what a record is
     /// routed by.
     slots: Range<BlockSlot>,
@@ -1847,13 +2052,27 @@ struct Building<K> {
     /// built the band held.
     position: usize,
     sink: K,
-    order: indexes::OrderCheck,
+    order: O,
 }
 
-/// Send one index record to the layer whose epoch its slot falls in.
+/// The layer in a band whose epoch `slot` falls in, if any.
 ///
 /// A binary search rather than a walk of the band: this runs once per record,
 /// and a mainnet archive store holds hundreds of millions of them.
+fn layer_for<K, O>(
+    building: &mut [Building<K, O>],
+    slot: BlockSlot,
+) -> Option<&mut Building<K, O>> {
+    let above = building.partition_point(|layer| layer.slots.start <= slot);
+
+    above
+        .checked_sub(1)
+        .map(|at| &mut building[at])
+        .filter(|layer| layer.slots.contains(&slot))
+}
+
+/// Send one index record to the layer whose epoch its slot falls in
+/// ([`layer_for`]).
 ///
 /// A record that lands in no layer is **dropped on purpose** — see
 /// [`write_indexes`] for the two ways the band's span can cover a slot no layer
@@ -1865,17 +2084,9 @@ fn route_index<K: RecordSink>(
     record: IndexRecord,
     records: &mut Records<'_>,
 ) -> Result<(), Error> {
-    let slot = indexes::slot_of(&record);
-
-    let above = building.partition_point(|layer| layer.slots.start <= slot);
-
-    let Some(layer) = above.checked_sub(1).map(|at| &mut building[at]) else {
+    let Some(layer) = layer_for(building, indexes::slot_of(&record)) else {
         return Ok(());
     };
-
-    if !layer.slots.contains(&slot) {
-        return Ok(());
-    }
 
     layer.order.check(&record)?;
     layer.sink.write_record(&indexes::encode(&record)?)?;

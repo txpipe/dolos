@@ -150,7 +150,7 @@ A relative path resolves against one of three bases, named for every path field 
 
 | base | fields |
 | ---- | ------ |
-| the working directory | `storage.path`, `serve.grpc.tls_client_ca_root`, `serve.ouroboros.listen_path` |
+| the working directory | `storage.path`, `serve.ouroboros.listen_path` |
 | `storage.path` | `storage.state.path`, `storage.archive.path`, `storage.archive.blocks_path`, `storage.cache.path`, `sync.wal_path`, `mempool.path` |
 | the configuration file's directory | `chain.cardano.genesis.*_path` |
 
@@ -373,7 +373,7 @@ and for each keyspace, all with leveled compaction, a 64 MiB table target and a 
 | `state-cursor`, `state-utxos`, `state-entities` | 64 MiB | 4 |
 | `state-tags` | 128 MiB | 8 |
 | `archive-blocks`, `archive-logs` | 64 MiB | 4 |
-| `archive-tags`, `index-exact` | 128 MiB | 8 |
+| `archive-tags`, `index-exact`, `index-entity` | 128 MiB | 8 |
 
 The database row applies at every open. Fjall records a keyspace's memtable and compaction when it creates the keyspace, so the keyspace rows govern stores created from now on, and a store keeps the keyspace settings it was created with. Each store logs its tuning when it opens, and `dolos data stats` reports it.
 
@@ -469,7 +469,6 @@ The [UTxO RPC](../apis/grpc) endpoint.
 | field | type | default |
 | ----- | ---- | ------- |
 | `listen_address` | string, `IP:PORT` | required |
-| `tls_client_ca_root` | path, relative to the working directory | none |
 | `permissive_cors` | boolean | `true` |
 | `http2_adaptive_window` | boolean | `true` |
 | `http2_initial_stream_window_size` | integer (bytes) | hyper's default |
@@ -477,9 +476,10 @@ The [UTxO RPC](../apis/grpc) endpoint.
 | `http2_max_frame_size` | integer (bytes) | hyper's default |
 | `http2_max_concurrent_streams` | integer (streams per connection) | hyper's default |
 
-- `tls_client_ca_root` names a CA root file that client certificates would be checked against. **It does not work in this release, so leave it out.** The endpoint has no server certificate to present, so when the field is set gRPC fails as it starts, and the node stops with it: sync and every other API shut down and the command exits with an error. `dolos config check` does not catch this.
 - `permissive_cors` allows cross-origin requests from any origin.
 - `http2_adaptive_window` sizes the HTTP/2 flow-control windows to the link. While it is on, the two `http2_initial_*_window_size` fields have no effect.
+
+The endpoint serves plaintext gRPC. Terminate TLS, and client authentication when it is needed, at a reverse proxy in front of it.
 
 HTTP/2 flow control is hop by hop, and the receiver advertises the window that gates the sender. For server-streaming calls Dolos is the sender, so these windows govern downloads only for clients that connect directly; behind a proxy, the proxy's window applies.
 

@@ -405,7 +405,8 @@ mod schema_tests {
 // the end. The `EpochTransition` and
 // `EpochWrapUp` variants point at the *legacy* (deprecated) struct
 // shapes for the same reason; `EpochTransitionV2` / `EpochWrapUpV2` are
-// the live shapes used by all new commit paths.
+// the live shapes used by all new commit paths. A removed delta keeps its
+// index as a `Retired…` variant over [`RetiredDelta`].
 #[allow(deprecated)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum CardanoDelta {
@@ -454,7 +455,7 @@ pub enum CardanoDelta {
     EpochWrapUpV2(Box<EpochWrapUpV2>),
     EpochTransitionV2(Box<EpochTransitionV2>),
     EpochWrapUpV3(Box<EpochWrapUpV3>),
-    DRepAnchorUpdate(Box<DRepAnchorUpdate>),
+    RetiredDRepAnchorUpdate(RetiredDelta),
     NewProposalV2(Box<NewProposalV2>),
     VoteCast(Box<VoteCast>),
     DRepExpiryUpdate(Box<DRepExpiryUpdate>),
@@ -467,7 +468,7 @@ pub enum CardanoDelta {
     ConstitutionUpdate(Box<ConstitutionUpdate>),
     GovRootsUpdate(Box<GovRootsUpdate>),
     GovDistrAccumulate(Box<GovDistrAccumulate>),
-    DRepPowerUpdate(Box<DRepPowerUpdate>),
+    RetiredDRepPowerUpdate(RetiredDelta),
     GovDormancyTick(Box<GovDormancyTick>),
     CommitteeGc(Box<CommitteeGc>),
     GovDistrRotate(Box<GovDistrRotate>),
@@ -488,6 +489,18 @@ pub enum CardanoDelta {
     CommitteeDissolve(Box<CommitteeDissolve>),
     CommitteeReseat(Box<CommitteeReseat>),
     PoolCalidusUpdate(Box<PoolCalidusUpdate>),
+}
+
+/// The payload of a retired delta variant, which holds the variant's index so
+/// no later variant reuses it. Nothing builds one, and the WAL version bump
+/// that retired it wipes every WAL written before, so none decodes.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RetiredDelta;
+
+impl RetiredDelta {
+    fn unreachable(&self) -> ! {
+        unreachable!("a retired delta variant is never built")
+    }
 }
 
 impl CardanoDelta {
@@ -574,7 +587,6 @@ delta_from!(EStartProgress);
 delta_from!(RupdProgress);
 delta_from!(EpochTransitionV2);
 delta_from!(EpochWrapUpV3);
-delta_from!(DRepAnchorUpdate);
 delta_from!(NewProposalV2);
 delta_from!(VoteCast);
 delta_from!(DRepExpiryUpdate);
@@ -587,7 +599,6 @@ delta_from!(CommitteeUpdate);
 delta_from!(ConstitutionUpdate);
 delta_from!(GovRootsUpdate);
 delta_from!(GovDistrAccumulate);
-delta_from!(DRepPowerUpdate);
 delta_from!(GovDormancyTick);
 delta_from!(CommitteeGc);
 delta_from!(GovDistrRotate);
@@ -629,7 +640,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepActivity(x) => x.key(),
             Self::DRepUnRegistration(x) => x.key(),
             Self::DRepExpiration(x) => x.key(),
-            Self::DRepAnchorUpdate(x) => x.key(),
             Self::DRepSighting(x) => x.key(),
             Self::WithdrawalInc(x) => x.key(),
             Self::VoteDelegation(x) => x.key(),
@@ -648,7 +658,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::ConstitutionUpdate(x) => x.key(),
             Self::GovRootsUpdate(x) => x.key(),
             Self::GovDistrAccumulate(x) => x.key(),
-            Self::DRepPowerUpdate(x) => x.key(),
             Self::GovDormancyTick(x) => x.key(),
             Self::CommitteeGc(x) => x.key(),
             Self::GovDistrRotate(x) => x.key(),
@@ -693,6 +702,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::CommitteeDissolve(x) => x.key(),
             Self::CommitteeReseat(x) => x.key(),
             Self::PoolCalidusUpdate(x) => x.key(),
+            Self::RetiredDRepAnchorUpdate(x) | Self::RetiredDRepPowerUpdate(x) => x.unreachable(),
         }
     }
 
@@ -713,7 +723,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepUnRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepActivity(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepExpiration(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::DRepAnchorUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepSighting(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::WithdrawalInc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::VoteDelegation(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -732,7 +741,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::ConstitutionUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovRootsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDistrAccumulate(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::DRepPowerUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDormancyTick(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::CommitteeGc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDistrRotate(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -777,6 +785,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::CommitteeDissolve(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::CommitteeReseat(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolCalidusUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::RetiredDRepAnchorUpdate(x) | Self::RetiredDRepPowerUpdate(x) => x.unreachable(),
         }
     }
 
@@ -797,7 +806,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepUnRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepActivity(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepExpiration(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::DRepAnchorUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepSighting(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::WithdrawalInc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::VoteDelegation(x) => Self::downcast_undo(x.as_ref(), entity),
@@ -816,7 +824,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::ConstitutionUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovRootsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDistrAccumulate(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::DRepPowerUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDormancyTick(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::CommitteeGc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDistrRotate(x) => Self::downcast_undo(x.as_ref(), entity),
@@ -861,6 +868,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::CommitteeDissolve(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::CommitteeReseat(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolCalidusUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::RetiredDRepAnchorUpdate(x) | Self::RetiredDRepPowerUpdate(x) => x.unreachable(),
         }
     }
 }
@@ -875,6 +883,9 @@ mod wal_tests {
     fn appended_delta_variant_indices_are_pinned() {
         let account = AccountKey(StakeCredential::AddrKeyhash([0x11; 28].into()));
         let deltas: Vec<(u32, CardanoDelta)> = vec![
+            // retired, never reused
+            (45, CardanoDelta::RetiredDRepAnchorUpdate(RetiredDelta)),
+            (58, CardanoDelta::RetiredDRepPowerUpdate(RetiredDelta)),
             (
                 64,
                 GovDRepSnapshot::new(DRepSnapshot {
@@ -965,6 +976,7 @@ mod wal_tests {
                     (100, 0),
                     [0x77; 32].into(),
                     -5,
+                    false,
                 )
                 .into(),
             ),

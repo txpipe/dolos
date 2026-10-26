@@ -21,7 +21,7 @@ use pallas::ledger::primitives::{
 
 use crate::{
     ewrap::stake::{admits_pool, stake_snapshot_of},
-    ewrap::{AccountId, BoundaryVisitor as _, BoundaryWork, DRepId, ProposalId},
+    ewrap::{AccountId, BoundaryVisitor as _, BoundaryWork, ProposalId},
     load_era_summary, load_gov, pallas_extras,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
@@ -716,39 +716,18 @@ impl BoundaryWork {
         (self.starting_epoch_no() == unregistered_epoch + 1).then_some(unregistered_at)
     }
 
-    fn should_expire_drep(&self, drep: &DRepState) -> Result<bool, ChainError> {
-        if drep.expired {
-            return Ok(false);
-        }
-
-        if drep.is_unregistered() {
-            return Ok(false);
+    fn should_expire_drep(&self, drep: &DRepState) -> bool {
+        if drep.expired || drep.is_unregistered() {
+            return false;
         }
 
         // Epoch-based expiry, Haskell-style: the stored value carries no
         // dormancy credit, so add the counter back. A DRep is active while
         // `epoch <= expiry + dormant`, i.e. it expires entering the first
         // epoch strictly greater.
-        if let Some(expiry) = &drep.expiry {
-            let actual = expiry.current + self.num_dormant_epochs;
+        let actual = drep.expiry.current + self.num_dormant_epochs;
 
-            return Ok(actual < self.starting_epoch_no());
-        }
-
-        // Legacy fallback for rows written before the epoch-based expiry
-        // field existed: the old slot-arithmetic heuristic. Self-heals as
-        // activity repopulates the field.
-        let last_activity_slot = drep
-            .last_active_slot
-            .unwrap_or(drep.registered_at.map(|x| x.0).unwrap_or_default());
-
-        let (last_activity_epoch, _) = self.chain_summary.slot_epoch(last_activity_slot);
-
-        let pparams = self.ending_state().pparams.unwrap_live();
-
-        let expiring_epoch = last_activity_epoch + pparams.ensure_drep_inactivity_period()?;
-
-        Ok(expiring_epoch <= self.starting_epoch_no())
+        actual < self.starting_epoch_no()
     }
 
     /// Current boundary registration, including certificate order within a
@@ -787,10 +766,7 @@ impl BoundaryWork {
                     self.boundary_dreps.insert(
                         credential,
                         crate::DRepSnapshotEntry {
-                            expiry: drep
-                                .expiry
-                                .as_ref()
-                                .and_then(|expiry| expiry.as_of(self.ending_state.number)),
+                            expiry: drep.expiry.as_of(self.ending_state.number),
                             unregistered_at: drep.unregistered_at,
                         },
                     );
@@ -799,7 +775,7 @@ impl BoundaryWork {
 
             if let Some(unregistered_at) = self.is_retiring_drep(&drep) {
                 self.retiring_dreps.push((drep.identifier, unregistered_at));
-            } else if self.should_expire_drep(&drep)? {
+            } else if self.should_expire_drep(&drep) {
                 self.expiring_dreps.push(drep.identifier);
             }
         }
@@ -1070,27 +1046,6 @@ impl BoundaryWork {
                 );
                 None
             }
-        }
-    }
-
-    /// Emit the boundary `DRepPowerUpdate` for one DRep: registered DReps
-    /// get the stake the accumulation attributed to them (zero when absent
-    /// from the distribution — including DReps registered after the
-    /// boundary, which postdate the snapshot). No-op writes are elided.
-    fn emit_drep_power_update(
-        &mut self,
-        distr: &BTreeMap<DRep, u64>,
-        id: &DRepId,
-        drep: &DRepState,
-    ) {
-        if drep.registered_at.is_none() || drep.is_unregistered() {
-            return;
-        }
-
-        let power = distr.get(&drep.identifier).copied().unwrap_or_default();
-
-        if power != drep.voting_power {
-            self.add_delta(crate::DRepPowerUpdate::new(id.clone(), power));
         }
     }
 
@@ -1600,11 +1555,11 @@ impl BoundaryWork {
             visitor_wrapup.visit_retiring_pool(self, pool_hash, &pool, account.as_ref())?;
         }
 
-        // DReps — drops.visit_drep emits DRepExpiration for expiring dreps;
-        // registered dreps additionally get their boundary voting power
-        // written from the completed distribution accumulator, with the
-        // boundary-paid credits folded in — the same amounts
-        // `GovDistrBoundaryCredit` persists into the accumulator itself.
+        // DReps — drops.visit_drep emits DRepExpiration for expiring dreps.
+        // The `drep-epochs` rows below take the completed distribution
+        // accumulator with the boundary-paid credits folded in — the same
+        // amounts `GovDistrBoundaryCredit` persists into the accumulator
+        // itself.
         let drep_power = self.completed_drep_distr().map(|mut distr| {
             for (drep, credit) in &self.boundary_drep_credits {
                 *distr.entry(drep.clone()).or_default() += credit;
@@ -1623,10 +1578,6 @@ impl BoundaryWork {
             visitor_drops.visit_drep(self, &drep_id, &drep)?;
             visitor_refunds.visit_drep(self, &drep_id, &drep)?;
             visitor_wrapup.visit_drep(self, &drep_id, &drep)?;
-
-            if let Some(distr) = drep_power.as_ref() {
-                self.emit_drep_power_update(distr, &drep_id, &drep);
-            }
 
             if Self::is_drep_registered_at_boundary(&drep, boundary_slot) {
                 registered_dreps.insert(drep.identifier);
@@ -1872,18 +1823,16 @@ mod tests {
         identifier: DRep,
         registered_at: Option<u64>,
         unregistered_at: Option<u64>,
-        voting_power: u64,
+        deposit: u64,
     ) -> crate::DRepState {
         crate::DRepState {
             registered_at: registered_at.map(|slot| (slot, 0)),
-            voting_power,
             last_active_slot: None,
             unregistered_at: unregistered_at.map(|slot| (slot, 0)),
             expired: false,
-            deposit: voting_power,
+            deposit,
             identifier,
-            anchor: None,
-            expiry: None,
+            expiry: crate::DRepExpiry::new(CLOSING_EPOCH + 100, CLOSING_EPOCH),
         }
     }
 
@@ -2029,13 +1978,17 @@ mod tests {
             .expect("accumulator present")
     }
 
+    /// A DRep's entry in the last completed distribution, the one minibf
+    /// serves.
     fn read_drep_power(domain: &ToyDomain, drep: &DRep) -> u64 {
-        domain
-            .state()
-            .read_entity_typed::<crate::DRepState>(&DRepKey::from(drep))
+        crate::load_gov::<ToyDomain>(domain.state())
             .unwrap()
-            .expect("drep row present")
-            .voting_power
+            .prev_distr
+            .expect("completed distribution")
+            .drep_distr
+            .get(drep)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// End-to-end shard pass over a seeded store: the accumulated
@@ -2043,8 +1996,8 @@ mod tests {
     /// the delegated weight (done criterion 3), track the abstain
     /// pseudo-DRep separately, skip delegations to DReps outside the
     /// snapshot's registered set, survive shard replays unchanged (done
-    /// criterion 1 through the real commit path), and land on
-    /// `DRepState.voting_power` at finalize.
+    /// criterion 1 through the real commit path), and rotate into
+    /// `prev_distr` at finalize.
     #[test]
     fn shard_accumulation_builds_boundary_distributions() {
         let domain = seed_domain();
@@ -2075,10 +2028,9 @@ mod tests {
         }
         assert_eq!(read_distr(&domain), distr);
 
-        // finalize writes the accumulated powers: the registered drep gets
-        // its delegated stake (replacing the deposit seed), the drep
-        // registered after the boundary is zeroed (absent from the
-        // snapshot), the unregistered one is left alone
+        // finalize completes the distribution: the registered drep gets its
+        // delegated stake, the drep registered after the boundary and the
+        // unregistered one have no entry
         let mut boundary =
             BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
         boundary
@@ -2107,9 +2059,7 @@ mod tests {
     /// distribution, at its full value and under the start of the closing
     /// epoch: the registered DReps and the unregistered one in it, and both
     /// pseudo-DReps, which count as registered. The DRep registered after the
-    /// boundary is outside the distribution and has no row. The second
-    /// registered DRep already stores its power, so its update is elided and
-    /// its row still carries the value.
+    /// boundary is outside the distribution and has no row.
     #[test]
     fn finalize_archives_one_drep_epoch_row_per_distribution_entry() {
         let domain = seed_domain();
@@ -2162,12 +2112,6 @@ mod tests {
             .map(|(key, log)| (key.0.clone(), log.clone()))
             .collect();
         assert_eq!(rows, expected);
-
-        let script_key = DRepKey::from(&script_drep());
-        let script_updated = boundary.deltas.entities.values().flatten().any(|delta| {
-            matches!(delta, crate::CardanoDelta::DRepPowerUpdate(update) if update.drep_id == script_key)
-        });
-        assert!(!script_updated, "an unchanged power emits no update");
 
         boundary
             .commit_finalize::<ToyDomain>(state, domain.archive())
@@ -2371,8 +2315,6 @@ mod tests {
                 None,
                 None,
             ),
-            blocks_minted_total: 0,
-            register_slot: 0,
             retiring_epoch: Some(CLOSING_EPOCH + 1),
             deposit: 0,
             calidus: None,
@@ -2452,10 +2394,14 @@ mod tests {
 
         for cert in certs {
             match cert {
-                Cert::Reg(slot, order) => {
-                    DRepRegistration::new(identifier.clone(), *slot, *order, 500, None)
-                        .apply(&mut entity)
-                }
+                Cert::Reg(slot, order) => DRepRegistration::new(
+                    identifier.clone(),
+                    *slot,
+                    *order,
+                    500,
+                    crate::DRepExpiry::new(CLOSING_EPOCH + 100, CLOSING_EPOCH),
+                )
+                .apply(&mut entity),
                 Cert::UnReg(slot, order) => {
                     DRepUnRegistration::new(identifier.clone(), *slot, *order).apply(&mut entity)
                 }
@@ -3754,14 +3700,12 @@ mod ratification_tests {
 
         let drep_row = crate::DRepState {
             registered_at: Some((0, 0)),
-            voting_power: 1_000,
             last_active_slot: None,
             unregistered_at: None,
             expired: false,
             deposit: 0,
             identifier: drep(),
-            anchor: None,
-            expiry: None,
+            expiry: crate::DRepExpiry::new(CLOSING + 100, CLOSING),
         };
 
         writer
@@ -3811,11 +3755,9 @@ mod ratification_tests {
                 unregistered_at: Some((slot, 0)),
                 deposit: 0,
                 identifier: drep(),
-                voting_power: 1000,
                 last_active_slot: None,
                 expired: false,
-                anchor: None,
-                expiry: Some(crate::DRepExpiry::new(CLOSING + 100, CLOSING)),
+                expiry: crate::DRepExpiry::new(CLOSING + 100, CLOSING),
             };
             if reregister {
                 row.registered_at = Some((slot + 1, 0));
@@ -3954,7 +3896,7 @@ mod ratification_tests {
             .unwrap();
         assert_eq!(snapshot.closing_epoch, CLOSING);
         assert_eq!(snapshot.dreps, boundary.boundary_dreps);
-        assert_eq!(snapshot.dreps[&drep_cred()].expiry, None);
+        assert_eq!(snapshot.dreps[&drep_cred()].expiry, Some(CLOSING + 100));
         assert_eq!(snapshot.dreps[&drep_cred()].unregistered_at, None);
     }
 
@@ -4049,7 +3991,7 @@ mod ratification_tests {
         );
 
         let mut live = replay_drep_certs(drep(), &certs(CLOSING + 1));
-        live.expiry = Some(crate::DRepExpiry::new(CLOSING + 100, CLOSING));
+        live.expiry = crate::DRepExpiry::new(CLOSING + 100, CLOSING);
 
         let mut gov = crate::load_gov::<ToyDomain>(state).unwrap();
         gov.drep_snapshot
@@ -4251,16 +4193,16 @@ mod ratification_tests {
         ) {
             let domain = seed(&[]);
             let mut row = domain.state().read_entity_typed::<crate::DRepState>(&DRepKey::from(&drep())).unwrap().unwrap();
-            row.expiry = Some(crate::DRepExpiry::new(expiry, updated_in));
-            let expected = row.expiry.as_ref().unwrap().as_of(CLOSING);
+            row.expiry = crate::DRepExpiry::new(expiry, updated_in);
+            let expected = row.expiry.as_of(CLOSING);
             let writer = domain.state().start_writer().unwrap();
             writer.write_entity_typed(&DRepKey::from(&drep()), &row).unwrap();
             writer.commit().unwrap();
             let boundary = BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
-            row.expiry.as_mut().unwrap().set(next_expiry, CLOSING + 1);
+            row.expiry.set(next_expiry, CLOSING + 1);
             proptest::prop_assert_eq!(boundary.boundary_dreps[&drep_cred()].expiry, expected);
             proptest::prop_assert_eq!(boundary.boundary_dreps[&drep_cred()].expiry,
-                row.expiry.as_ref().unwrap().as_of(CLOSING));
+                row.expiry.as_of(CLOSING));
         }
     }
 
@@ -4356,13 +4298,10 @@ mod ratification_tests {
             domain.genesis(),
             Default::default(),
             Default::default(),
-            0,
-            1,
-            ranges.clone(),
         )
         .unwrap();
         shard
-            .commit_shard::<ToyDomain>(domain.state(), domain.archive(), ranges)
+            .commit_shard::<ToyDomain>(domain.state(), domain.archive(), 0, 1, ranges)
             .unwrap();
 
         let mut estart = crate::estart::WorkContext::load_finalize::<ToyDomain>(
@@ -4399,8 +4338,8 @@ mod ratification_tests {
     /// shard accumulation ran on pre-enactment positions — on mainnet the
     /// 644→645 boundary's six items left the `Abstain` bucket short by
     /// exactly their deliverable total. The finalize pass folds the credit
-    /// into the accumulator, the rotated copy the next boundary ratifies
-    /// with, and the published `DRepState.voting_power`.
+    /// into the accumulator and the rotated copy the next boundary ratifies
+    /// with, which minibf serves.
     #[test]
     fn enacted_withdrawal_credits_the_boundary_drep_distr() {
         let accepted = withdrawal(0x01, Some(Vote::Yes), CLOSING + 10);
@@ -4469,13 +4408,6 @@ mod ratification_tests {
             rotated.drep_distr.get(&drep()),
             Some(&(DEPOSIT + WITHDRAWAL))
         );
-
-        let drep_row = domain
-            .state()
-            .read_entity_typed::<crate::DRepState>(&DRepKey::from(&drep()))
-            .unwrap()
-            .expect("drep row present");
-        assert_eq!(drep_row.voting_power, DEPOSIT + WITHDRAWAL);
     }
 
     /// A proposal's deposit counts on the pool leg only while the proposal

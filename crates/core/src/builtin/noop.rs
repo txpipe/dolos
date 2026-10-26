@@ -9,9 +9,12 @@ use std::ops::Range;
 use bytes::Bytes;
 
 use crate::{
-    archive::{ArchiveError, ArchiveStore, ArchiveWriter, EmptyExactIter, EmptyTagIter},
+    archive::{
+        ArchiveError, ArchiveStore, ArchiveWriter, EmptyEntityRecordIter, EmptyExactIter,
+        EmptyTagIter,
+    },
     cache::{CacheDiskTier, CacheEntry, CacheError, Cost},
-    indexes::{ArchiveIndexDelta, IndexRecord},
+    indexes::{ArchiveIndexDelta, EntityKind, IndexRecord},
     BlockBody, BlockSlot, ChainPoint, EntityValue, KeyRange, LogKey, Namespace, RawBlock,
     TagDimension,
 };
@@ -40,6 +43,17 @@ impl ArchiveWriter for NoOpArchiveWriter {
 
     fn undo(&self, _point: &ChainPoint) -> Result<(), ArchiveError> {
         Ok(())
+    }
+
+    /// Discarded like every other write here: a node with no archive keeps no
+    /// entity index, and its seal still runs.
+    fn write_entity(
+        &self,
+        kind: EntityKind,
+        key: &[u8],
+        _slot: BlockSlot,
+    ) -> Result<(), ArchiveError> {
+        crate::archive::check_entity_key(kind, key)
     }
 
     fn apply_index(&self, _deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
@@ -149,6 +163,7 @@ impl ArchiveStore for NoOpArchiveStore {
     type SlotIter = EmptySlotIter;
     type TagIter = EmptyTagIter;
     type ExactIter = EmptyExactIter;
+    type EntityRecordIter = EmptyEntityRecordIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         Ok(NoOpArchiveWriter)
@@ -215,6 +230,18 @@ impl ArchiveStore for NoOpArchiveStore {
         Ok(None)
     }
 
+    fn entity_slots(
+        &self,
+        kind: EntityKind,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<BlockSlot>>, ArchiveError> {
+        for key in keys {
+            crate::archive::check_entity_key(kind, key)?;
+        }
+
+        Ok(vec![None; keys.len()])
+    }
+
     fn slots_by_tag(
         &self,
         _dimension: TagDimension,
@@ -244,6 +271,15 @@ impl ArchiveStore for NoOpArchiveStore {
         _slots: Range<BlockSlot>,
     ) -> Result<Self::ExactIter, ArchiveError> {
         Err(ArchiveError::Unsupported("iter_exact_records"))
+    }
+
+    /// See [`NoOpArchiveStore::iter_archive_tags`].
+    fn iter_entity_records(
+        &self,
+        _kinds: &[EntityKind],
+        _slots: Range<BlockSlot>,
+    ) -> Result<Self::EntityRecordIter, ArchiveError> {
+        Err(ArchiveError::Unsupported("iter_entity_records"))
     }
 }
 

@@ -791,8 +791,6 @@ pub struct OuroborosConfig {
 pub struct GrpcConfig {
     pub listen_address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls_client_ca_root: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     permissive_cors: Option<bool>,
 
     /// Enable hyper's adaptive (BDP-based) flow-control windowing. Defaults to
@@ -817,10 +815,9 @@ pub struct GrpcConfig {
 }
 
 impl GrpcConfig {
-    pub fn new(listen_address: String, tls_client_ca_root: Option<PathBuf>) -> Self {
+    pub fn new(listen_address: String) -> Self {
         Self {
             listen_address,
-            tls_client_ca_root,
             permissive_cors: None,
             http2_adaptive_window: None,
             http2_initial_stream_window_size: None,

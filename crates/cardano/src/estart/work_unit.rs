@@ -2,11 +2,12 @@
 //!
 //! Sharded: `total_shards()` reports the boundary's shard count and the
 //! executor invokes `load` / `commit_state` once per shard. Each shard
-//! covers a first-byte prefix range of the credential key space, iterates
-//! accounts in range, runs the snapshot-rotation visitor
-//! (`AccountTransition`), and emits `EStartProgress` to advance
+//! covers a first-byte prefix range of the credential key space. Its
+//! commit reads the accounts in range once, tallying, rotating and writing
+//! each in one state transaction with the `EStartProgress` that advances
 //! `EpochState.estart_progress`. The shard's stake-only account-epoch rows
-//! for the opening epoch commit to the archive before its state does.
+//! for the opening epoch, built in that same pass, commit to the archive
+//! before its state does.
 //!
 //! After the per-shard loop, `finalize()` seals the period logs of every
 //! immutable epoch (`crate::periods`), then runs the global "Estart" pass:
@@ -15,10 +16,11 @@
 //! changes), and the cursor advance. The cursor moves only here, so a
 //! crash before finalize restarts from the boundary block.
 //!
-//! `AccountTransition` is not natively idempotent (re-applying double-rolls
-//! the EpochValue snapshot), so true mid-shard resume requires additional
-//! work — same TODO posture as `EwrapWorkUnit`. `finalize` is separately
-//! guarded to run exactly once (see `commit_finalize`).
+//! The rotation is not idempotent (rotating twice double-rolls the
+//! `EpochValue` snapshots), so a resumed boundary skips the committed
+//! shards; a shard is all or nothing, as its rows and its progress commit
+//! together. `finalize` is separately guarded to run exactly once (see
+//! `commit_finalize`).
 
 use std::sync::Arc;
 
@@ -47,9 +49,9 @@ pub struct EstartWorkUnit {
 
     /// First shard to run on this invocation. Populated in `initialize()`
     /// from `EpochState.estart_progress.committed` so a restart after a
-    /// mid-boundary crash skips already-committed shards
-    /// (`AccountTransition` is non-idempotent on replay — would double-
-    /// rotate every account in the replayed shard).
+    /// mid-boundary crash skips already-committed shards (the rotation is
+    /// non-idempotent on replay — it would double-rotate every account in
+    /// the replayed shard).
     start_shard: u32,
 
     /// AVVM reclamation for this boundary, computed once in `initialize()`.
@@ -117,8 +119,8 @@ where
         // boundary. While a boundary is in flight, the persisted
         // `estart_progress` is authoritative — `total` guards against a
         // config change mid-boundary, and `committed` lets a restart
-        // skip shards whose state already landed (`AccountTransition`
-        // is non-idempotent on replay — would double-rotate every
+        // skip shards whose state already landed (the rotation is
+        // non-idempotent on replay — it would double-rotate every
         // account in the replayed shard).
         //
         // Errors propagate: state-read failure must not silently fall
@@ -155,8 +157,6 @@ where
     }
 
     fn load(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
-        let ranges = crate::AccountKey::shard_ranges(shard_index, self.total_shards);
-
         debug!(
             slot = self.slot,
             shard = shard_index,
@@ -169,9 +169,6 @@ where
             self.genesis.clone(),
             self.avvm_reclamation.clone(),
             self.inputs.clone(),
-            shard_index,
-            self.total_shards,
-            ranges,
         )?;
 
         info!(
@@ -187,7 +184,7 @@ where
     }
 
     fn compute(&mut self, _shard_index: u32) -> Result<(), DomainError> {
-        debug!("estart compute (deltas computed during load)");
+        debug!("estart compute (accounts rotate during commit)");
         Ok(())
     }
 
@@ -199,7 +196,13 @@ where
             .as_mut()
             .ok_or_else(|| DomainError::Internal("estart context not loaded".into()))?;
 
-        context.commit_shard::<D>(domain.state(), domain.archive(), ranges)?;
+        context.commit_shard::<D>(
+            domain.state(),
+            domain.archive(),
+            shard_index,
+            self.total_shards,
+            ranges,
+        )?;
         Ok(())
     }
 

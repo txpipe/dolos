@@ -16,17 +16,19 @@
 //! never a re-pin.
 //!
 //! Between them these freeze: every media type, the tag string, every archive
-//! dimension name and exact-record kind literal, every `log-{ns}` and
-//! `state-{ns}` kind string — which is where the namespace strings live now
-//! that neither record names one — the layer header and scope shapes, and the
-//! `position`/`parameters` key spellings, the shard and schema maps included.
+//! dimension name and exact-record kind literal, every `log-{ns}`,
+//! `entity-{kind}` and `state-{ns}` kind string — which is where the namespace
+//! and kind strings live now that no record names one — the layer header and
+//! scope shapes, and the `position`/`parameters` key spellings, the shard,
+//! schema and entity maps included.
 
 mod common;
 
 use common::*;
 use dolos_core::{BlockHash, ChainPoint};
 use dolos_snapshot::{
-    layers::{blocks, digests, indexes, logs, state},
+    entity_kind_for,
+    layers::{blocks, digests, entities, indexes, logs, state},
     log_ns_for, state_ns_for, DolosProfile, RetainedEpochs, BLOCKS, DIGESTS, INDEXES,
 };
 use stelae::{
@@ -39,7 +41,7 @@ use stelae::{
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 69] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 71] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -123,6 +125,18 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 69] = [
         "sha256:c02fef757b3b8f5a65c04642cdc1e9c11a37f817528e43dcac261fbc983031a1",
         2,
         95,
+    ),
+    (
+        "entity-asset",
+        "sha256:b820744b499226137d7521dce605dae7c0f17fb1964dd5b8967d0ec2669a233c",
+        3,
+        124,
+    ),
+    (
+        "entity-script",
+        "sha256:ca4862a274c299824946a599d5d5468bd4944dbfabd396b767e83798ae5aae2b",
+        3,
+        117,
     ),
     (
         "state-account-addresses",
@@ -458,7 +472,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 69] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:d3e1798371c5a0f6d9111da5bac27a95adfdc296e4f730d323e2c72b1b582ee9";
+    "sha256:3d2bbd25478f39a74e2394c259a66364f49b376afc7a4f52f40c9b6b17c85101";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -699,6 +713,12 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:c02fef757b3b8f5a65c04642cdc1e9c11a37f817528e43dcac261fbc983031a1","kind":"log-pool-epochs","#,
     r#""mediaType":"application/vnd.dolos.stele.log-pool-epochs.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":95},"#,
+    r#"{"diffId":"sha256:b820744b499226137d7521dce605dae7c0f17fb1964dd5b8967d0ec2669a233c","kind":"entity-asset","#,
+    r#""mediaType":"application/vnd.dolos.stele.entity-asset.v1+zstd","records":3,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":124},"#,
+    r#"{"diffId":"sha256:ca4862a274c299824946a599d5d5468bd4944dbfabd396b767e83798ae5aae2b","kind":"entity-script","#,
+    r#""mediaType":"application/vnd.dolos.stele.entity-script.v1+zstd","records":3,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":117},"#,
     r#"{"diffId":"sha256:9c4a51d9ef3969cea7075cf31eaadf82efc9bef6e5427296976201af4663d8e5","kind":"state-account-addresses","#,
     r#""mediaType":"application/vnd.dolos.stele.state-account-addresses.v1+zstd","records":2,"#,
     r#""scope":{"epoch":4,"shard":0},"uncompressedSize":165},"#,
@@ -865,6 +885,7 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#""mediaType":"application/vnd.dolos.stele.digests.v1+zstd","records":3,"#,
     r#""scope":{"lastImmutable":3},"uncompressedSize":250}"#,
     r#"],"parameters":{"#,
+    r#""entities":{"asset":32,"script":28},"#,
     r#""indexKeyHash":"xxh3-64","#,
     r#""schemas":{"account-address-chunks":1,"account-addresses":1,"account-epochs":1,"account-stakes":0,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"assets":1,"datums":1,"drep-epochs":1,"drep-sightings":1,"dreps":2,"epochs":4,"eras":2,"first-mint-chunks":2,"first-mints":2,"first-script-chunks":1,"first-scripts":1,"gov":4,"leader-rewards":0,"member-rewards":0,"metadata-labels":2,"payment-address-chunks":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-mint-chunks":1,"pool-deposit-refunds":0,"pool-epochs":2,"pools":3,"proposals":4,"scripts":1,"utxos":1},"#,
     r#""shards":{"account-addresses":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"assets":16,"datums":16,"drep-sightings":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"scripts":16,"utxos":16},"#,
@@ -880,6 +901,14 @@ fn decode_one(kind: &str, record: &[u8]) {
     // carry, never in how a record is written.
     if let Some(ns) = log_ns_for(kind) {
         logs::decode(ns, record).unwrap();
+
+        return;
+    }
+
+    // One codec for every entity kind as well, which takes the entity kind
+    // the layer kind names for its id width.
+    if let Some(kind) = entity_kind_for(kind) {
+        entities::decode(kind, record).unwrap();
 
         return;
     }

@@ -281,18 +281,36 @@ pub fn payment_stats() -> PaymentStats {
     PaymentStats { tx_count: 23 }
 }
 
-/// A mint and a burn, so both signs of the amount are pinned.
+/// A flagged mint, a plain mint and a burn, so the flag and both signs of
+/// the amount are pinned.
 pub fn asset_mint_chunk() -> AssetMintChunk {
     AssetMintChunk {
         count: 259,
-        mints: vec![(hash32(0xd0), 1_000_000), (hash32(0xd1), -42)],
+        mints: vec![
+            AssetMintSet {
+                tx_hash: hash32(0xd0),
+                amount: 1_000_000,
+                names_asset: true,
+            },
+            AssetMintSet {
+                tx_hash: hash32(0xd3),
+                amount: 1,
+                names_asset: false,
+            },
+            AssetMintSet {
+                tx_hash: hash32(0xd1),
+                amount: -42,
+                names_asset: false,
+            },
+        ],
     }
 }
 
 pub fn asset_mint_set() -> AssetMintSet {
     AssetMintSet {
         tx_hash: hash32(0xd2),
-        amount: -7,
+        amount: 7,
+        names_asset: true,
     }
 }
 
@@ -360,18 +378,16 @@ pub fn drep_sighting_state() -> DRepSightingState {
 pub fn drep_state() -> DRepState {
     DRepState {
         registered_at: Some((55_555, 3)),
-        voting_power: 777_000_000,
         last_active_slot: Some(66_666),
         unregistered_at: Some((77_777, 11)),
         expired: true,
         deposit: 500_000_000,
         identifier: DRep::Key(hash28(0xa0)),
-        anchor: Some(anchor(0xa1)),
-        expiry: Some(DRepExpiry {
+        expiry: DRepExpiry {
             current: 412,
             updated_in: 409,
             prev: Some(400),
-        }),
+        },
     }
 }
 
@@ -707,8 +723,6 @@ pub fn pool_state() -> PoolState {
                 pool_snapshot(0x05),
             ],
         ),
-        blocks_minted_total: 4_242,
-        register_slot: 55_555_555,
         retiring_epoch: Some(777),
         deposit: 500_000_000,
         calidus: Some(CalidusRegistration {

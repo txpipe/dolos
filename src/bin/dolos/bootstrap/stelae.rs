@@ -354,8 +354,13 @@ fn report(
     );
 
     println!(
-        "restored: {} blocks, {} logs, {} index records, {} entities, {} utxos",
-        summary.blocks, summary.logs, summary.index_records, summary.entities, summary.utxos,
+        "restored: {} blocks, {} logs, {} index records, {} first-seen entries, {} entities, {} utxos",
+        summary.blocks,
+        summary.logs,
+        summary.index_records,
+        summary.entity_index,
+        summary.entities,
+        summary.utxos,
     );
 }
 
