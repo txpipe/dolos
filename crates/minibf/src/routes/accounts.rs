@@ -20,14 +20,14 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
-    model::{AccountState, DRepState, PoolState},
+    indexes::{utxo_dimensions, AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
+    model::{AccountState, DRepState, PoolState, ProposalState},
     pallas_extras,
     periods::{account_addresses, stats},
     AccountEpochLog, AccountKey, ChainSummary, PoolHash,
 };
 use dolos_core::async_query::BlockMetaResolver;
-use dolos_core::{ArchiveStore as _, Domain, DomainError, StateStore as _};
+use dolos_core::{ArchiveStore as _, Domain, DomainError, StateStore as _, Tag};
 use futures_util::StreamExt;
 use pallas::{
     crypto::hash::{Hash, Hasher},
@@ -198,6 +198,7 @@ pub async fn by_stake<D>(
 ) -> Result<Json<AccountContent>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -206,8 +207,11 @@ where
 
     let state = domain
         .read_cardano_entity::<AccountState>(&account_key.account)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if state.is_none() && !account_appears_in_proposals(&domain, &account_key.account)? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
 
     let tip_slot = domain
         .archive()
@@ -220,6 +224,11 @@ where
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let state = state.unwrap_or_else(|| {
+        let (epoch, _) = chain.slot_epoch(tip_slot);
+        AccountState::new(epoch, account_key.account.credential().clone())
+    });
+
     let model = AccountModelBuilder {
         account_state: state,
         stake_address: Some(account_key.address),
@@ -229,6 +238,35 @@ where
     .into_model()?;
 
     Ok(Json(model))
+}
+
+fn account_appears_in_proposals<D>(
+    domain: &Facade<D>,
+    account: &AccountKey,
+) -> Result<bool, StatusCode>
+where
+    Option<ProposalState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    for item in domain.iter_cardano_entities::<ProposalState>(None)? {
+        let (_, proposal) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if proposal.reward_account.as_ref() == Some(account.credential()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn account_exists<D>(domain: &Facade<D>, account: &AccountKey) -> Result<bool, StatusCode>
+where
+    Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    if domain.cardano_entity_exists::<AccountState>(account)? {
+        return Ok(true);
+    }
+    account_appears_in_proposals(domain, account)
 }
 
 /// Whether a pool registration the pool state still holds names the
@@ -245,9 +283,6 @@ where
 /// overwrites `next`, and each epoch transition rotates the oldest version
 /// out of `go`. A credential named only by such a replaced registration is
 /// gone from every version, so it still 404s. db-sync remembers it forever.
-/// Closing the gap needs the state layer to record the credential when the
-/// certificate names it. That is the same fix #1325 needs for proposal return
-/// addresses.
 fn account_appears_in_pool_registrations<D>(
     domain: &Facade<D>,
     account: &StakeAddress,
@@ -309,6 +344,7 @@ pub async fn by_stake_addresses<D>(
 ) -> Result<Json<Vec<AccountAddressesContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -320,7 +356,7 @@ where
     let pagination = Pagination::try_from(params)?;
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
-    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)?
+    if !account_exists(&domain, &account_key.account)?
         && !account_appears_in_pool_registrations(&domain, &account_key.address)?
     {
         return Err(StatusCode::NOT_FOUND.into());
@@ -370,12 +406,13 @@ pub async fn by_stake_addresses_total<D>(
 ) -> Result<DirectJson, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
 
-    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
+    if !account_exists(&domain, &account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -424,19 +461,9 @@ where
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&address, network)?;
 
-    let stake = account_key.address.to_vec();
-    let refs = domain
-        .blocking(move |domain| {
-            domain
-                .state()
-                .utxos_by_stake(&stake)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-        })
-        .await?;
+    let tag = Tag::new(utxo_dimensions::STAKE, account_key.address.to_vec());
 
-    let utxos =
-        super::utxos::load_utxo_models(&domain, refs, pagination, super::utxos::UtxoFilter::All)
-            .await?;
+    let utxos = super::utxos::load_tag_page(&domain, &tag, &pagination).await?;
 
     Ok(Json(utxos))
 }
@@ -448,6 +475,7 @@ pub async fn by_stake_addresses_assets<D>(
 ) -> Result<Json<Vec<AccountAddressesAssetsInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
@@ -455,7 +483,7 @@ where
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
 
-    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
+    if !account_exists(&domain, &account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -767,6 +795,7 @@ async fn by_stake_actions<D, F, T>(
 ) -> Result<Vec<T>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
     F: Fn(
         &AccountActionContext<'_, D>,
         &StakeAddress,
@@ -778,7 +807,7 @@ where
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(stake_address, network)?;
 
-    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
+    if !account_exists(&domain, &account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -837,6 +866,7 @@ pub async fn by_stake_delegations<D>(
 ) -> Result<Json<Vec<AccountDelegationContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
@@ -860,6 +890,7 @@ pub async fn by_stake_registrations<D>(
 ) -> Result<Json<Vec<AccountRegistrationContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
@@ -924,6 +955,7 @@ pub async fn by_stake_mirs<D>(
 ) -> Result<Json<Vec<AccountMirContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
@@ -1014,13 +1046,14 @@ pub async fn by_stake_history<D>(
 ) -> Result<Json<Vec<AccountHistoryContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
 
-    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
+    if !account_exists(&domain, &account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1087,12 +1120,13 @@ pub async fn by_stake_rewards<D>(
 ) -> Result<Json<Vec<AccountRewardContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
-    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
+    if !account_exists(&domain, &account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
     let tip = domain.get_tip_slot()?;
@@ -1165,6 +1199,7 @@ pub async fn by_stake_withdrawals<D>(
 ) -> Result<Json<Vec<AccountWithdrawalContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
@@ -1172,7 +1207,7 @@ where
 
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
-    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
+    if !account_exists(&domain, &account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1312,6 +1347,7 @@ pub async fn by_stake_transactions<D>(
 ) -> Result<Json<Vec<AccountTransactionsContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
@@ -1319,7 +1355,7 @@ where
 
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
-    if !domain.cardano_entity_exists::<AccountState>(&account_key.account)? {
+    if !account_exists(&domain, &account_key.account)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1387,7 +1423,7 @@ mod tests {
         account_withdrawal_content_inner::AccountWithdrawalContentInner,
     };
     use dolos_cardano::model::{EpochValue, PoolParams, PoolSnapshot};
-    use dolos_core::{ArchiveWriter as _, EraCbor, StateWriter as _, UtxoSetDelta};
+    use dolos_core::{ArchiveWriter as _, EraCbor, StateWriter as _, UtxoSetDelta, UtxoValue};
     use dolos_testing::{
         synthetic::SyntheticBlockConfig, toy_domain::ToyDomain, utxo_with_value, MIN_UTXO_AMOUNT,
     };
@@ -1477,7 +1513,7 @@ mod tests {
         assert_bad_request(encode_bech32("addr_vk", &[7u8; 32]));
     }
 
-    fn asset_utxo(address: &str, assets: &[([u8; 28], u64)]) -> Arc<EraCbor> {
+    fn asset_utxo(address: &str, assets: &[([u8; 28], u64)]) -> EraCbor {
         let multi: BTreeMap<_, _> = assets
             .iter()
             .map(|(policy, quantity)| {
@@ -1491,10 +1527,7 @@ mod tests {
             })
             .collect();
 
-        Arc::new(utxo_with_value(
-            address,
-            Value::Multiasset(MIN_UTXO_AMOUNT, multi),
-        ))
+        utxo_with_value(address, Value::Multiasset(MIN_UTXO_AMOUNT, multi))
     }
 
     fn asset_unit(policy: [u8; 28]) -> String {
@@ -1609,8 +1642,6 @@ mod tests {
         PoolState {
             operator: Hash::from(operator),
             snapshot: EpochValue::with_live(3, snapshot),
-            blocks_minted_total: 0,
-            register_slot: 0,
             retiring_epoch: None,
             deposit: 0,
             calidus: None,
@@ -1670,6 +1701,195 @@ mod tests {
                 serde_json::from_slice(&bytes).expect("failed to parse account addresses");
             assert!(addresses.is_empty(), "{account}");
         }
+    }
+
+    fn proposal_return_accounts_block(
+        slot: u64,
+        block_number: u64,
+        prev_hash: Hash<32>,
+        valid: bool,
+    ) -> dolos_core::RawBlock {
+        use pallas::codec::utils::{NonEmptySet, Set};
+        use pallas::ledger::primitives::conway::{
+            Anchor, GovAction, ProposalProcedure, TransactionBody,
+        };
+
+        let account = |payload| StakeAddress::new(Network::Testnet, payload).to_vec();
+        let proposals = [
+            StakePayload::Stake(Hash::from([0x93; 28])),
+            StakePayload::Script(Hash::from([0x93; 28])),
+        ]
+        .into_iter()
+        .map(|payload| ProposalProcedure {
+            deposit: 100_000_000,
+            reward_account: account(payload).into(),
+            gov_action: GovAction::Information,
+            anchor: Anchor {
+                url: "https://example.invalid/proposal".to_string(),
+                content_hash: Hash::from([0; 32]),
+            },
+        })
+        .collect::<Vec<_>>();
+
+        let body = TransactionBody {
+            inputs: Set::from(vec![]),
+            outputs: vec![],
+            fee: 0,
+            ttl: None,
+            certificates: None,
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: None,
+            proposal_procedures: Some(NonEmptySet::try_from(proposals).unwrap()),
+            treasury_value: None,
+            donation: None,
+        };
+
+        let (_, raw) = dolos_testing::blocks::make_conway_block_with_txs_at(
+            slot,
+            block_number,
+            Some(prev_hash),
+            vec![(body, valid)],
+            None,
+        );
+        raw
+    }
+
+    async fn assert_proposal_account_endpoints(valid: bool, resolved: bool) {
+        use dolos_core::import::ImportExt as _;
+
+        let mut imported = None;
+        let app = TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+            let tip = domain.state().read_cursor().unwrap().unwrap();
+            let block = domain
+                .archive()
+                .get_block_by_slot(&tip.slot())
+                .unwrap()
+                .unwrap();
+            let number = MultiEraBlock::decode(&block).unwrap().number();
+            domain
+                .import_blocks(vec![proposal_return_accounts_block(
+                    tip.slot() + 1,
+                    number + 1,
+                    tip.hash().unwrap(),
+                    valid,
+                )])
+                .expect("import proposal block");
+
+            if valid && resolved {
+                let writer = domain.state().start_writer().unwrap();
+                for item in domain
+                    .state()
+                    .iter_entities_typed::<ProposalState>(None)
+                    .unwrap()
+                {
+                    let (key, mut proposal) = item.unwrap();
+                    if proposal.idx == 0 {
+                        proposal.ratified_epoch = Some(2);
+                    } else {
+                        proposal.canceled_epoch = Some(3);
+                    }
+                    writer.write_entity_typed(&key, &proposal).unwrap();
+                }
+                writer.commit().unwrap();
+            }
+            imported = Some(domain.clone());
+        });
+
+        let imported = imported.unwrap();
+        for payload in [
+            StakePayload::Stake(Hash::from([0x93; 28])),
+            StakePayload::Script(Hash::from([0x93; 28])),
+        ] {
+            let address = StakeAddress::new(Network::Testnet, payload);
+            let credential = pallas_extras::stake_address_to_cred(&address);
+            let key = AccountKey::from(credential);
+            assert!(imported
+                .state()
+                .read_entity_typed::<AccountState>(&key)
+                .unwrap()
+                .is_none());
+            let account = address.to_bech32().unwrap();
+            for suffix in [
+                "registrations",
+                "delegations",
+                "withdrawals",
+                "mirs",
+                "rewards",
+                "history",
+                "addresses",
+                "addresses/assets",
+                "transactions",
+                "utxos",
+            ] {
+                let path = format!("/accounts/{account}/{suffix}");
+                let (status, bytes) = app.get_bytes(&path).await;
+                if valid || suffix == "utxos" {
+                    assert_eq!(
+                        status,
+                        StatusCode::OK,
+                        "{path}: {}",
+                        String::from_utf8_lossy(&bytes)
+                    );
+                    let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+                    assert!(rows.is_empty(), "{path}: {rows:?}");
+                } else {
+                    assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+                }
+            }
+            let path = format!("/accounts/{account}");
+            let (status, bytes) = app.get_bytes(&path).await;
+            if valid {
+                assert_eq!(status, StatusCode::OK, "{path}");
+                let content: AccountContent = serde_json::from_slice(&bytes).unwrap();
+                assert!(!content.registered);
+                assert!(!content.active);
+                assert_eq!(content.controlled_amount, "0");
+                assert_eq!(content.withdrawable_amount, "0");
+                assert!(content.pool_id.is_none());
+                assert!(content.drep_id.is_none());
+            } else {
+                assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            }
+            let path = format!("/accounts/{account}/addresses/total");
+            let (status, bytes) = app.get_bytes(&path).await;
+            if valid {
+                assert_eq!(status, StatusCode::OK, "{path}");
+                let total: AccountAddressesTotal = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(total.tx_count, 0);
+            } else {
+                assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            }
+            assert!(imported
+                .state()
+                .read_entity_typed::<AccountState>(&key)
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn accounts_named_only_by_proposal_returns_need_no_account_state() {
+        assert_proposal_account_endpoints(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_named_only_by_resolved_proposals_remain_known() {
+        assert_proposal_account_endpoints(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_named_only_by_invalid_proposals_remain_unknown() {
+        assert_proposal_account_endpoints(false, false).await;
     }
 
     #[tokio::test]
@@ -1856,14 +2076,27 @@ mod tests {
             // ASSET_A sorts first ascending because its oldest occurrence is
             // first, and first descending because its newest occurrence is
             // last.
-            let produced_utxo = HashMap::from([
+            let replaced = [
                 (oldest_ref, asset_utxo(&vectors.address, &[(ASSET_A, 5)])),
                 (middle_ref, asset_utxo(&vectors.address, &[(ASSET_B, 3)])),
                 (
                     newest_ref,
                     asset_utxo(&vectors.address, &[(ASSET_A, 7), (ASSET_C, 1)]),
                 ),
-            ]);
+            ];
+
+            // the replaced UTxOs keep the position their tags are ordered by
+            let current = domain
+                .state()
+                .get_utxos(ordered_refs.clone())
+                .expect("failed to load fixture utxos");
+            let produced_utxo = replaced
+                .into_iter()
+                .map(|(txo_ref, output)| {
+                    let position = current[&txo_ref].position();
+                    (txo_ref, Arc::new(UtxoValue::new(output, position)))
+                })
+                .collect::<HashMap<_, _>>();
 
             let writer = domain
                 .state()

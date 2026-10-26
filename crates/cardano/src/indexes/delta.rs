@@ -7,8 +7,8 @@
 //! store).
 
 use dolos_core::{
-    keys, ArchiveIndexDelta, BlockSlot, EraCbor, Tag, TagDimension, TxoRef, UtxoIndexDelta,
-    UtxoMap, UtxoSetDelta,
+    keys, ArchiveIndexDelta, BlockSlot, Tag, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap,
+    UtxoPosition, UtxoSetDelta, UtxoValue,
 };
 use pallas::{
     codec::minicbor,
@@ -44,7 +44,7 @@ use crate::{model::ProposalKey, pallas_extras};
 /// // Add tags as block is traversed
 /// builder.add_tx_hash(tx_hash);
 /// builder.add_address(&address);
-/// builder.add_produced_utxo(txo_ref, &output);
+/// builder.add_produced_utxo(txo_ref, Some(position), &output);
 ///
 /// // Take both halves
 /// let (utxo_tags, archive) = builder.into_parts();
@@ -65,64 +65,31 @@ impl CardanoIndexDeltaBuilder {
     /// Add a produced UTxO to the delta.
     ///
     /// Extracts tags from the output (address, assets) and adds them to the
-    /// UTxO filter delta for insertion.
-    pub fn add_produced_utxo(&mut self, txo_ref: TxoRef, output: &MultiEraOutput) {
-        let tags = Self::extract_utxo_tags(output);
-        self.utxo.produced.push((txo_ref, tags));
+    /// UTxO filter delta for insertion, ordered by `position`.
+    pub fn add_produced_utxo(
+        &mut self,
+        txo_ref: TxoRef,
+        position: Option<UtxoPosition>,
+        output: &MultiEraOutput,
+    ) {
+        self.utxo
+            .produced
+            .push((txo_ref, position, utxo_tags(output)));
     }
 
     /// Add a consumed UTxO to the delta.
     ///
     /// Extracts tags from the output (address, assets) and adds them to the
-    /// UTxO filter delta for removal.
-    pub fn add_consumed_utxo(&mut self, txo_ref: TxoRef, output: &MultiEraOutput) {
-        let tags = Self::extract_utxo_tags(output);
-        self.utxo.consumed.push((txo_ref, tags));
-    }
-
-    /// Extract UTxO filter tags from an output.
-    fn extract_utxo_tags(output: &MultiEraOutput) -> Vec<Tag> {
-        let mut tags = Vec::new();
-
-        // Address tags
-        if let Ok(addr) = output.address() {
-            match addr {
-                Address::Shelley(x) => {
-                    tags.push(Tag::new(utxo::ADDRESS, x.to_vec()));
-                    tags.push(Tag::new(utxo::PAYMENT, x.payment().to_vec()));
-                    if let Some(stake) = pallas_extras::shelley_address_to_stake_address(&x) {
-                        tags.push(Tag::new(utxo::STAKE, stake.to_vec()));
-                    }
-                }
-                Address::Stake(x) => {
-                    tags.push(Tag::new(utxo::ADDRESS, x.to_vec()));
-                    tags.push(Tag::new(utxo::STAKE, x.to_vec()));
-                }
-                Address::Byron(x) => {
-                    tags.push(Tag::new(utxo::ADDRESS, x.to_vec()));
-                }
-            }
-        }
-
-        // Asset tags
-        for ma in output.value().assets() {
-            tags.push(Tag::new(utxo::POLICY, ma.policy().to_vec()));
-            for asset in ma.assets() {
-                let mut subject = asset.policy().to_vec();
-                subject.extend(asset.name());
-                tags.push(Tag::new(utxo::ASSET, subject));
-            }
-        }
-
-        // Reference script tag
-        if let Some(script_ref) = output.script_ref() {
-            tags.push(Tag::new(
-                utxo::SCRIPT_REF,
-                pallas_extras::script_ref_hash(&script_ref).to_vec(),
-            ));
-        }
-
-        tags
+    /// UTxO filter delta for removal, at `position`.
+    pub fn add_consumed_utxo(
+        &mut self,
+        txo_ref: TxoRef,
+        position: Option<UtxoPosition>,
+        output: &MultiEraOutput,
+    ) {
+        self.utxo
+            .consumed
+            .push((txo_ref, position, utxo_tags(output)));
     }
 
     // ============ Archive Block Operations ============
@@ -244,7 +211,7 @@ impl CardanoIndexDeltaBuilder {
     /// the archive index once the block that carried it first is pruned. The
     /// tags do not follow phase-2 validity; `script_by_hash` filters the
     /// blocks it reads. A produced output's reference script is tagged with
-    /// it, see [`Self::extract_utxo_tags`].
+    /// it, see [`utxo_tags`].
     pub fn add_tx_scripts(&mut self, tx: &MultiEraTx) {
         use pallas::ledger::traverse::{ComputeHash as _, OriginalHash as _};
 
@@ -572,24 +539,29 @@ impl CardanoIndexDeltaBuilder {
 
     // ============ Batch UTxO Operations (for genesis/import) ============
 
-    /// Add produced UTxOs from a map of raw CBOR outputs.
+    /// Add produced UTxOs from a map of stored values.
     ///
     /// This is used for genesis bootstrap, bulk imports and WAL replay, where
-    /// UTxOs are provided as raw CBOR rather than parsed block outputs. An
-    /// output that does not decode gets no tags, as on the block path.
+    /// UTxOs are provided as stored values rather than parsed block outputs.
+    /// Each value's position orders its tags. An output that does not decode
+    /// gets no tags, as on the block path.
     pub fn add_produced_utxos(&mut self, utxos: &UtxoMap) {
-        for (txo_ref, era_cbor) in utxos {
-            if let Some(tags) = Self::extract_tags_from_era_cbor(era_cbor) {
-                self.utxo.produced.push((txo_ref.clone(), tags));
+        for (txo_ref, value) in utxos {
+            if let Some(tags) = Self::extract_tags_from_value(value) {
+                self.utxo
+                    .produced
+                    .push((txo_ref.clone(), value.position(), tags));
             }
         }
     }
 
-    /// Add consumed UTxOs from a map of raw CBOR outputs.
+    /// Add consumed UTxOs from a map of stored values.
     pub fn add_consumed_utxos(&mut self, utxos: &UtxoMap) {
-        for (txo_ref, era_cbor) in utxos {
-            if let Some(tags) = Self::extract_tags_from_era_cbor(era_cbor) {
-                self.utxo.consumed.push((txo_ref.clone(), tags));
+        for (txo_ref, value) in utxos {
+            if let Some(tags) = Self::extract_tags_from_value(value) {
+                self.utxo
+                    .consumed
+                    .push((txo_ref.clone(), value.position(), tags));
             }
         }
     }
@@ -604,11 +576,60 @@ impl CardanoIndexDeltaBuilder {
         self.add_consumed_utxos(&utxo_delta.undone_utxo);
     }
 
-    /// Extract UTxO filter tags from raw EraCbor.
-    fn extract_tags_from_era_cbor(era_cbor: &EraCbor) -> Option<Vec<Tag>> {
-        let output = MultiEraOutput::try_from(era_cbor).ok()?;
-        Some(Self::extract_utxo_tags(&output))
+    /// Extract UTxO filter tags from a stored value.
+    fn extract_tags_from_value(value: &UtxoValue) -> Option<Vec<Tag>> {
+        let output = MultiEraOutput::try_from(value).ok()?;
+        Some(utxo_tags(&output))
     }
+}
+
+/// The live-UTxO tags of an output: its address, payment and stake
+/// credentials, policies, assets and reference script.
+///
+/// The one derivation every tag write uses, so a check of the tags against the
+/// UTxO set derives them the same way.
+pub fn utxo_tags(output: &MultiEraOutput) -> Vec<Tag> {
+    let mut tags = Vec::new();
+
+    // Address tags
+    if let Ok(addr) = output.address() {
+        match addr {
+            Address::Shelley(x) => {
+                tags.push(Tag::new(utxo::ADDRESS, x.to_vec()));
+                tags.push(Tag::new(utxo::PAYMENT, x.payment().to_vec()));
+                if let Some(stake) = pallas_extras::shelley_address_to_stake_address(&x) {
+                    tags.push(Tag::new(utxo::STAKE, stake.to_vec()));
+                }
+            }
+            Address::Stake(x) => {
+                tags.push(Tag::new(utxo::ADDRESS, x.to_vec()));
+                tags.push(Tag::new(utxo::STAKE, x.to_vec()));
+            }
+            Address::Byron(x) => {
+                tags.push(Tag::new(utxo::ADDRESS, x.to_vec()));
+            }
+        }
+    }
+
+    // Asset tags
+    for ma in output.value().assets() {
+        tags.push(Tag::new(utxo::POLICY, ma.policy().to_vec()));
+        for asset in ma.assets() {
+            let mut subject = asset.policy().to_vec();
+            subject.extend(asset.name());
+            tags.push(Tag::new(utxo::ASSET, subject));
+        }
+    }
+
+    // Reference script tag
+    if let Some(script_ref) = output.script_ref() {
+        tags.push(Tag::new(
+            utxo::SCRIPT_REF,
+            pallas_extras::script_ref_hash(&script_ref).to_vec(),
+        ));
+    }
+
+    tags
 }
 
 /// The live-UTxO tag changes a `UtxoSetDelta` implies.
@@ -633,6 +654,7 @@ mod tests {
     };
     use pallas::ledger::primitives::conway::{GovActionId, Vote, VotingProcedure};
     use std::collections::BTreeSet;
+    use std::sync::Arc;
 
     fn test_shelley_address() -> Address {
         Address::Shelley(ShelleyAddress::new(
@@ -684,7 +706,7 @@ mod tests {
         let cbor = minicbor::to_vec(&output).unwrap();
         let output = MultiEraOutput::decode(Era::Conway, &cbor).unwrap();
 
-        let tags = CardanoIndexDeltaBuilder::extract_utxo_tags(&output);
+        let tags = utxo_tags(&output);
 
         // Native scripts hash their CBOR behind a leading 0x00 language tag.
         let script_cbor = minicbor::to_vec(&script).unwrap();
@@ -1427,5 +1449,156 @@ mod tests {
         assert_eq!(archive[1].block_number, None);
         assert_eq!(archive[1].block_hash, ebb.hash().to_vec());
         assert_eq!(archive[2].block_number, Some(7));
+    }
+
+    /// One live tag key as the stores order it: dimension, lookup key, the
+    /// creation position's tag order, ref.
+    type TagKey = (
+        TagDimension,
+        Vec<u8>,
+        [u8; dolos_core::TAG_ORDER_LEN],
+        TxoRef,
+    );
+
+    fn tag_keys(
+        entries: &[(TxoRef, Option<UtxoPosition>, Vec<Tag>)],
+    ) -> impl Iterator<Item = TagKey> + '_ {
+        entries.iter().flat_map(|(txo, position, tags)| {
+            tags.iter().map(move |tag| {
+                (
+                    tag.dimension,
+                    tag.key.clone(),
+                    UtxoPosition::tag_order(*position),
+                    txo.clone(),
+                )
+            })
+        })
+    }
+
+    /// What `apply_utxo_tags` does to the stored keys.
+    fn apply(keys: &mut BTreeSet<TagKey>, delta: &UtxoIndexDelta) {
+        keys.extend(tag_keys(&delta.produced));
+        for key in tag_keys(&delta.consumed) {
+            keys.remove(&key);
+        }
+    }
+
+    /// What `undo_utxo_tags` does to the stored keys: consumed entries come
+    /// back first, so an output its own block spent ends up removed.
+    fn undo(keys: &mut BTreeSet<TagKey>, delta: &UtxoIndexDelta) {
+        keys.extend(tag_keys(&delta.consumed));
+        for key in tag_keys(&delta.produced) {
+            keys.remove(&key);
+        }
+    }
+
+    fn value(address: dolos_testing::TestAddress, position: Option<(u64, u16)>) -> Arc<UtxoValue> {
+        let output = dolos_testing::utxo_with_value(
+            address,
+            pallas::ledger::primitives::conway::Value::Coin(2_000_000),
+        );
+        let position = position.map(|(slot, tx_index)| UtxoPosition::new(slot, tx_index));
+
+        Arc::new(UtxoValue::new(output, position))
+    }
+
+    fn map(entries: &[(TxoRef, Arc<UtxoValue>)]) -> UtxoMap {
+        entries.iter().cloned().collect()
+    }
+
+    /// Produce, consume, roll a block back and recover its inputs: the tag keys
+    /// the deltas leave behind are the keys rebuilt from the UTxO set that
+    /// remains, creation positions included, so a spent or recovered UTxO is
+    /// removed and restored under the key it was written with.
+    #[test]
+    fn tag_keys_through_a_cycle_equal_the_keys_rebuilt_from_the_set() {
+        use dolos_testing::TestAddress::{Alice, Bob};
+
+        let txo = |n: u8, idx: u32| TxoRef(Hash::from([n; 32]), idx);
+
+        let genesis = UtxoSetDelta {
+            produced_utxo: map(&[
+                (txo(0, 0), value(Alice, None)),
+                (txo(0, 1), value(Bob, None)),
+            ]),
+            ..Default::default()
+        };
+
+        let block_a = UtxoSetDelta {
+            consumed_utxo: map(&[(txo(0, 0), value(Alice, None))]),
+            produced_utxo: map(&[
+                (txo(10, 0), value(Bob, Some((10, 0)))),
+                (txo(11, 0), value(Alice, Some((10, 1)))),
+                (txo(11, 1), value(Bob, Some((10, 1)))),
+            ]),
+            ..Default::default()
+        };
+
+        // its second tx spends an output of its first, so that output is both
+        // produced and consumed, as `compute_apply_delta` names it
+        let block_b = UtxoSetDelta {
+            consumed_utxo: map(&[
+                (txo(11, 1), value(Bob, Some((10, 1)))),
+                (txo(20, 1), value(Alice, Some((20, 0)))),
+            ]),
+            produced_utxo: map(&[
+                (txo(20, 0), value(Bob, Some((20, 0)))),
+                (txo(20, 1), value(Alice, Some((20, 0)))),
+                (txo(21, 0), value(Alice, Some((20, 1)))),
+            ]),
+            ..Default::default()
+        };
+
+        // the rollback of block B, as `compute_undo_delta` names it
+        let undo_b = UtxoSetDelta {
+            undone_utxo: block_b.produced_utxo.clone(),
+            recovered_stxi: block_b.consumed_utxo.clone(),
+            ..Default::default()
+        };
+
+        let mut keys = BTreeSet::new();
+        let mut set = UtxoMap::new();
+
+        for delta in [&genesis, &block_a, &block_b] {
+            apply(&mut keys, &utxo_index_delta_from_utxo_delta(delta));
+
+            set.extend(delta.produced_utxo.clone());
+            for txo in delta.consumed_utxo.keys() {
+                set.remove(txo);
+            }
+        }
+
+        // `compute_undo` builds the rollback's tags the way the block put them
+        // in, and `undo_utxo_tags` inverts them
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.add_produced_utxos(&undo_b.undone_utxo);
+        builder.add_consumed_utxos(&undo_b.recovered_stxi);
+        undo(&mut keys, &builder.into_parts().0);
+
+        // what `apply_utxoset` does with a rollback: recovered UTxOs are put
+        // back before undone ones are deleted
+        set.extend(undo_b.recovered_stxi.clone());
+        for txo in undo_b.undone_utxo.keys() {
+            set.remove(txo);
+        }
+
+        let rebuilt = utxo_index_delta_from_utxo_delta(&UtxoSetDelta {
+            produced_utxo: set,
+            ..Default::default()
+        });
+        let rebuilt: BTreeSet<TagKey> = tag_keys(&rebuilt.produced).collect();
+
+        assert!(!rebuilt.is_empty());
+        assert_eq!(keys, rebuilt);
+
+        // the recovered UTxO is back under its original position
+        assert!(keys
+            .iter()
+            .any(|(_, _, order, txo)| *txo == TxoRef(Hash::from([11; 32]), 1)
+                && *order == UtxoPosition::tag_order(Some(UtxoPosition::new(10, 1)))));
+
+        // and the output block B spent itself left no key behind
+        let spent_in_block = txo(20, 1);
+        assert!(keys.iter().all(|(_, _, _, key)| *key != spent_in_block));
     }
 }

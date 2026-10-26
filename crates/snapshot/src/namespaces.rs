@@ -17,8 +17,8 @@
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepSightingState, DRepState,
-    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepEpochLog, DRepSightingState,
+    DRepState, DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
     PoolEpochLog, PoolState, ProposalState, ScriptState,
@@ -31,7 +31,8 @@ use crate::Error;
 ///
 /// The one namespace with no entity type behind it, so the one string this
 /// crate owns outright. Its key is `tx_hash(32) ‖ output_index(4, BE)` and its
-/// value is CBOR `[era, body]` — see [`crate::layers::state`].
+/// value is CBOR `[era, body, slot, tx_index]`, or `[era, body]` for a UTxO no
+/// block produced — see [`crate::layers::state`].
 pub const UTXOS: Namespace = "utxos";
 
 /// Every namespace, state or log, in ascending byte order.
@@ -39,7 +40,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against the schemas directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 31] = [
+pub const NAMESPACES: [Namespace; 32] = [
     AccountAddressChunk::NS,
     AccountAddressSet::NS,
     AccountEpochLog::NS,
@@ -50,6 +51,7 @@ pub const NAMESPACES: [Namespace; 31] = [
     AssetMintSet::NS,
     AssetState::NS,
     DatumState::NS,
+    DRepEpochLog::NS,
     DRepSightingState::NS,
     DRepState::NS,
     EpochState::NS,
@@ -95,7 +97,7 @@ pub const NAMESPACES: [Namespace; 31] = [
 /// `estart_tally`, and the frozen tally on each `PoolSnapshot`. Kept beside
 /// [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 32] = [
     (AccountAddressChunk::NS, 1),
     (AccountAddressSet::NS, 1),
     (AccountEpochLog::NS, 1),
@@ -106,6 +108,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (AssetMintSet::NS, 1),
     (AssetState::NS, 1),
     (DatumState::NS, 1),
+    (DRepEpochLog::NS, 1),
     (DRepSightingState::NS, 1),
     (DRepState::NS, 2),
     (EpochState::NS, 4),
@@ -169,6 +172,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         AccountAddressChunk::NS
         | AccountEpochLog::NS
         | AssetMintChunk::NS
+        | DRepEpochLog::NS
         | FirstMintChunk::NS
         | FirstScriptChunk::NS
         | PaymentAddressChunk::NS
@@ -191,6 +195,7 @@ pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         AccountStats::NS => exact::<<AccountStats as LogEntity>::Key>(key),
         AddressStats::NS => exact::<<AddressStats as LogEntity>::Key>(key),
         AssetMintChunk::NS => exact::<<AssetMintChunk as LogEntity>::Key>(key),
+        DRepEpochLog::NS => exact::<<DRepEpochLog as LogEntity>::Key>(key),
         EpochState::NS => exact::<<EpochState as LogEntity>::Key>(key),
         FirstMintChunk::NS => exact::<<FirstMintChunk as LogEntity>::Key>(key),
         FirstScriptChunk::NS => exact::<<FirstScriptChunk as LogEntity>::Key>(key),

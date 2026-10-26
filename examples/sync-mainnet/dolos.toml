@@ -1,30 +1,21 @@
-[upstream]
-peer_address = "backbone.mainnet.cardanofoundation.org:3001"
-
-[storage]
-version = "v4"
-path = "data"
-
-[genesis]
-byron_path = "byron.json"
-shelley_path = "shelley.json"
-alonzo_path = "alonzo.json"
-conway_path = "conway.json"
-
-[sync]
-max_history = 2592000
-max_rollback = 129600
-
-[submit]
-prune_height = 200
-
-[serve.grpc]
-listen_address = "[::]:50051"
-
-[serve.ouroboros]
-listen_path = "dolos.socket"
+compatibility = "v2-alpha.1"
 
 [chain]
-type = "cardano"
-magic = 764824073
-is_testnet = false
+protocol = "cardano"
+network = "mainnet"
+
+[storage]
+path = "data"
+
+[storage.state]
+type = "fjall"
+
+[storage.archive]
+type = "fjall"
+
+[history]
+mode = "rolling"
+window = { unit = "slot", value = 2592000 }
+
+[serve.minibf]
+listen_address = "[::]:3000"

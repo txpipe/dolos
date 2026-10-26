@@ -34,7 +34,9 @@
 //! ## A reused layer is attested without being reproduced
 //!
 //! The layers of an epoch that has closed cannot change, so a publish that
-//! already published them has no reason to build them again: it points its
+//! already published them has no reason to build them again. The one
+//! exception is `log-account-epochs`, whose rows settle one boundary after the
+//! window closes ([`crate::is_settled`]). Otherwise the publish points its
 //! manifest at the blobs the previous manifest pointed at and never opens the
 //! store. That is worth a plain sentence, because it changes what a publish
 //! asserts. The new inscription describes those layers, and this node did not
@@ -105,7 +107,11 @@
 //! - **a recorded digest equals a rebuilt one**, because an epoch layer is
 //!   deterministic for a closed epoch — the property the export golden and the
 //!   two-backend determinism test already pin — and the record refuses itself
-//!   if anything the bytes depend on has moved ([`Origin`]);
+//!   if anything the bytes depend on has moved ([`Origin`]). The one kind it
+//!   does not hold for is `log-account-epochs`, whose window settles one
+//!   boundary after it closes, and the record does not say at which sequence it
+//!   built a layer. A publish therefore never takes that kind from a record,
+//!   only from the predecessor manifest ([`export::Settling`]);
 //! - **`--rebuild` ignores it wholesale**, exactly as it already ignores
 //!   inheritance, and overwrites it rather than reading it;
 //! - **the manifest remains the only statement of what the repository holds.**
@@ -162,10 +168,10 @@ pub use stelae::oci::{Auth, Registry, Repository, DEFAULT_CONCURRENCY, SCHEME};
 use stelae_driver::publish::Chained;
 
 use crate::{
-    export::{self, Plan, Predecessor as _, Standing},
+    export::{self, Plan, Predecessor as _, Settling, Standing},
     layers::digests,
     restore::{Outlook, Restoring, Summary, Target},
-    DolosProfile, Error, Scope as _, DENSE_EPOCH_KINDS, EPOCH_KINDS,
+    DolosProfile, Error,
 };
 
 /// Which stele in a repository a restore wants.
@@ -687,7 +693,8 @@ where
 
     let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
-    let previous = chained(publishing, latest.as_ref(), plan)?;
+    let settling = chained(publishing, latest.as_ref(), plan)?;
+    let previous = settling.inner();
 
     // Reset before the export, so what comes back is this publish's cost and
     // not a total carried over from an earlier one through the same transport.
@@ -699,7 +706,7 @@ where
         archive,
         state,
         digest_records,
-        &previous,
+        &settling,
         observer,
     )?;
 
@@ -747,50 +754,16 @@ pub fn preview<A: ArchiveStore, S: StateStore>(
 
     let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
-    let previous = chained(publishing, latest.as_ref(), plan)?;
+    let settling = chained(publishing, latest.as_ref(), plan)?;
+    let previous = settling.inner();
+    let forecast = export::forecast(plan, archive, &settling, digest_records)?;
 
-    // Every epoch selected contributes one `blocks` and one `indexes` layer and
-    // as many log layers as it has namespaces with logs, the state tip
-    // contributes every shard of every kind however the epochs were restricted,
-    // the retained dumps contribute what `export::state_layers` counts, and the
-    // digests layer is there exactly when its records are.
-    let carried_dumps = export::carried_dumps(plan, &previous)?;
-
-    let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
-        + export::log_layers(plan, archive, &previous)?
-        + export::state_layers(plan, &previous)?
-        + usize::from(digest_records.is_some());
-
-    // The same lookup `export` will make, through the same `layer_spec`, so a
-    // preview and the publish that follows it cannot disagree about which
-    // layers are inherited. A failure here is the scope refusing a kind it does
-    // not describe, and it propagates rather than counting as a miss: a dry run
-    // that quietly reported "build it" for a layer nobody could build would be
-    // the one number a publisher trusts, wrong.
-    // A dump this publish adopts is a layer nothing walks a store for; the one
-    // it cuts out of its own tip is not, because the tip is walked either way.
-    let mut layers_reused = carried_dumps;
-
-    for window in &plan.epochs {
-        let scope = window.scope(plan.network.magic());
-
-        for kind in EPOCH_KINDS {
-            let spec = scope.layer_spec(kind)?;
-
-            if previous.carried_forward(kind, &spec.scope)? {
-                layers_reused += 1;
-            }
-        }
-    }
-
-    // A layer carried forward is a layer that exists, so `total` counted it
-    // too — see `export::log_layers`, which asks the predecessor first.
     Ok(Preview {
         sequence: plan.sequence,
         predecessor: previous.predecessor(),
         history: previous.history().len(),
-        layers_built: total - layers_reused,
-        layers_reused,
+        layers_built: forecast.layers_built,
+        layers_reused: forecast.layers_reused,
     })
 }
 
@@ -803,11 +776,12 @@ pub fn preview<A: ArchiveStore, S: StateStore>(
 /// the driver takes are the ones this profile composes — the sequence, the
 /// `position` document, the [`Origin`] a record is filed under, and the
 /// record's path, which is [`record_path_in`]'s and never derived down there.
+/// [`export::Settling`] keeps the record from supplying `log-account-epochs`.
 fn chained<'a>(
     publishing: Publishing<'a>,
     latest: Option<&'a Stele>,
     plan: &Plan,
-) -> Result<Chained<'a>, Error> {
+) -> Result<Settling<Chained<'a>>, Error> {
     // This profile identifies a dataset by its network magic; the driver holds
     // the number and never reads it.
     let origin = Origin::of(
@@ -817,14 +791,17 @@ fn chained<'a>(
         crate::compression(),
     );
 
-    Ok(Chained::new(
+    let chained = Chained::new(
         &DolosProfile,
         publishing,
         latest,
         plan.sequence,
         &plan.position()?,
         origin,
-    )?)
+    )?;
+    let manifest = latest.map(Stele::read_inscription).transpose()?;
+
+    Settling::new(chained, manifest.as_ref())
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@ fn fold(domain: &ToyDomain) -> Vec<u8> {
     for entry in domain.state().iter_utxos().unwrap() {
         let (_, utxo) = entry.unwrap();
         count += 1;
-        bytes += utxo.1.len() as u64;
+        bytes += utxo.cbor().len() as u64;
     }
 
     [count.to_be_bytes(), bytes.to_be_bytes()].concat()

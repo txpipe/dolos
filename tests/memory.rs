@@ -7,7 +7,7 @@ use dolos_cardano::indexes::archive_dimensions;
 use dolos_core::{
     ArchiveIndexDelta, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter,
     EntityKey, EraCbor, NamespaceType, StateSchema, StateStore as CoreStateStore,
-    StateWriter as CoreStateWriter, Tag, TagRecord, TxoRef, UtxoSetDelta,
+    StateWriter as CoreStateWriter, Tag, TagRecord, TxoRef, UtxoSetDelta, UtxoValue,
 };
 
 // The counters are process-global, so every test is #[serial]: a concurrent
@@ -221,9 +221,10 @@ fn seed_utxos<S: CoreStateStore>(store: &S) {
             let mut hash = [0u8; 32];
             hash[..8].copy_from_slice(&i.to_be_bytes());
             let txo = TxoRef(hash.into(), 0);
-            delta
-                .produced_utxo
-                .insert(txo, Arc::new(EraCbor(6, cbor.clone())));
+            delta.produced_utxo.insert(
+                txo,
+                Arc::new(UtxoValue::new(EraCbor(6, cbor.clone()), None)),
+            );
         }
 
         let writer = store.start_writer().expect("start_writer failed");

@@ -6,9 +6,10 @@ sidebar:
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Dolos configuration defines concerns such as toplogy, storage, APIs, logging, etc. Dolos also requires Cardano genesis data to operate. For the sake of simplicity, we've decided to follow the schema for the existing .json files used by the Haskell node.
+Dolos configuration describes the node: the chain it follows, its upstream, its storage and history, its mempool and the APIs it serves. A known Cardano network needs no genesis files, since they are built in; a custom network names its own, following the schema of the Haskell node's genesis files.
 
 <CardGrid>
   <LinkCard title="Introduction" href="./configuration/introduction" />
   <LinkCard title="Schema" href="./configuration/schema" />
+  <LinkCard title="Migrating to v2" href="./migration/dolos-v2" />
 </CardGrid>

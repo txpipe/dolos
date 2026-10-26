@@ -34,9 +34,8 @@ use dolos_core::{
 use tracing::{debug, info};
 
 use crate::{
-    rewards::{Reward, RewardMap},
-    shard::ACCOUNT_SHARDS,
-    AccountKey, CardanoLogic, EpochState, PendingRewardState, PoolEpochLog, PoolHash, PoolKey,
+    rewards::RewardMap, shard::ACCOUNT_SHARDS, AccountKey, CardanoLogic, EpochState,
+    PendingRewardState, PoolEpochLog, PoolHash, PoolKey,
 };
 
 use super::RupdWork;
@@ -44,10 +43,7 @@ use super::RupdWork;
 /// Sum the rewards this RUPD emitted, per pool, from the `PendingRewardState`
 /// entities the shards persisted.
 ///
-/// Returns `(total_rewards, operator_share)` per pool, matching
-/// [`crate::rewards::RewardMap::aggregate_pool_rewards`]: every reward counts
-/// toward the pool total, and leader rewards additionally toward the operator
-/// share.
+/// Returns the total rewards per pool, the leader's and the delegators'.
 ///
 /// Derived from state rather than accumulated in memory across shards so a
 /// mid-RUPD restart reports the full epoch: `initialize` starts a fresh work
@@ -56,8 +52,8 @@ use super::RupdWork;
 /// `Ewrap` consumes them at the epoch boundary, which is after `finalize`.
 fn aggregate_pending_pool_rewards<S: StateStore>(
     state: &S,
-) -> Result<HashMap<PoolHash, (u64, u64)>, DomainError> {
-    let mut out: HashMap<PoolHash, (u64, u64)> = HashMap::new();
+) -> Result<HashMap<PoolHash, u64>, DomainError> {
+    let mut out: HashMap<PoolHash, u64> = HashMap::new();
 
     for record in state.iter_entities_typed::<PendingRewardState>(None)? {
         let (_, pending) = record?;
@@ -65,19 +61,87 @@ fn aggregate_pending_pool_rewards<S: StateStore>(
         // Iterate the two reward lists directly (`into_log_entries` would
         // allocate an intermediate Vec per record — this loop visits every
         // rewarded account on the network).
-        for (pool, value) in &pending.as_delegator {
-            let (total_rewards, _) = out.entry(*pool).or_insert((0, 0));
+        for (pool, value) in pending.as_delegator.iter().chain(&pending.as_leader) {
+            let total_rewards = out.entry(*pool).or_default();
             *total_rewards = total_rewards.saturating_add(*value);
-        }
-
-        for (pool, value) in &pending.as_leader {
-            let (total_rewards, operator_share) = out.entry(*pool).or_insert((0, 0));
-            *total_rewards = total_rewards.saturating_add(*value);
-            *operator_share = operator_share.saturating_add(*value);
         }
     }
 
     Ok(out)
+}
+
+/// `numerator / denominator` as Blockfrost reports a pool's `active_size`.
+///
+/// db-sync divides the two stakes as Postgres `numeric` and casts the
+/// quotient to `float8`. The division rounds half up to a scale Postgres
+/// picks for at least sixteen significant digits (`select_div_scale`), so the
+/// float is the one nearest that decimal rather than the exact ratio, and a
+/// plain `f64` division of the stakes misses it by an ulp about a quarter of
+/// the time. A zero denominator gives zero.
+fn numeric_ratio(numerator: u64, denominator: u64) -> f64 {
+    if numerator == 0 || denominator == 0 {
+        return 0.0;
+    }
+
+    // Postgres stores numerics in base-10000 digits: the weight is the index
+    // of the leading digit, counted from the units digit.
+    let leading = |mut value: u64| {
+        let mut weight = 0i32;
+        while value >= 10_000 {
+            value /= 10_000;
+            weight += 1;
+        }
+        (weight, value)
+    };
+
+    let (weight1, first1) = leading(numerator);
+    let (weight2, first2) = leading(denominator);
+
+    let mut qweight = weight1 - weight2;
+    if first1 <= first2 {
+        qweight -= 1;
+    }
+
+    let scale = (16 - qweight * 4).clamp(0, 1000) as usize;
+
+    // Long division to `scale` decimals; the remainder stays below the
+    // denominator, so ten times it fits a u128.
+    let divisor = denominator as u128;
+    let mut integer = numerator as u128 / divisor;
+    let mut remainder = numerator as u128 % divisor;
+    let mut decimals = Vec::with_capacity(scale);
+
+    for _ in 0..scale {
+        remainder *= 10;
+        decimals.push((remainder / divisor) as u8);
+        remainder %= divisor;
+    }
+
+    // Round half up, carrying through the decimals into the integer part.
+    if remainder * 2 >= divisor {
+        let mut carry = true;
+        for digit in decimals.iter_mut().rev() {
+            if *digit == 9 {
+                *digit = 0;
+            } else {
+                *digit += 1;
+                carry = false;
+                break;
+            }
+        }
+        if carry {
+            integer += 1;
+        }
+    }
+
+    let decimals: String = decimals
+        .iter()
+        .map(|digit| char::from(b'0' + digit))
+        .collect();
+
+    format!("{integer}.{decimals}")
+        .parse()
+        .expect("a decimal literal parses as f64")
 }
 
 /// Sharded work unit for computing rewards at the stability window.
@@ -182,28 +246,7 @@ impl RupdWorkUnit {
         // re-run is idempotent.
         for (credential, reward) in rewards.iter_pending() {
             let key = AccountKey::from(credential);
-
-            let (as_leader, as_delegator) = match reward {
-                Reward::MultiPool(r) => (
-                    r.leader_rewards().collect(),
-                    r.delegator_rewards().collect(),
-                ),
-                Reward::PreAllegra(r) => {
-                    let (pool, value) = r.pool_and_value();
-                    if r.is_leader() {
-                        (vec![(pool, value)], vec![])
-                    } else {
-                        (vec![], vec![(pool, value)])
-                    }
-                }
-            };
-
-            let pending = PendingRewardState {
-                credential: credential.clone(),
-                is_spendable: reward.is_spendable(),
-                as_leader,
-                as_delegator,
-            };
+            let pending = reward.to_pending_state(credential);
 
             writer.write_entity_typed(&key, &pending)?;
         }
@@ -247,7 +290,9 @@ impl RupdWorkUnit {
             .as_ref()
             .ok_or_else(|| DomainError::Internal("rupd work not loaded".into()))?;
 
-        let Some((_, epoch)) = work.relevant_epochs() else {
+        // The first stake epoch logs its distribution too, with rewards 0:
+        // no RUPD computed any for it, so no pending reward names its pools.
+        let Some((_, epoch)) = work.stake_epochs() else {
             return Ok(());
         };
 
@@ -260,29 +305,21 @@ impl RupdWorkUnit {
 
         for (pool_hash, pool_state) in snapshot.pools.iter() {
             let pool_stake = snapshot.get_pool_stake(pool_hash);
-            let relative_size = if snapshot.active_stake_sum > 0 {
-                (pool_stake as f64) / snapshot.active_stake_sum as f64
-            } else {
-                0.0
-            };
+            let relative_size = numeric_ratio(pool_stake, snapshot.active_stake_sum);
             let params = pool_state.go().map(|x| &x.params);
-            let declared_pledge = params.map(|x| x.pledge).unwrap_or(0);
             let fixed_cost = params.map(|x| x.cost).unwrap_or(0);
             let margin_cost = params.map(|x| x.margin.clone());
             let blocks_minted = pool_state.mark().map(|x| x.blocks_minted).unwrap_or(0) as u64;
 
-            let (total_rewards, operator_share) =
-                pool_rewards.get(pool_hash).copied().unwrap_or((0, 0));
+            let total_rewards = pool_rewards.get(pool_hash).copied().unwrap_or(0);
 
             let log = PoolEpochLog {
                 blocks_minted,
                 total_stake: pool_stake,
                 relative_size,
                 live_pledge: snapshot.get_pool_live_pledge(pool_hash),
-                declared_pledge,
                 delegators_count: snapshot.get_pool_delegator_count(pool_hash),
                 total_rewards,
-                operator_share,
                 fixed_cost,
                 margin_cost,
             };
@@ -376,11 +413,11 @@ where
             .as_ref()
             .ok_or_else(|| DomainError::Internal("rupd work not loaded".into()))?;
 
-        // RUPD doesn't run before the snapshot epoch is past first
-        // Shelley — `relevant_epochs` returns None and we emit no
-        // rewards.  We still emit `RupdProgress` in `commit_state` so
-        // the cursor advances.
-        let rewards = if work.relevant_epochs().is_some() {
+        // No rewards before the snapshot epoch is past first Shelley —
+        // `reward_epochs` returns None, even where the stake snapshot is
+        // loaded for the logs. We still emit `RupdProgress` in
+        // `commit_state` so the cursor advances.
+        let rewards = if work.reward_epochs().is_some() {
             crate::rewards::define_rewards(work)?
         } else {
             RewardMap::<RupdWork>::from_pending(Default::default(), work.incentives.clone())
@@ -469,7 +506,9 @@ mod tests {
                 .accounts_by_pool
                 .insert(*pool, credential.clone(), *stake);
             *snapshot.pool_stake.entry(*pool).or_default() += *stake;
-            *snapshot.pool_delegator_counts.entry(*pool).or_default() += 1;
+            if *stake > 0 {
+                *snapshot.pool_delegator_counts.entry(*pool).or_default() += 1;
+            }
             snapshot.active_stake_sum += *stake;
         }
 
@@ -481,7 +520,7 @@ mod tests {
 
     /// Single Conway era, `epoch_length = 100`, so epoch boundaries land on
     /// slots 0, 100, 200, ... and `first_shelley_epoch()` is 0 — enough for
-    /// `relevant_epochs()` to resolve at `CURRENT_EPOCH`.
+    /// `stake_epochs()` to resolve at `CURRENT_EPOCH`.
     fn test_chain_summary() -> crate::ChainSummary {
         let mut summary = crate::ChainSummary::default();
         summary.append_era(
@@ -553,6 +592,105 @@ mod tests {
         unit.commit_shard(domain.state(), 0).expect("commit_shard");
 
         assert_eq!(committed_shards(&domain), Some(1));
+    }
+
+    /// Pool stake, epoch stake and the `active_size` Blockfrost reports, from
+    /// mainnet (pool1pu5jlj…, epochs 212, 214, 229) and preview (pool1a7h89…,
+    /// epochs 42, 58). A plain `f64` division misses all but the last.
+    #[test]
+    fn numeric_ratio_matches_blockfrost() {
+        let cases = [
+            (76778927458702, 12106602864871837, 0.006341905183119658),
+            (76957913014111, 13382718156097189, 0.0057505442553946965),
+            (13375523282499, 19510155416091834, 0.0006855672339476581),
+            (2663056412603, 375970644528781, 0.0070831498452245244),
+            (1536346314736, 384837670103602, 0.003992193161138307),
+        ];
+
+        for (numerator, denominator, expected) in cases {
+            assert_eq!(numeric_ratio(numerator, denominator), expected);
+        }
+
+        assert_ne!(76778927458702.0 / 12106602864871837.0, 0.006341905183119658);
+    }
+
+    #[test]
+    fn numeric_ratio_edges() {
+        assert_eq!(numeric_ratio(0, 100), 0.0);
+        assert_eq!(numeric_ratio(5, 0), 0.0);
+        assert_eq!(numeric_ratio(7, 7), 1.0);
+        assert_eq!(numeric_ratio(1, 3), 1.0 / 3.0);
+        assert_eq!(numeric_ratio(u64::MAX, u64::MAX), 1.0);
+    }
+
+    /// The quotient 0.00323897880448927272|72… is cut at 20 decimals, and the
+    /// next digit rounds the cut up to a different double than the truncated
+    /// decimal gives. 1273 / 10485760 is 0.00012140274047851562|5, an exact
+    /// half at the cut, which rounds up where half down or half to even would
+    /// keep a different double. 8529360004794 / 20235083305638617 is
+    /// 0.00042151346134647476|4999…, just short of a half, and stays down.
+    /// 3000000000014 / 21955336489517329 is 0.00013664103947786739|96…, which
+    /// carries through the 9 to …786740.
+    #[test]
+    fn numeric_ratio_rounds_half_up_at_the_scale() {
+        assert_eq!(
+            numeric_ratio(71_257_533_698_764, 22_000_000_000_000_000),
+            0.003238978804489273
+        );
+        assert_ne!(
+            "0.00323897880448927272".parse::<f64>().unwrap(),
+            0.003238978804489273
+        );
+
+        assert_eq!(numeric_ratio(1273, 10_485_760), 0.00012140274047851564);
+        assert_ne!(
+            "0.00012140274047851562".parse::<f64>().unwrap(),
+            0.00012140274047851564
+        );
+
+        assert_eq!(
+            numeric_ratio(8_529_360_004_794, 20_235_083_305_638_617),
+            0.00042151346134647474
+        );
+        assert_ne!(
+            "0.00042151346134647477".parse::<f64>().unwrap(),
+            0.00042151346134647474
+        );
+
+        assert_eq!(
+            numeric_ratio(3_000_000_000_014, 21_955_336_489_517_329),
+            0.0001366410394778674
+        );
+        assert_ne!(
+            "0.00013664103947786749".parse::<f64>().unwrap(),
+            0.0001366410394778674
+        );
+    }
+
+    /// Both stakes lead with the base-10000 digit 1, so the quotient's weight
+    /// drops by one and the scale is 24 decimals, not 20:
+    /// 0.000093332914661520271677 against 0.00009333291466152027, which is a
+    /// different double. 10^16 + 1 is five digits led by 1, not four led by
+    /// 10000, so 1.25e12 over it also takes 24 decimals.
+    #[test]
+    fn numeric_ratio_scales_past_equal_leading_digits() {
+        assert_eq!(
+            numeric_ratio(1_129_944_532_028, 12_106_602_864_871_837),
+            9.333291466152028e-5
+        );
+        assert_ne!(
+            "0.00009333291466152027".parse::<f64>().unwrap(),
+            9.333291466152028e-5
+        );
+
+        assert_eq!(
+            numeric_ratio(1_250_000_000_000, 10_000_000_000_000_001),
+            0.00012499999999999998
+        );
+        assert_ne!(
+            "0.00012499999999999999".parse::<f64>().unwrap(),
+            0.00012499999999999998
+        );
     }
 
     // --- per-pool PoolEpochLog figures survive a mid-RUPD restart ---
@@ -642,12 +780,14 @@ mod tests {
         // Exactly what `initialize()` leaves behind before any `load()`:
         // pool-level globals, and an empty per-account map because no shard
         // ran in this process.
+        // Preview epoch 42's stakes, where both a plain `f64` division and the
+        // exactly rounded ratio miss Blockfrost's `active_size`.
         let mut snapshot = StakeSnapshot::empty();
         snapshot.pools.insert(pool, pool_snapshot(100, 20, 3));
-        snapshot.pool_stake.insert(pool, 1_000);
+        snapshot.pool_stake.insert(pool, 2_663_056_412_603);
         snapshot.pool_delegator_counts.insert(pool, 2);
         snapshot.pool_live_pledges.insert(pool, 400);
-        snapshot.active_stake_sum = 1_000;
+        snapshot.active_stake_sum = 375_970_644_528_781;
         assert_eq!(snapshot.iter_accounts().count(), 0);
 
         // Rewards as the shards left them in state: one leader, one delegator.
@@ -664,18 +804,17 @@ mod tests {
         let log = read_stake_log(&domain, chain.epoch_start(CURRENT_EPOCH - 1), pool)
             .expect("missing pool epoch log");
 
-        assert_eq!(log.total_stake, 1_000);
+        assert_eq!(log.total_stake, 2_663_056_412_603);
+        assert_eq!(log.relative_size, 0.0070831498452245244);
         assert_eq!(log.delegators_count, 2);
         assert_eq!(log.live_pledge, 400);
         assert_eq!(log.total_rewards, 100);
-        assert_eq!(log.operator_share, 30);
         assert_eq!(log.blocks_minted, 3);
-        assert_eq!(log.declared_pledge, 100);
         assert_eq!(log.fixed_cost, 20);
     }
 
     #[test]
-    fn pending_rewards_aggregate_per_pool_splitting_out_the_operator_share() {
+    fn pending_rewards_aggregate_per_pool() {
         let domain = ToyDomain::new(None, None);
 
         let first = pool(1);
@@ -691,8 +830,8 @@ mod tests {
 
         let aggregated = aggregate_pending_pool_rewards(domain.state()).expect("aggregate");
 
-        assert_eq!(aggregated.get(&first).copied(), Some((12, 5)));
-        assert_eq!(aggregated.get(&second).copied(), Some((11, 0)));
+        assert_eq!(aggregated.get(&first).copied(), Some(12));
+        assert_eq!(aggregated.get(&second).copied(), Some(11));
     }
 
     #[test]

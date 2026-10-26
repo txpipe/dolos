@@ -28,8 +28,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         proposal_deposits: rolling.proposal_deposits,
         drep_refunds: rolling.drep_refunds,
         treasury_donations: rolling.treasury_donations,
-        // Use effective MIR amounts from EndStats (only MIRs applied to registered accounts)
-        // Rolling stats contain total from MIR certificates, which includes unregistered accounts
+        // EndStats keeps only the MIRs applied to registered accounts
         reserve_mirs: end.reserve_mirs,
         treasury_mirs: end.treasury_mirs,
         treasury_withdrawals: end.treasury_withdrawals,
@@ -68,10 +67,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
             .saturating_sub(delta.consumed_incentives()),
         effective_reserve_mirs = end.reserve_mirs,
         effective_treasury_mirs = end.treasury_mirs,
-        invalid_reserve_mirs = end.invalid_reserve_mirs,
-        invalid_treasury_mirs = end.invalid_treasury_mirs,
         treasury_withdrawals = end.treasury_withdrawals,
-        invalid_treasury_withdrawals = end.invalid_treasury_withdrawals,
         pool_invalid_refund_count = end.pool_invalid_refund_count,
         proposal_invalid_refunds = end.proposal_invalid_refunds,
         treasury_donations = rolling.treasury_donations,

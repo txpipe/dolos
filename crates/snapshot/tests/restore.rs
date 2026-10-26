@@ -47,14 +47,15 @@ use dolos_cardano::{
     AccountKey, AccountStats, AddressKey, AddressStats,
 };
 use dolos_core::{
-    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, StateStore,
-    StateWriter as _, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    ArchiveStore, ArchiveWriter as _, ChainPoint, Domain as _, EntityKey, EntityRecord,
+    ExactRecord, LogKey, StateStore, StateWriter as _, TagOrder, TagRecord, TagStart, TxoRef,
+    UtxoSet, UtxoSetDelta, UtxoValue,
 };
 use dolos_snapshot::{
     is_state_kind,
     restore::{self, default_budget, progress_path_in, Budget, Checkpoint},
-    state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL, KINDS,
-    LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
+    state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL,
+    ENTITY_INDEX_KINDS, ENTITY_KINDS, KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::{
     faults::{FaultyStateStore, TestFault},
@@ -541,7 +542,7 @@ impl<S: StateStore> Progress for UtxoBatchObserver<S> {
                 .collect(),
             ..Default::default()
         };
-        for (txo, tags) in utxo_index_delta_from_utxo_delta(&delta).produced {
+        for (txo, _, tags) in utxo_index_delta_from_utxo_delta(&delta).produced {
             for tag in tags {
                 assert!(
                     self.state
@@ -620,7 +621,7 @@ fn resume_repairs_utxos_written_without_tags_by_an_older_restore() {
 
     let tags = utxo_index_delta_from_utxo_delta(&delta);
     assert!(!tags.produced.is_empty());
-    for (_, tags) in &tags.produced {
+    for (_, _, tags) in &tags.produced {
         for tag in tags {
             assert!(blank
                 .state()
@@ -739,6 +740,175 @@ fn a_restored_node_is_the_node_it_came_from_on_memory() {
 #[test]
 fn a_restored_node_is_the_node_it_came_from_on_fjall() {
     roundtrip::<FjallStores>();
+}
+
+// --------------------------------------------------------------------------
+// The entity index
+// --------------------------------------------------------------------------
+
+/// Entries as a seal writes them, straight into `domain`'s archive: both kinds,
+/// across the stele's complete window and its boundary sliver, in an id order
+/// that is not their slot order. Returns them as the index yields them.
+fn seed_entity_index<B: ToyStores>(domain: &ToyDomain<B>) -> Vec<EntityRecord> {
+    let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
+    let sliver = summary.epoch_start(1);
+
+    let (_, asset) = ENTITY_KINDS[0];
+    let (_, script) = ENTITY_KINDS[1];
+
+    let mut entries: Vec<EntityRecord> = [
+        (asset, 0x02, 100),
+        (asset, 0x01, 300),
+        (script, 0x08, 200),
+        (script, 0x07, sliver),
+    ]
+    .into_iter()
+    .map(|(kind, byte, slot)| EntityRecord::new(kind, &vec![byte; kind.key_len()], slot).unwrap())
+    .collect();
+
+    let writer = domain.archive().start_writer().unwrap();
+
+    for entry in &entries {
+        writer
+            .write_entity(entry.kind, entry.key(), entry.slot)
+            .unwrap();
+    }
+
+    writer.commit().unwrap();
+
+    entries.sort();
+    entries
+}
+
+fn entity_index_of<A: ArchiveStore>(store: &A) -> Vec<EntityRecord> {
+    store
+        .iter_entity_records(&ENTITY_INDEX_KINDS, 0..u64::MAX)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// The entity index survives the trip: one layer per kind and window that
+/// first saw an entity, written back through `write_entity`, and the restored
+/// node publishes the same stele.
+fn entity_index_round_trip<B: ToyStores>() {
+    let domain: ToyDomain<B> = harness();
+    let seeded = seed_entity_index(&domain);
+
+    let temp = tempfile::tempdir().unwrap();
+    let original = export_to(temp.path(), &domain);
+
+    let layers: Vec<(&str, u64)> = original
+        .layers
+        .iter()
+        .filter(|layer| layer.kind.starts_with("entity-"))
+        .map(|layer| (layer.kind.as_str(), layer.scope["epoch"].as_u64().unwrap()))
+        .collect();
+
+    assert_eq!(
+        layers,
+        [
+            ("entity-asset", 0),
+            ("entity-script", 0),
+            ("entity-script", 1)
+        ]
+    );
+
+    let blank = Blank::<B>::open();
+    let summary = restore_into(temp.path(), magic_of(&domain), &blank, shredded()).unwrap();
+
+    assert_eq!(summary.entity_index, seeded.len() as u64);
+    assert_eq!(entity_index_of(domain.archive()), seeded);
+    assert_eq!(entity_index_of(&blank.archive), seeded);
+
+    let again = tempfile::tempdir().unwrap();
+    let republished = {
+        let stele = SteleDir::create(again.path()).unwrap();
+        let plan =
+            dolos_snapshot::export::plan(blank.state(), magic_of(&domain), Default::default())
+                .unwrap();
+
+        dolos_snapshot::export::export(
+            &stele,
+            &plan,
+            &blank.archive,
+            blank.state(),
+            None,
+            &dolos_snapshot::export::First,
+            &Observer::silent(),
+        )
+        .unwrap()
+    };
+
+    assert_eq!(original.digest().unwrap(), republished.digest().unwrap());
+}
+
+#[test]
+fn the_entity_index_round_trips_on_memory() {
+    entity_index_round_trip::<MemoryStores>();
+}
+
+#[test]
+fn the_entity_index_round_trips_on_fjall() {
+    entity_index_round_trip::<FjallStores>();
+}
+
+/// Restore the harness's stele with `edit` applied to its inscription, which
+/// has to be refused before anything is written, and return the refusal.
+fn refuse_edited_stele(edit: impl FnOnce(&mut Inscription)) -> Error {
+    let domain: ToyDomain = harness();
+    let magic = magic_of(&domain);
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut inscription = export_to(temp.path(), &domain);
+
+    edit(&mut inscription);
+    SteleDir::open(temp.path())
+        .unwrap()
+        .seal(&DolosProfile, &inscription)
+        .unwrap();
+
+    let blank = Blank::<MemoryStores>::open();
+    let err = restore_into(temp.path(), magic, &blank, default_budget()).unwrap_err();
+
+    assert_untouched(&blank);
+
+    err
+}
+
+/// A stele that does not declare an entity kind this build indexes, or
+/// declares one at another id width, is refused before anything is written:
+/// the restored node would otherwise take every repeat for a first sighting.
+#[test]
+fn a_stele_without_the_entity_kinds_is_refused_before_anything_is_written() {
+    let undeclared = refuse_edited_stele(|inscription| {
+        inscription
+            .parameters
+            .as_object_mut()
+            .unwrap()
+            .remove("entities");
+    });
+
+    assert!(
+        matches!(undeclared, Error::UndeclaredEntityKind { kind: "asset" }),
+        "{undeclared:?}"
+    );
+
+    let narrower = refuse_edited_stele(|inscription| {
+        inscription.parameters["entities"]["script"] = json!(32);
+    });
+
+    assert!(
+        matches!(
+            narrower,
+            Error::EntityWidthMismatch {
+                kind: "script",
+                declared: 32,
+                registered: 28,
+            }
+        ),
+        "{narrower:?}"
+    );
 }
 
 /// The address and account totals of every key the harness's stats name.
@@ -1106,6 +1276,11 @@ fn assert_state_matches<S: StateStore>(restored: &S, original: &S) {
 
     let utxos = utxos_of(original);
     assert!(!utxos.is_empty(), "the fixture has no utxos");
+    assert!(
+        utxos.values().any(|value| value.position().is_some()),
+        "no fixture utxo has a creation position, so its trip proves nothing"
+    );
+    // the values compare whole: the creation position rides the record
     assert_eq!(utxos_of(restored), utxos, "the utxo set");
 }
 
@@ -1143,7 +1318,8 @@ fn assert_indexes_match<A: ArchiveStore>(restored: &A, original: &A) {
 ///
 /// This is the point. `utxo::*` tags are never shipped — ADR-004's Amendment
 /// 2 — so they exist in a restored node only because the restore rebuilt
-/// them, and only a query proves it did.
+/// them, and only a query proves it did. The ordered reads compare too: the
+/// rebuilt keys carry the creation positions the sync wrote.
 fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
     // Every dimension the ledger tagged the restored UTxO set under, asked of
     // both stores.
@@ -1158,7 +1334,7 @@ fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
     let rebuilt = utxo_index_delta_from_utxo_delta(&delta);
     let mut asked = 0usize;
 
-    for (txo, tags) in &rebuilt.produced {
+    for (txo, _, tags) in &rebuilt.produced {
         for tag in tags {
             let left: UtxoSet = restored.utxos_by_tag(tag.dimension, &tag.key).unwrap();
             let right: UtxoSet = original.utxos_by_tag(tag.dimension, &tag.key).unwrap();
@@ -1169,6 +1345,27 @@ fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
                 tag.dimension
             );
             assert_eq!(left, right, "utxos under {}", tag.dimension);
+
+            for order in [TagOrder::Asc, TagOrder::Desc] {
+                let page = |store: &S| {
+                    store
+                        .utxos_by_tag_page(
+                            tag.dimension,
+                            &tag.key,
+                            order,
+                            TagStart::Skip(0),
+                            usize::MAX,
+                        )
+                        .unwrap()
+                };
+
+                assert_eq!(
+                    page(restored),
+                    page(original),
+                    "{order:?} order under {}",
+                    tag.dimension
+                );
+            }
 
             asked += 1;
         }
@@ -1188,7 +1385,7 @@ fn entities_of<S: StateStore>(store: &S, ns: &'static str) -> Vec<(EntityKey, Ve
         .collect()
 }
 
-fn utxos_of<S: StateStore>(store: &S) -> std::collections::BTreeMap<TxoRef, EraCbor> {
+fn utxos_of<S: StateStore>(store: &S) -> std::collections::BTreeMap<TxoRef, UtxoValue> {
     store.iter_utxos().unwrap().map(Result::unwrap).collect()
 }
 

@@ -24,6 +24,17 @@ The process will take from several minutes to a few hours depending on the
 network. You'll see a sequence of progress bars describing the each of the
 steps of the process.
 
+Where the snapshot comes from is an input of the command, not configuration:
+
+| arg | description | default |
+| --- | ----------- | ------- |
+| `--variant <VARIANT>` | `full` or `ledger` | `full` |
+| `--point <POINT>` | the point in history of the snapshot, such as an era, an epoch or `latest` | `latest` |
+| `--download-url <TEMPLATE>` | URL to download from; `${VERSION}`, `${NETWORK}`, `${VARIANT}` and `${POINT}` are substituted | the official snapshot host |
+| `--file <PATH>` | a local snapshot `.tar.gz` to import instead of downloading | none |
+
+A configuration file with a `[snapshot]` section is refused; pass `--download-url` instead.
+
 <Aside type="caution">
 The process doesn't support resuming from previous runs, if you interrupt the process you'll need to start over.
 </Aside>
@@ -31,4 +42,12 @@ The process doesn't support resuming from previous runs, if you interrupt the pr
 <Aside>
 The above command won't proceed if it detects that you already have data from
 previous Dolos runs.
+</Aside>
+
+<Aside type="caution">
+A snapshot holds the stores of the node that exported it. Once unpacked, they
+pass the same [identity check](../architecture/data-layer#store-identity) as
+any store: a snapshot exported before stores recorded a compatibility identity
+is refused. Bootstrap from a [stele](../migration/dolos-v2#stores) or re-sync
+instead.
 </Aside>

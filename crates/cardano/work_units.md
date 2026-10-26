@@ -51,7 +51,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 
 - Each shard is scoped to a first-byte prefix bucket of the credential key space.
 - `load` builds the shard's context only; it reads no account.
-- `commit_state` (`WorkContext::commit_shard`, `estart/commit.rs`) streams the accounts in this shard's range once, inside the shard's state transaction: each account is added to the shard's stake tally as it stands, rotated (`AccountState::rotate`: `EpochValue.go ← set ← mark ← live ← next` for stake, pool and drep) and written back. No per-account deltas are built: ESTART writes no WAL and is never undone.
+- `commit_state` (`WorkContext::commit_shard`, `estart/commit.rs`) streams the accounts in this shard's range once, inside the shard's state transaction: each account is added to the shard's stake tally as it stands, rotated (`AccountState::rotate`: `EpochValue.go ← set ← mark ← live ← next` for stake, pool and drep) and written back. The same pass writes each account's stake-only account-epoch row for the opening epoch (`estart/stake.rs`, from its `mark` before rotation) to the archive, which commits before the state. No per-account deltas are built: ESTART writes no WAL and is never undone.
 - Deltas emitted per shard:
   - `EStartProgress` — `estart/commit.rs`. Single per shard, applied in the same transaction as the shard's rows. Targets `epochs` — advances `estart_progress = Some(ShardProgress { committed: shard_index + 1, total })` and adds the shard's tally to `estart_tally`. Idempotent + ordered + total-mismatch guarded, mirroring `EWrapProgress`.
 
@@ -132,7 +132,7 @@ The rotation is not idempotent (rotating twice double-rolls), so a resumed bound
 ### `finalize()` — Rupd global pass
 
 - Direct write: `EpochState.incentives = Some(work.incentives)` and `EpochState.rupd_progress = None`. Single one-shot write so concurrent shard commits can't race.
-- Direct writes: per-pool `PoolEpochLog` archive entries from the shard-accumulator (`total_rewards`, `operator_share`, `delegators_count` rolled up across shards; `blocks_minted`, `total_stake`, `relative_size`, `declared_pledge`, `fixed_cost`, `margin_cost` from globals).
+- Direct writes: per-pool `PoolEpochLog` archive entries from the shard-accumulator (`total_rewards`, `delegators_count` rolled up across shards; `blocks_minted`, `total_stake`, `relative_size`, `fixed_cost`, `margin_cost` from globals).
 - No deltas emitted in finalize.
 
 `PendingRewardState` writes are overwrite-by-key, so true mid-shard resume is safe (rerunning a shard rewrites the same credentials with identical data).
@@ -168,6 +168,7 @@ The rotation is not idempotent (rotating twice double-rolls), so a resumed bound
 - Classifies retiring pools / expiring dreps / enacting+dropping proposals; processes pending MIRs; runs enactment + refund + wrapup-global visitors.
 - Assembles the final `EndStats` (prepare-time fields combined with the accumulator fields populated by the preceding shard runs) and emits a single `EpochWrapUp` to close the boundary.
 - Direct writes: writes the completed `EpochState` to the archive under the epoch-start temporal key.
+- Direct writes: one `DRepEpochLog` archive entry per entry of the completed DRep distribution (Abstain and NoConfidence included), under the same epoch-start temporal key; none when the distribution is incomplete.
 - Direct deletes: `PendingMirState` entries for processed MIRs.
 - Deltas emitted in finalize (10 distinct variants, 11 sites):
   - **Enactment** (`ewrap/enactment.rs`):

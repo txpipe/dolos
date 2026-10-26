@@ -1,4 +1,4 @@
-use dolos_core::{EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
+use dolos_core::{TxoRef, UtxoMap, UtxoSetDelta, UtxoValue};
 use redb::{
     Range, ReadTransaction, ReadableDatabase, ReadableTable as _, ReadableTableMetadata as _,
     TableDefinition, TableStats, WriteTransaction,
@@ -10,25 +10,24 @@ use crate::Error;
 use super::StateStore;
 
 type UtxosKey = (&'static [u8; 32], u32);
-type UtxosValue = (u16, &'static [u8]);
+/// The CBOR `UtxoValue`, the encoding every state store keeps.
+type UtxosValue = &'static [u8];
 
 pub struct UtxosIterator(Range<'static, UtxosKey, UtxosValue>);
 
 impl Iterator for UtxosIterator {
-    type Item = Result<(TxoRef, EraCbor), ::redb::StorageError>;
+    type Item = Result<(TxoRef, UtxoValue), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let x = self.0.next()?;
 
-        let x = x.map(|(k, v)| {
+        let x = x.map_err(Error::from).and_then(|(k, v)| {
             let (hash, idx) = k.value();
             let k = TxoRef((*hash).into(), idx);
 
-            let (era, cbor) = v.value();
-            let cbor = cbor.to_owned();
-            let v = EraCbor(era, cbor);
+            let v = UtxoValue::decode_cbor(v.value())?;
 
-            (k, v)
+            Ok((k, v))
         });
 
         Some(x)
@@ -59,9 +58,7 @@ impl UtxosTable {
 
         for key in refs {
             if let Some(body) = table.get(&(&key.0 as &[u8; 32], key.1))? {
-                let (era, cbor) = body.value();
-                let cbor = cbor.to_owned();
-                let value = Arc::new(EraCbor(era, cbor));
+                let value = Arc::new(UtxoValue::decode_cbor(body.value())?);
 
                 out.insert(key, value);
             }
@@ -75,14 +72,12 @@ impl UtxosTable {
 
         for (k, v) in delta.produced_utxo.iter() {
             let k: (&[u8; 32], u32) = (&k.0, k.1);
-            let v: (u16, &[u8]) = (v.0, &v.1);
-            table.insert(k, v)?;
+            table.insert(k, v.encode_cbor().as_slice())?;
         }
 
         for (k, v) in delta.recovered_stxi.iter() {
             let k: (&[u8; 32], u32) = (&k.0, k.1);
-            let v: (u16, &[u8]) = (v.0, &v.1);
-            table.insert(k, v)?;
+            table.insert(k, v.encode_cbor().as_slice())?;
         }
 
         for (k, _) in delta.undone_utxo.iter() {
@@ -184,14 +179,14 @@ mod tests {
         for (txo_ref, era_cbor) in utxo_delta.produced_utxo.iter() {
             if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
                 let tags = extract_utxo_tags(&output);
-                produced.push((txo_ref.clone(), tags));
+                produced.push((txo_ref.clone(), era_cbor.position(), tags));
             }
         }
 
         for (txo_ref, era_cbor) in utxo_delta.consumed_utxo.iter() {
             if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
                 let tags = extract_utxo_tags(&output);
-                consumed.push((txo_ref.clone(), tags));
+                consumed.push((txo_ref.clone(), era_cbor.position(), tags));
             }
         }
 
@@ -201,7 +196,7 @@ mod tests {
         for (txo_ref, era_cbor) in utxo_delta.recovered_stxi.iter() {
             if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
                 let tags = extract_utxo_tags(&output);
-                produced.push((txo_ref.clone(), tags));
+                produced.push((txo_ref.clone(), era_cbor.position(), tags));
             }
         }
 
@@ -209,7 +204,7 @@ mod tests {
         for (txo_ref, era_cbor) in utxo_delta.undone_utxo.iter() {
             if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
                 let tags = extract_utxo_tags(&output);
-                consumed.push((txo_ref.clone(), tags));
+                consumed.push((txo_ref.clone(), era_cbor.position(), tags));
             }
         }
 

@@ -1,5 +1,5 @@
 use pallas::{
-    codec::minicbor::{self, Decode, Encode},
+    codec::minicbor::{self, data::Int, decode, encode, Decode, Decoder, Encode, Encoder},
     crypto::hash::Hash,
     ledger::primitives::Epoch,
 };
@@ -16,15 +16,52 @@ pub type MintPosition = (u64, u32);
 ///
 /// Keyed `AssetKey ‖ epoch ‖ (slot, tx index)`, so one prefix scan returns
 /// every unsealed epoch of an asset, in chain order, and nothing else. The
-/// value is `[tx hash, amount]`; the key holds the rest.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+/// value is `[tx hash, 2 × amount + names_asset]`; the key holds the rest.
+/// The same pair is an entry of [`AssetMintChunk`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetMintSet {
-    #[n(0)]
     pub tx_hash: Hash<32>,
 
     /// The signed quantity: negative for a burn, never zero.
-    #[n(1)]
     pub amount: i64,
+
+    /// The mint sets the asset's `metadata_tx`: its tx's CIP-25 metadata
+    /// names the asset. Never set on a burn.
+    pub names_asset: bool,
+}
+
+impl<C> Encode<C> for AssetMintSet {
+    fn encode<W: encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        _: &mut C,
+    ) -> Result<(), encode::Error<W::Error>> {
+        // 2 × i64 + 1 spans exactly the CBOR integer range
+        let packed = 2 * i128::from(self.amount) + i128::from(self.names_asset);
+        let packed = Int::try_from(packed).expect("within the CBOR integer range");
+
+        e.array(2)?.encode(self.tx_hash)?.int(packed)?;
+        Ok(())
+    }
+}
+
+impl<'b, C> Decode<'b, C> for AssetMintSet {
+    fn decode(d: &mut Decoder<'b>, _: &mut C) -> Result<Self, decode::Error> {
+        if d.array()? != Some(2) {
+            return Err(decode::Error::message("expected a two-item mint"));
+        }
+
+        let tx_hash = d.decode()?;
+        let packed = i128::from(d.int()?);
+        let amount = i64::try_from(packed.div_euclid(2))
+            .map_err(|_| decode::Error::message("mint amount out of range"))?;
+
+        Ok(Self {
+            tx_hash,
+            amount,
+            names_asset: packed.rem_euclid(2) == 1,
+        })
+    }
 }
 
 entity_boilerplate!(
@@ -43,6 +80,7 @@ impl StageAssetMint {
         position: MintPosition,
         tx_hash: Hash<32>,
         amount: i64,
+        names_asset: bool,
     ) -> Self {
         let key = GroupKey {
             group: asset,
@@ -50,12 +88,19 @@ impl StageAssetMint {
             member: position,
         };
 
-        Self::at(key, AssetMintSet { tx_hash, amount })
+        Self::at(
+            key,
+            AssetMintSet {
+                tx_hash,
+                amount,
+                names_asset,
+            },
+        )
     }
 }
 
-/// One chunk of an asset's mints and burns in an epoch, as `(tx hash,
-/// amount)` in chain order.
+/// One chunk of an asset's mints and burns in an epoch, in chain order, each
+/// as its staged [`AssetMintSet`] row.
 ///
 /// Sealed at `epoch_start(e) ‖ AssetKey ‖ chunk (4 B)`. Every chunk carries
 /// the asset's count for the epoch, so a reader learns it from the first
@@ -66,22 +111,22 @@ pub struct AssetMintChunk {
     pub count: u64,
 
     #[n(1)]
-    pub mints: Vec<(Hash<32>, i64)>,
+    pub mints: Vec<AssetMintSet>,
 }
 
 entity_boilerplate!(AssetMintChunk, "asset-mint-chunks", log = (AssetKey, u32));
 
 impl ChunkRow for AssetMintChunk {
-    type Item = (Hash<32>, i64);
+    type Item = AssetMintSet;
 
-    fn new(count: u64, items: Vec<(Hash<32>, i64)>) -> Self {
+    fn new(count: u64, items: Vec<AssetMintSet>) -> Self {
         Self {
             count,
             mints: items,
         }
     }
 
-    fn into_items(self) -> Vec<(Hash<32>, i64)> {
+    fn into_items(self) -> Vec<AssetMintSet> {
         self.mints
     }
 }
@@ -96,8 +141,9 @@ pub(crate) mod testing {
         pub fn any_asset_mint_set()(
             tx_hash in root::any_hash_32(),
             amount in any::<i64>().prop_filter("never zero", |x| *x != 0),
+            names_asset in any::<bool>(),
         ) -> AssetMintSet {
-            AssetMintSet { tx_hash, amount }
+            AssetMintSet { tx_hash, amount, names_asset: names_asset && amount > 0 }
         }
     }
 
@@ -109,7 +155,14 @@ pub(crate) mod testing {
             tx_index in 0u32..500,
             row in any_asset_mint_set(),
         ) -> StageAssetMint {
-            StageAssetMint::mint(AssetKey(asset), epoch, (slot, tx_index), row.tx_hash, row.amount)
+            StageAssetMint::mint(
+                AssetKey(asset),
+                epoch,
+                (slot, tx_index),
+                row.tx_hash,
+                row.amount,
+                row.names_asset,
+            )
         }
     }
 }
@@ -129,6 +182,61 @@ mod prop_tests {
             assert_delta_roundtrip(entity.clone(), delta.clone());
             assert_delta_serde_roundtrip(entity, delta);
         }
+
+        #[test]
+        fn a_mint_round_trips_through_cbor(
+            tx_hash in crate::model::testing::any_hash_32(),
+            amount in any::<i64>(),
+            names_asset in any::<bool>(),
+        ) {
+            let row = super::AssetMintSet { tx_hash, amount, names_asset };
+            let raw = pallas::codec::minicbor::to_vec(&row).unwrap();
+            prop_assert_eq!(pallas::codec::minicbor::decode::<super::AssetMintSet>(&raw).unwrap(), row);
+        }
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use pallas::codec::minicbor;
+
+    use super::*;
+
+    fn raw(amount: i64, names_asset: bool) -> Vec<u8> {
+        let row = AssetMintSet {
+            tx_hash: [0xab; 32].into(),
+            amount,
+            names_asset,
+        };
+        minicbor::to_vec(&row).unwrap()[35..].to_vec()
+    }
+
+    /// The flag rides in the amount's low bit, so the common amounts keep
+    /// their one-byte head and the extremes still fit a CBOR integer.
+    #[test]
+    fn the_flag_packs_into_the_amount() {
+        assert_eq!(raw(1, false), [0x02]);
+        assert_eq!(raw(1, true), [0x03]);
+        assert_eq!(raw(11, true), [0x17]);
+        assert_eq!(raw(-1, false), [0x21]);
+        assert_eq!(raw(-12, false), [0x37]);
+        assert_eq!(raw(i64::MAX, true), [&[0x1b][..], &[0xff; 8]].concat());
+        assert_eq!(raw(i64::MIN, false), [&[0x3b][..], &[0xff; 8]].concat());
+    }
+
+    #[test]
+    fn a_mint_without_two_items_is_refused() {
+        let mut good = minicbor::to_vec(AssetMintSet {
+            tx_hash: [0xab; 32].into(),
+            amount: 1,
+            names_asset: false,
+        })
+        .unwrap();
+        assert!(minicbor::decode::<AssetMintSet>(&good).is_ok());
+
+        good[0] = 0x83;
+        good.push(0x00);
+        assert!(minicbor::decode::<AssetMintSet>(&good).is_err());
     }
 }
 

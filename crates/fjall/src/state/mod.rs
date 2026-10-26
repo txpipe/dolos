@@ -7,16 +7,19 @@
 //!
 //! State is organized into four keyspaces based on access patterns:
 //!
-//! 1. **`state-cursor`**: Chain position tracking (single key-value)
+//! 1. **`state-cursor`**: Chain position tracking, and the compatibility
+//!    identity the store recorded when it was created
 //!
 //! 2. **`state-utxos`**: UTxO set storage Key: `[tx_hash:32][index:4]` (36
-//!    bytes) Value: `[era:2][cbor:...]`
+//!    bytes) Value: CBOR `[era, body, slot, tx_index]` (`[era, body]` for a
+//!    UTxO no block produced)
 //!
 //! 3. **`state-entities`**: All entity types with namespace hash prefix Key:
 //!    `[ns_hash:8][entity_key:var]` Value: entity CBOR bytes
 //!
 //! 4. **`state-tags`**: Live-UTxO tags (mutable: insert on produce, delete on
-//!    consume) Key: `[dim_hash:8][lookup_key:var][txo_ref:36]` -> empty
+//!    consume) Key: `[dim_hash:8][lookup_key:var][tag_order:10][txo_ref:36]` ->
+//!    empty, so a lookup key's refs sort by creation position
 //!
 //! This design reduces the number of LSM-tree segment files compared to using
 //! separate keyspaces per entity type, avoiding "too many open files" errors
@@ -32,8 +35,8 @@ use std::sync::Mutex;
 
 use dolos_core::{
     ChainPoint, EntityKey, EntityValue, KeyRange, Namespace, StateError,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TxoRef,
-    UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
+    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TagEntry, TagOrder,
+    TagStart, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
 };
 use fjall::{Database, Keyspace, OwnedWriteBatch, PersistMode, Readable};
 
@@ -60,17 +63,20 @@ mod keyspace_names {
 /// Key for the cursor entry
 const CURSOR_KEY: &[u8] = &[0u8];
 
+/// Key for the compatibility identity, beside the cursor
+const IDENTITY_KEY: &[u8] = b"identity";
+
 /// Fjall-based state store implementation with unified entities keyspace.
 ///
 /// Uses 4 keyspaces:
-/// - `cursor`: Chain position tracking
+/// - `cursor`: Chain position tracking and the compatibility identity
 /// - `utxos`: UTxO set storage
 /// - `entities`: All entity types with namespace hash prefixes
 /// - `tags`: Live-UTxO tags, a projection of `utxos`
 #[derive(Clone)]
 pub struct StateStore {
     db: Database,
-    /// Cursor keyspace (chain position)
+    /// Cursor keyspace (chain position and compatibility identity)
     cursor: Keyspace,
     /// UTxO set keyspace
     utxos: Keyspace,
@@ -125,6 +131,36 @@ impl StateStore {
     /// Get a reference to the entities keyspace
     pub fn entities_keyspace(&self) -> &Keyspace {
         &self.entities
+    }
+
+    /// The compatibility identity the store recorded when it was created.
+    pub fn identity(&self) -> Result<Option<String>, Error> {
+        let value = self.cursor.get(IDENTITY_KEY)?;
+
+        Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
+    /// Record the compatibility identity, synced to disk before it returns.
+    pub fn record_identity(&self, identity: &str) -> Result<(), Error> {
+        self.cursor.insert(IDENTITY_KEY, identity.as_bytes())?;
+        self.db.persist(PersistMode::SyncAll)?;
+
+        Ok(())
+    }
+
+    /// Whether the store holds a cursor or any row.
+    pub fn holds_data(&self) -> Result<bool, Error> {
+        if self.cursor.contains_key(CURSOR_KEY)? {
+            return Ok(true);
+        }
+
+        for keyspace in [&self.utxos, &self.entities, &self.tags] {
+            if !keyspace.is_empty()? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Per-keyspace disk footprint: `(name, bytes, path)`.
@@ -339,6 +375,32 @@ impl CoreStateStore for StateStore {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
         tags::get_by_key(&snapshot, &self.tags, dimension, key).map_err(StateError::from)
+    }
+
+    fn utxos_by_tag_page(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        order: TagOrder,
+        start: TagStart,
+        count: usize,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        tags::get_page_by_key(&snapshot, &self.tags, dimension, key, order, start, count)
+            .map_err(StateError::from)
+    }
+
+    fn utxos_with_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        entries: Vec<TagEntry>,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        tags::filter_by_key(&snapshot, &self.tags, dimension, key, entries)
+            .map_err(StateError::from)
     }
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {

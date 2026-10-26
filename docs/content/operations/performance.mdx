@@ -24,7 +24,7 @@ The main drivers of resource usage are:
 
 - **Storage mode**. Ledger-only uses the least disk and I/O. Sliding history adds a bounded historical window. Full archive retains the full chain history and is the most expensive mode.
 - **Enabled APIs**. Running only sync is cheaper than serving gRPC, Mini-Blockfrost, Mini-Kupo, TRP, and Ouroboros compatibility interfaces at the same time.
-- **Storage backend and cache tuning**. Cache sizes and backend options in the [`[storage]`](../configuration/schema#storage-section) configuration directly affect memory use, disk activity, and throughput.
+- **Store types and the derived-answer cache**. Whether each store is on disk or in memory, and the cache budgets in the [`[storage]`](../configuration/schema#storage) configuration, directly affect memory use, disk activity, and throughput. A Fjall store's tuning is fixed by its preset, not set field by field.
 - **Query mix**. A node serving mostly current-state lookups behaves differently from one serving heavy historical scans or broad asset and address searches.
 
 If your goal is to minimize operational cost, start with the smallest storage mode and API surface that satisfies your workload, then increase capacity only where measurements show a bottleneck.
@@ -69,10 +69,10 @@ Dolos includes a write-ahead log and bounded rollback history to support restart
 - **Normal chain rollback** is handled within the configured rollback window.
 - **Corruption, missing data, or deliberate rebootstrap** may require importing from snapshot, Mithril, or syncing again from a peer.
 
-The most relevant configuration knobs are in the [`[sync]`](../configuration/schema#sync-section) section:
+The rollback window is not configurable: the WAL always keeps the protocol's mutable window (on Cardano, `3k/f` slots), and a normal chain rollback is handled within it. How much archive history remains before pruning is set in the [`[history]`](../configuration/schema#history) section:
 
-- `max_rollback` controls how much rollback history Dolos keeps available for rollback handling.
-- `max_history` controls how much recent archive history remains before pruning. The window bounds the archive's block bodies, its logs, and its two index keyspaces (`archive-tags` and `index-exact`) alike: housekeeping removes the index entries of pruned blocks in a sweep of both keyspaces, run once the prune cutoff has advanced by a sixteenth of the window since the last sweep rather than every round. A sliding-history node restored from a full-history stele pays one whole-keyspace scan on its first sweep, then only window-sized ones.
+- `mode = "rolling"` with a `window` keeps that many slots behind the tip. The window bounds the archive's block bodies, its logs, and its index keyspaces (`archive-tags`, `index-exact` and `index-entity`) alike: housekeeping removes the index entries of pruned blocks in a sweep of those keyspaces, run once the prune cutoff has advanced by a sixteenth of the window since the last sweep rather than every round. A rolling-history node restored from a full-history stele pays one whole-keyspace scan on its first sweep, then only window-sized ones.
+- `mode = "full"`, the default, keeps everything, and `mode = "none"` keeps no archive.
 
 Bootstrap commands also provide flags such as `--continue` and `--skip-if-data` to help operators resume or safely avoid repeating work when data already exists. See the [bootstrap overview](../bootstrap).
 

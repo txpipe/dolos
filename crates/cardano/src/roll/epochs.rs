@@ -2,11 +2,7 @@ use std::collections::HashMap;
 
 use dolos_core::{BrokenInvariant, ChainError, Genesis, TxOrder, TxoRef};
 use pallas::ledger::{
-    primitives::{
-        alonzo::{InstantaneousRewardSource, InstantaneousRewardTarget, MoveInstantaneousReward},
-        conway::RationalNumber,
-        Epoch,
-    },
+    primitives::{conway::RationalNumber, Epoch},
     traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
 };
 
@@ -203,14 +199,6 @@ impl BlockVisitor for EpochStateVisitor {
             self.stats_delta.as_mut().unwrap().removed_accounts += 1;
         }
 
-        if let Some(cert) = pallas_extras::cert_as_pool_registration(cert) {
-            self.stats_delta
-                .as_mut()
-                .unwrap()
-                .registered_pools
-                .insert(cert.operator);
-        }
-
         if let Some(cert) = pallas_extras::cert_as_drep_registration(cert) {
             tracing::debug!(cert=?cert.cred, "drep registration");
             self.stats_delta.as_mut().unwrap().drep_deposits += cert.deposit;
@@ -219,55 +207,6 @@ impl BlockVisitor for EpochStateVisitor {
         if let Some(cert) = pallas_extras::cert_as_drep_unregistration(cert) {
             tracing::debug!(cert=?cert.cred, "drep un-registration");
             self.stats_delta.as_mut().unwrap().drep_refunds += cert.deposit;
-        }
-
-        if let Some(cert) = pallas_extras::cert_as_mir_certificate(cert) {
-            let MoveInstantaneousReward { source, target, .. } = cert;
-
-            match (source, target) {
-                (
-                    InstantaneousRewardSource::Reserves,
-                    InstantaneousRewardTarget::StakeCredentials(creds),
-                ) => {
-                    for (cred, amount) in creds {
-                        if amount < 0 {
-                            tracing::warn!(
-                                source = "reserves",
-                                credential = ?cred,
-                                amount = amount,
-                                "NEGATIVE MIR amount detected - clamping to 0"
-                            );
-                        }
-                        let amount = amount.max(0) as u64;
-                        self.stats_delta.as_mut().unwrap().reserve_mirs += amount;
-                    }
-                }
-                (
-                    InstantaneousRewardSource::Treasury,
-                    InstantaneousRewardTarget::StakeCredentials(creds),
-                ) => {
-                    for (cred, amount) in creds {
-                        if amount < 0 {
-                            tracing::warn!(
-                                source = "treasury",
-                                credential = ?cred,
-                                amount = amount,
-                                "NEGATIVE MIR amount detected - clamping to 0"
-                            );
-                        }
-                        let amount_u64 = amount.max(0) as u64;
-                        tracing::debug!(
-                            source = "treasury",
-                            credential = ?cred,
-                            amount = amount,
-                            amount_u64 = amount_u64,
-                            "processing treasury MIR"
-                        );
-                        self.stats_delta.as_mut().unwrap().treasury_mirs += amount_u64;
-                    }
-                }
-                _ => {}
-            }
         }
 
         Ok(())
@@ -344,7 +283,8 @@ mod tests {
     }
 
     fn owned(output: MultiEraOutput<'_>) -> OwnedMultiEraOutput {
-        OwnedMultiEraOutput::decode(Arc::new(output.into())).unwrap()
+        OwnedMultiEraOutput::decode(Arc::new(dolos_core::UtxoValue::new(output.into(), None)))
+            .unwrap()
     }
 
     fn alonzo_tx_cbor(body: alonzo::TransactionBody, success: bool) -> Vec<u8> {

@@ -375,7 +375,8 @@ mod tests {
                     let key = TxoRef(tx, ordinal as u32);
                     let cbor =
                         dolos_testing::utxo_with_random_amount(address, 4_000_000..5_000_000);
-                    utxos.insert(key, std::sync::Arc::new(cbor));
+                    let value = dolos_core::UtxoValue::new(cbor, None);
+                    utxos.insert(key, std::sync::Arc::new(value));
                 }
             }
             dolos_core::UtxoSetDelta {

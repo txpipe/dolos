@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tx3_resolver::{Expression, StructExpr};
 
-use dolos_core::{EraCbor, TxoRef};
+use dolos_core::{EraCbor, TxoRef, UtxoValue};
 use pallas::{
     codec::{minicbor, utils::KeyValuePairs},
     ledger::{
@@ -109,11 +109,11 @@ pub fn into_tx3_utxoref(txoref: TxoRef) -> tx3_resolver::UtxoRef {
 
 pub fn into_tx3_utxo(
     txoref: TxoRef,
-    utxo: Arc<EraCbor>,
+    utxo: Arc<UtxoValue>,
 ) -> Result<tx3_resolver::Utxo, Box<tx3_resolver::Error>> {
     let r#ref = into_tx3_utxoref(txoref);
 
-    let EraCbor(era, cbor) = utxo.as_ref();
+    let EraCbor(era, cbor) = &utxo.output;
 
     let era = Era::try_from(*era).map_err(|e| tx3_resolver::Error::StoreError(e.to_string()))?;
 

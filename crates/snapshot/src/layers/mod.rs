@@ -1,7 +1,7 @@
 //! One codec per layer kind.
 //!
 //! Every module here exposes the same three things, so a caller meets one shape
-//! five times:
+//! for every kind:
 //!
 //! - `encode(&Record) -> Result<CanonicalCbor, Error>` — through
 //!   [`stelae::frame::encode`], so the deterministic-encoding profile is
@@ -26,6 +26,7 @@
 
 pub mod blocks;
 pub mod digests;
+pub mod entities;
 pub mod indexes;
 pub mod logs;
 pub mod state;

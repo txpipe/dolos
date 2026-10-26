@@ -3,7 +3,8 @@
 //! Single sharded work unit covering the entire open-half pipeline. The
 //! per-shard body streams the accounts of a key-range slice once, in its
 //! state transaction: it tallies the stake distribution the boundary
-//! freezes (`stake`), rotates each account and writes it back.
+//! freezes (`stake`), writes the opening epoch's stake-only account-epoch
+//! row to the archive, rotates each account and writes it back.
 //! `finalize()` runs the global Estart pass (pool / drep / proposal
 //! transitions, nonce, `EpochTransition`, era transitions) and is the only
 //! phase that advances the cursor.
@@ -13,13 +14,14 @@
 //! `BoundaryVisitor` trait and its `nonces` and `reset` visitors run in
 //! finalize.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
-use dolos_core::{ChainError, Genesis};
+use dolos_core::{BlockSlot, ChainError, Genesis};
+use pallas::ledger::primitives::Epoch;
 
 use crate::{
-    eras::ChainSummary, roll::WorkDeltas, CardanoDelta, DRepState, EpochState, EraKey, PoolState,
-    ProposalState,
+    eras::ChainSummary, roll::WorkDeltas, CardanoDelta, DRepState, EpochState, EraKey, PoolHash,
+    PoolState, ProposalState,
 };
 
 pub mod avvm;
@@ -78,6 +80,26 @@ pub type PoolId = crate::PoolKey;
 pub type DRepId = crate::DRepKey;
 pub type ProposalId = crate::ProposalKey;
 
+/// What `initialize` indexes once per boundary for every shard to read.
+/// Pools rotate only in finalize, so a resumed boundary rebuilds the same.
+#[derive(Debug, Default)]
+pub struct ShardInputs {
+    /// The owners of every pool in the closing epoch; the shards tally live
+    /// pledge with it.
+    pub owners: PoolOwners,
+
+    /// The distribution the opening epoch's account rows carry their stake
+    /// leg from, and the protocol it counts under: the gate of the EWRAP that
+    /// writes the epoch's full rows, one boundary later
+    /// (`ewrap::stake::stake_snapshot_of`). Opening E, it is the snapshot of
+    /// E-2, the accounts' `mark` before they rotate. `None` while the gate is
+    /// closed.
+    pub stake_snapshot: Option<(Epoch, EraKey)>,
+
+    /// The pools admitted to [`Self::stake_snapshot`]'s distribution.
+    pub stake_pools: HashSet<PoolHash>,
+}
+
 pub struct WorkContext {
     // loaded
     ended_state: EpochState,
@@ -91,9 +113,9 @@ pub struct WorkContext {
     /// set, which are one event and travel together. Empty everywhere else.
     pub avvm_reclamation: AvvmReclamation,
 
-    /// The owners of every pool in the closing epoch, built once per
-    /// boundary in `initialize`; the shards tally live pledge with it.
-    pub owners: Arc<PoolOwners>,
+    /// The pool owners and the stake-leg source, built once per boundary in
+    /// `initialize`.
+    pub inputs: Arc<ShardInputs>,
 
     /// The protocol the shards tally stake under (`stake::tally_protocol`).
     pub tally_protocol: EraKey,
@@ -113,6 +135,21 @@ impl WorkContext {
 
     pub fn starting_epoch_no(&self) -> u64 {
         self.ended_state.number + 1
+    }
+
+    /// The slot the opening epoch's account-epoch rows are keyed under: its
+    /// start, which is where the EWRAP closing the epoch after it writes the
+    /// full rows.
+    ///
+    /// Any rollback to that slot or before it drops the rows, since the
+    /// archive cuts every log row at or after the rollback slot: an orphaned
+    /// first block of the epoch, a reconnect while the tip sits on that slot,
+    /// and the rollback a restart runs after a crash mid-ESTART, which keeps
+    /// only the shards still to run. ESTART does not run again for a boundary
+    /// already crossed, so the epoch lacks those rows until that EWRAP writes
+    /// them (`stake::warn_on_dropped_rows` says so).
+    pub fn account_epoch_slot(&self) -> BlockSlot {
+        self.chain_summary.epoch_start(self.starting_epoch_no())
     }
 
     pub fn add_delta(&mut self, delta: impl Into<CardanoDelta>) {

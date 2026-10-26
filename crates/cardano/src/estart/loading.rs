@@ -14,7 +14,7 @@ use std::sync::Arc;
 use dolos_core::{ChainError, Domain, Genesis, StateStore};
 
 use crate::{
-    estart::{avvm::AvvmReclamation, stake, BoundaryVisitor as _, PoolOwners, WorkContext},
+    estart::{avvm::AvvmReclamation, stake, BoundaryVisitor as _, ShardInputs, WorkContext},
     gov_from_conway_genesis, load_era_summary,
     roll::WorkDeltas,
     DRepState, EraKey, GovGenesisInit, PoolState, ProposalState,
@@ -118,7 +118,7 @@ impl WorkContext {
             active_protocol,
             genesis,
             avvm_reclamation,
-            owners: Default::default(),
+            inputs: Default::default(),
             tally_protocol,
             deltas: WorkDeltas::default(),
             active_stake: None,
@@ -139,17 +139,17 @@ impl WorkContext {
     }
 
     /// Load for a per-shard Estart phase: build a fresh context (no
-    /// global iteration) with the AVVM reclamation total and the pool
-    /// owners precomputed in the work unit's `initialize`. The shard's
+    /// global iteration) with the AVVM reclamation total and the shard
+    /// inputs precomputed in the work unit's `initialize`. The shard's
     /// accounts are read once, by `commit_shard`.
     pub fn load_shard<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
         avvm_reclamation: AvvmReclamation,
-        owners: Arc<PoolOwners>,
+        inputs: Arc<ShardInputs>,
     ) -> Result<Self, ChainError> {
         let mut ctx = Self::new_empty_with_avvm::<D>(state, genesis, avvm_reclamation)?;
-        ctx.owners = owners;
+        ctx.inputs = inputs;
         Ok(ctx)
     }
 }

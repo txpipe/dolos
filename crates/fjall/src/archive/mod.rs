@@ -3,12 +3,12 @@
 //! The archive keeps block bodies in flat segment files ([`dolos_flatfiles`],
 //! one zstd frame per body, named by the frame's physical location) and
 //! holds the rows that point into the history — a blocks location table,
-//! the derived-log namespaces, and the two index projections of the blocks
-//! — in an LSM tree. Behavior is
-//! pinned by the shared conformance suite (`tests/archive_conformance.rs`),
-//! with the builtin memory archive as the oracle.
+//! the derived-log namespaces, the index projections of the blocks and the
+//! entity index — in an LSM tree. Behavior is pinned by the shared conformance
+//! suite (`tests/archive_conformance.rs`), with the builtin memory archive as
+//! the oracle.
 //!
-//! ## Four Keyspace Design
+//! ## Keyspace Design
 //!
 //! 1. **`archive-blocks`**: slot → packed 16-byte [`BlockLocation`]s, newest
 //!    first. Key is the 8-byte big-endian slot; the value encoding is
@@ -28,23 +28,33 @@
 //! 4. **`index-exact`**: exact-match lookups (block hash, block number, tx hash
 //!    → slot). Key: `[dim_hash:8][key_data:var]` → `[slot:8]`. See [`exact`].
 //!
-//! The two index keyspaces are projections of the blocks and are written in
-//! the same batch as the block locations, so the history and its lookups
+//! 5. **`index-entity`**: the entity index (an entity's id → the slot it was
+//!    first seen at). Key: `[kind_hash:8][id:kind width]` → `[slot:8]`. See
+//!    [`entity`].
+//!
+//! 6. **`archive-meta`**: the compatibility identity the store recorded when it
+//!    was created, under the key `identity`.
+//!
+//! The tag and exact keyspaces are projections of the blocks and are written
+//! in the same batch as the block locations, so the history and its lookups
 //! commit together. They keep the compaction settings the standalone index
-//! store gave them. A rollback removes its entries through
+//! store gave them. A rollback removes their entries through
 //! [`CoreArchiveWriter::undo_index`]; `truncate_front` does not touch them.
+//! The entity index is written by the seal of an immutable epoch with the
+//! epoch's sealed logs, and nothing but a prune removes an entry.
 //!
 //! ## Pruning the index keyspaces
 //!
 //! The slot is the *last* key component of a tag entry and the *value* of an
-//! exact entry, so neither keyspace can be range-deleted by slot the way the
-//! blocks and logs are. `prune_history` walks them in resumable chunks,
-//! examining at most the caller's index row budget across both keyspaces
-//! per call. Retained rows consume the same budget as expired rows. Each
-//! pass fixes its cutoff; subsequent calls resume with fresh snapshots so
-//! block application can run between chunks, including during history
-//! catch-up. Passes under a budget are amortized over a sixteenth of the
-//! retained window. Without a budget, all due work finishes synchronously.
+//! exact or entity entry, so none of the index keyspaces can be range-deleted
+//! by slot the way the blocks and logs are. `prune_history` walks them in
+//! resumable chunks, one keyspace after another, examining at most the
+//! caller's index row budget across all of them per call. Retained rows consume
+//! the same budget as expired rows. Each pass fixes its cutoff; subsequent
+//! calls resume with fresh snapshots so block application can run between
+//! chunks, including during history catch-up. Passes under a budget are
+//! amortized over a sixteenth of the retained window. Without a budget, all due
+//! work finishes synchronously.
 //!
 //! Unlike the redb writer, log batches are not reordered before insertion:
 //! shuffling exists to work around redb's half-split of ascending B-tree
@@ -70,6 +80,7 @@ use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
 use crate::preset::{Preset, Tuning};
 use crate::Error;
 
+pub mod entity;
 pub mod exact;
 pub mod log_keys;
 pub mod scan;
@@ -80,6 +91,7 @@ use log_keys::{
     namespace_start,
 };
 
+pub use entity::EntityRecordIterator as EntityRecordIter;
 pub use exact::ExactRecordIterator as ExactIter;
 pub use tags::{SlotIterator as SlotIter, TagRecordIterator as TagIter};
 
@@ -98,10 +110,19 @@ struct IndexSweepState {
 
 struct IndexSweep {
     cutoff: BlockSlot,
-    tags_done: bool,
+    phase: SweepPhase,
     after: Option<fjall::UserKey>,
     tags_removed: u64,
     exact_removed: u64,
+    entity_removed: u64,
+}
+
+/// The keyspace a sweep pass is walking, in the order it walks them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SweepPhase {
+    Tags,
+    Exact,
+    Entity,
 }
 
 struct SweepChunk {
@@ -121,7 +142,14 @@ mod keyspace_names {
     pub const TAGS: &str = "archive-tags";
     /// Exact-match keyspace (block hash, tx hash, block number -> slot)
     pub const EXACT: &str = "index-exact";
+    /// Entity index keyspace (entity id -> first-seen slot)
+    pub const ENTITY: &str = "index-entity";
+    /// Store metadata keyspace (the compatibility identity)
+    pub const META: &str = "archive-meta";
 }
+
+/// Key for the compatibility identity in the metadata keyspace
+const IDENTITY_KEY: &[u8] = b"identity";
 
 fn io_err(e: std::io::Error) -> ArchiveError {
     ArchiveError::InternalError(e.to_string())
@@ -134,7 +162,7 @@ fn fjall_err(e: fjall::Error) -> ArchiveError {
 /// Fjall-based archive store.
 ///
 /// Block bodies live in flat segment files; the location table, the log
-/// namespaces and the two index keyspaces live in the LSM tree.
+/// namespaces and the index keyspaces live in the LSM tree.
 #[derive(Clone)]
 pub struct ArchiveStore {
     db: Database,
@@ -142,6 +170,8 @@ pub struct ArchiveStore {
     logs: Keyspace,
     tags: Keyspace,
     exact: Keyspace,
+    entity: Keyspace,
+    meta: Keyspace,
     flatfiles: Arc<FlatFileStore>,
     schema: Arc<StateSchema>,
     preset: Preset,
@@ -211,6 +241,8 @@ impl ArchiveStore {
             logs: db.keyspace(keyspace_names::LOGS, || tuning.logs.options())?,
             tags: db.keyspace(keyspace_names::TAGS, || tuning.tags.options())?,
             exact: db.keyspace(keyspace_names::EXACT, || tuning.exact.options())?,
+            entity: db.keyspace(keyspace_names::ENTITY, || tuning.entity.options())?,
+            meta: db.keyspace(keyspace_names::META, || tuning.meta.options())?,
             db,
             flatfiles: Arc::new(flatfiles),
             schema: Arc::new(schema),
@@ -232,6 +264,8 @@ impl ArchiveStore {
                 (keyspace_names::LOGS, tuning.logs),
                 (keyspace_names::TAGS, tuning.tags),
                 (keyspace_names::EXACT, tuning.exact),
+                (keyspace_names::ENTITY, tuning.entity),
+                (keyspace_names::META, tuning.meta),
             ],
         )
     }
@@ -246,6 +280,38 @@ impl ArchiveStore {
         &self.db
     }
 
+    /// The compatibility identity the store recorded when it was created.
+    pub fn identity(&self) -> Result<Option<String>, Error> {
+        let value = self.meta.get(IDENTITY_KEY)?;
+
+        Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
+    /// Record the compatibility identity, synced to disk before it returns.
+    pub fn record_identity(&self, identity: &str) -> Result<(), Error> {
+        self.meta.insert(IDENTITY_KEY, identity.as_bytes())?;
+        self.db.persist(PersistMode::SyncAll)?;
+
+        Ok(())
+    }
+
+    /// Whether the index holds any block location, log row or index entry.
+    pub fn holds_data(&self) -> Result<bool, Error> {
+        for keyspace in [
+            &self.blocks,
+            &self.logs,
+            &self.tags,
+            &self.exact,
+            &self.entity,
+        ] {
+            if !keyspace.is_empty()? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     /// Per-keyspace disk footprint: `(name, bytes, path)`.
     pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
         [
@@ -253,6 +319,8 @@ impl ArchiveStore {
             (keyspace_names::LOGS, &self.logs),
             (keyspace_names::TAGS, &self.tags),
             (keyspace_names::EXACT, &self.exact),
+            (keyspace_names::ENTITY, &self.entity),
+            (keyspace_names::META, &self.meta),
         ]
         .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
         .to_vec()
@@ -268,6 +336,8 @@ impl ArchiveStore {
         self.logs.major_compact()?;
         self.tags.major_compact()?;
         self.exact.major_compact()?;
+        self.entity.major_compact()?;
+        self.meta.major_compact()?;
         self.db.persist(PersistMode::SyncAll)?;
 
         Ok(())
@@ -369,10 +439,11 @@ impl ArchiveStore {
                 }
                 state.active = Some(IndexSweep {
                     cutoff: prune_before,
-                    tags_done: false,
+                    phase: SweepPhase::Tags,
                     after: None,
                     tags_removed: 0,
                     exact_removed: 0,
+                    entity_removed: 0,
                 });
             }
             if remaining == 0 {
@@ -384,39 +455,51 @@ impl ArchiveStore {
 
             let active = state.active.as_mut().unwrap();
             let limit = remaining.min(INDEX_SWEEP_CHUNK_ENTRIES);
-            let chunk = if active.tags_done {
-                self.sweep_below(
-                    snapshot,
-                    &self.exact,
-                    active.cutoff,
-                    active.after.as_deref(),
-                    limit,
-                    |_, value| exact::slot_of_entry(value),
-                )?
-            } else {
-                self.sweep_below(
+            let chunk = match active.phase {
+                SweepPhase::Tags => self.sweep_below(
                     snapshot,
                     &self.tags,
                     active.cutoff,
                     active.after.as_deref(),
                     limit,
                     |key, _| tags::slot_of_entry(key),
-                )?
+                )?,
+                SweepPhase::Exact => self.sweep_below(
+                    snapshot,
+                    &self.exact,
+                    active.cutoff,
+                    active.after.as_deref(),
+                    limit,
+                    |_, value| exact::slot_of_entry(value),
+                )?,
+                SweepPhase::Entity => self.sweep_below(
+                    snapshot,
+                    &self.entity,
+                    active.cutoff,
+                    active.after.as_deref(),
+                    limit,
+                    |_, value| entity::slot_of_entry(value),
+                )?,
             };
 
             // A chunk publishes progress only after its removal batch commits.
             remaining -= chunk.visited;
             active.after = chunk.after;
-            if active.tags_done {
-                active.exact_removed += chunk.removed;
-            } else {
-                active.tags_removed += chunk.removed;
+            match active.phase {
+                SweepPhase::Tags => active.tags_removed += chunk.removed,
+                SweepPhase::Exact => active.exact_removed += chunk.removed,
+                SweepPhase::Entity => active.entity_removed += chunk.removed,
             }
             if !chunk.exhausted {
                 continue;
             }
-            if !active.tags_done {
-                active.tags_done = true;
+            let next = match active.phase {
+                SweepPhase::Tags => Some(SweepPhase::Exact),
+                SweepPhase::Exact => Some(SweepPhase::Entity),
+                SweepPhase::Entity => None,
+            };
+            if let Some(next) = next {
+                active.phase = next;
                 active.after = None;
                 continue;
             }
@@ -425,6 +508,7 @@ impl ArchiveStore {
                 cutoff_slot = active.cutoff,
                 tags = active.tags_removed,
                 exact = active.exact_removed,
+                entity = active.entity_removed,
                 "swept archive index entries below cutoff"
             );
             state.last_completed = Some(active.cutoff);
@@ -620,6 +704,17 @@ impl CoreArchiveWriter for ArchiveWriter {
         tags::undo(&mut batch, &self.store.tags, deltas)?;
 
         Ok(())
+    }
+
+    fn write_entity(
+        &self,
+        kind: dolos_core::EntityKind,
+        key: &[u8],
+        slot: BlockSlot,
+    ) -> Result<(), ArchiveError> {
+        let mut batch = self.batch.lock().unwrap();
+
+        entity::insert(&mut batch, &self.store.entity, kind, key, slot)
     }
 
     fn append_prehashed(
@@ -926,6 +1021,7 @@ impl CoreArchiveStore for ArchiveStore {
     type SlotIter = SlotIter;
     type TagIter = TagIter;
     type ExactIter = ExactIter;
+    type EntityRecordIter = EntityRecordIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         Ok(ArchiveWriter::new(self))
@@ -1231,6 +1327,15 @@ impl CoreArchiveStore for ArchiveStore {
         exact::get_by_tx_hash(&snapshot, &self.exact, tx_hash).map_err(ArchiveError::from)
     }
 
+    fn entity_slots(
+        &self,
+        kind: dolos_core::EntityKind,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<BlockSlot>>, ArchiveError> {
+        let snapshot = self.db.snapshot();
+        entity::get_many(&snapshot, &self.entity, kind, keys)
+    }
+
     fn slots_by_tag(
         &self,
         dimension: TagDimension,
@@ -1266,6 +1371,16 @@ impl CoreArchiveStore for ArchiveStore {
         let snapshot = self.db.snapshot();
 
         Ok(ExactIter::new(snapshot, &self.exact, slots))
+    }
+
+    fn iter_entity_records(
+        &self,
+        kinds: &[dolos_core::EntityKind],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::EntityRecordIter, ArchiveError> {
+        let snapshot = self.db.snapshot();
+
+        Ok(EntityRecordIter::new(snapshot, &self.entity, kinds, slots))
     }
 }
 
@@ -1689,5 +1804,49 @@ mod tests {
         assert_eq!(locations(&store, 2), retained);
         assert_eq!(store.get_block_by_slot(&3).unwrap().unwrap(), *body(3, 1));
         assert_eq!(store.get_block_by_slot(&2).unwrap().unwrap(), *body(2, 0));
+    }
+
+    /// Any one keyspace of history counts as data: a block location, a log
+    /// row, a tag or an exact lookup, each alone.
+    #[test]
+    fn every_history_keyspace_holds_data() {
+        let mut schema = StateSchema::default();
+        schema.insert("logs", dolos_core::NamespaceType::KeyValue);
+
+        let empty = ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        assert!(!empty.holds_data().unwrap());
+
+        let blocks = ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        write(&blocks, &[(10, body(10, 0))]);
+
+        let logs = ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        let writer = logs.start_writer().unwrap();
+        writer
+            .write_log("logs", &LogKey::of(10, &1u32), &vec![1])
+            .unwrap();
+        writer.commit().unwrap();
+
+        let tags = ArchiveStore::for_tempdir(schema.clone()).unwrap();
+        write_indexes(
+            &tags,
+            &[ArchiveIndexDelta {
+                slot: 10,
+                tags: vec![dolos_core::Tag::new("address", vec![1; 28])],
+                ..Default::default()
+            }],
+        );
+
+        let exact = ArchiveStore::for_tempdir(schema).unwrap();
+        write_indexes(&exact, &[number_delta(10, 1)]);
+
+        for (only, store) in [&blocks, &logs, &tags, &exact].into_iter().enumerate() {
+            let filled = [&store.blocks, &store.logs, &store.tags, &store.exact]
+                .map(|keyspace| !keyspace.is_empty().unwrap());
+            let mut expected = [false; 4];
+            expected[only] = true;
+
+            assert_eq!(filled, expected, "keyspace {only}");
+            assert!(store.holds_data().unwrap(), "keyspace {only}");
+        }
     }
 }

@@ -39,6 +39,8 @@ pub struct PoolParams {
     pub pool_metadata: Option<PoolMetadata>,
 }
 
+/// A registered pool. Indexes 11 and 12 held fields that left the record;
+/// they must not be reused.
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoolState {
     #[n(1)]
@@ -46,12 +48,6 @@ pub struct PoolState {
 
     #[n(2)]
     pub snapshot: EpochValue<PoolSnapshot>,
-
-    #[n(11)]
-    pub blocks_minted_total: u32,
-
-    #[n(12)]
-    pub register_slot: u64,
 
     #[n(13)]
     pub retiring_epoch: Option<u64>,
@@ -152,7 +148,8 @@ impl TransitionDefault for PoolSnapshot {
 }
 
 /// One pool's share of a stake distribution: the stake delegated to it, its
-/// delegators, and the part of the stake its owners delegate.
+/// delegators with stake above zero, and the part of the stake its owners
+/// delegate.
 #[derive(Debug, Encode, Decode, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoolTally {
     #[n(0)]
@@ -279,8 +276,6 @@ pub(crate) mod testing {
         pub fn any_pool_state()(
             operator in root::any_pool_hash(),
             snapshot in any_epoch_value(any_pool_snapshot().boxed()),
-            blocks_minted_total in 0u32..10_000u32,
-            register_slot in root::any_slot(),
             retiring_epoch in prop::option::of(root::any_epoch()),
             deposit in root::any_lovelace(),
             calidus in prop::option::of(any_calidus_registration()),
@@ -288,8 +283,6 @@ pub(crate) mod testing {
             PoolState {
                 operator,
                 snapshot,
-                blocks_minted_total,
-                register_slot,
                 retiring_epoch,
                 deposit,
                 calidus,
@@ -420,13 +413,11 @@ impl dolos_core::EntityDelta for PoolRegistration {
             };
 
             let state = PoolState {
-                register_slot: self.slot,
                 operator: self.cert.operator,
                 // please note that new pools will udpate its live snapshot directly. This differs
                 // from the behavior of existing pools where the change is scheduled for the next
                 // epoch.
                 snapshot: EpochValue::with_live(self.epoch, snapshot),
-                blocks_minted_total: 0,
                 retiring_epoch: None,
                 deposit: self.pool_deposit,
                 calidus: None,
@@ -480,7 +471,6 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
                 self.epoch,
             );
 
-            entity.blocks_minted_total += self.count;
             let live = entity.snapshot.unwrap_live_mut();
             live.blocks_minted += self.count;
         }
@@ -488,7 +478,6 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
 
     fn undo(&self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
-            entity.blocks_minted_total -= self.count;
             let live = entity.snapshot.unwrap_live_mut();
             live.blocks_minted -= self.count;
         }
@@ -856,8 +845,6 @@ mod prop_tests {
         let pool = PoolState {
             operator,
             snapshot: EpochValue::with_live(5, snapshot),
-            blocks_minted_total: 0,
-            register_slot: 0,
             retiring_epoch: None,
             deposit: 0,
             calidus: None,

@@ -1,22 +1,38 @@
-[upstream]
-block_production_interval = 10
+compatibility = "v2-alpha.1"
 
-[storage]
-version = "v4"
-path = "data"
+[chain]
+protocol = "cardano"
+network = "custom"
 
-[genesis]
+[chain.cardano]
+magic = 42
+is_testnet = true
+
+[chain.cardano.genesis]
 byron_path = "byron.json"
 shelley_path = "shelley.json"
 alonzo_path = "alonzo.json"
 conway_path = "conway.json"
-force_protocol = 6
 
-[sync]
-max_rollback = 10000
+[[chain.cardano.custom_utxos]]
+ref = ["8d910e3a410a353787d50a708e24c6ba2cc2b6b86ec6d8cb5bf9bbec20bfc937", 0]
+era = 7
+cbor = [162, 0, 88, 29, 96, 13, 209, 114, 185, 177, 134, 111, 217, 81, 59, 150, 252, 190, 55, 138, 45, 90, 220, 127, 180, 153, 148, 158, 136, 101, 213, 62, 223, 1, 27, 0, 0, 0, 23, 72, 118, 232, 0]
 
-[submit]
-prune_height = 200
+[[chain.cardano.custom_utxos]]
+ref = ["2ecf77d32245449d50f7d07238eef4d4a5e16fe35ac6574d537f2d711088e8a4", 0]
+era = 7
+cbor = [162, 0, 88, 29, 96, 99, 200, 189, 42, 33, 58, 198, 103, 9, 130, 227, 119, 177, 45, 193, 219, 164, 255, 90, 117, 32, 244, 35, 33, 101, 62, 168, 179, 1, 27, 0, 0, 0, 23, 72, 118, 232, 0]
+
+[upstream]
+type = "emulator"
+block_production_interval = 10
+
+[storage]
+path = "data"
+
+[mempool]
+retain_confirmed_blocks = 200
 
 [serve.grpc]
 listen_address = "[::]:50051"
@@ -25,15 +41,7 @@ listen_address = "[::]:50051"
 listen_path = "dolos.socket"
 
 [serve.trp]
-listen_address = "[::]:8000"
-
-[chain]
-type = "cardano"
-magic = 2
-is_testnet = true
-
-[telemetry]
-enabled = true
+listen_address = "[::]:8164"
 
 [logging]
-max_level = "DEBUG"
+level = "debug"

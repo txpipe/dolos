@@ -5,22 +5,32 @@ use std::sync::Arc;
 
 use crate::owned::OwnedMultiEraOutput;
 
+/// The value a block's output is stored with: the output, and the position of
+/// the transaction at `tx_index` in the block.
+fn produced_value(block: &MultiEraBlock, tx_index: usize, output: MultiEraOutput) -> UtxoValue {
+    let position = UtxoPosition::of_tx(block.slot(), tx_index);
+    UtxoValue::new(output.into(), Some(position))
+}
+
 pub fn compute_block_dependencies(block: &MultiEraBlock, loaded: &mut RawUtxoMap) -> Vec<TxoRef> {
-    let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
+    let txs = block.txs();
 
     // TODO: turn this into "referenced utxos" instead of just consumed.
 
     // add all produced utxos to the loaded map
-    for (tx_hash, tx) in txs.iter() {
+    for (tx_index, tx) in txs.iter().enumerate() {
+        let tx_hash = tx.hash();
+
         for (idx, utxo) in tx.produces() {
-            let utxo_ref = TxoRef(*tx_hash, idx as u32);
-            loaded.insert(utxo_ref, Arc::new(utxo.into()));
+            let utxo_ref = TxoRef(tx_hash, idx as u32);
+            let value = produced_value(block, tx_index, utxo);
+            loaded.insert(utxo_ref, Arc::new(value));
         }
     }
 
     // find all consumed utxos in the block
     let consumed: HashSet<_> = txs
-        .values()
+        .iter()
         .flat_map(MultiEraTx::consumes)
         .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
         .collect();
@@ -47,20 +57,23 @@ pub fn compute_block_dependencies(block: &MultiEraBlock, loaded: &mut RawUtxoMap
 /// return an error if any of the assumed invariants have been broken in the
 /// process of computing the delta, but it doesn't provide a comprehensive
 /// validation of the ledger rules.
+///
+/// Each produced UTxO carries its creation position: the block's slot and its
+/// transaction's index in the block. A consumed UTxO keeps the value it was
+/// loaded with, position included.
 pub fn compute_apply_delta(
     block: &MultiEraBlock,
     loaded: &HashMap<TxoRef, OwnedMultiEraOutput>,
 ) -> Result<UtxoSetDelta, BrokenInvariant> {
     let mut delta = UtxoSetDelta::default();
 
-    let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
+    for (tx_index, tx) in block.txs().iter().enumerate() {
+        let tx_hash = tx.hash();
 
-    for (tx_hash, tx) in txs.iter() {
         for (idx, produced) in tx.produces() {
-            let uxto_ref = TxoRef(*tx_hash, idx as u32);
-            delta
-                .produced_utxo
-                .insert(uxto_ref, Arc::new(produced.into()));
+            let uxto_ref = TxoRef(tx_hash, idx as u32);
+            let value = produced_value(block, tx_index, produced);
+            delta.produced_utxo.insert(uxto_ref, Arc::new(value));
         }
 
         for consumed in tx.consumes() {
@@ -79,22 +92,28 @@ pub fn compute_apply_delta(
     Ok(delta)
 }
 
+/// The reverse of [`compute_apply_delta`]: the block's outputs are undone at
+/// the position they were produced at, and the UTxOs it consumed are recovered
+/// with the value the WAL kept for them, position included.
 pub fn compute_undo_delta(
     block: &MultiEraBlock,
     context: &HashMap<TxoRef, OwnedMultiEraOutput>,
 ) -> Result<UtxoSetDelta, BrokenInvariant> {
     let mut delta = UtxoSetDelta::default();
 
-    let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
+    let txs = block.txs();
 
-    for (tx_hash, tx) in txs.iter() {
+    for (tx_index, tx) in txs.iter().enumerate() {
+        let tx_hash = tx.hash();
+
         for (idx, body) in tx.produces() {
-            let utxo_ref = TxoRef(*tx_hash, idx as u32);
-            delta.undone_utxo.insert(utxo_ref, Arc::new(body.into()));
+            let utxo_ref = TxoRef(tx_hash, idx as u32);
+            let value = produced_value(block, tx_index, body);
+            delta.undone_utxo.insert(utxo_ref, Arc::new(value));
         }
     }
 
-    for (_, tx) in txs.iter() {
+    for tx in txs.iter() {
         for consumed in tx.consumes() {
             let stxi_ref = TxoRef(*consumed.hash(), consumed.index() as u32);
 
@@ -111,6 +130,7 @@ pub fn compute_undo_delta(
     Ok(delta)
 }
 
+/// The genesis UTxOs. No block produced them, so they carry no position.
 pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
     let mut delta = UtxoSetDelta::default();
 
@@ -129,9 +149,8 @@ pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
             };
 
             let utxo_body = MultiEraOutput::from_byron(&utxo_body).to_owned();
-            delta
-                .produced_utxo
-                .insert(utxo_ref, Arc::new(utxo_body.into()));
+            let value = UtxoValue::new(utxo_body.into(), None);
+            delta.produced_utxo.insert(utxo_ref, Arc::new(value));
         }
     }
     // shelley
@@ -149,16 +168,16 @@ pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
                 pallas::ledger::primitives::conway::TransactionOutput::Legacy(utxo_body.into());
 
             let utxo_body = MultiEraOutput::from_conway(&utxo_body).to_owned();
+            let value = UtxoValue::new(utxo_body.into(), None);
 
-            delta
-                .produced_utxo
-                .insert(utxo_ref, Arc::new(utxo_body.into()));
+            delta.produced_utxo.insert(utxo_ref, Arc::new(value));
         }
     }
 
     delta
 }
 
+/// The configured UTxOs. No block produced them, so they carry no position.
 pub fn build_custom_utxos_delta(
     config: &crate::CardanoLogicConfig,
 ) -> Result<UtxoSetDelta, ChainError> {
@@ -169,11 +188,11 @@ pub fn build_custom_utxos_delta(
             .era
             .unwrap_or(pallas::ledger::traverse::Era::Conway.into());
 
-        let eracbor = EraCbor(era, utxo.cbor.clone());
+        let value = UtxoValue::new(EraCbor(era, utxo.cbor.clone()), None);
 
         delta
             .produced_utxo
-            .insert(utxo.ref_.clone(), Arc::new(eracbor));
+            .insert(utxo.ref_.clone(), Arc::new(value));
     }
 
     Ok(delta)
@@ -189,6 +208,8 @@ mod tests {
 
     use super::*;
 
+    /// The block's inputs, each stored at a position of its own: slot 1, tx
+    /// index the input's rank among the block's inputs.
     fn fake_slice_for_block(block: &MultiEraBlock) -> HashMap<TxoRef, OwnedMultiEraOutput> {
         let valid_utxo = block
             .txs()
@@ -204,12 +225,13 @@ mod tests {
             .iter()
             .flat_map(MultiEraTx::consumes)
             .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
-            .map(|key| {
+            .enumerate()
+            .map(|(rank, key)| {
                 (
                     key,
-                    OwnedMultiEraOutput::decode(Arc::new(EraCbor(
-                        block.era().into(),
-                        valid_utxo.clone(),
+                    OwnedMultiEraOutput::decode(Arc::new(UtxoValue::new(
+                        EraCbor(block.era().into(), valid_utxo.clone()),
+                        Some(UtxoPosition::of_tx(1, rank)),
                     )))
                     .unwrap(),
                 )
@@ -316,6 +338,116 @@ mod tests {
                 assert_eq!(utxo, expected);
             }
         }
+    }
+
+    /// Every produced UTxO is stored at its block's slot and its tx's index in
+    /// the block; every consumed one keeps the value, position included, it
+    /// was loaded with.
+    #[test]
+    fn apply_gives_each_produced_utxo_its_tx_position() {
+        let cbor = load_test_block("alonzo27.block");
+        let block = MultiEraBlock::decode(&cbor).unwrap();
+        let context = fake_slice_for_block(&block);
+
+        assert!(block.txs().len() > 1, "the block needs several txs");
+
+        let delta = super::compute_apply_delta(&block, &context).unwrap();
+
+        for (tx_index, tx) in block.txs().iter().enumerate() {
+            let expected = UtxoPosition::of_tx(block.slot(), tx_index);
+
+            for (idx, _) in tx.produces() {
+                let value = &delta.produced_utxo[&TxoRef(tx.hash(), idx as u32)];
+                assert_eq!(value.position(), Some(expected));
+            }
+
+            for input in tx.consumes() {
+                let txo_ref = TxoRef(*input.hash(), input.index() as u32);
+                let loaded = context[&txo_ref].borrow_owner();
+                assert_eq!(delta.consumed_utxo[&txo_ref], *loaded);
+            }
+        }
+    }
+
+    /// The dependencies a block resolves itself — its own outputs, which a
+    /// later tx in the batch may spend — carry the same position the apply
+    /// path stores them at.
+    #[test]
+    fn block_dependencies_carry_the_produced_positions() {
+        let cbor = load_test_block("alonzo27.block");
+        let block = MultiEraBlock::decode(&cbor).unwrap();
+        let context = fake_slice_for_block(&block);
+
+        let mut loaded = RawUtxoMap::new();
+        compute_block_dependencies(&block, &mut loaded);
+
+        let delta = super::compute_apply_delta(&block, &context).unwrap();
+
+        for (txo_ref, value) in &delta.produced_utxo {
+            assert_eq!(&loaded[txo_ref], value);
+        }
+    }
+
+    /// Undo takes the block's outputs back out at the position apply stored
+    /// them at, and restores each consumed UTxO at its original position.
+    #[test]
+    fn undo_restores_consumed_utxos_at_their_original_position() {
+        let cbor = load_test_block("alonzo27.block");
+        let block = MultiEraBlock::decode(&cbor).unwrap();
+        let context = fake_slice_for_block(&block);
+
+        let apply = super::compute_apply_delta(&block, &context).unwrap();
+        let undo = super::compute_undo_delta(&block, &context).unwrap();
+
+        assert_eq!(undo.undone_utxo, apply.produced_utxo);
+        assert_eq!(undo.recovered_stxi, apply.consumed_utxo);
+
+        let positions: HashSet<_> = undo
+            .recovered_stxi
+            .values()
+            .map(|value| value.position())
+            .collect();
+        assert!(
+            positions.len() > 1,
+            "the inputs need distinct positions to tell them apart"
+        );
+    }
+
+    /// No block produced the genesis UTxOs (AVVM ones included) or the
+    /// configured ones, so none has a position.
+    #[test]
+    fn origin_and_configured_utxos_carry_no_position() {
+        for network in ["mainnet", "preview"] {
+            let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+                .join("test_data")
+                .join(network)
+                .join("genesis");
+
+            let genesis = crate::utils::load_genesis(&path);
+            let delta = compute_origin_delta(&genesis);
+
+            assert!(!delta.produced_utxo.is_empty());
+            assert!(delta
+                .produced_utxo
+                .values()
+                .all(|value| value.position().is_none()));
+        }
+
+        let config = crate::CardanoLogicConfig {
+            custom_utxos: vec![dolos_core::config::CustomUtxo {
+                ref_: TxoRef(Hash::from([7; 32]), 1),
+                era: None,
+                cbor: vec![0x82, 0x00, 0x00],
+            }],
+            ..Default::default()
+        };
+
+        let delta = build_custom_utxos_delta(&config).unwrap();
+        assert_eq!(delta.produced_utxo.len(), 1);
+        assert!(delta
+            .produced_utxo
+            .values()
+            .all(|value| value.position().is_none()));
     }
 
     #[test]

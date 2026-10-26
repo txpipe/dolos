@@ -168,6 +168,8 @@ pub struct ArchivePreset {
     pub logs: KeyspaceTuning,
     pub tags: KeyspaceTuning,
     pub exact: KeyspaceTuning,
+    pub entity: KeyspaceTuning,
+    pub meta: KeyspaceTuning,
 }
 
 impl ArchivePreset {
@@ -177,6 +179,8 @@ impl ArchivePreset {
         logs: KeyspaceTuning::FJALL_DEFAULT,
         tags: KeyspaceTuning::INDEX,
         exact: KeyspaceTuning::INDEX,
+        entity: KeyspaceTuning::INDEX,
+        meta: KeyspaceTuning::FJALL_DEFAULT,
     };
 }
 
@@ -386,6 +390,8 @@ mod tests {
             logs,
             tags,
             exact,
+            entity,
+            meta,
         } = ArchivePreset::STANDARD;
 
         assert_eq!(database, DATABASE);
@@ -393,6 +399,8 @@ mod tests {
         assert_eq!(logs, PRIMARY);
         assert_eq!(tags, INDEX);
         assert_eq!(exact, INDEX);
+        assert_eq!(entity, INDEX);
+        assert_eq!(meta, PRIMARY);
     }
 
     #[test]

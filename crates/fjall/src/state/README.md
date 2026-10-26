@@ -16,7 +16,7 @@ The state store is organized into **4 keyspaces** based on access patterns, rath
 
 | Keyspace | Name | Purpose | Access Pattern |
 |----------|------|---------|----------------|
-| 1 | `state-cursor` | Chain position tracking | Single key read/write |
+| 1 | `state-cursor` | Chain position and compatibility identity | Single key reads/writes |
 | 2 | `state-utxos` | UTxO set storage | Point lookups by TxoRef |
 | 3 | `state-entities` | All entity types | Point lookups and range scans |
 | 4 | `state-tags` | Live-UTxO tags | Prefix scans by dimension and lookup key |
@@ -25,11 +25,19 @@ The state store is organized into **4 keyspaces** based on access patterns, rath
 
 ### Cursor Keyspace (`state-cursor`)
 
-Single entry storing the current chain position:
+The current chain position:
 
 ```
 Key:   [0x00]
 Value: bincode-serialized ChainPoint
+```
+
+And the compatibility identity the store recorded when it was created, which
+the node's store opener checks before anything else (see the data layer docs):
+
+```
+Key:   "identity"
+Value: UTF-8 contract identifier, e.g. "v2-alpha.1"
 ```
 
 ### UTxO Keyspace (`state-utxos`)
@@ -38,13 +46,17 @@ UTxO set indexed by transaction output reference:
 
 ```
 Key:   [tx_hash:32][output_index:4]  (36 bytes)
-Value: [era:2][cbor:...]
+Value: CBOR [era, body, slot, tx_index]   or   [era, body]
 ```
 
 - `tx_hash`: 32-byte transaction hash
 - `output_index`: 4-byte big-endian u32
-- `era`: 2-byte big-endian u16 (Cardano era identifier)
-- `cbor`: CBOR-encoded UTxO data
+- `era`: uint, the Cardano era identifier
+- `body`: bytes, the CBOR-encoded output
+- `slot`, `tx_index`: uints, the creation position — the slot of the block
+  that produced the UTxO and the producing transaction's index in it. A UTxO
+  no block produced (genesis, AVVM, configured) has none and stores the
+  two-element form. `dolos_core::UtxoValue` is the codec.
 
 ### Entities Keyspace (`state-entities`)
 
@@ -65,17 +77,28 @@ A range over a namespace starts at `ns_hash ‖ start` and ends at `ns_hash ‖ 
 The live-UTxO tags: which UTxOs answer under an address, payment credential, stake credential, policy id, asset id or reference script.
 
 ```
-Key:   [dim_hash:8][lookup_key:var][txo_ref:36]
+Key:   [dim_hash:8][lookup_key:var][slot:8][tx_index + 1:2][txo_ref:36]
 Value: (empty)
 ```
 
 - `dim_hash`: `xxh3("utxo:" + dimension)` — see `keys.rs`, `hash_dimension`
 - `lookup_key`: the logical key, stored verbatim so a prefix scan can find it
+- `slot`, `tx_index + 1`: the UTxO's creation position, big-endian
+  (`UtxoPosition::tag_order`). A UTxO without one writes ten zero bytes; the
+  index is offset by one so that no block position, slot 0's first
+  transaction included, sorts with them.
 - `txo_ref`: `[tx_hash:32][index:4]`, the UTxO the tag points at
 
-They are a projection of the UTxO set, so they are written in the same batch as
-the set (`StateWriter::apply_utxo_tags` / `undo_utxo_tags`) and read through
-`StateStore::utxos_by_tag`.
+A lookup key's refs therefore sort in creation order, then by ref. They are a
+projection of the UTxO set, so they are written in the same batch as the set
+(`StateWriter::apply_utxo_tags` / `undo_utxo_tags`) and read through
+`StateStore::utxos_by_tag` (the whole set), `StateStore::utxos_by_tag_page`
+(one page of entries in creation order, forward or reverse, from an offset or
+just past an entry, which stops at the page's end) or
+`StateStore::utxos_with_tag` (a point read of each given entry's full key).
+The scans keep only keys of the lookup key's exact length: a longer key under
+the same prefix belongs to a longer lookup key, such as an asset name that
+extends another, and is stepped over.
 
 Note the asymmetry with the archive's tags, which hash their key: here the lookup key is stored whole, because a live-UTxO query knows the key it is asking about and wants the exact refs back.
 
@@ -159,7 +182,7 @@ for result in iter {
 // Stream the whole UTxO set (snapshot export, live-UTxO index rebuild)
 let iter = store.iter_utxos()?;
 for result in iter {
-    let (txo_ref, era_cbor) = result?;
+    let (txo_ref, value) = result?;
     // Process UTxO
 }
 ```

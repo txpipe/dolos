@@ -12,8 +12,9 @@
 use std::collections::BTreeMap;
 
 use dolos_core::{
-    save_entity_at, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain, EntityDelta as _,
-    Genesis, NsKey, RangeOf, StateEntity, StateStore, StateWriter,
+    save_entity_at, ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError,
+    ChainPoint, Domain, EntityDelta as _, Genesis, NsKey, RangeOf, StateEntity, StateStore,
+    StateWriter,
 };
 use tracing::{debug, instrument, trace, warn};
 
@@ -131,19 +132,22 @@ impl super::WorkContext {
 
     /// Commit a single per-shard run in one state transaction: stream the
     /// accounts of the shard's key ranges once, adding each to the shard's
-    /// tally as it stands, rotating it and writing it back, then apply the
-    /// shard's `EStartProgress` (carrying the tally) to `EpochState`.
+    /// tally and writing its stake-only account-epoch row to the archive as
+    /// it stands, then rotating it and writing it back. The shard's
+    /// `EStartProgress` (carrying the tally) applies to `EpochState` in the
+    /// same transaction, after the rows reach the archive.
     ///
     /// No per-account deltas are built: ESTART writes no WAL and is never
-    /// undone. A crash before the commit leaves the shard's rows untouched,
-    /// and the resumed boundary reads them again.
+    /// undone. A crash before the state commit leaves the shard's accounts
+    /// untouched, and the resumed boundary reads them again.
     ///
     /// **Does not advance the cursor.** Cursor moves only in
     /// `commit_finalize`.
-    #[instrument(skip(self, state))]
+    #[instrument(skip(self, state, archive))]
     pub fn commit_shard<D: Domain>(
         &mut self,
         state: &D::State,
+        archive: &D::Archive,
         shard_index: u32,
         total_shards: u32,
         ranges: Vec<RangeOf<AccountKey>>,
@@ -151,8 +155,10 @@ impl super::WorkContext {
         debug!("committing estart changes");
 
         let writer = state.start_writer()?;
+        let archive_writer = archive.start_writer()?;
 
         let next_epoch = self.starting_epoch_no();
+        let slot = self.account_epoch_slot();
         let mut tally = BTreeMap::new();
 
         for range in ranges {
@@ -160,6 +166,11 @@ impl super::WorkContext {
                 let (account_id, mut account) = record?;
 
                 self.tally_account(&mut tally, &account);
+
+                if let Some(row) = self.account_epoch_row(&account) {
+                    archive_writer.write_log_typed(slot, &account_id, &row)?;
+                }
+
                 account.rotate(next_epoch);
 
                 writer.write_entity_typed::<AccountState>(&account_id, &account)?;
@@ -175,6 +186,12 @@ impl super::WorkContext {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted shard deltas");
         }
 
+        // Archive first, as EWRAP's shards do: the state commit marks the
+        // shard done in `EStartProgress`, and a restart never re-runs a done
+        // shard. A crash in between re-runs the shard from the same
+        // pre-rotation accounts, which writes the same rows under the same
+        // keys again.
+        archive_writer.commit()?;
         writer.commit()?;
 
         debug!("estart commit complete");
@@ -299,7 +316,7 @@ mod tests {
             chain_summary: ChainSummary::default(),
             genesis: domain.genesis(),
             avvm_reclamation: Default::default(),
-            owners: Default::default(),
+            inputs: Default::default(),
             tally_protocol: EraKey::from(9),
             deltas: Default::default(),
             active_stake: None,

@@ -1,17 +1,16 @@
 //! UTxO table operations for fjall state store.
 //!
 //! UTxOs are stored with composite keys: `txhash[32] ++ idx[4]` (36 bytes)
-//! Values are: `era[2] ++ cbor[...]`
+//! Values are the CBOR [`UtxoValue`]: `[era, body, slot, tx_index]`, or
+//! `[era, body]` for a UTxO no block produced.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use dolos_core::{EraCbor, StateError, TxoRef, UtxoEntry, UtxoMap, UtxoSetDelta};
+use dolos_core::{StateError, TxoRef, UtxoEntry, UtxoMap, UtxoSetDelta, UtxoValue};
 use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
-use crate::keys::{
-    decode_txo_ref, decode_utxo_value, encode_txo_ref, encode_utxo_value, TXO_REF_SIZE,
-};
+use crate::keys::{decode_txo_ref, encode_txo_ref, TXO_REF_SIZE};
 use crate::Error;
 
 /// Apply UTxO delta to the UTxO keyspace.
@@ -24,17 +23,15 @@ pub fn apply_delta(
     delta: &UtxoSetDelta,
 ) -> Result<(), Error> {
     // Insert produced UTxOs
-    for (txo_ref, era_cbor) in &delta.produced_utxo {
+    for (txo_ref, value) in &delta.produced_utxo {
         let key = encode_txo_ref(txo_ref);
-        let value = encode_utxo_value(era_cbor.0, &era_cbor.1);
-        batch.insert(keyspace, key, value);
+        batch.insert(keyspace, key, value.encode_cbor());
     }
 
     // Insert recovered UTxOs (rollback: restore previously consumed)
-    for (txo_ref, era_cbor) in &delta.recovered_stxi {
+    for (txo_ref, value) in &delta.recovered_stxi {
         let key = encode_txo_ref(txo_ref);
-        let value = encode_utxo_value(era_cbor.0, &era_cbor.1);
-        batch.insert(keyspace, key, value);
+        batch.insert(keyspace, key, value.encode_cbor());
     }
 
     // Remove consumed UTxOs
@@ -54,7 +51,8 @@ pub fn apply_delta(
 
 /// Batch lookup UTxOs by refs.
 ///
-/// Returns a map of found UTxOs. Missing UTxOs are silently skipped.
+/// Returns a map of found UTxOs. Missing UTxOs are silently skipped; a value
+/// that does not decode is an error.
 ///
 /// Uses the `Readable` trait to support both direct keyspace access and
 /// snapshot-based reads. Snapshot-based reads avoid potential deadlocks with
@@ -70,9 +68,10 @@ pub fn get_utxos<R: Readable>(
         let key = encode_txo_ref(txo_ref);
 
         if let Some(value) = readable.get(keyspace, key).map_err(Error::Fjall)? {
-            if let Some((era, cbor)) = decode_utxo_value(&value) {
-                result.insert(txo_ref.clone(), Arc::new(EraCbor(era, cbor)));
-            }
+            let value = UtxoValue::decode_cbor(&value)
+                .map_err(|err| Error::Codec(format!("malformed utxo {txo_ref}: {err}")))?;
+
+            result.insert(txo_ref.clone(), Arc::new(value));
         }
     }
 
@@ -138,7 +137,7 @@ impl Iterator for UtxosIterator {
                         ))));
                     }
 
-                    let Some((era, cbor)) = decode_utxo_value(&value_bytes) else {
+                    let Ok(value) = UtxoValue::decode_cbor(&value_bytes) else {
                         self.done = true;
                         return Some(Err(StateError::InternalStoreError(
                             "malformed utxo entry: undecodable value".into(),
@@ -146,7 +145,7 @@ impl Iterator for UtxosIterator {
                     };
 
                     let txo_ref = decode_txo_ref(&key_bytes);
-                    Some(Ok((txo_ref, EraCbor(era, cbor))))
+                    Some(Ok((txo_ref, value)))
                 }
                 Err(e) => {
                     self.done = true;
