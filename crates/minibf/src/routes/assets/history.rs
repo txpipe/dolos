@@ -53,7 +53,7 @@ where
 
     let pagination = Pagination::try_from(params)?;
 
-    let (subject, state) = super::resolve_asset_state(&domain, &subject)?;
+    let (subject, state) = crate::mapping::assets::resolve_asset_state(&domain, &subject)?;
 
     let Some(initial_slot) = state.initial_slot else {
         return Ok(Json(vec![]));
