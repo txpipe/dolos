@@ -128,11 +128,14 @@ pub enum OnOverload {
 }
 
 #[derive(Debug)]
-struct FetchFailed(Option<DrepsInnerMetadataError>);
+struct FetchFailed {
+    url: String,
+    error: Option<DrepsInnerMetadataError>,
+}
 
 impl std::fmt::Display for FetchFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.0 {
+        match &self.error {
             Some(error) => f.write_str(&error.message),
             None => f.write_str("off-chain metadata fetch failed"),
         }
@@ -343,11 +346,26 @@ where
         filled => filled,
     };
 
+    // A joined fetch of the same hash can fail at another URL.
+    let filled = match filled {
+        Err(error)
+            if error
+                .downcast_fill::<FetchFailed>()
+                .is_some_and(|failed| failed.url != location.url) =>
+        {
+            let fill = fill_body(cache.clone(), location.clone(), namespaces, fetch());
+            cache
+                .fill_inline(namespaces.bodies, &location.hash, fill)
+                .await
+        }
+        filled => filled,
+    };
+
     match filled {
         Ok(body) if location.holds_hash(&body) => MetadataBody::Verified(body),
         Ok(_) => MetadataBody::Unfetched,
         Err(error) => match error.downcast_fill::<FetchFailed>() {
-            Some(FetchFailed(failure)) => MetadataBody::Failed(failure.clone()),
+            Some(failed) => MetadataBody::Failed(failed.error.clone()),
             None => {
                 tracing::warn!(url = %location.url, %error, "off-chain metadata not loaded");
                 MetadataBody::Unfetched
@@ -383,7 +401,10 @@ where
         Ok(body) => Ok(CacheEntry::new(body, 0)),
         Err(failure) => {
             keep_failure(&cache, &location, namespaces, &failure);
-            Err(FetchFailed(failure))
+            Err(FetchFailed {
+                url: location.url,
+                error: failure,
+            })
         }
     }
 }
@@ -737,6 +758,61 @@ mod tests {
             assert!(error.is_none());
         }
         assert_eq!(gated.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_shared_failure_at_another_url_retries_the_own_url() {
+        let cache = memory_cache();
+        let dead = pool_metadata(POOL_BODY);
+        let mut moved = dead.clone();
+        moved.url = "https://mirror.invalid/pool.json".to_string();
+        let failure = crate::mapping::pool_connection_error(&dead.url);
+        let (started, ready) = tokio::sync::oneshot::channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let first = tokio::spawn({
+            let (cache, dead, failure, release) = (
+                cache.clone(),
+                dead.clone(),
+                failure.clone(),
+                release.clone(),
+            );
+            let started = std::sync::Mutex::new(Some(started));
+            async move {
+                load_pool_metadata(&cache, &dead, move |_| {
+                    let (failure, release) = (failure.clone(), release.clone());
+                    let started = started.lock().unwrap().take();
+                    async move {
+                        if let Some(started) = started {
+                            let _ = started.send(());
+                        }
+                        release.notified().await;
+                        Err(Some(failure))
+                    }
+                })
+                .await
+            }
+        });
+        ready.await.unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let second = tokio::spawn({
+            let (cache, moved, fetch) = (
+                cache.clone(),
+                moved.clone(),
+                serving_pool(POOL_BODY, &calls),
+            );
+            async move { load_pool_metadata(&cache, &moved, fetch).await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        release.notify_one();
+
+        let (missing, error) = first.await.unwrap();
+        assert!(missing.is_none());
+        assert_eq!(error.unwrap(), failure);
+        let (fetched, error) = second.await.unwrap();
+        assert_eq!(fetched.unwrap().ticker, "POOL");
+        assert!(error.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
