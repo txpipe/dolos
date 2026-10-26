@@ -46,6 +46,21 @@ async fn proposal_metadata_parts(
     Ok((id, hash, metadata, error))
 }
 
+/// The anchor of the proposal `tx` proposed at action index `idx`, from its
+/// state row or its final row. Both metadata routes read it here. A proposal
+/// without an anchor is a 404.
+fn proposal_anchor<D: Domain>(
+    domain: &Facade<D>,
+    tx: Hash<32>,
+    idx: u32,
+) -> Result<Anchor, StatusCode> {
+    read_proposal_row(&domain.inner, &ProposalKey::new(tx, idx))?
+        .ok_or(StatusCode::NOT_FOUND)?
+        .into_state()
+        .anchor
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
 /// This endpoint returns proposal metadata by transaction hash and certificate
 /// index.
 ///
@@ -62,15 +77,11 @@ where
 {
     let tx: Hash<32> = tx_hash.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let state = read_proposal_row(&domain.inner, &ProposalKey::new(tx, cert_index))?
-        .ok_or(StatusCode::NOT_FOUND)?
-        .into_state();
-
-    let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let anchor = proposal_anchor(&domain, tx, cert_index)?;
 
     let gateways = domain.config.ipfs_gateways();
     let (id, hash, metadata, _error) =
-        proposal_metadata_parts(&tx, cert_index, anchor, &gateways).await?;
+        proposal_metadata_parts(&tx, cert_index, &anchor, &gateways).await?;
 
     let metadata = metadata.ok_or(StatusCode::NOT_FOUND)?;
 
@@ -78,7 +89,7 @@ where
         id,
         tx_hash: hex::encode(tx),
         cert_index: cert_index.try_into().map_err(|_| StatusCode::BAD_REQUEST)?,
-        url: anchor.url.clone(),
+        url: anchor.url,
         hash,
         json_metadata: Some(metadata.json),
         bytes: metadata.bytes,
@@ -98,14 +109,10 @@ where
 {
     let (tx, idx) = parse_gov_action_id(&gov_action_id).map_err(|_| Error::InvalidGovActionId)?;
 
-    let state = read_proposal_row(&domain.inner, &ProposalKey::new(tx, idx))?
-        .ok_or(StatusCode::NOT_FOUND)?
-        .into_state();
-
-    let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let anchor = proposal_anchor(&domain, tx, idx)?;
 
     let gateways = domain.config.ipfs_gateways();
-    let (id, hash, metadata, error) = proposal_metadata_parts(&tx, idx, anchor, &gateways).await?;
+    let (id, hash, metadata, error) = proposal_metadata_parts(&tx, idx, &anchor, &gateways).await?;
 
     let (json_metadata, bytes) = match metadata {
         Some(AnchorMetadata { json, bytes }) => (Some(json), Some(bytes)),
@@ -116,7 +123,7 @@ where
         id,
         tx_hash: hex::encode(tx),
         cert_index: idx.try_into().map_err(|_| StatusCode::BAD_REQUEST)?,
-        url: anchor.url.clone(),
+        url: anchor.url,
         hash,
         json_metadata,
         bytes,

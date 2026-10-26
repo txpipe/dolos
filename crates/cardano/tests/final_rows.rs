@@ -20,7 +20,10 @@ use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
     toy_domain::ToyDomain,
 };
-use pallas::ledger::primitives::{conway::Vote, Epoch, StakeCredential};
+use pallas::ledger::primitives::{
+    conway::{Anchor, Vote},
+    Epoch, StakeCredential,
+};
 
 fn devnet() -> Arc<Genesis> {
     Arc::new(dolos_cardano::include::devnet::load())
@@ -62,7 +65,7 @@ fn proposal(byte: u8, ratified: Option<Epoch>, canceled: Option<Epoch>) -> Propo
     }
 }
 
-/// Enacted at the boundary closing epoch 0.
+/// Enacted at the boundary closing epoch 0, with a metadata anchor.
 const ENACTED: u8 = 0xa1;
 /// Expired at the boundary closing epoch 0, which stamps the epoch it opens.
 const EXPIRED: u8 = 0xa2;
@@ -71,9 +74,19 @@ const LATER: u8 = 0xa3;
 /// Never resolved.
 const LIVE: u8 = 0xa4;
 
+fn anchor() -> Anchor {
+    Anchor {
+        url: "https://example.invalid/proposal".to_string(),
+        content_hash: [6u8; 32].into(),
+    }
+}
+
 fn proposals() -> Vec<ProposalState> {
     vec![
-        proposal(ENACTED, Some(0), None),
+        ProposalState {
+            anchor: Some(anchor()),
+            ..proposal(ENACTED, Some(0), None)
+        },
         proposal(EXPIRED, None, Some(1)),
         proposal(LATER, Some(1), None),
         proposal(LIVE, None, None),
@@ -185,6 +198,10 @@ fn a_resolved_proposal_moves_to_the_log_one_boundary_after_its_resolution() {
         expected.spo_votes.clear();
         assert_eq!(row, &expected);
     }
+
+    // the anchor the metadata routes serve, and its absence
+    assert_eq!(log[&key(ENACTED)].1.anchor, Some(anchor()));
+    assert_eq!(log[&key(EXPIRED)].1.anchor, None);
 
     // opening 3: LATER leaves, keyed at the start of epoch 2; LIVE stays
     open_next_epoch(&domain).unwrap();

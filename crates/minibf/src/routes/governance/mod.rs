@@ -228,21 +228,23 @@ pub(super) mod testing {
     use bech32::{Bech32, Hrp};
     use blockfrost_openapi::models::drep::Drep as DrepModel;
     use dolos_cardano::{
+        final_rows::FinalRows,
         model::{
             gov::{GovDistr, GovState},
             DRepSightingState,
         },
         pallas_extras,
     };
-    use dolos_core::StateWriter as _;
+    use dolos_core::{ArchiveWriter as _, StateWriter as _};
     use dolos_testing::{
         synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote},
         toy_domain::ToyDomain,
     };
     use pallas::{
+        codec::utils::Bytes,
         crypto::hash::Hash,
         ledger::primitives::{
-            conway::{Anchor, DRep, GovAction, Vote, Voter},
+            conway::{Anchor, DRep, GovAction, ProtocolParamUpdate, Vote, Voter},
             StakeCredential,
         },
     };
@@ -458,6 +460,185 @@ pub(super) mod testing {
 
     pub fn spo_voter() -> Voter {
         Voter::StakePoolKey([0x99u8; 28].into())
+    }
+
+    pub fn cc_script_voter() -> Voter {
+        Voter::ConstitutionalCommitteeScript([0xAAu8; 28].into())
+    }
+
+    pub fn cc_key_voter() -> Voter {
+        Voter::ConstitutionalCommitteeKey([0xBBu8; 28].into())
+    }
+
+    /// A pool that votes once, in the last block of [`resolved_votes_cfg`].
+    pub fn late_spo_voter() -> Voter {
+        Voter::StakePoolKey([0x98u8; 28].into())
+    }
+
+    pub fn empty_update() -> ProtocolParamUpdate {
+        ProtocolParamUpdate {
+            minfee_a: None,
+            minfee_b: None,
+            max_block_body_size: None,
+            max_transaction_size: None,
+            max_block_header_size: None,
+            key_deposit: None,
+            pool_deposit: None,
+            maximum_epoch: None,
+            desired_number_of_stake_pools: None,
+            pool_pledge_influence: None,
+            expansion_rate: None,
+            treasury_growth_rate: None,
+            min_pool_cost: None,
+            ada_per_utxo_byte: None,
+            cost_models_for_script_languages: None,
+            execution_costs: None,
+            max_tx_ex_units: None,
+            max_block_ex_units: None,
+            max_value_size: None,
+            collateral_percentage: None,
+            max_collateral_inputs: None,
+            pool_voting_thresholds: None,
+            drep_voting_thresholds: None,
+            min_committee_size: None,
+            committee_term_limit: None,
+            governance_action_validity_period: None,
+            governance_action_deposit: None,
+            drep_deposit: None,
+            drep_inactivity_period: None,
+            minfee_refscript_cost_per_byte: None,
+        }
+    }
+
+    /// Block 0 proposes two info actions, a treasury withdrawal and a
+    /// parameter change. Every later block votes on action 0, and the DRep
+    /// and the pool vote on it again two blocks later. Blocks 2 and 5 carry
+    /// the DRep's votes on action 1 beside another voter's vote on action 0,
+    /// so an oldest-first page that looks past itself reads blocks that the
+    /// DRep's tag and action 0's tag both name, without the DRep's vote on
+    /// action 0. Block 5 comes after the DRep's newest vote on action 0.
+    pub fn resolved_votes_cfg() -> SyntheticBlockConfig {
+        let withdrawal = GovAction::TreasuryWithdrawals(
+            BTreeMap::from([(
+                Bytes::from(
+                    hex::decode("e0788cf0519348fefaf3c721c5f5bd60b195b444fa0d8fb4512dc259be")
+                        .unwrap(),
+                ),
+                2000,
+            )]),
+            None,
+        );
+
+        let change = GovAction::ParameterChange(
+            None,
+            Box::new(ProtocolParamUpdate {
+                minfee_a: Some(999),
+                key_deposit: Some(5_000_000),
+                ..empty_update()
+            }),
+            None,
+        );
+
+        SyntheticBlockConfig {
+            block_count: 6,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![
+                vec![vec![
+                    GovAction::Information,
+                    GovAction::Information,
+                    withdrawal,
+                    change,
+                ]],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            ],
+            votes_by_block: vec![
+                vec![],
+                vec![vec![
+                    synthetic_vote(cc_key_voter(), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(drep_key_voter(), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(spo_voter(), 0, 0, 0, Vote::Abstain),
+                ]],
+                vec![vec![
+                    synthetic_vote(cc_script_voter(), 0, 0, 0, Vote::No),
+                    synthetic_vote(drep_key_voter(), 0, 0, 1, Vote::No),
+                ]],
+                vec![vec![synthetic_vote(
+                    drep_key_voter(),
+                    0,
+                    0,
+                    0,
+                    Vote::Abstain,
+                )]],
+                vec![vec![synthetic_vote(spo_voter(), 0, 0, 0, Vote::Yes)]],
+                vec![vec![
+                    synthetic_vote(late_spo_voter(), 0, 0, 0, Vote::Yes),
+                    synthetic_vote(drep_key_voter(), 0, 0, 1, Vote::Yes),
+                ]],
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// Enacts every proposal in state at the boundary closing epoch 0, as
+    /// EWRAP stamps it, and when `moved` moves each to the final-row log as
+    /// the ESTART opening epoch 2 does.
+    pub fn enact_proposals(domain: &ToyDomain, moved: bool) {
+        let rows: Vec<(ProposalKey, ProposalState)> = domain
+            .state()
+            .iter_entities_typed::<ProposalState>(None)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let writer = domain.state().start_writer().unwrap();
+
+        for (key, row) in &rows {
+            let mut row = row.clone();
+            row.ratified_epoch = Some(0);
+            writer.write_entity_typed(key, &row).unwrap();
+        }
+
+        writer.commit().unwrap();
+
+        if moved {
+            move_proposals_to_log(domain, true);
+        }
+    }
+
+    /// Moves every proposal in state to the final-row log, keyed at the start
+    /// of epoch 1, as the ESTART finalize commit does: the archive commits
+    /// first, then the state deletes the rows. Without `commit_state` the
+    /// state commit never runs, as after a crash between the two.
+    pub fn move_proposals_to_log(domain: &ToyDomain, commit_state: bool) {
+        let slot = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+            .unwrap()
+            .epoch_start(1);
+
+        let mut finals = FinalRows::default();
+
+        for row in domain
+            .state()
+            .iter_entities_typed::<ProposalState>(None)
+            .unwrap()
+        {
+            let (key, row) = row.unwrap();
+            finals.push(slot, &key, &row);
+        }
+
+        assert!(!finals.is_empty(), "no proposal to move");
+
+        let archive = domain.archive().start_writer().unwrap();
+        let state = domain.state().start_writer().unwrap();
+        finals.write(&state, &archive).unwrap();
+        archive.commit().unwrap();
+
+        if commit_state {
+            state.commit().unwrap();
+        }
     }
 }
 
@@ -720,132 +901,37 @@ mod tests {
 /// routes now read the votes from the archive alone.
 #[cfg(test)]
 mod final_row_tests {
-    use super::testing::*;
-    use crate::{mapping::bech32_gov_action, test_support::TestApp};
-    use dolos_cardano::{
-        final_rows::FinalRows,
-        model::{ProposalKey, ProposalState},
+    use super::{testing::*, visit_proposals};
+    use crate::{
+        mapping::bech32_gov_action,
+        test_support::{TestApp, TestDomainBuilder},
     };
-    use dolos_core::{
-        ArchiveStore as _, ArchiveWriter as _, Domain as _, StateStore as _, StateWriter as _,
+    use blockfrost_openapi::models::{
+        proposal_metadata_v2::ProposalMetadataV2, proposal_votes_inner::ProposalVotesInner,
     };
-    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
-    use pallas::{
-        crypto::hash::Hash,
-        ledger::primitives::conway::{GovAction, Vote, Voter},
-    };
-
-    fn cc_script_voter() -> Voter {
-        Voter::ConstitutionalCommitteeScript([0xAAu8; 28].into())
-    }
-
-    fn cc_key_voter() -> Voter {
-        Voter::ConstitutionalCommitteeKey([0xBBu8; 28].into())
-    }
-
-    /// Block 0 proposes two actions. Every later block votes on action 0,
-    /// and the DRep and the pool vote on it again two blocks later. Block 2
-    /// carries the DRep's vote on action 1, so an oldest-first page that
-    /// looks past itself reads a block the DRep's tag and action 0's tag both
-    /// name, without the DRep's vote on action 0.
-    fn cfg() -> SyntheticBlockConfig {
-        SyntheticBlockConfig {
-            block_count: 5,
-            txs_per_block: 1,
-            gov_actions_by_block: vec![
-                vec![vec![GovAction::Information, GovAction::Information]],
-                vec![],
-                vec![],
-                vec![],
-                vec![],
-            ],
-            votes_by_block: vec![
-                vec![],
-                vec![vec![
-                    synthetic_vote(cc_key_voter(), 0, 0, 0, Vote::Yes),
-                    synthetic_vote(drep_key_voter(), 0, 0, 0, Vote::Yes),
-                    synthetic_vote(spo_voter(), 0, 0, 0, Vote::Abstain),
-                ]],
-                vec![vec![
-                    synthetic_vote(cc_script_voter(), 0, 0, 0, Vote::No),
-                    synthetic_vote(drep_key_voter(), 0, 0, 1, Vote::No),
-                ]],
-                vec![vec![synthetic_vote(
-                    drep_key_voter(),
-                    0,
-                    0,
-                    0,
-                    Vote::Abstain,
-                )]],
-                vec![vec![synthetic_vote(spo_voter(), 0, 0, 0, Vote::Yes)]],
-            ],
-            ..Default::default()
-        }
-    }
-
-    /// Enacts every proposal of the chain at the boundary closing epoch 0,
-    /// as EWRAP stamps it, and when `moved` moves each to the final-row log
-    /// as the ESTART opening epoch 2 does: archive first, then the state.
-    fn enact(domain: &ToyDomain, moved: bool) {
-        let rows: Vec<(ProposalKey, ProposalState)> = domain
-            .state()
-            .iter_entities_typed::<ProposalState>(None)
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-
-        assert_eq!(rows.len(), 2);
-
-        let writer = domain.state().start_writer().unwrap();
-
-        for (key, row) in &rows {
-            let mut row = row.clone();
-            row.ratified_epoch = Some(0);
-            writer.write_entity_typed(key, &row).unwrap();
-        }
-
-        writer.commit().unwrap();
-
-        if !moved {
-            return;
-        }
-
-        let slot = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
-            .unwrap()
-            .epoch_start(1);
-
-        let mut finals = FinalRows::default();
-
-        for (key, _) in &rows {
-            let row = domain
-                .state()
-                .read_entity_typed::<ProposalState>(key)
-                .unwrap()
-                .unwrap();
-            finals.push(slot, key, &row);
-        }
-
-        let archive = domain.archive().start_writer().unwrap();
-        let state = domain.state().start_writer().unwrap();
-        finals.write(&state, &archive).unwrap();
-        archive.commit().unwrap();
-        state.commit().unwrap();
-
-        assert!(domain
-            .state()
-            .iter_entities_typed::<ProposalState>(None)
-            .unwrap()
-            .next()
-            .is_none());
-    }
+    use dolos_cardano::model::ProposalState;
+    use dolos_core::{ArchiveStore as _, Domain as _, StateStore as _};
+    use pallas::crypto::hash::Hash;
+    use serde_json::Value;
 
     fn app(moved: bool) -> TestApp {
-        TestApp::new_with_cfg_and_setup(cfg(), |domain, _| enact(domain, moved))
+        TestApp::new_with_cfg_and_setup(resolved_votes_cfg(), |domain, _| {
+            enact_proposals(domain, moved)
+        })
     }
 
-    async fn body(app: &TestApp, path: &str) -> (axum::http::StatusCode, String) {
+    /// The status and the JSON value of an answer, an empty body as `null`.
+    /// Values rather than bytes, because `governance_description` orders its
+    /// keys differently from one request to the next, on `main` too.
+    async fn body(app: &TestApp, path: &str) -> (axum::http::StatusCode, Value) {
         let (status, bytes) = app.get_bytes(path).await;
-        (status, String::from_utf8(bytes).unwrap())
+
+        let value = match bytes.is_empty() {
+            true => Value::Null,
+            false => serde_json::from_slice(&bytes).unwrap(),
+        };
+
+        (status, value)
     }
 
     #[tokio::test]
@@ -856,7 +942,8 @@ mod final_row_tests {
         let tx = tx_hash_of_block(&live, 0);
         assert_eq!(tx, tx_hash_of_block(&moved, 0));
 
-        let id = bech32_gov_action(&tx.parse::<Hash<32>>().unwrap(), 0).unwrap();
+        let id = |idx| bech32_gov_action(&tx.parse::<Hash<32>>().unwrap(), idx).unwrap();
+        let (info, withdrawal, change) = (id(0), id(2), id(3));
 
         let mut paths = vec![
             "/governance/proposals".to_string(),
@@ -865,10 +952,18 @@ mod final_row_tests {
             "/governance/committee/votes".to_string(),
             format!("/governance/proposals/{tx}/0"),
             format!("/governance/proposals/{tx}/1"),
-            format!("/governance/proposals/{id}"),
+            format!("/governance/proposals/{tx}/2"),
+            format!("/governance/proposals/{tx}/3"),
+            format!("/governance/proposals/{info}"),
             format!("/governance/proposals/{tx}/0/withdrawals"),
             format!("/governance/proposals/{tx}/0/parameters"),
-            format!("/governance/proposals/{id}/votes"),
+            format!("/governance/proposals/{tx}/2/withdrawals"),
+            format!("/governance/proposals/{withdrawal}/withdrawals"),
+            format!("/governance/proposals/{tx}/3/parameters"),
+            format!("/governance/proposals/{change}/parameters"),
+            format!("/governance/proposals/{tx}/0/metadata"),
+            format!("/governance/proposals/{info}/metadata"),
+            format!("/governance/proposals/{info}/votes"),
             format!("/governance/proposals/{tx}/1/votes"),
         ];
 
@@ -893,12 +988,86 @@ mod final_row_tests {
             assert_eq!(body(&moved, path).await, expected, "{path}");
         }
 
+        // the payout, the parameter change and the anchor come from the
+        // final row
+        let (status, withdrawals) =
+            body(&moved, &format!("/governance/proposals/{tx}/2/withdrawals")).await;
+        assert_eq!(status, 200);
+        assert!(withdrawals.as_array().is_some_and(|rows| !rows.is_empty()));
+
+        let (status, _) = body(&moved, &format!("/governance/proposals/{tx}/3/parameters")).await;
+        assert_eq!(status, 200);
+
+        let (status, metadata) =
+            body(&moved, &format!("/governance/proposals/{info}/metadata")).await;
+        assert_eq!(status, 200);
+        let metadata: ProposalMetadataV2 = serde_json::from_value(metadata).unwrap();
+        assert_eq!(metadata.url, "https://example.invalid/proposal");
+
         // the votes the archive alone tells apart: the DRep's and the pool's
         // first votes were superseded two blocks later
         let (_, votes) = body(&moved, &format!("/governance/proposals/{tx}/0/votes")).await;
-        let votes: Vec<blockfrost_openapi::models::proposal_votes_inner::ProposalVotesInner> =
-            serde_json::from_str(&votes).unwrap();
+        let votes: Vec<ProposalVotesInner> = serde_json::from_value(votes).unwrap();
         let counted: Vec<bool> = votes.iter().map(|row| row.counted).collect();
-        assert_eq!(counted, [true, false, false, true, true, true]);
+        assert_eq!(counted, [true, false, false, true, true, true, true]);
+
+        // the DRep's newest vote, on a page that ends before block 5, which
+        // both tags name for the DRep's vote on action 1
+        let path = format!("/governance/proposals/{tx}/0/votes?count=1&page=5");
+        let (_, page) = body(&moved, &path).await;
+        let page: Vec<ProposalVotesInner> = serde_json::from_value(page).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].voter, votes[1].voter);
+        assert!(page[0].counted);
+    }
+
+    /// ESTART commits a final row before it deletes the state row, so a crash
+    /// between the two leaves the proposal in both stores. The listing names
+    /// it once.
+    #[tokio::test]
+    async fn a_proposal_in_both_stores_is_listed_once() {
+        let live = app(false);
+        let both = TestApp::new_with_cfg_and_setup(resolved_votes_cfg(), |domain, _| {
+            enact_proposals(domain, false);
+            move_proposals_to_log(domain, false);
+        });
+
+        for path in [
+            "/governance/proposals",
+            "/governance/proposals?order=desc",
+            "/governance/proposals?count=1&page=2",
+        ] {
+            assert_eq!(body(&both, path).await, body(&live, path).await, "{path}");
+        }
+    }
+
+    /// The proposal in both stores is visited from its state row, vote maps
+    /// included.
+    #[test]
+    fn a_proposal_in_both_stores_is_visited_from_state() {
+        let (domain, _) = TestDomainBuilder::new_with_synthetic(resolved_votes_cfg()).finish();
+        enact_proposals(&domain, false);
+        move_proposals_to_log(&domain, false);
+
+        let in_state: Vec<ProposalState> = domain
+            .state()
+            .iter_entities_typed::<ProposalState>(None)
+            .unwrap()
+            .map(|row| row.unwrap().1)
+            .collect();
+
+        let logged = domain
+            .archive()
+            .iter_logs_typed::<ProposalState>(None)
+            .unwrap()
+            .count();
+
+        assert_eq!(logged, in_state.len());
+        assert!(in_state.iter().any(|row| !row.drep_votes.is_empty()));
+
+        let mut visited = vec![];
+        visit_proposals(&domain, |row| visited.push(row.clone())).unwrap();
+
+        assert_eq!(visited, in_state);
     }
 }

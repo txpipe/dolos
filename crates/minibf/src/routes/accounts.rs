@@ -1782,7 +1782,10 @@ mod tests {
         raw
     }
 
-    async fn assert_proposal_account_endpoints(valid: bool, resolved: bool) {
+    /// The account endpoints of an account that only proposals name as their
+    /// return account: proposals that are `valid`, `resolved` and, when
+    /// `moved`, moved to the final-row log as ESTART moves them.
+    async fn assert_proposal_account_endpoints(valid: bool, resolved: bool, moved: bool) {
         use dolos_core::import::ImportExt as _;
 
         let mut imported = None;
@@ -1820,6 +1823,18 @@ mod tests {
                 }
                 writer.commit().unwrap();
             }
+
+            if moved {
+                crate::routes::governance::testing::move_proposals_to_log(domain, true);
+
+                assert!(domain
+                    .state()
+                    .iter_entities_typed::<ProposalState>(None)
+                    .unwrap()
+                    .next()
+                    .is_none());
+            }
+
             imported = Some(domain.clone());
         });
 
@@ -1897,17 +1912,24 @@ mod tests {
 
     #[tokio::test]
     async fn accounts_named_only_by_proposal_returns_need_no_account_state() {
-        assert_proposal_account_endpoints(true, false).await;
+        assert_proposal_account_endpoints(true, false, false).await;
     }
 
     #[tokio::test]
     async fn accounts_named_only_by_resolved_proposals_remain_known() {
-        assert_proposal_account_endpoints(true, true).await;
+        assert_proposal_account_endpoints(true, true, false).await;
+    }
+
+    /// The final-row log still names the account once ESTART has moved the
+    /// proposals out of state.
+    #[tokio::test]
+    async fn accounts_named_only_by_moved_proposals_remain_known() {
+        assert_proposal_account_endpoints(true, true, true).await;
     }
 
     #[tokio::test]
     async fn accounts_named_only_by_invalid_proposals_remain_unknown() {
-        assert_proposal_account_endpoints(false, false).await;
+        assert_proposal_account_endpoints(false, false, false).await;
     }
 
     #[tokio::test]

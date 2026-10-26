@@ -157,41 +157,6 @@ mod tests {
         }
     }
 
-    fn empty_update() -> ProtocolParamUpdate {
-        ProtocolParamUpdate {
-            minfee_a: None,
-            minfee_b: None,
-            max_block_body_size: None,
-            max_transaction_size: None,
-            max_block_header_size: None,
-            key_deposit: None,
-            pool_deposit: None,
-            maximum_epoch: None,
-            desired_number_of_stake_pools: None,
-            pool_pledge_influence: None,
-            expansion_rate: None,
-            treasury_growth_rate: None,
-            min_pool_cost: None,
-            ada_per_utxo_byte: None,
-            cost_models_for_script_languages: None,
-            execution_costs: None,
-            max_tx_ex_units: None,
-            max_block_ex_units: None,
-            max_value_size: None,
-            collateral_percentage: None,
-            max_collateral_inputs: None,
-            pool_voting_thresholds: None,
-            drep_voting_thresholds: None,
-            min_committee_size: None,
-            committee_term_limit: None,
-            governance_action_validity_period: None,
-            governance_action_deposit: None,
-            drep_deposit: None,
-            drep_inactivity_period: None,
-            minfee_refscript_cost_per_byte: None,
-        }
-    }
-
     /// The thresholds preview's `aa1fe93e…0f6b#0` (pool) and
     /// `1fb793f6…425b#0` (DRep) set, in one update so a single fixture pins
     /// both groups.
