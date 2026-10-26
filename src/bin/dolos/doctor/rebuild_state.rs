@@ -2,10 +2,11 @@
 //! archive.
 //!
 //! The archive holds the full raw chain, and state computation reads nothing
-//! of it but the entity index below each batch, which a replay leaves as it
-//! was, so a synced instance can rebuild its state store offline by
-//! replaying its own archive through the import lifecycle: no network, no
-//! snapshot re-import, no re-writing of the archive. This is the
+//! of it but the entity index below each batch, which a replay without
+//! `--rewrite-logs` leaves as it was, so a synced instance can rebuild its
+//! state store offline by replaying its own archive through the import
+//! lifecycle: no network, no snapshot re-import, and without
+//! `--rewrite-logs` no re-writing of the archive. This is the
 //! debugging loop for state-math fixes — a full replay re-writes every store
 //! to test a change that only touches state.
 //!

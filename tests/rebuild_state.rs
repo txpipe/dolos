@@ -297,6 +297,16 @@ fn target_and_ephemeral_leave_the_instance_untouched() {
 /// starting at Alonzo, so ESTART seals an epoch two boundaries after it.
 /// Every block's first tx carries the same three scripts.
 fn sync_across_sealed_epochs() -> Node {
+    sync_across_sealed_epochs_from(350, 350, vec![])
+}
+
+/// [`sync_across_sealed_epochs`] with its blocks at `first_slot` and every
+/// `slot_step` after, and the given txs of each block phase-2 invalid.
+fn sync_across_sealed_epochs_from(
+    first_slot: u64,
+    slot_step: u64,
+    invalid_txs_by_block: Vec<Vec<u32>>,
+) -> Node {
     let node = Node::new();
     let root = node.root.path();
     dolos_cardano::include::devnet::save(root).unwrap();
@@ -338,8 +348,9 @@ fn sync_across_sealed_epochs() -> Node {
         dolos_testing::synthetic::SyntheticBlockConfig {
             block_count: 16,
             txs_per_block: 1,
-            slot: 350,
-            slot_step: 350,
+            slot: first_slot,
+            slot_step,
+            invalid_txs_by_block,
             plain_txs: true,
             seed_amount: dolos_testing::MIN_UTXO_AMOUNT + 7,
             asset_names_by_block: (0..16).map(|i| format!("M{i:03}")).collect(),
@@ -367,7 +378,7 @@ fn script_entries(archive: &dolos::storage::ArchiveStoreBackend) -> Vec<(Vec<u8>
 /// scripts every block repeats are staged once, in the epoch of their first
 /// carrier, long sealed when the replay reaches the later blocks. A witness
 /// that read no index would stage them again in the unsealed epochs and the
-/// rebuilt state would differ. The batch bound is the next test's.
+/// rebuilt state would differ. The batch bound is the next two tests'.
 #[test]
 fn a_target_rebuild_reads_the_source_entity_index_across_sealed_epochs() {
     let node = sync_across_sealed_epochs();
@@ -408,6 +419,33 @@ fn a_target_rebuild_reads_the_source_entity_index_across_sealed_epochs() {
 #[test]
 fn a_stopped_target_rebuild_stages_the_first_carrier() {
     let node = sync_across_sealed_epochs();
+
+    let target = node.root.path().join("rebuilt-state");
+    assert_ok(&rebuild(
+        &node,
+        &[
+            "--target",
+            &target.display().to_string(),
+            "--stop-epoch",
+            "1",
+        ],
+    ));
+
+    let rebuilt =
+        dolos::storage::StateStoreBackend::open_fjall(&target, dolos_fjall::Preset::Standard)
+            .unwrap();
+
+    let staged = &StateContents::read(&rebuilt).entities["first-scripts"];
+    assert_eq!(staged.len(), 3, "staged {staged:?}");
+}
+
+/// The chain's first block carries the scripts in an invalid tx only, so
+/// their first carrier is the second block, which shares a batch with the
+/// third: a witness bounded at the batch's last slot reads the first
+/// carrier's own index entries as earlier ones and stages nothing.
+#[test]
+fn a_stopped_target_rebuild_bounds_the_witness_at_the_batch_start() {
+    let node = sync_across_sealed_epochs_from(100, 200, vec![vec![0]]);
 
     let target = node.root.path().join("rebuilt-state");
     assert_ok(&rebuild(
