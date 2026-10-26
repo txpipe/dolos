@@ -772,8 +772,8 @@ mod tests {
     }
 
     /// A script that only the auxiliary data carries is tagged like a
-    /// witness: the registry lists it, so `script_by_hash` has to find the
-    /// block.
+    /// witness: the registry lists it, so its blocks are tagged like any
+    /// other carrier's.
     #[test]
     fn auxiliary_scripts_get_script_tags() {
         use pallas::codec::minicbor;

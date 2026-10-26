@@ -366,8 +366,8 @@ fn script_entries(archive: &dolos::storage::ArchiveStoreBackend) -> Vec<(Vec<u8>
 /// witness reads the source archive's entity index below each batch, so the
 /// scripts every block repeats are staged once, in the epoch of their first
 /// carrier, long sealed when the replay reaches the later blocks. A witness
-/// that read no index, or the index without the batch bound, would stage
-/// them again in the unsealed epochs and the rebuilt state would differ.
+/// that read no index would stage them again in the unsealed epochs and the
+/// rebuilt state would differ. The batch bound is the next test's.
 #[test]
 fn a_target_rebuild_reads_the_source_entity_index_across_sealed_epochs() {
     let node = sync_across_sealed_epochs();
@@ -398,6 +398,34 @@ fn a_target_rebuild_reads_the_source_entity_index_across_sealed_epochs() {
             .unwrap();
 
     assert_eq!(StateContents::read(&rebuilt), before.state);
+}
+
+/// `--target` stopped at epoch 1, before the replay seals the first
+/// carrier's epoch: the source index already holds the scripts' entries, at
+/// the first carrier's slot, so a witness that reads the index at or past
+/// the batch takes the first carrier for a repeat and stages nothing. Bounded
+/// below the batch, it stages each script once.
+#[test]
+fn a_stopped_target_rebuild_stages_the_first_carrier() {
+    let node = sync_across_sealed_epochs();
+
+    let target = node.root.path().join("rebuilt-state");
+    assert_ok(&rebuild(
+        &node,
+        &[
+            "--target",
+            &target.display().to_string(),
+            "--stop-epoch",
+            "1",
+        ],
+    ));
+
+    let rebuilt =
+        dolos::storage::StateStoreBackend::open_fjall(&target, dolos_fjall::Preset::Standard)
+            .unwrap();
+
+    let staged = &StateContents::read(&rebuilt).entities["first-scripts"];
+    assert_eq!(staged.len(), 3, "staged {staged:?}");
 }
 
 /// A `--target` holding a state store a release that predates store

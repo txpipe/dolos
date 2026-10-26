@@ -28,9 +28,11 @@
 //! leaves WAL(origin) behind a partial state cursor, which the next startup
 //! refuses loudly (`InconsistentState`); re-running this command recovers.
 //!
-//! An archive written before the entity index existed holds no entries, so
-//! `--target` and `--ephemeral` over it would take every script a sealed
-//! epoch saw for a new one. Rebuild such an archive in place with
+//! An archive whose seals wrote no script entries — one written before the
+//! entity index existed, or by an earlier build that kept the index but
+//! indexed no scripts — holds none, so a rebuild without `--rewrite-logs`
+//! over it, in place, `--target` or `--ephemeral`, would take every script a
+//! sealed epoch saw for a new one. Rebuild such an archive in place with
 //! `--rewrite-logs` first: its seals write the index as the replay goes.
 
 use std::io::IsTerminal as _;

@@ -282,7 +282,7 @@ pub fn entities(kind: EntityKind) -> Vec<EntityRecord> {
 ///
 /// One layer per namespace, so a kind's shards are the ones its spec'd count
 /// allows and its fixture keys reach: both of [`SHARDS`] for `assets`,
-/// `datums`, `scripts` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`,
+/// `datums` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`,
 /// and shard 0 for every single blob. Every state namespace is among them —
 /// which is what `the_golden_state_layers_cover_every_namespace` holds this
 /// to.

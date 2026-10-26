@@ -1117,10 +1117,9 @@ pub enum ArchiveStoreBackend {
     /// slot-derived and identical under replay, so re-written log rows
     /// overwrite the originals in place. Index entries are keyed by what they
     /// project and the slot, so a replay re-writes the ones the archive holds
-    /// and adds the ones an older indexer never emitted (the auxiliary-data
-    /// script tags `script_by_hash` falls back on). The replay re-runs every
-    /// seal, so it writes the entity index again with the sealed logs; an
-    /// entry is keyed by its id, so the rewrite lands in place.
+    /// and adds the ones an older indexer never emitted. The replay re-runs
+    /// every seal, so it writes the entity index again with the sealed logs;
+    /// an entry is keyed by its id, so the rewrite lands in place.
     ///
     /// [`Self::logs_only`] is the sole constructor, and it never nests one
     /// gate inside another.

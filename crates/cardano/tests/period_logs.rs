@@ -16,10 +16,12 @@ use dolos_cardano::{
     AccountKey, AssetKey, CardanoDelta,
 };
 use dolos_core::{
-    import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, AsyncQueryFacade, ChainPoint,
-    Domain as _, Genesis, RangeOf, StateStore as _, WalStore as _,
+    import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ArchiveWriter as _,
+    AsyncQueryFacade, ChainPoint, Domain as _, Genesis, RangeOf, StateStore as _, StateWriter as _,
+    WalStore as _,
 };
 use dolos_testing::{
+    faults::{FaultyToyDomain, TestFault},
     synthetic::{build_synthetic_blocks, sample_alonzo_block, SyntheticBlockConfig},
     toy_domain::ToyDomain,
     MIN_UTXO_AMOUNT,
@@ -508,6 +510,101 @@ async fn scripts_are_staged_once_across_sealed_epochs() {
         let found = query.script_by_hash(&hash).await.unwrap();
         assert!(found.is_some_and(|x| !x.script.is_empty()));
     }
+}
+
+/// `script_by_hash` reads the staged rows of every unsealed epoch, not only
+/// the tip's: the tip has crossed into epoch 1 while the scripts' first
+/// carrier's epoch 0 is still staged, and each script is found there.
+#[tokio::test]
+async fn script_by_hash_finds_a_script_staged_in_an_earlier_unsealed_epoch() {
+    let step = 350;
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 3,
+        txs_per_block: 1,
+        slot: step,
+        slot_step: step,
+        asset_names_by_block: (0..3).map(|i| format!("M{i:03}")).collect(),
+        ..Default::default()
+    });
+
+    let genesis = genesis_with(700, 10, 6);
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    let tip = domain.import_blocks(raw).unwrap();
+
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let (tip_epoch, _) = chain.slot_epoch(tip);
+    let (first_epoch, _) = chain.slot_epoch(step);
+
+    assert!(tip_epoch > first_epoch);
+
+    let staged = scripts(&domain);
+    assert_eq!(staged.len(), 3);
+    assert!(staged.iter().all(|(epoch, _, _)| *epoch == first_epoch));
+
+    let query = AsyncQueryFacade::new(domain.clone());
+
+    for (_, hash, _) in staged {
+        let found = query.script_by_hash(&Hash::from(hash)).await.unwrap();
+        assert!(found.is_some_and(|x| !x.script.is_empty()));
+    }
+}
+
+/// A seal that lands between `script_by_hash`'s first index read and its
+/// staged-row read moves the script out of the staged rows and into the
+/// index; the second index read finds it there.
+#[tokio::test]
+async fn script_by_hash_finds_a_script_sealed_during_the_lookup() {
+    let cfg = SyntheticBlockConfig {
+        block_count: 2,
+        txs_per_block: 1,
+        ..Default::default()
+    };
+
+    let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+    for block in blocks {
+        domain.roll_forward(block).unwrap();
+    }
+
+    let (key, row) = domain
+        .state()
+        .iter_entities_typed::<FirstScriptSet>(None)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+
+    let hash = key.member.0;
+    let faulty = FaultyToyDomain::new(domain.clone(), TestFault::None);
+
+    let sealer = domain.clone();
+    faulty.after_entity_slots(move || {
+        let writer = sealer.archive().start_writer().unwrap();
+        writer
+            .write_entity(entities::SCRIPT, hash.as_slice(), row.slot)
+            .unwrap();
+        writer.commit().unwrap();
+
+        let writer = sealer.state().start_writer().unwrap();
+        writer
+            .save_entity_typed::<FirstScriptSet>(&key, None)
+            .unwrap();
+        writer.commit().unwrap();
+    });
+
+    let found = AsyncQueryFacade::new(faulty)
+        .script_by_hash(&hash)
+        .await
+        .unwrap();
+
+    assert!(found.is_some_and(|x| !x.script.is_empty()));
+    assert!(scripts(&domain)
+        .iter()
+        .all(|(_, staged, _)| *staged != *hash));
 }
 
 /// A copy of the devnet genesis with `epoch_length`-slot epochs, security
