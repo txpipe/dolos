@@ -34,9 +34,9 @@ impl ChainStream {
                                 Ok(Some((next, _))) => {
                                     crawler = next;
                                 }
-                                _ => break,
+                                _ => return,
                             },
-                            None => break,
+                            None => return,
                         }
                     }
                 }
