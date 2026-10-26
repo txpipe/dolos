@@ -4,7 +4,7 @@ use pallas::network::miniprotocols::{
     chainsync::{BlockContent, ClientRequest, N2CServer, Tip},
     Point,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::prelude::*;
 
@@ -126,13 +126,43 @@ impl<D: Domain> Session<D> {
 
         let crawler = self.assume_crawler();
 
-        let next = crawler.next_block();
+        match crawler.next_block() {
+            Ok(Some((point, block))) => self.send_forward(point, block).await,
+            Ok(None) => self.send_await_and_next().await,
+            Err(err) => {
+                // The cursor can no longer load the next batch (the WAL dropped
+                // the overlap we were crawling from). Re-seek from the point we
+                // stalled on instead of unwinding the session's task.
+                warn!(%err, "crawler lost its overlap, re-seeking from the last point");
 
-        if let Some((point, block)) = next {
-            self.send_forward(point, block).await?;
-        } else {
-            self.send_await_and_next().await?;
+                self.reseek().await?;
+
+                self.send_await_and_next().await
+            }
         }
+    }
+
+    async fn reseek(&mut self) -> Result<(), Error> {
+        let point = self.assume_crawler().last_point().cloned();
+
+        let mut found = match &point {
+            Some(point) => {
+                ChainCrawler::<D>::start(&self.domain, &[point.clone()]).map_err(Error::server)?
+            }
+            None => None,
+        };
+
+        // Falling back to an empty intersect parks the cursor on the WAL tip so
+        // the session always keeps something to wait on.
+        if found.is_none() {
+            found = ChainCrawler::<D>::start(&self.domain, &[]).map_err(Error::server)?;
+        }
+
+        let Some((crawler, _)) = found else {
+            return Err(Error::custom("crawler could not re-seek"));
+        };
+
+        self.crawler = Some(crawler);
 
         Ok(())
     }
