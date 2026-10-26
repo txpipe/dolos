@@ -1,7 +1,5 @@
 use axum::http::StatusCode;
-use blockfrost_openapi::models::{
-    account_addresses_content_inner::AccountAddressesContentInner, account_content::AccountContent,
-};
+use blockfrost_openapi::models::account_content::AccountContent;
 use dolos_cardano::{model::AccountState, ChainSummary};
 use pallas::ledger::addresses::StakeAddress;
 
@@ -68,19 +66,6 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
             pool_id,
             drep_id,
         };
-
-        Ok(out)
-    }
-}
-
-impl<'a> IntoModel<Vec<AccountAddressesContentInner>> for AccountModelBuilder<'a> {
-    type SortKey = ();
-
-    fn into_model(self) -> Result<Vec<AccountAddressesContentInner>, StatusCode> {
-        let out: Vec<_> = vec![]
-            .into_iter()
-            .map(|x| AccountAddressesContentInner { address: x })
-            .collect();
 
         Ok(out)
     }

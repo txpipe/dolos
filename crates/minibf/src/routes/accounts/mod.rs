@@ -1,8 +1,4 @@
 use axum::http::StatusCode;
-use blockfrost_openapi::models::{
-    account_addresses_content_inner::AccountAddressesContentInner,
-    account_delegation_content_inner::AccountDelegationContentInner,
-};
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, SlotOrder},
     model::{AccountState, ProposalState},
@@ -19,7 +15,7 @@ use pallas::{
     },
 };
 
-use crate::{error::Error, mapping::IntoModel, pagination::Pagination, Facade};
+use crate::{error::Error, pagination::Pagination, Facade};
 
 mod addresses;
 mod addresses_assets;
@@ -235,26 +231,6 @@ impl<T> AccountActivityModelBuilder<T> {
         }
 
         Ok(())
-    }
-}
-
-impl IntoModel<Vec<AccountDelegationContentInner>>
-    for AccountActivityModelBuilder<AccountDelegationContentInner>
-{
-    type SortKey = ();
-
-    fn into_model(self) -> Result<Vec<AccountDelegationContentInner>, StatusCode> {
-        Ok(self.items)
-    }
-}
-
-impl IntoModel<Vec<AccountAddressesContentInner>>
-    for AccountActivityModelBuilder<AccountAddressesContentInner>
-{
-    type SortKey = ();
-
-    fn into_model(self) -> Result<Vec<AccountAddressesContentInner>, StatusCode> {
-        Ok(self.items)
     }
 }
 
