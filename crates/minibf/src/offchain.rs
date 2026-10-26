@@ -1,64 +1,109 @@
+use axum::body::Bytes;
 use blockfrost_openapi::models::{DrepsInnerMetadata, DrepsInnerMetadataError};
 use dolos_core::{CacheEntry, CacheError, CacheNamespace, CacheStore};
-use pallas::{crypto::hash::Hasher, ledger::primitives::conway::Anchor};
+use pallas::{
+    crypto::hash::Hasher,
+    ledger::primitives::{conway::Anchor, PoolMetadata},
+};
 use std::{convert::Infallible, future::Future, path::Path, time::Duration};
 
 use crate::mapping::{
     anchor_metadata_from_body, anchor_offchain_body, offchain_hash_mismatch_error,
+    pool_fetch_error, pool_offchain_body, PoolOffchainMetadata,
 };
 
-// The fetch itself, with its public-address gate, redirect limit, `ipfs://`
-// gateways and size cap, is the one `/governance/dreps/{drep_id}/metadata`
-// runs (`anchor_offchain_body`). This module only keeps what it returns, since
-// a list page asks for up to a hundred anchors at a time.
-
-/// How many anchor fetches the whole process runs at a time, whichever
-/// requests asked for them. A page answers by its deadline and leaves the
-/// fetches it started running, so without this bound pages served back to
-/// back could stack outbound connections well past what any one page opens.
-/// Cache hits never wait on it.
+/// The maximum concurrent fetches for each metadata cache.
 pub const MAX_CONCURRENT_FETCHES: usize = 16;
 
-/// How many anchor fetches the whole process keeps under way, those waiting
-/// to run included. A fetch outlives the page that started it, so without
-/// this bound pages served back to back, each missing on other anchors, would
-/// pile up detached fetches faster than [`MAX_CONCURRENT_FETCHES`] drains
-/// them. A miss past it starts no detached fetch, and its caller decides what
-/// it gets instead ([`OnOverload`]); a miss on an anchor already under way
-/// still joins that fetch.
+/// The maximum pending fetches for each metadata cache, including those
+/// running.
 pub const MAX_PENDING_LOADS: usize = 4 * MAX_CONCURRENT_FETCHES;
 
-/// A failed fetch is answered from the cache for this long, so a dead host
-/// costs one timeout per window instead of one per page render.
 const FAILURE_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// Verified bodies, keyed by the content hash of their anchor. The hash pins
-/// the content, so a body is immutable input and is kept in both tiers; every
-/// read checks it against the hash again.
+/// Verified DRep bodies, keyed by content hash, in memory and on disk.
 pub const OFFCHAIN: CacheNamespace = CacheNamespace::immutable("offchain", 1)
     .with_fill_limits(MAX_CONCURRENT_FETCHES, MAX_PENDING_LOADS);
 
-/// Failed fetches, keyed by the content hash and url of their anchor, in
-/// memory only.
+/// Failed DRep fetches, keyed by content hash and URL, in memory only.
 pub const OFFCHAIN_FAILURES: CacheNamespace =
     CacheNamespace::tip_scoped("offchain-failures", 1, FAILURE_TTL);
 
-/// Where earlier versions kept verified bodies, under the storage path.
+/// Verified pool bodies, keyed by content hash, in memory and on disk.
+pub const POOL_OFFCHAIN: CacheNamespace = CacheNamespace::immutable("pool-offchain", 1)
+    .with_fill_limits(MAX_CONCURRENT_FETCHES, MAX_PENDING_LOADS);
+
+/// Failed pool fetches, keyed by content hash and URL, in memory only.
+pub const POOL_OFFCHAIN_FAILURES: CacheNamespace =
+    CacheNamespace::tip_scoped("pool-offchain-failures", 1, FAILURE_TTL);
+
+#[derive(Clone, Copy)]
+struct MetadataCache {
+    bodies: &'static str,
+    failures: &'static str,
+}
+
+const DREP_CACHE: MetadataCache = MetadataCache {
+    bodies: OFFCHAIN.name,
+    failures: OFFCHAIN_FAILURES.name,
+};
+
+const POOL_CACHE: MetadataCache = MetadataCache {
+    bodies: POOL_OFFCHAIN.name,
+    failures: POOL_OFFCHAIN_FAILURES.name,
+};
+
+#[derive(Clone)]
+struct MetadataLocation {
+    url: String,
+    hash: Vec<u8>,
+}
+
+impl MetadataLocation {
+    fn holds_hash(&self, body: &[u8]) -> bool {
+        Hasher::<256>::hash(body).as_ref() == self.hash
+    }
+
+    fn failure_key(&self) -> Vec<u8> {
+        [self.hash.as_slice(), self.url.as_bytes()].concat()
+    }
+}
+
+impl From<&Anchor> for MetadataLocation {
+    fn from(anchor: &Anchor) -> Self {
+        Self {
+            url: anchor.url.clone(),
+            hash: anchor.content_hash.to_vec(),
+        }
+    }
+}
+
+impl From<&PoolMetadata> for MetadataLocation {
+    fn from(metadata: &PoolMetadata) -> Self {
+        Self {
+            url: metadata.url.clone(),
+            hash: metadata.hash.to_vec(),
+        }
+    }
+}
+
 const LEGACY_DIR: &str = "offchain";
 
-/// Registers the namespaces this module keeps. Without [`OFFCHAIN`] anchors
-/// go out unfetched until restart; without [`OFFCHAIN_FAILURES`] a failing
-/// anchor is fetched again on every request.
+/// Registers the pool and DRep metadata cache namespaces.
 pub fn register<C: CacheStore>(cache: &C) {
-    for namespace in [OFFCHAIN, OFFCHAIN_FAILURES] {
+    for namespace in [
+        OFFCHAIN,
+        OFFCHAIN_FAILURES,
+        POOL_OFFCHAIN,
+        POOL_OFFCHAIN_FAILURES,
+    ] {
         if let Err(error) = cache.register(namespace.clone()) {
             tracing::warn!(namespace = namespace.name, %error, "cannot register cache namespace");
         }
     }
 }
 
-/// Removes the directory earlier versions kept verified bodies in. The cache
-/// holds them now, and the directory is disposable.
+/// Removes the directory earlier versions kept verified bodies in.
 pub fn remove_legacy_dir(storage_path: &Path) {
     let dir = storage_path.join(LEGACY_DIR);
 
@@ -73,47 +118,33 @@ pub fn remove_legacy_dir(storage_path: &Path) {
     }
 }
 
-/// What a miss gets while [`MAX_PENDING_LOADS`] fetches are already under way.
+/// What a miss gets while the pending fetch limit is reached.
 #[derive(Debug, Clone, Copy)]
 pub enum OnOverload {
-    /// Its anchor alone, unfetched, the way a list row past its page deadline
-    /// goes out: a page shows what it has rather than wait on a backlog.
+    /// Return the anchor without metadata.
     Unfetched,
-    /// The fetch all the same, run within the caller's own request rather
-    /// than detached, so it lasts no longer than the request does: an
-    /// endpoint that serves one anchor owes its client the fetch or its error.
+    /// Fetch within the caller's request, under the concurrent fetch limit.
     Inline,
 }
 
-/// A failed fetch, as a cache fill reports it.
 #[derive(Debug)]
-struct FetchFailed(DrepsInnerMetadataError);
+struct FetchFailed(Option<DrepsInnerMetadataError>);
 
 impl std::fmt::Display for FetchFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0.message)
+        match &self.0 {
+            Some(error) => f.write_str(&error.message),
+            None => f.write_str("off-chain metadata fetch failed"),
+        }
     }
 }
 
 impl std::error::Error for FetchFailed {}
 
-fn errored(mut out: DrepsInnerMetadata, error: DrepsInnerMetadataError) -> DrepsInnerMetadata {
-    out.error = Some(Box::new(error));
-    out
-}
-
-/// The metadata of a verified body.
-fn verified(out: DrepsInnerMetadata, body: &[u8]) -> DrepsInnerMetadata {
-    match anchor_metadata_from_body(&out.url, body) {
-        Ok(metadata) => DrepsInnerMetadata {
-            json_metadata: Some(metadata.json),
-            bytes: Some(metadata.bytes),
-            ..out
-        },
-        // the spec keeps `json_metadata` and `bytes` null on failed
-        // validation and reports the failure through `error`
-        Err(error) => errored(out, error),
-    }
+enum MetadataBody {
+    Verified(Bytes),
+    Failed(Option<DrepsInnerMetadataError>),
+    Unfetched,
 }
 
 /// The metadata of `anchor` before any fetch: the anchor fields alone.
@@ -127,55 +158,69 @@ pub fn unfetched(anchor: &Anchor) -> DrepsInnerMetadata {
     }
 }
 
-fn holds_hash(anchor: &Anchor, body: &[u8]) -> bool {
-    Hasher::<256>::hash(body) == anchor.content_hash
+fn drep_metadata(anchor: &Anchor, body: MetadataBody) -> DrepsInnerMetadata {
+    let mut out = unfetched(anchor);
+
+    match body {
+        MetadataBody::Verified(body) => match anchor_metadata_from_body(&anchor.url, &body) {
+            Ok(metadata) => {
+                out.json_metadata = Some(metadata.json);
+                out.bytes = Some(metadata.bytes);
+            }
+            Err(error) => out.error = Some(Box::new(error)),
+        },
+        MetadataBody::Failed(error) => out.error = error.map(Box::new),
+        MetadataBody::Unfetched => {}
+    }
+
+    out
 }
 
-fn failure_key(anchor: &Anchor) -> Vec<u8> {
-    [anchor.content_hash.as_ref(), anchor.url.as_bytes()].concat()
-}
-
-/// What the cache holds for `anchor`: its body, else a fresh failure. A body
-/// that no longer matches its hash is removed. Reads the disk tier.
-fn cached<C: CacheStore>(cache: &C, anchor: &Anchor) -> Option<DrepsInnerMetadata> {
-    let key = anchor.content_hash.as_ref();
-
-    if let Some(body) = cache.get(OFFCHAIN.name, key) {
-        if holds_hash(anchor, &body) {
-            return Some(verified(unfetched(anchor), &body));
+fn cached<C: CacheStore>(
+    cache: &C,
+    location: &MetadataLocation,
+    namespaces: MetadataCache,
+) -> Option<MetadataBody> {
+    if let Some(body) = cache.get(namespaces.bodies, &location.hash) {
+        if location.holds_hash(&body) {
+            return Some(MetadataBody::Verified(body));
         }
 
-        tracing::warn!(url = %anchor.url, "dropping cached off-chain metadata that fails its hash");
+        tracing::warn!(url = %location.url, "dropping cached off-chain metadata that fails its hash");
 
-        if let Err(error) = cache.remove(OFFCHAIN.name, key) {
+        if let Err(error) = cache.remove(namespaces.bodies, &location.hash) {
             tracing::warn!(%error, "cannot remove cached off-chain metadata");
         }
     }
 
-    let failure = cache.get(OFFCHAIN_FAILURES.name, &failure_key(anchor))?;
-    let failure = serde_json::from_slice(&failure).ok()?;
-
-    Some(errored(unfetched(anchor), failure))
+    let failure = cache.get(namespaces.failures, &location.failure_key())?;
+    Some(MetadataBody::Failed(serde_json::from_slice(&failure).ok()?))
 }
 
-/// The metadata of `anchor` if the cache holds it already. It never goes to
-/// the network, so a page answers these rows without spending a fetch slot
-/// on them.
-pub async fn cached_drep_metadata<C: CacheStore>(
+async fn cached_body<C: CacheStore>(
     cache: &C,
-    anchor: &Anchor,
-) -> Option<DrepsInnerMetadata> {
-    let (cache, anchor) = (cache.clone(), anchor.clone());
+    location: &MetadataLocation,
+    namespaces: MetadataCache,
+) -> Option<MetadataBody> {
+    let (cache, location) = (cache.clone(), location.clone());
 
-    tokio::task::spawn_blocking(move || cached(&cache, &anchor))
+    tokio::task::spawn_blocking(move || cached(&cache, &location, namespaces))
         .await
         .ok()
         .flatten()
 }
 
-/// The metadata of `anchor`, as both `/governance/dreps` and
-/// `/governance/dreps/{drep_id}/metadata` serve it: from the cache, else
-/// fetched and kept there.
+/// Returns cached DRep metadata without a network request.
+pub async fn cached_drep_metadata<C: CacheStore>(
+    cache: &C,
+    anchor: &Anchor,
+) -> Option<DrepsInnerMetadata> {
+    cached_body(cache, &MetadataLocation::from(anchor), DREP_CACHE)
+        .await
+        .map(|body| drep_metadata(anchor, body))
+}
+
+/// Returns DRep metadata from the cache, or fetches and caches its body.
 pub async fn fetch_drep_metadata<C: CacheStore>(
     cache: &C,
     ipfs_gateways: &[String],
@@ -191,7 +236,6 @@ pub async fn fetch_drep_metadata<C: CacheStore>(
     load_drep_metadata(cache, anchor, on_overload, fetch).await
 }
 
-/// [`fetch_drep_metadata`] over `fetch`, the request for an anchor's body.
 async fn load_drep_metadata<C, F, Fut>(
     cache: &C,
     anchor: &Anchor,
@@ -203,89 +247,163 @@ where
     F: Fn(Anchor) -> Fut,
     Fut: Future<Output = Result<Vec<u8>, DrepsInnerMetadataError>> + Send + 'static,
 {
-    if let Some(cached) = cached_drep_metadata(cache, anchor).await {
+    let body = load_body(
+        cache,
+        &MetadataLocation::from(anchor),
+        DREP_CACHE,
+        on_overload,
+        || {
+            let fetched = fetch(anchor.clone());
+            async move { fetched.await.map_err(Some) }
+        },
+    )
+    .await;
+
+    drep_metadata(anchor, body)
+}
+
+/// Returns pool metadata and its error from the cache, or fetches and caches
+/// its body.
+pub async fn fetch_pool_metadata<C: CacheStore>(
+    cache: &C,
+    metadata: &PoolMetadata,
+) -> (
+    Option<PoolOffchainMetadata>,
+    Option<DrepsInnerMetadataError>,
+) {
+    load_pool_metadata(cache, metadata, |metadata| async move {
+        pool_offchain_body(&metadata.url)
+            .await
+            .map_err(|error| pool_fetch_error(&metadata.url, error))
+    })
+    .await
+}
+
+async fn load_pool_metadata<C, F, Fut>(
+    cache: &C,
+    metadata: &PoolMetadata,
+    fetch: F,
+) -> (
+    Option<PoolOffchainMetadata>,
+    Option<DrepsInnerMetadataError>,
+)
+where
+    C: CacheStore,
+    F: Fn(PoolMetadata) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, Option<DrepsInnerMetadataError>>> + Send + 'static,
+{
+    let body = load_body(
+        cache,
+        &MetadataLocation::from(metadata),
+        POOL_CACHE,
+        OnOverload::Inline,
+        || fetch(metadata.clone()),
+    )
+    .await;
+
+    match body {
+        MetadataBody::Verified(body) => (serde_json::from_slice(&body).ok(), None),
+        MetadataBody::Failed(error) => (None, error),
+        MetadataBody::Unfetched => (None, None),
+    }
+}
+
+async fn load_body<C, F, Fut>(
+    cache: &C,
+    location: &MetadataLocation,
+    namespaces: MetadataCache,
+    on_overload: OnOverload,
+    fetch: F,
+) -> MetadataBody
+where
+    C: CacheStore,
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, Option<DrepsInnerMetadataError>>> + Send + 'static,
+{
+    if let Some(cached) = cached_body(cache, location, namespaces).await {
         return cached;
     }
 
-    let fill = fill_body(cache.clone(), anchor.clone(), fetch(anchor.clone()));
-    let key = anchor.content_hash.as_ref();
+    let fill = fill_body(cache.clone(), location.clone(), namespaces, fetch());
 
-    // the fill runs on its own task, so it reaches its end, and fills the
-    // cache, whether or not anyone still waits for it
-    match cache.get_or_fill_async(OFFCHAIN.name, key, fill).await {
+    // A detached fill survives cancellation of the request that started it.
+    let filled = match cache
+        .get_or_fill_async(namespaces.bodies, &location.hash, fill)
+        .await
+    {
         Err(CacheError::Overloaded) => match on_overload {
-            OnOverload::Unfetched => unfetched(anchor),
+            OnOverload::Unfetched => return MetadataBody::Unfetched,
             OnOverload::Inline => {
-                // within the same fetch bound as a detached load
-                let fill = fill_body(cache.clone(), anchor.clone(), fetch(anchor.clone()));
-                rendered(anchor, cache.fill_inline(OFFCHAIN.name, key, fill).await)
+                let fill = fill_body(cache.clone(), location.clone(), namespaces, fetch());
+                cache
+                    .fill_inline(namespaces.bodies, &location.hash, fill)
+                    .await
             }
         },
-        filled => rendered(anchor, filled),
-    }
-}
-
-/// The metadata of `anchor` as its fill left it.
-fn rendered(anchor: &Anchor, filled: Result<impl AsRef<[u8]>, CacheError>) -> DrepsInnerMetadata {
-    let out = unfetched(anchor);
+        filled => filled,
+    };
 
     match filled {
-        Ok(body) if holds_hash(anchor, body.as_ref()) => verified(out, body.as_ref()),
-        // the next read drops it
-        Ok(_) => out,
+        Ok(body) if location.holds_hash(&body) => MetadataBody::Verified(body),
+        Ok(_) => MetadataBody::Unfetched,
         Err(error) => match error.downcast_fill::<FetchFailed>() {
-            Some(FetchFailed(failure)) => errored(out, failure.clone()),
-            // a fill that panicked, or a namespace that never registered
+            Some(FetchFailed(failure)) => MetadataBody::Failed(failure.clone()),
             None => {
-                tracing::warn!(url = %anchor.url, %error, "off-chain metadata not loaded");
-                out
+                tracing::warn!(url = %location.url, %error, "off-chain metadata not loaded");
+                MetadataBody::Unfetched
             }
         },
     }
 }
 
-/// The fill of `anchor`'s body: what `fetch` returns, once it matches the
-/// anchor's hash. A failure is kept in [`OFFCHAIN_FAILURES`] and nothing in
-/// [`OFFCHAIN`].
-async fn fill_body<C, Fut>(cache: C, anchor: Anchor, fetch: Fut) -> Result<CacheEntry, FetchFailed>
+async fn fill_body<C, Fut>(
+    cache: C,
+    location: MetadataLocation,
+    namespaces: MetadataCache,
+    fetch: Fut,
+) -> Result<CacheEntry, FetchFailed>
 where
     C: CacheStore,
-    Fut: Future<Output = Result<Vec<u8>, DrepsInnerMetadataError>>,
+    Fut: Future<Output = Result<Vec<u8>, Option<DrepsInnerMetadataError>>>,
 {
     let fetched = fetch.await.and_then(|body| {
-        if holds_hash(&anchor, &body) {
+        if location.holds_hash(&body) {
             return Ok(body);
         }
 
         let actual = Hasher::<256>::hash(&body);
-
-        Err(offchain_hash_mismatch_error(
-            &anchor.url,
-            anchor.content_hash.as_ref(),
+        Err(Some(offchain_hash_mismatch_error(
+            &location.url,
+            &location.hash,
             actual.as_ref(),
-        ))
+        )))
     });
 
     match fetched {
         Ok(body) => Ok(CacheEntry::new(body, 0)),
         Err(failure) => {
-            keep_failure(&cache, &anchor, &failure);
+            keep_failure(&cache, &location, namespaces, &failure);
             Err(FetchFailed(failure))
         }
     }
 }
 
-fn keep_failure<C: CacheStore>(cache: &C, anchor: &Anchor, failure: &DrepsInnerMetadataError) {
+fn keep_failure<C: CacheStore>(
+    cache: &C,
+    location: &MetadataLocation,
+    namespaces: MetadataCache,
+    failure: &Option<DrepsInnerMetadataError>,
+) {
     let Ok(value) = serde_json::to_vec(failure) else {
         return;
     };
 
-    let kept = cache.refill(OFFCHAIN_FAILURES.name, &failure_key(anchor), move || {
+    let kept = cache.refill(namespaces.failures, &location.failure_key(), move || {
         Ok::<_, Infallible>(CacheEntry::new(value, 0))
     });
 
     if let Err(error) = kept {
-        tracing::warn!(url = %anchor.url, %error, "cannot keep off-chain metadata failure");
+        tracing::warn!(url = %location.url, %error, "cannot keep off-chain metadata failure");
     }
 }
 
@@ -409,6 +527,216 @@ mod tests {
         fn open(&self) {
             self.gate.add_permits(Semaphore::MAX_PERMITS / 2);
         }
+    }
+
+    const POOL_BODY: &[u8] = br#"{"name":"Pool","description":"A pool","ticker":"POOL","homepage":"https://example.com"}"#;
+
+    fn pool_metadata(body: &[u8]) -> PoolMetadata {
+        PoolMetadata {
+            url: "https://example.invalid/pool.json".to_string(),
+            hash: Hasher::<256>::hash(body).to_vec().into(),
+        }
+    }
+
+    type PoolFetch =
+        futures::future::BoxFuture<'static, Result<Vec<u8>, Option<DrepsInnerMetadataError>>>;
+
+    fn serving_pool(
+        body: &'static [u8],
+        calls: &Arc<AtomicUsize>,
+    ) -> impl Fn(PoolMetadata) -> PoolFetch {
+        let calls = calls.clone();
+        move |_| {
+            let calls = calls.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(body.to_vec())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn pool_metadata_survives_restart_and_an_unavailable_url() {
+        let dir = temp_root("pool-restart");
+        let metadata = pool_metadata(POOL_BODY);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let domain = persistent_domain(&dir);
+        let (fetched, error) =
+            load_pool_metadata(domain.cache(), &metadata, serving_pool(POOL_BODY, &calls)).await;
+        assert_eq!(fetched.unwrap().ticker, "POOL");
+        assert!(error.is_none());
+        domain.cache().flush().unwrap();
+        drop(domain);
+
+        let domain = persistent_domain(&dir);
+        let (kept, error) = fetch_pool_metadata(domain.cache(), &metadata).await;
+        assert_eq!(kept.unwrap().ticker, "POOL");
+        assert!(error.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(domain);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pool_metadata_uses_the_hash_when_the_url_body_changes() {
+        let cache = memory_cache();
+        let metadata = pool_metadata(POOL_BODY);
+        let calls = Arc::new(AtomicUsize::new(0));
+        load_pool_metadata(&cache, &metadata, serving_pool(POOL_BODY, &calls)).await;
+
+        let changed = br#"{"name":"Other","description":"Changed","ticker":"NEW","homepage":"https://example.com"}"#;
+        let (kept, error) =
+            load_pool_metadata(&cache, &metadata, serving_pool(changed, &calls)).await;
+        assert_eq!(kept.unwrap().ticker, "POOL");
+        assert!(error.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        cache.wipe(POOL_OFFCHAIN.name).unwrap();
+        let (missing, error) =
+            load_pool_metadata(&cache, &metadata, serving_pool(changed, &calls)).await;
+        assert!(missing.is_none());
+        assert_eq!(error.unwrap().code, MetadataError::HashMismatch);
+        assert!(cache
+            .get(POOL_OFFCHAIN.name, metadata.hash.as_slice())
+            .is_none());
+
+        let updated = pool_metadata(changed);
+        let (fetched, error) =
+            load_pool_metadata(&cache, &updated, serving_pool(changed, &calls)).await;
+        assert_eq!(fetched.unwrap().ticker, "NEW");
+        assert!(error.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn pool_failures_expire_and_a_different_url_retries_immediately() {
+        let ttl = Duration::from_millis(100);
+        let cache = memory_cache();
+        cache
+            .register(CacheNamespace::tip_scoped(
+                POOL_OFFCHAIN_FAILURES.name,
+                1,
+                ttl,
+            ))
+            .unwrap();
+        let metadata = pool_metadata(POOL_BODY);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let failure = crate::mapping::pool_connection_error(&metadata.url);
+        let (missing, error) = load_pool_metadata(&cache, &metadata, |_| {
+            let failure = failure.clone();
+            async move { Err(Some(failure)) }
+        })
+        .await;
+        assert!(missing.is_none());
+        assert_eq!(error.unwrap(), failure);
+
+        let location = MetadataLocation::from(&metadata);
+        while cached_body(&cache, &location, POOL_CACHE).await.is_none() {
+            tokio::task::yield_now().await;
+        }
+        let (missing, error) =
+            load_pool_metadata(&cache, &metadata, serving_pool(POOL_BODY, &calls)).await;
+        assert!(missing.is_none());
+        assert_eq!(error.unwrap(), failure);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        tokio::time::sleep(ttl).await;
+        let (fetched, error) =
+            load_pool_metadata(&cache, &metadata, serving_pool(POOL_BODY, &calls)).await;
+        assert_eq!(fetched.unwrap().ticker, "POOL");
+        assert!(error.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        cache.wipe(POOL_OFFCHAIN.name).unwrap();
+        load_pool_metadata(&cache, &metadata, |_| {
+            let failure = failure.clone();
+            async move { Err(Some(failure)) }
+        })
+        .await;
+        while cached_body(&cache, &location, POOL_CACHE).await.is_none() {
+            tokio::task::yield_now().await;
+        }
+        let mut moved = metadata.clone();
+        moved.url.push_str("?mirror");
+        let (fetched, error) =
+            load_pool_metadata(&cache, &moved, serving_pool(POOL_BODY, &calls)).await;
+        assert_eq!(fetched.unwrap().ticker, "POOL");
+        assert!(error.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn pool_metadata_keeps_silent_failures_and_invalid_json_behavior() {
+        let cache = memory_cache();
+        let metadata = pool_metadata(POOL_BODY);
+        let (missing, error) = load_pool_metadata(&cache, &metadata, |_| async { Err(None) }).await;
+        assert!(missing.is_none());
+        assert!(error.is_none());
+        while cached_body(&cache, &MetadataLocation::from(&metadata), POOL_CACHE)
+            .await
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (missing, error) =
+            load_pool_metadata(&cache, &metadata, serving_pool(POOL_BODY, &calls)).await;
+        assert!(missing.is_none());
+        assert!(error.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        for body in [b"not json".as_slice(), b"{}".as_slice()] {
+            let (missing, error) =
+                load_pool_metadata(&cache, &pool_metadata(body), serving_pool(body, &calls)).await;
+            assert!(missing.is_none());
+            assert!(error.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn pool_and_drep_fetch_policies_do_not_share_entries_or_failures() {
+        let cache = memory_cache();
+        let metadata = pool_metadata(POOL_BODY);
+        let anchor = Anchor {
+            url: metadata.url.clone(),
+            content_hash: Hasher::<256>::hash(POOL_BODY),
+        };
+        cache_verified_body(&cache, &anchor, POOL_BODY).await;
+        let (missing, error) = fetch_pool_metadata(&cache, &metadata).await;
+        assert!(missing.is_none());
+        assert_eq!(error.unwrap().code, MetadataError::ConnectionError);
+        let drep = fetch_drep_metadata(&cache, &[], &anchor, OnOverload::Inline).await;
+        assert!(drep.error.is_none());
+        assert!(drep.json_metadata.is_some());
+    }
+
+    #[tokio::test]
+    async fn concurrent_pool_misses_share_one_fetch() {
+        let cache = memory_cache();
+        let metadata = pool_metadata(POOL_BODY);
+        let gated = Gated::default();
+        let requests: Vec<_> = (0..8)
+            .map(|_| {
+                let (cache, metadata, gated) = (cache.clone(), metadata.clone(), gated.clone());
+                tokio::spawn(async move {
+                    load_pool_metadata(&cache, &metadata, |_| {
+                        let fetch = gated.fetch(POOL_BODY.to_vec());
+                        let fetched = fetch(anchor(POOL_BODY));
+                        async move { fetched.await.map_err(Some) }
+                    })
+                    .await
+                })
+            })
+            .collect();
+        gated.wait_for_running(1).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        gated.open();
+        for request in requests {
+            let (metadata, error) = request.await.unwrap();
+            assert_eq!(metadata.unwrap().ticker, "POOL");
+            assert!(error.is_none());
+        }
+        assert_eq!(gated.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -718,20 +1046,19 @@ mod tests {
 
     #[test]
     fn verified_bodies_render_json_or_a_decode_error() {
-        let out = DrepsInnerMetadata {
-            url: "https://x.io/d.json".to_string(),
-            hash: String::new(),
-            json_metadata: None,
-            bytes: None,
-            error: None,
-        };
-
-        let json = verified(out.clone(), br#"{"a":1}"#);
+        let anchor = anchor(br#"{"a":1}"#);
+        let json = drep_metadata(
+            &anchor,
+            MetadataBody::Verified(Bytes::from_static(br#"{"a":1}"#)),
+        );
         assert_eq!(json.json_metadata, Some(serde_json::json!({"a": 1})));
         assert_eq!(json.bytes.as_deref(), Some("\\x7b2261223a317d"));
         assert!(json.error.is_none());
 
-        let broken = verified(out, b"not json");
+        let broken = drep_metadata(
+            &anchor,
+            MetadataBody::Verified(Bytes::from_static(b"not json")),
+        );
         assert_eq!(broken.json_metadata, None);
         assert_eq!(broken.bytes, None);
         assert_eq!(broken.error.unwrap().code, MetadataError::DecodeError);

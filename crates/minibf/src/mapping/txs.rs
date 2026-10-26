@@ -48,9 +48,9 @@ use dolos_cardano::{
 use dolos_core::{ArchiveStore as _, Domain, EraCbor, TxHash, TxOrder, TxoRef};
 
 use super::{
-    bech32_pool, list_assets, pool_offchain_metadata, rational_to_f64, redeemer_fee,
-    redeemer_script_hash, stake_cred_to_address, try_into_or_500, vkey_to_stake_address, IntoModel,
-    PoolOffchainMetadata, UtxoOutputModelBuilder,
+    bech32_pool, list_assets, rational_to_f64, redeemer_fee, redeemer_script_hash,
+    stake_cred_to_address, try_into_or_500, vkey_to_stake_address, IntoModel, PoolOffchainMetadata,
+    UtxoOutputModelBuilder,
 };
 use crate::Facade;
 
@@ -300,7 +300,10 @@ impl<'a> TxModelBuilder<'a> {
         Ok(())
     }
 
-    pub async fn fetch_pool_metadata(&mut self) -> Result<(), StatusCode> {
+    pub async fn fetch_pool_metadata<C: dolos_core::CacheStore>(
+        &mut self,
+        cache: &C,
+    ) -> Result<(), StatusCode> {
         let pool_registrations = self
             .tx()?
             .certs()
@@ -340,8 +343,13 @@ impl<'a> TxModelBuilder<'a> {
 
         self.pool_metadata = join_all(pool_registrations.iter().map(
             |(pool_hash, url, hash)| async move {
-                pool_offchain_metadata(url, Some(hash.as_slice()))
+                let metadata = pallas::ledger::primitives::PoolMetadata {
+                    url: url.clone(),
+                    hash: hash.clone(),
+                };
+                crate::offchain::fetch_pool_metadata(cache, &metadata)
                     .await
+                    .0
                     .map(|meta| (*pool_hash, meta))
             },
         ))

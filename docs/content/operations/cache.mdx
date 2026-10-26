@@ -15,16 +15,30 @@ The cache is split into namespaces, one per use. Each namespace has a format ver
 | `totals`             | immutable  | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total`           |
 | `network`            | tip-scoped | the `/network` body, for 30 seconds                                                                           |
 | `offchain`           | immutable  | the verified DRep metadata of `/governance/dreps` and `/governance/dreps/{drep_id}/metadata`, by content hash |
-| `offchain-failures`  | tip-scoped | failed metadata fetches, for 10 minutes, so a dead host is not asked again on every request                   |
+| `offchain-failures`  | tip-scoped | failed DRep metadata fetches, for 10 minutes, so a dead host is not asked again on every request                   |
+| `pool-offchain` | immutable | verified pool metadata for `/pools/{pool_id}/metadata`, `/pools/extended`, and `/txs/{hash}/pool_updates`, by content hash |
+| `pool-offchain-failures` | tip-scoped | failed pool metadata fetches, for 10 minutes, keyed by content hash and URL |
 | `pool-registrations` | immutable  | where each pool first registered, for the order of `/pools` and `/pools/extended`                             |
 | `pool-blocks`        | immutable  | each pool's lifetime blocks, for `blocks_minted` in `/pools/extended` and `/pools/{pool_id}`                  |
 
 A namespace has one of two validity models:
 
-- **Immutable** entries are never stale. An `offchain` body is pinned by its anchor's content hash, which every read checks again. The other immutable entries are built from sealed data only, so they are at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. The `pool-registrations` and `pool-blocks` namespaces each hold a single entry that covers every pool, up to the last slot or epoch no rollback can undo, and a read adds what came after. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
-- **Tip-scoped** entries are valid for a while. After that, a `network` entry is served stale while one rebuild replaces it, and an `offchain-failures` entry is ignored, so the next request fetches again. They are kept in memory only.
+- **Immutable** entries are never stale. The `offchain` and `pool-offchain` bodies are pinned by their advertised content hashes. Every read checks the hash again. The other immutable entries are built from sealed data only, so they are at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. The `pool-registrations` and `pool-blocks` namespaces each hold a single entry that covers every pool, up to the last slot or epoch no rollback can undo, and a read adds what came after. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
+- **Tip-scoped** entries are valid for a while. After that, a `network` entry is served stale while one rebuild replaces it, and an `offchain-failures` or `pool-offchain-failures` entry is ignored, so the next request fetches again. They are kept in memory only.
 
 The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file found corrupt, cut short, or laid out by another release, such as one you rolled back from, is recreated empty; one that fails to open for another reason, such as its permissions, is an error and the node does not start.
+
+Pool metadata uses the same cache loader as DRep metadata, with separate namespaces for its fetch policy.
+Each metadata cache permits 16 concurrent fetches and 64 pending loads.
+A pool fetch keeps its five-second timeout and 512-byte limit.
+Pool extended listings wait at most five seconds for metadata.
+Started cache fills continue after that deadline.
+
+Once cached, a verified pool body remains available during an upstream outage until eviction or deletion.
+A new advertised hash triggers a new fetch.
+Failures stay in memory for 10 minutes, then the next request retries.
+There is no background retry timer.
+Disabling the cache makes each request fetch again.
 
 ## Budgets and admission
 
