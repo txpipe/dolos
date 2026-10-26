@@ -507,6 +507,8 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let chain = domain.get_chain_summary()?;
+
     let mut out = Vec::with_capacity(rows.len());
     for (txo_ref, value) in rows {
         let output = MultiEraOutput::try_from(value.as_ref())
@@ -515,7 +517,8 @@ where
         let builder = UtxoOutputModelBuilder::from_output(tx_hash, txo_idx, output);
 
         let builder = if let Some(x) = block_deps.get(&tx_hash).cloned() {
-            builder.with_block_data(x)
+            let block_time = chain.slot_time(x.slot);
+            builder.with_block_data(x).with_block_time(block_time)
         } else {
             builder
         };
