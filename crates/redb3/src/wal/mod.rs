@@ -202,8 +202,10 @@ const WAL_METADATA_VERSION_KEY: &str = "version";
 /// 4: inputs carry each UTxO's creation position beside its output.
 /// 5: staged asset mints carry whether their tx's CIP-25 metadata names the
 ///    asset.
-/// 6: `ScriptFirstSeen` retires; its index decodes to nothing.
-pub const CURRENT_WAL_VERSION: u32 = 6;
+/// 6: the DRep and pool deltas drop the fields minibf now derives, and
+///    `DRepAnchorUpdate` and `DRepPowerUpdate` retire.
+/// 7: `ScriptFirstSeen` retires.
+pub const CURRENT_WAL_VERSION: u32 = 7;
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 
@@ -1006,6 +1008,13 @@ mod tests {
     #[test]
     fn a_version_4_wal_is_wiped_on_open() {
         assert_wiped_on_open(4);
+    }
+
+    /// A version-5 WAL holds DRep and pool deltas with the fields that left
+    /// the records, so opening it wipes the entries.
+    #[test]
+    fn a_version_5_wal_is_wiped_on_open() {
+        assert_wiped_on_open(5);
     }
 
     #[test]

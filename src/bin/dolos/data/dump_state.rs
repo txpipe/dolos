@@ -283,7 +283,6 @@ impl TableRow for PoolState {
         vec![
             "key",
             "pool bech32",
-            "registered at",
             "retiring epoch",
             "calidus key",
             "pledge (go)",
@@ -305,7 +304,6 @@ impl TableRow for PoolState {
         vec![
             format!("{}", pool_hex),
             format!("{}", pool_bech32),
-            format!("{}", self.register_slot),
             format!(
                 "{}",
                 self.retiring_epoch
@@ -335,7 +333,6 @@ impl TableRow for DRepState {
             "kind",
             "registered slot",
             "unregistered slot",
-            "voting power",
             "expiry epoch",
             "expired",
             "deposit",
@@ -363,11 +360,7 @@ impl TableRow for DRepState {
             self.unregistered_at
                 .map(|(slot, _)| slot.to_string())
                 .unwrap_or_default(),
-            self.voting_power.to_string(),
-            self.expiry
-                .as_ref()
-                .map(|x| x.current.to_string())
-                .unwrap_or_default(),
+            self.expiry.current.to_string(),
             self.expired.to_string(),
             self.deposit.to_string(),
         ]

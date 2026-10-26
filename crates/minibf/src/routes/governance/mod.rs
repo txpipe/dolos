@@ -1,10 +1,12 @@
+use std::collections::BTreeMap;
+
 use axum::http::StatusCode;
 use dolos_cardano::{
-    model::{DRepKey, ProposalState},
+    model::{gov::GovState, DRepKey, ProposalState},
     ChainSummary, PParamsSet,
 };
 use dolos_core::{ArchiveError, BlockBody, BlockSlot, Domain, KeyCodec as _};
-use pallas::ledger::traverse::MultiEraBlock;
+use pallas::ledger::{primitives::conway::DRep, traverse::MultiEraBlock};
 
 use crate::{error::Error, Facade};
 
@@ -47,6 +49,18 @@ fn chain_context<D: Domain>(
     let pparams = domain.get_current_effective_pparams()?;
 
     Ok((chain, tip, pparams))
+}
+
+/// The last completed DRep distribution, empty before the first one. See
+/// [`crate::mapping::governance::dreps::drep_amount`].
+fn drep_distribution<D: Domain>(domain: &Facade<D>) -> Result<BTreeMap<DRep, u64>, StatusCode> {
+    let distribution = domain
+        .read_cardano_entity::<GovState>(&())?
+        .and_then(|gov| gov.prev_distr)
+        .map(|distr| distr.drep_distr)
+        .unwrap_or_default();
+
+    Ok(distribution)
 }
 
 /// Whether the row is a Conway governance action rather than a pre-Conway
@@ -126,7 +140,10 @@ pub(super) mod testing {
     use bech32::{Bech32, Hrp};
     use blockfrost_openapi::models::drep::Drep as DrepModel;
     use dolos_cardano::{
-        model::{gov::GovState, DRepSightingState, DRepState},
+        model::{
+            gov::{GovDistr, GovState},
+            DRepSightingState,
+        },
         pallas_extras,
     };
     use dolos_core::{StateStore as _, StateWriter as _};
@@ -178,8 +195,7 @@ pub(super) mod testing {
     /// This function gives the synthetic DRep an anchor that Dolos can never
     /// fetch. `example.invalid` does not resolve (RFC 6761), so the fetch
     /// always stops with a connection error. The endpoint still returns the
-    /// anchor fields. This function uses the same entity key that the
-    /// endpoint reads. The synthetic chain imported a registration with no
+    /// anchor fields. The synthetic chain imported a registration with no
     /// anchor, and this function replaces it.
     pub fn seed_drep_anchor(domain: &ToyDomain, drep_bytes: Vec<u8>) {
         let anchor = Anchor {
@@ -190,20 +206,11 @@ pub(super) mod testing {
         seed_drep_with_anchor(domain, drep_bytes, anchor);
     }
 
+    /// The anchor the DRep's sighting carries, which both the list and
+    /// `/metadata` serve.
     pub fn seed_drep_with_anchor(domain: &ToyDomain, drep_bytes: Vec<u8>, anchor: Anchor) {
-        // This code builds the identifier from the same bytes as the entity
-        // key. If the keyhash of the synthetic vector changes, the identifier
-        // and the key still agree.
-        let keyhash: [u8; 28] = drep_bytes[1..]
-            .try_into()
-            .expect("drep bytes carry a 28-byte hash");
-
         let key = drep_key(&drep_bytes).unwrap();
 
-        let mut state = DRepState::new(DRep::Key(Hash::from(keyhash)));
-        state.anchor = Some(anchor.clone());
-
-        // the list serves the sighting's anchor, so it carries the same one
         let mut sighting = domain
             .state()
             .read_entity_typed::<DRepSightingState>(&key)
@@ -216,12 +223,9 @@ pub(super) mod testing {
             .start_writer()
             .expect("failed to start writer");
         writer
-            .write_entity_typed(&key, &state)
-            .expect("failed to write drep state");
-        writer
             .write_entity_typed(&key, &sighting)
             .expect("failed to write drep sighting");
-        writer.commit().expect("failed to commit drep state");
+        writer.commit().expect("failed to commit drep sighting");
     }
 
     pub fn synthetic_drep() -> DRep {
@@ -272,6 +276,40 @@ pub(super) mod testing {
 
     pub fn cc_cold_key(byte: u8) -> StakeCredential {
         StakeCredential::AddrKeyhash(Hash::from([byte; 28]))
+    }
+
+    /// Makes `distribution` the last completed DRep distribution, the one the
+    /// DRep routes serve `amount` from.
+    pub fn seed_distribution(domain: &ToyDomain, distribution: BTreeMap<DRep, u64>) {
+        let mut gov = domain
+            .state()
+            .read_entity_typed::<GovState>(&())
+            .expect("The state store cannot read the governance state.")
+            .unwrap_or_default();
+
+        let mut distr = GovDistr::new(0, 1);
+        distr.committed_shards = 1;
+        distr.drep_distr = distribution;
+        gov.prev_distr = Some(distr);
+
+        seed_gov(domain, gov);
+    }
+
+    /// Makes `distribution` the partial DRep distribution of a boundary whose
+    /// shards are still running, beside the last completed one.
+    pub fn seed_partial_distribution(domain: &ToyDomain, distribution: BTreeMap<DRep, u64>) {
+        let mut gov = domain
+            .state()
+            .read_entity_typed::<GovState>(&())
+            .expect("The state store cannot read the governance state.")
+            .unwrap_or_default();
+
+        let mut distr = GovDistr::new(1, 2);
+        distr.committed_shards = 1;
+        distr.drep_distr = distribution;
+        gov.distr = Some(distr);
+
+        seed_gov(domain, gov);
     }
 
     /// This function overwrites the governance singleton with the given state.

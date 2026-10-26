@@ -86,8 +86,6 @@ fn pool(operator: u8, is_retired: bool) -> PoolState {
     PoolState {
         operator: pool_hash(operator),
         snapshot: EpochValue::with_live(0, snapshot),
-        blocks_minted_total: 0,
-        register_slot: 0,
         retiring_epoch: None,
         deposit: 0,
         calidus: None,
