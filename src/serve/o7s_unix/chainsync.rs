@@ -137,23 +137,18 @@ impl<D: Domain> Session<D> {
 
                 self.reseek().await?;
 
-                // The fresh cursor may hold buffered pages; `next_tip` is only
-                // defined on a tip batch, so forward buffered blocks until it
-                // parks on the tip subscription.
-                loop {
-                    let next = self.assume_crawler().next_block();
-
-                    match next {
-                        Ok(Some((point, block))) => self.send_forward(point, block).await?,
-                        Ok(None) => break,
-                        Err(retry_err) => {
-                            warn!(%retry_err, "re-seek did not restore overlap, ending session");
-                            return Err(Error::server(retry_err));
-                        }
+                // The fresh cursor may hold buffered pages, but the peer only asked for one
+                // reply: any RollForward leaves us idle with the client holding agency, so
+                // answer with a single block (or an await if there is none) and let the next
+                // RequestNext drain the rest.
+                match self.assume_crawler().next_block() {
+                    Ok(Some((point, block))) => self.send_forward(point, block).await,
+                    Ok(None) => self.send_await_and_next().await,
+                    Err(retry_err) => {
+                        warn!(%retry_err, "re-seek did not restore overlap, ending session");
+                        Err(Error::server(retry_err))
                     }
                 }
-
-                self.send_await_and_next().await
             }
         }
     }
