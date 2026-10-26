@@ -32,7 +32,8 @@ Pool metadata uses the same cache loader as DRep metadata, with separate namespa
 Each metadata cache permits 16 concurrent fetches and 64 pending loads.
 A pool fetch keeps its five-second timeout and 512-byte limit.
 Pool extended listings wait at most five seconds for metadata.
-Started cache fills continue after that deadline.
+Up to 64 fetches continue in the background after that deadline and store their bodies.
+Fetches past that limit stop at the deadline.
 
 Once cached, a verified pool body remains available during an upstream outage until eviction or deletion.
 A new advertised hash triggers a new fetch.
