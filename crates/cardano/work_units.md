@@ -63,8 +63,8 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 - Direct writes: `EraState` writes during era transitions (Shelley→Allegra etc.).
 - **Sets the cursor** to `ChainPoint::Slot(boundary_slot)` — the only phase across all work units that moves the cursor. A crash before `finalize()` restarts from the boundary block.
 - Deltas emitted in finalize:
-  - `NonceTransition` — `estart/nonces.rs:40`. Targets `epochs`.
-  - `PoolTransition` — `estart/reset.rs:138`. One per pool. Targets `pools`.
+  - `NonceTransition` — `estart/nonces.rs:92`. Targets `epochs`.
+  - `PoolTransition` — `estart/reset.rs:134`. One per pool. Targets `pools`.
   - `EpochTransition` — `estart/reset.rs:151` (emitted from `compute_global_deltas` in `estart/loading.rs`). Single. Targets `epochs`.
 
 The rotation is not idempotent (rotating twice double-rolls), so a resumed boundary skips the shards `estart_progress` records as committed. A shard is all or nothing: its rows and its `EStartProgress` commit together, so a crash inside a shard leaves its rows untouched for the resumed run to read again.
