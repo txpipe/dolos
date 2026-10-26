@@ -2025,42 +2025,43 @@ mod tests {
 
     /// The rows of one page share the blocks their walks read. An
     /// oldest-first page over block 1 holds the DRep's and the pool's votes,
-    /// and both walks find a re-vote in block 2, which the page reads and
-    /// charges once: two blocks with the listing's one.
+    /// and both walks find a re-vote in block 2. The page reads block 2 once
+    /// more than its live row does, and charges it once: two blocks with the
+    /// listing's one.
     #[test]
     fn governance_proposal_votes_walks_of_one_page_read_a_block_once() {
-        let domain = |moved| {
+        let read = |moved, budget| {
             let (domain, vectors) =
-                TestDomainBuilder::new_with_synthetic(shared_revote_cfg()).finish();
+                TestDomainBuilder::<MeasuredStores<MemoryStores>>::new_with_synthetic_in(
+                    shared_revote_cfg(),
+                    |_| (),
+                )
+                .finish();
             enact_proposals(&domain, moved);
-            (domain, vectors)
+
+            let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
+                .parse()
+                .expect("failed to parse the proposal tx");
+            let page = Pagination {
+                count: 2,
+                ..Default::default()
+            };
+            let counters = &domain.archive().counters;
+
+            let before = counters.snapshot().block_reads;
+            let counted = read_votes(&domain, tx, 0, &page, budget)
+                .map(|rows| rows.iter().map(|row| row.counted).collect_vec());
+
+            (counted, counters.snapshot().block_reads - before)
         };
 
-        let (moved, vectors) = domain(true);
-        let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
-            .parse()
-            .expect("failed to parse the proposal tx");
-        let page = Pagination {
-            count: 2,
-            ..Default::default()
-        };
+        let (live, live_reads) = read(false, 1);
+        assert_eq!(live.expect("the page fits the budget"), [false, false]);
 
-        let rows = read_votes(&moved, tx, 0, &page, 2).expect("the page fits the budget");
-        assert_eq!(
-            rows.iter().map(|row| row.counted).collect_vec(),
-            [false, false]
-        );
+        let (moved, moved_reads) = read(true, 2);
+        assert_eq!(moved.expect("the page fits the budget"), [false, false]);
+        assert_eq!(moved_reads, live_reads + 1);
 
-        assert!(matches!(
-            read_votes(&moved, tx, 0, &page, 1),
-            Err(Error::ScanBudgetExceeded)
-        ));
-
-        let (live, _) = domain(false);
-        let rows = read_votes(&live, tx, 0, &page, 1).expect("the page fits the budget");
-        assert_eq!(
-            rows.iter().map(|row| row.counted).collect_vec(),
-            [false, false]
-        );
+        assert!(matches!(read(true, 1).0, Err(Error::ScanBudgetExceeded)));
     }
 }
