@@ -134,7 +134,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::governance::testing::*;
+    use crate::{routes::governance::testing::*, test_support::TestDomainBuilder};
+    use dolos_core::config::MinibfConfig;
+    use dolos_testing::{measured::MeasuredStores, toy_domain::MemoryStores};
 
     #[tokio::test]
     async fn governance_proposal_metadata_returns_404_when_fetch_fails() {
@@ -187,5 +189,42 @@ mod tests {
             let path = format!("/governance/proposals/{id}/metadata");
             assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
         }
+    }
+
+    /// The by-tx route answers 404 when the anchor fetch fails, so its answer
+    /// cannot show where it found the anchor. On a proposal moved to the
+    /// final-row log, it reads the same log rows as the by-id route, which
+    /// serves the anchor from the final row.
+    #[tokio::test]
+    async fn both_metadata_routes_read_a_moved_proposal_from_its_final_row() {
+        let (domain, vectors) =
+            TestDomainBuilder::<MeasuredStores<MemoryStores>>::new_with_synthetic_in(
+                resolved_votes_cfg(),
+                |_| (),
+            )
+            .finish();
+        enact_proposals(&domain, true);
+
+        let facade = Facade {
+            inner: domain.clone(),
+            config: MinibfConfig::new("[::]:0".parse().expect("invalid listen address")),
+        };
+        let tx = vectors.blocks[0].tx_hashes[0].clone();
+        let tx_hash: Hash<32> = tx.parse().expect("Cannot parse the transaction hash.");
+        let id = bech32_gov_action(&tx_hash, 0).expect("Cannot encode the governance action ID.");
+        let log_rows = || domain.archive().counters.snapshot().log_rows;
+
+        let before = log_rows();
+        let Json(by_id) = proposal_metadata_by_gov_action(Path(id), State(facade.clone()))
+            .await
+            .expect("The by-id route failed.");
+        assert_eq!(by_id.url, "https://example.invalid/proposal");
+        let read_by_id = log_rows() - before;
+        assert!(read_by_id > 0);
+
+        let before = log_rows();
+        let by_tx = proposal_metadata(Path((tx, 0)), State(facade)).await;
+        assert!(matches!(by_tx, Err(Error::Code(StatusCode::NOT_FOUND))));
+        assert_eq!(log_rows() - before, read_by_id);
     }
 }

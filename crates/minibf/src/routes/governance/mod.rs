@@ -511,12 +511,13 @@ pub(super) mod testing {
     }
 
     /// Block 0 proposes two info actions, a treasury withdrawal and a
-    /// parameter change. Every later block votes on action 0, and the DRep
-    /// and the pool vote on it again two blocks later. Blocks 2 and 5 carry
-    /// the DRep's votes on action 1 beside another voter's vote on action 0,
-    /// so an oldest-first page that looks past itself reads blocks that the
-    /// DRep's tag and action 0's tag both name, without the DRep's vote on
-    /// action 0. Block 5 comes after the DRep's newest vote on action 0.
+    /// parameter change. Every later block votes on action 0. The DRep and
+    /// the pool vote on it in block 1, and again, the DRep in block 3 and the
+    /// pool in block 4. Blocks 2 and 5 carry the DRep's votes on action 1
+    /// beside another voter's vote on action 0, so an oldest-first page that
+    /// looks past itself reads blocks that the DRep's tag and action 0's tag
+    /// both name, without the DRep's vote on action 0. Block 5 comes after the
+    /// DRep's newest vote on action 0.
     pub fn resolved_votes_cfg() -> SyntheticBlockConfig {
         let withdrawal = GovAction::TreasuryWithdrawals(
             BTreeMap::from([(
@@ -586,7 +587,7 @@ pub(super) mod testing {
     /// Enacts every proposal in state at the boundary closing epoch 0, as
     /// EWRAP stamps it, and when `moved` moves each to the final-row log as
     /// the ESTART opening epoch 2 does.
-    pub fn enact_proposals(domain: &ToyDomain, moved: bool) {
+    pub fn enact_proposals<D: Domain>(domain: &D, moved: bool) {
         let rows: Vec<(ProposalKey, ProposalState)> = domain
             .state()
             .iter_entities_typed::<ProposalState>(None)
@@ -613,8 +614,8 @@ pub(super) mod testing {
     /// of epoch 1, as the ESTART finalize commit does: the archive commits
     /// first, then the state deletes the rows. Without `commit_state` the
     /// state commit never runs, as after a crash between the two.
-    pub fn move_proposals_to_log(domain: &ToyDomain, commit_state: bool) {
-        let slot = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+    pub fn move_proposals_to_log<D: Domain>(domain: &D, commit_state: bool) {
+        let slot = dolos_cardano::eras::load_era_summary::<D>(domain.state())
             .unwrap()
             .epoch_start(1);
 
@@ -1005,7 +1006,7 @@ mod final_row_tests {
         assert_eq!(metadata.url, "https://example.invalid/proposal");
 
         // the votes the archive alone tells apart: the DRep's and the pool's
-        // first votes were superseded two blocks later
+        // first votes were superseded, in blocks 3 and 4
         let (_, votes) = body(&moved, &format!("/governance/proposals/{tx}/0/votes")).await;
         let votes: Vec<ProposalVotesInner> = serde_json::from_value(votes).unwrap();
         let counted: Vec<bool> = votes.iter().map(|row| row.counted).collect();

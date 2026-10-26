@@ -321,8 +321,10 @@ where
 /// by the boundary after, so nothing newer hides past the visible tip.
 ///
 /// The blocks the check reads draw on the request's budget, as the listing's
-/// do. So a deep oldest-first page of a resolved proposal can exceed a
-/// budget that the same page of its live row fits in.
+/// do. So any oldest-first page of a resolved proposal, the first one
+/// included, can exceed a budget that the same page of its live row fits in.
+/// The check reads no more blocks than the action has vote blocks up to the
+/// visible tip.
 struct WalkedNewest<'a, D: Domain> {
     domain: &'a D,
     key: ProposalKey,
@@ -740,8 +742,9 @@ mod tests {
     use dolos_cardano::model::ProposalState;
     use dolos_core::StateWriter as _;
     use dolos_testing::{
+        measured::MeasuredStores,
         synthetic::{SyntheticBlockConfig, SyntheticVectors},
-        toy_domain::ToyDomain,
+        toy_domain::{MemoryStores, ToyDomain},
     };
     use itertools::Itertools;
     use pallas::ledger::primitives::{conway::GovAction, Epoch};
@@ -1802,6 +1805,14 @@ mod tests {
             shared_slots(&[10, 1000], &run_then_vote),
             (vec![1000], 2, misses + 1)
         );
+
+        // the seek after a run starts past the run's last slot, not at the
+        // action slot the run passed without the voter
+        let run_past_15 = (11..=14).chain(16..=999).collect_vec();
+        assert_eq!(
+            shared_slots(&[10, 15, 1000], &run_past_15),
+            (vec![], 2, misses)
+        );
     }
 
     /// Block 0 proposes two actions, block 1 holds the DRep's vote on action
@@ -1844,6 +1855,36 @@ mod tests {
 
         assert_eq!(rows, get_votes(&live, &path).await);
         assert_eq!(rows.iter().map(|row| row.counted).collect_vec(), [true]);
+    }
+
+    /// The page of the test above reads as many tag entries from the resolved
+    /// proposal as from its live row: the walk reads none of the DRep's ten
+    /// later votes on action 1.
+    #[test]
+    fn governance_proposal_votes_walk_reads_no_tag_entry_past_the_action() {
+        let tag_entries = |moved| {
+            let (domain, vectors) =
+                TestDomainBuilder::<MeasuredStores<MemoryStores>>::new_with_synthetic_in(
+                    other_action_votes_cfg(),
+                    |_| (),
+                )
+                .finish();
+            enact_proposals(&domain, moved);
+
+            let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
+                .parse()
+                .expect("failed to parse the proposal tx");
+            let counters = &domain.archive().counters;
+
+            let before = counters.snapshot().tag_candidates;
+            let rows = read_votes(&domain, tx, 0, &Pagination::default(), 100)
+                .expect("the page fits the budget");
+            assert_eq!(rows.iter().map(|row| row.counted).collect_vec(), [true]);
+
+            counters.snapshot().tag_candidates - before
+        };
+
+        assert_eq!(tag_entries(true), tag_entries(false));
     }
 
     /// The walk of a resolved proposal reads its blocks from the request's
