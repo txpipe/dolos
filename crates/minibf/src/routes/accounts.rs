@@ -1660,8 +1660,6 @@ mod tests {
         PoolState {
             operator: Hash::from(operator),
             snapshot: EpochValue::with_live(3, snapshot),
-            blocks_minted_total: 0,
-            register_slot: 0,
             retiring_epoch: None,
             deposit: 0,
             calidus: None,

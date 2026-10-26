@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::drep_metadata::DrepMetadata;
-use dolos_cardano::model::DRepState;
+use dolos_cardano::model::DRepSightingState;
 use dolos_core::Domain;
 
 use crate::{
@@ -15,16 +15,17 @@ use crate::{
 
 use super::drep_key;
 
-/// `GET /governance/dreps/{drep_id}/metadata`: the registered anchor of the
-/// DRep, and the off-chain metadata for that anchor.
+/// `GET /governance/dreps/{drep_id}/metadata`: the newest anchor a
+/// registration or update of the DRep carried, and the off-chain metadata
+/// for that anchor.
 ///
 /// db-sync returns the latest registration or update that still has an
-/// anchor. Its query uses an inner join to `voting_anchor`. Then it takes
-/// the newest row. Dolos obeys the ledger rules and clears the anchor on a
-/// registration or update that has no anchor. As a result, Blockfrost keeps
-/// the older anchor, but Dolos answers 404.
+/// anchor: its query inner-joins `voting_anchor` and takes the newest row. So
+/// a registration or update without one keeps the older anchor, though the
+/// ledger clears it. The DRep's sighting holds that anchor, and the list
+/// serves it too.
 ///
-/// A DRep with no current anchor is a 404, not an empty body. The two
+/// A DRep that never carried an anchor is a 404, not an empty body. The two
 /// special DReps have no registration, so they are also a 404.
 ///
 /// If the fetch fails, Dolos keeps the anchor and puts the cause in `error`,
@@ -33,10 +34,7 @@ use super::drep_key;
 pub async fn drep_metadata<D: Domain>(
     Path(drep): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<DrepMetadata>, StatusCode>
-where
-    Option<DRepState>: From<D::Entity>,
-{
+) -> Result<Json<DrepMetadata>, StatusCode> {
     let parsed = parse_drep_id(&drep)?;
 
     // The special DReps have no registration, so they have no anchor.
@@ -44,11 +42,11 @@ where
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let state = domain
-        .read_cardano_entity::<DRepState>(&drep_key(&parsed.encoded)?)?
+    let sighting = domain
+        .read_cardano_entity::<DRepSightingState>(&drep_key(&parsed.encoded)?)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let anchor = sighting.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
 
     let hex = if parsed.is_legacy {
         hex::encode(&parsed.encoded[1..])
@@ -155,6 +153,51 @@ mod tests {
         );
         assert_eq!(model.bytes, Some(format!("\\x{}", hex::encode(body))));
         assert!(model.error.is_none());
+    }
+
+    /// An update without an anchor leaves the one the registration carried,
+    /// as db-sync keeps it, though the ledger clears it.
+    #[tokio::test]
+    async fn governance_drep_metadata_keeps_the_anchor_an_update_omits() {
+        use pallas::ledger::primitives::{
+            conway::{Certificate, DRep},
+            StakeCredential,
+        };
+
+        let hash = [0xe2; 28];
+        let credential = StakeCredential::AddrKeyhash(hash.into());
+
+        let registered = Anchor {
+            url: "https://example.invalid/drep/registered".to_string(),
+            content_hash: [0x51; 32].into(),
+        };
+
+        // block 0 registers the DRep with an anchor, block 1 updates it
+        // without one
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 2,
+            extra_certs_by_block: vec![
+                vec![vec![Certificate::RegDRepCert(
+                    credential.clone(),
+                    1000,
+                    Some(registered.clone()),
+                )]],
+                vec![vec![Certificate::UpdateDRepCert(credential, None)]],
+            ],
+            ..Default::default()
+        });
+
+        let drep = crate::mapping::bech32_drep(&DRep::Key(hash.into())).unwrap();
+
+        let path = format!("/governance/dreps/{drep}/metadata");
+        let (status, body) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: DrepMetadata =
+            serde_json::from_slice(&body).expect("failed to parse drep metadata");
+
+        assert_eq!(model.url, registered.url);
+        assert_eq!(model.hash, hex::encode(registered.content_hash));
     }
 
     #[tokio::test]

@@ -89,8 +89,9 @@ pub struct SyntheticBlockConfig {
     /// The mints of each tx, per block, replacing the default mint. Each entry
     /// holds one list per tx; a missing entry keeps the default.
     pub mints_by_block: Vec<Vec<TxMints>>,
-    /// Txs carry no certificates and no withdrawal. The default ones register
-    /// a DRep, which a pre-Conway chain cannot carry across an epoch boundary.
+    /// Txs carry no withdrawal and no certificates but their
+    /// `extra_certs_by_block`. The default ones register a DRep, which a
+    /// pre-Conway chain cannot carry across an epoch boundary.
     pub plain_txs: bool,
     /// The addresses of zero-lovelace outputs each tx appends after its own,
     /// per block. Each entry holds one list per tx; a missing entry appends
@@ -1233,17 +1234,20 @@ fn sample_transaction(
     // registers the DRep.
     let vote_delegation = Certificate::VoteDeleg(stake_cred, DRep::Key(drep_keyhash.into()));
 
-    let mut certificates = vec![
-        registration,
-        delegation,
-        pool_cert,
-        drep_cert,
-        vote_delegation,
-    ];
+    let mut certificates = if plain {
+        vec![]
+    } else {
+        vec![
+            registration,
+            delegation,
+            pool_cert,
+            drep_cert,
+            vote_delegation,
+        ]
+    };
     certificates.extend(extra_certs);
 
-    let certificates =
-        (!plain).then(|| NonEmptySet::try_from(certificates).expect("non-empty certificates"));
+    let certificates = NonEmptySet::try_from(certificates).ok();
 
     let body =
         TransactionBody {

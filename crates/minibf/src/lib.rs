@@ -326,6 +326,11 @@ where
         tracing::warn!(%error, "totals cache not registered");
     }
 
+    // disposable: without the namespaces the pool routes read the archive
+    if let Err(error) = dolos_cardano::pool_history::register_pool_caches(&facade.inner) {
+        tracing::warn!(%error, "pool caches not registered");
+    }
+
     let permissive_cors = facade.config.permissive_cors();
     let route_prefix = facade.config.route_prefix().cloned();
     let routes = Router::new()

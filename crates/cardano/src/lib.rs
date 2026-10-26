@@ -33,6 +33,7 @@ pub mod indexes;
 pub mod model;
 pub mod owned;
 pub mod periods;
+pub mod pool_history;
 pub mod pots;
 pub mod rewards;
 pub mod shard;
