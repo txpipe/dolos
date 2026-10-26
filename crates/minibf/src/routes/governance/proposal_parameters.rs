@@ -4,8 +4,8 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::proposal_parameters::ProposalParameters;
-use dolos_cardano::model::{ProposalAction, ProposalKey, ProposalState};
-use dolos_core::{Domain, StateStore as _};
+use dolos_cardano::model::{ProposalAction, ProposalKey};
+use dolos_core::Domain;
 use pallas::crypto::hash::Hash;
 
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
     Facade,
 };
 
-use super::is_gov_action;
+use super::{is_gov_action, read_proposal_row};
 
 /// The parameter change proposed by `tx` at action index `idx`.
 ///
@@ -31,11 +31,9 @@ fn read_parameters<D: Domain>(
 ) -> Result<ProposalParameters, Error> {
     let key = ProposalKey::new(tx, idx);
 
-    let state = domain
-        .state()
-        .read_entity_typed::<ProposalState>(&key)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let state = read_proposal_row(&domain.inner, &key)?
+        .ok_or(StatusCode::NOT_FOUND)?
+        .into_state();
 
     // A pre-Conway update proposal is a parameter change too, but db-sync
     // keeps those out of the governance table this endpoint reads.

@@ -6,8 +6,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::proposals_inner::{GovernanceType, ProposalsInner};
-use dolos_cardano::model::ProposalState;
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
 
 use crate::{
@@ -17,7 +16,7 @@ use crate::{
     Facade,
 };
 
-use super::is_gov_action;
+use super::{is_gov_action, visit_proposals};
 
 struct ProposalRow {
     slot: BlockSlot,
@@ -154,32 +153,27 @@ fn select_proposals<D: Domain>(
     )
 }
 
-/// The page of `GET /governance/proposals`, read off the state and ordered
+/// The page of `GET /governance/proposals`, read off the live rows in state
+/// and the final rows of the resolved proposals that left it, and ordered
 /// against the archive.
 ///
-/// Every proposal is walked to build one page. The namespace holds one row per
-/// governance action ever submitted and each of those costs a deposit, so it
-/// grows in the hundreds — 155 rows on mainnet and 1536 on preview, the
-/// cheapest of the networks to propose on — against the million-row namespaces
-/// the other listings here already walk. What the page actually pays for is
-/// the archive, and that is bounded by the page size.
+/// Every proposal is walked to build one page. There is one per governance
+/// action ever submitted and each of those costs a deposit, so they number in
+/// the hundreds — 155 on mainnet and 1536 on preview, the cheapest of the
+/// networks to propose on — against the million-row namespaces the other
+/// listings here already walk. A final row carries no votes, so the resolved
+/// majority is cheap to decode. What the page actually pays for is the
+/// archive, and that is bounded by the page size.
 fn read_page<D: Domain>(domain: &D, pagination: &Pagination) -> Result<Vec<ProposalsInner>, Error> {
     let mut rows = Vec::new();
 
-    let entities = domain
-        .state()
-        .iter_entities_typed::<ProposalState>(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    for entry in entities {
-        let (_, state) = entry.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        if !is_gov_action(&state) {
-            continue;
+    visit_proposals(domain, |state| {
+        if !is_gov_action(state) {
+            return;
         }
 
         let Some(governance_type) = governance_type(&state.action) else {
-            continue;
+            return;
         };
 
         rows.push(ProposalRow {
@@ -188,7 +182,7 @@ fn read_page<D: Domain>(domain: &D, pagination: &Pagination) -> Result<Vec<Propo
             idx: state.idx,
             governance_type,
         });
-    }
+    })?;
 
     select_proposals(domain, rows, pagination)?
         .into_iter()

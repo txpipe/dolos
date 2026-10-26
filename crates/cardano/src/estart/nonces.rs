@@ -190,6 +190,7 @@ mod tests {
             deltas: Default::default(),
             active_stake: None,
             logs: Vec::new(),
+            finals: Default::default(),
         }
     }
 

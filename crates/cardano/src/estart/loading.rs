@@ -23,16 +23,18 @@ use crate::{
 
 impl WorkContext {
     /// Iterate the global (non-account-keyed) entity classes of the
-    /// finalize pass — pools, dreps, proposals — and emit transition
-    /// deltas for each. Closes by emitting the single `EpochTransition`
-    /// delta that advances the epoch number, recomputes pots, and
-    /// (optionally) migrates pparams across an era boundary.
+    /// finalize pass — pools, dreps, proposals — emit transition deltas for
+    /// each, and gather the rows that move to the final-row log. Closes by
+    /// emitting the single `EpochTransition` delta that advances the epoch
+    /// number, recomputes pots, and (optionally) migrates pparams across an
+    /// era boundary.
     ///
     /// Account-keyed transitions are handled by `compute_shard_deltas`,
     /// which the executor runs once per shard ahead of this finalize pass.
     pub fn compute_global_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let mut visitor_nonces = super::nonces::BoundaryVisitor;
         let mut visitor_reset = super::reset::BoundaryVisitor;
+        let mut visitor_finals = super::final_rows::BoundaryVisitor;
 
         let pools = state.iter_entities_typed::<PoolState>(None)?;
 
@@ -41,6 +43,7 @@ impl WorkContext {
 
             visitor_nonces.visit_pool(self, &pool_id, &pool)?;
             visitor_reset.visit_pool(self, &pool_id, &pool)?;
+            visitor_finals.visit_pool(self, &pool_id, &pool)?;
         }
 
         let dreps = state.iter_entities_typed::<DRepState>(None)?;
@@ -50,6 +53,7 @@ impl WorkContext {
 
             visitor_nonces.visit_drep(self, &drep_id, &drep)?;
             visitor_reset.visit_drep(self, &drep_id, &drep)?;
+            visitor_finals.visit_drep(self, &drep_id, &drep)?;
         }
 
         let proposals = state.iter_entities_typed::<ProposalState>(None)?;
@@ -59,10 +63,12 @@ impl WorkContext {
 
             visitor_nonces.visit_proposal(self, &proposal_id, &proposal)?;
             visitor_reset.visit_proposal(self, &proposal_id, &proposal)?;
+            visitor_finals.visit_proposal(self, &proposal_id, &proposal)?;
         }
 
         visitor_nonces.flush(self)?;
         visitor_reset.flush(self)?;
+        visitor_finals.flush(self)?;
 
         // Closing global delta — emitted once per epoch boundary, after
         // all per-entity transitions have been queued.
@@ -124,6 +130,7 @@ impl WorkContext {
             deltas: WorkDeltas::default(),
             active_stake: None,
             logs: Vec::new(),
+            finals: Default::default(),
         })
     }
 

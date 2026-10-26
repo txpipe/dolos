@@ -17,6 +17,8 @@ use crate::{
     Facade,
 };
 
+use super::read_proposal_row;
+
 /// This function builds the common fields for a proposal metadata response.
 ///
 /// The anchor contains the metadata URL and hash from the proposal procedure.
@@ -60,9 +62,9 @@ where
 {
     let tx: Hash<32> = tx_hash.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let state = domain
-        .read_cardano_entity::<ProposalState>(&ProposalKey::new(tx, cert_index))?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let state = read_proposal_row(&domain.inner, &ProposalKey::new(tx, cert_index))?
+        .ok_or(StatusCode::NOT_FOUND)?
+        .into_state();
 
     let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
 
@@ -96,9 +98,9 @@ where
 {
     let (tx, idx) = parse_gov_action_id(&gov_action_id).map_err(|_| Error::InvalidGovActionId)?;
 
-    let state = domain
-        .read_cardano_entity::<ProposalState>(&ProposalKey::new(tx, idx))?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let state = read_proposal_row(&domain.inner, &ProposalKey::new(tx, idx))?
+        .ok_or(StatusCode::NOT_FOUND)?
+        .into_state();
 
     let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
 

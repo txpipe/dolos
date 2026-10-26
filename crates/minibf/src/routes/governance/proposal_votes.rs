@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -6,7 +8,7 @@ use axum::{
 use blockfrost_openapi::models::proposal_votes_inner::{self, ProposalVotesInner};
 use dolos_cardano::{
     indexes::CardanoArchiveIndexExt as _,
-    model::{DRepKey, DRepState, ProposalKey, ProposalState},
+    model::{DRepKey, DRepState, ProposalKey},
     pallas_extras,
 };
 use dolos_core::{ArchiveStore as _, BlockSlot, ChainPoint, Domain, StateStore as _, TxOrder};
@@ -31,7 +33,7 @@ use crate::{
     Facade,
 };
 
-use super::collect_block_rows;
+use super::{collect_block_rows, read_proposal_row, ProposalRow};
 
 struct ProposalVoteRow {
     tx: Hash<32>,
@@ -256,6 +258,150 @@ fn proposal_votes_in_block(block: &MultiEraBlock, action: &GovActionId) -> Vec<P
     out
 }
 
+/// The newest vote of each voter on a resolved proposal, found by the
+/// `action_votes` walk instead of the vote maps its final row dropped.
+///
+/// A page reads a prefix of the listing, in whole blocks. Read newest first,
+/// that prefix holds every vote newer than a row on the page. Read oldest
+/// first, a newer vote can sit past it, in a block that both the action's
+/// `action_votes` tag and the voter's `voter_votes` tag name, so the check
+/// reads only those blocks, from the request's budget. No vote lands on a
+/// proposal once it is resolved, and the archive holds its votes by the
+/// boundary after, so nothing newer hides past the visible tip.
+struct WalkedNewest<'a, D: Domain> {
+    domain: &'a D,
+    key: ProposalKey,
+    action: GovActionId,
+
+    /// The newest position of each voter among the rows the page read.
+    read: BTreeMap<Voter, (BlockSlot, TxOrder)>,
+
+    /// The slots past the rows read, inclusive, where an oldest-first page
+    /// looks for newer votes; `None` newest first.
+    ahead: Option<(BlockSlot, BlockSlot)>,
+
+    /// The action's tagged slots in [`Self::ahead`], read on first use.
+    action_slots: Option<BTreeSet<BlockSlot>>,
+
+    /// The blocks past the rows read, by slot, read on first use.
+    blocks: HashMap<BlockSlot, Vec<ProposalVoteRow>>,
+}
+
+impl<'a, D: Domain> WalkedNewest<'a, D> {
+    fn new(
+        domain: &'a D,
+        key: &ProposalKey,
+        action: &GovActionId,
+        rows: &[ProposalVoteRow],
+        descending: bool,
+        visible: BlockSlot,
+    ) -> Self {
+        let mut read: BTreeMap<Voter, (BlockSlot, TxOrder)> = BTreeMap::new();
+
+        for row in rows {
+            let position = (row.slot, row.tx_order);
+            let newest = read.entry(row.voter.clone()).or_insert(position);
+            *newest = (*newest).max(position);
+        }
+
+        let last = rows.iter().map(|row| row.slot).max();
+
+        let ahead = match last {
+            Some(last) if !descending && last < visible => Some((last + 1, visible)),
+            _ => None,
+        };
+
+        Self {
+            domain,
+            key: *key,
+            action: action.clone(),
+            read,
+            ahead,
+            action_slots: None,
+            blocks: HashMap::new(),
+        }
+    }
+
+    /// Whether `row` holds its voter's newest vote on the action.
+    fn is_newest(&mut self, row: &ProposalVoteRow, budget: &mut usize) -> Result<bool, Error> {
+        let position = (row.slot, row.tx_order);
+
+        if self
+            .read
+            .get(&row.voter)
+            .is_some_and(|newest| *newest > position)
+        {
+            return Ok(false);
+        }
+
+        let Some((from, to)) = self.ahead else {
+            return Ok(true);
+        };
+
+        let archive = self.domain.archive();
+
+        if self.action_slots.is_none() {
+            let slots = archive
+                .slots_by_action_votes(&self.key, from, to)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .collect::<Result<BTreeSet<_>, _>>()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            self.action_slots = Some(slots);
+        }
+
+        let voter_slots = archive
+            .slots_by_voter_votes(&pallas_extras::voter_id_bytes(&row.voter), from, to)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        for slot in voter_slots {
+            let slot = slot.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            if !self
+                .action_slots
+                .as_ref()
+                .is_some_and(|x| x.contains(&slot))
+            {
+                continue;
+            }
+
+            if !self.blocks.contains_key(&slot) {
+                // The same budget the listing draws on.
+                if *budget == 0 {
+                    return Err(Error::ScanBudgetExceeded);
+                }
+
+                *budget -= 1;
+
+                // A tagged block the archive no longer holds leaves the
+                // walk, as it leaves the listing.
+                let rows = match archive
+                    .get_block_by_slot(&slot)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                {
+                    Some(body) => {
+                        let block = MultiEraBlock::decode(&body)
+                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                        proposal_votes_in_block(&block, &self.action)
+                    }
+                    None => vec![],
+                };
+
+                self.blocks.insert(slot, rows);
+            }
+
+            if self.blocks[&slot]
+                .iter()
+                .any(|later| later.voter == row.voter)
+            {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+}
+
 const STABLE_CURSOR_ATTEMPTS: usize = 3;
 
 /// Whether two cursors are the same commit: same variant, slot and hash.
@@ -309,9 +455,10 @@ fn read_at_stable_cursor<T, E: From<StatusCode>>(
 /// the list, and the votes after it move up, like the other history endpoints
 /// under rolling history.
 ///
-/// Only the newest vote of a voter can count, and the proposal's state row
-/// holds that vote's position (`VoteEntry`), so only the rows on the page pay
-/// for the `counted` check.
+/// Only the newest vote of a voter can count. A live proposal's state row
+/// holds that vote's position (`VoteEntry`); a resolved proposal's final row
+/// has no vote maps, and the walk finds it instead ([`WalkedNewest`]). Either
+/// way only the rows on the page pay for the `counted` check.
 ///
 /// The `counted` flags compare the archive rows with the proposal row and
 /// with the DRep rows, so the whole page is read between two reads of the
@@ -352,14 +499,9 @@ fn read_votes_at<D: Domain>(
 ) -> Result<Vec<ProposalVotesInner>, Error> {
     let key = ProposalKey::new(tx, idx);
 
-    let state = domain
-        .state()
-        .read_entity_typed::<ProposalState>(&key)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     // Blockfrost joins against db-sync and sends whatever rows come back, so
     // an unknown proposal is an empty listing rather than a 404.
-    let Some(state) = state else {
+    let Some(proposal) = read_proposal_row(domain, &key)? else {
         return Ok(vec![]);
     };
 
@@ -415,11 +557,14 @@ fn read_votes_at<D: Domain>(
     // The last slot whose deregistration can still drop a vote: the one
     // before the epoch that the proposal closes in, capped at the visible
     // tip.
-    let end = match proposal_closed_epoch(&state, current_epoch) {
+    let end = match proposal_closed_epoch(proposal.state(), current_epoch) {
         Some(closed) => chain.epoch_start(closed).saturating_sub(1),
         None => BlockSlot::MAX,
     }
     .min(visible);
+
+    let mut walked = matches!(proposal, ProposalRow::Final(_))
+        .then(|| WalkedNewest::new(domain, &key, &action, &rows, descending, visible));
 
     let page = rows
         .into_iter()
@@ -429,11 +574,17 @@ fn read_votes_at<D: Domain>(
     let mut out = Vec::new();
 
     for mut row in page {
-        // Only the newest vote of a voter can count. The vote map of the
-        // state row pins its position.
-        row.counted = state
-            .vote_entry(&row.voter)
-            .is_some_and(|entry| entry.newest.0 == row.slot && entry.newest_order == row.tx_order);
+        // Only the newest vote of a voter can count. The vote map of a live
+        // proposal's row pins its position; a final row's comes from the walk.
+        row.counted = match walked.as_mut() {
+            Some(walked) => walked.is_newest(&row, budget)?,
+            None => proposal
+                .state()
+                .vote_entry(&row.voter)
+                .is_some_and(|entry| {
+                    entry.newest.0 == row.slot && entry.newest_order == row.tx_order
+                }),
+        };
 
         let drep = match &row.voter {
             Voter::DRepKey(hash) => Some(StakeCredential::AddrKeyhash(*hash)),
@@ -537,6 +688,7 @@ mod tests {
         routes::governance::testing::*,
         test_support::{TestApp, TestFault},
     };
+    use dolos_cardano::model::ProposalState;
     use dolos_core::StateWriter as _;
     use dolos_testing::{
         synthetic::{SyntheticBlockConfig, SyntheticVectors},

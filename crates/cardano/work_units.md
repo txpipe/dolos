@@ -58,9 +58,10 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 ### `finalize()` — Estart global pass
 
 - Builds a fresh `WorkContext` via `WorkContext::load_finalize` (using the AVVM total computed in `initialize`).
-- Iterates pools / dreps / proposals; emits transition deltas via the `nonces` and `reset` visitors.
+- Iterates pools / dreps / proposals; emits transition deltas via the `nonces` and `reset` visitors, and gathers the rows that leave state via the `final_rows` visitor: a proposal resolved at a boundary before the one just crossed (`ProposalState::leaves_state_at`).
 - Emits the closing `EpochTransition` delta (rotates `number` / `initial_pots` / `rolling` / `pparams`, seeds `EpochState.end = Some(EndStats::default())`, resets *both* `ewrap_progress = None` and `estart_progress = None`).
 - Direct writes: `EraState` writes during era transitions (Shelley→Allegra etc.).
+- Direct writes and deletes (`crate::final_rows`): each moved row's final row, vote maps dropped for a proposal, goes to the log of its own namespace under `epoch_start` of the closing epoch, and its state row is deleted. The archive commits before the state, so a crash in between re-runs finalize over the same rows.
 - **Sets the cursor** to `ChainPoint::Slot(boundary_slot)` — the only phase across all work units that moves the cursor. A crash before `finalize()` restarts from the boundary block.
 - Deltas emitted in finalize:
   - `NonceTransition` — `estart/nonces.rs:40`. Targets `epochs`.
@@ -69,7 +70,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 
 `AccountTransition` is not natively idempotent on re-apply (would double-roll), so true mid-shard resume remains a TODO — same posture as `EwrapWorkUnit`.
 
-- Namespaces touched: `accounts` (shard range, per shard), `pools`, `epochs`, `eras` (in finalize).
+- Namespaces touched: `accounts` (shard range, per shard), `pools`, `epochs`, `eras`, `proposals` (deletes, and its log) (in finalize).
 
 ## 2. `RollWorkUnit` — applies a batch of blocks
 

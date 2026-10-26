@@ -175,7 +175,7 @@ pub const LOG_NAMESPACES: [Namespace; LOG_KINDS.len()] = {
 /// Nothing in the tree marks an entity as log-bearing, so this table is where
 /// the log namespaces are spelled, held to the entity types by
 /// `log_kinds_derive_from_their_namespaces` in `tests/coverage.rs`.
-pub const LOG_KINDS: [(&str, Namespace); 12] = [
+pub const LOG_KINDS: [(&str, Namespace); 13] = [
     ("log-account-address-chunks", AccountAddressChunk::NS),
     ("log-account-epochs", AccountEpochLog::NS),
     ("log-account-stats", AccountStats::NS),
@@ -188,6 +188,7 @@ pub const LOG_KINDS: [(&str, Namespace); 12] = [
     ("log-payment-address-chunks", PaymentAddressChunk::NS),
     ("log-policy-mint-chunks", PolicyMintChunk::NS),
     ("log-pool-epochs", PoolEpochLog::NS),
+    ("log-proposals", ProposalState::NS),
 ];
 
 /// The entity index layer kinds and the kind each carries, in inscription

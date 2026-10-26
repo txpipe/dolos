@@ -12,7 +12,8 @@
 //! immutable epoch (`crate::periods`), then runs the global "Estart" pass:
 //! pool / drep / proposal snapshot transitions, nonce transition, pot
 //! recalculation (`EpochTransition`), era transitions (if protocol version
-//! changes), and the cursor advance. The cursor moves only here, so a
+//! changes), the moves to the final-row log (`crate::final_rows`), and the
+//! cursor advance. The cursor moves only here, so a
 //! crash before finalize restarts from the boundary block.
 //!
 //! `AccountTransition` is not natively idempotent (re-applying double-rolls
@@ -222,7 +223,7 @@ where
             context.starting_epoch_no(),
         )?;
 
-        context.commit_finalize::<D>(domain.state(), self.slot)?;
+        context.commit_finalize::<D>(domain.state(), domain.archive(), self.slot)?;
 
         // Replace the per-shard context with the finalize-phase
         // WorkContext so post-finalize introspection (e.g. `ended_state`

@@ -240,6 +240,8 @@ where
     Ok(Json(model))
 }
 
+/// Whether a proposal names the credential as its return account: a live one
+/// in state, or a resolved one in the final-row log.
 fn account_appears_in_proposals<D>(
     domain: &Facade<D>,
     account: &AccountKey,
@@ -248,12 +250,28 @@ where
     Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
+    let names =
+        |proposal: &ProposalState| proposal.reward_account.as_ref() == Some(account.credential());
+
     for item in domain.iter_cardano_entities::<ProposalState>(None)? {
         let (_, proposal) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if proposal.reward_account.as_ref() == Some(account.credential()) {
+        if names(&proposal) {
             return Ok(true);
         }
     }
+
+    let logged = domain
+        .archive()
+        .iter_logs_typed::<ProposalState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for item in logged {
+        let (_, _, proposal) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if names(&proposal) {
+            return Ok(true);
+        }
+    }
+
     Ok(false)
 }
 

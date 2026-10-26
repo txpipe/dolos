@@ -368,6 +368,7 @@ pub fn build_log_schema() -> StateSchema {
     register_log::<PaymentAddressChunk>(&mut schema);
     register_log::<AccountStats>(&mut schema);
     register_log::<AssetMintChunk>(&mut schema);
+    register_log::<ProposalState>(&mut schema);
     schema
 }
 
@@ -393,6 +394,17 @@ mod schema_tests {
             assert!(!states.contains_key(ns), "{ns} is a state namespace");
             assert!(logs.contains_key(ns), "{ns} is not a log namespace");
         }
+    }
+
+    /// A final-row kind keeps its live rows in state and its final rows in
+    /// the log of the same namespace.
+    #[test]
+    fn final_row_kinds_register_in_both_stores() {
+        let states = build_schema();
+        let logs = build_log_schema();
+
+        assert!(states.contains_key(ProposalState::NS));
+        assert!(logs.contains_key(ProposalState::NS));
     }
 }
 
