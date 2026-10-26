@@ -45,13 +45,12 @@ unmaintained = "none"
 ignore = [
     # "RUSTSEC-0000-0000", # reason — <issue link>
     #
-    # The three entries below are the zstd 0.13 line, reached only through
-    # `mithril-client 0.14.5` and `stelae v0.2.0`, which both pin `zstd ^0.13.3`;
-    # every Dolos crate is on zstd 0.14.3 / zstd-safe 8.2.0 (patched). The
-    # streams that copy decodes are the Mithril snapshot archive from the
-    # configured aggregator and the stele layers from the configured OCI
-    # registry, not client input. Drop them once stelae and mithril-client
-    # move to zstd 0.14 (mithril-client 0.14.34 does, but brings aws-lc-rs).
+    # The three entries below are the zstd 0.13 line, which only `stelae v0.2.0`
+    # still pulls (`zstd = "0.13.3"` up to and including its v0.3.1); every
+    # Dolos crate and mithril-client are on zstd 0.14.3 / zstd-safe 8.2.0, the
+    # patched line. The streams that copy decodes are the stele layers from the
+    # configured OCI registry. Drop the three once a stelae release moves to
+    # zstd 0.14 and the tag here follows it.
     "RUSTSEC-2026-0391", # zstd 0.13: abandoned stream leaks into the next on a reused context
     "RUSTSEC-2026-0398", # zstd-safe 7: Seekable::decompress over-length; the seekable feature is not compiled in
     "RUSTSEC-2026-0403", # zstd-safe 7: uninitialised memory on a failed legacy-frame stream decode
