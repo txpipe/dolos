@@ -1,9 +1,19 @@
 use axum::http::StatusCode;
-use pallas::ledger::traverse::MultiEraOutput;
-use std::{collections::HashSet, sync::Arc};
+use pallas::{
+    crypto::hash::Hash,
+    ledger::traverse::{MultiEraBlock, MultiEraOutput},
+};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::RangeInclusive,
+    sync::Arc,
+};
 
 use dolos_cardano::indexes::AsyncCardanoQueryExt as _;
-use dolos_core::{Domain, StateStore as _, Tag, TagEntry, TagOrder, TagStart, TxoRef, UtxoValue};
+use dolos_core::{
+    ArchiveStore as _, BlockSlot, Domain, StateStore as _, Tag, TagEntry, TagOrder, TagStart,
+    TxHash, TxoRef, UtxoValue, TAG_ORDER_LEN,
+};
 
 use crate::{
     mapping::{IntoModel, UtxoOutputModelBuilder},
@@ -244,6 +254,337 @@ where
     }
 
     into_models(domain, rows.rows).await
+}
+
+/// The inclusive block-height range a listing is bounded to, as Blockfrost
+/// reads `from` and `to` on the UTxO listings that take them: the heights
+/// alone, an `:index` cuts nothing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HeightRange {
+    pub from: Option<u64>,
+    pub to: Option<u64>,
+}
+
+impl HeightRange {
+    pub fn of(pagination: &Pagination) -> Self {
+        Self {
+            from: pagination.from.as_ref().map(|bound| bound.number),
+            to: pagination.to.as_ref().map(|bound| bound.number),
+        }
+    }
+
+    fn holds(&self, height: u64) -> bool {
+        self.from.is_none_or(|from| height >= from) && self.to.is_none_or(|to| height <= to)
+    }
+}
+
+/// The slots a height range bounds a walk to, and the edge zones whose rows
+/// are held against the exact heights.
+///
+/// A Byron epoch-boundary block blurs the edges: it takes the height of the
+/// main block before it and the slot of the main block after it, so the exact
+/// index can answer a height with a slot whose rows hold the next height, and
+/// the rows of that height sit a slot earlier. The walk therefore starts at
+/// the slot of the height below `from` and checks the rows up to `from`'s slot
+/// against their block's height, and does the same for the rows at `to`'s
+/// slot.
+struct SlotBounds {
+    /// The first slot the walk reads.
+    lower: BlockSlot,
+    /// The last slot the walk reads, when the range has a top.
+    upper: Option<BlockSlot>,
+    edges: Vec<RangeInclusive<BlockSlot>>,
+    heights: HeightRange,
+}
+
+impl SlotBounds {
+    fn on_edge(&self, slot: BlockSlot) -> bool {
+        self.edges.iter().any(|edge| edge.contains(&slot))
+    }
+}
+
+/// The oldest block the archive holds: its slot and its height.
+struct Oldest {
+    slot: BlockSlot,
+    height: u64,
+}
+
+/// The oldest block the archive holds, or `None` while it holds none.
+async fn oldest_held<D>(domain: &Facade<D>) -> Result<Option<Oldest>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    domain
+        .blocking(|domain| {
+            let Some((slot, body)) = domain
+                .archive()
+                .get_range(None, None)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .next()
+            else {
+                return Ok(None);
+            };
+
+            let height = MultiEraBlock::decode(&body)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .number();
+
+            Ok(Some(Oldest { slot, height }))
+        })
+        .await
+}
+
+/// The slots `range` bounds a listing to: the first slot a row may sit at and
+/// the last one, when there is one. `None` when no held block lies in the
+/// range.
+///
+/// The lower bound never drops below the oldest block the archive holds, so a
+/// listing starts at the rows it can still describe. A height the exact index
+/// does not know is told apart by that block: below it the height was pruned,
+/// so such a `from` is no bound and such a `to` leaves nothing; at or above it
+/// the height is past the held chain, as after a rollback that dropped the
+/// index entries before the bodies, so such a `from` leaves nothing and such a
+/// `to` is no bound.
+async fn slot_bounds<D>(
+    domain: &Facade<D>,
+    range: &HeightRange,
+) -> Result<Option<SlotBounds>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let Some(oldest) = oldest_held(domain).await? else {
+        return Ok(None);
+    };
+
+    let slot_of = |height: u64| async move {
+        domain
+            .query()
+            .slot_by_number(height)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    };
+
+    let mut lower = oldest.slot;
+    let mut edges = Vec::with_capacity(2);
+
+    if let Some(from) = range.from {
+        match slot_of(from).await? {
+            Some(slot) => {
+                // the rows of `from` may sit anywhere past the height below it
+                let below = match from.checked_sub(1) {
+                    Some(below) => slot_of(below).await?,
+                    None => None,
+                };
+
+                lower = lower.max(below.unwrap_or(oldest.slot).min(slot));
+                edges.push(lower..=slot.max(lower));
+            }
+            None if from < oldest.height => {}
+            None => return Ok(None),
+        }
+    }
+
+    let mut upper = None;
+
+    if let Some(to) = range.to {
+        match slot_of(to).await? {
+            Some(slot) => {
+                upper = Some(slot);
+                edges.push(slot..=slot);
+            }
+            None if to < oldest.height => return Ok(None),
+            None => {}
+        }
+    }
+
+    if upper.is_some_and(|upper| upper < lower) {
+        return Ok(None);
+    }
+
+    Ok(Some(SlotBounds {
+        lower,
+        upper,
+        edges,
+        heights: *range,
+    }))
+}
+
+/// The ref every real entry sorts before: no transaction hashes to all ones.
+fn last_txo() -> TxoRef {
+    TxoRef(Hash::from([0xff; 32]), u32::MAX)
+}
+
+/// An entry that every positioned entry at `slot` or later sorts after, and
+/// every one before `slot` sorts before. At slot 0 it still sorts after the
+/// entries without a position, whose order bytes are all zeros.
+fn entry_before(slot: BlockSlot) -> TagEntry {
+    let mut order = [0; TAG_ORDER_LEN];
+
+    if let Some(previous) = slot.checked_sub(1) {
+        order[..8].copy_from_slice(&previous.to_be_bytes());
+        order[8..].fill(0xff);
+    }
+
+    TagEntry {
+        order,
+        txo: last_txo(),
+    }
+}
+
+/// An entry that every entry at `slot` or earlier sorts before.
+fn entry_after(slot: BlockSlot) -> TagEntry {
+    let mut order = [0xff; TAG_ORDER_LEN];
+    order[..8].copy_from_slice(&slot.to_be_bytes());
+
+    TagEntry {
+        order,
+        txo: last_txo(),
+    }
+}
+
+/// The slot an entry's order bytes name; 0 for an entry without a position.
+fn entry_slot(entry: &TagEntry) -> BlockSlot {
+    let mut slot = [0; 8];
+    slot.copy_from_slice(&entry.order[..8]);
+
+    BlockSlot::from_be_bytes(slot)
+}
+
+/// Loads one page of the UTxOs that carry `tag` and were created in the
+/// blocks of `range`, in creation order, as [`load_tag_page`] does without
+/// the range. Only rows whose creating block the archive holds are listed:
+/// the models built here report that block.
+///
+/// The range resolves to slots through the archive's exact index, so the walk
+/// starts at the first row inside it and stops at the first one past it. The
+/// offset costs tag entries, as a plain listing's does; the page's rows are
+/// read, and so are the rows of the edge slots, whose block decides whether
+/// they are in the range at all.
+pub async fn load_tag_page_in_heights<D, T>(
+    domain: &Facade<D>,
+    tag: &Tag,
+    pagination: &Pagination,
+    range: &HeightRange,
+) -> Result<Vec<T>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    T: serde::Serialize,
+    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
+{
+    let Some(bounds) = slot_bounds(domain, range).await? else {
+        return Ok(Vec::new());
+    };
+
+    let order = tag_order(&pagination.order);
+
+    let start = match (order, bounds.upper) {
+        (TagOrder::Asc, _) => TagStart::After(entry_before(bounds.lower)),
+        (TagOrder::Desc, Some(upper)) => TagStart::After(entry_after(upper)),
+        (TagOrder::Desc, None) => TagStart::Skip(0),
+    };
+
+    let past_end = |entry: &TagEntry| match order {
+        TagOrder::Asc => bounds.upper.is_some_and(|upper| entry_slot(entry) > upper),
+        TagOrder::Desc => entry_slot(entry) < bounds.lower,
+    };
+
+    let mut walk = Walk::tag(tag.clone(), order, start);
+    let mut rows = Rows::new(pagination.count);
+    let mut skip = pagination.skip();
+    let mut ended = false;
+
+    while !rows.full() && !ended {
+        let want = skip.saturating_add(rows.missing()).min(MAX_WINDOW);
+        let mut entries = walk.next(domain, want).await?;
+
+        if entries.is_empty() {
+            break;
+        }
+
+        if let Some(end) = entries.iter().position(past_end) {
+            entries.truncate(end);
+            ended = true;
+        }
+
+        // The entries come in runs on and off the edge zones. Off them the
+        // offset is counted in entries, their values unread; on them every
+        // row is read and held against its block's height first.
+        let mut rest = entries.as_slice();
+
+        while !rest.is_empty() && !rows.full() {
+            let on_edge = bounds.on_edge(entry_slot(&rest[0]));
+            let len = rest
+                .iter()
+                .position(|entry| bounds.on_edge(entry_slot(entry)) != on_edge)
+                .unwrap_or(rest.len());
+            let (run, tail) = rest.split_at(len);
+            rest = tail;
+
+            if on_edge {
+                let loaded = rows.load(domain, run.to_vec(), false).await?;
+                let heights = block_heights(domain, &loaded).await?;
+
+                for (txo_ref, value) in loaded {
+                    match heights.get(&txo_ref.0) {
+                        // outside the range: not a row of this listing
+                        Some(height) if !bounds.heights.holds(*height) => continue,
+                        // its block is gone: it keeps its place in the offset
+                        // and drops out of the page, as a spent row does
+                        None if skip > 0 => skip -= 1,
+                        None => continue,
+                        Some(_) if skip > 0 => skip -= 1,
+                        Some(_) if !rows.full() => rows.rows.push((txo_ref, value)),
+                        Some(_) => break,
+                    }
+                }
+            } else {
+                let skipped = skip.min(run.len());
+                skip -= skipped;
+                let (passed, page) = run.split_at(skipped);
+                rows.count_entries(passed);
+
+                if !page.is_empty() {
+                    let loaded = rows.load(domain, page.to_vec(), false).await?;
+                    let heights = block_heights(domain, &loaded).await?;
+                    let located = loaded
+                        .into_iter()
+                        .filter(|(txo_ref, _)| heights.contains_key(&txo_ref.0));
+                    rows.rows.extend(located);
+                    rows.rows.truncate(rows.count);
+                }
+            }
+        }
+    }
+
+    into_located_models(domain, rows.rows).await
+}
+
+/// The height of the creating block of each row of `rows` whose block the
+/// archive holds, with the row's transaction at its position, by tx hash. A
+/// row whose block is gone has no entry: it is left out of a page so the page
+/// is topped up from the next rows, as a spent row is.
+async fn block_heights<D>(
+    domain: &Facade<D>,
+    rows: &[(TxoRef, Arc<UtxoValue>)],
+) -> Result<HashMap<TxHash, u64>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let positions = rows
+        .iter()
+        .filter_map(|(txo_ref, value)| Some((txo_ref.0, value.position()?)))
+        .collect::<Vec<_>>();
+
+    let held = domain
+        .query()
+        .block_meta_by_positions(positions)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(held
+        .into_iter()
+        .map(|(tx_hash, meta)| (tx_hash, meta.height))
+        .collect())
 }
 
 /// What a filtered listing walks, in creation order.
@@ -496,6 +837,33 @@ where
     T: serde::Serialize,
     for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
 {
+    build_models(domain, rows, false).await
+}
+
+/// As [`into_models`], leaving out every row whose creating block the archive
+/// does not hold, for the models that report that block.
+async fn into_located_models<D, T>(
+    domain: &Facade<D>,
+    rows: Vec<(TxoRef, Arc<UtxoValue>)>,
+) -> Result<Vec<T>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    T: serde::Serialize,
+    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
+{
+    build_models(domain, rows, true).await
+}
+
+async fn build_models<D, T>(
+    domain: &Facade<D>,
+    rows: Vec<(TxoRef, Arc<UtxoValue>)>,
+    located_only: bool,
+) -> Result<Vec<T>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    T: serde::Serialize,
+    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
+{
     let located = rows
         .iter()
         .filter_map(|(txo_ref, value)| Some((txo_ref.0, value.position()?)))
@@ -516,11 +884,13 @@ where
         let TxoRef(tx_hash, txo_idx) = txo_ref;
         let builder = UtxoOutputModelBuilder::from_output(tx_hash, txo_idx, output);
 
-        let builder = if let Some(x) = block_deps.get(&tx_hash).cloned() {
-            let block_time = chain.slot_time(x.slot);
-            builder.with_block_data(x).with_block_time(block_time)
-        } else {
-            builder
+        let builder = match block_deps.get(&tx_hash).cloned() {
+            Some(x) => {
+                let block_time = chain.slot_time(x.slot);
+                builder.with_block_data(x).with_block_time(block_time)
+            }
+            None if located_only => continue,
+            None => builder,
         };
 
         let key: Vec<u8> = builder.txo_ref().into();

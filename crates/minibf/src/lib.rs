@@ -575,6 +575,10 @@ where
             get(routes::assets::by_subject_history::<D>),
         )
         .route(
+            "/assets/{subject}/utxos",
+            get(routes::assets::by_subject_utxos::<D>),
+        )
+        .route(
             "/assets/{subject}/transactions",
             get(routes::assets::by_subject_transactions::<D>),
         )
