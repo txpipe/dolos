@@ -159,16 +159,31 @@ impl<D: Domain> ChainCrawler<D> {
         Ok(())
     }
 
-    pub fn next_block(&mut self) -> Option<(ChainPoint, RawBlock)> {
+    /// The point the cursor currently sits on, if it has one. Used by callers
+    /// that need to re-seek after a loading error.
+    pub fn last_point(&self) -> Option<&ChainPoint> {
+        match &self.batch {
+            Batch::Tip(point, _) | Batch::WalPage(point, _) | Batch::ArchivePage(point, _) => {
+                Some(point)
+            }
+        }
+    }
+
+    /// Advance the cursor, reporting a failure to load the next batch.
+    ///
+    /// A drained batch stays in place when loading fails, so the caller can
+    /// re-seek from [`Self::last_point`] and call again. Returning `None` means
+    /// the cursor genuinely reached the tip and has nothing more to hand out.
+    pub fn next_block(&mut self) -> Result<Option<(ChainPoint, RawBlock)>, DomainError> {
         if self.batch.is_drained() {
-            self.load_next_batch().ok()?;
+            self.load_next_batch()?;
         }
 
         if self.batch.is_tip() {
-            return None;
+            return Ok(None);
         }
 
-        self.batch.pop()
+        Ok(self.batch.pop())
     }
 
     pub async fn next_tip(&mut self) -> TipEvent {
@@ -188,7 +203,7 @@ impl<D: Domain> Iterator for ChainCrawler<D> {
     type Item = (ChainPoint, RawBlock);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_block()
+        self.next_block().ok().flatten()
     }
 }
 
