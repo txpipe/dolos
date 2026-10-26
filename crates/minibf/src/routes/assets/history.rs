@@ -100,6 +100,10 @@ mod tests {
     use itertools::Itertools;
     use pallas::ledger::primitives::{alonzo, TransactionInput};
 
+    use axum::http::StatusCode;
+
+    use dolos_core::Domain;
+
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
         assert_eq!(
