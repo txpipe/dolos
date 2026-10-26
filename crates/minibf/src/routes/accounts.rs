@@ -1031,15 +1031,19 @@ fn reward_entries(
 /// `GET /accounts/{stake_address}/history`: the stake this account had active
 /// in each epoch, and the pool that stake was delegated to.
 ///
-/// The row is the one `/epochs/{epoch}/stakes` reads, kept under the start
-/// slot of the epoch the stake is active in, so the two endpoints are two cuts
-/// of one table: that one fixes the epoch and walks accounts, this one fixes
-/// the account and walks epochs.
+/// Up to the tip epoch `C`, the row is the one `/epochs/{epoch}/stakes`
+/// reads, kept under the start slot of the epoch the stake is active in, so
+/// the two endpoints are two cuts of one table: that one fixes the epoch and
+/// walks accounts, this one fixes the account and walks epochs.
 ///
 /// A row with no stake leg belongs to a reward-only account, and a zero-stake
 /// row belongs to a delegator the distribution never carried — the same two
 /// the epoch endpoint filters out before paginating. What is left has to carry
 /// a pool, so a row that does not is an error here exactly as it is there.
+///
+/// The last entry, for `C + 1`, has no row: it is read from the account's
+/// `mark` snapshot, as db-sync holds it once the snapshot is taken, under the
+/// same two filters. `/epochs/{C + 1}/stakes` stays a 404.
 pub async fn by_stake_history<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -1434,7 +1438,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::test_support::{totals_bodies, TestApp, TestFault};
+    use crate::test_support::{totals_bodies, TestApp, TestAppBuilder, TestFault};
     use axum::http::header;
     use blockfrost_openapi::models::{
         account_addresses_assets_inner::AccountAddressesAssetsInner,
@@ -1453,7 +1457,9 @@ mod tests {
         model::{EpochValue, PoolDelegation, PoolParams, PoolSnapshot},
         PoolKey,
     };
-    use dolos_core::{ArchiveWriter as _, EraCbor, StateWriter as _, UtxoSetDelta, UtxoValue};
+    use dolos_core::{
+        ArchiveWriter as _, EraCbor, FixedNamespace, StateWriter as _, UtxoSetDelta, UtxoValue,
+    };
     use dolos_testing::{
         synthetic::{SyntheticBlockConfig, SyntheticVectors},
         toy_domain::ToyDomain,
@@ -2978,12 +2984,22 @@ mod tests {
     /// The pool the next-epoch tests delegate the fixture account's `mark` to.
     const NEXT_POOL: [u8; 28] = [0x5e; 28];
 
+    /// A pool the account's live delegation moves to after `mark` is taken.
+    const LATER_POOL: [u8; 28] = [0x5f; 28];
+
     /// How the next-epoch tests shape the account and its `mark` pool.
     struct NextEpochMark {
         /// The epoch the account's values sit at; the tip epoch unless lagging.
         at: Epoch,
         stake: u64,
+        /// `mark`'s stake at pointer addresses, counted before Conway only.
+        pointer_stake: u64,
         delegated: bool,
+        /// The pool the account's live value delegates to.
+        live_pool: [u8; 28],
+        /// The epoch the pool's snapshot sits at; the tip epoch unless
+        /// lagging.
+        pool_at: Epoch,
         /// Whether the pool's own `mark` is retired.
         mark_retired: bool,
         retiring_epoch: Option<Epoch>,
@@ -2994,7 +3010,10 @@ mod tests {
             Self {
                 at: tip,
                 stake: 9_000_000,
+                pointer_stake: 0,
                 delegated: true,
+                live_pool: NEXT_POOL,
+                pool_at: tip,
                 mark_retired: false,
                 retiring_epoch: None,
             }
@@ -3023,10 +3042,8 @@ mod tests {
     }
 
     /// Rewrites the fixture account's stake and delegation as `shape` says,
-    /// and writes [`NEXT_POOL`] with its snapshot at the tip epoch.
+    /// and writes [`NEXT_POOL`] with its snapshot where `shape` puts it.
     fn seed_next_epoch_mark(domain: &ToyDomain, vectors: &SyntheticVectors, shape: NextEpochMark) {
-        let tip = tip_epoch_of(domain);
-
         let key = parse_account_key_param(&vectors.stake_address, Network::Testnet)
             .expect("invalid fixture stake address")
             .account;
@@ -3037,11 +3054,11 @@ mod tests {
             .expect("account read failed")
             .expect("missing fixture account");
 
-        let stake = |utxo_sum| dolos_cardano::model::Stake {
+        let stake = |utxo_sum, utxo_sum_at_pointer_addresses| dolos_cardano::model::Stake {
             utxo_sum,
             rewards_sum: 0,
             withdrawals_sum: 0,
-            utxo_sum_at_pointer_addresses: 0,
+            utxo_sum_at_pointer_addresses,
         };
 
         let delegation = if shape.delegated {
@@ -3050,10 +3067,14 @@ mod tests {
             PoolDelegation::NotDelegated
         };
 
-        account.stake = value_with_mark(shape.at, stake(shape.stake), stake(1_000_000));
+        account.stake = value_with_mark(
+            shape.at,
+            stake(shape.stake, shape.pointer_stake),
+            stake(1_000_000, 0),
+        );
         // the live values are delegated with stake, so only `mark` keeps an
         // entry out
-        let live = PoolDelegation::Pool(Hash::from(NEXT_POOL));
+        let live = PoolDelegation::Pool(Hash::from(shape.live_pool));
         account.pool = value_with_mark(shape.at, delegation, live);
 
         let mut pool = reward_only_pool(NEXT_POOL, vec![]);
@@ -3062,7 +3083,7 @@ mod tests {
             is_retired: shape.mark_retired,
             ..snapshot.clone()
         };
-        pool.snapshot = value_with_mark(tip, mark, snapshot);
+        pool.snapshot = value_with_mark(shape.pool_at, mark, snapshot);
         pool.retiring_epoch = shape.retiring_epoch;
 
         let writer = domain.state().start_writer().expect("state writer");
@@ -3075,22 +3096,35 @@ mod tests {
         writer.commit().expect("state commit failed");
     }
 
+    /// `builder`'s app over a chain shaped by `shape`.
+    fn next_epoch_app(
+        builder: TestAppBuilder,
+        shape: impl FnOnce(Epoch) -> NextEpochMark + 'static,
+    ) -> TestApp {
+        builder
+            .with_setup(|domain, vectors| {
+                let tip = tip_epoch_of(domain);
+                seed_next_epoch_mark(domain, vectors, shape(tip));
+            })
+            .build()
+    }
+
     /// The fixture account's history over a chain shaped by `shape`, with the
     /// tip epoch it was read at.
     async fn next_epoch_history(
         query: &str,
-        shape: impl FnOnce(Epoch) -> NextEpochMark,
+        shape: impl FnOnce(Epoch) -> NextEpochMark + 'static,
     ) -> (Epoch, Vec<AccountHistoryContentInner>) {
-        let cfg = SyntheticBlockConfig {
-            block_count: 5,
-            txs_per_block: 3,
-            ..Default::default()
-        };
+        next_epoch_history_on(TestApp::builder(), query, shape).await
+    }
 
-        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
-            let tip = tip_epoch_of(domain);
-            seed_next_epoch_mark(domain, vectors, shape(tip));
-        });
+    /// [`next_epoch_history`] over `builder`'s app.
+    async fn next_epoch_history_on(
+        builder: TestAppBuilder,
+        query: &str,
+        shape: impl FnOnce(Epoch) -> NextEpochMark + 'static,
+    ) -> (Epoch, Vec<AccountHistoryContentInner>) {
+        let app = next_epoch_app(builder, shape);
 
         let stake_address = app.vectors().stake_address.as_str();
         let path = format!("/accounts/{stake_address}/history{query}");
@@ -3218,6 +3252,99 @@ mod tests {
             retired.iter().map(|x| x.active_epoch).collect::<Vec<_>>(),
             [tip as i32 - 1]
         );
+    }
+
+    /// Pool retirement takes effect for the distribution through `mark`, not
+    /// through the pool's scheduled retirement: a pool retiring at the
+    /// boundary into `C` still has an unretired `mark`, and its delegators
+    /// are in `C + 1`; a retired `mark` keeps them out whatever the schedule
+    /// says.
+    #[tokio::test]
+    async fn accounts_by_stake_history_next_epoch_follows_retirement_in_mark() {
+        let (tip, retiring_now) = next_epoch_history("", |tip| NextEpochMark {
+            retiring_epoch: Some(tip),
+            ..NextEpochMark::at_tip(tip)
+        })
+        .await;
+
+        let next = retiring_now.last().expect("empty history");
+        assert_eq!(next.active_epoch, tip as i32 + 1);
+        assert_eq!(next.pool_id, bech32_pool(NEXT_POOL).unwrap());
+
+        let (tip, retired) = next_epoch_history("", |tip| NextEpochMark {
+            mark_retired: true,
+            ..NextEpochMark::at_tip(tip)
+        })
+        .await;
+        assert_eq!(
+            retired.iter().map(|x| x.active_epoch).collect::<Vec<_>>(),
+            [tip as i32 - 1]
+        );
+    }
+
+    /// An account that redelegated after `mark` was taken is in `C + 1` with
+    /// `mark`'s pool, not its live one.
+    #[tokio::test]
+    async fn accounts_by_stake_history_next_epoch_keeps_mark_pool_after_redelegation() {
+        let (tip, history) = next_epoch_history("", |tip| NextEpochMark {
+            live_pool: LATER_POOL,
+            ..NextEpochMark::at_tip(tip)
+        })
+        .await;
+
+        let next = history.last().expect("empty history");
+        assert_eq!(next.active_epoch, tip as i32 + 1);
+        assert_eq!(next.amount, "9000000");
+        assert_eq!(next.pool_id, bech32_pool(NEXT_POOL).unwrap());
+    }
+
+    /// A pool whose snapshot lags the tip holds another epoch's `mark`: no
+    /// `C + 1` entry, and no error.
+    #[tokio::test]
+    async fn accounts_by_stake_history_skips_next_epoch_on_lagging_pool() {
+        let (tip, history) = next_epoch_history("", |tip| NextEpochMark {
+            pool_at: tip - 1,
+            ..NextEpochMark::at_tip(tip)
+        })
+        .await;
+
+        assert_eq!(
+            history.iter().map(|x| x.active_epoch).collect::<Vec<_>>(),
+            [tip as i32 - 1]
+        );
+    }
+
+    /// `C + 1`'s amount is `mark`'s stake under the protocol the snapshot was
+    /// taken in: pointer-address stake counts before Conway and not after.
+    #[tokio::test]
+    async fn accounts_by_stake_history_next_epoch_counts_pointer_stake_by_protocol() {
+        let shape = |tip| NextEpochMark {
+            pointer_stake: 500_000,
+            ..NextEpochMark::at_tip(tip)
+        };
+
+        let (_, babbage) =
+            next_epoch_history_on(TestApp::builder().with_protocol(8), "", shape).await;
+        assert_eq!(babbage.last().expect("empty history").amount, "9500000");
+
+        let (_, conway) =
+            next_epoch_history_on(TestApp::builder().with_protocol(9), "", shape).await;
+        assert_eq!(conway.last().expect("empty history").amount, "9000000");
+    }
+
+    /// A failed read of the `mark` pool fails the request rather than
+    /// dropping `C + 1`.
+    #[tokio::test]
+    async fn accounts_by_stake_history_next_epoch_pool_read_error() {
+        let builder = TestApp::builder().with_fault(TestFault::StateNamespaceError(
+            <PoolState as FixedNamespace>::NS,
+        ));
+        let app = next_epoch_app(builder, NextEpochMark::at_tip);
+
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/history");
+
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]

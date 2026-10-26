@@ -28,6 +28,12 @@ pub enum TestFault {
     /// would never get there if opening the store failed too — a stele restore
     /// above all, which writes tags alongside each incoming UTxO batch.
     StateTagsApplyError,
+    /// Only reads and scans of this namespace fail; every other state call
+    /// succeeds.
+    ///
+    /// For a caller whose later read has to fail while an earlier one, of
+    /// another entity, succeeds.
+    StateNamespaceError(Namespace),
     WalStoreError,
     GenesisError,
     /// The process dies after this many store commits: the first `n` state or
@@ -130,8 +136,8 @@ impl FaultyStateStore {
         }
     }
 
-    fn should_fault_ns(&self, _ns: dolos_core::Namespace) -> bool {
-        self.should_fault()
+    fn should_fault_ns(&self, ns: dolos_core::Namespace) -> bool {
+        self.should_fault() || self.fault == TestFault::StateNamespaceError(ns)
     }
 
     fn should_fault(&self) -> bool {
