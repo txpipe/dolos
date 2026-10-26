@@ -4298,13 +4298,10 @@ mod ratification_tests {
             domain.genesis(),
             Default::default(),
             Default::default(),
-            0,
-            1,
-            ranges.clone(),
         )
         .unwrap();
         shard
-            .commit_shard::<ToyDomain>(domain.state(), domain.archive(), ranges)
+            .commit_shard::<ToyDomain>(domain.state(), domain.archive(), 0, 1, ranges)
             .unwrap();
 
         let mut estart = crate::estart::WorkContext::load_finalize::<ToyDomain>(

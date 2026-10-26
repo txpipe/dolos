@@ -189,7 +189,6 @@ mod tests {
             tally_protocol: active_protocol,
             deltas: Default::default(),
             active_stake: None,
-            logs: Vec::new(),
             finals: Default::default(),
         }
     }
