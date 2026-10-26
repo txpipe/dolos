@@ -191,10 +191,11 @@ mod tests {
         }
     }
 
-    /// The by-tx route answers 404 when the anchor fetch fails, so its answer
-    /// cannot show where it found the anchor. On a proposal moved to the
-    /// final-row log, it reads the same log rows as the by-id route, which
-    /// serves the anchor from the final row.
+    /// On a proposal moved to the final-row log, the by-id route serves the
+    /// anchor from the final row, and the by-tx route reads the same log
+    /// rows. The by-tx route answers 404 when the anchor fetch fails, and the
+    /// log read scans every row whatever the key, so this shows only that it
+    /// falls back to the log, not which row it uses.
     #[tokio::test]
     async fn both_metadata_routes_read_a_moved_proposal_from_its_final_row() {
         let (domain, vectors) =

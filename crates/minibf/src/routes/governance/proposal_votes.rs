@@ -1887,6 +1887,49 @@ mod tests {
         assert_eq!(tag_entries(true), tag_entries(false));
     }
 
+    /// Block 0 proposes two actions, block 1 holds the DRep's vote on action
+    /// 0 and block 6 the pool's. Blocks 2 to 5 and 7 to 11 hold the DRep's
+    /// votes on action 1.
+    fn vote_ahead_cfg() -> SyntheticBlockConfig {
+        let mut cfg = other_action_votes_cfg();
+        cfg.votes_by_block[6] = vec![vec![synthetic_vote(spo_voter(), 0, 0, 0, Vote::Yes)]];
+        cfg
+    }
+
+    /// An oldest-first page of one row, over block 1, has one vote block of
+    /// the action ahead. The walk of the resolved proposal reads that slot
+    /// from the action's tag, and none of the DRep's votes on action 1 before
+    /// or after it.
+    #[test]
+    fn governance_proposal_votes_walk_reads_the_voter_tag_only_at_action_slots_ahead() {
+        let tag_entries = |moved| {
+            let (domain, vectors) =
+                TestDomainBuilder::<MeasuredStores<MemoryStores>>::new_with_synthetic_in(
+                    vote_ahead_cfg(),
+                    |_| (),
+                )
+                .finish();
+            enact_proposals(&domain, moved);
+
+            let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
+                .parse()
+                .expect("failed to parse the proposal tx");
+            let page = Pagination {
+                count: 1,
+                ..Default::default()
+            };
+            let counters = &domain.archive().counters;
+
+            let before = counters.snapshot().tag_candidates;
+            let rows = read_votes(&domain, tx, 0, &page, 100).expect("the page fits the budget");
+            assert_eq!(rows.iter().map(|row| row.counted).collect_vec(), [true]);
+
+            counters.snapshot().tag_candidates - before
+        };
+
+        assert_eq!(tag_entries(true), tag_entries(false) + 1);
+    }
+
     /// The walk of a resolved proposal reads its blocks from the request's
     /// budget. The DRep row of an oldest-first page over block 1 walks
     /// block 2, which both tags name, and block 3, which holds its re-vote:
