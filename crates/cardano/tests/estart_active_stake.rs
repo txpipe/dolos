@@ -7,28 +7,34 @@
 //! values to an independent scan of the accounts, with the filters the reward
 //! calculation applies, across several boundaries, through RUPD's reads and
 //! the `PoolEpochLog` rows it writes, and across a crash at every commit of
-//! the boundary. The harness is `ToyDomain` on the devnet genesis, and every
-//! work unit runs through `execute_work_unit`, the executor the node runs.
+//! the boundary. The account rows the shards rotate are held to the bytes
+//! the per-account `AccountTransition` deltas stored, straight through and
+//! across the same crashes. The harness is `ToyDomain` on the devnet
+//! genesis, and every work unit runs through `execute_work_unit`, the
+//! executor the node runs.
 
 use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{
     sync::execute_work_unit, ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _,
-    BrokenInvariant, ChainError, Domain, DomainError, Genesis, StateStore as _, StateWriter as _,
-    Tag,
+    BrokenInvariant, ChainError, Domain, DomainError, Entity as _, EntityDelta as _, EntityKey,
+    FixedNamespace, Genesis, RangeOf, StateStore as _, StateWriter as _, Tag,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
     toy_domain::ToyDomain,
 };
-use pallas::ledger::primitives::{conway::RationalNumber, Epoch, StakeCredential};
+use pallas::ledger::primitives::{
+    conway::{DRep, RationalNumber},
+    Epoch, StakeCredential,
+};
 
 use dolos_cardano::{
     estart::EstartWorkUnit, ewrap::EwrapWorkUnit, indexes::archive_dimensions, rupd::RupdWorkUnit,
-    rupd::StakeSnapshot, AccountEpochLog, AccountKey, AccountState, CardanoWorkUnit,
-    DRepDelegation, EndStats, EpochState, EpochValue, EraBoundary, EraKey, EraState,
-    PendingRewardState, PoolDelegation, PoolEpochLog, PoolHash, PoolKey, PoolParams, PoolSnapshot,
-    PoolState, PoolTally, Stake,
+    rupd::StakeSnapshot, AccountEpochLog, AccountKey, AccountState, AccountTransition,
+    CardanoWorkUnit, DRepDelegation, EndStats, EpochState, EpochValue, EraBoundary, EraKey,
+    EraState, PendingRewardState, PoolDelegation, PoolEpochLog, PoolHash, PoolKey, PoolParams,
+    PoolSnapshot, PoolState, PoolTally, Stake,
 };
 
 fn key(byte: u8) -> StakeCredential {
@@ -1289,4 +1295,157 @@ fn assert_lifetime_blocks_around_rupd(domain: ToyDomain, first_minted: Epoch) {
     }
 
     assert!(read_in_mark > 0, "no read between ESTART and RUPD");
+}
+
+/// Every stored account row, key and value bytes, in key order.
+fn account_rows(domain: &ToyDomain) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let range = RangeOf::<AccountKey>::all().into_raw();
+
+    domain
+        .state()
+        .iter_entities(<AccountState as FixedNamespace>::NS, range)
+        .unwrap()
+        .map(|x| {
+            let (key, value) = x.unwrap();
+            (key.as_ref().to_vec(), value)
+        })
+        .collect()
+}
+
+/// The rows the per-account `AccountTransition` deltas stored: each row
+/// rotated into `next_epoch` by the delta's `apply`, then encoded.
+fn rotated_by_deltas(domain: &ToyDomain, next_epoch: Epoch) -> Vec<(Vec<u8>, Vec<u8>)> {
+    domain
+        .state()
+        .iter_entities_typed::<AccountState>(None)
+        .unwrap()
+        .map(|x| {
+            let (key, account) = x.unwrap();
+
+            let mut entity = Some(account);
+            AccountTransition::new(key.clone(), next_epoch).apply(&mut entity);
+
+            let (_, value) = AccountState::encode_entity(&entity.unwrap());
+            (EntityKey::of(&key).as_ref().to_vec(), value)
+        })
+        .collect()
+}
+
+/// Schedule a change for the next epoch on some accounts, so their rotation
+/// takes a scheduled value instead of carrying the live one.
+fn schedule_changes(domain: &ToyDomain) {
+    let epoch = epoch_state(domain).number;
+
+    let mut scheduled = Vec::new();
+
+    for mut account in all_accounts(domain) {
+        if account.credential == key(0x80) {
+            account
+                .pool
+                .schedule(epoch, Some(PoolDelegation::Pool(pool_hash(EMPTY))));
+        }
+
+        if account.credential == script(0x90) {
+            account
+                .drep
+                .schedule(epoch, Some(DRepDelegation::Delegated(DRep::Abstain)));
+        }
+
+        scheduled.push(account);
+    }
+
+    write(domain, |writer| {
+        for account in &scheduled {
+            writer
+                .write_entity_typed(&AccountKey::from(&account.credential), account)
+                .unwrap();
+        }
+    });
+}
+
+/// The shards' one streamed pass stores, at every boundary, the bytes the
+/// per-account `AccountTransition` deltas stored.
+#[test]
+fn the_shard_pass_stores_the_rows_the_transition_deltas_stored() {
+    let domain = seeded(devnet());
+
+    for round in 0..4u64 {
+        churn(&domain, round);
+
+        if round % 2 == 1 {
+            schedule_changes(&domain);
+        }
+
+        let expected = rotated_by_deltas(&domain, epoch_state(&domain).number + 1);
+        assert_eq!(expected.len(), accounts().len());
+
+        open_next_epoch(&domain).unwrap();
+
+        assert_eq!(
+            account_rows(&domain),
+            expected,
+            "account rows after the boundary opening epoch {}",
+            round + 1
+        );
+    }
+}
+
+/// A boundary interrupted after any number of commits, and resumed, stores
+/// the same account bytes as one that ran straight through. The committed
+/// shards are not rotated again, and the others rotate once from rows the
+/// interrupted run left untouched.
+#[test]
+fn a_resumed_boundary_stores_the_same_account_bytes() {
+    let prepare = || {
+        let domain = seeded(devnet());
+        open_next_epoch(&domain).unwrap();
+        churn(&domain, 0);
+        schedule_changes(&domain);
+        domain
+    };
+
+    let clean = prepare();
+    open_next_epoch(&clean).unwrap();
+
+    let expected = account_rows(&clean);
+    let opened = epoch_state(&clean).number;
+
+    let mut interrupted_between_shards = 0;
+    let mut crash_after = 0;
+
+    loop {
+        let domain = prepare();
+
+        let crashing =
+            FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(crash_after));
+
+        if open_next_epoch(&crashing).is_ok() {
+            // past the last commit, so every crash point has been covered
+            break;
+        }
+
+        let rotated = all_accounts(&domain)
+            .iter()
+            .filter(|x| x.stake.epoch() == Some(opened))
+            .count();
+
+        if rotated > 0 && rotated < accounts().len() {
+            interrupted_between_shards += 1;
+        }
+
+        open_next_epoch(&domain).expect("resume");
+
+        assert_eq!(
+            account_rows(&domain),
+            expected,
+            "account rows after a crash following commit {crash_after}"
+        );
+
+        crash_after += 1;
+    }
+
+    assert!(
+        interrupted_between_shards > 1,
+        "no crash left the accounts partly rotated"
+    );
 }
