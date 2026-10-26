@@ -369,7 +369,7 @@ mod tests {
     use blockfrost_openapi::models::{
         account_addresses_total::AccountAddressesTotal, account_content::AccountContent,
     };
-    use dolos_core::{ArchiveStore as _, StateStore as _, StateWriter as _};
+    use dolos_core::{StateStore as _, StateWriter as _};
     use dolos_testing::synthetic::SyntheticBlockConfig;
 
     fn encode_bech32(hrp: &str, payload: &[u8]) -> String {
