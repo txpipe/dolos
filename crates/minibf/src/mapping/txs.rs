@@ -42,9 +42,10 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{
-    pallas_extras, AccountState, ChainSummary, DRepState, PParamsSet, PoolHash, PoolKey, PoolState,
+    indexes::{pool_certs_in, CardanoArchiveIndexExt as _, PoolCert},
+    pallas_extras, pool_history, AccountState, ChainSummary, DRepState, PParamsSet, PoolHash,
 };
-use dolos_core::{Domain, EraCbor, TxHash, TxOrder, TxoRef};
+use dolos_core::{ArchiveStore as _, Domain, EraCbor, TxHash, TxOrder, TxoRef};
 
 use super::{
     bech32_pool, list_assets, pool_offchain_metadata, rational_to_f64, redeemer_fee,
@@ -111,7 +112,9 @@ pub struct TxModelBuilder<'a> {
     consumed_deps: HashMap<TxoRef, TxHash>,
     pool_metadata: HashMap<PoolHash, PoolOffchainMetadata>,
     deposit: Option<i64>,
-    affected_pools: HashMap<Hash<28>, PoolState>,
+    /// Whether each pool registration certificate of the tx, by index, takes
+    /// a fresh registration; see [`TxModelBuilder::is_pool_registration`].
+    pool_registrations: HashMap<usize, bool>,
 }
 
 impl<'a> TxModelBuilder<'a> {
@@ -128,7 +131,7 @@ impl<'a> TxModelBuilder<'a> {
             pparams: None,
             network: None,
             deps: HashMap::new(),
-            affected_pools: HashMap::new(),
+            pool_registrations: HashMap::new(),
             consumed_deps: HashMap::new(),
             pool_metadata: HashMap::new(),
             deposit: None,
@@ -174,40 +177,125 @@ impl<'a> TxModelBuilder<'a> {
         }
     }
 
-    pub async fn set_affected_pools<D>(&mut self, facade: &Facade<D>) -> Result<(), StatusCode>
-    where
-        D: Domain + Clone + Send + Sync + 'static,
-        Option<PoolState>: From<D::Entity>,
-    {
-        self.affected_pools = self
+    /// The newest certificate of `operator` before certificate `cert_index`
+    /// of this tx, in this block or an earlier one, `None` if it never
+    /// registered. A pool the Shelley genesis stakes is registered from the
+    /// start.
+    fn previous_pool_cert<D: Domain>(
+        &self,
+        facade: &Facade<D>,
+        operator: &PoolHash,
+        cert_index: usize,
+    ) -> Result<Option<PoolCert>, StatusCode> {
+        let here = (self.block.slot(), self.order, cert_index);
+
+        let in_block = pool_certs_in(&self.block, operator)
+            .into_iter()
+            .take_while(|(at, _)| *at < here)
+            .last();
+
+        if let Some((_, cert)) = in_block {
+            return Ok(Some(cert));
+        }
+
+        let previous = facade
+            .archive()
+            .pool_cert_before(operator, self.block.slot())
+            .map_err(crate::log_and_500(
+                "failed to read a pool's previous certificate",
+            ))?;
+
+        if previous.is_none() && pool_history::genesis_pools(&facade.genesis()).contains(operator) {
+            return Ok(Some(PoolCert::Registration));
+        }
+
+        Ok(previous)
+    }
+
+    /// The epoch of the block before this one, or this block's where the
+    /// archive no longer holds it.
+    fn previous_block_epoch<D: Domain>(&self, facade: &Facade<D>) -> Result<Epoch, StatusCode> {
+        let previous = facade
+            .archive()
+            .get_range(None, Some(self.block.slot()))
+            .map_err(crate::log_and_500("failed to read the previous block"))?
+            .next_back();
+
+        match previous {
+            Some((slot, _)) => Ok(self.chain_or_500()?.slot_epoch(slot).0),
+            None => self.tx_epoch(),
+        }
+    }
+
+    /// Whether certificate `cert_index`, of `operator`, takes the pool
+    /// deposit: when the pool is not registered as the ledger applies it,
+    /// because it never registered or its retirement took effect by the
+    /// block's epoch.
+    fn takes_pool_deposit<D: Domain>(
+        &self,
+        facade: &Facade<D>,
+        operator: &PoolHash,
+        cert_index: usize,
+    ) -> Result<bool, StatusCode> {
+        Ok(
+            match self.previous_pool_cert(facade, operator, cert_index)? {
+                None => true,
+                Some(PoolCert::Registration) => false,
+                Some(PoolCert::Retirement(retiring)) => self.tx_epoch()? >= retiring,
+            },
+        )
+    }
+
+    /// db-sync's rule for a pool certificate (`isPoolRegistration`): a
+    /// registration, active two epochs on, when the pool was not registered
+    /// at the end of the previous block, because it never registered or its
+    /// retirement had taken effect, and no earlier certificate in the block
+    /// updated it. Otherwise an update, active three epochs on, which cancels
+    /// a pending retirement.
+    ///
+    /// It reads the pools before the ledger ticks into the block's epoch, so
+    /// in the first block of the epoch a retirement takes effect in, the
+    /// certificate takes the deposit and is still an update.
+    fn is_pool_registration<D: Domain>(
+        &self,
+        facade: &Facade<D>,
+        operator: &PoolHash,
+        cert_index: usize,
+    ) -> Result<bool, StatusCode> {
+        Ok(
+            match self.previous_pool_cert(facade, operator, cert_index)? {
+                None => true,
+                Some(PoolCert::Registration) => false,
+                Some(PoolCert::Retirement(retiring)) => {
+                    self.previous_block_epoch(facade)? >= retiring
+                }
+            },
+        )
+    }
+
+    pub fn set_pool_registrations<D: Domain>(
+        &mut self,
+        facade: &Facade<D>,
+    ) -> Result<(), StatusCode> {
+        let registrations: Vec<(usize, PoolHash)> = self
             .tx()?
             .certs()
             .iter()
-            .filter_map(|cert| match cert {
-                MultiEraCert::AlonzoCompatible(cow) => {
-                    if let AlonzoCert::PoolRegistration { operator, .. } = *(**cow).clone() {
-                        Some(operator)
-                    } else {
-                        None
-                    }
-                }
-                MultiEraCert::Conway(cow) => {
-                    if let ConwayCert::PoolRegistration { operator, .. } = *(**cow).clone() {
-                        Some(operator)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
+            .enumerate()
+            .filter_map(|(cert_index, cert)| {
+                pallas_extras::cert_as_pool_registration(cert).map(|reg| (cert_index, reg.operator))
             })
-            .filter_map(|operator| {
-                match facade.read_cardano_entity::<PoolState>(&PoolKey((*operator).into())) {
-                    Ok(Some(state)) => Some(Ok((operator, state))),
-                    Ok(None) => None,
-                    Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
-                }
+            .collect();
+
+        self.pool_registrations = registrations
+            .into_iter()
+            .map(|(cert_index, operator)| {
+                Ok((
+                    cert_index,
+                    self.is_pool_registration(facade, &operator, cert_index)?,
+                ))
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, StatusCode>>()?;
 
         Ok(())
     }
@@ -269,7 +357,6 @@ impl<'a> TxModelBuilder<'a> {
     where
         D: Domain + Clone + Send + Sync + 'static,
         Option<AccountState>: From<D::Entity>,
-        Option<PoolState>: From<D::Entity>,
         Option<DRepState>: From<D::Entity>,
     {
         let pparms = self.pparams_or_500()?;
@@ -280,7 +367,7 @@ impl<'a> TxModelBuilder<'a> {
         let mut repeated = HashSet::new();
         let mut out = 0;
 
-        for cert in self.tx()?.certs() {
+        for (cert_index, cert) in self.tx()?.certs().into_iter().enumerate() {
             if let Some(reg) = pallas_extras::cert_as_stake_registration(&cert) {
                 let key = minicbor::to_vec(&reg).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
                 if repeated.insert((0, key.clone())) {
@@ -289,18 +376,10 @@ impl<'a> TxModelBuilder<'a> {
             }
 
             if let Some(reg) = pallas_extras::cert_as_pool_registration(&cert) {
-                if repeated.insert((1, reg.operator.to_vec())) {
-                    match facade
-                        .read_cardano_entity::<PoolState>(&PoolKey(reg.operator))
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                    {
-                        Some(pool) => {
-                            if self.block.slot() <= pool.register_slot {
-                                out += pool_deposit
-                            }
-                        }
-                        None => out += pool_deposit,
-                    }
+                if repeated.insert((1, reg.operator.to_vec()))
+                    && self.takes_pool_deposit(facade, &reg.operator, cert_index)?
+                {
+                    out += pool_deposit;
                 }
             }
 
@@ -1047,19 +1126,6 @@ struct PoolUpdateModelBuilder {
 }
 
 impl PoolUpdateModelBuilder {
-    pub fn extract_operator(cert: &MultiEraCert) -> Option<Hash<28>> {
-        match cert {
-            MultiEraCert::AlonzoCompatible(cow) => match *(**cow).clone() {
-                AlonzoCert::PoolRegistration { operator, .. } => Some(operator),
-                _ => None,
-            },
-            MultiEraCert::Conway(cow) => match *(**cow).clone() {
-                ConwayCert::PoolRegistration { operator, .. } => Some(operator),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
     fn new_from_alonzo(
         cert: AlonzoCert,
         cert_index: usize,
@@ -1245,13 +1311,10 @@ impl IntoModel<Vec<TxContentPoolCertsInner>> for TxModelBuilder<'_> {
             .into_iter()
             .enumerate()
             .filter_map(|(cert_index, cert)| {
-                let is_registration = PoolUpdateModelBuilder::extract_operator(&cert)
-                    .map(|operator| {
-                        self.affected_pools
-                            .get(&operator)
-                            .map(|state| state.register_slot == self.block.slot())
-                            .unwrap_or(true)
-                    })
+                let is_registration = self
+                    .pool_registrations
+                    .get(&cert_index)
+                    .copied()
                     .unwrap_or(true);
                 let builder = PoolUpdateModelBuilder::new(
                     cert,
