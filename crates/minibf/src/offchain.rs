@@ -486,6 +486,12 @@ where
         },
         // a namespace that failed to register: fetch without the cache
         Err(CacheError::UnknownNamespace(_)) => {
+            tracing::warn!(
+                namespace = namespaces.bodies,
+                url = %location.url,
+                "metadata cache namespace not registered, fetching without the cache"
+            );
+
             return match fill_body(cache.clone(), location.clone(), namespaces, fetch()).await {
                 Ok(entry) => MetadataBody::Verified(entry.value),
                 Err(failed) => MetadataBody::Failed(failed.error),
