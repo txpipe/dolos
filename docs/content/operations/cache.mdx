@@ -14,8 +14,8 @@ The cache is split into namespaces, one per use. Each namespace has a format ver
 | -------------------- | ---------- | ------------------------------------------------------------------------------------------------------------- |
 | `totals`             | immutable  | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total`           |
 | `network`            | tip-scoped | the `/network` body, for 30 seconds                                                                           |
-| `offchain`           | immutable  | the verified DRep metadata of `/governance/dreps` and `/governance/dreps/{drep_id}/metadata`, by content hash |
-| `offchain-failures`  | tip-scoped | failed DRep metadata fetches, for 10 minutes, so a dead host is not asked again on every request                   |
+| `offchain`           | immutable  | verified DRep and proposal metadata under `/governance`, by content hash |
+| `offchain-failures`  | tip-scoped | failed DRep and proposal metadata fetches, for 10 minutes, keyed by content hash and URL                   |
 | `pool-offchain` | immutable | verified pool metadata for `/pools/{pool_id}/metadata`, `/pools/extended`, and `/txs/{hash}/pool_updates`, by content hash |
 | `pool-offchain-failures` | tip-scoped | failed pool metadata fetches, for 10 minutes, keyed by content hash and URL |
 | `pool-registrations` | immutable  | where each pool first registered, for the order of `/pools` and `/pools/extended`                             |
@@ -28,7 +28,9 @@ A namespace has one of two validity models:
 
 The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file found corrupt, cut short, or laid out by another release, such as one you rolled back from, is recreated empty; one that fails to open for another reason, such as its permissions, is an error and the node does not start.
 
-Pool metadata uses the same cache loader as DRep metadata, with separate namespaces for its fetch policy.
+DRep and proposal metadata share the `offchain` cache and its governance fetch policy.
+Both proposal metadata endpoints use this cache.
+Pool metadata uses the same cache loader, with separate namespaces for its fetch policy.
 Each metadata cache permits 16 concurrent fetches and 64 pending loads.
 A pool fetch keeps its five-second timeout and 512-byte limit.
 Pool extended listings wait at most five seconds for metadata.

@@ -793,26 +793,6 @@ fn resolve_anchor_urls(url: &str, ipfs_gateways: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// This function fetches metadata from a governance-anchor URL.
-///
-/// The function returns the JSON body and the raw bytes. On failure, it
-/// returns a typed error that keeps the original on-chain URL. See
-/// [`anchor_offchain_body`] for the fetch rules.
-pub async fn anchor_offchain_metadata(
-    url: &str,
-    expected_hash: &[u8],
-    ipfs_gateways: &[String],
-) -> (Option<AnchorMetadata>, Option<DrepsInnerMetadataError>) {
-    let metadata = anchor_offchain_body(url, expected_hash, ipfs_gateways)
-        .await
-        .and_then(|body| anchor_metadata_from_body(url, &body));
-
-    match metadata {
-        Ok(metadata) => (Some(metadata), None),
-        Err(error) => (None, Some(error)),
-    }
-}
-
 /// This function fetches the raw body of a governance anchor and makes sure
 /// that its hash matches `expected_hash`.
 ///
@@ -986,13 +966,10 @@ mod offchain_tests {
                 .expect("Cannot read the test server address.")
         );
 
-        let (metadata, error) = anchor_offchain_metadata(&url, &[0; 32], &[]).await;
-
-        assert!(metadata.is_none());
-        assert_eq!(
-            error.expect("The connection error is absent.").code,
-            Code::ConnectionError
-        );
+        let error = anchor_offchain_body(&url, &[0; 32], &[])
+            .await
+            .expect_err("The loopback URL was accepted.");
+        assert_eq!(error.code, Code::ConnectionError);
         assert_eq!(
             listener
                 .accept()

@@ -22,7 +22,7 @@ use serde::Deserialize;
 use crate::{
     error::Error,
     mapping::governance::dreps::{drep_amount, drep_is_expired, drep_is_retired, drep_list_item},
-    offchain::{cached_drep_metadata, fetch_drep_metadata, unfetched, OnOverload},
+    offchain::{cached_anchor_metadata, fetch_anchor_metadata, unfetched, OnOverload},
     pagination::{Order, Pagination, PaginationParameters},
     scan::{EntityScan, ENTITY_CHUNK},
     Facade,
@@ -49,7 +49,7 @@ const PAGE_METADATA_DEADLINE: Duration = Duration::from_secs(3);
 /// Runs `loads`, at most `concurrency` at a time, and returns, in order, what
 /// each one settled to within `deadline`: `None` for a load still running or
 /// never started. Every load is dropped at the deadline, so one that should
-/// outlive it has to detach its own work, the way `fetch_drep_metadata` does.
+/// outlive it has to detach its own work, the way `fetch_anchor_metadata` does.
 async fn settle_within<F: Future>(
     loads: Vec<F>,
     concurrency: usize,
@@ -390,8 +390,8 @@ where
 
     let metadata = page_metadata(
         &anchors,
-        |anchor| cached_drep_metadata(cache, anchor),
-        |anchor| fetch_drep_metadata(cache, &gateways, anchor, on_overload),
+        |anchor| cached_anchor_metadata(cache, anchor),
+        |anchor| fetch_anchor_metadata(cache, &gateways, anchor, on_overload),
         PAGE_METADATA_DEADLINE,
     )
     .await;

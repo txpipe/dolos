@@ -5,15 +5,16 @@ use axum::{
 };
 use blockfrost_openapi::models::{
     proposal_metadata::ProposalMetadata, proposal_metadata_v2::ProposalMetadataV2,
-    DrepsInnerMetadataError,
+    DrepsInnerMetadata,
 };
 use dolos_cardano::model::{ProposalKey, ProposalState};
-use dolos_core::Domain;
+use dolos_core::{CacheStore, Domain};
 use pallas::{crypto::hash::Hash, ledger::primitives::conway::Anchor};
 
 use crate::{
     error::Error,
-    mapping::{anchor_offchain_metadata, bech32_gov_action, parse_gov_action_id, AnchorMetadata},
+    mapping::{bech32_gov_action, parse_gov_action_id},
+    offchain::{fetch_anchor_metadata, OnOverload},
     Facade,
 };
 
@@ -23,27 +24,17 @@ use super::read_proposal_row;
 ///
 /// The anchor contains the metadata URL and hash from the proposal procedure.
 /// The function returns metadata or an error, but not both.
-async fn proposal_metadata_parts(
+async fn proposal_metadata_parts<C: CacheStore>(
+    cache: &C,
     tx: &Hash<32>,
     idx: u32,
     anchor: &Anchor,
     ipfs_gateways: &[String],
-) -> Result<
-    (
-        String,
-        String,
-        Option<AnchorMetadata>,
-        Option<DrepsInnerMetadataError>,
-    ),
-    StatusCode,
-> {
+) -> Result<(String, DrepsInnerMetadata), StatusCode> {
     let id = bech32_gov_action(tx, idx)?;
-    let hash = hex::encode(anchor.content_hash);
+    let metadata = fetch_anchor_metadata(cache, ipfs_gateways, anchor, OnOverload::Inline).await;
 
-    let (metadata, error) =
-        anchor_offchain_metadata(&anchor.url, anchor.content_hash.as_ref(), ipfs_gateways).await;
-
-    Ok((id, hash, metadata, error))
+    Ok((id, metadata))
 }
 
 /// The anchor of the proposal `tx` proposed at action index `idx`, from its
@@ -80,19 +71,17 @@ where
     let anchor = proposal_anchor(&domain, tx, cert_index)?;
 
     let gateways = domain.config.ipfs_gateways();
-    let (id, hash, metadata, _error) =
-        proposal_metadata_parts(&tx, cert_index, &anchor, &gateways).await?;
-
-    let metadata = metadata.ok_or(StatusCode::NOT_FOUND)?;
+    let (id, metadata) =
+        proposal_metadata_parts(domain.inner.cache(), &tx, cert_index, &anchor, &gateways).await?;
 
     Ok(Json(ProposalMetadata {
         id,
         tx_hash: hex::encode(tx),
         cert_index: cert_index.try_into().map_err(|_| StatusCode::BAD_REQUEST)?,
         url: anchor.url,
-        hash,
-        json_metadata: Some(metadata.json),
-        bytes: metadata.bytes,
+        hash: metadata.hash,
+        json_metadata: Some(metadata.json_metadata.ok_or(StatusCode::NOT_FOUND)?),
+        bytes: metadata.bytes.ok_or(StatusCode::NOT_FOUND)?,
     }))
 }
 
@@ -112,22 +101,18 @@ where
     let anchor = proposal_anchor(&domain, tx, idx)?;
 
     let gateways = domain.config.ipfs_gateways();
-    let (id, hash, metadata, error) = proposal_metadata_parts(&tx, idx, &anchor, &gateways).await?;
-
-    let (json_metadata, bytes) = match metadata {
-        Some(AnchorMetadata { json, bytes }) => (Some(json), Some(bytes)),
-        None => (None, None),
-    };
+    let (id, metadata) =
+        proposal_metadata_parts(domain.inner.cache(), &tx, idx, &anchor, &gateways).await?;
 
     Ok(Json(ProposalMetadataV2 {
         id,
         tx_hash: hex::encode(tx),
         cert_index: idx.try_into().map_err(|_| StatusCode::BAD_REQUEST)?,
         url: anchor.url,
-        hash,
-        json_metadata,
-        bytes,
-        error: error.map(Box::new),
+        hash: metadata.hash,
+        json_metadata: metadata.json_metadata,
+        bytes: metadata.bytes,
+        error: metadata.error,
     }))
 }
 
@@ -137,6 +122,79 @@ mod tests {
     use crate::{routes::governance::testing::*, test_support::TestDomainBuilder};
     use dolos_core::config::MinibfConfig;
     use dolos_testing::{measured::MeasuredStores, toy_domain::MemoryStores};
+
+    #[tokio::test]
+    async fn proposal_metadata_endpoints_share_a_persistent_cache() {
+        use crate::test_support::TestApp;
+        use dolos_core::{CacheStore as _, StateStore as _, StateWriter as _};
+        use dolos_testing::synthetic::SyntheticBlockConfig;
+        use pallas::{crypto::hash::Hasher, ledger::primitives::conway::GovAction};
+
+        let dir = std::env::temp_dir().join(format!(
+            "dolos-proposal-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let body = br#"{"body":{"title":"Cached proposal"}}"#;
+        let anchor = Anchor {
+            url: "https://example.invalid/proposal".to_string(),
+            content_hash: Hasher::<256>::hash(body),
+        };
+        let cfg = SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information]]],
+            ..Default::default()
+        };
+
+        for first_start in [true, false] {
+            let app = TestApp::new_with_cfg_and_domain(cfg.clone(), |domain| {
+                domain.with_persistent_cache(&dir).unwrap()
+            });
+            let facade = app.facade();
+            let tx = tx_hash_of_block(&app, 0);
+            let tx_hash = tx.parse().unwrap();
+            let id = bech32_gov_action(&tx_hash, 0).unwrap();
+            let key = ProposalKey::new(tx_hash, 0);
+            let mut proposal = facade
+                .state()
+                .read_entity_typed::<ProposalState>(&key)
+                .unwrap()
+                .unwrap();
+            proposal.anchor = Some(anchor.clone());
+            let writer = facade.state().start_writer().unwrap();
+            writer.write_entity_typed(&key, &proposal).unwrap();
+            writer.commit().unwrap();
+
+            if first_start {
+                crate::offchain::cache_verified_body(facade.cache(), &anchor, body).await;
+            }
+
+            for path in [
+                format!("/governance/proposals/{tx}/0/metadata"),
+                format!("/governance/proposals/{id}/metadata"),
+            ] {
+                let (status, response) = app.get_bytes(&path).await;
+                assert_eq!(status, StatusCode::OK, "{path}");
+                let metadata: ProposalMetadataV2 = serde_json::from_slice(&response).unwrap();
+                assert_eq!(metadata.id, id);
+                assert_eq!(metadata.url, anchor.url);
+                assert_eq!(metadata.hash, hex::encode(anchor.content_hash));
+                assert_eq!(
+                    metadata.json_metadata,
+                    Some(serde_json::from_slice(body).unwrap())
+                );
+                assert_eq!(metadata.bytes, Some(format!("\\x{}", hex::encode(body))));
+                assert!(metadata.error.is_none());
+            }
+            facade.cache().flush().unwrap();
+        }
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[tokio::test]
     async fn governance_proposal_metadata_returns_404_when_fetch_fails() {

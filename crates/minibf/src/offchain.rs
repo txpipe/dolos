@@ -21,11 +21,13 @@ pub const MAX_PENDING_LOADS: usize = 4 * MAX_CONCURRENT_FETCHES;
 
 const FAILURE_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// Verified DRep bodies, keyed by content hash, in memory and on disk.
+/// Verified governance-anchor bodies, keyed by content hash, in memory and on
+/// disk.
 pub const OFFCHAIN: CacheNamespace = CacheNamespace::immutable("offchain", 1)
     .with_fill_limits(MAX_CONCURRENT_FETCHES, MAX_PENDING_LOADS);
 
-/// Failed DRep fetches, keyed by content hash and URL, in memory only.
+/// Failed governance-anchor fetches, keyed by content hash and URL, in memory
+/// only.
 pub const OFFCHAIN_FAILURES: CacheNamespace =
     CacheNamespace::tip_scoped("offchain-failures", 1, FAILURE_TTL);
 
@@ -43,7 +45,7 @@ struct MetadataCache {
     failures: &'static str,
 }
 
-const DREP_CACHE: MetadataCache = MetadataCache {
+const ANCHOR_CACHE: MetadataCache = MetadataCache {
     bodies: OFFCHAIN.name,
     failures: OFFCHAIN_FAILURES.name,
 };
@@ -89,7 +91,7 @@ impl From<&PoolMetadata> for MetadataLocation {
 
 const LEGACY_DIR: &str = "offchain";
 
-/// Registers the pool and DRep metadata cache namespaces.
+/// Registers the pool and governance metadata cache namespaces.
 pub fn register<C: CacheStore>(cache: &C) {
     for namespace in [
         OFFCHAIN,
@@ -161,7 +163,7 @@ pub fn unfetched(anchor: &Anchor) -> DrepsInnerMetadata {
     }
 }
 
-fn drep_metadata(anchor: &Anchor, body: MetadataBody) -> DrepsInnerMetadata {
+fn anchor_metadata(anchor: &Anchor, body: MetadataBody) -> DrepsInnerMetadata {
     let mut out = unfetched(anchor);
 
     match body {
@@ -213,18 +215,19 @@ async fn cached_body<C: CacheStore>(
         .flatten()
 }
 
-/// Returns cached DRep metadata without a network request.
-pub async fn cached_drep_metadata<C: CacheStore>(
+/// Returns cached governance-anchor metadata without a network request.
+pub async fn cached_anchor_metadata<C: CacheStore>(
     cache: &C,
     anchor: &Anchor,
 ) -> Option<DrepsInnerMetadata> {
-    cached_body(cache, &MetadataLocation::from(anchor), DREP_CACHE)
+    cached_body(cache, &MetadataLocation::from(anchor), ANCHOR_CACHE)
         .await
-        .map(|body| drep_metadata(anchor, body))
+        .map(|body| anchor_metadata(anchor, body))
 }
 
-/// Returns DRep metadata from the cache, or fetches and caches its body.
-pub async fn fetch_drep_metadata<C: CacheStore>(
+/// Returns governance-anchor metadata from the cache, or fetches and caches its
+/// body.
+pub async fn fetch_anchor_metadata<C: CacheStore>(
     cache: &C,
     ipfs_gateways: &[String],
     anchor: &Anchor,
@@ -236,10 +239,10 @@ pub async fn fetch_drep_metadata<C: CacheStore>(
         async move { anchor_offchain_body(&anchor.url, anchor.content_hash.as_ref(), &gateways).await }
     };
 
-    load_drep_metadata(cache, anchor, on_overload, fetch).await
+    load_anchor_metadata(cache, anchor, on_overload, fetch).await
 }
 
-async fn load_drep_metadata<C, F, Fut>(
+async fn load_anchor_metadata<C, F, Fut>(
     cache: &C,
     anchor: &Anchor,
     on_overload: OnOverload,
@@ -253,7 +256,7 @@ where
     let body = load_body(
         cache,
         &MetadataLocation::from(anchor),
-        DREP_CACHE,
+        ANCHOR_CACHE,
         on_overload,
         || {
             let fetched = fetch(anchor.clone());
@@ -262,7 +265,7 @@ where
     )
     .await;
 
-    drep_metadata(anchor, body)
+    anchor_metadata(anchor, body)
 }
 
 /// Returns pool metadata and its error from the cache, or fetches and caches
@@ -726,7 +729,7 @@ mod tests {
         let (missing, error) = fetch_pool_metadata(&cache, &metadata).await;
         assert!(missing.is_none());
         assert_eq!(error.unwrap().code, MetadataError::ConnectionError);
-        let drep = fetch_drep_metadata(&cache, &[], &anchor, OnOverload::Inline).await;
+        let drep = fetch_anchor_metadata(&cache, &[], &anchor, OnOverload::Inline).await;
         assert!(drep.error.is_none());
         assert!(drep.json_metadata.is_some());
     }
@@ -822,7 +825,7 @@ mod tests {
         let anchor = anchor(br#"{"body":"expected"}"#);
 
         let fetch = serving(br#"{"body":"tampered"}"#, &calls);
-        let got = load_drep_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await;
+        let got = load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await;
 
         assert_eq!(got.error.unwrap().code, MetadataError::HashMismatch);
         assert!(got.bytes.is_none());
@@ -839,12 +842,12 @@ mod tests {
             .get(OFFCHAIN.name, anchor.content_hash.as_ref())
             .is_some());
 
-        assert_eq!(cached_drep_metadata(&cache, &anchor).await, None);
+        assert_eq!(cached_anchor_metadata(&cache, &anchor).await, None);
         assert_eq!(cache.get(OFFCHAIN.name, anchor.content_hash.as_ref()), None);
 
         let calls = Arc::new(AtomicUsize::new(0));
         let fetch = serving(br#"{"body":"hello"}"#, &calls);
-        let got = load_drep_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await;
+        let got = load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await;
 
         assert_eq!(
             got.json_metadata,
@@ -870,7 +873,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
 
         let domain = persistent_domain(&dir);
-        let fetched = load_drep_metadata(
+        let fetched = load_anchor_metadata(
             domain.cache(),
             &anchor,
             OnOverload::Unfetched,
@@ -881,7 +884,7 @@ mod tests {
         drop(domain);
 
         let domain = persistent_domain(&dir);
-        let kept = load_drep_metadata(
+        let kept = load_anchor_metadata(
             domain.cache(),
             &anchor,
             OnOverload::Unfetched,
@@ -933,25 +936,25 @@ mod tests {
             }
         };
 
-        let failed = load_drep_metadata(&cache, &anchor, OnOverload::Unfetched, &failing).await;
+        let failed = load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, &failing).await;
         assert_eq!(
             failed.error.as_ref().unwrap().code,
             MetadataError::ConnectionError
         );
 
         // the failure lands from a fill of its own
-        while cached_drep_metadata(&cache, &anchor).await.is_none() {
+        while cached_anchor_metadata(&cache, &anchor).await.is_none() {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
 
-        let served = load_drep_metadata(&cache, &anchor, OnOverload::Unfetched, &failing).await;
+        let served = load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, &failing).await;
         assert_eq!(served, failed);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         tokio::time::sleep(ttl).await;
 
         let fetch = serving(br#"{"body":"later"}"#, &calls);
-        let refetched = load_drep_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await;
+        let refetched = load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await;
         assert!(refetched.error.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
@@ -968,7 +971,7 @@ mod tests {
                 let (cache, anchor, fetch) =
                     (cache.clone(), anchor.clone(), gated.fetch(body.clone()));
                 tokio::spawn(async move {
-                    load_drep_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await
+                    load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await
                 })
             })
             .collect();
@@ -998,7 +1001,7 @@ mod tests {
                 let body = format!("{{\"body\":{i}}}").into_bytes();
                 let (cache, anchor, fetch) = (cache.clone(), anchor(&body), gated.fetch(body));
                 tokio::spawn(async move {
-                    load_drep_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await
+                    load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await
                 })
             })
             .collect();
@@ -1037,7 +1040,7 @@ mod tests {
         let holding = tokio::spawn({
             let (cache, held, fetch) =
                 (cache.clone(), held.clone(), gated.fetch(held_body.clone()));
-            async move { load_drep_metadata(&cache, &held, OnOverload::Unfetched, fetch).await }
+            async move { load_anchor_metadata(&cache, &held, OnOverload::Unfetched, fetch).await }
         });
 
         gated.wait_for_running(1).await;
@@ -1047,12 +1050,12 @@ mod tests {
         let past = anchor(body);
 
         let unfetched_row =
-            load_drep_metadata(&cache, &past, OnOverload::Unfetched, serving(body, &calls)).await;
+            load_anchor_metadata(&cache, &past, OnOverload::Unfetched, serving(body, &calls)).await;
         assert_eq!(unfetched_row, unfetched(&past));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
 
         let inline =
-            load_drep_metadata(&cache, &past, OnOverload::Inline, serving(body, &calls)).await;
+            load_anchor_metadata(&cache, &past, OnOverload::Inline, serving(body, &calls)).await;
         assert_eq!(
             inline.json_metadata,
             Some(serde_json::json!({"body": "past"}))
@@ -1061,7 +1064,7 @@ mod tests {
 
         let joined = tokio::spawn({
             let (cache, held, fetch) = (cache.clone(), held.clone(), gated.fetch(held_body));
-            async move { load_drep_metadata(&cache, &held, OnOverload::Unfetched, fetch).await }
+            async move { load_anchor_metadata(&cache, &held, OnOverload::Unfetched, fetch).await }
         });
 
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1084,7 +1087,7 @@ mod tests {
             let body = format!("{{\"body\":{i}}}").into_bytes();
             let (cache, anchor, fetch) = (cache.clone(), anchor(&body), gated.fetch(body));
             tokio::spawn(
-                async move { load_drep_metadata(&cache, &anchor, on_overload, fetch).await },
+                async move { load_anchor_metadata(&cache, &anchor, on_overload, fetch).await },
             )
         };
 
@@ -1123,7 +1126,7 @@ mod tests {
     #[test]
     fn verified_bodies_render_json_or_a_decode_error() {
         let anchor = anchor(br#"{"a":1}"#);
-        let json = drep_metadata(
+        let json = anchor_metadata(
             &anchor,
             MetadataBody::Verified(Bytes::from_static(br#"{"a":1}"#)),
         );
@@ -1131,7 +1134,7 @@ mod tests {
         assert_eq!(json.bytes.as_deref(), Some("\\x7b2261223a317d"));
         assert!(json.error.is_none());
 
-        let broken = drep_metadata(
+        let broken = anchor_metadata(
             &anchor,
             MetadataBody::Verified(Bytes::from_static(b"not json")),
         );
