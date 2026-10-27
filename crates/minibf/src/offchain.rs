@@ -18,12 +18,24 @@ use crate::mapping::{
     offchain_hash_mismatch_error, pool_fetch_error, pool_offchain_body, PoolOffchainMetadata,
 };
 
-/// The maximum concurrent fetches for each metadata cache.
+/// The maximum concurrent fetches for the DRep and the proposal metadata
+/// caches each. An anchor body can reach 3 MB, so the bound also caps memory.
 pub const MAX_CONCURRENT_FETCHES: usize = 16;
 
-/// The maximum pending fetches for each metadata cache, including those
-/// running.
+/// The maximum pending fetches for the DRep and the proposal metadata caches
+/// each, including those running.
 pub const MAX_PENDING_LOADS: usize = 4 * MAX_CONCURRENT_FETCHES;
+
+/// The maximum concurrent fetches for the pool metadata cache. A pool body is
+/// at most 512 bytes, so the bound is on open connections alone, and a cold
+/// page of 64 rows misses no fetch slot.
+pub const MAX_CONCURRENT_POOL_FETCHES: usize = 64;
+
+/// The maximum pending fetches for the pool metadata cache, including those
+/// running. A fetch takes at most five seconds, so a request admitted past
+/// one round of running fetches still gets a slot within five seconds, and
+/// a single-pool request within its deadline.
+pub const MAX_PENDING_POOL_LOADS: usize = 2 * MAX_CONCURRENT_POOL_FETCHES;
 
 /// How long a failed fetch answers in place of a new one. It keeps a dead
 /// host from costing a fetch timeout on every request, and stays short enough
@@ -53,7 +65,7 @@ pub const PROPOSAL_OFFCHAIN_FAILURES: CacheNamespace =
 
 /// Verified pool bodies, keyed by content hash, in memory and on disk.
 pub const POOL_OFFCHAIN: CacheNamespace = CacheNamespace::immutable("pool-offchain", 1)
-    .with_fill_limits(MAX_CONCURRENT_FETCHES, MAX_PENDING_LOADS);
+    .with_fill_limits(MAX_CONCURRENT_POOL_FETCHES, MAX_PENDING_POOL_LOADS);
 
 /// Failed pool fetches, keyed by content hash and URL, in memory only.
 pub const POOL_OFFCHAIN_FAILURES: CacheNamespace =
@@ -1516,11 +1528,15 @@ mod tests {
             assert_eq!(failures.validity, ten_minutes, "{}", failures.name);
         }
 
-        for bodies in [OFFCHAIN, PROPOSAL_OFFCHAIN, POOL_OFFCHAIN] {
+        for (bodies, concurrent, pending) in [
+            (OFFCHAIN, 16, 64),
+            (PROPOSAL_OFFCHAIN, 16, 64),
+            (POOL_OFFCHAIN, 64, 128),
+        ] {
             assert_eq!(bodies.validity, Validity::Immutable, "{}", bodies.name);
             let limits = FillLimits {
-                concurrent: 16,
-                pending: 64,
+                concurrent,
+                pending,
             };
             assert_eq!(bodies.fill_limits, Some(limits), "{}", bodies.name);
         }

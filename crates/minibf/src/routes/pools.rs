@@ -49,7 +49,7 @@ use crate::{
     },
     offchain::{
         cached_pool_metadata, fetch_listed_pool_metadata, settle_within, PoolMetadataLoad,
-        MAX_PENDING_LOADS,
+        MAX_CONCURRENT_POOL_FETCHES,
     },
     pagination::{Pagination, PaginationParameters},
     routes::governance::voter_casts,
@@ -756,10 +756,10 @@ async fn page_pool_metadata<C: dolos_core::CacheStore>(
     .await
 }
 
-/// Cached rows answer at once. Misses start up to [`MAX_PENDING_LOADS`] at a
-/// time, so each one registers its fetch before the deadline: the cache runs
-/// [`crate::offchain::MAX_CONCURRENT_FETCHES`] of them, queues the rest, and
-/// keeps every result for the next request.
+/// Cached rows answer at once. Misses start at most
+/// [`MAX_CONCURRENT_POOL_FETCHES`] at a time, one per fetch slot, so a page
+/// queues no fetch ahead of a single-pool request. A miss started before the
+/// deadline keeps its result for the next request.
 async fn page_pool_metadata_with<'a, C, L>(
     cache: &C,
     onchain: &[Option<&'a pallas::ledger::primitives::PoolMetadata>],
@@ -787,7 +787,7 @@ where
         .map(load)
         .collect();
 
-    let mut settled = settle_within(loads, MAX_PENDING_LOADS, deadline)
+    let mut settled = settle_within(loads, MAX_CONCURRENT_POOL_FETCHES, deadline)
         .await
         .into_iter();
 
@@ -3152,14 +3152,17 @@ mod tests {
         assert_eq!(listed.unwrap().ticker, "POOL");
     }
 
-    /// A cold page with more misses than fetch slots registers a fetch for
-    /// each of them before its deadline, so the next request finds every row.
+    /// A cold page with more misses than fetch slots starts one fetch per
+    /// slot and queues none, so a single-pool request never waits behind the
+    /// page. What it started keeps its result, and the next request fetches
+    /// the rest.
     #[tokio::test]
-    async fn a_cold_page_warms_every_row_past_the_fetch_slots() {
-        use crate::offchain::{load_pool_metadata, OnOverload, MAX_CONCURRENT_FETCHES};
+    async fn a_cold_page_starts_no_more_fetches_than_its_slots() {
+        use crate::offchain::{load_pool_metadata, OnOverload};
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::sync::Semaphore;
 
-        let rows = MAX_CONCURRENT_FETCHES + 4;
+        let rows = MAX_CONCURRENT_POOL_FETCHES + 4;
         let bodies: Vec<_> = (0..rows)
             .map(|i| {
                 format!(r#"{{"name":"P{i}","description":"","ticker":"P{i}","homepage":""}}"#)
@@ -3179,42 +3182,53 @@ mod tests {
         let app = TestApp::new();
         let cache = app.facade().inner.cache().clone();
         let gate = Arc::new(Semaphore::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
         let held = |index: usize| {
-            let (body, gate) = (bodies[index].clone(), gate.clone());
+            let (body, gate, started) = (bodies[index].clone(), gate.clone(), started.clone());
             move |_| {
-                let (body, gate) = (body.clone(), gate.clone());
+                let (body, gate, started) = (body.clone(), gate.clone(), started.clone());
                 async move {
+                    started.fetch_add(1, Ordering::SeqCst);
                     let _ = gate.acquire().await;
                     Ok(body)
                 }
             }
         };
+        let page = |deadline| {
+            page_pool_metadata_with(
+                &cache,
+                &onchain,
+                |metadata| {
+                    let index = metadata.url.trim_end_matches(".json");
+                    let index: usize = index.rsplit('/').next().unwrap().parse().unwrap();
+                    load_pool_metadata(&cache, metadata, OnOverload::Unfetched, held(index))
+                },
+                deadline,
+            )
+        };
 
-        let cold = page_pool_metadata_with(
-            &cache,
-            &onchain,
-            |metadata| {
-                let index = metadata.url.trim_end_matches(".json");
-                let index: usize = index.rsplit('/').next().unwrap().parse().unwrap();
-                load_pool_metadata(&cache, metadata, OnOverload::Unfetched, held(index))
-            },
-            Duration::from_millis(100),
-        )
-        .await;
+        let cold = page(Duration::from_millis(100)).await;
         assert!(cold.iter().all(|(listed, _)| listed.is_none()));
+        assert_eq!(started.load(Ordering::SeqCst), MAX_CONCURRENT_POOL_FETCHES);
 
+        // the started fetches outlive the page and keep their bodies
         gate.add_permits(Semaphore::MAX_PERMITS / 2);
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let warm = page_pool_metadata(&cache, &onchain).await;
-                if warm.iter().all(|(listed, _)| listed.is_some()) {
+                let kept = page_pool_metadata(&cache, &onchain[..MAX_CONCURRENT_POOL_FETCHES]);
+                if kept.await.iter().all(|(listed, _)| listed.is_some()) {
                     break;
                 }
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("a row the cold page did not start was never fetched");
+        .expect("a fetch the cold page started never kept its body");
+        assert_eq!(started.load(Ordering::SeqCst), MAX_CONCURRENT_POOL_FETCHES);
+
+        let warm = page(Duration::from_secs(5)).await;
+        assert!(warm.iter().all(|(listed, _)| listed.is_some()));
+        assert_eq!(started.load(Ordering::SeqCst), rows);
     }
 
     #[test]
