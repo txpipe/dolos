@@ -25,10 +25,12 @@ use dolos_cardano::{
     cip151,
     final_rows::newest_final_row,
     indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
-    model::{AccountState, CalidusRegistration, PoolState},
+    model::{AccountState, CalidusRegistration, FixedNamespace as _, PoolState},
     pallas_extras, pool_history, AccountKey, PoolEpochLog, PoolHash, PoolKey,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
+use dolos_core::{
+    keys, ArchiveStore as _, BlockSlot, Domain, Entity as _, KeyRange, StateStore as _,
+};
 use futures::{future::join_all, StreamExt};
 use itertools::Itertools;
 use pallas::{
@@ -37,7 +39,7 @@ use pallas::{
         addresses::Network,
         primitives::{
             conway::{Vote, Voter},
-            Epoch, StakeCredential,
+            StakeCredential,
         },
         traverse::MultiEraBlock,
     },
@@ -572,61 +574,59 @@ where
     }))
 }
 
-/// The retiring epoch the pool's newest certificate in a valid transaction
-/// names, `None` when that certificate registers the pool or the archive holds
-/// none of its certificates.
-fn newest_retirement<D: Domain>(domain: &D, pool: &PoolHash) -> Result<Option<Epoch>, StatusCode> {
-    let archive = domain.archive();
-
-    let slot = archive
+/// The slot of the pool's newest certificate, `None` when the archive holds
+/// none of them.
+fn newest_cert_slot<D: Domain>(
+    domain: &D,
+    pool: &PoolHash,
+) -> Result<Option<BlockSlot>, StatusCode> {
+    domain
+        .archive()
         .slots_by_pool_certs(pool.as_slice(), 0, BlockSlot::MAX)
         .map_err(log_and_500("failed to read the pool certs index"))?
         .next_back()
         .transpose()
-        .map_err(log_and_500("failed to read the pool certs index"))?;
+        .map_err(log_and_500("failed to read the pool certs index"))
+}
 
-    let Some(slot) = slot else {
-        return Ok(None);
-    };
+/// The first final row of `key` at or after `from`, decoding only its rows.
+fn first_final_row_from<D: Domain>(
+    domain: &D,
+    key: &PoolKey,
+    from: BlockSlot,
+) -> Result<Option<PoolState>, StatusCode> {
+    let wanted = keys::encode(key);
 
-    let Some(body) = archive
-        .get_block_by_slot(&slot)
-        .map_err(log_and_500("failed to read a pool certs block"))?
-    else {
-        return Ok(None);
-    };
+    let rows = domain
+        .archive()
+        .iter_logs(PoolState::NS, KeyRange::slots(from..BlockSlot::MAX))
+        .map_err(log_and_500("failed to iterate the pools log"))?;
 
-    let block =
-        MultiEraBlock::decode(&body).map_err(log_and_500("failed to decode a pool certs block"))?;
+    for row in rows {
+        let (log_key, value) = row.map_err(log_and_500("failed to read the pools log"))?;
 
-    let mut newest = None;
+        if log_key.entity() == wanted.as_slice() {
+            let row = PoolState::decode_entity(PoolState::NS, &value)
+                .map_err(log_and_500("failed to decode a pools log row"))?;
 
-    for tx in block.txs().iter().filter(|tx| tx.is_valid()) {
-        for cert in tx.certs() {
-            if pallas_extras::cert_as_pool_registration(&cert)
-                .is_some_and(|cert| &cert.operator == pool)
-            {
-                newest = None;
-            }
-
-            if let Some(cert) =
-                pallas_extras::cert_as_pool_retirement(&cert).filter(|cert| &cert.operator == pool)
-            {
-                newest = Some(cert.epoch);
-            }
+            return Ok(Some(row));
         }
     }
 
-    Ok(newest)
+    Ok(None)
 }
 
 /// A pool's row: the state row, then its final row in the log.
 ///
 /// ESTART commits a final row before it deletes the state row, so a state
-/// miss read first finds a moved pool in the log. The final row is keyed at
-/// the epoch [`PoolState::final_row_epoch`] derives from the retirement the
-/// pool's newest certificate makes. Where that misses, a pruned archive
-/// without the certificate for one, the log is scanned for the newest row.
+/// miss read first finds a moved pool in the log. A moved pool's newest
+/// certificate is the retirement that moved it, and its final row is the
+/// pool's first one keyed after that certificate's slot, at the retiring
+/// epoch + 2 ([`PoolState::final_row_epoch`]). So the log is read forward
+/// from that slot to the pool's first row, with no block read; only the rows
+/// of pools moved in between are passed over, by key. Where that misses, an
+/// archive pruned of the certificate for one, the log is scanned for the
+/// newest row.
 pub(crate) fn read_pool_row<D: Domain>(
     domain: &D,
     pool: PoolHash,
@@ -642,18 +642,9 @@ pub(crate) fn read_pool_row<D: Domain>(
         return Ok(live);
     }
 
-    if let Some(retiring) = newest_retirement(domain, &pool)? {
-        let chain = dolos_cardano::eras::load_era_summary::<D>(domain.state())
-            .map_err(log_and_500("failed to load era summary"))?;
-        let slot = chain.epoch_start(PoolState::final_row_epoch(retiring));
-
-        let logged = domain
-            .archive()
-            .read_log_typed::<PoolState>(slot, &key)
-            .map_err(log_and_500("failed to read the pools log"))?;
-
-        if logged.is_some() {
-            return Ok(logged);
+    if let Some(slot) = newest_cert_slot(domain, &pool)? {
+        if let Some(row) = first_final_row_from(domain, &key, slot)? {
+            return Ok(Some(row));
         }
     }
 
@@ -4557,9 +4548,9 @@ mod retired_pool_phases {
 
     use crate::{mapping::bech32_pool, test_support::TestApp};
 
-    /// The epoch the pool retires at: the synthetic chain's first, so it has
-    /// retired by the tip.
-    const RETIRING: u64 = 0;
+    /// The epoch the pool retires at: the one after the synthetic chain's
+    /// (epoch 2), as a retirement certificate must name a later epoch.
+    const RETIRING: u64 = 3;
 
     /// An owner only the retired pool's registration names: no account and no
     /// other pool knows it.
@@ -4682,8 +4673,9 @@ mod retired_pool_phases {
             format!("/pools/{pool}/votes"),
             format!("/epochs/1/stakes/{pool}"),
             format!("/epochs/1/blocks/{pool}"),
+            // not `/pools/retiring`: the synthetic tip is before the
+            // retirement, where a chain is three epochs past it by the move
             "/pools/retired".to_string(),
-            "/pools/retiring".to_string(),
             format!("/accounts/{owner}/addresses"),
         ]
     }
@@ -4746,11 +4738,11 @@ mod retired_pool_phases {
         assert_eq!(status, StatusCode::OK);
     }
 
-    /// The point read keys the log at the epoch the newest retirement names,
+    /// The point read reads the log forward from the newest certificate,
     /// rather than scanning it: a decoy row keyed later, which a scan would
     /// take for the newest, is not served.
     #[tokio::test]
-    async fn the_point_read_keys_the_log_by_the_newest_retirement() {
+    async fn the_point_read_starts_at_the_newest_certificate() {
         let app = retired_pool_app(2, |domain, pool, row| {
             move_to_log(domain, pool, &row, final_row_slot(domain));
 
@@ -4773,13 +4765,14 @@ mod retired_pool_phases {
         assert_eq!(pool.declared_pledge, "0");
     }
 
-    /// A row the newest retirement does not key, as in an archive pruned of
-    /// the certificate, is found by a scan of the log.
+    /// A row keyed before the newest certificate, where the forward read
+    /// cannot reach it, as when an archive pruned of the retirement holds a
+    /// later certificate only, is found by a scan of the log.
     #[tokio::test]
-    async fn a_row_off_the_retirement_key_is_found_by_a_scan() {
+    async fn a_row_before_the_newest_certificate_is_found_by_a_scan() {
         let moved = moved_app();
         let elsewhere = retired_pool_app(2, |domain, pool, row| {
-            move_to_log(domain, pool, &row, final_row_slot(domain) - 1);
+            move_to_log(domain, pool, &row, 0);
         });
 
         let before = answers(&moved).await;
