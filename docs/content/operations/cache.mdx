@@ -35,10 +35,13 @@ Each kind runs at most 16 fetches at once and keeps at most 64 in progress, so o
 A fetch in progress continues after its request ends and stores its result.
 
 A pool fetch keeps its five-second timeout and 512-byte limit.
-`/pools/extended` fetches at most 16 of its rows at a time and waits at most five seconds, the wait for a fetch slot included.
-Rows not started by then show no metadata, and a later request fetches them.
-`/pools/{pool_id}/metadata` and `/txs/{hash}/pool_updates` wait at most 10 seconds for a fetch, and the proposal metadata routes at most 15 seconds.
+`/pools/extended` starts a fetch for each row it misses and waits at most five seconds, the wait for a fetch slot included.
+Rows not fetched by then show no metadata, and their fetches continue for the next request.
+A row past the 64 fetches in progress starts no fetch, and a later request fetches it.
+`/pools/{pool_id}/metadata` and `/txs/{hash}/pool_updates` wait at most 10 seconds for a fetch.
+The proposal metadata routes wait 15 seconds for each URL they try, and an `ipfs://` anchor tries each configured gateway in turn.
 A fetch past that deadline continues and stores its result for the next request.
+While 64 fetches are in progress, these routes fetch within the request instead, and that fetch stops at the deadline.
 
 Once cached, a verified body remains available during an upstream outage until eviction or deletion.
 A new advertised hash triggers a new fetch.

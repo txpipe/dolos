@@ -795,6 +795,14 @@ fn resolve_anchor_urls(url: &str, ipfs_gateways: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The longest [`anchor_offchain_body`] can take for `url`: one request
+/// timeout for each candidate URL it tries in turn.
+pub(crate) fn anchor_fetch_budget(url: &str, ipfs_gateways: &[String]) -> Duration {
+    let candidates = resolve_anchor_urls(url, ipfs_gateways).len().max(1);
+
+    ANCHOR_FETCH_TIMEOUT.saturating_mul(u32::try_from(candidates).unwrap_or(u32::MAX))
+}
+
 /// This function fetches the raw body of a governance anchor and makes sure
 /// that its hash matches `expected_hash`.
 ///
@@ -1343,6 +1351,26 @@ mod offchain_tests {
                 "https://gateway.pinata.cloud/ipfs/bafkreigmd7xasljkmisbal5pu2xcqolr2fkre4jnlllgqrof4wctadxa7m"
                     .to_string(),
             ],
+        );
+    }
+
+    #[test]
+    fn anchor_fetch_budget_allows_one_timeout_per_candidate() {
+        let gateways = [
+            "https://ipfs.io".to_string(),
+            "https://gateway.pinata.cloud".to_string(),
+        ];
+
+        let direct = anchor_fetch_budget("https://example.com/a.json", &gateways);
+        assert_eq!(direct, ANCHOR_FETCH_TIMEOUT);
+
+        let ipfs = anchor_fetch_budget("ipfs://bafyfoo", &gateways);
+        assert_eq!(ipfs, ANCHOR_FETCH_TIMEOUT * 2);
+
+        // no gateway, no request: the budget still has one timeout
+        assert_eq!(
+            anchor_fetch_budget("ipfs://bafyfoo", &[]),
+            ANCHOR_FETCH_TIMEOUT
         );
     }
 

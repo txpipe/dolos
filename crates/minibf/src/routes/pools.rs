@@ -49,7 +49,7 @@ use crate::{
     },
     offchain::{
         cached_pool_metadata, fetch_listed_pool_metadata, settle_within, PoolMetadataLoad,
-        MAX_CONCURRENT_FETCHES,
+        MAX_PENDING_LOADS,
     },
     pagination::{Pagination, PaginationParameters},
     routes::governance::voter_casts,
@@ -741,13 +741,35 @@ fn build_pool_metadata_response(
     }))
 }
 
-/// The off-chain metadata of each row of a pool page, in page order. Cached
-/// rows answer at once; misses load at most [`MAX_CONCURRENT_FETCHES`] at a
-/// time, within [`PAGE_METADATA_DEADLINE`].
+/// The off-chain metadata of each row of a pool page, in page order, within
+/// [`PAGE_METADATA_DEADLINE`].
 async fn page_pool_metadata<C: dolos_core::CacheStore>(
     cache: &C,
     onchain: &[Option<&pallas::ledger::primitives::PoolMetadata>],
 ) -> Vec<PoolMetadataLoad> {
+    page_pool_metadata_with(
+        cache,
+        onchain,
+        |metadata| fetch_listed_pool_metadata(cache, metadata),
+        PAGE_METADATA_DEADLINE,
+    )
+    .await
+}
+
+/// Cached rows answer at once. Misses start up to [`MAX_PENDING_LOADS`] at a
+/// time, so each one registers its fetch before the deadline: the cache runs
+/// [`crate::offchain::MAX_CONCURRENT_FETCHES`] of them, queues the rest, and
+/// keeps every result for the next request.
+async fn page_pool_metadata_with<'a, C, L>(
+    cache: &C,
+    onchain: &[Option<&'a pallas::ledger::primitives::PoolMetadata>],
+    load: impl Fn(&'a pallas::ledger::primitives::PoolMetadata) -> L,
+    deadline: Duration,
+) -> Vec<PoolMetadataLoad>
+where
+    C: dolos_core::CacheStore,
+    L: std::future::Future<Output = PoolMetadataLoad>,
+{
     let cached = join_all(onchain.iter().map(|metadata| async move {
         match metadata {
             Some(metadata) => cached_pool_metadata(cache, metadata).await,
@@ -762,10 +784,10 @@ async fn page_pool_metadata<C: dolos_core::CacheStore>(
         .zip(&cached)
         .filter(|(_, cached)| cached.is_none())
         .filter_map(|(metadata, _)| *metadata)
-        .map(|metadata| fetch_listed_pool_metadata(cache, metadata))
+        .map(load)
         .collect();
 
-    let mut settled = settle_within(loads, MAX_CONCURRENT_FETCHES, PAGE_METADATA_DEADLINE)
+    let mut settled = settle_within(loads, MAX_PENDING_LOADS, deadline)
         .await
         .into_iter();
 
@@ -3128,6 +3150,71 @@ mod tests {
         fill.await.unwrap();
         let (listed, _) = page_pool_metadata(&cache, &onchain).await.remove(0);
         assert_eq!(listed.unwrap().ticker, "POOL");
+    }
+
+    /// A cold page with more misses than fetch slots registers a fetch for
+    /// each of them before its deadline, so the next request finds every row.
+    #[tokio::test]
+    async fn a_cold_page_warms_every_row_past_the_fetch_slots() {
+        use crate::offchain::{load_pool_metadata, OnOverload, MAX_CONCURRENT_FETCHES};
+        use tokio::sync::Semaphore;
+
+        let rows = MAX_CONCURRENT_FETCHES + 4;
+        let bodies: Vec<_> = (0..rows)
+            .map(|i| {
+                format!(r#"{{"name":"P{i}","description":"","ticker":"P{i}","homepage":""}}"#)
+                    .into_bytes()
+            })
+            .collect();
+        let metadata: Vec<_> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| PoolMetadata {
+                url: format!("https://example.invalid/{i}.json"),
+                hash: Hasher::<256>::hash(body).to_vec().into(),
+            })
+            .collect();
+        let onchain: Vec<_> = metadata.iter().map(Some).collect();
+
+        let app = TestApp::new();
+        let cache = app.facade().inner.cache().clone();
+        let gate = Arc::new(Semaphore::new(0));
+        let held = |index: usize| {
+            let (body, gate) = (bodies[index].clone(), gate.clone());
+            move |_| {
+                let (body, gate) = (body.clone(), gate.clone());
+                async move {
+                    let _ = gate.acquire().await;
+                    Ok(body)
+                }
+            }
+        };
+
+        let cold = page_pool_metadata_with(
+            &cache,
+            &onchain,
+            |metadata| {
+                let index = metadata.url.trim_end_matches(".json");
+                let index: usize = index.rsplit('/').next().unwrap().parse().unwrap();
+                load_pool_metadata(&cache, metadata, OnOverload::Unfetched, held(index))
+            },
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(cold.iter().all(|(listed, _)| listed.is_none()));
+
+        gate.add_permits(Semaphore::MAX_PERMITS / 2);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let warm = page_pool_metadata(&cache, &onchain).await;
+                if warm.iter().all(|(listed, _)| listed.is_some()) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a row the cold page did not start was never fetched");
     }
 
     #[test]

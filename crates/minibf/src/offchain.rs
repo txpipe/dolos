@@ -14,8 +14,8 @@ use std::{
 };
 
 use crate::mapping::{
-    anchor_metadata_from_body, anchor_offchain_body, offchain_hash_mismatch_error,
-    pool_fetch_error, pool_offchain_body, PoolOffchainMetadata,
+    anchor_fetch_budget, anchor_metadata_from_body, anchor_offchain_body,
+    offchain_hash_mismatch_error, pool_fetch_error, pool_offchain_body, PoolOffchainMetadata,
 };
 
 /// The maximum concurrent fetches for each metadata cache.
@@ -25,15 +25,15 @@ pub const MAX_CONCURRENT_FETCHES: usize = 16;
 /// running.
 pub const MAX_PENDING_LOADS: usize = 4 * MAX_CONCURRENT_FETCHES;
 
+/// How long a failed fetch answers in place of a new one. It keeps a dead
+/// host from costing a fetch timeout on every request, and stays short enough
+/// that a host back online shows its metadata soon.
 const FAILURE_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// How long a single-pool request waits for its metadata, the wait for a
-/// fetch slot included.
+/// fetch slot included. Past the pending limit the fetch runs in the request
+/// and stops at the deadline, so nothing is kept for the next request.
 const POOL_REQUEST_DEADLINE: Duration = Duration::from_secs(10);
-
-/// How long a proposal metadata request waits for its metadata, the wait for
-/// a fetch slot included.
-const PROPOSAL_REQUEST_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Verified DRep bodies, keyed by content hash, in memory and on disk.
 pub const OFFCHAIN: CacheNamespace = CacheNamespace::immutable("offchain", 1)
@@ -294,7 +294,9 @@ pub async fn fetch_drep_metadata<C: CacheStore>(
 }
 
 /// Returns proposal metadata from the cache, or fetches and caches its body,
-/// within [`PROPOSAL_REQUEST_DEADLINE`].
+/// within the time its fetch can take, the wait for a fetch slot included: an
+/// `ipfs://` anchor tries each gateway in turn. Past the pending limit the
+/// fetch runs in the request and stops at the deadline.
 pub async fn fetch_proposal_metadata<C: CacheStore>(
     cache: &C,
     ipfs_gateways: &[String],
@@ -308,7 +310,9 @@ pub async fn fetch_proposal_metadata<C: CacheStore>(
         OnOverload::Inline,
     );
 
-    tokio::time::timeout(PROPOSAL_REQUEST_DEADLINE, load)
+    let deadline = anchor_fetch_budget(&anchor.url, ipfs_gateways);
+
+    tokio::time::timeout(deadline, load)
         .await
         .unwrap_or_else(|_| unfetched(anchor))
 }
@@ -427,7 +431,7 @@ where
     .unwrap_or((None, None))
 }
 
-async fn load_pool_metadata<C, F, Fut>(
+pub(crate) async fn load_pool_metadata<C, F, Fut>(
     cache: &C,
     metadata: &PoolMetadata,
     on_overload: OnOverload,
@@ -484,9 +488,10 @@ where
                     .await
             }
         },
-        // a namespace that failed to register: fetch without the cache
+        // a namespace that failed to register, which `register` warned of:
+        // fetch without the cache
         Err(CacheError::UnknownNamespace(_)) => {
-            tracing::warn!(
+            tracing::debug!(
                 namespace = namespaces.bodies,
                 url = %location.url,
                 "metadata cache namespace not registered, fetching without the cache"
@@ -588,8 +593,10 @@ async fn keep_failure<C: CacheStore>(
         })
         .await;
 
+    // the failures namespace lives in memory, so only a failed registration,
+    // which `register` warned of, refuses it
     if let Err(error) = kept {
-        tracing::warn!(url = %location.url, %error, "cannot keep off-chain metadata failure");
+        tracing::debug!(url = %location.url, %error, "cannot keep off-chain metadata failure");
     }
 }
 
@@ -1153,9 +1160,13 @@ mod tests {
                 })
             })
             .collect();
-        while joined.load(Ordering::SeqCst) < 8 {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while joined.load(Ordering::SeqCst) < 8 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a request never reached its fetch");
         gated.open();
         for request in requests {
             let (metadata, error) = request.await.unwrap();
