@@ -28,7 +28,7 @@ use crate::{
     Facade,
 };
 
-use super::{chain_context, drep_distribution};
+use super::{chain_context, drep_distribution, drep_final_rows, read_drep_row};
 
 /// How many anchors one page loads at a time. A page asks for up to 100 rows
 /// and every miss costs a round trip capped at the fetch timeout, so the bound
@@ -155,7 +155,8 @@ fn parse_bool_filter(value: Option<&str>) -> Result<Option<bool>, Error> {
 }
 
 /// One listed DRep: its sighting, and its ledger row where the ledger has
-/// one. A DRep only a vote delegation named has none.
+/// one, in state or as its final row in the log. A DRep only a vote
+/// delegation named has none.
 struct DrepRow {
     key: DRepKey,
     sighting: DRepSightingState,
@@ -198,9 +199,10 @@ where
         .await
 }
 
-/// The ledger row of every sighted DRep, read by one scan of `dreps` rather
-/// than a point read per DRep: the filters and `order_by=amount` need every
-/// row before they can cut a page.
+/// The ledger row of every sighted DRep, read by one scan of `dreps` and one
+/// of its log rather than a point read per DRep: the filters and
+/// `order_by=amount` need every row before they can cut a page. The state
+/// row wins over a final row.
 async fn join_drep_states<D>(
     domain: &Facade<D>,
     sightings: Vec<(DRepKey, DRepSightingState)>,
@@ -215,10 +217,14 @@ where
         .into_iter()
         .collect();
 
+    let mut finals = domain
+        .blocking(|facade| drep_final_rows(&facade.inner))
+        .await?;
+
     let rows = sightings
         .into_iter()
         .map(|(key, sighting)| {
-            let state = states.remove(&key);
+            let state = states.remove(&key).or_else(|| finals.remove(&key));
 
             DrepRow {
                 key,
@@ -244,7 +250,7 @@ where
             sightings
                 .into_iter()
                 .map(|(key, sighting)| {
-                    let state = facade.read_cardano_entity::<DRepState>(&key)?;
+                    let state = read_drep_row(&facade.inner, &key)?;
 
                     Ok(DrepRow {
                         key,

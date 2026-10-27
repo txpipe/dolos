@@ -175,13 +175,14 @@ pub const LOG_NAMESPACES: [Namespace; LOG_KINDS.len()] = {
 /// Nothing in the tree marks an entity as log-bearing, so this table is where
 /// the log namespaces are spelled, held to the entity types by
 /// `log_kinds_derive_from_their_namespaces` in `tests/coverage.rs`.
-pub const LOG_KINDS: [(&str, Namespace); 13] = [
+pub const LOG_KINDS: [(&str, Namespace); 14] = [
     ("log-account-address-chunks", AccountAddressChunk::NS),
     ("log-account-epochs", AccountEpochLog::NS),
     ("log-account-stats", AccountStats::NS),
     ("log-address-stats", AddressStats::NS),
     ("log-asset-mint-chunks", AssetMintChunk::NS),
     ("log-drep-epochs", DRepEpochLog::NS),
+    ("log-dreps", DRepState::NS),
     ("log-epochs", EpochState::NS),
     ("log-first-mint-chunks", FirstMintChunk::NS),
     ("log-first-script-chunks", FirstScriptChunk::NS),

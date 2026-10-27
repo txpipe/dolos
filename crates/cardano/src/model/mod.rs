@@ -369,6 +369,7 @@ pub fn build_log_schema() -> StateSchema {
     register_log::<AccountStats>(&mut schema);
     register_log::<AssetMintChunk>(&mut schema);
     register_log::<ProposalState>(&mut schema);
+    register_log::<DRepState>(&mut schema);
     schema
 }
 
@@ -403,8 +404,10 @@ mod schema_tests {
         let states = build_schema();
         let logs = build_log_schema();
 
-        assert!(states.contains_key(ProposalState::NS));
-        assert!(logs.contains_key(ProposalState::NS));
+        for ns in [ProposalState::NS, DRepState::NS] {
+            assert!(states.contains_key(ns), "{ns} is not a state namespace");
+            assert!(logs.contains_key(ns), "{ns} is not a log namespace");
+        }
     }
 }
 

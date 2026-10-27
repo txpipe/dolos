@@ -1,27 +1,29 @@
 //! The final-row log through the real ESTART: a resolved proposal leaves state
 //! at the boundary after the one that resolved it, and its row, without vote
 //! maps, moves to the `proposals` log keyed at the start of the epoch that
-//! boundary closes. The harness is `ToyDomain` on the devnet genesis, and
-//! every work unit runs through `execute_work_unit`, the executor the node
-//! runs.
+//! boundary closes. An unregistered DRep leaves state once no proposal still
+//! live predates its unregistration, and its whole row moves to the `dreps`
+//! log. The harness is `ToyDomain` on the devnet genesis, and every work unit
+//! runs through `execute_work_unit`, the executor the node runs.
 
 use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_cardano::{
     estart::EstartWorkUnit,
-    final_rows::{newest_final_row, FinalRow as _},
-    CardanoWorkUnit, EpochState, ProposalAction, ProposalKey, ProposalState, VoteEntry,
+    final_rows::{final_row_from, newest_final_row, FinalRow as _},
+    CardanoWorkUnit, DRepExpiry, DRepKey, DRepRegistration, DRepState, EpochState, ProposalAction,
+    ProposalKey, ProposalState, VoteEntry,
 };
 use dolos_core::{
-    sync::execute_work_unit, ArchiveStore as _, BlockSlot, Domain, DomainError, Genesis,
-    StateStore as _, StateWriter as _,
+    sync::execute_work_unit, ArchiveStore as _, BlockSlot, Domain, DomainError, EntityDelta as _,
+    Genesis, StateStore as _, StateWriter as _,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
     toy_domain::ToyDomain,
 };
 use pallas::ledger::primitives::{
-    conway::{Anchor, Vote},
+    conway::{Anchor, DRep, Vote},
     Epoch, StakeCredential,
 };
 
@@ -301,4 +303,246 @@ fn a_crash_at_any_commit_moves_the_same_rows() {
         crash_after > 1,
         "the boundary committed too little to crash"
     );
+}
+
+// --- DReps ---
+
+/// Unregistered before `VOTED` was submitted.
+const EARLY: u8 = 0xb1;
+/// Votes on `VOTED`, then unregisters while it is live.
+const HELD: u8 = 0xb2;
+/// Unregisters in epoch 2, after `VOTED` resolves.
+const CLOSING: u8 = 0xb3;
+/// Never unregisters.
+const ACTIVE: u8 = 0xb4;
+
+/// The proposal `HELD` votes on.
+const VOTED: u8 = 0xa5;
+
+/// The slot `VOTED` is submitted at, in epoch 0.
+const SUBMITTED: BlockSlot = 40;
+
+fn drep_key(byte: u8) -> DRepKey {
+    DRepKey(DRep::Key([byte; 28].into()))
+}
+
+/// A DRep registered at slot 1 and, when `unregistered` is set, unregistered
+/// there with its deposit refunded.
+fn drep(byte: u8, unregistered: Option<BlockSlot>) -> DRepState {
+    let mut row = DRepState::new(DRep::Key([byte; 28].into()), DRepExpiry::new(100, 0));
+    row.registered_at = Some((1, 0));
+    row.unregistered_at = unregistered.map(|slot| (slot, 0));
+    row.deposit = if unregistered.is_some() {
+        0
+    } else {
+        500_000_000
+    };
+    row.last_active_slot = Some(unregistered.unwrap_or(1));
+    row
+}
+
+/// A devnet store in its first epoch: `VOTED`, live, with `HELD`'s vote, and
+/// the DReps that exist then.
+fn seeded_dreps() -> ToyDomain {
+    let domain = ToyDomain::new_with_genesis(devnet(), None, None);
+
+    let voted = ProposalState {
+        slot: SUBMITTED,
+        max_epoch: Some(100),
+        drep_votes: BTreeMap::from([(credential(HELD), vote(SUBMITTED + 1))]),
+        ..proposal(VOTED, None, None)
+    };
+
+    let writer = domain.state().start_writer().unwrap();
+
+    writer.write_entity_typed(&voted.key(), &voted).unwrap();
+
+    for row in [
+        drep(EARLY, Some(SUBMITTED - 10)),
+        drep(HELD, Some(SUBMITTED + 2)),
+        drep(ACTIVE, None),
+    ] {
+        writer
+            .write_entity_typed(&DRepKey::from(&row.identifier), &row)
+            .unwrap();
+    }
+
+    writer.commit().unwrap();
+
+    domain
+}
+
+fn dreps_in_state(domain: &ToyDomain) -> BTreeMap<DRepKey, DRepState> {
+    domain
+        .state()
+        .iter_entities_typed::<DRepState>(None)
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+}
+
+fn dreps_logged(domain: &ToyDomain) -> BTreeMap<DRepKey, (BlockSlot, DRepState)> {
+    domain
+        .archive()
+        .iter_logs_typed::<DRepState>(None)
+        .unwrap()
+        .map(|row| {
+            let (slot, key, row) = row.unwrap();
+            (key, (slot, row))
+        })
+        .collect()
+}
+
+fn write_drep(domain: &ToyDomain, row: &DRepState) {
+    let writer = domain.state().start_writer().unwrap();
+    writer
+        .write_entity_typed(&DRepKey::from(&row.identifier), row)
+        .unwrap();
+    writer.commit().unwrap();
+}
+
+fn keys_of<V>(rows: &BTreeMap<DRepKey, V>) -> Vec<DRepKey> {
+    rows.keys().cloned().collect()
+}
+
+/// Done criterion of the objective: an unregistered DRep leaves state once
+/// it unregistered before the epoch the boundary closes and before every
+/// proposal still live was submitted. Its whole row moves to the log, keyed
+/// at the start of the closed epoch, and a later registration makes a fresh
+/// state row.
+#[test]
+fn an_unregistered_drep_moves_once_no_live_proposal_predates_it() {
+    let domain = seeded_dreps();
+
+    // opening 1: every unregistration is in the closing epoch
+    open_next_epoch(&domain).unwrap();
+    assert_eq!(
+        keys_of(&dreps_in_state(&domain)),
+        vec![drep_key(EARLY), drep_key(HELD), drep_key(ACTIVE)]
+    );
+    assert!(dreps_logged(&domain).is_empty());
+
+    // opening 2: EARLY leaves; VOTED is live and predates HELD's
+    // unregistration
+    open_next_epoch(&domain).unwrap();
+    assert_eq!(
+        keys_of(&dreps_in_state(&domain)),
+        vec![drep_key(HELD), drep_key(ACTIVE)]
+    );
+
+    let log = dreps_logged(&domain);
+    assert_eq!(keys_of(&log), vec![drep_key(EARLY)]);
+    assert_eq!(
+        log[&drep_key(EARLY)],
+        (epoch_start(&domain, 1), drep(EARLY, Some(SUBMITTED - 10)))
+    );
+
+    // in epoch 2: CLOSING unregisters, and the EWRAP closing 2 enacts VOTED
+    let closing = drep(CLOSING, Some(epoch_start(&domain, 2) + 5));
+    write_drep(&domain, &closing);
+
+    let mut voted = domain
+        .state()
+        .read_entity_typed::<ProposalState>(&key(VOTED))
+        .unwrap()
+        .unwrap();
+    voted.ratified_epoch = Some(2);
+    let writer = domain.state().start_writer().unwrap();
+    writer.write_entity_typed(&key(VOTED), &voted).unwrap();
+    writer.commit().unwrap();
+
+    // opening 3: HELD leaves; CLOSING unregistered in the closing epoch
+    open_next_epoch(&domain).unwrap();
+    assert_eq!(
+        keys_of(&dreps_in_state(&domain)),
+        vec![drep_key(CLOSING), drep_key(ACTIVE)]
+    );
+
+    let held = drep(HELD, Some(SUBMITTED + 2));
+    let log = dreps_logged(&domain);
+    assert_eq!(
+        log[&drep_key(HELD)],
+        (epoch_start(&domain, 2), held.clone())
+    );
+    assert_eq!(held.final_row(), held);
+
+    // the point read from the unregistration finds the row
+    assert_eq!(
+        final_row_from::<DRepState>(domain.archive(), &drep_key(HELD), SUBMITTED + 2).unwrap(),
+        Some((epoch_start(&domain, 2), held.clone()))
+    );
+    assert_eq!(
+        final_row_from::<DRepState>(domain.archive(), &drep_key(ACTIVE), 0).unwrap(),
+        None
+    );
+
+    // in epoch 3: HELD registers again, on a fresh row
+    let mut entity = None;
+    let reregistered_at = epoch_start(&domain, 3) + 1;
+    DRepRegistration::new(
+        DRep::Key([HELD; 28].into()),
+        reregistered_at,
+        0,
+        500_000_000,
+        DRepExpiry::new(120, 3),
+    )
+    .apply(&mut entity);
+    let fresh = entity.unwrap();
+    assert_eq!(fresh.registered_at, Some((reregistered_at, 0)));
+    assert_eq!(fresh.unregistered_at, None);
+    write_drep(&domain, &fresh);
+
+    // opening 4: CLOSING leaves; HELD stays on its fresh row, its old final
+    // row still in the log
+    open_next_epoch(&domain).unwrap();
+    assert_eq!(
+        keys_of(&dreps_in_state(&domain)),
+        vec![drep_key(HELD), drep_key(ACTIVE)]
+    );
+    assert_eq!(dreps_in_state(&domain)[&drep_key(HELD)], fresh);
+
+    let log = dreps_logged(&domain);
+    assert_eq!(
+        keys_of(&log),
+        vec![drep_key(EARLY), drep_key(HELD), drep_key(CLOSING)]
+    );
+    assert_eq!(log[&drep_key(CLOSING)], (epoch_start(&domain, 3), closing));
+    assert_eq!(log[&drep_key(HELD)].0, epoch_start(&domain, 2));
+
+    // VOTED left at the same boundary, one after its resolution
+    assert!(logged(&domain).contains_key(&key(VOTED)));
+}
+
+/// The rule on its own: the deposit, the closing epoch and every live
+/// submission each hold a DRep.
+#[test]
+fn the_drep_rule_holds_what_a_reader_could_still_need() {
+    let closing_start = 1_000;
+    let unregistered = drep(EARLY, Some(500));
+
+    assert!(unregistered.leaves_state_at(closing_start, None));
+    assert!(unregistered.leaves_state_at(closing_start, Some(501)));
+
+    // a live proposal submitted at or before the unregistration
+    assert!(!unregistered.leaves_state_at(closing_start, Some(500)));
+    assert!(!unregistered.leaves_state_at(closing_start, Some(400)));
+
+    // unregistered in the closing epoch
+    assert!(!unregistered.leaves_state_at(500, None));
+
+    // registered, or registered again after the unregistration
+    assert!(!drep(ACTIVE, None).leaves_state_at(closing_start, None));
+    let reregistered = DRepState {
+        registered_at: Some((600, 0)),
+        deposit: 500_000_000,
+        ..unregistered.clone()
+    };
+    assert!(!reregistered.leaves_state_at(closing_start, None));
+
+    // a deposit not yet refunded
+    let unrefunded = DRepState {
+        deposit: 1,
+        ..unregistered
+    };
+    assert!(!unrefunded.leaves_state_at(closing_start, None));
 }

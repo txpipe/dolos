@@ -25,8 +25,8 @@
 //! the newest final row wins ([`newest_final_row`]).
 
 use dolos_core::{
-    keys, ArchiveError, ArchiveStore, ArchiveWriter, BlockSlot, ChainError, EntityValue, KeyRange,
-    LogEntity, LogKey, NsKey, StateEntity, StateWriter,
+    keys, ArchiveError, ArchiveStore, ArchiveWriter, BlockSlot, ChainError, EntityValue, KeyBytes,
+    KeyRange, LogEntity, LogKey, NsKey, StateEntity, StateWriter,
 };
 
 /// An entity kind whose rows ESTART moves from state to its log once they have
@@ -124,4 +124,34 @@ pub fn newest_final_row<E: FinalRow>(
                 .map_err(|err| ArchiveError::EntityDecodingError(err.to_string()))
         })
         .transpose()
+}
+
+/// The first final row of `key` keyed at or after `from`, with its slot.
+///
+/// For a reader that knows a slot the newest final row cannot precede, and no
+/// older one can follow: a DRep's newest unregistration. The scan starts
+/// there, decodes only the row of `key`, and stops at it.
+pub fn final_row_from<E: FinalRow>(
+    archive: &impl ArchiveStore,
+    key: &<E as StateEntity>::Key,
+    from: BlockSlot,
+) -> Result<Option<(BlockSlot, E)>, ArchiveError> {
+    let wanted = keys::encode(key);
+
+    let range = KeyRange {
+        start: KeyBytes::from_slice(&from.to_be_bytes()),
+        end: None,
+    };
+
+    for row in archive.iter_logs(E::NS, range)? {
+        let (log_key, value) = row?;
+
+        if log_key.entity() == wanted.as_slice() {
+            return E::decode_entity(E::NS, &value)
+                .map(|row| Some((log_key.slot(), row)))
+                .map_err(|err| ArchiveError::EntityDecodingError(err.to_string()));
+        }
+    }
+
+    Ok(None)
 }

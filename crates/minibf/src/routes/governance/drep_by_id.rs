@@ -14,7 +14,7 @@ use crate::{
     Facade,
 };
 
-use super::{chain_context, drep_distribution, drep_key};
+use super::{chain_context, drep_distribution, drep_key, read_drep_row};
 
 pub async fn drep_by_id<D: Domain>(
     Path(drep): Path<String>,
@@ -27,7 +27,7 @@ where
     let key = drep_key(&parsed.encoded)?;
 
     // the special DReps have no row
-    let drep_state = domain.read_cardano_entity::<DRepState>(&key)?;
+    let drep_state = read_drep_row(&domain.inner, &key)?;
 
     if drep_state.is_none() && !parsed.is_special {
         return Err(StatusCode::NOT_FOUND);
