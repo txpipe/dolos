@@ -50,26 +50,27 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 ### Per-shard body — per-account snapshot rotation
 
 - Each shard is scoped to a first-byte prefix bucket of the credential key space.
-- Streams per-account snapshot transitions (rotate `EpochValue.go ← set ← mark ← live ← next`) for the accounts in this shard's range. Splits the account pass into bounded-memory chunks so `AccountTransition` deltas don't accumulate by the millions.
+- `load` builds the shard's context only; it reads no account.
+- `commit_state` (`WorkContext::commit_shard`, `estart/commit.rs`) streams the accounts in this shard's range once, inside the shard's state transaction: each account is added to the shard's stake tally as it stands, rotated (`AccountState::rotate`: `EpochValue.go ← set ← mark ← live ← next` for stake, pool and drep) and written back. The same pass writes each account's stake-only account-epoch row for the opening epoch (`estart/stake.rs`, from its `mark` before rotation) to the archive, which commits before the state. No per-account deltas are built: ESTART writes no WAL and is never undone.
 - Deltas emitted per shard:
-  - `AccountTransition` — `estart/reset.rs:130` (visitor reused by the shard pass). One per account in range. Targets `accounts`.
-  - `EStartProgress` — `estart/loading.rs:42`. Single per shard. Targets `epochs` — advances `estart_progress = Some(ShardProgress { committed: shard_index + 1, total })`. Idempotent + ordered + total-mismatch guarded, mirroring `EWrapProgress`.
+  - `EStartProgress` — `estart/commit.rs`. Single per shard, applied in the same transaction as the shard's rows. Targets `epochs` — advances `estart_progress = Some(ShardProgress { committed: shard_index + 1, total })` and adds the shard's tally to `estart_tally`. Idempotent + ordered + total-mismatch guarded, mirroring `EWrapProgress`.
 
 ### `finalize()` — Estart global pass
 
 - Builds a fresh `WorkContext` via `WorkContext::load_finalize` (using the AVVM total computed in `initialize`).
-- Iterates pools / dreps / proposals; emits transition deltas via the `nonces` and `reset` visitors.
+- Iterates pools / dreps / proposals; emits transition deltas via the `nonces` and `reset` visitors, and gathers the rows that leave state via the `final_rows` visitor: a proposal resolved at a boundary before the one just crossed (`ProposalState::leaves_state_at`).
 - Emits the closing `EpochTransition` delta (rotates `number` / `initial_pots` / `rolling` / `pparams`, seeds `EpochState.end = Some(EndStats::default())`, resets *both* `ewrap_progress = None` and `estart_progress = None`).
 - Direct writes: `EraState` writes during era transitions (Shelley→Allegra etc.).
+- Direct writes and deletes (`crate::final_rows`): each moved row's final row, vote maps dropped for a proposal, goes to the log of its own namespace under `epoch_start` of the closing epoch, and its state row is deleted. The archive commits before the state, so a crash in between re-runs finalize over the same rows.
 - **Sets the cursor** to `ChainPoint::Slot(boundary_slot)` — the only phase across all work units that moves the cursor. A crash before `finalize()` restarts from the boundary block.
 - Deltas emitted in finalize:
-  - `NonceTransition` — `estart/nonces.rs:40`. Targets `epochs`.
-  - `PoolTransition` — `estart/reset.rs:141`. One per pool. Targets `pools`.
-  - `EpochTransition` — `estart/reset.rs:158` (emitted from `compute_global_deltas` in `estart/loading.rs`). Single. Targets `epochs`.
+  - `NonceTransition` — `estart/nonces.rs:92`. Targets `epochs`.
+  - `PoolTransition` — `estart/reset.rs:134`. One per pool. Targets `pools`.
+  - `EpochTransition` — `estart/reset.rs:151` (emitted from `compute_global_deltas` in `estart/loading.rs`). Single. Targets `epochs`.
 
-`AccountTransition` is not natively idempotent on re-apply (would double-roll), so true mid-shard resume remains a TODO — same posture as `EwrapWorkUnit`.
+The rotation is not idempotent (rotating twice double-rolls), so a resumed boundary skips the shards `estart_progress` records as committed. A shard is all or nothing: its rows and its `EStartProgress` commit together, so a crash inside a shard leaves its rows untouched for the resumed run to read again.
 
-- Namespaces touched: `accounts` (shard range, per shard), `pools`, `epochs`, `eras` (in finalize).
+- Namespaces touched: `accounts` (shard range, per shard), `pools`, `epochs`, `eras`, `proposals` (deletes, and its log) (in finalize).
 
 ## 2. `RollWorkUnit` — applies a batch of blocks
 

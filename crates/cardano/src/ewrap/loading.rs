@@ -4298,13 +4298,10 @@ mod ratification_tests {
             domain.genesis(),
             Default::default(),
             Default::default(),
-            0,
-            1,
-            ranges.clone(),
         )
         .unwrap();
         shard
-            .commit_shard::<ToyDomain>(domain.state(), domain.archive(), ranges)
+            .commit_shard::<ToyDomain>(domain.state(), domain.archive(), 0, 1, ranges)
             .unwrap();
 
         let mut estart = crate::estart::WorkContext::load_finalize::<ToyDomain>(
@@ -4314,7 +4311,7 @@ mod ratification_tests {
         .unwrap();
         let slot = estart.chain_summary.epoch_start(estart.starting_epoch_no());
         estart
-            .commit_finalize::<ToyDomain>(domain.state(), slot)
+            .commit_finalize::<ToyDomain>(domain.state(), domain.archive(), slot)
             .unwrap();
 
         let after = crate::load_epoch::<ToyDomain>(domain.state()).unwrap();

@@ -1,13 +1,16 @@
 //! Commit logic for the open half of the epoch boundary (per-shard runs
 //! plus the finalize pass).
 //!
-//! Both code paths use the same streaming pattern: each entity namespace
-//! is read one record at a time, deltas for that record are applied, and
-//! the result is written immediately. Per-shard commits flush
-//! `EpochState`'s `EStartProgress` and the shard's account-range
-//! slice; the finalize commit flushes pool / drep / proposal transitions,
-//! the closing `EpochTransition` and optional era-summary writes, and
-//! advances the cursor.
+//! Both code paths stream: each entity namespace is read one record at a
+//! time and the result is written immediately. Per-shard commits rotate
+//! the shard's account-range slice in that same pass and flush
+//! `EpochState`'s `EStartProgress`; the finalize commit applies the
+//! queued pool / drep / proposal transitions, the closing
+//! `EpochTransition` and optional era-summary writes, moves the
+//! boundary's final rows from state to the archive, and advances the
+//! cursor.
+
+use std::collections::BTreeMap;
 
 use dolos_core::{
     save_entity_at, ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError,
@@ -17,8 +20,8 @@ use dolos_core::{
 use tracing::{debug, instrument, trace, warn};
 
 use crate::{
-    forks, AccountKey, AccountState, CardanoEntity, DRepState, EpochState, EraKey, EraState,
-    GovState, PoolState, ProposalState,
+    forks, AccountKey, AccountState, CardanoEntity, DRepState, EStartProgress, EpochState, EraKey,
+    EraState, GovState, PoolState, ProposalState,
 };
 
 /// Close `previous` at `starting_epoch` and open the era that `new_version`
@@ -128,10 +131,16 @@ impl super::WorkContext {
         Ok(())
     }
 
-    /// Commit a single per-shard run: stream-and-apply per-account snapshot
-    /// transitions for the shard's key ranges, then commit the
-    /// `EStartProgress` delta against `EpochState`, after the shard's
-    /// stake-only account-epoch rows reach the archive.
+    /// Commit a single per-shard run in one state transaction: stream the
+    /// accounts of the shard's key ranges once, adding each to the shard's
+    /// tally and writing its stake-only account-epoch row to the archive as
+    /// it stands, then rotating it and writing it back. The shard's
+    /// `EStartProgress` (carrying the tally) applies to `EpochState` in the
+    /// same transaction, after the rows reach the archive.
+    ///
+    /// No per-account deltas are built: ESTART writes no WAL and is never
+    /// undone. A crash before the state commit leaves the shard's accounts
+    /// untouched, and the resumed boundary reads them again.
     ///
     /// **Does not advance the cursor.** Cursor moves only in
     /// `commit_finalize`.
@@ -140,6 +149,8 @@ impl super::WorkContext {
         &mut self,
         state: &D::State,
         archive: &D::Archive,
+        shard_index: u32,
+        total_shards: u32,
         ranges: Vec<RangeOf<AccountKey>>,
     ) -> Result<(), ChainError> {
         debug!("committing estart changes");
@@ -147,24 +158,30 @@ impl super::WorkContext {
         let writer = state.start_writer()?;
         let archive_writer = archive.start_writer()?;
 
-        // Stream accounts in this shard's ranges only (one per
-        // StakeCredential variant). Each call drains the matching deltas
-        // from `self.deltas`, so a delta keyed inside range N stays in
-        // the map until range N is streamed.
+        let next_epoch = self.starting_epoch_no();
+        let slot = self.account_epoch_slot();
+        let mut tally = BTreeMap::new();
+
         for range in ranges {
-            self.stream_and_apply_namespace::<D, AccountState>(state, &writer, Some(range))?;
+            for record in state.iter_entities_typed::<AccountState>(Some(range))? {
+                let (account_id, mut account) = record?;
+
+                self.tally_account(&mut tally, &account);
+
+                if let Some(row) = self.account_epoch_row(&account) {
+                    archive_writer.write_log_typed(slot, &account_id, &row)?;
+                }
+
+                account.rotate(next_epoch);
+
+                writer.write_entity_typed::<AccountState>(&account_id, &account)?;
+            }
         }
 
-        // EpochState gets the EStartProgress delta.
+        self.add_delta(EStartProgress::new(shard_index, total_shards, tally));
+
         self.deltas
             .apply_singleton::<EpochState, _>(state, &writer)?;
-
-        let slot = self.account_epoch_slot();
-
-        debug!(log_count = self.logs.len(), "writing shard archive logs");
-        for (account, log) in self.logs.drain(..) {
-            archive_writer.write_log_typed(slot, &account, &log)?;
-        }
 
         if !self.deltas.entities.is_empty() {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted shard deltas");
@@ -183,8 +200,8 @@ impl super::WorkContext {
     }
 
     /// Commit the finalize half: pool / drep / proposal transitions + the
-    /// closing `EpochTransition` + (optional) era-summary writes + cursor
-    /// advance.
+    /// closing `EpochTransition` + (optional) era-summary writes + the moves
+    /// to the final-row log + cursor advance.
     ///
     /// `AccountState` is intentionally **not** streamed here — per-account
     /// snapshot transitions were committed by the preceding per-shard
@@ -195,10 +212,15 @@ impl super::WorkContext {
     /// It is also where the Shelley→Allegra AVVM reclamation deletes its
     /// UTxOs — see [`crate::estart::avvm`] for why that belongs in the same
     /// transaction as the pot delta.
+    ///
+    /// The final rows commit to the archive before the state deletes them, as
+    /// the period seals do: a crash in between re-runs finalize over the same
+    /// rows, which writes the same log rows again.
     #[instrument(skip_all)]
     pub fn commit_finalize<D: Domain>(
         &mut self,
         state: &D::State,
+        archive: &D::Archive,
         slot: BlockSlot,
     ) -> Result<(), ChainError> {
         debug!("committing estart finalize changes");
@@ -224,6 +246,12 @@ impl super::WorkContext {
         let era_transition = self.collect_era_transition(state)?;
 
         let writer = state.start_writer()?;
+
+        // A moved row takes no boundary delta: the log keeps the row the
+        // visitors read, and the state row goes.
+        for key in self.finals.keys() {
+            self.deltas.entities.remove(key);
+        }
 
         // Skip AccountState — committed earlier by per-shard runs.
 
@@ -273,6 +301,17 @@ impl super::WorkContext {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted deltas");
         }
 
+        if !self.finals.is_empty() {
+            debug!(
+                count = self.finals.len(),
+                "moving final rows to the archive"
+            );
+
+            let archive_writer = archive.start_writer()?;
+            self.finals.write(&writer, &archive_writer)?;
+            archive_writer.commit()?;
+        }
+
         // Set cursor — only in finalize, never in shards.
         writer.set_cursor(ChainPoint::Slot(slot))?;
 
@@ -304,7 +343,7 @@ mod tests {
             tally_protocol: EraKey::from(9),
             deltas: Default::default(),
             active_stake: None,
-            logs: Vec::new(),
+            finals: Default::default(),
         }
     }
 

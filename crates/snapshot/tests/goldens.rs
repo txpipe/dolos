@@ -41,7 +41,7 @@ use stelae::{
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 67] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 68] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -125,6 +125,12 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 67] = [
         "sha256:c02fef757b3b8f5a65c04642cdc1e9c11a37f817528e43dcac261fbc983031a1",
         2,
         95,
+    ),
+    (
+        "log-proposals",
+        "sha256:8d8990b6d7874faadef34630c88f6073c5313d2a15c915ccc22f6fb1af802330",
+        2,
+        101,
     ),
     (
         "entity-asset",
@@ -448,7 +454,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 67] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:3cd9adab25163768da5690156c10d212eabb019c4ab18510d6c24372df94e90d";
+    "sha256:2f81543f21a9b91f23505ea65718b4bf2d2cc98fc0ed9d870c8d8625de068d2f";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -689,6 +695,9 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:c02fef757b3b8f5a65c04642cdc1e9c11a37f817528e43dcac261fbc983031a1","kind":"log-pool-epochs","#,
     r#""mediaType":"application/vnd.dolos.stele.log-pool-epochs.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":95},"#,
+    r#"{"diffId":"sha256:8d8990b6d7874faadef34630c88f6073c5313d2a15c915ccc22f6fb1af802330","kind":"log-proposals","#,
+    r#""mediaType":"application/vnd.dolos.stele.log-proposals.v1+zstd","records":2,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":101},"#,
     r#"{"diffId":"sha256:b820744b499226137d7521dce605dae7c0f17fb1964dd5b8967d0ec2669a233c","kind":"entity-asset","#,
     r#""mediaType":"application/vnd.dolos.stele.entity-asset.v1+zstd","records":3,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":124},"#,

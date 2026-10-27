@@ -1038,8 +1038,8 @@ impl dolos_core::EntityDelta for EWrapProgress {
 /// in-flight pipeline robust against a config change between shards (e.g.
 /// across a crash and restart).
 ///
-/// The shard's per-account work lands directly on each `AccountState` via
-/// `AccountTransition` deltas. Its one accumulator is `tally`, the shard's
+/// The shard's per-account work lands directly on each `AccountState`, in
+/// the pass that reads it. Its one accumulator is `tally`, the shard's
 /// part of the stake distribution being frozen, which `apply` adds to
 /// `EpochState.estart_tally` in the same commit as the shard's rotations.
 ///

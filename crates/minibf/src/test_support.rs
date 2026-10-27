@@ -19,7 +19,7 @@ use dolos_testing::{
         build_synthetic_blocks, seed_account_stake_logs, seed_epoch_logs, seed_reward_logs,
         SyntheticBlockConfig, SyntheticVectors,
     },
-    toy_domain::ToyDomain,
+    toy_domain::{MemoryStores, ToyDomain, ToyStores},
 };
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
@@ -400,8 +400,8 @@ pub fn stake_address_chain() -> SyntheticBlockConfig {
     }
 }
 
-pub struct TestDomainBuilder {
-    domain: ToyDomain,
+pub struct TestDomainBuilder<B: ToyStores = MemoryStores> {
+    domain: ToyDomain<B>,
     vectors: SyntheticVectors,
 }
 
@@ -423,6 +423,17 @@ impl TestDomainBuilder {
 
     /// The synthetic chain over the preview genesis as `adjust` leaves it.
     pub fn new_with_synthetic_and_genesis(
+        cfg: SyntheticBlockConfig,
+        adjust: impl FnOnce(&mut dolos_core::Genesis),
+    ) -> Self {
+        Self::new_with_synthetic_in(cfg, adjust)
+    }
+}
+
+impl<B: ToyStores> TestDomainBuilder<B> {
+    /// [`TestDomainBuilder::new_with_synthetic_and_genesis`] over a fresh
+    /// set of `B` stores.
+    pub fn new_with_synthetic_in(
         mut cfg: SyntheticBlockConfig,
         adjust: impl FnOnce(&mut dolos_core::Genesis),
     ) -> Self {
@@ -445,11 +456,11 @@ impl TestDomainBuilder {
         }
         let (blocks, vectors, chain_config) = build_synthetic_blocks(cfg);
 
-        let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+        let domain = ToyDomain::<B>::with_backend(genesis, chain_config, None, None);
         domain
             .import_blocks(blocks.clone())
             .expect("failed to import synthetic blocks");
-        let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+        let summary = dolos_cardano::eras::load_era_summary::<ToyDomain<B>>(domain.state())
             .expect("era summary");
         let tip_slot = domain
             .state()
@@ -485,7 +496,7 @@ impl TestDomainBuilder {
         Self { domain, vectors }
     }
 
-    pub fn finish(self) -> (ToyDomain, SyntheticVectors) {
+    pub fn finish(self) -> (ToyDomain<B>, SyntheticVectors) {
         (self.domain, self.vectors)
     }
 }
