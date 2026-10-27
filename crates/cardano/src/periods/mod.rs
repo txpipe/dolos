@@ -15,7 +15,10 @@
 //! group and epoch. `PaymentStats` lives in state only too, sealing into the
 //! same `Chunk` as its `Set`.
 
-use std::{collections::BTreeMap, ops::Range};
+use std::{
+    collections::BTreeMap,
+    ops::{Range, RangeInclusive},
+};
 
 use dolos_core::{
     ArchiveError, ArchiveStore, ArchiveWriter as _, ChainError, Domain, EntityDelta, EntityValue,
@@ -237,6 +240,25 @@ pub fn is_sealable(
     boundary: Epoch,
 ) -> bool {
     chain.epoch_start(epoch + 1) + mutable_slots <= chain.epoch_start(boundary)
+}
+
+/// The epochs whose staged rows are still in state while the chain stands
+/// in `epoch`: every epoch the boundary opening `epoch` could not seal.
+///
+/// Sealability is monotone in the epoch, so the range runs from the oldest
+/// unsealable epoch to `epoch` itself.
+pub fn unsealed_epochs(
+    chain: &ChainSummary,
+    mutable_slots: u64,
+    epoch: Epoch,
+) -> RangeInclusive<Epoch> {
+    let mut oldest = epoch;
+
+    while oldest > 0 && !is_sealable(chain, mutable_slots, oldest - 1, epoch) {
+        oldest -= 1;
+    }
+
+    oldest..=epoch
 }
 
 /// Seal every staged epoch that is immutable at the boundary opening

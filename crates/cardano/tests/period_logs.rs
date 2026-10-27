@@ -7,22 +7,26 @@ use std::{
 };
 
 use dolos_cardano::{
+    indexes::{archive_dimensions::SCRIPT, entities, AsyncCardanoQueryExt as _},
     model::{
         AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, AssetState,
-        FirstMintChunk, FirstMintSet, FirstScriptSet, ScriptState,
+        FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet,
     },
     periods::is_sealable,
     AccountKey, AssetKey, CardanoDelta,
 };
 use dolos_core::{
-    import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ChainPoint, Domain as _,
-    Genesis, RangeOf, StateStore as _, WalStore as _,
+    import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ArchiveWriter as _,
+    AsyncQueryFacade, ChainPoint, Domain as _, Genesis, RangeOf, StateStore as _, StateWriter as _,
+    WalStore as _,
 };
 use dolos_testing::{
+    faults::{FaultyToyDomain, TestFault},
     synthetic::{build_synthetic_blocks, sample_alonzo_block, SyntheticBlockConfig},
     toy_domain::ToyDomain,
     MIN_UTXO_AMOUNT,
 };
+use pallas::crypto::hash::Hash;
 use pallas::ledger::{
     addresses::{Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart},
     primitives::{alonzo, StakeCredential, TransactionInput},
@@ -324,35 +328,25 @@ fn zero_mint_stages_no_first_mint() {
     assert_eq!(count(|x| matches!(x, CardanoDelta::MintStatsUpdate(_))), 1);
 }
 
-/// The script hashes the witness holds, and the `(epoch, script hash)` keys
-/// staged as first seen.
-type ScriptRows = (BTreeSet<[u8; 28]>, BTreeSet<(u64, [u8; 28])>);
-
-fn scripts(domain: &ToyDomain) -> ScriptRows {
-    let witness = domain
-        .state()
-        .iter_entities_typed::<ScriptState>(None)
-        .unwrap()
-        .map(|row| *row.unwrap().0 .0)
-        .collect();
-
-    let staged = domain
+/// The `(epoch, script hash, slot)` of each script staged as first seen.
+fn scripts(domain: &ToyDomain) -> BTreeSet<(u64, [u8; 28], u64)> {
+    domain
         .state()
         .iter_entities_typed::<FirstScriptSet>(None)
         .unwrap()
         .map(|row| {
-            let (key, _) = row.unwrap();
-            (key.epoch, *key.member.0)
+            let (key, row) = row.unwrap();
+            (key.epoch, *key.member.0, row.slot)
         })
-        .collect();
-
-    (witness, staged)
+        .collect()
 }
 
 /// Rollback for first scripts: undoing the block that first carried a script
-/// removes its witness and set rows, and a block that only repeats scripts
-/// leaves them alone. The first block's tx failed phase-2 validation, so the
-/// scripts it carries count from the second block.
+/// removes its set rows, and a block that only repeats scripts leaves them
+/// alone. The first block's tx failed phase-2 validation, so its witnesses
+/// do not count, get no `script` tag, and the scripts are staged once, at the
+/// second block, the first valid carrier. Each undone block's `script` tags go
+/// with it.
 #[test]
 fn rollback_removes_the_script_rows_of_the_block_that_first_carried_them() {
     let cfg = SyntheticBlockConfig {
@@ -377,17 +371,240 @@ fn rollback_removes_the_script_rows_of_the_block_that_first_carried_them() {
         after.push(scripts(&domain));
     }
 
-    let none = (BTreeSet::new(), BTreeSet::new());
+    let none = BTreeSet::new();
     assert_eq!(after[0], none, "an invalid tx's witnesses were recorded");
-    assert_eq!(after[1].0.len(), 3);
-    assert_eq!(after[1].1.len(), 3);
+    assert_eq!(after[1].len(), 3);
+    assert!(after[1]
+        .iter()
+        .all(|(_, _, slot)| *slot == points[1].slot()));
     assert_eq!(after[2], after[1]);
+
+    let tagged = |domain: &ToyDomain| -> BTreeSet<u64> {
+        after[1]
+            .iter()
+            .flat_map(|(_, hash, _)| {
+                domain
+                    .archive()
+                    .slots_by_tag(SCRIPT, hash, 0, u64::MAX)
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+
+    assert_eq!(
+        tagged(&domain),
+        BTreeSet::from([points[1].slot(), points[2].slot()])
+    );
 
     domain.rollback(&points[1]).unwrap();
     assert_eq!(scripts(&domain), after[1]);
+    assert_eq!(tagged(&domain), BTreeSet::from([points[1].slot()]));
 
     domain.rollback(&points[0]).unwrap();
     assert_eq!(scripts(&domain), none);
+    assert!(tagged(&domain).is_empty());
+}
+
+/// `script_by_hash` finds a script at its staged row's block, which is also
+/// its first tagged one, the block that counts it: the invalid tx that
+/// carried it earlier left no tag.
+#[tokio::test]
+async fn script_by_hash_finds_a_script_at_its_counting_block() {
+    let cfg = SyntheticBlockConfig {
+        block_count: 3,
+        txs_per_block: 1,
+        invalid_txs_by_block: vec![vec![0], vec![], vec![]],
+        ..Default::default()
+    };
+
+    let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+    let mut slots = Vec::new();
+
+    for block in &blocks {
+        domain.roll_forward(block.clone()).unwrap();
+        slots.push(MultiEraBlock::decode(block).unwrap().slot());
+    }
+
+    let staged = scripts(&domain);
+    assert_eq!(staged.len(), 3);
+
+    let query = AsyncQueryFacade::new(domain.clone());
+
+    for (_, hash, slot) in staged {
+        let first = domain
+            .archive()
+            .slots_by_tag(SCRIPT, &hash, 0, slots[2])
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first, slots[1], "first tag is not the counting block");
+        assert_eq!(slot, slots[1]);
+
+        let found = query.script_by_hash(&Hash::from(hash)).await.unwrap();
+        assert!(found.is_some_and(|x| !x.script.is_empty()));
+    }
+}
+
+/// The roll's witness across sealed epochs: every block carries the same
+/// scripts, the seal moves their first carrier's epoch into the entity index,
+/// and no later epoch stages them again. `script_by_hash` then finds each
+/// through the index.
+#[tokio::test]
+async fn scripts_are_staged_once_across_sealed_epochs() {
+    let (blocks, step) = (16, 350);
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: blocks,
+        txs_per_block: 1,
+        slot: step,
+        slot_step: step,
+        asset_names_by_block: (0..blocks).map(|i| format!("M{i:03}")).collect(),
+        ..Default::default()
+    });
+
+    let genesis = genesis_with(700, 10, 6);
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis.clone(), chain_config, None, None);
+    let tip = domain.import_blocks(raw).unwrap();
+
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let mutable = dolos_cardano::mutable_slots(&genesis);
+    let (tip_epoch, _) = chain.slot_epoch(tip);
+    let (first_epoch, _) = chain.slot_epoch(step);
+
+    assert!(is_sealable(&chain, mutable, first_epoch, tip_epoch));
+    assert!(
+        scripts(&domain).is_empty(),
+        "staged again: {:?}",
+        scripts(&domain)
+    );
+
+    let indexed: Vec<_> = domain
+        .archive()
+        .iter_entity_records(&[entities::SCRIPT], 0..u64::MAX)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    assert_eq!(indexed.len(), 3);
+    assert!(indexed.iter().all(|record| record.slot == step));
+
+    let listed = domain
+        .archive()
+        .read_log_typed::<FirstScriptChunk>(chain.epoch_start(first_epoch), &0)
+        .unwrap()
+        .expect("the first carrier's epoch is not sealed");
+    assert_eq!(listed.count, 3);
+
+    let query = AsyncQueryFacade::new(domain.clone());
+
+    for record in indexed {
+        let hash = Hash::<28>::from(record.key());
+        let found = query.script_by_hash(&hash).await.unwrap();
+        assert!(found.is_some_and(|x| !x.script.is_empty()));
+    }
+}
+
+/// `script_by_hash` reads the staged rows of every unsealed epoch, not only
+/// the tip's: the tip has crossed into epoch 1 while the scripts' first
+/// carrier's epoch 0 is still staged, and each script is found there.
+#[tokio::test]
+async fn script_by_hash_finds_a_script_staged_in_an_earlier_unsealed_epoch() {
+    let step = 350;
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 3,
+        txs_per_block: 1,
+        slot: step,
+        slot_step: step,
+        asset_names_by_block: (0..3).map(|i| format!("M{i:03}")).collect(),
+        ..Default::default()
+    });
+
+    let genesis = genesis_with(700, 10, 6);
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    let tip = domain.import_blocks(raw).unwrap();
+
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let (tip_epoch, _) = chain.slot_epoch(tip);
+    let (first_epoch, _) = chain.slot_epoch(step);
+
+    assert!(tip_epoch > first_epoch);
+
+    let staged = scripts(&domain);
+    assert_eq!(staged.len(), 3);
+    assert!(staged.iter().all(|(epoch, _, _)| *epoch == first_epoch));
+
+    let query = AsyncQueryFacade::new(domain.clone());
+
+    for (_, hash, _) in staged {
+        let found = query.script_by_hash(&Hash::from(hash)).await.unwrap();
+        assert!(found.is_some_and(|x| !x.script.is_empty()));
+    }
+}
+
+/// A seal that lands between `script_by_hash`'s first index read and its
+/// staged-row read moves the script out of the staged rows and into the
+/// index; the second index read finds it there.
+#[tokio::test]
+async fn script_by_hash_finds_a_script_sealed_during_the_lookup() {
+    let cfg = SyntheticBlockConfig {
+        block_count: 2,
+        txs_per_block: 1,
+        ..Default::default()
+    };
+
+    let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+    for block in blocks {
+        domain.roll_forward(block).unwrap();
+    }
+
+    let (key, row) = domain
+        .state()
+        .iter_entities_typed::<FirstScriptSet>(None)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+
+    let hash = key.member.0;
+    let faulty = FaultyToyDomain::new(domain.clone(), TestFault::None);
+
+    let sealer = domain.clone();
+    faulty.after_entity_slots(move || {
+        let writer = sealer.archive().start_writer().unwrap();
+        writer
+            .write_entity(entities::SCRIPT, hash.as_slice(), row.slot)
+            .unwrap();
+        writer.commit().unwrap();
+
+        let writer = sealer.state().start_writer().unwrap();
+        writer
+            .save_entity_typed::<FirstScriptSet>(&key, None)
+            .unwrap();
+        writer.commit().unwrap();
+    });
+
+    let found = AsyncQueryFacade::new(faulty)
+        .script_by_hash(&hash)
+        .await
+        .unwrap();
+
+    assert!(found.is_some_and(|x| !x.script.is_empty()));
+    assert!(scripts(&domain)
+        .iter()
+        .all(|(_, staged, _)| *staged != *hash));
 }
 
 /// A copy of the devnet genesis with `epoch_length`-slot epochs, security
