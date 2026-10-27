@@ -34,13 +34,14 @@ pub fn block_pool_registrations(block: &MultiEraBlock) -> Vec<PoolHash> {
 /// final-row log holds them.
 ///
 /// A moved pool that registers again gets a fresh row without the calidus key
-/// its final row carried (founder ruling, 2026-10-25), but the nonce stays: a
-/// signed registration replayed with a lower nonce is still rejected. The
-/// floor is the final row's registration with no key, seeded right after the
-/// certificate that makes the fresh row, so the transaction's own
-/// registration lands on top of it. A visitor cannot read the stores, so the
-/// floors are read once per batch, ahead of the crawl, and each is spent by the
-/// registration that seeds it.
+/// its final row carried (founder ruling, 2026-10-25), but the nonce stays: on
+/// a node that holds the final row, a signed registration replayed with a
+/// lower nonce is still rejected. A node that has pruned the final row has no
+/// floor and accepts the replay. The floor is the final row's registration
+/// with no key, seeded right after the certificate that makes the fresh row,
+/// so the transaction's own registration lands on top of it. A visitor cannot
+/// read the stores, so the floors are read once per batch, ahead of the crawl,
+/// and each is spent by the registration that seeds it.
 #[derive(Debug, Default, Clone)]
 pub struct CalidusFloors {
     floors: HashMap<PoolHash, CalidusRegistration>,

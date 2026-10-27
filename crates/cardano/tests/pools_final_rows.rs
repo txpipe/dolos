@@ -15,8 +15,8 @@ use dolos_cardano::{
     PoolWrapUp,
 };
 use dolos_core::{
-    sync::execute_work_unit, ArchiveStore as _, BlockSlot, Domain, EntityDelta, Genesis,
-    StateStore as _, StateWriter as _,
+    sync::execute_work_unit, ArchiveStore as _, ArchiveWriter as _, BlockSlot, Domain, EntityDelta,
+    Genesis, StateStore as _, StateWriter as _,
 };
 use dolos_testing::toy_domain::ToyDomain;
 use pallas::ledger::primitives::{conway::RationalNumber, Epoch};
@@ -316,4 +316,158 @@ fn a_moved_pool_registering_again_reads_its_nonce_floor_from_the_log() {
 
     register(&domain, 2_000);
     assert_eq!(floors(&domain, batch).floor(&operator()), None);
+}
+
+/// Log `row` as `pool`'s final row at `slot`, as ESTART does when it moves it.
+fn log_final_row(domain: &ToyDomain, slot: BlockSlot, pool: PoolHash, row: &PoolState) {
+    let writer = domain.archive().start_writer().unwrap();
+    writer.write_log_typed(slot, &PoolKey(pool), row).unwrap();
+    writer.commit().unwrap();
+}
+
+/// `pool`'s row once a registration at `nonce` landed, its key revoked.
+fn final_row(pool: PoolHash, nonce: u64) -> PoolState {
+    let mut row = None;
+
+    let cert = MultiEraPoolRegistration {
+        operator: pool,
+        ..registration(1_000)
+    };
+    PoolRegistration::new(cert, 1, 0, POOL_DEPOSIT).apply(&mut row);
+
+    let revoked = CalidusRegistration {
+        pub_key: None,
+        nonce,
+        ..calidus()
+    };
+    PoolCalidusUpdate::new(pool, revoked).apply(&mut row);
+
+    row.unwrap()
+}
+
+fn floor_nonce(domain: &ToyDomain, first_slot: BlockSlot) -> Option<u64> {
+    floors(domain, first_slot)
+        .floor(&operator())
+        .map(|x| x.nonce)
+}
+
+/// A pool moved twice floors at its newer final row.
+#[test]
+fn the_floor_is_the_pools_newest_final_row() {
+    let domain = ToyDomain::new_with_genesis(devnet(), None, None);
+
+    log_final_row(&domain, 10, operator(), &final_row(operator(), 5));
+    log_final_row(&domain, 20, operator(), &final_row(operator(), 9));
+
+    assert_eq!(floor_nonce(&domain, 100), Some(9));
+}
+
+/// Another pool's final row, logged later, is not this pool's floor.
+#[test]
+fn another_pools_final_row_is_not_the_floor() {
+    let domain = ToyDomain::new_with_genesis(devnet(), None, None);
+    let other: PoolHash = [0xb9; 28].into();
+
+    log_final_row(&domain, 10, operator(), &final_row(operator(), 5));
+    log_final_row(&domain, 20, other, &final_row(other, 50));
+
+    assert_eq!(floor_nonce(&domain, 100), Some(5));
+}
+
+mod import {
+    use dolos_core::import::ImportExt as _;
+    use dolos_testing::{
+        cip151 as signer,
+        synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+    };
+    use pallas::crypto::key::ed25519::SecretKey;
+    use pallas::ledger::primitives::{conway::Certificate, Bytes, RationalNumber, Set};
+
+    use super::*;
+
+    fn cold_key() -> SecretKey {
+        signer::cold_key(9)
+    }
+
+    fn pool() -> PoolHash {
+        signer::pool_id(&cold_key())
+    }
+
+    const KEY: [u8; 32] = [0x57; 32];
+
+    fn pool_registration() -> Certificate {
+        Certificate::PoolRegistration {
+            operator: pool(),
+            vrf_keyhash: [0xb2; 32].into(),
+            pledge: 0,
+            cost: 340_000_000,
+            margin: RationalNumber {
+                numerator: 1,
+                denominator: 100,
+            },
+            reward_account: Bytes::from([[0xe0].as_slice(), &[0xb3; 28]].concat()),
+            pool_owners: Set::from(vec![[0xb3; 28].into()]),
+            relays: vec![],
+            pool_metadata: None,
+        }
+    }
+
+    /// A node holding `pool`'s final rows, keyed at their slots, that imports
+    /// a three-block chain: the first block is a batch of its own, and the
+    /// last two one batch, where only the last registers `pool` again. Every
+    /// transaction carries a signed CIP-151 registration of [`KEY`] at
+    /// `nonce`.
+    fn import_registering_again(final_rows: &[(BlockSlot, u64)], nonce: u64) -> ToyDomain {
+        let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 1,
+            plain_txs: true,
+            extra_certs_by_block: vec![vec![vec![]], vec![vec![]], vec![vec![pool_registration()]]],
+            metadata_entries: signer::signed_registration(&cold_key(), nonce, KEY),
+            pool_id: signer::pool_bech32(&cold_key()),
+            ..Default::default()
+        });
+
+        let genesis = Arc::new(dolos_cardano::include::preview::load());
+        let domain = ToyDomain::new_with_genesis_and_config(genesis, config, None, None);
+
+        for (slot, nonce) in final_rows {
+            log_final_row(&domain, *slot, pool(), &final_row(pool(), *nonce));
+        }
+
+        domain.import_blocks(blocks).unwrap();
+
+        domain
+    }
+
+    fn row(domain: &ToyDomain) -> PoolState {
+        domain
+            .state()
+            .read_entity_typed::<PoolState>(&PoolKey(pool()))
+            .unwrap()
+            .expect("the second block registers the pool")
+    }
+
+    /// The floor read ahead of the batch reaches the block that spends it:
+    /// the replayed lower nonce is ignored and no key is served.
+    #[test]
+    fn a_later_block_of_the_batch_keeps_the_nonce_floor() {
+        let domain = import_registering_again(&[(0, 200)], 100);
+        let calidus = row(&domain).calidus.expect("the floor seeds the row");
+
+        assert_eq!(calidus.pub_key, None);
+        assert_eq!(calidus.nonce, 200);
+    }
+
+    /// A final row keyed after the batch's first slot, as a re-roll over an
+    /// archive holding a later move finds it, is not the floor: a nonce above
+    /// the earlier row's registers the key.
+    #[test]
+    fn a_final_row_after_the_batch_is_not_the_floor() {
+        let domain = import_registering_again(&[(0, 200), (10_000, 300)], 250);
+        let calidus = row(&domain).calidus.unwrap();
+
+        assert_eq!(calidus.pub_key, Some(KEY));
+        assert_eq!(calidus.nonce, 250);
+    }
 }
