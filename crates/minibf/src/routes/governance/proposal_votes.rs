@@ -9,7 +9,7 @@ use blockfrost_openapi::models::proposal_votes_inner::{self, ProposalVotesInner}
 use dolos_cardano::{
     indexes::CardanoArchiveIndexExt as _,
     model::{DRepKey, ProposalKey},
-    pallas_extras,
+    pallas_extras, ChainSummary,
 };
 use dolos_core::{
     ArchiveError, ArchiveStore as _, BlockSlot, ChainPoint, Domain, StateStore as _, TxOrder,
@@ -176,6 +176,8 @@ fn scan_drep_deregistration<D: Domain>(
 /// certificate blocks too.
 fn drep_vote_counts<D: Domain>(
     domain: &D,
+    chain: &ChainSummary,
+    tip: BlockSlot,
     cred: &StakeCredential,
     vote_at: (BlockSlot, TxOrder),
     end: BlockSlot,
@@ -187,7 +189,7 @@ fn drep_vote_counts<D: Domain>(
 
     let drep = DRepKey(pallas_extras::stake_cred_to_drep(cred));
 
-    let Some(row) = read_drep_row(domain, &drep)? else {
+    let Some(row) = read_drep_row(domain, chain, tip, &drep)? else {
         return Ok(true);
     };
 
@@ -651,8 +653,15 @@ fn read_votes_at<D: Domain>(
         // Only the DRep rows on the page pay for the deregistration check.
         if row.counted {
             if let Some(cred) = drep {
-                row.counted =
-                    drep_vote_counts(domain, &cred, (row.slot, row.tx_order), end, budget)?;
+                row.counted = drep_vote_counts(
+                    domain,
+                    &chain,
+                    cursor,
+                    &cred,
+                    (row.slot, row.tx_order),
+                    end,
+                    budget,
+                )?;
             }
         }
 

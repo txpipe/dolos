@@ -26,14 +26,14 @@ where
     let parsed = parse_drep_id(&drep)?;
     let key = drep_key(&parsed.encoded)?;
 
+    let (chain, tip, pparams) = chain_context(&domain)?;
+
     // the special DReps have no row
-    let drep_state = read_drep_row(&domain.inner, &key)?;
+    let drep_state = read_drep_row(&domain.inner, &chain, tip, &key)?;
 
     if drep_state.is_none() && !parsed.is_special {
         return Err(StatusCode::NOT_FOUND);
     }
-
-    let (chain, tip, pparams) = chain_context(&domain)?;
 
     let amount = drep_amount(&key.0, drep_state.as_ref(), &drep_distribution(&domain)?);
 

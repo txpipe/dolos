@@ -240,17 +240,21 @@ where
 /// The ledger rows of one page's DReps, by point reads in one blocking task.
 async fn read_drep_states<D>(
     domain: &Facade<D>,
+    chain: &ChainSummary,
+    tip: BlockSlot,
     sightings: Vec<(DRepKey, DRepSightingState)>,
 ) -> Result<Vec<DrepRow>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    let chain = chain.clone();
+
     domain
         .blocking(move |facade| {
             sightings
                 .into_iter()
                 .map(|(key, sighting)| {
-                    let state = read_drep_row(&facade.inner, &key)?;
+                    let state = read_drep_row(&facade.inner, &chain, tip, &key)?;
 
                     Ok(DrepRow {
                         key,
@@ -297,7 +301,7 @@ where
             .take(pagination.count)
             .collect();
 
-        let rows = read_drep_states(domain, page).await?;
+        let rows = read_drep_states(domain, &chain, tip, page).await?;
 
         return Ok(DrepsPage {
             rows,

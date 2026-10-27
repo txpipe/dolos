@@ -10,7 +10,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_cardano::{
     estart::EstartWorkUnit,
-    final_rows::{final_row_from, newest_final_row, FinalRow as _},
+    final_rows::{newest_final_row, FinalRow as _},
     CardanoWorkUnit, DRepExpiry, DRepKey, DRepRegistration, DRepState, EpochState, ProposalAction,
     ProposalKey, ProposalState, VoteEntry,
 };
@@ -466,13 +466,21 @@ fn an_unregistered_drep_moves_once_no_live_proposal_predates_it() {
     );
     assert_eq!(held.final_row(), held);
 
-    // the point read from the unregistration finds the row
+    // the point read at the closed epoch finds the row; the newest-row scan
+    // agrees and misses a DRep in state
     assert_eq!(
-        final_row_from::<DRepState>(domain.archive(), &drep_key(HELD), SUBMITTED + 2).unwrap(),
+        domain
+            .archive()
+            .read_log_typed::<DRepState>(epoch_start(&domain, 2), &drep_key(HELD))
+            .unwrap(),
+        Some(held.clone())
+    );
+    assert_eq!(
+        newest_final_row::<DRepState>(domain.archive(), &drep_key(HELD)).unwrap(),
         Some((epoch_start(&domain, 2), held.clone()))
     );
     assert_eq!(
-        final_row_from::<DRepState>(domain.archive(), &drep_key(ACTIVE), 0).unwrap(),
+        newest_final_row::<DRepState>(domain.archive(), &drep_key(ACTIVE)).unwrap(),
         None
     );
 
