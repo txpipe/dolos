@@ -34,9 +34,8 @@ use dolos_core::{
 use tracing::{debug, info};
 
 use crate::{
-    rewards::{Reward, RewardMap},
-    shard::ACCOUNT_SHARDS,
-    AccountKey, CardanoLogic, EpochState, PendingRewardState, PoolEpochLog, PoolHash, PoolKey,
+    rewards::RewardMap, shard::ACCOUNT_SHARDS, AccountKey, CardanoLogic, EpochState,
+    PendingRewardState, PoolEpochLog, PoolHash, PoolKey,
 };
 
 use super::RupdWork;
@@ -44,10 +43,7 @@ use super::RupdWork;
 /// Sum the rewards this RUPD emitted, per pool, from the `PendingRewardState`
 /// entities the shards persisted.
 ///
-/// Returns `(total_rewards, operator_share)` per pool, matching
-/// [`crate::rewards::RewardMap::aggregate_pool_rewards`]: every reward counts
-/// toward the pool total, and leader rewards additionally toward the operator
-/// share.
+/// Returns the total rewards per pool, the leader's and the delegators'.
 ///
 /// Derived from state rather than accumulated in memory across shards so a
 /// mid-RUPD restart reports the full epoch: `initialize` starts a fresh work
@@ -56,8 +52,8 @@ use super::RupdWork;
 /// `Ewrap` consumes them at the epoch boundary, which is after `finalize`.
 fn aggregate_pending_pool_rewards<S: StateStore>(
     state: &S,
-) -> Result<HashMap<PoolHash, (u64, u64)>, DomainError> {
-    let mut out: HashMap<PoolHash, (u64, u64)> = HashMap::new();
+) -> Result<HashMap<PoolHash, u64>, DomainError> {
+    let mut out: HashMap<PoolHash, u64> = HashMap::new();
 
     for record in state.iter_entities_typed::<PendingRewardState>(None)? {
         let (_, pending) = record?;
@@ -65,15 +61,9 @@ fn aggregate_pending_pool_rewards<S: StateStore>(
         // Iterate the two reward lists directly (`into_log_entries` would
         // allocate an intermediate Vec per record — this loop visits every
         // rewarded account on the network).
-        for (pool, value) in &pending.as_delegator {
-            let (total_rewards, _) = out.entry(*pool).or_insert((0, 0));
+        for (pool, value) in pending.as_delegator.iter().chain(&pending.as_leader) {
+            let total_rewards = out.entry(*pool).or_default();
             *total_rewards = total_rewards.saturating_add(*value);
-        }
-
-        for (pool, value) in &pending.as_leader {
-            let (total_rewards, operator_share) = out.entry(*pool).or_insert((0, 0));
-            *total_rewards = total_rewards.saturating_add(*value);
-            *operator_share = operator_share.saturating_add(*value);
         }
     }
 
@@ -256,28 +246,7 @@ impl RupdWorkUnit {
         // re-run is idempotent.
         for (credential, reward) in rewards.iter_pending() {
             let key = AccountKey::from(credential);
-
-            let (as_leader, as_delegator) = match reward {
-                Reward::MultiPool(r) => (
-                    r.leader_rewards().collect(),
-                    r.delegator_rewards().collect(),
-                ),
-                Reward::PreAllegra(r) => {
-                    let (pool, value) = r.pool_and_value();
-                    if r.is_leader() {
-                        (vec![(pool, value)], vec![])
-                    } else {
-                        (vec![], vec![(pool, value)])
-                    }
-                }
-            };
-
-            let pending = PendingRewardState {
-                credential: credential.clone(),
-                is_spendable: reward.is_spendable(),
-                as_leader,
-                as_delegator,
-            };
+            let pending = reward.to_pending_state(credential);
 
             writer.write_entity_typed(&key, &pending)?;
         }
@@ -338,23 +307,19 @@ impl RupdWorkUnit {
             let pool_stake = snapshot.get_pool_stake(pool_hash);
             let relative_size = numeric_ratio(pool_stake, snapshot.active_stake_sum);
             let params = pool_state.go().map(|x| &x.params);
-            let declared_pledge = params.map(|x| x.pledge).unwrap_or(0);
             let fixed_cost = params.map(|x| x.cost).unwrap_or(0);
             let margin_cost = params.map(|x| x.margin.clone());
             let blocks_minted = pool_state.mark().map(|x| x.blocks_minted).unwrap_or(0) as u64;
 
-            let (total_rewards, operator_share) =
-                pool_rewards.get(pool_hash).copied().unwrap_or((0, 0));
+            let total_rewards = pool_rewards.get(pool_hash).copied().unwrap_or(0);
 
             let log = PoolEpochLog {
                 blocks_minted,
                 total_stake: pool_stake,
                 relative_size,
                 live_pledge: snapshot.get_pool_live_pledge(pool_hash),
-                declared_pledge,
                 delegators_count: snapshot.get_pool_delegator_count(pool_hash),
                 total_rewards,
-                operator_share,
                 fixed_cost,
                 margin_cost,
             };
@@ -844,14 +809,12 @@ mod tests {
         assert_eq!(log.delegators_count, 2);
         assert_eq!(log.live_pledge, 400);
         assert_eq!(log.total_rewards, 100);
-        assert_eq!(log.operator_share, 30);
         assert_eq!(log.blocks_minted, 3);
-        assert_eq!(log.declared_pledge, 100);
         assert_eq!(log.fixed_cost, 20);
     }
 
     #[test]
-    fn pending_rewards_aggregate_per_pool_splitting_out_the_operator_share() {
+    fn pending_rewards_aggregate_per_pool() {
         let domain = ToyDomain::new(None, None);
 
         let first = pool(1);
@@ -867,8 +830,8 @@ mod tests {
 
         let aggregated = aggregate_pending_pool_rewards(domain.state()).expect("aggregate");
 
-        assert_eq!(aggregated.get(&first).copied(), Some((12, 5)));
-        assert_eq!(aggregated.get(&second).copied(), Some((11, 0)));
+        assert_eq!(aggregated.get(&first).copied(), Some(12));
+        assert_eq!(aggregated.get(&second).copied(), Some(11));
     }
 
     #[test]

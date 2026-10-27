@@ -27,8 +27,13 @@ pub async fn by_number_stakes<D: Domain>(
 
     let (chain, current) = current_epoch(&domain)?;
 
-    // Blockfrost 404s future epochs; an epoch with no logged distribution is
-    // an empty page.
+    // Blockfrost 404s future epochs. Every other epoch pages the distribution
+    // logged for it, the current and previous ones from the rows ESTART
+    // writes as it opens each. A page is empty before the first stake epoch,
+    // and empty or partial for the two latest epochs while ESTART's rows are
+    // missing: on a store upgraded mid-epoch, or after a rollback to the
+    // epoch's start or a restart after a crash mid-ESTART (the node warns).
+    // Those heal when EWRAP writes the full rows one boundary later.
     if epoch > current {
         return Err(StatusCode::NOT_FOUND.into());
     }
@@ -239,6 +244,65 @@ mod tests {
         assert_eq!(stakes[0].stake_address, address.to_bech32().unwrap());
         assert_eq!(stakes[0].pool_id, bech32_pool(pool).unwrap());
         assert_eq!(stakes[0].amount, "2000");
+    }
+
+    /// The two latest epochs list their distributions before the EWRAP that
+    /// writes their full rows has run, from the rows ESTART logged as it
+    /// opened each. The next epoch stays a 404.
+    #[tokio::test]
+    async fn epochs_stakes_lists_the_two_latest_epochs() {
+        use dolos_cardano::{estart::EstartWorkUnit, CardanoWorkUnit};
+        use dolos_core::{sync::execute_work_unit, StateStore as _, StateWriter as _};
+
+        let (pool, delegator) = ([0x73; 28], [0x74; 28]);
+
+        let app = TestApp::new_with_cfg_and_domain(Default::default(), |_| {
+            let domain = store_past_the_first_stake_epoch(pool, delegator);
+            let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+            let epoch = dolos_cardano::load_epoch::<ToyDomain>(domain.state())
+                .unwrap()
+                .number;
+            let next = chain.epoch_start(epoch + 1);
+
+            let mut estart =
+                CardanoWorkUnit::Estart(Box::new(EstartWorkUnit::new(next, domain.genesis())));
+            execute_work_unit(&domain, &mut estart).unwrap();
+
+            let writer = domain.state().start_writer().unwrap();
+            writer
+                .set_cursor(dolos_testing::slot_to_chainpoint(next + 1))
+                .unwrap();
+            writer.commit().unwrap();
+
+            domain
+        });
+
+        let tip = app.tip_epoch();
+        let first_stake = app
+            .facade()
+            .get_chain_summary()
+            .unwrap()
+            .first_shelley_epoch()
+            + 2;
+        // EWRAP last closed `first_stake + 1`, writing `first_stake`'s full
+        // rows; the two latest epochs have only ESTART's.
+        assert_eq!(tip, first_stake + 2);
+
+        for epoch in [tip - 1, tip] {
+            let stakes: Vec<EpochStakeContentInner> =
+                get_ok(&app, &format!("/epochs/{epoch}/stakes")).await;
+
+            assert_eq!(stakes.len(), 1, "epoch {epoch}: {stakes:?}");
+            assert_eq!(stakes[0].pool_id, bech32_pool(pool).unwrap());
+            assert_eq!(stakes[0].amount, "2000");
+        }
+
+        assert_status(
+            &app,
+            &format!("/epochs/{}/stakes", tip + 1),
+            StatusCode::NOT_FOUND,
+        )
+        .await;
     }
 
     #[tokio::test]

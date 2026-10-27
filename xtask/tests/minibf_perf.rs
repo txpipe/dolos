@@ -64,17 +64,21 @@ async fn verify_fixture<Stores: ToyStores>(stores: Stores) {
             }
             "address-transactions-page" => assert!(work.tag_candidates > 0),
             "account-utxos-wide" => {
+                // the page's refs and the page's blocks, however wide the
+                // account: the stored creation position names each row's
+                // block, so no exact-index lookup either. The page is the
+                // first rows in chain order, `transactions_per_block` a block.
                 let selected_rows = case.expected.as_array().unwrap().len() as u64;
-                assert_eq!(
-                    work.utxo_refs,
-                    (fixture.shape.blocks * fixture.shape.transactions_per_block) as u64
+                let page_blocks =
+                    selected_rows.div_ceil(fixture.shape.transactions_per_block as u64);
+                assert!(
+                    selected_rows
+                        < (fixture.shape.blocks * fixture.shape.transactions_per_block) as u64
                 );
-                assert_eq!(work.exact_lookups, work.utxo_refs);
+                assert_eq!(work.utxo_refs, selected_rows);
+                assert_eq!(work.exact_lookups, 0);
                 assert_eq!(work.tip_reads, selected_rows);
-                assert_eq!(
-                    work.block_reads - work.tip_reads,
-                    fixture.shape.blocks as u64
-                );
+                assert_eq!(work.block_reads - work.tip_reads, page_blocks);
                 assert!(work.decoded_bytes > 0);
             }
             _ => {}
@@ -90,6 +94,54 @@ async fn route_fixtures_and_work_guards_on_memory() {
 #[tokio::test(flavor = "multi_thread")]
 async fn route_fixtures_and_work_guards_on_fjall() {
     verify_fixture(FjallStores::open()).await;
+}
+
+/// An address's asset listing probes the walked tag's entries in the other
+/// tag by key and loads the values of the page's rows only, however many rows
+/// it walks: every output in the fixture holds the asset, the address a third
+/// of them.
+async fn verify_asset_listing<Stores: ToyStores>(stores: Stores) {
+    let fixture = ApiFixture::new(stores, FixtureShape::default()).unwrap();
+    let router = dolos_minibf::build_router(
+        MinibfConfig::new("127.0.0.1:0".parse().unwrap()),
+        fixture.domain.clone(),
+    );
+    let vectors = &fixture.vectors;
+    let rows: Vec<Value> = vectors
+        .blocks
+        .iter()
+        .take(4)
+        .map(|block| json!([block.tx_hashes[0], 0]))
+        .collect();
+    let case = cases::Case {
+        name: "address-asset-utxos".into(),
+        path: format!(
+            "/addresses/{}/utxos/{}?count=4&order=asc",
+            vectors.address, vectors.asset_unit
+        ),
+        fields: vec!["/tx_hash".into(), "/output_index".into()],
+        expected: json!(rows),
+        array: true,
+        live: true,
+    };
+
+    fixture.domain.archive().counters.reset();
+    cases::request(router, &case).await.unwrap();
+    let work = fixture.domain.archive().counters.snapshot();
+
+    assert!(fixture.shape.blocks > 4);
+    assert_eq!(work.utxo_reads, 4);
+    assert_eq!(work.exact_lookups, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn asset_listing_loads_the_page_values_only_on_memory() {
+    verify_asset_listing(MemoryStores::open()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn asset_listing_loads_the_page_values_only_on_fjall() {
+    verify_asset_listing(FjallStores::open()).await;
 }
 
 fn scalar_case() -> cases::Case {

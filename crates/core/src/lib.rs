@@ -71,7 +71,7 @@ pub type Cbor = Vec<u8>;
 pub type BlockBody = Cbor;
 pub type RawBlock = Arc<BlockBody>;
 pub type RawBlockBatch = Vec<RawBlock>;
-pub type RawUtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
+pub type RawUtxoMap = HashMap<TxoRef, Arc<UtxoValue>>;
 pub type BlockEra = pallas::ledger::traverse::Era;
 pub type BlockHash = Hash<32>;
 pub type BlockHeader = Cbor;
@@ -195,6 +195,183 @@ impl TryFrom<EraCbor> for MultiEraUpdate<'_> {
     }
 }
 
+/// Where a UTxO was created: the slot of the block that holds the producing
+/// transaction, and that transaction's index in the block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct UtxoPosition {
+    pub slot: BlockSlot,
+    pub tx_index: u16,
+}
+
+/// Width of [`UtxoPosition::tag_order`].
+pub const TAG_ORDER_LEN: usize = 10;
+
+impl UtxoPosition {
+    /// The largest tx index a position holds. [`Self::tag_order`] writes the
+    /// index plus one, so `u16::MAX` has no tag order.
+    pub const MAX_TX_INDEX: u16 = u16::MAX - 1;
+
+    pub fn new(slot: BlockSlot, tx_index: u16) -> Self {
+        Self { slot, tx_index }
+    }
+
+    /// The position at `slot` and `tx_index`, or `None` when the index is past
+    /// [`Self::MAX_TX_INDEX`]. Decoders use it to refuse a stored index no
+    /// block can hold.
+    pub fn checked(slot: BlockSlot, tx_index: u16) -> Option<Self> {
+        (tx_index <= Self::MAX_TX_INDEX).then(|| Self::new(slot, tx_index))
+    }
+
+    /// The position of the transaction at `index` in the block at `slot`.
+    ///
+    /// Panics at 65535 transactions, which no block can hold.
+    pub fn of_tx(slot: BlockSlot, index: usize) -> Self {
+        u16::try_from(index)
+            .ok()
+            .and_then(|index| Self::checked(slot, index))
+            .expect("a block holds fewer than 65535 transactions")
+    }
+
+    /// The bytes that order a UTxO in its live-UTxO tags: the slot, big-endian,
+    /// then the tx index plus one, big-endian.
+    ///
+    /// A UTxO without a position (genesis, AVVM, configured) takes all zeros,
+    /// which the offset index keeps below every block position, slot 0's first
+    /// transaction included. Every backend orders tags by these bytes, then by
+    /// the ref.
+    pub fn tag_order(position: Option<Self>) -> [u8; TAG_ORDER_LEN] {
+        let mut bytes = [0; TAG_ORDER_LEN];
+
+        if let Some(Self { slot, tx_index }) = position {
+            let index = tx_index
+                .checked_add(1)
+                .expect("a block holds fewer than 65535 transactions");
+
+            bytes[..8].copy_from_slice(&slot.to_be_bytes());
+            bytes[8..].copy_from_slice(&index.to_be_bytes());
+        }
+
+        bytes
+    }
+}
+
+/// A live UTxO as the state store keeps it: the output, and the position of
+/// the transaction that produced it.
+///
+/// Stored as CBOR `[era, body, slot, tx_index]`. A UTxO no block produced
+/// (genesis, AVVM, configured) has no position and stores `[era, body]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UtxoValue {
+    pub output: EraCbor,
+    pub position: Option<UtxoPosition>,
+}
+
+impl UtxoValue {
+    pub fn new(output: EraCbor, position: Option<UtxoPosition>) -> Self {
+        Self { output, position }
+    }
+
+    pub fn era(&self) -> Era {
+        self.output.era()
+    }
+
+    pub fn cbor(&self) -> &[u8] {
+        self.output.cbor()
+    }
+
+    pub fn position(&self) -> Option<UtxoPosition> {
+        self.position
+    }
+
+    /// The CBOR the state stores keep.
+    pub fn encode_cbor(&self) -> Cbor {
+        minicbor::to_vec(self).expect("encoding into a vec is infallible")
+    }
+
+    /// Decodes [`Self::encode_cbor`]'s bytes, exactly: trailing bytes are
+    /// refused.
+    pub fn decode_cbor(bytes: &[u8]) -> Result<Self, minicbor::decode::Error> {
+        let mut decoder = minicbor::Decoder::new(bytes);
+        let value = decoder.decode()?;
+
+        if decoder.position() != bytes.len() {
+            return Err(minicbor::decode::Error::message(
+                "utxo value: trailing bytes",
+            ));
+        }
+
+        Ok(value)
+    }
+}
+
+impl<C> Encode<C> for UtxoValue {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        let EraCbor(era, body) = &self.output;
+
+        match self.position {
+            Some(UtxoPosition { slot, tx_index }) => {
+                e.array(4)?
+                    .u16(*era)?
+                    .bytes(body)?
+                    .u64(slot)?
+                    .u16(tx_index)?;
+            }
+            None => {
+                e.array(2)?.u16(*era)?.bytes(body)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl<'b, C> Decode<'b, C> for UtxoValue {
+    fn decode(
+        d: &mut minicbor::Decoder<'b>,
+        _ctx: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        let len = d.array()?;
+        let era = d.u16()?;
+        let body = d.bytes()?.to_vec();
+
+        let position = match len {
+            Some(2) => None,
+            Some(4) => {
+                let position = UtxoPosition::checked(d.u64()?, d.u16()?).ok_or_else(|| {
+                    minicbor::decode::Error::message("utxo value: tx_index out of range")
+                })?;
+
+                Some(position)
+            }
+            _ => {
+                return Err(minicbor::decode::Error::message(
+                    "utxo value: expected [era, body] or [era, body, slot, tx_index]",
+                ))
+            }
+        };
+
+        Ok(Self::new(EraCbor(era, body), position))
+    }
+}
+
+impl AsRef<[u8]> for UtxoValue {
+    fn as_ref(&self) -> &[u8] {
+        self.cbor()
+    }
+}
+
+impl<'a> TryFrom<&'a UtxoValue> for MultiEraOutput<'a> {
+    type Error = pallas::codec::minicbor::decode::Error;
+
+    fn try_from(value: &'a UtxoValue) -> Result<Self, Self::Error> {
+        MultiEraOutput::try_from(&value.output)
+    }
+}
+
 impl From<&MultiEraInput<'_>> for TxoRef {
     fn from(value: &MultiEraInput<'_>) -> Self {
         TxoRef(*value.hash(), value.index() as u32)
@@ -288,16 +465,16 @@ pub enum BrokenInvariant {
     },
 }
 
-pub type UtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
+pub type UtxoMap = HashMap<TxoRef, Arc<UtxoValue>>;
 
 pub type UtxoSet = HashSet<TxoRef>;
 
 #[derive(Default, Debug, Clone)]
 pub struct UtxoSetDelta {
-    pub produced_utxo: HashMap<TxoRef, Arc<EraCbor>>,
-    pub consumed_utxo: HashMap<TxoRef, Arc<EraCbor>>,
-    pub recovered_stxi: HashMap<TxoRef, Arc<EraCbor>>,
-    pub undone_utxo: HashMap<TxoRef, Arc<EraCbor>>,
+    pub produced_utxo: HashMap<TxoRef, Arc<UtxoValue>>,
+    pub consumed_utxo: HashMap<TxoRef, Arc<UtxoValue>>,
+    pub recovered_stxi: HashMap<TxoRef, Arc<UtxoValue>>,
+    pub undone_utxo: HashMap<TxoRef, Arc<UtxoValue>>,
 }
 
 #[derive(Debug, Clone)]
@@ -313,7 +490,7 @@ where
 {
     pub block: Cbor,
     pub delta: Vec<D>,
-    pub inputs: HashMap<TxoRef, Arc<EraCbor>>,
+    pub inputs: HashMap<TxoRef, Arc<UtxoValue>>,
 }
 
 impl<D> LogValue<D>
@@ -629,7 +806,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     /// to reverse the block's effects.
     fn compute_undo(
         block: &Cbor,
-        inputs: &HashMap<TxoRef, Arc<EraCbor>>,
+        inputs: &HashMap<TxoRef, Arc<UtxoValue>>,
         point: ChainPoint,
     ) -> Result<UndoBlockData, ChainError>;
 
@@ -641,12 +818,18 @@ pub trait ChainLogic: Sized + Send + Sync {
     /// stores that are behind the state store.
     fn compute_catchup(
         block: &Cbor,
-        inputs: &HashMap<TxoRef, Arc<EraCbor>>,
+        inputs: &HashMap<TxoRef, Arc<UtxoValue>>,
         point: ChainPoint,
     ) -> Result<CatchUpBlockData, ChainError>;
 
+    /// Called by a rollback to `to` before the archive drops every log row
+    /// keyed at or after `to`'s slot. No block undo restores rows that
+    /// boundary work wrote there, so this is where the chain says so. The
+    /// default does nothing.
+    fn rolling_back<D: Domain>(_domain: &D, _to: &ChainPoint) {}
+
     // TODO: remove from the interface - this is Cardano-specific
-    fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError>;
+    fn decode_utxo(&self, utxo: Arc<UtxoValue>) -> Result<Self::Utxo, ChainError>;
 
     // TODO: remove from the interface - this is Cardano-specific
     fn mutable_slots(domain: &impl Domain) -> BlockSlot;
@@ -857,6 +1040,70 @@ mod tests {
             ChainPoint::Specific(50, slot_to_hash(20)),
             ChainPoint::Specific(50, slot_to_hash(50)),
         );
+    }
+
+    #[test]
+    fn utxo_values_round_trip_with_and_without_a_position() {
+        for position in [
+            None,
+            Some(UtxoPosition::new(0, 0)),
+            Some(UtxoPosition::new(u64::MAX, 7)),
+        ] {
+            let value = UtxoValue::new(EraCbor(6, vec![0x82, 0x00, 0x01]), position);
+            let bytes = value.encode_cbor();
+
+            assert_eq!(bytes[0], if position.is_some() { 0x84 } else { 0x82 });
+            assert_eq!(UtxoValue::decode_cbor(&bytes).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn a_malformed_utxo_value_is_refused() {
+        let value = UtxoValue::new(EraCbor(6, vec![0xa0]), Some(UtxoPosition::new(9, 1)));
+
+        let mut trailing = value.encode_cbor();
+        trailing.push(0x00);
+        assert!(UtxoValue::decode_cbor(&trailing).is_err());
+
+        // a position is both fields or neither
+        let three = [0x83, 0x06, 0x41, 0xa0, 0x09];
+        assert!(UtxoValue::decode_cbor(&three).is_err());
+
+        // an index with no tag order
+        let past_max = UtxoValue::new(EraCbor(6, vec![0xa0]), Some(UtxoPosition::new(9, u16::MAX)));
+        assert!(UtxoValue::decode_cbor(&past_max.encode_cbor()).is_err());
+
+        let at_max = UtxoValue::new(
+            EraCbor(6, vec![0xa0]),
+            UtxoPosition::checked(9, UtxoPosition::MAX_TX_INDEX),
+        );
+        assert_eq!(
+            UtxoValue::decode_cbor(&at_max.encode_cbor()).unwrap(),
+            at_max
+        );
+    }
+
+    #[test]
+    fn tag_order_puts_no_position_first_then_slot_then_index() {
+        let order = |position: Option<(u64, u16)>| {
+            UtxoPosition::tag_order(position.map(|(slot, tx)| UtxoPosition::new(slot, tx)))
+        };
+
+        let ordered = [
+            order(None),
+            order(Some((0, 0))),
+            order(Some((0, 1))),
+            order(Some((0, u16::MAX - 1))),
+            order(Some((1, 0))),
+            order(Some((256, 0))),
+            order(Some((u64::MAX, 0))),
+        ];
+
+        for pair in ordered.windows(2) {
+            assert!(pair[0] < pair[1], "{:?} !< {:?}", pair[0], pair[1]);
+        }
+
+        assert_eq!(order(None), [0; TAG_ORDER_LEN]);
     }
 
     #[test]

@@ -71,6 +71,10 @@ pub struct SyntheticBlockConfig {
     /// resolvable input, which is what the endpoints reading the spent side of
     /// a tx need.
     pub spend_previous_outputs: bool,
+    /// Fund each tx after the first of a block from output 0 of the tx before
+    /// it in the same block, so every block spends outputs it produced.
+    /// Excludes `spend_previous_outputs`, which spends those outputs again.
+    pub spend_within_block: bool,
     /// Indices of the phase-2-invalid txs in each block. Each outer entry
     /// represents one block; an empty list leaves every tx valid.
     pub invalid_txs_by_block: Vec<Vec<u32>>,
@@ -85,8 +89,9 @@ pub struct SyntheticBlockConfig {
     /// The mints of each tx, per block, replacing the default mint. Each entry
     /// holds one list per tx; a missing entry keeps the default.
     pub mints_by_block: Vec<Vec<TxMints>>,
-    /// Txs carry no certificates and no withdrawal. The default ones register
-    /// a DRep, which a pre-Conway chain cannot carry across an epoch boundary.
+    /// Txs carry no withdrawal and no certificates but their
+    /// `extra_certs_by_block`. The default ones register a DRep, which a
+    /// pre-Conway chain cannot carry across an epoch boundary.
     pub plain_txs: bool,
     /// The addresses of zero-lovelace outputs each tx appends after its own,
     /// per block. Each entry holds one list per tx; a missing entry appends
@@ -194,6 +199,7 @@ impl Default for SyntheticBlockConfig {
             extra_certs_by_block: vec![],
             proposal_deposit: 100_000_000,
             spend_previous_outputs: false,
+            spend_within_block: false,
             invalid_txs_by_block: vec![],
             ada_only_by_block: vec![],
             mint_redeemer: None,
@@ -345,6 +351,11 @@ pub fn build_synthetic_blocks(
     let submit_amount = cfg.lovelace * 10;
     let submit_output = cfg.lovelace * 5;
 
+    assert!(
+        !(cfg.spend_previous_outputs && cfg.spend_within_block),
+        "spend_within_block spends the outputs spend_previous_outputs spends"
+    );
+
     let mut chain_config = dolos_cardano::CardanoLogicConfig::default();
 
     let address_bytes = Address::from_bech32(&cfg.address)
@@ -485,7 +496,15 @@ pub fn build_synthetic_blocks(
                 .then(|| prev_block_tx_hashes.get(tx_offset).copied())
                 .flatten();
 
-            let seed_tx_hash = match funded_by_account {
+            // the tx before this one in the block, whose output 0 this one
+            // spends
+            let funded_in_block = cfg
+                .spend_within_block
+                .then(|| tx_offset.checked_sub(1))
+                .flatten()
+                .map(|previous| tx_specs[previous].body.compute_hash());
+
+            let seed_tx_hash = match funded_in_block.or(funded_by_account) {
                 Some(hash) => hash,
                 None => {
                     let seed_tx_hash =
@@ -1215,17 +1234,20 @@ fn sample_transaction(
     // registers the DRep.
     let vote_delegation = Certificate::VoteDeleg(stake_cred, DRep::Key(drep_keyhash.into()));
 
-    let mut certificates = vec![
-        registration,
-        delegation,
-        pool_cert,
-        drep_cert,
-        vote_delegation,
-    ];
+    let mut certificates = if plain {
+        vec![]
+    } else {
+        vec![
+            registration,
+            delegation,
+            pool_cert,
+            drep_cert,
+            vote_delegation,
+        ]
+    };
     certificates.extend(extra_certs);
 
-    let certificates =
-        (!plain).then(|| NonEmptySet::try_from(certificates).expect("non-empty certificates"));
+    let certificates = NonEmptySet::try_from(certificates).ok();
 
     let body =
         TransactionBody {

@@ -9,3 +9,6 @@ type = "ephemeral"
 
 [storage.archive]
 type = "ephemeral"
+
+[storage.cache]
+enabled = false

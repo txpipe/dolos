@@ -130,7 +130,7 @@ Each boundary runs `EWRAP` at the end of the closing epoch and `ESTART` at the s
 | `RUPD` | Reward calculation at stability window | Sharded: per-shard reward computation against the mark snapshot, finalize emits `incentives` and clears `rupd_progress` |
 | `EWRAP` shards | `applyRUpd` (per-account) + reward filtering | Per-account: applies pending rewards to registered accounts, filters/routes unspendable rewards (treasury vs reserves), accumulates contributions into `EpochState.end` via `EWrapProgress` |
 | `EWRAP` finalize | `applyMIR` + boundary close | Global once-per-boundary: applies MIRs, processes pool/proposal refunds, classifies retiring/expiring entities, finalizes `EndStats`, rotates `pparams`/`rolling` snapshots forward (emits `EpochWrapUpV2`) |
-| `ESTART` shards | NEWEPOCH per-account snapshot rotation | Per-account: rotates each `AccountState`'s `EpochValue` snapshots forward via `AccountTransition` |
+| `ESTART` shards | NEWEPOCH per-account snapshot rotation | Per-account: rotates each `AccountState`'s `EpochValue` snapshots forward (`AccountState::rotate`, in `commit_shard`) |
 | `ESTART` finalize | NEWEPOCH global transition | Rotates remaining (pool/drep/proposal) snapshots, computes initial pots, advances epoch number (emits `EpochTransitionV2`), runs era transition if applicable |
 
 ### Key Source Files

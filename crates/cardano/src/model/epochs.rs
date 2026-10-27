@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{cbor, BlockSlot, Genesis, NsKey};
 use pallas::{
@@ -15,7 +12,7 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    epoch_value::{EpochValue, TransitionDefault},
+    epoch_value::{ShallowEpochValue, TransitionDefault},
     eras::EraTransition,
     pools::{PoolHash, PoolTally},
     pparams::PParamsSet,
@@ -113,20 +110,6 @@ pub struct RollingStats {
     #[n(7)]
     pub withdrawals: Lovelace,
 
-    /// Pools registered during the epoch.
-    ///
-    /// **Ordered**, and that is load-bearing rather than incidental: this
-    /// value's minicbor encoding is copied verbatim into a stele's
-    /// `state-epochs` and `log-epochs` layers, so an iteration order that
-    /// varies per instance — as a hash container's does — would make two
-    /// honest publishers of the same ledger disagree about the bytes of
-    /// identical state (ADR-004, "Determinism depends on deterministic entity
-    /// encoding"). Any container reachable from an entity value has to order
-    /// by content; `crates/snapshot/tests/field_registry.rs` is what holds
-    /// this one to it.
-    #[n(8)]
-    pub registered_pools: BTreeSet<PoolHash>,
-
     #[n(13)]
     pub blocks_minted: u32,
 
@@ -139,27 +122,14 @@ pub struct RollingStats {
     #[n(16)]
     pub drep_refunds: Lovelace,
 
-    // TODO: deprecate
-    #[n(17)]
-    pub __proposal_refunds: Lovelace,
-
     #[n(18)]
     #[cbor(default)]
     pub treasury_donations: Lovelace,
-
-    #[n(19)]
-    #[cbor(default)]
-    pub reserve_mirs: Lovelace,
 
     /// Blocks minted in non-overlay slots (includes pools + genesis delegates).
     #[n(20)]
     #[cbor(default)]
     pub non_overlay_blocks_minted: u32,
-
-    /// MIR sourced from treasury.
-    #[n(21)]
-    #[cbor(default)]
-    pub treasury_mirs: Lovelace,
 
     /// Number of transactions across all blocks minted this epoch.
     #[n(22)]
@@ -230,42 +200,17 @@ pub struct EndStats {
     #[cbor(default)]
     pub reserve_mirs: Lovelace,
 
-    /// MIRs to unregistered accounts (stays in treasury, not transferred).
-    #[n(13)]
-    #[cbor(default)]
-    pub invalid_treasury_mirs: Lovelace,
-
-    /// MIRs to unregistered accounts (stays in reserves, not transferred).
-    #[n(14)]
-    #[cbor(default)]
-    pub invalid_reserve_mirs: Lovelace,
-
     /// Treasury withdrawals enacted by governance at the boundary and
     /// delivered to registered accounts (moved treasury → rewards).
     #[n(15)]
     #[cbor(default)]
     pub treasury_withdrawals: Lovelace,
 
-    /// Enacted treasury withdrawals whose target account cannot receive
-    /// them (unregistered at the boundary) — discarded, the value stays
-    /// in treasury.
-    #[n(16)]
-    #[cbor(default)]
-    pub invalid_treasury_withdrawals: Lovelace,
-
     #[n(6)]
     pub proposal_invalid_refunds: Lovelace,
 
     #[n(7)]
     pub proposal_refunds: Lovelace,
-
-    // TODO: deprecate
-    #[n(8)]
-    pub __drep_deposits: Lovelace,
-
-    // TODO: deprecate
-    #[n(9)]
-    pub __drep_refunds: Lovelace,
 }
 
 /// Snapshot of a sharded phase's progress + total within a single epoch
@@ -295,11 +240,12 @@ pub struct EpochState {
     #[n(1)]
     pub initial_pots: Pots,
 
+    /// Read at `next`, `live` and `mark` only, so shallow, like `pparams`.
     #[n(2)]
-    pub rolling: EpochValue<RollingStats>,
+    pub rolling: ShallowEpochValue<RollingStats>,
 
     #[n(9)]
-    pub pparams: EpochValue<PParamsSet>,
+    pub pparams: ShallowEpochValue<PParamsSet>,
 
     #[n(10)]
     pub largest_stable_slot: BlockSlot,
@@ -382,8 +328,8 @@ impl Default for EpochState {
         Self {
             number: 0,
             initial_pots: Pots::default(),
-            rolling: EpochValue::new(0),
-            pparams: EpochValue::new(0),
+            rolling: ShallowEpochValue::new(0),
+            pparams: ShallowEpochValue::new(0),
             largest_stable_slot: 0,
             previous_nonce_tail: None,
             nonces: None,
@@ -406,7 +352,7 @@ impl SingletonEntity for EpochState {}
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-    use crate::model::epoch_value::testing::any_epoch_value;
+    use crate::model::epoch_value::testing::any_shallow_epoch_value;
     use crate::model::pparams::testing::any_pparams_set;
     use crate::model::testing as root;
     use crate::pots::testing::{any_epoch_incentives, any_pots};
@@ -466,14 +412,9 @@ pub(crate) mod testing {
                 unspendable_to_reserves: 0,
                 treasury_mirs: 0,
                 reserve_mirs: 0,
-                invalid_treasury_mirs: 0,
-                invalid_reserve_mirs: 0,
                 treasury_withdrawals: 0,
-                invalid_treasury_withdrawals: 0,
                 proposal_invalid_refunds: 0,
                 proposal_refunds: 0,
-                __drep_deposits: 0,
-                __drep_refunds: 0,
             }
         }
     }
@@ -482,8 +423,8 @@ pub(crate) mod testing {
         pub fn any_epoch_state()(
             number in root::any_epoch(),
             initial_pots in any_pots(),
-            rolling in any_epoch_value(any_rolling_stats().boxed()),
-            pparams in any_epoch_value(any_pparams_set().boxed()),
+            rolling in any_shallow_epoch_value(any_rolling_stats().boxed()),
+            pparams in any_shallow_epoch_value(any_pparams_set().boxed()),
             largest_stable_slot in root::any_slot(),
             previous_nonce_tail in prop::option::of(root::any_hash_32()),
             nonces in prop::option::of(any_nonces()),
@@ -546,22 +487,17 @@ pub struct EpochStatsUpdate {
     pub(crate) new_accounts: u64,
     pub(crate) removed_accounts: u64,
     pub(crate) withdrawals: u64,
-    pub(crate) registered_pools: BTreeSet<PoolHash>,
     pub(crate) drep_deposits: Lovelace,
     pub(crate) proposal_deposits: Lovelace,
     pub(crate) drep_refunds: Lovelace,
     pub(crate) treasury_donations: Lovelace,
-    pub(crate) reserve_mirs: Lovelace,
-    pub(crate) treasury_mirs: Lovelace,
     pub(crate) non_overlay_blocks_minted: u32,
     pub(crate) tx_count: u64,
     pub(crate) output: cbor::U128,
     pub(crate) block_slot: u64,
 
-    // undo: did apply create rolling.live from default? Plus the pre-union pool set, which
-    // can't be recovered by set subtraction (a pool in both prev and self would be removed).
+    // undo: did apply create rolling.live from default?
     pub(crate) was_new: bool,
-    pub(crate) prev_registered_pools: BTreeSet<PoolHash>,
 
     // Undo data for the first and last block slots. A min or max operation is
     // not reversible by arithmetic. So `apply` keeps the earlier values here,
@@ -584,8 +520,6 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         self.was_new = live_slot.is_none();
         let stats = live_slot.get_or_insert_default();
 
-        self.prev_registered_pools = stats.registered_pools.clone();
-
         stats.blocks_minted += 1;
 
         if self.utxo_delta > 0 {
@@ -602,8 +536,6 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.drep_deposits += self.drep_deposits;
         stats.drep_refunds += self.drep_refunds;
         stats.treasury_donations += self.treasury_donations;
-        stats.reserve_mirs += self.reserve_mirs;
-        stats.treasury_mirs += self.treasury_mirs;
         stats.non_overlay_blocks_minted += self.non_overlay_blocks_minted;
         stats.tx_count += self.tx_count;
         stats.output += self.output;
@@ -621,12 +553,6 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
             stats.first_block_slot = self.block_slot;
         }
         stats.last_block_slot = self.block_slot;
-
-        stats.registered_pools = stats
-            .registered_pools
-            .union(&self.registered_pools)
-            .cloned()
-            .collect();
     }
 
     fn undo(&self, entity: &mut Option<EpochState>) {
@@ -656,16 +582,12 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.drep_deposits -= self.drep_deposits;
         stats.drep_refunds -= self.drep_refunds;
         stats.treasury_donations -= self.treasury_donations;
-        stats.reserve_mirs -= self.reserve_mirs;
-        stats.treasury_mirs -= self.treasury_mirs;
         stats.non_overlay_blocks_minted -= self.non_overlay_blocks_minted;
         stats.tx_count -= self.tx_count;
         stats.output -= self.output;
 
         stats.first_block_slot = self.prev_first_block_slot;
         stats.last_block_slot = self.prev_last_block_slot;
-
-        stats.registered_pools = self.prev_registered_pools.clone();
     }
 }
 
@@ -723,7 +645,7 @@ pub struct PParamsUpdate {
     pub(crate) to_update: PParamsSet,
 
     // undo
-    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_pparams: Option<ShallowEpochValue<PParamsSet>>,
 }
 
 impl PParamsUpdate {
@@ -776,8 +698,8 @@ pub struct EpochWrapUp {
     pub(crate) stats: EndStats,
 
     // undo
-    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
-    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_rolling: Option<ShallowEpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<ShallowEpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
 }
 
@@ -846,8 +768,8 @@ pub struct EpochWrapUpV2 {
     pub(crate) stats: EndStats,
 
     // undo
-    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
-    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_rolling: Option<ShallowEpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<ShallowEpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
     pub(crate) prev_ewrap_progress: Option<ShardProgress>,
 }
@@ -913,8 +835,8 @@ pub struct EpochWrapUpV3 {
     pub(crate) stats: EndStats,
 
     // undo
-    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
-    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_rolling: Option<ShallowEpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<ShallowEpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
     pub(crate) prev_ewrap_finalized: bool,
     // No prev_ewrap_progress — apply does not mutate ewrap_progress.
@@ -1116,8 +1038,8 @@ impl dolos_core::EntityDelta for EWrapProgress {
 /// in-flight pipeline robust against a config change between shards (e.g.
 /// across a crash and restart).
 ///
-/// The shard's per-account work lands directly on each `AccountState` via
-/// `AccountTransition` deltas. Its one accumulator is `tally`, the shard's
+/// The shard's per-account work lands directly on each `AccountState`, in
+/// the pass that reads it. Its one accumulator is `tally`, the shard's
 /// part of the stake distribution being frozen, which `apply` adds to
 /// `EpochState.estart_tally` in the same commit as the shard's rotations.
 ///
@@ -1412,8 +1334,8 @@ pub struct EpochTransition {
     // undo
     pub(crate) prev_number: Epoch,
     pub(crate) prev_initial_pots: Option<Pots>,
-    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
-    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_rolling: Option<ShallowEpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<ShallowEpochValue<PParamsSet>>,
 }
 
 #[allow(deprecated)]
@@ -1517,8 +1439,8 @@ pub struct EpochTransitionV2 {
     // undo
     pub(crate) prev_number: Epoch,
     pub(crate) prev_initial_pots: Option<Pots>,
-    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
-    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_rolling: Option<ShallowEpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<ShallowEpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
     pub(crate) prev_ewrap_progress: Option<ShardProgress>,
     pub(crate) prev_estart_progress: Option<ShardProgress>,
@@ -1701,7 +1623,7 @@ mod tests {
             .with(PParamValue::MinFeeA(45));
 
         for scheduled in [None, Some(current.clone().with(PParamValue::MinFeeB(10)))] {
-            let mut pparams = EpochValue::with_live(0, current.clone());
+            let mut pparams = ShallowEpochValue::with_live(0, current.clone());
             pparams.schedule(0, scheduled.clone());
             let mut entity = Some(EpochState {
                 pparams,
@@ -1737,8 +1659,8 @@ mod tests {
     #[test]
     fn epoch_stats_preserve_first_slot_across_apply_undo_and_reapply() {
         for rolling in [
-            EpochValue::new(0),
-            EpochValue::with_live(0, RollingStats::default()),
+            ShallowEpochValue::new(0),
+            ShallowEpochValue::with_live(0, RollingStats::default()),
         ] {
             for slots in [[0, 0, 2, 4], [0, 20, 40, 60], [2, 4, 6, 8]] {
                 let mut entity = Some(EpochState {
@@ -1781,7 +1703,7 @@ mod tests {
     #[test]
     fn epoch_stats_reset_first_slot_on_transition() {
         let mut entity = Some(EpochState {
-            pparams: EpochValue::with_live(0, PParamsSet::default()),
+            pparams: ShallowEpochValue::with_live(0, PParamsSet::default()),
             ..Default::default()
         });
         let mut first_block = EpochStatsUpdate::default();
@@ -1829,7 +1751,9 @@ mod tests {
 mod prop_tests {
     use super::testing::{any_end_stats, any_epoch_state, any_nonces};
     use super::*;
-    use crate::model::epoch_value::testing::{any_epoch_value, any_epoch_value_no_next};
+    use crate::model::epoch_value::testing::{
+        any_shallow_epoch_value, any_shallow_epoch_value_no_next,
+    };
     use crate::model::pparams::testing::any_pparams_set;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
     use crate::pots::testing::{any_epoch_incentives, any_pots};
@@ -1842,8 +1766,8 @@ mod prop_tests {
         fn any_epoch_state_no_rolling_next()(
             number in root::any_epoch(),
             initial_pots in any_pots(),
-            rolling in any_epoch_value_no_next(super::testing::any_rolling_stats().boxed()),
-            pparams in any_epoch_value(any_pparams_set().boxed()),
+            rolling in any_shallow_epoch_value_no_next(super::testing::any_rolling_stats().boxed()),
+            pparams in any_shallow_epoch_value(any_pparams_set().boxed()),
             largest_stable_slot in root::any_slot(),
             previous_nonce_tail in prop::option::of(root::any_hash_32()),
             nonces in prop::option::of(any_nonces()),

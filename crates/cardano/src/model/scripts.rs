@@ -3,11 +3,11 @@
 //!
 //! Nothing else enumerates scripts. They are not ledger state, and the archive
 //! index keeps a hash of the script hash, so it answers "where is this script"
-//! but not "which scripts are there". Three namespaces do:
+//! but not "which scripts are there". The archive's entity index (sealed
+//! epochs) and the staged rows (unsealed ones) give a script's first
+//! sighting: the roll reads them to tell a new script from a repeat, and
+//! `/scripts/{hash}` reads the script there. Two namespaces list them:
 //!
-//! - `scripts`, the witness, keyed by script hash: where the script was first
-//!   seen, which is what a block needs to tell a new script from a repeat and
-//!   what `/scripts/{hash}` starts its lookup from.
 //! - `first-scripts`, a `Set` keyed `epoch ‖ script hash`: the scripts an
 //!   unsealed epoch saw first.
 //! - `first-script-chunks`, the `Chunk` the set seals into: an epoch's scripts
@@ -22,26 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::periods::{ChunkRow, GroupKey, Ungrouped};
 
-/// Where a script was first seen: its block's slot, its tx's index in the
-/// block and its place among the scripts the tx carries.
-///
-/// Field order is listing order, so the derived ordering is db-sync's.
-#[derive(
-    Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord,
-)]
-pub struct ScriptState {
-    #[n(0)]
-    pub slot: u64,
-
-    #[n(1)]
-    pub tx_index: u32,
-
-    #[n(2)]
-    pub order: u32,
-}
-
 hash_key!(
-    /// The hash of a script, the key of its `scripts` row.
+    /// The hash of a script, the member of its `first-scripts` key.
     ScriptKey,
     Hash<28>,
     28
@@ -49,10 +31,12 @@ hash_key!(
 
 display_as_stored!(ScriptKey);
 
-entity_boilerplate!(ScriptState, "scripts", state = ScriptKey);
-
 /// A script an epoch saw first, held in state until the epoch seals into
-/// [`FirstScriptChunk`]s. The value is the script's [`ScriptState`].
+/// [`FirstScriptChunk`]s. The value is where the script was first seen: its
+/// block's slot, its tx's index in the block and its place among the scripts
+/// the tx carries.
+///
+/// Field order is listing order, so the derived ordering is db-sync's.
 #[derive(
     Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord,
 )]
@@ -71,16 +55,6 @@ pub struct FirstScriptSet {
 pub type FirstScriptKey = GroupKey<Ungrouped, ScriptKey>;
 
 entity_boilerplate!(FirstScriptSet, "first-scripts", state = FirstScriptKey);
-
-impl From<ScriptState> for FirstScriptSet {
-    fn from(x: ScriptState) -> Self {
-        Self {
-            slot: x.slot,
-            tx_index: x.tx_index,
-            order: x.order,
-        }
-    }
-}
 
 /// One chunk of the scripts an epoch saw first, in first-seen order.
 ///
@@ -117,63 +91,17 @@ pub(crate) mod testing {
     use proptest::prelude::*;
 
     prop_compose! {
-        pub fn any_script_state()(
+        pub fn any_first_script_set()(
             slot in root::any_slot(),
             tx_index in 0u32..500,
             order in 0u32..50,
-        ) -> ScriptState {
-            ScriptState { slot, tx_index, order }
+        ) -> FirstScriptSet {
+            FirstScriptSet { slot, tx_index, order }
         }
     }
 }
 
 // --- Deltas ---
-
-/// Records where a script was first seen.
-///
-/// Emitted once per script, by the block that carries it first: the roll
-/// tells new scripts from repeats ahead of applying, so an existing row is
-/// left alone.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScriptFirstSeen {
-    pub(crate) script_hash: Hash<28>,
-    pub(crate) first: ScriptState,
-
-    /// For undo: did this delta create the row?
-    pub(crate) was_new: bool,
-}
-
-impl ScriptFirstSeen {
-    pub fn new(script_hash: Hash<28>, first: ScriptState) -> Self {
-        Self {
-            script_hash,
-            first,
-            was_new: false,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for ScriptFirstSeen {
-    type Entity = ScriptState;
-
-    fn key(&self) -> NsKey {
-        NsKey::of::<ScriptState>(&ScriptKey(self.script_hash))
-    }
-
-    fn apply(&mut self, entity: &mut Option<ScriptState>) {
-        self.was_new = entity.is_none();
-
-        if self.was_new {
-            *entity = Some(self.first);
-        }
-    }
-
-    fn undo(&self, entity: &mut Option<ScriptState>) {
-        if self.was_new {
-            *entity = None;
-        }
-    }
-}
 
 /// Stages a script in the `first-scripts` row of the epoch that saw it first.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,14 +114,14 @@ pub struct StageFirstScript {
 }
 
 impl StageFirstScript {
-    pub fn new(epoch: u64, script_hash: Hash<28>, first: ScriptState) -> Self {
+    pub fn new(epoch: u64, script_hash: Hash<28>, first: FirstScriptSet) -> Self {
         Self {
             key: GroupKey {
                 group: Ungrouped,
                 epoch,
                 member: ScriptKey(script_hash),
             },
-            row: first.into(),
+            row: first,
             was_new: false,
         }
     }
@@ -223,52 +151,17 @@ impl dolos_core::EntityDelta for StageFirstScript {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::any_script_state;
+    use super::testing::any_first_script_set;
     use super::*;
     use crate::model::testing::{
         self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
     };
-    use dolos_core::{EntityDelta as _, KeyCodec as _};
+    use dolos_core::KeyCodec as _;
     use proptest::prelude::*;
-
-    fn first(slot: u64) -> ScriptState {
-        ScriptState {
-            slot,
-            tx_index: 1,
-            order: 2,
-        }
-    }
-
-    #[test]
-    fn first_seen_records_a_new_script() {
-        let mut delta = ScriptFirstSeen::new(Hash::new([1u8; 28]), first(42));
-        let mut entity = None;
-
-        delta.apply(&mut entity);
-
-        assert!(delta.was_new);
-        assert_eq!(entity, Some(first(42)));
-
-        delta.undo(&mut entity);
-        assert_eq!(entity, None);
-    }
-
-    #[test]
-    fn first_seen_leaves_a_known_script_alone() {
-        let mut delta = ScriptFirstSeen::new(Hash::new([1u8; 28]), first(42));
-        let mut entity = Some(first(10));
-
-        delta.apply(&mut entity);
-        assert!(!delta.was_new);
-        assert_eq!(entity, Some(first(10)));
-
-        delta.undo(&mut entity);
-        assert_eq!(entity, Some(first(10)));
-    }
 
     #[test]
     fn positions_order_as_db_sync_lists() {
-        let at = |slot, tx_index, order| ScriptState {
+        let at = |slot, tx_index, order| FirstScriptSet {
             slot,
             tx_index,
             order,
@@ -285,7 +178,12 @@ mod tests {
 
     #[test]
     fn first_script_keys_are_epoch_then_hash() {
-        let key = StageFirstScript::new(300, Hash::new([7u8; 28]), first(1)).key;
+        let sighting = FirstScriptSet {
+            slot: 1,
+            tx_index: 1,
+            order: 2,
+        };
+        let key = StageFirstScript::new(300, Hash::new([7u8; 28]), sighting).key;
         let raw = dolos_core::keys::encode(&key);
 
         assert_eq!(raw.len(), 8 + 28);
@@ -296,19 +194,10 @@ mod tests {
     }
 
     prop_compose! {
-        fn any_script_first_seen()(
-            script_hash in root::any_hash_28(),
-            first in any_script_state(),
-        ) -> ScriptFirstSeen {
-            ScriptFirstSeen::new(script_hash, first)
-        }
-    }
-
-    prop_compose! {
         fn any_stage_first_script()(
             epoch in 0u64..1000,
             script_hash in root::any_hash_28(),
-            first in any_script_state(),
+            first in any_first_script_set(),
         ) -> StageFirstScript {
             StageFirstScript::new(epoch, script_hash, first)
         }
@@ -316,17 +205,8 @@ mod tests {
 
     proptest! {
         #[test]
-        fn script_first_seen_roundtrip(
-            entity in prop::option::of(any_script_state()),
-            delta in any_script_first_seen(),
-        ) {
-            assert_delta_roundtrip(entity, delta.clone());
-            assert_delta_serde_roundtrip(entity, delta);
-        }
-
-        #[test]
         fn stage_first_script_roundtrip(
-            entity in prop::option::of(any_script_state().prop_map(FirstScriptSet::from)),
+            entity in prop::option::of(any_first_script_set()),
             delta in any_stage_first_script(),
         ) {
             assert_delta_roundtrip(entity, delta.clone());

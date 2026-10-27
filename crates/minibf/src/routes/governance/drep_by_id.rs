@@ -8,13 +8,13 @@ use dolos_core::Domain;
 
 use crate::{
     mapping::{
-        governance::dreps::{parse_drep_id, DrepModelBuilder},
+        governance::dreps::{drep_amount, parse_drep_id, DrepModelBuilder},
         IntoModel,
     },
     Facade,
 };
 
-use super::{chain_context, drep_key};
+use super::{chain_context, drep_distribution, drep_key};
 
 pub async fn drep_by_id<D: Domain>(
     Path(drep): Path<String>,
@@ -24,18 +24,18 @@ where
     Option<DRepState>: From<D::Entity>,
 {
     let parsed = parse_drep_id(&drep)?;
+    let key = drep_key(&parsed.encoded)?;
 
-    let drep_state = if parsed.is_special {
-        domain.read_cardano_entity::<DRepState>(&drep_key(&parsed.encoded)?)?
-    } else {
-        Some(
-            domain
-                .read_cardano_entity::<DRepState>(&drep_key(&parsed.encoded)?)?
-                .ok_or(StatusCode::NOT_FOUND)?,
-        )
-    };
+    // the special DReps have no row
+    let drep_state = domain.read_cardano_entity::<DRepState>(&key)?;
+
+    if drep_state.is_none() && !parsed.is_special {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     let (chain, tip, pparams) = chain_context(&domain)?;
+
+    let amount = drep_amount(&key.0, drep_state.as_ref(), &drep_distribution(&domain)?);
 
     let model = DrepModelBuilder {
         drep_id: parsed.drep_id,
@@ -43,6 +43,7 @@ where
         is_legacy: parsed.is_legacy,
         is_special: parsed.is_special,
         state: drep_state,
+        amount,
         pparams: &pparams,
         chain: &chain,
         tip,
@@ -112,8 +113,9 @@ mod tests {
         let expected = DrepModel {
             drep_id,
             hex: hex::encode(&payload),
-            // the ledger's drep_distr counts the DRep's own deposit
-            amount: "7777".to_string(),
+            // registered after the last completed distribution, so in none
+            // yet: Blockfrost serves 0, not the deposit
+            amount: "0".to_string(),
             active: true,
             active_epoch: Some(2),
             has_script: false,
@@ -125,17 +127,29 @@ mod tests {
         assert_eq!(model, expected);
     }
 
+    /// The special DReps have no row; they serve their entries in the last
+    /// completed distribution, as Blockfrost does.
     #[tokio::test]
     async fn governance_drep_special_ids() {
-        let app = TestApp::new();
+        use pallas::ledger::primitives::conway::DRep;
 
-        for id in ["drep_always_abstain", "drep_always_no_confidence"] {
+        let app = TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+            seed_distribution(
+                domain,
+                [(DRep::Abstain, 40), (DRep::NoConfidence, 50)].into(),
+            );
+        });
+
+        for (id, amount) in [
+            ("drep_always_abstain", 40),
+            ("drep_always_no_confidence", 50),
+        ] {
             let model = get_drep(&app, id).await;
 
             let expected = DrepModel {
                 drep_id: id.to_string(),
                 hex: "".to_string(),
-                amount: "0".to_string(),
+                amount: amount.to_string(),
                 active: true,
                 active_epoch: None,
                 has_script: false,
@@ -146,6 +160,20 @@ mod tests {
 
             assert_eq!(model, expected);
         }
+    }
+
+    /// A regular DRep serves its entry in the last completed distribution,
+    /// never the partial one the next boundary's shards are building.
+    #[tokio::test]
+    async fn governance_drep_amount_is_the_completed_distribution_entry() {
+        let app = TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+            seed_distribution(domain, [(synthetic_drep(), 1_234)].into());
+            seed_partial_distribution(domain, [(synthetic_drep(), 9_999)].into());
+        });
+
+        let model = get_drep(&app, &app.vectors().drep_id.clone()).await;
+
+        assert_eq!(model.amount, "1234");
     }
 
     #[tokio::test]

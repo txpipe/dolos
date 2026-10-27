@@ -140,7 +140,7 @@ mod tests {
         routes::governance::testing::*,
         test_support::{TestApp, TestFault},
     };
-    use dolos_cardano::model::{DRepDelegation, DRepKey, EpochValue, Stake};
+    use dolos_cardano::model::{DRepDelegation, DRepExpiry, DRepKey, EpochValue, Stake};
     use dolos_core::{StateStore as _, StateWriter as _};
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use pallas::ledger::{
@@ -170,7 +170,7 @@ mod tests {
         unregistered_at: Option<(BlockSlot, TxOrder)>,
     ) {
         let drep = synthetic_drep();
-        let mut state = DRepState::new(drep.clone());
+        let mut state = DRepState::new(drep.clone(), DRepExpiry::new(0, 0));
         state.registered_at = registered_at;
         state.unregistered_at = unregistered_at;
 

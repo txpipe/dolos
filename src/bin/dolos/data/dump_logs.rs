@@ -4,7 +4,10 @@ use comfy_table::Table;
 use dolos_cardano::{
     eras::load_chain_summary_from_state,
     eras::log_epoch_range_to_key_range,
-    model::{AccountEpochLog, AccountKey, DRepEpochLog, DRepKey, PParamKind, PoolKey},
+    model::{
+        AccountEpochLog, AccountKey, DRepEpochLog, DRepKey, PParamKind, PoolKey, ProposalKey,
+        ProposalState,
+    },
     ChainSummary, EpochState, PoolEpochLog,
 };
 use dolos_core::{config::RootConfig, LogEntity, LogRangeOf};
@@ -251,9 +254,7 @@ impl TableRow for PoolEpochLog {
             "active stake",
             "delegators count",
             "live pledge",
-            "declared pledge",
             "total rewards",
-            "operator share",
         ]
     }
 
@@ -271,9 +272,7 @@ impl TableRow for PoolEpochLog {
             format!("{}", self.total_stake),
             format!("{}", self.delegators_count),
             format!("{}", self.live_pledge),
-            format!("{}", self.declared_pledge),
             format!("{}", self.total_rewards),
-            format!("{}", self.operator_share),
         ]
     }
 }
@@ -315,6 +314,48 @@ impl TableRow for DRepEpochLog {
             epoch_of(slot, ctx),
             self.voting_power.to_string(),
             self.registered.to_string(),
+        ]
+    }
+}
+
+/// A resolved proposal's final row (`dolos_cardano::final_rows`). The epoch is
+/// the key's, the one the boundary that moved it closed: the proposal's enacted
+/// or dropped epoch.
+impl TableRow for ProposalState {
+    type Log = ProposalState;
+
+    fn view(log: Self::Log) -> Self {
+        log
+    }
+
+    fn header(format: OutputFormat) -> Vec<&'static str> {
+        if matches!(format, OutputFormat::Dbsync) {
+            todo!("dbsync format not supported for proposals logs");
+        }
+        vec![
+            "proposal",
+            "epoch",
+            "proposed in",
+            "ratified",
+            "canceled",
+            "deposit",
+        ]
+    }
+
+    fn row(&self, slot: BlockSlot, key: &ProposalKey, ctx: &RowContext) -> Vec<String> {
+        if matches!(ctx.format, OutputFormat::Dbsync) {
+            todo!("dbsync format not supported for proposals logs");
+        }
+
+        let epoch = |x: Option<u64>| x.map_or("-".to_string(), |x| x.to_string());
+
+        vec![
+            ProposalState::id(key.tx, key.idx),
+            epoch_of(slot, ctx),
+            epoch(self.proposed_in),
+            epoch(self.ratified_epoch),
+            epoch(self.canceled_epoch),
+            epoch(self.deposit),
         ]
     }
 }
@@ -670,7 +711,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         || matches!(args.format, OutputFormat::Dbsync)
         || matches!(
             args.namespace.as_str(),
-            "pool-epochs" | "drep-epochs" | "account-epochs/rewards"
+            "pool-epochs" | "drep-epochs" | "proposals" | "account-epochs/rewards"
         );
     let summary = if need_summary {
         let state = crate::common::open_state_store(config)?;
@@ -703,6 +744,9 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         }
         "drep-epochs" => {
             dump_logs::<DRepEpochLog>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
+        }
+        "proposals" => {
+            dump_logs::<ProposalState>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
         }
         "account-epochs" => {
             dump_logs::<AccountEpochLog>(&archive, skip, take, &ctx, start_slot, end_slot, range)?

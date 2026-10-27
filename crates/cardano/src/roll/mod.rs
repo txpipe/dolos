@@ -737,6 +737,7 @@ pub(crate) fn compute_delta<D: Domain>(
     genesis: Arc<Genesis>,
     cache: &Cache,
     state: &D::State,
+    archive: &D::Archive,
     batch: &mut WorkBatch,
 ) -> Result<(), ChainError> {
     let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
@@ -778,16 +779,21 @@ pub(crate) fn compute_delta<D: Domain>(
         dormancy.drep_keys = Arc::new(keys);
     }
 
-    // Script context: which of the scripts the batch carries were seen before.
-    // Like dormancy it evolves across the blocks of the batch, so it's taken
-    // back after each crawl.
+    // Script context: which of the scripts the batch carries an earlier block
+    // carried, by the archive's entity index below the batch and the staged
+    // rows of the unsealed epochs. Like dormancy it evolves across the blocks
+    // of the batch, so it's taken back after each crawl.
     let carried: Vec<_> = batch
         .blocks
         .iter()
         .map(|block| block_script_sightings(block.decoded().view()))
         .collect();
 
-    let mut script_registry = ScriptRegistryContext::load(state, &carried)?;
+    let unsealed =
+        crate::periods::unsealed_epochs(&cache.eras, crate::utils::mutable_slots(&genesis), epoch);
+
+    let mut script_registry =
+        ScriptRegistryContext::load(state, archive, &carried, batch.first_slot(), unsealed)?;
 
     for (block, carried) in batch.blocks.iter_mut().zip(carried) {
         let mut builder = DeltaBuilder::new(
@@ -1061,9 +1067,6 @@ mod tests {
         assert_eq!(stats.drep_refunds, 0);
         assert_eq!(stats.proposal_deposits, 0);
         assert_eq!(stats.withdrawals, 0);
-        assert_eq!(stats.reserve_mirs, 0);
-        assert_eq!(stats.treasury_mirs, 0);
-        assert!(stats.registered_pools.is_empty());
 
         // The transaction is still counted and its collateral still priced.
         assert_eq!(stats.tx_count, 1);
@@ -1213,7 +1216,6 @@ mod tests {
         assert!(stats.drep_deposits > 0);
         assert!(stats.proposal_deposits > 0);
         assert!(stats.withdrawals > 0);
-        assert!(!stats.registered_pools.is_empty());
         assert_eq!(stats.tx_count, 1);
     }
 }

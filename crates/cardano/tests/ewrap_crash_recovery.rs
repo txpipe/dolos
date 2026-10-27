@@ -24,9 +24,9 @@ use pallas::ledger::primitives::{conway::DRep, StakeCredential};
 
 use dolos_cardano::{
     ewrap::EwrapWorkUnit, pallas_extras, AccountEpochLog, AccountKey, AccountState,
-    CardanoWorkUnit, DRepDelegation, DRepEpochLog, DRepKey, DRepState, EpochState, EpochValue,
-    PendingRewardState, PoolDelegation, PoolEpochLog, PoolHash, PoolKey, PoolParams, PoolSnapshot,
-    PoolState, Stake,
+    CardanoWorkUnit, DRepDelegation, DRepEpochLog, DRepExpiry, DRepKey, DRepState, EpochState,
+    EpochValue, PendingRewardState, PoolDelegation, PoolEpochLog, PoolHash, PoolKey, PoolParams,
+    PoolSnapshot, PoolState, Stake,
 };
 
 const CLOSING_EPOCH: u64 = 5;
@@ -118,13 +118,11 @@ fn seeded() -> ToyDomain {
     let drep = DRepState {
         identifier: drep(),
         registered_at: Some((0, 0)),
-        voting_power: 0,
         last_active_slot: None,
         unregistered_at: None,
         expired: false,
         deposit: 0,
-        anchor: None,
-        expiry: None,
+        expiry: DRepExpiry::new(0, 0),
     };
     writer
         .write_entity_typed(&DRepKey::from(&drep.identifier), &drep)
@@ -155,8 +153,6 @@ fn seeded() -> ToyDomain {
                 live_pledge: None,
             },
         ),
-        blocks_minted_total: 0,
-        register_slot: 0,
         retiring_epoch: Some(CLOSING_EPOCH + 1),
         deposit: 0,
         calidus: None,
@@ -181,7 +177,6 @@ fn seeded() -> ToyDomain {
     for (byte, total_rewards) in computed {
         let log = PoolEpochLog {
             total_rewards,
-            operator_share: LEADER_REWARD,
             ..Default::default()
         };
 
@@ -310,15 +305,15 @@ fn clean_run() -> Outcome {
     let settled: Vec<_> = expected
         .pool_epochs
         .iter()
-        .map(|(_, pool, log)| (pool.0[0], log.total_rewards, log.operator_share))
+        .map(|(_, pool, log)| (pool.0[0], log.total_rewards))
         .collect();
 
-    let paid: Vec<_> = [(UNPAID, 0, 0)]
+    let paid: Vec<_> = [(UNPAID, 0)]
         .into_iter()
         .chain(
             ACCOUNTS
                 .into_iter()
-                .map(|byte| (byte, u64::from(byte) + LEADER_REWARD, LEADER_REWARD)),
+                .map(|byte| (byte, u64::from(byte) + LEADER_REWARD)),
         )
         .collect();
 

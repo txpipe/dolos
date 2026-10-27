@@ -18,7 +18,7 @@
 //! the ledger does, not by a test-only raw constructor — the encoding a stele
 //! carries is the encoding the ledger writes.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use dolos_cardano::{
     model::{
@@ -29,7 +29,7 @@ use dolos_cardano::{
         FirstScriptChunk, FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces,
         PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
         PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, PoolTally,
-        ProposalAction, ProposalState, RollingStats, ScriptState, ShardProgress, Stake, VoteEntry,
+        ProposalAction, ProposalState, RollingStats, ShardProgress, Stake, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
@@ -46,7 +46,7 @@ use dolos_cardano::{
     },
     pots::{EpochIncentives, Pots},
 };
-use dolos_core::{cbor, EraCbor};
+use dolos_core::{cbor, EraCbor, UtxoPosition, UtxoValue};
 
 // Every byte differs from its neighbours, so a field that shifts by one
 // position, or a hash that is truncated rather than carried whole, changes the
@@ -92,12 +92,16 @@ fn gov_action_id(seed: u8, index: u32) -> GovActionId {
 /// An `EpochValue` with all six of its fields populated, filled the way the
 /// ledger fills one: three `schedule`/`transition` rounds and a final
 /// `schedule`, leaving `go`, `set`, `mark`, `live` and `next` distinct and the
-/// position three epochs past `start`.
+/// position three epochs past `start`. A shallow value ends with `go` and
+/// `set` empty, as the ledger leaves them.
 ///
 /// Driving the public API rather than the `cfg(test)` raw constructor is the
 /// point — a canary built by a back door would pin an arrangement the ledger
 /// cannot actually produce.
-fn filled_epoch_value<T: Clone + std::fmt::Debug>(start: Epoch, slots: [T; 5]) -> EpochValue<T> {
+fn filled_epoch_value<T: Clone + std::fmt::Debug, const DEEP: bool>(
+    start: Epoch,
+    slots: [T; 5],
+) -> EpochValue<T, DEEP> {
     let [go, set, mark, live, next] = slots;
 
     let mut value = EpochValue::with_live(start, go);
@@ -146,9 +150,7 @@ pub fn pool_epoch_log() -> PoolEpochLog {
         relative_size: 0.015625,
         delegators_count: 317,
         live_pledge: 30_000_000_000,
-        declared_pledge: 25_000_000_000,
         total_rewards: 4_400_000_000,
-        operator_share: 340_000_000,
         fixed_cost: 170_000_000,
         margin_cost: Some(rational(3, 100)),
     }
@@ -279,18 +281,36 @@ pub fn payment_stats() -> PaymentStats {
     PaymentStats { tx_count: 23 }
 }
 
-/// A mint and a burn, so both signs of the amount are pinned.
+/// A flagged mint, a plain mint and a burn, so the flag and both signs of
+/// the amount are pinned.
 pub fn asset_mint_chunk() -> AssetMintChunk {
     AssetMintChunk {
         count: 259,
-        mints: vec![(hash32(0xd0), 1_000_000), (hash32(0xd1), -42)],
+        mints: vec![
+            AssetMintSet {
+                tx_hash: hash32(0xd0),
+                amount: 1_000_000,
+                names_asset: true,
+            },
+            AssetMintSet {
+                tx_hash: hash32(0xd3),
+                amount: 1,
+                names_asset: false,
+            },
+            AssetMintSet {
+                tx_hash: hash32(0xd1),
+                amount: -42,
+                names_asset: false,
+            },
+        ],
     }
 }
 
 pub fn asset_mint_set() -> AssetMintSet {
     AssetMintSet {
         tx_hash: hash32(0xd2),
-        amount: -7,
+        amount: 7,
+        names_asset: true,
     }
 }
 
@@ -319,14 +339,6 @@ pub fn account_address_chunk() -> AccountAddressChunk {
                 .concat()
                 .into(),
         ],
-    }
-}
-
-pub fn script_state() -> ScriptState {
-    ScriptState {
-        slot: 99_999_999,
-        tx_index: 321,
-        order: 7,
     }
 }
 
@@ -362,18 +374,16 @@ pub fn drep_sighting_state() -> DRepSightingState {
 pub fn drep_state() -> DRepState {
     DRepState {
         registered_at: Some((55_555, 3)),
-        voting_power: 777_000_000,
         last_active_slot: Some(66_666),
         unregistered_at: Some((77_777, 11)),
         expired: true,
         deposit: 500_000_000,
         identifier: DRep::Key(hash28(0xa0)),
-        anchor: Some(anchor(0xa1)),
-        expiry: Some(DRepExpiry {
+        expiry: DRepExpiry {
             current: 412,
             updated_in: 409,
             prev: Some(400),
-        }),
+        },
     }
 }
 
@@ -411,16 +421,12 @@ fn rolling_stats(seed: u64) -> RollingStats {
         new_accounts: 700 + seed,
         removed_accounts: 60 + seed,
         withdrawals: 50_000 + seed,
-        registered_pools: BTreeSet::from([hash28(0xb0), hash28(0xb1), hash28(0xb2)]),
         blocks_minted: 21_600 + seed as u32,
         drep_deposits: 4_000 + seed,
         proposal_deposits: 300 + seed,
         drep_refunds: 20 + seed,
-        __proposal_refunds: 1 + seed,
         treasury_donations: 11_000 + seed,
-        reserve_mirs: 12_000 + seed,
         non_overlay_blocks_minted: 21_000 + seed as u32,
-        treasury_mirs: 13_000 + seed,
         tx_count: 140_000 + seed,
         output: cbor::U128::new(340_282_366_920_938_463_463u128 + seed as u128),
         first_block_slot: 86_400_000 + seed,
@@ -456,14 +462,9 @@ fn end_stats() -> EndStats {
         unspendable_to_reserves: 800_000,
         treasury_mirs: 700_000,
         reserve_mirs: 600_000,
-        invalid_treasury_mirs: 500_000,
-        invalid_reserve_mirs: 400_000,
         treasury_withdrawals: 300_000,
-        invalid_treasury_withdrawals: 200_000,
         proposal_invalid_refunds: 100_000,
         proposal_refunds: 90_000,
-        __drep_deposits: 80_000,
-        __drep_refunds: 70_000,
     }
 }
 
@@ -718,8 +719,6 @@ pub fn pool_state() -> PoolState {
                 pool_snapshot(0x05),
             ],
         ),
-        blocks_minted_total: 4_242,
-        register_slot: 55_555_555,
         retiring_epoch: Some(777),
         deposit: 500_000_000,
         calidus: Some(CalidusRegistration {
@@ -778,9 +777,13 @@ pub fn proposal_state() -> ProposalState {
 }
 
 /// The one namespace whose value the profile *builds* rather than carries: the
-/// `[era, body]` wrapper of `crate::layers::state`.
-pub fn utxo_value() -> EraCbor {
-    EraCbor(6, bytes_of::<48>(0x33).to_vec())
+/// `[era, body, slot, tx_index]` wrapper of `crate::layers::state`. The
+/// position takes multi-byte uints, so a narrowed field moves the pinned bytes.
+pub fn utxo_value() -> UtxoValue {
+    UtxoValue::new(
+        EraCbor(6, bytes_of::<48>(0x33).to_vec()),
+        Some(UtxoPosition::new(134_217_728, 300)),
+    )
 }
 
 // The values the enum tables pin; nothing else builds them.

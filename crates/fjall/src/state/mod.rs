@@ -11,13 +11,15 @@
 //!    identity the store recorded when it was created
 //!
 //! 2. **`state-utxos`**: UTxO set storage Key: `[tx_hash:32][index:4]` (36
-//!    bytes) Value: `[era:2][cbor:...]`
+//!    bytes) Value: CBOR `[era, body, slot, tx_index]` (`[era, body]` for a
+//!    UTxO no block produced)
 //!
 //! 3. **`state-entities`**: All entity types with namespace hash prefix Key:
 //!    `[ns_hash:8][entity_key:var]` Value: entity CBOR bytes
 //!
 //! 4. **`state-tags`**: Live-UTxO tags (mutable: insert on produce, delete on
-//!    consume) Key: `[dim_hash:8][lookup_key:var][txo_ref:36]` -> empty
+//!    consume) Key: `[dim_hash:8][lookup_key:var][tag_order:10][txo_ref:36]` ->
+//!    empty, so a lookup key's refs sort by creation position
 //!
 //! This design reduces the number of LSM-tree segment files compared to using
 //! separate keyspaces per entity type, avoiding "too many open files" errors
@@ -33,8 +35,8 @@ use std::sync::Mutex;
 
 use dolos_core::{
     ChainPoint, EntityKey, EntityValue, KeyRange, Namespace, StateError,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TxoRef,
-    UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
+    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TagEntry, TagOrder,
+    TagStart, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
 };
 use fjall::{Database, Keyspace, OwnedWriteBatch, PersistMode, Readable};
 
@@ -373,6 +375,32 @@ impl CoreStateStore for StateStore {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
         tags::get_by_key(&snapshot, &self.tags, dimension, key).map_err(StateError::from)
+    }
+
+    fn utxos_by_tag_page(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        order: TagOrder,
+        start: TagStart,
+        count: usize,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        tags::get_page_by_key(&snapshot, &self.tags, dimension, key, order, start, count)
+            .map_err(StateError::from)
+    }
+
+    fn utxos_with_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        entries: Vec<TagEntry>,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        tags::filter_by_key(&snapshot, &self.tags, dimension, key, entries)
+            .map_err(StateError::from)
     }
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {

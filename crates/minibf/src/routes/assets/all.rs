@@ -79,6 +79,12 @@ mod tests {
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use itertools::Itertools;
 
+    use axum::http::StatusCode;
+
+    use dolos_core::Domain;
+
+    use crate::pagination::Order;
+
     /// The scan the period logs replaced: every block from Mary on, a tx's
     /// subjects in byte order, kept where the tx is the asset's `initial_tx`.
     mod scan {

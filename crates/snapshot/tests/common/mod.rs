@@ -11,9 +11,10 @@
 //! the *shape* of a record, and no part of it interprets a block, a hash or a
 //! stored key. What the fixture does have to be is *complete*, because the
 //! golden digests are what freeze the vocabulary: every archive dimension,
-//! every exact-record kind, every state namespace and every log *kind* appears
-//! at least once. Namespaces are frozen through their kinds now, for the state
-//! layers as for the logs — neither record carries one any more.
+//! every exact-record kind, every state namespace, every log *kind* and every
+//! entity *kind* appears at least once. Namespaces are frozen through their
+//! kinds now, for the state layers as for the logs — neither record carries one
+//! any more.
 
 // Each integration test binary compiles this module in full, so the parts one
 // binary does not reach look dead to it. They are not.
@@ -29,14 +30,14 @@ use dolos_cardano::{
         FixedNamespace as _, GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressKey,
         PaymentAddressSet, PaymentKey, PaymentStats, PendingMirState, PendingRewardState,
         PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalKey, ProposalState,
-        ScriptKey, ScriptState,
+        ScriptKey,
     },
     pallas::ledger::primitives::{conway::DRep, StakeCredential},
     periods::{GroupKey, Ungrouped},
 };
 use dolos_core::{
-    keys, BlockHash, EntityKey, EraCbor, ExactKind, ExactRecord, IndexRecord, LogKey, Namespace,
-    TagRecord, TxoRef,
+    keys, BlockHash, EntityKey, EntityKind, EntityRecord, EraCbor, ExactKind, ExactRecord,
+    IndexRecord, LogKey, Namespace, TagRecord, TxoRef, UtxoValue,
 };
 use dolos_snapshot::{
     layers::{
@@ -46,7 +47,7 @@ use dolos_snapshot::{
         state::{self, StateRecord},
     },
     DigestsScope, DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS, DIGESTS,
-    INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
+    ENTITY_KINDS, INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use stelae::{
     dir::{BlobIndex, SteleDir, WrittenLayer},
@@ -133,7 +134,6 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
         PolicyMintChunk::NS => keys::encode(&(PolicyKey([byte; 28].into()), u32::from(byte))),
         PoolState::NS | PoolEpochLog::NS => keys::encode(&PoolKey([byte; 28].into())),
         ProposalState::NS => keys::encode(&ProposalKey::new([byte; 32].into(), u32::from(byte))),
-        ScriptState::NS => keys::encode(&ScriptKey([byte; 28].into())),
         FirstScriptSet::NS => keys::encode(&GroupKey {
             group: Ungrouped,
             epoch: u64::from(byte),
@@ -259,12 +259,30 @@ pub fn logs(ns: Namespace) -> Vec<LogRecord> {
     )]
 }
 
+/// Two entries of `kind`, which is one layer's worth: ids ascending, slots
+/// not, so the golden freezes the id order the layer is sorted by.
+///
+/// The kind is not in the record — it is the layer's kind — so what tells one
+/// entity layer from another here is the ids, derived from the kind's
+/// position in [`ENTITY_KINDS`], and their width.
+pub fn entities(kind: EntityKind) -> Vec<EntityRecord> {
+    let i = ENTITY_KINDS
+        .iter()
+        .position(|(_, known)| *known == kind)
+        .expect("an entity kind") as u8;
+
+    [(0x60 + i, END_SLOT), (0x70 + i, START_SLOT)]
+        .into_iter()
+        .map(|(byte, slot)| EntityRecord::new(kind, &vec![byte; kind.key_len()], slot).unwrap())
+        .collect()
+}
+
 /// Every state layer the fixture writes: `(kind, namespace, shard)`, in
 /// inscription order.
 ///
 /// One layer per namespace, so a kind's shards are the ones its spec'd count
 /// allows and its fixture keys reach: both of [`SHARDS`] for `assets`,
-/// `datums`, `scripts` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`,
+/// `datums` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`,
 /// and shard 0 for every single blob. Every state namespace is among them —
 /// which is what `the_golden_state_layers_cover_every_namespace` holds this
 /// to.
@@ -303,7 +321,8 @@ pub fn state(ns: Namespace, shard: u8) -> Vec<StateRecord> {
     let byte = (shard << 4) | (i & 0x0f);
 
     vec![if ns == UTXOS {
-        state::utxo(&TxoRef([byte; 32].into(), 3), &EraCbor(6, vec![0xa0, byte])).unwrap()
+        let value = UtxoValue::new(EraCbor(6, vec![0xa0, byte]), None);
+        state::utxo(&TxoRef([byte; 32].into(), 3), &value).unwrap()
     } else {
         state::entity(
             &EntityKey::from_raw(&state_key(ns, byte)),
@@ -381,13 +400,15 @@ pub fn write_layer(
 
 /// The fixture's kinds, encoded, in inscription order.
 ///
-/// Every log kind and every state kind appears, which is what makes the goldens
-/// freeze every namespace-bearing kind string: the namespace lives in the
-/// layer header now, and nowhere else on the wire. A state kind appears once
+/// Every log kind, every entity kind and every state kind appears, which is
+/// what makes the goldens freeze every namespace- and kind-bearing kind
+/// string: the namespace or kind lives in the layer header, and nowhere else
+/// on the wire. A state kind appears once
 /// per populated shard in each role, dump and tip.
 pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     use dolos_snapshot::layers::{
-        blocks, digests as digests_layer, indexes as indexes_layer, logs,
+        blocks, digests as digests_layer, entities as entities_layer, indexes as indexes_layer,
+        logs,
     };
 
     let mut layers: Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> = vec![
@@ -408,6 +429,14 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
             kind,
             Box::new(epoch_scope()),
             encode_all(&self::logs(ns), |record| logs::encode(ns, record)),
+        ));
+    }
+
+    for (kind, entity) in ENTITY_KINDS {
+        layers.push((
+            kind,
+            Box::new(epoch_scope()),
+            encode_all(&self::entities(entity), entities_layer::encode),
         ));
     }
 

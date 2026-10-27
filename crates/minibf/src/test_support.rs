@@ -19,7 +19,7 @@ use dolos_testing::{
         build_synthetic_blocks, seed_account_stake_logs, seed_epoch_logs, seed_reward_logs,
         SyntheticBlockConfig, SyntheticVectors,
     },
-    toy_domain::ToyDomain,
+    toy_domain::{MemoryStores, ToyDomain, ToyStores},
 };
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
@@ -400,8 +400,8 @@ pub fn stake_address_chain() -> SyntheticBlockConfig {
     }
 }
 
-pub struct TestDomainBuilder {
-    domain: ToyDomain,
+pub struct TestDomainBuilder<B: ToyStores = MemoryStores> {
+    domain: ToyDomain<B>,
     vectors: SyntheticVectors,
 }
 
@@ -411,13 +411,34 @@ impl TestDomainBuilder {
     }
 
     pub fn new_with_synthetic_and_protocol(
-        mut cfg: SyntheticBlockConfig,
+        cfg: SyntheticBlockConfig,
         force_protocol: Option<usize>,
     ) -> Self {
+        Self::new_with_synthetic_and_genesis(cfg, |genesis| {
+            if let Some(protocol) = force_protocol {
+                genesis.force_protocol = Some(protocol);
+            }
+        })
+    }
+
+    /// The synthetic chain over the preview genesis as `adjust` leaves it.
+    pub fn new_with_synthetic_and_genesis(
+        cfg: SyntheticBlockConfig,
+        adjust: impl FnOnce(&mut dolos_core::Genesis),
+    ) -> Self {
+        Self::new_with_synthetic_in(cfg, adjust)
+    }
+}
+
+impl<B: ToyStores> TestDomainBuilder<B> {
+    /// [`TestDomainBuilder::new_with_synthetic_and_genesis`] over a fresh
+    /// set of `B` stores.
+    pub fn new_with_synthetic_in(
+        mut cfg: SyntheticBlockConfig,
+        adjust: impl FnOnce(&mut dolos_core::Genesis),
+    ) -> Self {
         let mut genesis = dolos_cardano::include::preview::load();
-        if let Some(protocol) = force_protocol {
-            genesis.force_protocol = Some(protocol);
-        }
+        adjust(&mut genesis);
         let genesis = Arc::new(genesis);
         let min_slot = {
             let temp = ToyDomain::new_with_genesis_and_config(
@@ -435,11 +456,11 @@ impl TestDomainBuilder {
         }
         let (blocks, vectors, chain_config) = build_synthetic_blocks(cfg);
 
-        let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+        let domain = ToyDomain::<B>::with_backend(genesis, chain_config, None, None);
         domain
             .import_blocks(blocks.clone())
             .expect("failed to import synthetic blocks");
-        let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+        let summary = dolos_cardano::eras::load_era_summary::<ToyDomain<B>>(domain.state())
             .expect("era summary");
         let tip_slot = domain
             .state()
@@ -475,7 +496,7 @@ impl TestDomainBuilder {
         Self { domain, vectors }
     }
 
-    pub fn finish(self) -> (ToyDomain, SyntheticVectors) {
+    pub fn finish(self) -> (ToyDomain<B>, SyntheticVectors) {
         (self.domain, self.vectors)
     }
 }
@@ -514,6 +535,7 @@ impl TestApp {
                 ..Default::default()
             },
             force_protocol: None,
+            genesis_pools: Vec::new(),
         }
     }
 
@@ -854,9 +876,39 @@ async fn ok_body(app: &TestApp, path: &str) -> Vec<u8> {
     bytes
 }
 
+/// A Shelley genesis `staking` section that stakes `pools`, with no
+/// delegation.
+fn genesis_staking(pools: &[[u8; 28]]) -> pallas::interop::hardano::configs::shelley::Staking {
+    let pools: serde_json::Map<String, serde_json::Value> = pools
+        .iter()
+        .map(|operator| {
+            let operator = hex::encode(operator);
+
+            let pool = serde_json::json!({
+                "cost": 0,
+                "margin": 0.0,
+                "pledge": 0,
+                "publicKey": operator,
+                "relays": [],
+                "rewardAccount": {
+                    "credential": { "keyHash": operator },
+                    "network": "Testnet"
+                },
+                "vrf": hex::encode([0x01; 32]),
+            });
+
+            (operator, pool)
+        })
+        .collect();
+
+    serde_json::from_value(serde_json::json!({ "pools": pools, "stake": {} }))
+        .expect("a valid staking section")
+}
+
 pub struct TestAppBuilder {
     cfg: SyntheticBlockConfig,
     force_protocol: Option<usize>,
+    genesis_pools: Vec<[u8; 28]>,
 }
 
 impl TestAppBuilder {
@@ -870,10 +922,28 @@ impl TestAppBuilder {
         self
     }
 
+    /// Stakes `operator` in the Shelley genesis, which registers no pool by
+    /// certificate.
+    pub fn with_genesis_pool(mut self, operator: [u8; 28]) -> Self {
+        self.genesis_pools.push(operator);
+        self
+    }
+
     pub fn build(self) -> TestApp {
+        let force_protocol = self.force_protocol;
+        let genesis_pools = self.genesis_pools;
+
         let (domain, vectors) =
-            TestDomainBuilder::new_with_synthetic_and_protocol(self.cfg, self.force_protocol)
-                .finish();
+            TestDomainBuilder::new_with_synthetic_and_genesis(self.cfg, |genesis| {
+                if let Some(protocol) = force_protocol {
+                    genesis.force_protocol = Some(protocol);
+                }
+
+                if !genesis_pools.is_empty() {
+                    genesis.shelley.staking = Some(genesis_staking(&genesis_pools));
+                }
+            })
+            .finish();
 
         let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
         TestApp::from_domain(domain, vectors, None, minibf)

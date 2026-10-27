@@ -4,22 +4,24 @@ sidebar:
   order: 5
 ---
 
-Dolos keeps a cache of answers it derives from its other stores, so that an expensive read is computed once rather than on every request. The cache is disposable: it is not part of the WAL, the state or the archive, it is left out of snapshots and restores, and deleting it changes no answer the node derives, only how fast the first requests are served. The exception is off-chain metadata, which the node does not derive: a cleared body is fetched again from its host, and is gone if the host no longer serves it.
+Dolos keeps a cache of answers it derives from its other stores, so that an expensive read is computed once rather than on every request. The cache is disposable: it is not part of the WAL, the state or the archive, it is left out of snapshots and restores, and deleting it changes no answer the node derives, only how fast the first requests are served. Its entries are not tied to a chain, though: when the chain under the same `storage.path` changes, as when a devnet is reset, clear the cache before starting the node, or it serves the old chain's answers. The exception is off-chain metadata, which the node does not derive: a cleared body is fetched again from its host, and is gone if the host no longer serves it.
 
 ## What it holds
 
 The cache is split into namespaces, one per use. Each namespace has a format version; an upgrade that changes a namespace's encoding bumps it, and the entries kept under the old version are wiped when the node starts.
 
-| namespace           | validity   | serves                                                                                                        |
-| ------------------- | ---------- | ------------------------------------------------------------------------------------------------------------- |
-| `totals`            | immutable  | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total`           |
-| `network`           | tip-scoped | the `/network` body, for 30 seconds                                                                           |
-| `offchain`          | immutable  | the verified DRep metadata of `/governance/dreps` and `/governance/dreps/{drep_id}/metadata`, by content hash |
-| `offchain-failures` | tip-scoped | failed metadata fetches, for 10 minutes, so a dead host is not asked again on every request                   |
+| namespace            | validity   | serves                                                                                                        |
+| -------------------- | ---------- | ------------------------------------------------------------------------------------------------------------- |
+| `totals`             | immutable  | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total`           |
+| `network`            | tip-scoped | the `/network` body, for 30 seconds                                                                           |
+| `offchain`           | immutable  | the verified DRep metadata of `/governance/dreps` and `/governance/dreps/{drep_id}/metadata`, by content hash |
+| `offchain-failures`  | tip-scoped | failed metadata fetches, for 10 minutes, so a dead host is not asked again on every request                   |
+| `pool-registrations` | immutable  | where each pool first registered, for the order of `/pools` and `/pools/extended`                             |
+| `pool-blocks`        | immutable  | each pool's lifetime blocks, for `blocks_minted` in `/pools/extended` and `/pools/{pool_id}`                  |
 
 A namespace has one of two validity models:
 
-- **Immutable** entries are never stale. An `offchain` body is pinned by its anchor's content hash, which every read checks again. The other immutable entries are built from sealed data only, so they are at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
+- **Immutable** entries are never stale. An `offchain` body is pinned by its anchor's content hash, which every read checks again. The other immutable entries are built from sealed data only, so they are at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. The `pool-registrations` and `pool-blocks` namespaces each hold a single entry that covers every pool, up to the last slot or epoch no rollback can undo, and a read adds what came after. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
 - **Tip-scoped** entries are valid for a while. After that, a `network` entry is served stale while one rebuild replaces it, and an `offchain-failures` entry is ignored, so the next request fetches again. They are kept in memory only.
 
 The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file found corrupt, cut short, or laid out by another release, such as one you rolled back from, is recreated empty; one that fails to open for another reason, such as its permissions, is an error and the node does not start.
@@ -28,13 +30,13 @@ The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writ
 
 | setting                               | default           |
 | ------------------------------------- | ----------------- |
-| `storage.cache.memory_budget_bytes`   | 512 MiB           |
-| `storage.cache.disk_budget_bytes`     | 4 GiB             |
+| `storage.cache.memory_mb`             | `512` (MiB)       |
+| `storage.cache.disk_mb`               | `4096` (MiB)      |
 | `storage.cache.admission.<namespace>` | the namespace's own |
 
 When a tier is full, it evicts the entries with the lowest build cost per byte first, and the least recently used among equals.
 
-An entry is kept only if building it cost at least its namespace's admission threshold, so cheap answers do not crowd out expensive ones. A `totals` entry's cost is the number of per-epoch unit sums its build read, and it is kept from 100,000. Set `[storage.cache.admission]` to change a threshold, for example `totals = 20000` to keep more credentials. See the [`storage.cache`](../configuration/schema#storagecache-section) section for every setting.
+An entry is kept only if building it cost at least its namespace's admission threshold, so cheap answers do not crowd out expensive ones. A `totals` entry's cost is the number of per-epoch unit sums its build read, and it is kept from 100,000. Set `[storage.cache.admission]` to change a threshold, for example `totals = 20000` to keep more credentials. See the [`storage.cache`](../configuration/schema#storagecache) section for every setting.
 
 ## Footprint
 
@@ -48,12 +50,12 @@ These figures size the `totals` namespace on mainnet. They were measured with do
 | `--scan`      | 191     | 539.0 MB    | 1.14 GB    | 92.8 s      | 539.0 MB    |
 | benchmark set | 7       | 233.7 MB    | 671 MB     | 8.0 s       | 233.7 MB    |
 
-- **Entry bytes** are what `dolos cache stats` reports and what `disk_budget_bytes` counts. The median entry is 119 KB; the largest, for the busiest credentials, are 47–88 MB.
+- **Entry bytes** are what `dolos cache stats` reports and what `disk_mb` counts. The median entry is 119 KB; the largest, for the busiest credentials, are 47–88 MB.
 - **The cache file** is larger than its entries: Redb rounds each large value up to a power of two and grows the file by doubling. Files written by `warm` measured 2.1 times their entry bytes for `--scan` and 2.9 times for the benchmark set; written with one durable commit per entry, the same sets measured 1.6 and 4.6 times. A running node commits durably only at shutdown, and until then Redb cannot reuse the pages of what was on disk when it started, so rewriting entries, such as `totals` entries refreshed after a seal, needs room for another copy of that content, and the file grows to make it. The growth levels off there rather than climbing with uptime, and a restart makes the space reusable. Leave room on disk for several times the disk budget. `clear` frees the space for reuse; the file shrinks only when nothing else sits after the freed pages, as when `totals` is the only namespace on disk.
 - **`warm` took** the wall-clock time on an SSD. For `--scan`, the time `warm` prints leaves out its first pass over the sealed address rows to find the candidates, so it printed 14.6 s of the 92.8 s.
-- **The memory tier** column is the tier's own accounting of the entries it held, keys plus values, which is what `memory_budget_bytes` counts. The tier held the whole benchmark set; the `--scan` figure is its entry bytes, which a node holding all of it would count. The process holds more than the tier, for the response buffers its allocator keeps.
+- **The memory tier** column is the tier's own accounting of the entries it held, keys plus values, which is what `memory_mb` counts. The tier held the whole benchmark set; the `--scan` figure is its entry bytes, which a node holding all of it would count. The process holds more than the tier, for the response buffers its allocator keeps.
 
-All of `--scan` fits the 4 GiB default disk budget, and the benchmark set fits the 512 MiB default memory budget. All of `--scan` does not fit the memory budget: it exceeds 512 MiB (536,870,912 bytes) by 2.1 MB. Under the default, a node whose clients read every kept key serves its lowest cost-per-byte entries from the disk tier. To keep the whole namespace in memory, raise `storage.cache.memory_budget_bytes` above 539 MB; the namespace grows with the chain, so leave headroom.
+All of `--scan` fits the 4 GiB default disk budget, and the benchmark set fits the 512 MiB default memory budget. All of `--scan` does not fit the memory budget: it exceeds 512 MiB (536,870,912 bytes) by 2.1 MB. Under the default, a node whose clients read every kept key serves its lowest cost-per-byte entries from the disk tier. To keep the whole namespace in memory, raise `storage.cache.memory_mb` above 514 (539 MB); the namespace grows with the chain, so leave headroom.
 
 ## Commands
 
@@ -89,4 +91,15 @@ The cache records OpenTelemetry metrics under the `dolos-cache` meter:
 
 ## Pruned nodes
 
-The `totals` namespace sums sealed per-epoch stats from the archive, which a node with `sync.max_history` set prunes. On such a node the namespace is off: the totals routes compute every answer without the cache, and `warm` and `verify` refuse it. Entries an earlier, unpruned run left on disk stay there until cleared: `stats` reports the namespace as off with their count, and `clear --namespace totals` or `clear --all` wipes them.
+The `totals` namespace sums sealed per-epoch stats from the archive, which a node with `history.mode = "rolling"` prunes. On such a node the namespace is off: the totals routes compute every answer without the cache, and `warm` and `verify` refuse it. Entries an earlier, unpruned run left on disk stay there until cleared: `stats` reports the namespace as off with their count, and `clear --namespace totals` or `clear --all` wipes them.
+
+The `pool-registrations` and `pool-blocks` namespaces are built from the archive's certificates and per-epoch pool logs, and are off on such a node in the same way. They are off too while `storage.cache.enabled = false`, since an entry that is never kept would be rebuilt for every pool on every request: the pool routes then read the archive for the pools they answer about.
+
+That makes the pool lists slower with the cache off, since `/pools` and `/pools/extended` order every pool by its first registration and read each one from the archive on every request. Measured on preprod, with 557 pools, at commit `7b842a05`:
+
+| route                       | cache on | cache off, warm | cache off, first call |
+| --------------------------- | -------- | --------------- | --------------------- |
+| `/pools?count=100`          | 2.3 ms   | 26.7 ms         | 158 ms                |
+| `/pools/extended?count=100` | 5.32 s   | 5.45 s          | 5.53 s                |
+
+The cost grows with the number of pools, so on mainnet it is several times larger. `/pools/{pool_id}` reads only its own pool and is not affected.

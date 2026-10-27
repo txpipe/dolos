@@ -39,9 +39,11 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::pallas_extras;
-use dolos_core::{async_query::BlockRefMeta, EraCbor, TxHash, TxoIdx, TxoRef};
+use dolos_core::{async_query::BlockRefMeta, TxHash, TxoIdx, TxoRef, UtxoValue};
 
+pub mod accounts;
 pub mod address_stats;
+pub mod assets;
 pub mod blocks;
 pub mod cost_models;
 pub mod direct_json;
@@ -1567,7 +1569,7 @@ pub struct AssetAggregate {
 /// Blockfrost orders account assets by these. The BTreeMap keeps units
 /// sorted, providing the tie-break order for assets sharing a position.
 pub fn aggregate_account_assets(
-    utxos: &HashMap<TxoRef, Arc<EraCbor>>,
+    utxos: &HashMap<TxoRef, Arc<UtxoValue>>,
     block_deps: &HashMap<TxHash, BlockRefMeta>,
 ) -> Result<BTreeMap<String, AssetAggregate>, StatusCode> {
     let mut by_unit: BTreeMap<String, AssetAggregate> = BTreeMap::new();

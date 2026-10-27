@@ -4,8 +4,8 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::proposal_parameters::ProposalParameters;
-use dolos_cardano::model::{ProposalAction, ProposalKey, ProposalState};
-use dolos_core::{Domain, StateStore as _};
+use dolos_cardano::model::{ProposalAction, ProposalKey};
+use dolos_core::Domain;
 use pallas::crypto::hash::Hash;
 
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
     Facade,
 };
 
-use super::is_gov_action;
+use super::{is_gov_action, read_proposal_row};
 
 /// The parameter change proposed by `tx` at action index `idx`.
 ///
@@ -31,11 +31,9 @@ fn read_parameters<D: Domain>(
 ) -> Result<ProposalParameters, Error> {
     let key = ProposalKey::new(tx, idx);
 
-    let state = domain
-        .state()
-        .read_entity_typed::<ProposalState>(&key)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let state = read_proposal_row(&domain.inner, &key)?
+        .ok_or(StatusCode::NOT_FOUND)?
+        .into_state();
 
     // A pre-Conway update proposal is a parameter change too, but db-sync
     // keeps those out of the governance table this endpoint reads.
@@ -95,6 +93,8 @@ mod tests {
         routes::governance::testing::*,
         test_support::{TestApp, TestFault},
     };
+    use dolos_cardano::ProposalState;
+    use dolos_core::StateStore as _;
     use dolos_testing::synthetic::SyntheticBlockConfig;
     use itertools::Itertools;
     use pallas::ledger::primitives::{
@@ -156,41 +156,6 @@ mod tests {
             drep_deposit: Some(99_999_000_000),
             drep_inactivity_period: Some(13),
             minfee_refscript_cost_per_byte: Some(ratio(999, 1)),
-        }
-    }
-
-    fn empty_update() -> ProtocolParamUpdate {
-        ProtocolParamUpdate {
-            minfee_a: None,
-            minfee_b: None,
-            max_block_body_size: None,
-            max_transaction_size: None,
-            max_block_header_size: None,
-            key_deposit: None,
-            pool_deposit: None,
-            maximum_epoch: None,
-            desired_number_of_stake_pools: None,
-            pool_pledge_influence: None,
-            expansion_rate: None,
-            treasury_growth_rate: None,
-            min_pool_cost: None,
-            ada_per_utxo_byte: None,
-            cost_models_for_script_languages: None,
-            execution_costs: None,
-            max_tx_ex_units: None,
-            max_block_ex_units: None,
-            max_value_size: None,
-            collateral_percentage: None,
-            max_collateral_inputs: None,
-            pool_voting_thresholds: None,
-            drep_voting_thresholds: None,
-            min_committee_size: None,
-            committee_term_limit: None,
-            governance_action_validity_period: None,
-            governance_action_deposit: None,
-            drep_deposit: None,
-            drep_inactivity_period: None,
-            minfee_refscript_cost_per_byte: None,
         }
     }
 
@@ -436,6 +401,13 @@ mod tests {
             ProtocolParamUpdate {
                 cost_models_for_script_languages: Some(CostModels {
                     plutus_v1: Some(vec![]),
+                    ..empty_models.clone()
+                }),
+                ..empty_update()
+            },
+            ProtocolParamUpdate {
+                cost_models_for_script_languages: Some(CostModels {
+                    unknown: [(7, vec![1, -2])].into(),
                     ..empty_models
                 }),
                 ..empty_update()
@@ -456,9 +428,25 @@ mod tests {
             serde_json::json!({}),
             serde_json::json!({}),
             serde_json::json!({"PlutusV1": []}),
+            serde_json::json!({}),
         ];
 
+        let mut before_move = vec![];
         for (idx, cost_models) in expected.into_iter().enumerate() {
+            let state = app
+                .facade()
+                .state()
+                .read_entity_typed::<ProposalState>(&ProposalKey::new(tx, idx as u32))
+                .unwrap()
+                .unwrap();
+            let ProposalAction::ParamChange(params) = state.action else {
+                panic!("The proposal action was not a parameter change.");
+            };
+            assert_eq!(params.cost_models_unknown().is_some(), idx != 0);
+            if (1..4).contains(&idx) {
+                assert_eq!(params.cost_models_unknown(), Some(Default::default()));
+            }
+
             let id = bech32_gov_action(&tx, idx as u32).unwrap();
             let paths = [
                 format!("/governance/proposals/{tx}/{idx}/parameters"),
@@ -477,9 +465,22 @@ mod tests {
                 if idx == 2 {
                     assert_eq!(value["parameters"]["max_block_size"], 90_015);
                 }
+                before_move.push((path, (status, bytes.clone())));
                 responses.push(bytes);
             }
             assert_eq!(responses[0], responses[1]);
+        }
+
+        enact_proposals(&app.facade().inner, true);
+        assert!(app
+            .facade()
+            .state()
+            .iter_entities_typed::<ProposalState>(None)
+            .unwrap()
+            .next()
+            .is_none());
+        for (path, expected) in before_move {
+            assert_eq!(app.get_bytes(&path).await, expected, "{path}");
         }
     }
 
