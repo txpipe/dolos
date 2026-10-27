@@ -678,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn pool_failures_expire_and_a_different_url_retries_immediately() {
-        let ttl = Duration::from_millis(100);
+        let ttl = Duration::from_millis(500);
         let cache = memory_cache();
         cache
             .register(CacheNamespace::tip_scoped(
@@ -699,9 +699,13 @@ mod tests {
         assert_eq!(error.unwrap(), failure);
 
         let location = MetadataLocation::from(&metadata);
-        while cached_body(&cache, &location, POOL_CACHE).await.is_none() {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while cached_body(&cache, &location, POOL_CACHE).await.is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the failure was never cached");
         let (missing, error) =
             load_pool_metadata(&cache, &metadata, serving_pool(POOL_BODY, &calls)).await;
         assert!(missing.is_none());
@@ -721,9 +725,13 @@ mod tests {
             async move { Err(Some(failure)) }
         })
         .await;
-        while cached_body(&cache, &location, POOL_CACHE).await.is_none() {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while cached_body(&cache, &location, POOL_CACHE).await.is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the failure was never cached");
         let mut moved = metadata.clone();
         moved.url.push_str("?mirror");
         let (fetched, error) =
