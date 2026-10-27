@@ -728,7 +728,8 @@ pub struct Verified {
 }
 
 /// Rebuilds a random sample of `sample` entries per namespace without the
-/// cache, each up to its own watermark, and compares them by digest.
+/// cache, each up to its own watermark, and compares what they answer by
+/// digest.
 pub fn verify<D, T>(
     domain: &D,
     namespaces: &Namespaces<D>,
@@ -763,7 +764,10 @@ where
                 Some(watermark) => match cache_use.build(domain, &key, watermark) {
                     Err(error) => Some(format!("rebuilding failed: {error}")),
                     Ok(rebuilt) => {
-                        let (stored, rebuilt) = (digest(&entry.value), digest(&rebuilt.value));
+                        let (stored, rebuilt) = (
+                            digest(cache_use.compared(&entry.value)),
+                            digest(cache_use.compared(&rebuilt.value)),
+                        );
 
                         (stored != rebuilt).then(|| {
                             format!("stored digest {stored}, rebuilt {rebuilt} at watermark {watermark}")
@@ -842,7 +846,7 @@ mod tests {
     use dolos_core::{
         config::{CacheConfig, HistoryConfig, HistoryWindow},
         import::ImportExt as _,
-        CacheEntry,
+        ArchiveStore as _, CacheEntry,
     };
     use dolos_testing::{
         synthetic::{build_synthetic_blocks, SyntheticBlockConfig, SyntheticVectors},
@@ -1494,6 +1498,91 @@ mod tests {
         domain.import_blocks(blocks).unwrap();
 
         domain
+    }
+
+    /// Every subject the chain's blocks mint, in the order they first mint it.
+    fn minted_subjects(domain: &ToyDomain) -> Vec<Vec<u8>> {
+        use pallas::ledger::traverse::MultiEraBlock;
+
+        let mut out: Vec<Vec<u8>> = vec![];
+
+        for (_, body) in domain.archive().get_range(None, None).unwrap() {
+            let block = MultiEraBlock::decode(&body).unwrap();
+
+            for tx in block.txs() {
+                for policy in tx.mints() {
+                    for asset in policy.assets() {
+                        let subject = [policy.policy().as_slice(), asset.name()].concat();
+
+                        if !out.contains(&subject) {
+                            out.push(subject);
+                        }
+                    }
+                }
+            }
+        }
+
+        out
+    }
+
+    /// The candidates of `warm --scan` are exactly the assets the entity index
+    /// holds a first mint for, in mint order: every asset a sealed epoch first
+    /// minted, and none of the unsealed ones.
+    #[test]
+    fn the_scan_takes_every_indexed_asset() {
+        use dolos_cardano::{indexes::entities, AssetKey};
+
+        let dir = tempfile::tempdir().unwrap();
+        let domain = minting(dir.path());
+
+        let minted = minted_subjects(&domain);
+        let keys: Vec<AssetKey> = minted.iter().map(|x| AssetKey::of(x)).collect();
+        let keys: Vec<&[u8]> = keys.iter().map(|x| x.0.as_slice()).collect();
+        let slots = domain
+            .archive()
+            .entity_slots(entities::ASSET, &keys)
+            .unwrap();
+
+        let indexed: Vec<Vec<u8>> = minted
+            .iter()
+            .zip(slots)
+            .filter(|(_, slot)| slot.is_some())
+            .map(|(subject, _)| subject.clone())
+            .collect();
+
+        assert_eq!(indexed.len(), 8, "of {} minted", minted.len());
+
+        let sealed = dolos_cardano::periods::assets::sealed_subjects(&domain).unwrap();
+        assert_eq!(sealed, indexed);
+    }
+
+    /// An archive whose seals listed an asset without indexing it, as seals
+    /// before the asset index did, fails `warm --scan` once, naming the
+    /// rebuild that indexes it, rather than once per key.
+    #[tokio::test]
+    async fn warm_scan_refuses_an_archive_without_the_asset_index() {
+        use dolos_cardano::{model::FirstMintChunk, periods::ChunkRow as _};
+        use dolos_core::ArchiveWriter as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let domain = minting(dir.path());
+        let namespaces = register(&domain).unwrap();
+
+        let unindexed = [[0xee; 28].as_slice(), b"OLD"].concat();
+        let writer = domain.archive().start_writer().unwrap();
+        writer
+            .write_log_typed(1, &0u32, &FirstMintChunk::new(1, vec![unindexed]))
+            .unwrap();
+        writer.commit().unwrap();
+
+        let error = warm(&domain, &namespaces, ASSETS.name, &Source::Scan)
+            .await
+            .unwrap_err();
+
+        let error = error.to_string();
+        assert!(error.contains("1 of the 9 assets"), "{error}");
+        assert!(error.contains("rebuild-state --rewrite-logs"), "{error}");
+        assert_eq!(domain.cache().disk().entries(ASSETS.name).unwrap(), 0);
     }
 
     /// `warm --scan` fills `assets` whole: one entry per asset a sealed epoch

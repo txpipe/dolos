@@ -113,11 +113,20 @@ impl FaultyToyDomain {
             .lock()
             .expect("entity slots hook") = Some(Box::new(hook));
     }
+
+    /// Runs `hook` once, after the next [`ArchiveStore::read_logs`] read
+    /// answers and before the caller gets the rows: a seal that lands between
+    /// a read of sealed rows and the reader's next read.
+    pub fn after_read_logs(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.archive.read_logs_hook.lock().expect("read logs hook") = Some(Box::new(hook));
+    }
 }
 
 type TagPageHook = Box<dyn FnMut(&[TagEntry], &MemoryStateStore) + Send>;
 
 type EntitySlotsHook = Box<dyn FnOnce() + Send>;
+
+type ReadLogsHook = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone)]
 pub struct FaultyStateStore {
@@ -348,6 +357,7 @@ pub struct FaultyArchiveStore {
     fault: TestFault,
     commits: Arc<AtomicU32>,
     entity_slots_hook: Arc<Mutex<Option<EntitySlotsHook>>>,
+    read_logs_hook: Arc<Mutex<Option<ReadLogsHook>>>,
 }
 
 impl FaultyArchiveStore {
@@ -361,6 +371,7 @@ impl FaultyArchiveStore {
             fault,
             commits,
             entity_slots_hook: Default::default(),
+            read_logs_hook: Default::default(),
         }
     }
 
@@ -402,7 +413,15 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.read_logs(ns, keys)
+        let rows = self.inner.read_logs(ns, keys)?;
+
+        let hook = self.read_logs_hook.lock().expect("read logs hook").take();
+
+        if let Some(hook) = hook {
+            hook();
+        }
+
+        Ok(rows)
     }
 
     fn iter_logs(

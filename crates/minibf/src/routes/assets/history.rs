@@ -52,7 +52,7 @@ where
 
     let pagination = Pagination::try_from(params)?;
 
-    let (subject, initial_slot) = crate::mapping::assets::resolve_asset(&domain, &subject)?;
+    let (subject, initial_slot) = crate::mapping::assets::resolve_asset(&domain, &subject).await?;
 
     let chain = domain.get_chain_summary()?;
     let (first_epoch, _) = chain.slot_epoch(initial_slot);

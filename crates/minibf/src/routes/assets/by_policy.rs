@@ -10,7 +10,7 @@ use pallas::crypto::hash::Hash;
 
 use crate::{
     error::Error,
-    mapping::assets::asset_summaries,
+    mapping::assets::asset_quantities,
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -64,12 +64,12 @@ where
     // Blockfrost returns 404 when the policy has no mint operations.
     let subjects = subjects.ok_or(StatusCode::NOT_FOUND)?;
 
-    let items = asset_summaries(&domain, subjects)
+    let items = asset_quantities(&domain, subjects)
         .await?
         .into_iter()
-        .map(|(subject, summary)| AssetPolicyInner {
+        .map(|(subject, quantity)| AssetPolicyInner {
             asset: hex::encode(&subject),
-            quantity: summary.fold.quantity().to_string(),
+            quantity: quantity.to_string(),
         })
         .collect();
 

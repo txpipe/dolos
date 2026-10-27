@@ -36,7 +36,7 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
-    let (asset, _) = resolve_asset(&domain, &subject)?;
+    let (asset, _) = resolve_asset(&domain, &subject).await?;
 
     let addresses = asset_holdings(&domain, asset, ASSET_ADDRESS_CHUNK).await?;
 

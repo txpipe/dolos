@@ -11,7 +11,7 @@ use dolos_core::{Domain, DomainError};
 
 use crate::{
     error::Error,
-    mapping::assets::asset_summaries,
+    mapping::assets::asset_quantities,
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -52,12 +52,12 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let items = asset_summaries(&domain, subjects)
+    let items = asset_quantities(&domain, subjects)
         .await?
         .into_iter()
-        .map(|(subject, summary)| AssetsInner {
+        .map(|(subject, quantity)| AssetsInner {
             asset: hex::encode(&subject),
-            quantity: summary.fold.quantity().to_string(),
+            quantity: quantity.to_string(),
         })
         .collect();
 
@@ -330,6 +330,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A sealed list that names an asset the entity index holds no first mint
+    /// for, as one sealed before the index existed does, leaves that asset
+    /// out of its page instead of failing it.
+    #[tokio::test]
+    async fn assets_all_leaves_out_an_unindexed_asset() {
+        use dolos_cardano::periods::ChunkRow as _;
+        use dolos_core::ArchiveWriter as _;
+
+        let unindexed = [[0xee; 28].as_slice(), b"OLD"].concat();
+
+        let mut domain = None;
+        let app = TestApp::new_with_cfg_and_setup(first_mint_chain(), |inner, _| {
+            // the oldest sealed epoch's list, which a page in mint order starts at
+            let (slot, _, head) = inner
+                .archive()
+                .iter_logs_typed::<FirstMintChunk>(None)
+                .unwrap()
+                .next()
+                .expect("an epoch sealed")
+                .unwrap();
+
+            let mut subjects: Vec<Vec<u8>> = head.subjects.into_iter().map(Vec::from).collect();
+            subjects.push(unindexed.clone());
+
+            let writer = inner.archive().start_writer().unwrap();
+            let chunk = FirstMintChunk::new(subjects.len() as u64, subjects);
+            writer.write_log_typed(slot, &0u32, &chunk).unwrap();
+            writer.commit().unwrap();
+
+            domain = Some(inner.clone());
+        });
+        let domain = domain.expect("setup ran");
+
+        let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+        let start = chain.epoch_start(chain.first_mary_epoch().unwrap());
+        let firsts = scan::first_mint_txs(&domain);
+        let expected = scan::first_mints(&domain, &firsts, start, Order::Asc, 99)
+            .into_iter()
+            .take(99)
+            .map(hex::encode)
+            .collect_vec();
+
+        let page = get_assets(&app, "?order=asc&count=100").await;
+        let got = page.into_iter().map(|x| x.asset).collect_vec();
+
+        assert_eq!(got, expected);
+        assert!(!got.contains(&hex::encode(&unindexed)));
     }
 
     /// Pages as deep as the chain goes are served: there is no scan to bound.

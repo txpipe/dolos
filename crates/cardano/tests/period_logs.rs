@@ -930,12 +930,16 @@ fn subject(policy: [u8; 28], name: &str) -> Vec<u8> {
     [policy.as_slice(), name.as_bytes()].concat()
 }
 
+/// The blocks a read walks for a label-100 token's metadata tx: minibf's
+/// default `max_scan_items`.
+const WALK: u64 = 3_000;
+
 /// What `/assets/{asset}` reads of `subject` with the tip at `tip`.
 async fn read_asset(domain: &ToyDomain, tip: u64, subject: &[u8]) -> Option<Facts> {
     let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
     let (epoch, _) = chain.slot_epoch(tip);
 
-    assets::asset_summary(domain, &chain, epoch, subject.to_vec())
+    assets::asset_summary(domain, &chain, epoch, subject.to_vec(), WALK)
         .await
         .unwrap()
         .map(|x| Facts {
@@ -1194,6 +1198,18 @@ fn reference_block(
     minted: Option<i64>,
     datum: bool,
 ) -> (dolos_core::RawBlock, Hash<32>) {
+    reference_block_with(slot, subject, input, minted, datum, vec![])
+}
+
+/// [`reference_block`] whose tx carries `metadata`.
+fn reference_block_with(
+    slot: u64,
+    subject: &[u8],
+    input: Option<Hash<32>>,
+    minted: Option<i64>,
+    datum: bool,
+    metadata: Vec<(u64, alonzo::Metadatum)>,
+) -> (dolos_core::RawBlock, Hash<32>) {
     use pallas::{
         codec::utils::{Bytes, KeepRaw, NonZeroInt, PositiveCoin, Set},
         ledger::primitives::conway::{
@@ -1237,6 +1253,13 @@ fn reference_block(
         .into_iter()
         .collect();
 
+    let aux = (!metadata.is_empty()).then(|| {
+        alonzo::AuxiliaryData::ShelleyMa(alonzo::ShelleyMaAuxiliaryData {
+            transaction_metadata: metadata.into_iter().collect(),
+            auxiliary_scripts: None,
+        })
+    });
+
     let body = TransactionBody {
         inputs: Set::from(inputs),
         outputs: vec![TransactionOutput::PostAlonzo(KeepRaw::from(output))],
@@ -1244,7 +1267,9 @@ fn reference_block(
         ttl: None,
         certificates: None,
         withdrawals: None,
-        auxiliary_data_hash: None,
+        auxiliary_data_hash: aux
+            .as_ref()
+            .map(pallas::ledger::traverse::ComputeHash::compute_hash),
         validity_interval_start: None,
         mint,
         script_data_hash: None,
@@ -1265,7 +1290,7 @@ fn reference_block(
         slot,
         None,
         vec![(body, true)],
-        None,
+        aux,
     );
 
     let tx = MultiEraBlock::decode(&raw).unwrap().txs()[0].hash();
@@ -1326,4 +1351,433 @@ async fn a_label_100_token_takes_its_newest_datum_output() {
     assert_eq!(read.fold.metadata_tx, Some(update_tx));
     assert_ne!(read.fold.metadata_tx, Some(move_tx));
     assert_eq!((read.quantity, read.initial_tx), (1, Some(mint_tx)));
+}
+
+/// Label 100's prefix, then `REF`, under `policy`.
+fn reference_subject(policy: [u8; 28]) -> Vec<u8> {
+    [policy.as_slice(), &[0x00, 0x06, 0x43, 0xb0], b"REF"].concat()
+}
+
+/// A label-100 token updated twice in the tail answers the newer datum: the
+/// walk goes newest first.
+#[tokio::test]
+async fn a_label_100_token_updated_twice_takes_the_newer_datum() {
+    let genesis = genesis_with(500, 5, 9);
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 14,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        ..Default::default()
+    });
+
+    let (mut raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    assert!(assets::register_assets_cache(&domain).unwrap());
+
+    let reference = reference_subject([0x72; 28]);
+
+    let (minted, mint_tx) = reference_block(260, &reference, None, Some(1), true);
+    raw.insert(1, minted);
+    domain.import_blocks(raw).unwrap();
+
+    let (first, first_tx) = reference_block(3510, &reference, Some(mint_tx), None, true);
+    let (second, second_tx) = reference_block(3520, &reference, Some(first_tx), None, true);
+    let tip = domain.import_blocks(vec![first, second]).unwrap();
+
+    let read = read_asset(&domain, tip, &reference).await;
+    assert_read_as_kept(&read, state_kept(&domain, &reference), "updated twice");
+    assert_eq!(read.unwrap().fold.metadata_tx, Some(second_tx));
+}
+
+/// A label-100 token's newest metadata tx can be a mint whose CIP-25 metadata
+/// names it, with no datum on its output: the walk takes that tx, as the roll
+/// set `AssetState.metadata_tx` from it.
+#[tokio::test]
+async fn a_label_100_token_takes_a_newer_cip25_mint() {
+    use alonzo::Metadatum;
+    use pallas::codec::utils::KeyValuePairs;
+
+    let genesis = genesis_with(500, 5, 9);
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 14,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        ..Default::default()
+    });
+
+    let (mut raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    assert!(assets::register_assets_cache(&domain).unwrap());
+
+    let policy = [0x73; 28];
+    let reference = reference_subject(policy);
+
+    let (minted, mint_tx) = reference_block(260, &reference, None, Some(1), true);
+    raw.insert(1, minted);
+    domain.import_blocks(raw).unwrap();
+
+    // label 721 naming the token by its bytes, under its policy's bytes
+    let nft = Metadatum::Map(KeyValuePairs::from(vec![(
+        Metadatum::Text("name".into()),
+        Metadatum::Text("x".into()),
+    )]));
+    let assets = Metadatum::Map(KeyValuePairs::from(vec![(
+        Metadatum::Bytes(reference[28..].to_vec().into()),
+        nft,
+    )]));
+    let label_721 = Metadatum::Map(KeyValuePairs::from(vec![(
+        Metadatum::Bytes(policy.to_vec().into()),
+        assets,
+    )]));
+
+    let (named, named_tx) = reference_block_with(
+        3510,
+        &reference,
+        Some(mint_tx),
+        Some(1),
+        false,
+        vec![(721, label_721)],
+    );
+    let tip = domain.import_blocks(vec![named]).unwrap();
+
+    let read = read_asset(&domain, tip, &reference).await;
+    assert_read_as_kept(&read, state_kept(&domain, &reference), "a CIP-25 mint");
+
+    let read = read.unwrap();
+    assert_eq!(read.fold.metadata_tx, Some(named_tx));
+    assert_eq!((read.quantity, read.mint_tx_count), (2, 2));
+}
+
+/// The `assets` watermark is the newest epoch no rollback can reach: with
+/// 500-slot epochs and `k` = 5, two epochs behind the tip's.
+#[test]
+fn the_assets_watermark_trails_the_tip_by_two_epochs() {
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 2,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        ..Default::default()
+    });
+
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain =
+        ToyDomain::new_with_genesis_and_config(genesis_with(500, 5, 9), chain_config, None, None);
+    domain.import_blocks(raw).unwrap();
+
+    let chain = chain_of(&domain);
+
+    assert_eq!(assets::assets_watermark(&domain, &chain, 1), None);
+    assert_eq!(assets::assets_watermark(&domain, &chain, 5), Some(3));
+    assert_eq!(assets::assets_watermark(&domain, &chain, 7), Some(5));
+}
+
+/// A seal that lands between `first_mint_slot`'s first index read and its
+/// staged-row read moves the first mint out of the staged rows and into the
+/// index; the second index read finds it there.
+#[test]
+fn first_mint_slot_finds_an_asset_sealed_during_the_lookup() {
+    let cfg = SyntheticBlockConfig {
+        block_count: 2,
+        txs_per_block: 1,
+        ..Default::default()
+    };
+
+    let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+    for block in blocks {
+        domain.roll_forward(block).unwrap();
+    }
+
+    let (key, row) = domain
+        .state()
+        .iter_entities_typed::<FirstMintSet>(None)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+
+    let subject = row.subject();
+    let faulty = FaultyToyDomain::new(domain.clone(), TestFault::None);
+
+    let sealer = domain.clone();
+    faulty.after_entity_slots(move || {
+        let writer = sealer.archive().start_writer().unwrap();
+        writer
+            .write_entity(entities::ASSET, key.member.0.as_slice(), row.slot)
+            .unwrap();
+        writer.commit().unwrap();
+
+        let writer = sealer.state().start_writer().unwrap();
+        writer
+            .save_entity_typed::<FirstMintSet>(&key, None)
+            .unwrap();
+        writer.commit().unwrap();
+    });
+
+    let chain = chain_of(&domain);
+    let tip = domain.state().read_cursor().unwrap().unwrap().slot();
+    let (tip, _) = chain.slot_epoch(tip);
+
+    let found = assets::first_mint_slot(&faulty, &chain, tip, &subject).unwrap();
+
+    assert_eq!(found, Some(row.slot));
+    assert!(staged(&domain)
+        .iter()
+        .all(|(_, staged, _)| *staged != subject));
+}
+
+/// A seal that lands between an entry's staged read and its sealed read moves
+/// an epoch's mints from the first to the second. The build reads the staged
+/// rows first, so it counts that epoch from them, as a build after the seal
+/// counts it from the chunks.
+#[test]
+fn an_entry_built_across_a_seal_counts_every_epoch() {
+    const P: [u8; 28] = [0x63; 28];
+
+    let blocks = 14;
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: blocks,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        mints_by_block: (0..blocks)
+            .map(|_| vec![vec![(P, "X".to_string(), 1)]])
+            .collect(),
+        ..Default::default()
+    });
+
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain =
+        ToyDomain::new_with_genesis_and_config(genesis_with(500, 5, 9), chain_config, None, None);
+
+    // up to epoch 5, which sealed epochs 0 to 3 and left 4 staged
+    let tip = domain.import_blocks(raw[..11].to_vec()).unwrap();
+    let chain = chain_of(&domain);
+    assert_eq!(chain.slot_epoch(tip).0, 5);
+
+    let in_epoch_4 = |domain: &ToyDomain| staged_mints(domain).iter().any(|(e, ..)| *e == 4);
+    assert!(in_epoch_4(&domain));
+
+    let x = subject(P, "X");
+    let faulty = FaultyToyDomain::new(domain.clone(), TestFault::None);
+
+    // the next boundary seals epoch 4 right after the build's first sealed read
+    let sealer = domain.clone();
+    let rest = raw[11..].to_vec();
+    faulty.after_read_logs(move || {
+        sealer.import_blocks(rest).unwrap();
+    });
+
+    let built = assets::build_asset_entry(&faulty, &chain, &x, 0, 4).unwrap();
+    assert!(!in_epoch_4(&domain), "epoch 4 not sealed by the hook");
+
+    let sealed = assets::build_asset_entry(&domain, &chain, &x, 0, 4).unwrap();
+
+    let built = AssetEntry::decode(&built.value).unwrap();
+    let sealed = AssetEntry::decode(&sealed.value).unwrap();
+
+    // one mint at slot 250, then two per 500-slot epoch up to epoch 4
+    assert_eq!(sealed.fold.mint_tx_count, 9);
+    assert_eq!(built.fold, sealed.fold);
+}
+
+/// An entry that started at another epoch than the asset's first mint, as one
+/// a read filled before a rebuild corrected the first mint, is not served:
+/// the read folds from the first mint, and the entry is built again from
+/// there.
+#[tokio::test]
+async fn an_entry_from_another_first_mint_is_built_again() {
+    const P: [u8; 28] = [0x64; 28];
+
+    let blocks = 14;
+    let mints_by_block = (0..blocks)
+        .map(|i| match i {
+            0 => vec![vec![(P, "X".to_string(), 5)]],
+            6 => vec![vec![(P, "X".to_string(), 3)]],
+            _ => vec![vec![(P, "FILL".to_string(), 1)]],
+        })
+        .collect();
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: blocks,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        mints_by_block,
+        ..Default::default()
+    });
+
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain =
+        ToyDomain::new_with_genesis_and_config(genesis_with(500, 5, 9), chain_config, None, None);
+    assert!(assets::register_assets_cache(&domain).unwrap());
+
+    let tip = domain.import_blocks(raw).unwrap();
+    let chain = chain_of(&domain);
+    let watermark = assets::assets_watermark(&domain, &chain, chain.slot_epoch(tip).0).unwrap();
+
+    // the re-mint's epoch, 3, taken for the first mint's
+    let x = subject(P, "X");
+    let stale = assets::build_asset_entry(&domain, &chain, &x, 3, watermark).unwrap();
+    domain
+        .cache()
+        .get_or_fill(ASSETS.name, &x, move || {
+            Ok::<_, dolos_core::ChainError>(stale)
+        })
+        .await
+        .unwrap();
+
+    let entry = cached_entry(&domain, &x).unwrap();
+    assert_eq!((entry.start, entry.fold.quantity()), (3, 3));
+
+    let read = read_asset(&domain, tip, &x).await;
+    assert_read_as_kept(&read, state_kept(&domain, &x), "past a stale entry");
+    assert_eq!(read.unwrap().quantity, 8);
+
+    for _ in 0..100 {
+        if cached_entry(&domain, &x).unwrap().start == 0 {
+            break;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let entry = cached_entry(&domain, &x).unwrap();
+    assert_eq!((entry.start, entry.watermark), (0, watermark));
+
+    let warm = read_asset(&domain, tip, &x).await;
+    assert_read_as_kept(&warm, state_kept(&domain, &x), "built again");
+}
+
+/// A read walks at most its limit of a label-100 token's tagged blocks past
+/// the cached epochs, newest first. One that finds no metadata tx within it
+/// keeps the one the cached epochs found; the lists read the supply alone.
+#[tokio::test]
+async fn a_bounded_walk_keeps_the_cached_metadata_tx() {
+    let genesis = genesis_with(500, 5, 9);
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 14,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        ..Default::default()
+    });
+
+    let (mut raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    assert!(assets::register_assets_cache(&domain).unwrap());
+
+    let reference = reference_subject([0x74; 28]);
+
+    let (minted, mint_tx) = reference_block(260, &reference, None, Some(1), true);
+    raw.insert(1, minted);
+    domain.import_blocks(raw).unwrap();
+
+    // in the tail: a new datum, then a move without one
+    let (updated, update_tx) = reference_block(3510, &reference, Some(mint_tx), None, true);
+    let (moved, _) = reference_block(3520, &reference, Some(update_tx), None, false);
+    let tip = domain.import_blocks(vec![updated, moved]).unwrap();
+
+    let chain = chain_of(&domain);
+    let (epoch, _) = chain.slot_epoch(tip);
+
+    let read = |walk| {
+        let (domain, chain, reference) = (domain.clone(), chain.clone(), reference.clone());
+
+        async move {
+            assets::asset_summary(&domain, &chain, epoch, reference, walk)
+                .await
+                .unwrap()
+                .unwrap()
+                .fold
+        }
+    };
+
+    // the move alone: the cached epochs' mint
+    assert_eq!(read(1).await.metadata_tx, Some(mint_tx));
+
+    // the move, then the update
+    assert_eq!(read(2).await.metadata_tx, Some(update_tx));
+    assert_eq!(read(WALK).await.metadata_tx, Some(update_tx));
+
+    let quantity = assets::asset_quantity(&domain, &chain, epoch, reference.clone())
+        .await
+        .unwrap();
+    assert_eq!(quantity, Some(1));
+}
+
+/// An entry extended across a label-100 update answers what one built afresh
+/// answers, though it counts the blocks of both walks in its cost: `verify`
+/// compares the entries without it.
+#[tokio::test]
+async fn an_entry_extended_across_a_label_100_update_answers_as_built_afresh() {
+    let genesis = genesis_with(500, 5, 9);
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 14,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        ..Default::default()
+    });
+
+    let (mut raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    assert!(assets::register_assets_cache(&domain).unwrap());
+
+    let reference = reference_subject([0x75; 28]);
+
+    let (minted, mint_tx) = reference_block(260, &reference, None, Some(1), true);
+    raw.insert(1, minted);
+
+    // up to slot 2250, epoch 4: the entry fills at watermark 2
+    let early = domain.import_blocks(raw[..10].to_vec()).unwrap();
+    read_asset(&domain, early, &reference).await.unwrap();
+    assert_eq!(cached_entry(&domain, &reference).unwrap().watermark, 2);
+
+    // updated in epoch 4, which the next watermark covers
+    let (updated, update_tx) = reference_block(2260, &reference, Some(mint_tx), None, true);
+    let mut rest = vec![updated];
+    rest.extend(raw[10..].iter().cloned());
+    let tip = domain.import_blocks(rest).unwrap();
+
+    let chain = chain_of(&domain);
+    let watermark = assets::assets_watermark(&domain, &chain, chain.slot_epoch(tip).0).unwrap();
+    assert!(watermark >= 4);
+
+    let read = read_asset(&domain, tip, &reference).await.unwrap();
+    assert_eq!(read.fold.metadata_tx, Some(update_tx));
+
+    for _ in 0..100 {
+        if cached_entry(&domain, &reference).unwrap().watermark == watermark {
+            break;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let stored = domain.cache().get(ASSETS.name, &reference).unwrap();
+    let afresh = assets::build_asset_entry(&domain, &chain, &reference, 0, watermark).unwrap();
+
+    let (extended, built) = (
+        AssetEntry::decode(&stored).unwrap(),
+        AssetEntry::decode(&afresh.value).unwrap(),
+    );
+    assert_eq!(extended.watermark, watermark);
+    assert_eq!(extended.fold.metadata_tx, Some(update_tx));
+
+    // the mint block the first walk read is counted once more
+    assert_eq!(extended.cost, built.cost + 1);
+    assert_eq!(
+        AssetEntry::without_cost(&stored),
+        AssetEntry::without_cost(&afresh.value)
+    );
 }

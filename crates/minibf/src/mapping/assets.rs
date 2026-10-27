@@ -20,6 +20,7 @@ use dolos_cardano::{
     ChainSummary,
 };
 use dolos_core::{BlockSlot, Domain, EraCbor};
+use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use pallas::{
     codec::minicbor,
@@ -413,6 +414,7 @@ impl AssetModelBuilder {
                 &self.chain,
                 self.tip,
                 ref_asset_bytes.clone(),
+                domain.config.max_scan_items(),
             )
             .await
             .map_err(log_500)?;
@@ -621,7 +623,7 @@ fn log_500(error: impl std::fmt::Debug) -> StatusCode {
 
 /// Decodes the subject and finds the slot of its first mint. Blockfrost
 /// returns 404 for a valid but unknown asset.
-pub(crate) fn resolve_asset<D>(
+pub(crate) async fn resolve_asset<D>(
     domain: &Facade<D>,
     subject: &str,
 ) -> Result<(Vec<u8>, BlockSlot), Error>
@@ -633,34 +635,67 @@ where
     let chain = domain.get_chain_summary()?;
     let (tip, _) = chain.slot_epoch(domain.get_tip_slot()?);
 
-    let slot = assets::first_mint_slot(&domain.inner, &chain, tip, &subject)
+    let slot = domain
+        .query()
+        .run_blocking({
+            let subject = subject.clone();
+            move |domain| Ok(assets::first_mint_slot(&domain, &chain, tip, &subject)?)
+        })
+        .await
         .map_err(log_500)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok((subject, slot))
 }
 
-/// The summary of each subject, in order: the supply, mint count and first
-/// and metadata txs that the asset routes report.
-pub(crate) async fn asset_summaries<D>(
+/// The asset reads a list page runs at once.
+const LIST_CONCURRENCY: usize = 16;
+
+/// The supply of each listed subject, in order.
+///
+/// A subject with no first mint is left out with a warning: only a sealed
+/// list that predates the archive's asset index names one, and its node needs
+/// `dolos doctor rebuild-state --rewrite-logs`.
+pub(crate) async fn asset_quantities<D>(
     domain: &Facade<D>,
     subjects: Vec<Vec<u8>>,
-) -> Result<Vec<(Vec<u8>, AssetSummary)>, Error>
+) -> Result<Vec<(Vec<u8>, i128)>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let chain = domain.get_chain_summary()?;
     let (tip, _) = chain.slot_epoch(domain.get_tip_slot()?);
 
-    let mut out = Vec::with_capacity(subjects.len());
+    let read: Vec<_> = futures_util::stream::iter(subjects)
+        .map(|subject| {
+            let chain = &chain;
 
-    for subject in subjects {
-        let summary = assets::asset_summary(&domain.inner, &chain, tip, subject.clone())
-            .await
-            .map_err(log_500)?
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            async move {
+                let quantity = assets::asset_quantity(&domain.inner, chain, tip, subject.clone())
+                    .await
+                    .map_err(log_500)?;
 
-        out.push((subject, summary));
+                Ok::<_, Error>((subject, quantity))
+            }
+        })
+        .buffered(LIST_CONCURRENCY)
+        .try_collect()
+        .await?;
+
+    let mut out = Vec::with_capacity(read.len());
+
+    for (subject, quantity) in read {
+        let Some(quantity) = quantity else {
+            tracing::warn!(
+                asset = hex::encode(&subject),
+                "a sealed first-mint list names an asset with no first mint in the entity \
+                 index; run `dolos doctor rebuild-state --rewrite-logs` to index it"
+            );
+
+            continue;
+        };
+
+        out.push((subject, quantity));
     }
 
     Ok(out)
@@ -680,7 +715,9 @@ where
     let chain = domain.get_chain_summary()?;
     let (tip, _) = chain.slot_epoch(domain.get_tip_slot()?);
 
-    let summary = assets::asset_summary(&domain.inner, &chain, tip, subject.clone())
+    let walk = domain.config.max_scan_items();
+
+    let summary = assets::asset_summary(&domain.inner, &chain, tip, subject.clone(), walk)
         .await
         .map_err(log_500)?
         .ok_or(StatusCode::NOT_FOUND)?;

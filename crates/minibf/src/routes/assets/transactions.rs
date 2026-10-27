@@ -29,7 +29,7 @@ where
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
-    let (subject, _) = resolve_asset(&domain, &subject)?;
+    let (subject, _) = resolve_asset(&domain, &subject).await?;
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let stream = domain.query().blocks_by_asset_stream(

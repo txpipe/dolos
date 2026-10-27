@@ -8,8 +8,8 @@ use dolos_cardano::{
     eras::load_era_summary,
     periods::{
         assets::{
-            assets_watermark, build_asset_entry, first_mint_slot, sealed_subjects, AssetEntry,
-            ASSETS,
+            assets_watermark, build_asset_entry, count_unindexed, first_mint_slot, sealed_subjects,
+            AssetEntry, ASSETS,
         },
         stats::{
             build_totals_entry, totals_candidates, totals_watermark, TotalsEntry, TotalsKey, TOTALS,
@@ -43,6 +43,11 @@ pub trait CacheUse<D: Domain>: Send + Sync + 'static {
 
     /// The watermark of a stored entry.
     fn watermark(&self, value: &[u8]) -> Option<Watermark>;
+
+    /// The part of a stored entry `verify` compares: what it answers.
+    fn compared<'a>(&self, value: &'a [u8]) -> &'a [u8] {
+        value
+    }
 
     /// The keys worth warming.
     fn candidates(&self, domain: &D) -> Result<Vec<Vec<u8>>, FillError>;
@@ -151,8 +156,13 @@ impl<D: Domain> CacheUse<D> for Assets {
     fn build(&self, domain: &D, key: &[u8], watermark: Watermark) -> Result<CacheEntry, FillError> {
         let tip = self.tip(domain)?.ok_or("the node holds no block")?;
 
-        let first = first_mint_slot(domain, &self.chain, tip, key)?
-            .ok_or_else(|| format!("asset {} was never minted", hex::encode(key)))?;
+        let first = first_mint_slot(domain, &self.chain, tip, key)?.ok_or_else(|| {
+            format!(
+                "asset {} has no first mint: it was never minted, or the archive's seals \
+                 predate its asset index (run `dolos doctor rebuild-state --rewrite-logs`)",
+                hex::encode(key)
+            )
+        })?;
 
         let (start, _) = self.chain.slot_epoch(first);
 
@@ -169,7 +179,30 @@ impl<D: Domain> CacheUse<D> for Assets {
         AssetEntry::watermark_of(value)
     }
 
+    /// Without the cost: an entry extended across a label-100 update records
+    /// more blocks than one built afresh.
+    fn compared<'a>(&self, value: &'a [u8]) -> &'a [u8] {
+        AssetEntry::without_cost(value).unwrap_or(value)
+    }
+
+    /// Every asset a sealed epoch first minted. An archive whose seals
+    /// predate the asset index lists assets it holds no first mint for, and
+    /// every build of those would fail: refuse it once, naming the rebuild
+    /// that indexes them.
     fn candidates(&self, domain: &D) -> Result<Vec<Vec<u8>>, FillError> {
-        Ok(sealed_subjects(domain)?)
+        let subjects = sealed_subjects(domain)?;
+        let unindexed = count_unindexed(domain, &subjects)?;
+
+        if unindexed > 0 {
+            return Err(format!(
+                "{unindexed} of the {} assets the sealed epochs list have no first mint in the \
+                 archive's entity index, which seals before this version did not write; run \
+                 `dolos doctor rebuild-state --rewrite-logs` first",
+                subjects.len()
+            )
+            .into());
+        }
+
+        Ok(subjects)
     }
 }
