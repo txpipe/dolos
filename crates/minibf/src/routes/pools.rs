@@ -589,7 +589,13 @@ fn newest_cert_slot<D: Domain>(
         .map_err(log_and_500("failed to read the pool certs index"))
 }
 
-/// The first final row of `key` at or after `from`, decoding only its rows.
+/// The log rows the point read passes over before it leaves the pool to a
+/// scan. They are the rows of pools moved between the certificate and the
+/// final row, at most `eMax` + 2 epochs of moves: a few dozen on mainnet.
+const FORWARD_READ_ROWS: usize = 256;
+
+/// The first final row of `key` among the [`FORWARD_READ_ROWS`] rows at or
+/// after `from`, decoding only its rows.
 fn first_final_row_from<D: Domain>(
     domain: &D,
     key: &PoolKey,
@@ -602,7 +608,7 @@ fn first_final_row_from<D: Domain>(
         .iter_logs(PoolState::NS, KeyRange::slots(from..BlockSlot::MAX))
         .map_err(log_and_500("failed to iterate the pools log"))?;
 
-    for row in rows {
+    for row in rows.take(FORWARD_READ_ROWS) {
         let (log_key, value) = row.map_err(log_and_500("failed to read the pools log"))?;
 
         if log_key.entity() == wanted.as_slice() {
@@ -616,18 +622,8 @@ fn first_final_row_from<D: Domain>(
     Ok(None)
 }
 
-/// A pool's row: the state row, then its final row in the log.
-///
-/// ESTART commits a final row before it deletes the state row, so a state
-/// miss read first finds a moved pool in the log. A moved pool's newest
-/// certificate is the retirement that moved it, and its final row is the
-/// pool's first one keyed after that certificate's slot, at the retiring
-/// epoch + 2 ([`PoolState::final_row_epoch`]). So the log is read forward
-/// from that slot to the pool's first row, with no block read; only the rows
-/// of pools moved in between are passed over, by key. Where that misses, an
-/// archive pruned of the certificate for one, the log is scanned for the
-/// newest row.
-pub(crate) fn read_pool_row<D: Domain>(
+/// A pool's row from state, or from the log by its newest certificate.
+fn point_read_pool_row<D: Domain>(
     domain: &D,
     pool: PoolHash,
 ) -> Result<Option<PoolState>, StatusCode> {
@@ -642,21 +638,51 @@ pub(crate) fn read_pool_row<D: Domain>(
         return Ok(live);
     }
 
-    if let Some(slot) = newest_cert_slot(domain, &pool)? {
-        if let Some(row) = first_final_row_from(domain, &key, slot)? {
-            return Ok(Some(row));
-        }
+    match newest_cert_slot(domain, &pool)? {
+        Some(slot) => first_final_row_from(domain, &key, slot),
+        None => Ok(None),
+    }
+}
+
+/// A pool's row: the state row, then its final row in the log.
+///
+/// ESTART commits a final row before it deletes the state row, so a state
+/// miss read first finds a moved pool in the log. A moved pool's newest
+/// certificate is the retirement that moved it, and its final row is the
+/// pool's first one keyed after that certificate's slot, at the retiring
+/// epoch + 2 ([`PoolState::final_row_epoch`]). So the log is read forward
+/// from that slot to the pool's first row, with no block read; only the rows
+/// of pools moved in between are passed over, by key. Where that misses, an
+/// archive pruned of the certificate for one or a pool that never registered,
+/// the log is scanned for the newest row, on the blocking pool under the query
+/// limiter.
+pub(crate) async fn read_pool_row<D>(
+    domain: &Facade<D>,
+    pool: PoolHash,
+) -> Result<Option<PoolState>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    if let Some(row) = point_read_pool_row(&domain.inner, pool)? {
+        return Ok(Some(row));
     }
 
-    let logged = newest_final_row::<PoolState>(domain.archive(), &key)
-        .map_err(log_and_500("failed to read the pools log"))?;
+    domain
+        .blocking(move |domain| {
+            let logged = newest_final_row::<PoolState>(domain.archive(), &PoolKey(pool))
+                .map_err(log_and_500("failed to read the pools log"))?;
 
-    Ok(logged.map(|(_, row)| row))
+            Ok(logged.map(|(_, row)| row))
+        })
+        .await
 }
 
 /// Whether the pool ever registered: it has a row in state or in the log.
-pub(crate) fn pool_exists<D: Domain>(domain: &D, pool: PoolHash) -> Result<bool, StatusCode> {
-    Ok(read_pool_row(domain, pool)?.is_some())
+pub(crate) async fn pool_exists<D>(domain: &Facade<D>, pool: PoolHash) -> Result<bool, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    Ok(read_pool_row(domain, pool).await?.is_some())
 }
 
 /// The newest final row of every pool in the log, in no particular order.
@@ -690,7 +716,9 @@ where
     let Some(hash) = parse_pool_id_unbounded(&id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    let pool = read_pool_row(&domain.inner, hash)?.ok_or(StatusCode::NOT_FOUND)?;
+    let pool = read_pool_row(&domain, hash)
+        .await?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let snapshot = pool
         .snapshot
@@ -1423,7 +1451,9 @@ where
     let Some(hash) = parse_pool_id_bounded(&id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    let pool = read_pool_row(&domain.inner, hash)?.ok_or(StatusCode::NOT_FOUND)?;
+    let pool = read_pool_row(&domain, hash)
+        .await?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let onchain = pool
         .snapshot
@@ -1446,7 +1476,9 @@ where
     let Some(hash) = parse_pool_id_bounded(&id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    let pool = read_pool_row(&domain.inner, hash)?.ok_or(StatusCode::NOT_FOUND)?;
+    let pool = read_pool_row(&domain, hash)
+        .await?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let relays = pool
         .snapshot
@@ -1632,7 +1664,7 @@ where
     // state or in the final-row log, covers every pool that registered on
     // chain, and a pool must register before it can mint. The index acts as a
     // second proof of existence, for any issuer that has no entity.
-    if !minted_any && !pool_exists(&domain.inner, pool)? {
+    if !minted_any && !pool_exists(&domain, pool).await? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1699,7 +1731,7 @@ where
     let Some(hash) = parse_pool_id_bounded(&id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    if !pool_exists(&domain.inner, hash)? {
+    if !pool_exists(&domain, hash).await? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1802,7 +1834,7 @@ where
     let Some(hash) = hash else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    if !pool_exists(&domain.inner, hash)? {
+    if !pool_exists(&domain, hash).await? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1854,7 +1886,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
 
-    if !pool_exists(&domain.inner, pool)? {
+    if !pool_exists(&domain, pool).await? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1919,7 +1951,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
 
-    if !pool_exists(&domain.inner, pool)? {
+    if !pool_exists(&domain, pool).await? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -4529,8 +4561,9 @@ mod retired_pool_phases {
     use axum::http::StatusCode;
     use blockfrost_openapi::models::{pool::Pool, pool_list_retire_inner::PoolListRetireInner};
     use dolos_cardano::{
-        final_rows::FinalRows, pallas_extras::MultiEraPoolRegistration, CalidusRegistration,
-        PoolHash, PoolKey, PoolRegistration, PoolState,
+        final_rows::FinalRows, indexes::CardanoArchiveIndexExt as _,
+        pallas_extras::MultiEraPoolRegistration, CalidusRegistration, PoolHash, PoolKey,
+        PoolRegistration, PoolState,
     };
     use dolos_core::{
         ArchiveStore as _, ArchiveWriter as _, BlockSlot, Domain as _, EntityDelta as _,
@@ -4763,6 +4796,150 @@ mod retired_pool_phases {
 
         let pool: Pool = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(pool.declared_pledge, "0");
+    }
+
+    /// Write `row` to the pools log under `key` at `slot`.
+    fn write_log_row(domain: &ToyDomain, slot: BlockSlot, key: &PoolKey, row: &PoolState) {
+        let writer = domain.archive().start_writer().unwrap();
+        writer.write_log_typed(slot, key, row).unwrap();
+        writer.commit().unwrap();
+    }
+
+    /// The slots of the pool's certificates, oldest first.
+    fn cert_slots(domain: &ToyDomain, pool: PoolHash) -> Vec<BlockSlot> {
+        domain
+            .archive()
+            .slots_by_pool_certs(pool.as_slice(), 0, BlockSlot::MAX)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// `row` with a pledge the served pool must not show.
+    fn with_pledge(row: &PoolState, pledge: u64) -> PoolState {
+        let mut row = row.clone();
+        row.snapshot.unwrap_live_mut().params.pledge = pledge;
+        row
+    }
+
+    async fn served_pledge(app: &TestApp) -> String {
+        let (status, bytes) = app
+            .get_bytes(&format!("/pools/{}", app.vectors().pool_id))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let pool: Pool = serde_json::from_slice(&bytes).unwrap();
+        pool.declared_pledge
+    }
+
+    /// The forward read takes the pool's own row: another pool's row at the
+    /// same slot, which sorts first, is passed over.
+    #[tokio::test]
+    async fn the_point_read_passes_over_another_pools_row() {
+        let app = retired_pool_app(2, |domain, pool, row| {
+            move_to_log(domain, pool, &row, final_row_slot(domain));
+
+            let other = PoolKey(PoolHash::from([0x10; 28]));
+            assert!(other.0 < pool);
+            write_log_row(
+                domain,
+                final_row_slot(domain),
+                &other,
+                &with_pledge(&row, 999),
+            );
+        });
+
+        assert_eq!(served_pledge(&app).await, "0");
+    }
+
+    /// Moved twice: the forward read starts at the newest certificate, past
+    /// the older final row, which sits between the two certificates.
+    #[tokio::test]
+    async fn the_point_read_serves_the_newer_of_two_final_rows() {
+        let app = retired_pool_app(2, |domain, pool, row| {
+            let certs = cert_slots(domain, pool);
+            assert!(certs.len() >= 2, "{certs:?}");
+            assert!(certs[0] + 1 < certs[certs.len() - 1]);
+
+            write_log_row(
+                domain,
+                certs[0] + 1,
+                &PoolKey(pool),
+                &with_pledge(&row, 111),
+            );
+            move_to_log(domain, pool, &row, final_row_slot(domain));
+        });
+
+        assert_eq!(served_pledge(&app).await, "0");
+    }
+
+    /// More rows of other pools than the forward read passes over sit between
+    /// the certificate and the final row: the scan still finds it.
+    #[tokio::test]
+    async fn a_row_past_the_forward_read_is_found_by_a_scan() {
+        let app = retired_pool_app(2, |domain, pool, row| {
+            let from = *cert_slots(domain, pool).last().unwrap();
+            let decoy = with_pledge(&row, 999);
+
+            for i in 0..=super::FORWARD_READ_ROWS {
+                let other = PoolKey(PoolHash::from([0x10; 28]));
+                write_log_row(domain, from + 1 + i as BlockSlot, &other, &decoy);
+            }
+
+            let past = from + 2 + super::FORWARD_READ_ROWS as BlockSlot;
+            move_to_log(domain, pool, &row, past);
+        });
+
+        assert_eq!(served_pledge(&app).await, "0");
+    }
+
+    /// A pool that never registered answers 404 on every pool route, after
+    /// the scan of the log finds nothing.
+    #[tokio::test]
+    async fn a_pool_that_never_registered_is_not_found() {
+        let app = moved_app();
+        let unknown = bech32_pool(PoolHash::from([0x33; 28])).unwrap();
+
+        for path in [
+            format!("/pools/{unknown}"),
+            format!("/pools/{unknown}/metadata"),
+            format!("/pools/{unknown}/relays"),
+            format!("/pools/{unknown}/history"),
+            format!("/pools/{unknown}/delegators"),
+            format!("/pools/{unknown}/updates"),
+            format!("/pools/{unknown}/blocks"),
+            format!("/pools/{unknown}/votes"),
+            format!("/epochs/1/stakes/{unknown}"),
+            format!("/epochs/1/blocks/{unknown}"),
+        ] {
+            let (status, _) = app.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    /// `/pools/retired` lists a pool moved twice once, at its newer final
+    /// row's retiring epoch.
+    #[tokio::test]
+    async fn pools_retired_lists_the_newer_of_two_final_rows() {
+        let app = retired_pool_app(2, |domain, pool, row| {
+            let mut older = row.clone();
+            older.retiring_epoch = Some(RETIRING - 1);
+
+            write_log_row(domain, 0, &PoolKey(pool), &older);
+            move_to_log(domain, pool, &row, final_row_slot(domain));
+        });
+
+        let (status, bytes) = app.get_bytes("/pools/retired").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let retired: Vec<PoolListRetireInner> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            retired,
+            vec![PoolListRetireInner {
+                pool_id: app.vectors().pool_id.clone(),
+                epoch: RETIRING as i32,
+            }]
+        );
     }
 
     /// A row keyed before the newest certificate, where the forward read

@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use dolos_cardano::{
     estart::EstartWorkUnit, final_rows::newest_final_row, pallas_extras::MultiEraPoolRegistration,
-    CalidusRegistration, CardanoWorkUnit, EpochState, PoolCalidusUpdate, PoolDeRegistration,
-    PoolHash, PoolKey, PoolRegistration, PoolState, PoolWrapUp,
+    roll::pools::CalidusFloors, CalidusRegistration, CardanoWorkUnit, EpochState,
+    PoolCalidusUpdate, PoolDeRegistration, PoolHash, PoolKey, PoolRegistration, PoolState,
+    PoolWrapUp,
 };
 use dolos_core::{
     sync::execute_work_unit, ArchiveStore as _, BlockSlot, Domain, EntityDelta, Genesis,
@@ -267,4 +268,52 @@ fn a_cancelled_retirement_keeps_the_pool_in_state() {
     let row = in_state(&domain).expect("the pool stays");
     assert!(!row.snapshot.live().unwrap().is_retired);
     assert!(logged(&domain).is_empty());
+}
+
+fn floors(domain: &ToyDomain, first_slot: BlockSlot) -> CalidusFloors {
+    CalidusFloors::load(
+        domain.state(),
+        domain.archive(),
+        &[vec![operator()]],
+        first_slot,
+    )
+    .unwrap()
+}
+
+/// A batch that registers the moved pool again reads its nonce floor from the
+/// newest final row keyed below the batch, with no key. Once the pool is back
+/// in state, or for a batch before the move, as a re-roll over an archive
+/// that already holds the move reads it, there is none.
+#[test]
+fn a_moved_pool_registering_again_reads_its_nonce_floor_from_the_log() {
+    let domain = ToyDomain::new_with_genesis(devnet(), None, None);
+
+    register(&domain, 1_000);
+    apply(&domain, PoolCalidusUpdate::new(operator(), calidus()));
+    assert!(floors(&domain, epoch_start(&domain, 1))
+        .floor(&operator())
+        .is_none());
+
+    retire_at(&domain, 2);
+
+    while in_state(&domain).is_some() {
+        open_next_epoch(&domain);
+    }
+
+    let keyed_at = epoch_start(&domain, 4);
+    let expected = CalidusRegistration {
+        pub_key: None,
+        ..calidus()
+    };
+
+    let batch = epoch_start(&domain, epoch(&domain)) + 1;
+    assert_eq!(floors(&domain, batch).floor(&operator()), Some(&expected));
+    assert_eq!(
+        floors(&domain, keyed_at + 1).floor(&operator()),
+        Some(&expected)
+    );
+    assert_eq!(floors(&domain, keyed_at).floor(&operator()), None);
+
+    register(&domain, 2_000);
+    assert_eq!(floors(&domain, batch).floor(&operator()), None);
 }

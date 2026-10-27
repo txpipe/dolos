@@ -36,7 +36,7 @@ where
     let Some(operator) = parse_pool_id_bounded(&pool_id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    if !pool_exists(&domain.inner, operator)? {
+    if !pool_exists(&domain, operator).await? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 

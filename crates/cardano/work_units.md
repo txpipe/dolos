@@ -91,6 +91,7 @@ The rotation is not idempotent (rotating twice double-rolls), so a resumed bound
     - `MintedBlocksInc:35`
     - `PoolRegistration:46`
     - `PoolDeRegistration:68,77`
+    - `PoolCalidusUpdate:217,244` (the second seeds the nonce floor of a moved pool registering again, read ahead of the crawl by `CalidusFloors::load`)
   - **DReps** (`roll/dreps.rs`):
     - `DRepRegistration:74`
     - `DRepUnRegistration:83`

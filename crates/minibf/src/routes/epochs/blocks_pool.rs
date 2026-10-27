@@ -156,7 +156,7 @@ where
 
     // Blockfrost 404s a pool db-sync never saw. A pool registers before it
     // mints, so a block found here proves it as well as a `PoolState` row does.
-    if !minted_here && !pool_exists(&domain.inner, hash)? {
+    if !minted_here && !pool_exists(&domain, hash).await? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
