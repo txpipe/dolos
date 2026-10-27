@@ -18,59 +18,93 @@ use crate::mapping::{
     offchain_hash_mismatch_error, pool_fetch_error, pool_offchain_body, PoolOffchainMetadata,
 };
 
-/// The maximum concurrent fetches for the DRep and the proposal metadata
-/// caches each. An anchor body can reach 3 MB, so the bound also caps memory.
+// The fetches themselves, with their public-address gate, redirect limit and
+// size caps, are the ones the single-item routes run: `anchor_offchain_body`
+// for DRep and proposal anchors, with its `ipfs://` gateways, and
+// `pool_offchain_body` for pools. This module only keeps what they return,
+// since a list page asks for up to a hundred of them at a time.
+
+/// How many DRep anchor fetches the whole process runs at a time, whichever
+/// requests asked for them, and as many again for proposal anchors. A page
+/// answers by its deadline and leaves the fetches it started running, so
+/// without this bound pages served back to back could stack outbound
+/// connections well past what any one page opens. An anchor body can reach
+/// 3 MB, so the bound also caps what fetches hold in memory. Cache hits never
+/// wait on it.
 pub const MAX_CONCURRENT_FETCHES: usize = 16;
 
-/// The maximum pending fetches for the DRep and the proposal metadata caches
-/// each, including those running.
+/// How many DRep anchor fetches the whole process keeps under way, those
+/// waiting to run included, and as many again for proposal anchors. A fetch
+/// outlives the page that started it, so without this bound pages served back
+/// to back, each missing on other anchors, would pile up detached fetches
+/// faster than [`MAX_CONCURRENT_FETCHES`] drains them. A miss past it starts
+/// no detached fetch, and its caller decides what it gets instead
+/// ([`OnOverload`]); a miss on an anchor already under way still joins that
+/// fetch.
 pub const MAX_PENDING_LOADS: usize = 4 * MAX_CONCURRENT_FETCHES;
 
-/// The maximum concurrent fetches for the pool metadata cache. A pool body is
-/// at most 512 bytes, so the bound is on open connections alone, and a cold
-/// page of 64 rows misses no fetch slot.
+/// How many pool metadata fetches the whole process runs at a time, whichever
+/// requests asked for them: [`MAX_CONCURRENT_FETCHES`] for pools. A pool body
+/// is at most 512 bytes, so the bound is on open connections alone, and it is
+/// set high enough that a cold `/pools/extended` page of 64 misses starts them
+/// all at once. Cache hits never wait on it.
 pub const MAX_CONCURRENT_POOL_FETCHES: usize = 64;
 
-/// The maximum pending fetches for the pool metadata cache, including those
-/// running. A fetch takes at most five seconds, so a request admitted past
-/// one round of running fetches still gets a slot within five seconds, and
-/// a single-pool request within its deadline.
+/// How many pool metadata fetches the whole process keeps under way, those
+/// waiting to run included: [`MAX_PENDING_LOADS`] for pools. A pool fetch
+/// lasts at most five seconds, so at twice the slots a fetch admitted behind
+/// one round of running fetches still gets a slot within five seconds, and a
+/// single-pool request answers within [`POOL_REQUEST_DEADLINE`].
 pub const MAX_PENDING_POOL_LOADS: usize = 2 * MAX_CONCURRENT_POOL_FETCHES;
 
-/// How long a failed fetch answers in place of a new one. It keeps a dead
-/// host from costing a fetch timeout on every request, and stays short enough
-/// that a host back online shows its metadata soon.
+/// A failed fetch is answered from the cache for this long, so a dead host
+/// costs one timeout per window instead of one per page render.
 const FAILURE_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// How long a single-pool request waits for its metadata, the wait for a
-/// fetch slot included. Past the pending limit the fetch runs in the request
-/// and stops at the deadline, so nothing is kept for the next request.
+/// How long `/pools/{pool_id}/metadata` and `/txs/{hash}/pool_updates` wait
+/// for a pool's metadata, the wait for a fetch slot included. A fetch still
+/// running at the deadline keeps going and fills the cache for the next
+/// request, unless it ran within the request past [`MAX_PENDING_POOL_LOADS`]:
+/// that one stops with the request.
 const POOL_REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 
-/// Verified DRep bodies, keyed by content hash, in memory and on disk.
+/// Verified DRep bodies, keyed by the content hash of their anchor. The hash
+/// pins the content, so a body is immutable input and is kept in both tiers;
+/// every read checks it against the hash again.
+///
+/// Every body is kept, whatever its fetch cost: a host can stop serving it,
+/// so a body a threshold turned away may not come back. An entry costs the
+/// time its fetch took, in milliseconds.
 pub const OFFCHAIN: CacheNamespace = CacheNamespace::immutable("offchain", 1)
     .with_fill_limits(MAX_CONCURRENT_FETCHES, MAX_PENDING_LOADS);
 
-/// Failed DRep fetches, keyed by content hash and URL, in memory only.
+/// Failed DRep fetches, keyed by the content hash and url of their anchor, in
+/// memory only.
 pub const OFFCHAIN_FAILURES: CacheNamespace =
     CacheNamespace::tip_scoped("offchain-failures", 1, FAILURE_TTL);
 
-/// Verified proposal bodies, keyed by content hash, in memory and on disk.
+/// Verified proposal bodies, keyed by the content hash of their anchor, kept
+/// and checked as [`OFFCHAIN`] keeps DRep bodies. A namespace of their own
+/// gives proposals their own fetch slots, so a DRep page never holds them up.
 pub const PROPOSAL_OFFCHAIN: CacheNamespace = CacheNamespace::immutable("proposal-offchain", 1)
     .with_fill_limits(MAX_CONCURRENT_FETCHES, MAX_PENDING_LOADS);
 
-/// Failed proposal fetches, keyed by content hash and URL, in memory only.
+/// Failed proposal fetches, keyed by the content hash and url of their anchor,
+/// in memory only.
 pub const PROPOSAL_OFFCHAIN_FAILURES: CacheNamespace =
     CacheNamespace::tip_scoped("proposal-offchain-failures", 1, FAILURE_TTL);
 
-/// Verified pool bodies, keyed by content hash, in memory and on disk.
+/// Verified pool bodies, keyed by the content hash the pool's registration
+/// advertises, kept and checked as [`OFFCHAIN`] keeps DRep bodies.
 pub const POOL_OFFCHAIN: CacheNamespace = CacheNamespace::immutable("pool-offchain", 1)
     .with_fill_limits(MAX_CONCURRENT_POOL_FETCHES, MAX_PENDING_POOL_LOADS);
 
-/// Failed pool fetches, keyed by content hash and URL, in memory only.
+/// Failed pool fetches, keyed by the advertised content hash and url, in
+/// memory only.
 pub const POOL_OFFCHAIN_FAILURES: CacheNamespace =
     CacheNamespace::tip_scoped("pool-offchain-failures", 1, FAILURE_TTL);
 
+/// The namespace pair one kind of metadata keeps: its bodies and its failures.
 #[derive(Clone, Copy)]
 struct MetadataCache {
     bodies: &'static str,
@@ -92,6 +126,8 @@ const POOL_CACHE: MetadataCache = MetadataCache {
     failures: POOL_OFFCHAIN_FAILURES.name,
 };
 
+/// Where a body is fetched from and the hash it must match, whichever kind of
+/// metadata advertised them.
 #[derive(Clone)]
 struct MetadataLocation {
     url: String,
@@ -126,9 +162,13 @@ impl From<&PoolMetadata> for MetadataLocation {
     }
 }
 
+/// Where earlier versions kept verified bodies, under the storage path.
 const LEGACY_DIR: &str = "offchain";
 
-/// Registers the pool, DRep and proposal metadata cache namespaces.
+/// Registers the namespaces this module keeps. Without a kind's bodies
+/// namespace its metadata is fetched on every request, without the cache;
+/// without its failures namespace a failing url is fetched again on every
+/// request.
 pub fn register<C: CacheStore>(cache: &C) {
     for namespace in [
         OFFCHAIN,
@@ -144,7 +184,8 @@ pub fn register<C: CacheStore>(cache: &C) {
     }
 }
 
-/// Removes the directory earlier versions kept verified bodies in.
+/// Removes the directory earlier versions kept verified bodies in. The cache
+/// holds them now, and the directory is disposable.
 pub fn remove_legacy_dir(storage_path: &Path) {
     let dir = storage_path.join(LEGACY_DIR);
 
@@ -159,15 +200,22 @@ pub fn remove_legacy_dir(storage_path: &Path) {
     }
 }
 
-/// What a miss gets while the pending fetch limit is reached.
+/// What a miss gets while its kind's pending limit of fetches is already
+/// under way.
 #[derive(Debug, Clone, Copy)]
 pub enum OnOverload {
-    /// Return the anchor without metadata.
+    /// Its row alone, unfetched, the way a list row past its page deadline
+    /// goes out: a page shows what it has rather than wait on a backlog.
     Unfetched,
-    /// Fetch within the caller's request, under the concurrent fetch limit.
+    /// The fetch all the same, run within the caller's own request rather
+    /// than detached, so it lasts no longer than the request does: an
+    /// endpoint that serves one item owes its client the fetch or its error.
     Inline,
 }
 
+/// A failed fetch, as a cache fill reports it: the url it failed at, since a
+/// request at another url for the same hash can join it, and the error, which
+/// a pool fetch leaves out for the failures Blockfrost reports none for.
 #[derive(Debug)]
 struct FetchFailed {
     url: String,
@@ -185,6 +233,7 @@ impl std::fmt::Display for FetchFailed {
 
 impl std::error::Error for FetchFailed {}
 
+/// What a load found for a location, before each kind renders it.
 enum MetadataBody {
     Verified(Bytes),
     Failed(Option<DrepsInnerMetadataError>),
@@ -242,6 +291,8 @@ fn anchor_metadata(anchor: &Anchor, body: MetadataBody) -> DrepsInnerMetadata {
                 out.json_metadata = Some(metadata.json);
                 out.bytes = Some(metadata.bytes);
             }
+            // the spec keeps `json_metadata` and `bytes` null on failed
+            // validation and reports the failure through `error`
             Err(error) => out.error = Some(Box::new(error)),
         },
         MetadataBody::Failed(error) => out.error = error.map(Box::new),
@@ -251,6 +302,8 @@ fn anchor_metadata(anchor: &Anchor, body: MetadataBody) -> DrepsInnerMetadata {
     out
 }
 
+/// What the cache holds for `location`: its body, else a fresh failure. A
+/// body that no longer matches its hash is removed. Reads the disk tier.
 fn cached<C: CacheStore>(
     cache: &C,
     location: &MetadataLocation,
@@ -285,7 +338,9 @@ async fn cached_body<C: CacheStore>(
         .flatten()
 }
 
-/// Returns cached DRep metadata without a network request.
+/// The metadata of `anchor` if the cache holds it already. It never goes to
+/// the network, so a page answers these rows without spending a fetch slot on
+/// them.
 pub async fn cached_drep_metadata<C: CacheStore>(
     cache: &C,
     anchor: &Anchor,
@@ -295,7 +350,9 @@ pub async fn cached_drep_metadata<C: CacheStore>(
         .map(|body| anchor_metadata(anchor, body))
 }
 
-/// Returns DRep metadata from the cache, or fetches and caches its body.
+/// The metadata of `anchor`, as both `/governance/dreps` and
+/// `/governance/dreps/{drep_id}/metadata` serve it: from the cache, else
+/// fetched and kept there.
 pub async fn fetch_drep_metadata<C: CacheStore>(
     cache: &C,
     ipfs_gateways: &[String],
@@ -305,10 +362,13 @@ pub async fn fetch_drep_metadata<C: CacheStore>(
     fetch_anchor_metadata(cache, DREP_CACHE, ipfs_gateways, anchor, on_overload).await
 }
 
-/// Returns proposal metadata from the cache, or fetches and caches its body,
-/// within the time its fetch can take, the wait for a fetch slot included: an
-/// `ipfs://` anchor tries each gateway in turn. Past the pending limit the
-/// fetch runs in the request and stops at the deadline.
+/// The metadata of a proposal's anchor, as both `/governance/proposals`
+/// metadata routes serve it: from the cache, else fetched and kept there,
+/// within the time the fetch can take ([`anchor_fetch_budget`]), since an
+/// `ipfs://` anchor tries each gateway in turn. The wait for a fetch slot
+/// counts against it. A fetch still running at the deadline keeps going for
+/// the next request, unless it ran within the request past
+/// [`MAX_PENDING_LOADS`]: that one stops with the request.
 pub async fn fetch_proposal_metadata<C: CacheStore>(
     cache: &C,
     ipfs_gateways: &[String],
@@ -380,7 +440,9 @@ fn pool_metadata_of(body: MetadataBody) -> PoolMetadataLoad {
     }
 }
 
-/// Returns cached pool metadata and its error without a network request.
+/// The metadata of a pool, and the error of its last failed fetch, if the
+/// cache holds them already. It never goes to the network, so a page answers
+/// these rows without spending a fetch slot on them.
 pub async fn cached_pool_metadata<C: CacheStore>(
     cache: &C,
     metadata: &PoolMetadata,
@@ -390,8 +452,10 @@ pub async fn cached_pool_metadata<C: CacheStore>(
         .map(pool_metadata_of)
 }
 
-/// Returns pool metadata and its error for a single-pool request, from the
-/// cache or a fetch, within [`POOL_REQUEST_DEADLINE`].
+/// The metadata of a pool and the error of its last failed fetch, as
+/// `/pools/{pool_id}/metadata` and `/txs/{hash}/pool_updates` serve them:
+/// from the cache, else fetched and kept there, within
+/// [`POOL_REQUEST_DEADLINE`].
 pub async fn fetch_pool_metadata<C: CacheStore>(
     cache: &C,
     metadata: &PoolMetadata,
@@ -406,8 +470,9 @@ pub async fn fetch_pool_metadata<C: CacheStore>(
     .await
 }
 
-/// Returns pool metadata and its error for a list row, from the cache or a
-/// fetch. A miss past the pending fetch limit returns no metadata.
+/// The metadata of a pool and the error of its last failed fetch, as a
+/// `/pools/extended` row shows them: from the cache, else fetched and kept
+/// there. A miss past [`MAX_PENDING_POOL_LOADS`] goes out without metadata.
 pub async fn fetch_listed_pool_metadata<C: CacheStore>(
     cache: &C,
     metadata: &PoolMetadata,
@@ -486,19 +551,9 @@ where
 
     let filled = match shared_fill(cache, location, namespaces, on_overload, &fetch).await {
         None => return MetadataBody::Unfetched,
-        // a namespace that failed to register, which `register` warned of:
-        // fetch without the cache
+        // a namespace that failed to register, which `register` warned of
         Some(Err(CacheError::UnknownNamespace(_))) => {
-            tracing::debug!(
-                namespace = namespaces.bodies,
-                url = %location.url,
-                "metadata cache namespace not registered, fetching without the cache"
-            );
-
-            return match fill_body(cache.clone(), location.clone(), namespaces, fetch()).await {
-                Ok(entry) => MetadataBody::Verified(entry.value),
-                Err(failed) => MetadataBody::Failed(failed.error),
-            };
+            return uncached(cache, location, namespaces, fetch()).await
         }
         Some(filled) => filled,
     };
@@ -520,14 +575,35 @@ where
 
     match filled {
         Ok(body) if location.holds_hash(&body) => MetadataBody::Verified(body),
+        // the next read drops it
         Ok(_) => MetadataBody::Unfetched,
         Err(error) => match error.downcast_fill::<FetchFailed>() {
             Some(failed) => MetadataBody::Failed(failed.error.clone()),
+            // a fill that panicked or was dropped, or a cache that cannot run
+            // one
             None => {
-                tracing::warn!(url = %location.url, %error, "off-chain metadata not loaded");
-                MetadataBody::Unfetched
+                tracing::warn!(%error, "off-chain metadata cache unavailable, fetching uncached");
+                uncached(cache, location, namespaces, fetch()).await
             }
         },
+    }
+}
+
+/// The body of `location` fetched without the cache's fill, for a cache that
+/// cannot run one. A failure is still kept, if its namespace can keep it.
+async fn uncached<C, Fut>(
+    cache: &C,
+    location: &MetadataLocation,
+    namespaces: MetadataCache,
+    fetch: Fut,
+) -> MetadataBody
+where
+    C: CacheStore,
+    Fut: Future<Output = Result<Vec<u8>, Option<DrepsInnerMetadataError>>>,
+{
+    match fill_body(cache.clone(), location.clone(), namespaces, fetch).await {
+        Ok(entry) => MetadataBody::Verified(entry.value),
+        Err(failed) => MetadataBody::Failed(failed.error),
     }
 }
 
@@ -548,6 +624,8 @@ where
 {
     let fill = fill_body(cache.clone(), location.clone(), namespaces, fetch());
 
+    // the fill runs on its own task, so it reaches its end, and fills the
+    // cache, whether or not anyone still waits for it
     match cache
         .get_or_fill_async(namespaces.bodies, &location.hash, fill)
         .await
@@ -560,7 +638,8 @@ where
     }
 }
 
-/// Fetches `location` in the caller's task, under the concurrent limit.
+/// Fetches `location` in the caller's task, within the same fetch bound as a
+/// detached load, and keeps what it gets as one would.
 async fn inline_fill<C, Fut>(
     cache: &C,
     location: &MetadataLocation,
@@ -578,6 +657,8 @@ where
         .await
 }
 
+/// Whether `filled` is the failure of a fetch at another url than
+/// `location`'s, one a request at `location` joined for the same hash.
 fn failed_elsewhere(filled: &Result<Bytes, CacheError>, location: &MetadataLocation) -> bool {
     filled.as_ref().is_err_and(|error| {
         error
@@ -586,6 +667,9 @@ fn failed_elsewhere(filled: &Result<Bytes, CacheError>, location: &MetadataLocat
     })
 }
 
+/// The fill of `location`'s body: what `fetch` returns, once it matches the
+/// hash. A failure is kept in the kind's failures namespace and nothing in its
+/// bodies namespace.
 async fn fill_body<C, Fut>(
     cache: C,
     location: MetadataLocation,
@@ -628,7 +712,8 @@ where
     }
 }
 
-/// Keeps `failure` before the fetch answers, so no request can miss it.
+/// Keeps `failure` before the fetch answers, so a request arriving as the
+/// fetch ends finds the failure rather than fetching the dead host again.
 async fn keep_failure<C: CacheStore>(
     cache: &C,
     location: &MetadataLocation,
@@ -646,10 +731,12 @@ async fn keep_failure<C: CacheStore>(
         })
         .await;
 
-    // the failures namespace lives in memory, so only a failed registration,
-    // which `register` warned of, refuses it
-    if let Err(error) = kept {
-        tracing::debug!(url = %location.url, %error, "cannot keep off-chain metadata failure");
+    match kept {
+        // a namespace that failed to register, which `register` warned of
+        Ok(_) | Err(CacheError::UnknownNamespace(_)) => {}
+        Err(error) => {
+            tracing::warn!(url = %location.url, %error, "cannot keep off-chain metadata failure")
+        }
     }
 }
 

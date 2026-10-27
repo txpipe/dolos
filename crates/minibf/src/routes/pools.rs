@@ -57,8 +57,14 @@ use crate::{
     Facade,
 };
 
-/// How long `/pools/extended` waits for the metadata of its rows, the wait
-/// for a fetch slot included.
+/// How long `/pools/extended` waits for the metadata of the rows it misses,
+/// the wait for a fetch slot included. A cold page behind dead hosts would
+/// otherwise wait out one five-second fetch timeout per wave of
+/// [`MAX_CONCURRENT_POOL_FETCHES`]. A fetch the page started before the
+/// deadline keeps going in the background and fills the cache for the next
+/// request; a miss it had not started yet is dropped. Either way its row goes
+/// out without metadata, the way Blockfrost serves a pool whose metadata
+/// db-sync has not fetched yet.
 const PAGE_METADATA_DEADLINE: Duration = Duration::from_secs(5);
 
 type ActivePools = HashSet<PoolHash>;

@@ -67,7 +67,7 @@ The fetch limits and deadlines still apply.
 
 When a tier is full, it evicts the entries with the lowest build cost per byte first, and the least recently used among equals.
 
-An entry is kept only if building it cost at least its namespace's admission threshold, so cheap answers do not crowd out expensive ones. A `totals` entry's cost is the number of per-epoch unit sums its build read, and it is kept from 100,000. An off-chain metadata entry's cost is the time its fetch took, in milliseconds. Set `[storage.cache.admission]` to change a threshold, for example `totals = 20000` to keep more credentials. See the [`storage.cache`](../configuration/schema#storagecache) section for every setting.
+An entry is kept only if building it cost at least its namespace's admission threshold, so cheap answers do not crowd out expensive ones. A `totals` entry's cost is the number of per-epoch unit sums its build read, and it is kept from 100,000. An off-chain metadata entry is kept whatever it cost: a host can stop serving a body, so a body a threshold turned away may not come back; its cost is the time its fetch took, in milliseconds. Set `[storage.cache.admission]` to change a threshold, for example `totals = 20000` to keep more credentials. See the [`storage.cache`](../configuration/schema#storagecache) section for every setting.
 
 ## Footprint
 
@@ -134,3 +134,5 @@ That makes the pool lists slower with the cache off, since `/pools` and `/pools/
 | `/pools/extended?count=100` | 5.32 s   | 5.45 s          | 5.53 s                |
 
 The `/pools/extended` row was measured before pool metadata was cached, so it shows a page whose metadata is not cached yet. The cost grows with the number of pools, so on mainnet it is several times larger. `/pools/{pool_id}` reads only its own pool and is not affected.
+
+The off-chain metadata namespaces, `offchain`, `proposal-offchain` and `pool-offchain` with their failures, read neither the archive nor the state, so they stay on in rolling history. They stay on while `storage.cache.enabled = false` too, as `totals` does: nothing is kept, so each request fetches again, within the same fetch limits.
