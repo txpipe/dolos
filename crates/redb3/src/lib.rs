@@ -39,6 +39,9 @@ pub enum Error {
     #[error("invalid dimension: {0}")]
     InvalidDimension(String),
 
+    #[error("malformed utxo value: {0}")]
+    UtxoValue(#[from] pallas::codec::minicbor::decode::Error),
+
     // TODO: remove this once we generalize opaque filters
     #[error(transparent)]
     AddressError(#[from] pallas::ledger::addresses::Error),

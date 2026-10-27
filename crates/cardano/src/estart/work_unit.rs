@@ -2,22 +2,26 @@
 //!
 //! Sharded: `total_shards()` reports the boundary's shard count and the
 //! executor invokes `load` / `commit_state` once per shard. Each shard
-//! covers a first-byte prefix range of the credential key space, iterates
-//! accounts in range, runs the snapshot-rotation visitor
-//! (`AccountTransition`), and emits `EStartProgress` to advance
-//! `EpochState.estart_progress`.
+//! covers a first-byte prefix range of the credential key space. Its
+//! commit reads the accounts in range once, tallying, rotating and writing
+//! each in one state transaction with the `EStartProgress` that advances
+//! `EpochState.estart_progress`. The shard's stake-only account-epoch rows
+//! for the opening epoch, built in that same pass, commit to the archive
+//! before its state does.
 //!
 //! After the per-shard loop, `finalize()` seals the period logs of every
 //! immutable epoch (`crate::periods`), then runs the global "Estart" pass:
 //! pool / drep / proposal snapshot transitions, nonce transition, pot
 //! recalculation (`EpochTransition`), era transitions (if protocol version
-//! changes), and the cursor advance. The cursor moves only here, so a
+//! changes), the moves to the final-row log (`crate::final_rows`), and the
+//! cursor advance. The cursor moves only here, so a
 //! crash before finalize restarts from the boundary block.
 //!
-//! `AccountTransition` is not natively idempotent (re-applying double-rolls
-//! the EpochValue snapshot), so true mid-shard resume requires additional
-//! work — same TODO posture as `EwrapWorkUnit`. `finalize` is separately
-//! guarded to run exactly once (see `commit_finalize`).
+//! The rotation is not idempotent (rotating twice double-rolls the
+//! `EpochValue` snapshots), so a resumed boundary skips the committed
+//! shards; a shard is all or nothing, as its rows and its progress commit
+//! together. `finalize` is separately guarded to run exactly once (see
+//! `commit_finalize`).
 
 use std::sync::Arc;
 
@@ -25,8 +29,8 @@ use dolos_core::{BlockSlot, Domain, DomainError, Genesis, WorkUnit};
 use tracing::{debug, info};
 
 use crate::{
-    estart::{stake, AvvmReclamation, PoolOwners, WorkContext},
-    load_epoch,
+    estart::{stake, AvvmReclamation, ShardInputs, WorkContext},
+    load_epoch, load_era_summary,
     shard::ACCOUNT_SHARDS,
     CardanoLogic, EpochState,
 };
@@ -46,9 +50,9 @@ pub struct EstartWorkUnit {
 
     /// First shard to run on this invocation. Populated in `initialize()`
     /// from `EpochState.estart_progress.committed` so a restart after a
-    /// mid-boundary crash skips already-committed shards
-    /// (`AccountTransition` is non-idempotent on replay — would double-
-    /// rotate every account in the replayed shard).
+    /// mid-boundary crash skips already-committed shards (the rotation is
+    /// non-idempotent on replay — it would double-rotate every account in
+    /// the replayed shard).
     start_shard: u32,
 
     /// AVVM reclamation for this boundary, computed once in `initialize()`.
@@ -56,11 +60,11 @@ pub struct EstartWorkUnit {
     /// UTxO set.
     avvm_reclamation: AvvmReclamation,
 
-    /// The owners of every pool in the closing epoch, indexed once in
-    /// `initialize()` and shared by every shard's live-pledge tally. Pools
-    /// rotate only in `finalize()`, so a resumed boundary rebuilds the same
-    /// index.
-    owners: Arc<PoolOwners>,
+    /// The pool owners every shard's live-pledge tally reads and the
+    /// distribution its stake-only rows come from, indexed once in
+    /// `initialize()`. Pools rotate only in `finalize()`, so a resumed
+    /// boundary rebuilds the same.
+    inputs: Arc<ShardInputs>,
 
     /// During the per-shard loop, holds the in-flight shard's
     /// `WorkContext` (build-and-discard between shards). After
@@ -78,7 +82,7 @@ impl EstartWorkUnit {
             total_shards: 0,
             start_shard: 0,
             avvm_reclamation: AvvmReclamation::default(),
-            owners: Default::default(),
+            inputs: Default::default(),
             context: None,
         }
     }
@@ -116,8 +120,8 @@ where
         // boundary. While a boundary is in flight, the persisted
         // `estart_progress` is authoritative — `total` guards against a
         // config change mid-boundary, and `committed` lets a restart
-        // skip shards whose state already landed (`AccountTransition`
-        // is non-idempotent on replay — would double-rotate every
+        // skip shards whose state already landed (the rotation is
+        // non-idempotent on replay — it would double-rotate every
         // account in the replayed shard).
         //
         // Errors propagate: state-read failure must not silently fall
@@ -132,7 +136,12 @@ where
         // boundary.
         self.avvm_reclamation = AvvmReclamation::at_boundary::<D>(domain.state(), &self.genesis)?;
 
-        self.owners = Arc::new(stake::pool_owners::<D>(domain.state(), epoch.number)?);
+        let chain = load_era_summary::<D>(domain.state())?;
+        self.inputs = Arc::new(stake::shard_inputs::<D>(
+            domain.state(),
+            epoch.number,
+            &chain,
+        )?);
 
         debug!(
             slot = self.slot,
@@ -140,15 +149,15 @@ where
             start = self.start_shard,
             avvm = self.avvm_reclamation.total,
             avvm_utxos = self.avvm_reclamation.utxos.len(),
-            pool_owners = self.owners.len(),
+            pool_owners = self.inputs.owners.len(),
+            stake_epoch = ?self.inputs.stake_snapshot.map(|(epoch, _)| epoch),
+            stake_pools = self.inputs.stake_pools.len(),
             "estart initialize"
         );
         Ok(())
     }
 
     fn load(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
-        let ranges = crate::AccountKey::shard_ranges(shard_index, self.total_shards);
-
         debug!(
             slot = self.slot,
             shard = shard_index,
@@ -160,10 +169,7 @@ where
             domain.state(),
             self.genesis.clone(),
             self.avvm_reclamation.clone(),
-            self.owners.clone(),
-            shard_index,
-            self.total_shards,
-            ranges,
+            self.inputs.clone(),
         )?;
 
         info!(
@@ -179,7 +185,7 @@ where
     }
 
     fn compute(&mut self, _shard_index: u32) -> Result<(), DomainError> {
-        debug!("estart compute (deltas computed during load)");
+        debug!("estart compute (accounts rotate during commit)");
         Ok(())
     }
 
@@ -191,7 +197,13 @@ where
             .as_mut()
             .ok_or_else(|| DomainError::Internal("estart context not loaded".into()))?;
 
-        context.commit_shard::<D>(domain.state(), ranges)?;
+        context.commit_shard::<D>(
+            domain.state(),
+            domain.archive(),
+            shard_index,
+            self.total_shards,
+            ranges,
+        )?;
         Ok(())
     }
 
@@ -214,7 +226,7 @@ where
             context.starting_epoch_no(),
         )?;
 
-        context.commit_finalize::<D>(domain.state(), self.slot)?;
+        context.commit_finalize::<D>(domain.state(), domain.archive(), self.slot)?;
 
         // Replace the per-shard context with the finalize-phase
         // WorkContext so post-finalize introspection (e.g. `ended_state`

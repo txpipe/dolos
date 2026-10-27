@@ -17,7 +17,7 @@ use crate::{
     Facade,
 };
 
-use super::is_gov_action;
+use super::{is_gov_action, read_proposal_row};
 
 /// Recover the submitted `GovAction` from the archived proposal tx. Returns
 /// `None` when the tx is absent (pruned archive), pre-Conway, or carries no
@@ -67,9 +67,9 @@ where
 {
     let key = ProposalKey::new(tx, idx);
 
-    let state = domain
-        .read_cardano_entity::<ProposalState>(&key)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let state = read_proposal_row(&domain.inner, &key)?
+        .ok_or(StatusCode::NOT_FOUND)?
+        .into_state();
 
     // Blockfrost never serves pre-Conway protocol updates here, and the
     // listing already hides them.

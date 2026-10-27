@@ -9,6 +9,15 @@
 //!
 //! ## The evidence
 //!
+//! The archive has to start at the chain's origin: its first block is the
+//! chain's first, by the test `doctor rebuild-state` applies (block number at
+//! most 1). A pruned archive's sweep has taken the entity index entries of its
+//! pruned blocks with them, so its node stages a re-carried script or asset
+//! again as a first sighting and seals it into its period logs. That is a
+//! pruned node's accepted posture as a query node (decision 0064, item 4) and
+//! exactly what a stele must never carry, so a publisher keeps full history
+//! (item 3).
+//!
 //! The state cursor has to be the plan's point, and the archive has to hold the
 //! block at that point together with the block before it in chain order. That
 //! predecessor must be the block the cursor's header names as its parent, and
@@ -61,6 +70,9 @@ pub struct Boundary {
 /// Why a store set is not an epoch-boundary cut.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ineligible {
+    /// The archive's first block is not the chain's first: it was pruned, or
+    /// bootstrapped somewhere after origin.
+    PrunedArchive { first: ChainPoint, number: u64 },
     /// The plan stands at a different point than the state store's cursor.
     PlanMismatch { stored: Option<ChainPoint> },
     /// The plan's sequence is not the epoch its cursor stands in.
@@ -82,6 +94,14 @@ pub enum Ineligible {
 impl std::fmt::Display for Ineligible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::PrunedArchive { first, number } => write!(
+                f,
+                "the archive starts at block #{number}, slot {}, not at the chain's first block, \
+                 so its entity index lacks the first sightings of the history it no longer holds; \
+                 publish from a node that keeps full history (history.mode = \"full\") and was \
+                 synced or restored from origin",
+                first.slot()
+            ),
             Self::PlanMismatch {
                 stored: Some(stored),
             } => write!(
@@ -179,6 +199,19 @@ fn evidence<A: ArchiveStore>(
 
     if epoch == 0 {
         return Err(refuse(Ineligible::InitialEpoch));
+    }
+
+    // An empty archive holds no cursor block either, which is the refusal
+    // that names it.
+    if let Some((first_slot, first_body)) = archive.get_range(None, None)?.next() {
+        let first = decode(first_slot, &first_body)?;
+
+        if first.number() > 1 {
+            return Err(refuse(Ineligible::PrunedArchive {
+                first: ChainPoint::Specific(first_slot, first.hash()),
+                number: first.number(),
+            }));
+        }
     }
 
     let at_slot = archive.get_blocks_by_slot(&slot)?;
@@ -447,6 +480,46 @@ mod tests {
         assert_eq!(
             reason(judge(&summary, &blocks[..1], &blocks[1].0)),
             Ineligible::MissingCursorBlock
+        );
+    }
+
+    /// A publisher keeps full history: an archive whose first block is past
+    /// the chain's first is refused, naming that block's slot, before
+    /// anything else about the boundary is read.
+    #[test]
+    fn an_archive_that_starts_after_origin_is_refused() {
+        let summary = summary(100);
+        let blocks = chain(&[150, 160, 180, 205]);
+
+        let refusal = reason(judge(&summary, &blocks[2..], &blocks[3].0));
+
+        assert_eq!(
+            refusal,
+            Ineligible::PrunedArchive {
+                first: blocks[2].0.clone(),
+                number: 2,
+            }
+        );
+
+        let message = refusal.to_string();
+        assert!(message.contains("block #2, slot 180"), "{message}");
+        assert!(message.contains("history.mode = \"full\""), "{message}");
+
+        // The same boundary from the full archive proceeds.
+        assert_eq!(judge(&summary, &blocks, &blocks[3].0).unwrap().epoch, 2);
+    }
+
+    /// The chain's first block may be its second in number: the test is the
+    /// one `doctor rebuild-state` applies, which tolerates a first block
+    /// numbered 1.
+    #[test]
+    fn an_archive_whose_first_block_is_number_one_starts_at_origin() {
+        let summary = summary(100);
+        let blocks = chain(&[150, 160, 205]);
+
+        assert_eq!(
+            judge(&summary, &blocks[1..], &blocks[2].0).unwrap().epoch,
+            2
         );
     }
 

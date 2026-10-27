@@ -22,7 +22,7 @@ use dolos_cardano::{
 use dolos_core::{
     config::CustomUtxo, import::ImportExt as _, ArchiveIndexDelta, ArchiveStore as _, BlockSlot,
     ChainLogic as _, ChainPoint, Domain as _, EraCbor, ExactRecord, RawBlock, Tag, TagRecord,
-    TxoRef,
+    TxoRef, UtxoValue,
 };
 use dolos_testing::{blocks::make_conway_block_with_txs_at, toy_domain::ToyDomain};
 use pallas::{
@@ -386,9 +386,9 @@ fn an_input_consumed_after_an_invalid_tx_is_tagged_by_its_spender_only() {
     );
 }
 
-fn era_cbor(output: TransactionOutput<'static>) -> Arc<EraCbor> {
+fn era_cbor(output: TransactionOutput<'static>) -> Arc<UtxoValue> {
     let cbor = pallas::codec::minicbor::to_vec(output).unwrap();
-    Arc::new(EraCbor(Era::Conway.into(), cbor))
+    Arc::new(UtxoValue::new(EraCbor(Era::Conway.into(), cbor), None))
 }
 
 fn tags(deltas: &[ArchiveIndexDelta]) -> Vec<(BlockSlot, Vec<Tag>)> {
@@ -405,7 +405,7 @@ fn wal_replay_ignores_inputs_the_block_does_not_consume() {
     let (block_slot, raw) = &chain.blocks[INVALID_AFTER_PRODUCER];
     let point = ChainPoint::Specific(*block_slot, MultiEraBlock::decode(raw).unwrap().hash());
 
-    let narrow: HashMap<TxoRef, Arc<EraCbor>> = HashMap::from([(
+    let narrow: HashMap<TxoRef, Arc<UtxoValue>> = HashMap::from([(
         seed(Seeds::COLLATERAL_ONE),
         era_cbor(output(collateral_address(1), 5 * ADA, None)),
     )]);

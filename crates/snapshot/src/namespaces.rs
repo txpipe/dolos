@@ -21,7 +21,7 @@ use dolos_cardano::model::{
     DRepState, DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolEpochLog, PoolState, ProposalState, ScriptState,
+    PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -31,7 +31,8 @@ use crate::Error;
 ///
 /// The one namespace with no entity type behind it, so the one string this
 /// crate owns outright. Its key is `tx_hash(32) ‖ output_index(4, BE)` and its
-/// value is CBOR `[era, body]` — see [`crate::layers::state`].
+/// value is CBOR `[era, body, slot, tx_index]`, or `[era, body]` for a UTxO no
+/// block produced — see [`crate::layers::state`].
 pub const UTXOS: Namespace = "utxos";
 
 /// Every namespace, state or log, in ascending byte order.
@@ -39,7 +40,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against the schemas directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 32] = [
+pub const NAMESPACES: [Namespace; 31] = [
     AccountAddressChunk::NS,
     AccountAddressSet::NS,
     AccountEpochLog::NS,
@@ -70,7 +71,6 @@ pub const NAMESPACES: [Namespace; 32] = [
     PoolEpochLog::NS,
     PoolState::NS,
     ProposalState::NS,
-    ScriptState::NS,
     UTXOS,
 ];
 
@@ -96,7 +96,7 @@ pub const NAMESPACES: [Namespace; 32] = [
 /// `estart_tally`, and the frozen tally on each `PoolSnapshot`. Kept beside
 /// [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 32] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (AccountAddressChunk::NS, 1),
     (AccountAddressSet::NS, 1),
     (AccountEpochLog::NS, 1),
@@ -127,7 +127,6 @@ pub const SCHEMA_REVS: [(Namespace, u64); 32] = [
     (PoolEpochLog::NS, 2),
     (PoolState::NS, 3),
     (ProposalState::NS, 5),
-    (ScriptState::NS, 1),
     (UTXOS, 1),
 ];
 
@@ -162,7 +161,6 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         PendingRewardState::NS => exact::<<PendingRewardState as StateEntity>::Key>(key),
         PoolState::NS => exact::<<PoolState as StateEntity>::Key>(key),
         ProposalState::NS => exact::<<ProposalState as StateEntity>::Key>(key),
-        ScriptState::NS => exact::<<ScriptState as StateEntity>::Key>(key),
         FirstMintSet::NS => exact::<<FirstMintSet as StateEntity>::Key>(key),
         FirstScriptSet::NS => exact::<<FirstScriptSet as StateEntity>::Key>(key),
         PaymentAddressSet::NS => exact::<<PaymentAddressSet as StateEntity>::Key>(key),
@@ -201,6 +199,7 @@ pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         PaymentAddressChunk::NS => exact::<<PaymentAddressChunk as LogEntity>::Key>(key),
         PolicyMintChunk::NS => exact::<<PolicyMintChunk as LogEntity>::Key>(key),
         PoolEpochLog::NS => exact::<<PoolEpochLog as LogEntity>::Key>(key),
+        ProposalState::NS => exact::<<ProposalState as LogEntity>::Key>(key),
         _ => return Err(Error::UnknownNamespace(ns.to_owned())),
     };
 

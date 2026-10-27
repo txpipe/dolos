@@ -34,9 +34,8 @@ use dolos_core::{
 use tracing::{debug, info};
 
 use crate::{
-    rewards::{Reward, RewardMap},
-    shard::ACCOUNT_SHARDS,
-    AccountKey, CardanoLogic, EpochState, PendingRewardState, PoolEpochLog, PoolHash, PoolKey,
+    rewards::RewardMap, shard::ACCOUNT_SHARDS, AccountKey, CardanoLogic, EpochState,
+    PendingRewardState, PoolEpochLog, PoolHash, PoolKey,
 };
 
 use super::RupdWork;
@@ -247,28 +246,7 @@ impl RupdWorkUnit {
         // re-run is idempotent.
         for (credential, reward) in rewards.iter_pending() {
             let key = AccountKey::from(credential);
-
-            let (as_leader, as_delegator) = match reward {
-                Reward::MultiPool(r) => (
-                    r.leader_rewards().collect(),
-                    r.delegator_rewards().collect(),
-                ),
-                Reward::PreAllegra(r) => {
-                    let (pool, value) = r.pool_and_value();
-                    if r.is_leader() {
-                        (vec![(pool, value)], vec![])
-                    } else {
-                        (vec![], vec![(pool, value)])
-                    }
-                }
-            };
-
-            let pending = PendingRewardState {
-                credential: credential.clone(),
-                is_spendable: reward.is_spendable(),
-                as_leader,
-                as_delegator,
-            };
+            let pending = reward.to_pending_state(credential);
 
             writer.write_entity_typed(&key, &pending)?;
         }

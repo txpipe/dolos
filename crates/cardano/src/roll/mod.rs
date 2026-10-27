@@ -737,6 +737,7 @@ pub(crate) fn compute_delta<D: Domain>(
     genesis: Arc<Genesis>,
     cache: &Cache,
     state: &D::State,
+    archive: &D::Archive,
     batch: &mut WorkBatch,
 ) -> Result<(), ChainError> {
     let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
@@ -778,16 +779,21 @@ pub(crate) fn compute_delta<D: Domain>(
         dormancy.drep_keys = Arc::new(keys);
     }
 
-    // Script context: which of the scripts the batch carries were seen before.
-    // Like dormancy it evolves across the blocks of the batch, so it's taken
-    // back after each crawl.
+    // Script context: which of the scripts the batch carries an earlier block
+    // carried, by the archive's entity index below the batch and the staged
+    // rows of the unsealed epochs. Like dormancy it evolves across the blocks
+    // of the batch, so it's taken back after each crawl.
     let carried: Vec<_> = batch
         .blocks
         .iter()
         .map(|block| block_script_sightings(block.decoded().view()))
         .collect();
 
-    let mut script_registry = ScriptRegistryContext::load(state, &carried)?;
+    let unsealed =
+        crate::periods::unsealed_epochs(&cache.eras, crate::utils::mutable_slots(&genesis), epoch);
+
+    let mut script_registry =
+        ScriptRegistryContext::load(state, archive, &carried, batch.first_slot(), unsealed)?;
 
     for (block, carried) in batch.blocks.iter_mut().zip(carried) {
         let mut builder = DeltaBuilder::new(

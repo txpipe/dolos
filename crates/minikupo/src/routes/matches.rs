@@ -553,7 +553,7 @@ fn select_chunk<D: Domain>(
 
     let mut selected = Vec::new();
     for (txo_ref, cbor) in utxos {
-        let cbor: &dolos_core::EraCbor = cbor.as_ref();
+        let cbor: &dolos_core::EraCbor = &cbor.output;
         let output = MultiEraOutput::try_from(cbor).map_err(|_| MatchError::Internal)?;
         let address = output.address().map_err(|_| MatchError::Internal)?;
 

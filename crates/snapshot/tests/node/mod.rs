@@ -26,7 +26,7 @@ use dolos_snapshot::{
 use dolos_testing::{
     blocks::make_conway_block_with_prev,
     synthetic::{build_synthetic_blocks, seed_epoch_logs, seed_reward_logs, SyntheticBlockConfig},
-    toy_domain::{ToyDomain, ToyStores},
+    toy_domain::{MemoryStores, ToyDomain, ToyStores},
 };
 use stelae::{dir::SteleDir, inscription::Inscription, progress::Observer};
 
@@ -378,4 +378,54 @@ pub fn plan_for<B: ToyStores>(domain: &ToyDomain<B>) -> Plan {
 
 pub fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) -> Inscription {
     export_plan(root, domain, &plan_for(domain))
+}
+
+/// An account's row of `window`, written straight to `domain`'s archive.
+pub fn write_account_row(
+    domain: &ToyDomain<MemoryStores>,
+    window: u64,
+    row: dolos_cardano::AccountEpochLog,
+) {
+    let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
+    let account = dolos_cardano::AccountKey::from(
+        dolos_cardano::pallas::ledger::primitives::StakeCredential::AddrKeyhash([0x51; 28].into()),
+    );
+
+    let writer = domain.archive().start_writer().unwrap();
+    writer
+        .write_log_typed(summary.epoch_start(window), &account, &row)
+        .unwrap();
+    writer.commit().unwrap();
+}
+
+/// A row as ESTART writes it: the stake leg alone.
+pub fn stake_only() -> dolos_cardano::AccountEpochLog {
+    dolos_cardano::AccountEpochLog {
+        active_stake: Some(2_000),
+        pool_id: Some([0x52; 28].into()),
+        ..Default::default()
+    }
+}
+
+/// The same row as the EWRAP that settles it rewrites it.
+pub fn settled() -> dolos_cardano::AccountEpochLog {
+    dolos_cardano::AccountEpochLog {
+        member_reward: Some(7),
+        ..stake_only()
+    }
+}
+
+pub fn account_layer(
+    inscription: &stelae::inscription::Inscription,
+    epoch: u64,
+) -> stelae::inscription::LayerDescriptor {
+    inscription
+        .layers
+        .iter()
+        .find(|layer| {
+            layer.kind == "log-account-epochs"
+                && layer.scope.get("epoch").and_then(serde_json::Value::as_u64) == Some(epoch)
+        })
+        .cloned()
+        .unwrap()
 }

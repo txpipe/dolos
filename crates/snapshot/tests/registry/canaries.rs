@@ -29,7 +29,7 @@ use dolos_cardano::{
         FirstScriptChunk, FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces,
         PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
         PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, PoolTally,
-        ProposalAction, ProposalState, RollingStats, ScriptState, ShardProgress, Stake, VoteEntry,
+        ProposalAction, ProposalState, RollingStats, ShardProgress, Stake, VoteEntry,
     },
     model::{
         AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
@@ -46,7 +46,7 @@ use dolos_cardano::{
     },
     pots::{EpochIncentives, Pots},
 };
-use dolos_core::{cbor, EraCbor};
+use dolos_core::{cbor, EraCbor, UtxoPosition, UtxoValue};
 
 // Every byte differs from its neighbours, so a field that shifts by one
 // position, or a hash that is truncated rather than carried whole, changes the
@@ -281,18 +281,36 @@ pub fn payment_stats() -> PaymentStats {
     PaymentStats { tx_count: 23 }
 }
 
-/// A mint and a burn, so both signs of the amount are pinned.
+/// A flagged mint, a plain mint and a burn, so the flag and both signs of
+/// the amount are pinned.
 pub fn asset_mint_chunk() -> AssetMintChunk {
     AssetMintChunk {
         count: 259,
-        mints: vec![(hash32(0xd0), 1_000_000), (hash32(0xd1), -42)],
+        mints: vec![
+            AssetMintSet {
+                tx_hash: hash32(0xd0),
+                amount: 1_000_000,
+                names_asset: true,
+            },
+            AssetMintSet {
+                tx_hash: hash32(0xd3),
+                amount: 1,
+                names_asset: false,
+            },
+            AssetMintSet {
+                tx_hash: hash32(0xd1),
+                amount: -42,
+                names_asset: false,
+            },
+        ],
     }
 }
 
 pub fn asset_mint_set() -> AssetMintSet {
     AssetMintSet {
         tx_hash: hash32(0xd2),
-        amount: -7,
+        amount: 7,
+        names_asset: true,
     }
 }
 
@@ -322,10 +340,6 @@ pub fn account_address_chunk() -> AccountAddressChunk {
                 .into(),
         ],
     }
-}
-
-pub fn script_state() -> ScriptState {
-    ScriptState { slot: 99_999_999 }
 }
 
 pub fn first_script_set() -> FirstScriptSet {
@@ -360,18 +374,16 @@ pub fn drep_sighting_state() -> DRepSightingState {
 pub fn drep_state() -> DRepState {
     DRepState {
         registered_at: Some((55_555, 3)),
-        voting_power: 777_000_000,
         last_active_slot: Some(66_666),
         unregistered_at: Some((77_777, 11)),
         expired: true,
         deposit: 500_000_000,
         identifier: DRep::Key(hash28(0xa0)),
-        anchor: Some(anchor(0xa1)),
-        expiry: Some(DRepExpiry {
+        expiry: DRepExpiry {
             current: 412,
             updated_in: 409,
             prev: Some(400),
-        }),
+        },
     }
 }
 
@@ -707,8 +719,6 @@ pub fn pool_state() -> PoolState {
                 pool_snapshot(0x05),
             ],
         ),
-        blocks_minted_total: 4_242,
-        register_slot: 55_555_555,
         retiring_epoch: Some(777),
         deposit: 500_000_000,
         calidus: Some(CalidusRegistration {
@@ -768,9 +778,13 @@ pub fn proposal_state() -> ProposalState {
 }
 
 /// The one namespace whose value the profile *builds* rather than carries: the
-/// `[era, body]` wrapper of `crate::layers::state`.
-pub fn utxo_value() -> EraCbor {
-    EraCbor(6, bytes_of::<48>(0x33).to_vec())
+/// `[era, body, slot, tx_index]` wrapper of `crate::layers::state`. The
+/// position takes multi-byte uints, so a narrowed field moves the pinned bytes.
+pub fn utxo_value() -> UtxoValue {
+    UtxoValue::new(
+        EraCbor(6, bytes_of::<48>(0x33).to_vec()),
+        Some(UtxoPosition::new(134_217_728, 300)),
+    )
 }
 
 // The values the enum tables pin; nothing else builds them.

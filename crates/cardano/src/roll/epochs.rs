@@ -283,7 +283,8 @@ mod tests {
     }
 
     fn owned(output: MultiEraOutput<'_>) -> OwnedMultiEraOutput {
-        OwnedMultiEraOutput::decode(Arc::new(output.into())).unwrap()
+        OwnedMultiEraOutput::decode(Arc::new(dolos_core::UtxoValue::new(output.into(), None)))
+            .unwrap()
     }
 
     fn alonzo_tx_cbor(body: alonzo::TransactionBody, success: bool) -> Vec<u8> {

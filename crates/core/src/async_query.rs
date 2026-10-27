@@ -12,7 +12,7 @@ use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
 
 use crate::{
     archive::ArchiveStore, ArchiveError, BlockBody, BlockHash, BlockHeight, BlockSlot, ChainError,
-    ChainPoint, Domain, DomainError, EraCbor, TagDimension, TxHash, TxOrder,
+    ChainPoint, Domain, DomainError, EraCbor, TagDimension, TxHash, TxOrder, UtxoPosition,
 };
 
 /// Lightweight block metadata for a transaction, extracted via a single decode.
@@ -364,6 +364,93 @@ where
             tx_index,
         })
         .await
+    }
+
+    /// Block metadata for transactions whose creation position is known,
+    /// reading and decoding each slot's bodies once and no exact index.
+    ///
+    /// A transaction is left out when the archive no longer holds the block at
+    /// its slot (pruned history), or holds none that carries it at its index.
+    /// Slot groups run as one blocking task each, at most
+    /// [`QueryLimiter::fan_out`] at a time.
+    pub async fn block_meta_by_positions(
+        &self,
+        located: impl IntoIterator<Item = (TxHash, UtxoPosition)>,
+    ) -> Result<HashMap<TxHash, BlockRefMeta>, DomainError> {
+        let mut groups: HashMap<BlockSlot, HashSet<(TxHash, u16)>> = HashMap::new();
+        for (tx_hash, position) in located {
+            groups
+                .entry(position.slot)
+                .or_default()
+                .insert((tx_hash, position.tx_index));
+        }
+
+        let query = self.clone();
+        let tasks = stream::iter(groups.into_iter().map(move |(slot, txs)| {
+            let query = query.clone();
+            async move {
+                query
+                    .run_blocking(move |domain| {
+                        let raws = domain.archive().get_blocks_by_slot(&slot)?;
+                        let mut found = Vec::with_capacity(txs.len());
+                        let mut decode_error = None;
+
+                        for raw in raws {
+                            let block = match MultiEraBlock::decode(raw.as_slice()) {
+                                Ok(block) => block,
+                                Err(error) => {
+                                    decode_error.get_or_insert_with(|| {
+                                        DomainError::ChainError(ChainError::DecodingError(error))
+                                    });
+                                    continue;
+                                }
+                            };
+
+                            let block_txs = block.txs();
+
+                            for (tx_hash, tx_index) in &txs {
+                                let index = usize::from(*tx_index);
+                                let carried = block_txs.get(index).map(MultiEraTx::hash);
+
+                                if carried == Some(*tx_hash) {
+                                    found.push(BlockRefMeta {
+                                        slot: block.slot(),
+                                        hash: block.hash(),
+                                        height: block.number(),
+                                        tx_hash: *tx_hash,
+                                        tx_index: index,
+                                    });
+                                }
+                            }
+                        }
+
+                        // A corrupt sibling cannot hide a transaction found in
+                        // a valid body, but must not turn into a silent miss.
+                        if found.len() != txs.len() {
+                            if let Some(error) = decode_error {
+                                return Err(error);
+                            }
+                        }
+
+                        Ok(found)
+                    })
+                    .await
+            }
+        }))
+        .buffer_unordered(self.inner.query_limiter().fan_out())
+        .collect::<Vec<_>>()
+        .await;
+
+        // Await every started blocking task before propagating an error. A
+        // dropped spawn_blocking handle does not cancel its underlying work.
+        let mut resolved = HashMap::new();
+        for task in tasks {
+            for meta in task? {
+                resolved.insert(meta.tx_hash, meta);
+            }
+        }
+
+        Ok(resolved)
     }
 
     /// Fetch the CBOR of every requested transaction, reading and decoding

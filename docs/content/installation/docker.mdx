@@ -27,12 +27,16 @@ For more information on available command-line arguments, check the [usage](../o
 
 ## Using a Configuration File
 
-The default daemon configuration file for _Dolos_ is located in `/etc/dolos/daemon.toml`. To run _Dolos_ in daemon mode with a custom configuration file, you need to mount it in the correct location. The following example runs a docker container in background using a configuration file named `daemon.toml` located in the current folder:
+_Dolos_ reads the file passed with `--config`, or else `dolos.toml` in its working directory. Mount the directory holding your configuration, and pass the file's path inside the container. The following example runs a container in the background with the `dolos.toml` in the current folder, and keeps the data in a named volume used as the working directory, which relative paths such as `storage.path` resolve against:
 
 ```
-docker run -d -v $(pwd)/daemon.toml:/etc/dolos/daemon.toml \
-    ghcr.io/txpipe/dolos:latest daemon
+docker run -d \
+    -v $(pwd):/etc/dolos:ro \
+    -v dolos-data:/data -w /data \
+    ghcr.io/txpipe/dolos:latest daemon --config /etc/dolos/dolos.toml
 ```
+
+Mounting the directory rather than the file also brings along the genesis files a custom network names, which resolve against the configuration file's directory. To check the file before starting the node, run the same container with `config check` in place of `daemon`.
 
 ## Versioned Images
 

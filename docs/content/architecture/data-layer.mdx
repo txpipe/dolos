@@ -45,28 +45,28 @@ The WAL keeps its own format version, wiped when older and refused when newer. T
 
 ## Storage traits and pluggable backends
 
-Each store is defined as a trait in `dolos-core` — `WalStore`, `StateStore`, `ArchiveStore`, and `MempoolStore` — and the rest of Dolos only ever talks to those traits. Concrete implementations are selected at runtime in `src/adapters/storage.rs`, which wraps each backend in an enum so a node can mix engines per store.
+Each store is defined as a trait in `dolos-core` — `WalStore`, `StateStore`, `ArchiveStore`, and `MempoolStore` — and the rest of Dolos only ever talks to those traits. Concrete implementations are selected at runtime in `src/adapters/storage.rs`, which wraps each backend in an enum, from each store's `type` in the configuration.
 
 Available backends:
 
-- **redb** (`dolos-redb3`) — an embedded ACID B+tree store. It backs the WAL (the only WAL implementation) and the mempool. It is not a state or archive backend.
-- **fjall** (`dolos-fjall`) — an LSM-tree engine tuned for write-heavy workloads with many hot keys. The only persistent backend for the state and archive stores, and the default for both.
-- **no-op** — a store that silently discards writes, used to *disable* the archive.
-- **in-memory** — non-persistent stores for testing and ephemeral nodes. State and archive have builtin implementations in `dolos-core` backed by ordered maps, which serve their traits in full; the WAL and mempool use redb's memory backend instead.
+- **redb** (`dolos-redb3`) — an embedded ACID B+tree store. It backs the WAL (the only WAL implementation) and the persistent mempool. It is not a state or archive backend.
+- **fjall** (`dolos-fjall`) — an LSM-tree engine tuned for write-heavy workloads with many hot keys. The only persistent backend for the state and archive stores (`type = "fjall"`), and the default for both. Its tuning comes from a named preset, `standard`.
+- **in-memory** — non-persistent stores for testing and ephemeral nodes (`type = "ephemeral"`). State and archive have builtin implementations in `dolos-core` backed by ordered maps, which serve their traits in full; the WAL follows the state, in memory with an ephemeral state.
+- **no-op** — an archive that silently discards writes, opened when the configuration keeps no history.
 
 ## Storage modes
 
-The three storage modes exposed in configuration are really combinations of backend selection and history-pruning limits:
+The three storage modes are the values of `history.mode`:
 
-| Mode | Archive | History | Use case |
-| ---- | ------- | ------- | -------- |
-| **Ledger-only** | no-op | none | Only the tip of the chain — smallest footprint, query-light deployments. |
-| **Sliding history** | enabled, pruned | a rolling window (`sync.max_history`) | Recent history for most dApp queries without a full archive. |
-| **Full archive** | enabled, unpruned | complete | The entire chain history — research, validation, explorers. |
+| Mode | `history.mode` | Archive | Use case |
+| ---- | -------------- | ------- | -------- |
+| **Ledger-only** | `none` | none | Only the tip of the chain — smallest footprint, query-light deployments. |
+| **Sliding history** | `rolling`, with a `window` | pruned to the window | Recent history for most dApp queries without a full archive. |
+| **Full archive** | `full` (the default) | complete | The entire chain history — research, validation, explorers. |
 
-`archive.backend = "no_op"` is the ledger-only switch, and it drops the historical lookups with the archive that hosts them. The live-UTxO tags are not affected: they project the UTxO set, so they stay in the state store in every mode (about 3.5 GB on mainnet).
+`history.mode = "none"` is the ledger-only switch, and it drops the historical lookups with the archive that hosts them. The live-UTxO tags are not affected: they project the UTxO set, so they stay in the state store in every mode (about 3.5 GB on mainnet).
 
-Pruning is driven by `prune_history()` on the WAL and archive stores. In the archive it covers the block bodies, the logs, and the `archive-tags` and `index-exact` keyspaces, so a sliding-history node's index footprint is window-sized too. See the [configuration schema](../configuration/schema#storage-section) for the exact keys.
+Pruning is driven by `prune_history()` on the WAL and archive stores. The WAL is always pruned to the protocol's rollback window. In the archive, pruning covers the block bodies, the logs, and the `archive-tags`, `index-exact` and `index-entity` keyspaces, so a sliding-history node's index footprint is window-sized too. A sliding-history node therefore keeps the first sightings of its window only, and a stele publisher keeps full history. See the [configuration schema](../configuration/schema#storage) for the exact keys, and for which store types combine.
 
 ## Data model primitives
 
@@ -81,13 +81,14 @@ A few concepts recur across the stores:
 - **Metadata label counts.** `metadata-labels` (`MetadataLabelState`) holds one state row per transaction metadata label: the number of valid transactions that carry it, raised per block by a delta that a rollback undoes. The key is the label as 8 big-endian bytes, so a scan returns labels in numeric order up to 2^64 − 1. A phase-2-invalid transaction adds nothing, as db-sync writes no metadata row for one. The counts are all-time, so pruning leaves them, and they never seal into the archive. `/metadata/txs/labels` pages through the namespace. On mainnet it is 3,199 rows, 25.1 kB on disk, carried in every stele's state tip. Source: `crates/cardano/src/model/metadata_labels.rs`.
 - **API-only state.** A fact the API serves that the ledger rules never read lives in its own state namespace, so a ledger namespace holds only what the ledger knows. `drep-sightings` (`DRepSightingState`, keyed by `DRepKey`) holds one row per DRep a certificate of a valid tx has named, vote delegations and the special DReps included: the position of the first such certificate, down to its place in the tx, and the latest anchor a registration or update carried. `/governance/dreps` lists DReps in that order with that anchor, which is db-sync's order and metadata, and reads the page's `DRepState` rows for the rest. The ledger's own anchor is cleared by an update without one, and a DRep only a vote delegation named has no `DRepState` row. Its deltas undo through the WAL, and its rows are never pruned. On mainnet it holds 1,700 rows, 128 kB on disk.
 - **Index dimensions.** Tag multimaps keyed by address, payment credential, stake credential, policy id, and asset id. The live ones point at the matching UTxOs and live in the state store's `state-tags` keyspace, written in the same batch as the UTxO set; the historical ones point at slots and live in the archive store's `archive-tags` keyspace, beside the `index-exact` keyspace that resolves a block hash, block number or transaction hash to its slot — both written in the same batch as the blocks they project.
+- **Entity index.** The `index-entity` keyspace maps an entity's id to the slot it was first seen at, for the entity kinds the chain declares; Cardano declares `asset` (its 32-byte `AssetKey`) and `script` (its 28-byte hash). Core names no kind. The seal of an immutable epoch writes it in the same commit as the epoch's sealed logs, nothing undoes it because no rollback reaches a sealed epoch, and a prune sweeps it by slot. Steles carry it as one `entity-{kind}` layer per kind and epoch, available from the stele cut two boundaries after the epoch. Source: `crates/core/src/{indexes,archive}.rs`, `crates/fjall/src/archive/entity.rs`, `crates/cardano/src/indexes/entities.rs`.
 
 The two fjall databases and their keyspaces:
 
 | Store | Keyspaces | One batch commits |
 |---|---|---|
 | state | `state-cursor`, `state-utxos`, `state-entities`, `state-tags` | entities + UTxO set + live-UTxO tags + cursor |
-| archive | `archive-blocks`, `archive-logs`, `archive-tags`, `index-exact`, `archive-meta` | block locations + logs + archive tags + exact lookups |
+| archive | `archive-blocks`, `archive-logs`, `archive-tags`, `index-exact`, `index-entity`, `archive-meta` | block locations + logs + archive tags + exact lookups + entity index entries |
 
 The [store identity](#store-identity) is written once, when the store is created, beside the cursor in `state-cursor` and alone in `archive-meta`.
 
@@ -122,7 +123,7 @@ A `Set` lives in state only, one row per member keyed `group ‖ epoch ‖ membe
 
 The sizes are the table files of each chunk namespace written at mainnet scale into a fully compacted fjall 3.1 store, measured under the namespace's earlier name (`stake-addresses`, `payment-stats` and `policy-first-mints`); renaming it left its keys and values unchanged. `first-mint-chunks` was built from mainnet's 11,159,935 first mints through epoch 646. `first-script-chunks` was measured in the endpoint-structures research, over mainnet's 319,671 scripts. `asset-mint-chunks` was measured under its own name, beside 0.26 MB of `asset-mints` staged in state at the tip.
 
-A `Set` lists a member once per epoch, so a list that names each member once over all of history needs a witness to tell a first appearance from a repeat. First mints use `AssetState.initial_slot`. Scripts have no ledger state, so `scripts` (`ScriptState`) is their witness: one row per script hash, holding the slot the script was first seen at, written once and never pruned; the tx index and order within the tx that place it in cardano-db-sync's order live in its `first-scripts` row. It travels in every stele. `/scripts/{script_hash}` starts its lookup from it. `first-scripts` has no group, so its rows key `epoch ‖ script hash`.
+A `Set` lists a member once per epoch, so a list that names each member once over all of history needs a witness to tell a first appearance from a repeat. First mints use `AssetState.initial_slot`. Scripts have no ledger state, so their witness is the archive's entity index for the sealed epochs, which the seal writes for every script it seals before it deletes the staged row, and the staged rows of the epochs not yet sealed (decision 0064). The roll reads both once per batch for the scripts the batch carries, taking only index entries below the batch's first slot, so a re-roll over an archive that already indexes the batch (`dolos doctor rebuild-state`) never reads the batch's own entries, and the staged rows are exact. `/scripts/{script_hash}` reads the index, then the staged rows, then the index again, and decodes the block they name. `first-scripts` has no group, so its rows key `epoch ‖ script hash`.
 
 **Vocabulary.** *Account* is a stake credential, *payment* is a payment credential and *address* is a whole address. *Stake* names only an amount of stake, so a pool's record for one epoch is a `PoolEpochLog`, not a stake log.
 

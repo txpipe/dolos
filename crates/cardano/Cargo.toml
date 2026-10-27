@@ -36,6 +36,7 @@ dolos-testing = { path = "../testing" }
 proptest = "1.7.0"
 bincode.workspace = true
 tokio = { workspace = true, features = ["macros", "time"] }
+tracing-subscriber = "0.3.17"
 
 [features]
 include-genesis = []

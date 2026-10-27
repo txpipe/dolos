@@ -302,7 +302,39 @@ impl FixedKey for ProposalKey {
 
 display_as_stored!(ProposalKey);
 
-entity_boilerplate!(ProposalState, "proposals", state = ProposalKey);
+entity_boilerplate!(
+    ProposalState,
+    "proposals",
+    state = ProposalKey,
+    log = ProposalKey
+);
+
+/// A resolved proposal's final row drops its vote maps: the ledger stops
+/// reading them at resolution, and the votes route reads the votes from the
+/// archive's `action_votes` tag.
+impl crate::final_rows::FinalRow for ProposalState {
+    fn final_row(&self) -> Self {
+        Self {
+            slot: self.slot,
+            tx: self.tx,
+            idx: self.idx,
+            action: self.action.clone(),
+            cost_models_present: self.cost_models_present,
+            max_epoch: self.max_epoch,
+            ratified_epoch: self.ratified_epoch,
+            canceled_epoch: self.canceled_epoch,
+            deposit: self.deposit,
+            reward_account: self.reward_account.clone(),
+            proposed_in: self.proposed_in,
+            parent: self.parent.clone(),
+            purpose: self.purpose,
+            anchor: self.anchor.clone(),
+            cc_votes: Default::default(),
+            drep_votes: Default::default(),
+            spo_votes: Default::default(),
+        }
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -550,6 +582,21 @@ impl ProposalState {
         true
     }
 
+    /// Whether the boundary opening `epoch` moves the proposal to the
+    /// final-row log (`crate::final_rows`): a boundary before the one that
+    /// closed `epoch - 1` resolved it. The EWRAP after its resolution was its
+    /// last reader, since `is_active` keeps it visible for that one extra
+    /// boundary's drop pass. Every later reader skips it, and a vote on it is
+    /// not valid on chain.
+    ///
+    /// The boundary that moves it closes the epoch the resolution removed it
+    /// at the start of: the enacted or dropped epoch, as db-sync reports it.
+    pub fn leaves_state_at(&self, epoch: Epoch) -> bool {
+        epoch
+            .checked_sub(1)
+            .is_some_and(|closed| !self.is_unresolved_at_close(closed))
+    }
+
     /// Build the ID of the proposal in its string form, as found on explorers.
     pub fn id(tx: Hash<32>, idx: u32) -> String {
         format!("{}#{}", hex::encode(tx), idx)
@@ -704,6 +751,19 @@ impl dolos_core::EntityDelta for NewProposal {
 }
 
 /// Creation of a proposal with full governance capture.
+///
+/// Supersedes [`NewProposal`] as the emitted delta: it additionally records
+/// the lineage parent, the purpose, and the metadata anchor of the submitted
+/// action (the full seven-variant action mapping flows through the shared
+/// `ProposalAction`). [`NewProposal`] remains only so pre-existing WAL rows
+/// keep decoding and replaying — its field layout is frozen (bincode) and
+/// can't grow.
+///
+/// `network_magic` and `protocol` are vestigial on both deltas: they fed the
+/// per-network table that stamped ratification at creation. The epoch
+/// boundary computes outcomes now and stamps them through
+/// [`ProposalResolved`], but the fields stay — the layout is
+/// bincode-positional and can't shrink any more than it can grow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewProposalV2 {
     pub(crate) slot: BlockSlot,
@@ -1723,6 +1783,39 @@ mod resolution_tests {
                 assert_eq!(entity, legacy_applied);
             }
         }
+    }
+
+    /// Every outcome of the boundary closing 505 leaves state at the boundary
+    /// opening 507, after the EWRAP closing 506 read it, and an expiry no
+    /// boundary stamped leaves at the same distance from its drop. A live
+    /// proposal stays.
+    #[test]
+    fn a_resolved_proposal_leaves_state_one_boundary_after_its_resolution() {
+        for outcome in [
+            ProposalOutcome::Enacted,
+            ProposalOutcome::Expired,
+            ProposalOutcome::PrunedSibling,
+        ] {
+            let mut entity = Some(proposal());
+            ProposalResolved::new([3u8; 32].into(), 1, outcome, 505).apply(&mut entity);
+            let state = entity.unwrap();
+
+            assert!(!state.leaves_state_at(506), "{outcome:?}");
+            assert!(state.leaves_state_at(507), "{outcome:?}");
+            assert!(state.leaves_state_at(600), "{outcome:?}");
+        }
+
+        // `max_epoch` 510, so the boundary closing 511 drops it
+        let unstamped = proposal();
+        assert!(!unstamped.leaves_state_at(512));
+        assert!(unstamped.leaves_state_at(513));
+
+        let live = ProposalState {
+            max_epoch: None,
+            ..proposal()
+        };
+        assert!(!live.leaves_state_at(600));
+        assert!(!live.leaves_state_at(0));
     }
 
     /// A proposal is born unresolved. Outcome stamping at creation is what

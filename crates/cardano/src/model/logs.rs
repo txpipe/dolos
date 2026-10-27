@@ -9,19 +9,31 @@ use super::pools::PoolHash;
 ///
 /// Replaces the four identically-keyed namespaces that preceded it —
 /// `leader-rewards`, `member-rewards`, `pool-deposit-refunds` and
-/// `account-stakes` (ADR-0027). Written by EWRAP alone, keyed by
-/// `(epoch_start(C-1), credential)` when the boundary closing epoch `C` runs:
-/// the stake temporal key three of the four already used, so the merge
-/// deduplicates the `LogKey` and the pool hash the stake leg and the member
-/// reward share.
+/// `account-stakes` (ADR-0027). Keyed by `(epoch_start(E), credential)` for
+/// epoch `E`: the stake temporal key three of the four already used, so the
+/// merge deduplicates the `LogKey` and the pool hash the stake leg and the
+/// member reward share.
+///
+/// Two writers fill the key. ESTART opening `E` writes the row with the stake
+/// leg alone, from the distribution active in `E`. The EWRAP closing `E + 1`
+/// writes the full row over it, with the same stake leg and the reward legs.
+/// So at tip `C` the rows of `C - 1` and `C` carry stake only, and the older
+/// ones are final.
 ///
 /// # Absence
 ///
 /// Absence is encoded per field, never by the row: `active_stake: Some(0)` is
 /// a real zero-stake delegator that `zero_stake_delegators_are_kept` requires
-/// to exist, while a missing row means "this account did nothing this epoch".
-/// The reward legs keep the opposite policy — the `> 0` filter lives in the
-/// read path, as it did across the three reward namespaces.
+/// to exist. On a final row, a missing row means "this account did nothing this
+/// epoch". The reward legs keep the opposite policy — the `> 0` filter lives in
+/// the read path, as it did across the three reward namespaces — and on a
+/// stake-only row they mean "not computed yet".
+///
+/// For the two latest epochs, a missing row can also mean ESTART's row is
+/// gone or was never written: a rollback to the epoch's start or before cuts
+/// it, a restart after a crash mid-ESTART keeps only the shards still to run,
+/// and a store upgraded mid-epoch has none for the epoch it upgraded in. Each
+/// heals when EWRAP writes the full rows one boundary later.
 ///
 /// # Repetition
 ///

@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -6,10 +8,12 @@ use axum::{
 use blockfrost_openapi::models::proposal_votes_inner::{self, ProposalVotesInner};
 use dolos_cardano::{
     indexes::CardanoArchiveIndexExt as _,
-    model::{DRepKey, DRepState, ProposalKey, ProposalState},
+    model::{DRepKey, DRepState, ProposalKey},
     pallas_extras,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, ChainPoint, Domain, StateStore as _, TxOrder};
+use dolos_core::{
+    ArchiveError, ArchiveStore as _, BlockSlot, ChainPoint, Domain, StateStore as _, TxOrder,
+};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -31,7 +35,7 @@ use crate::{
     Facade,
 };
 
-use super::collect_block_rows;
+use super::{collect_block_rows, read_proposal_row, ProposalRow};
 
 struct ProposalVoteRow {
     tx: Hash<32>,
@@ -256,6 +260,199 @@ fn proposal_votes_in_block(block: &MultiEraBlock, action: &GovActionId) -> Vec<P
     out
 }
 
+/// How many of a voter's tagged slots in a row, none of them an action slot,
+/// the walk reads before it seeks the voter's tag at the next action slot.
+/// A seek opens a store iterator and costs about as much as reading a run
+/// of entries from an open one.
+const MISSES_BEFORE_SEEK: usize = 16;
+
+/// The first slot at or after `from` that both `action_slots` and a voter's
+/// `voter_votes` tag name, where `voter_slots(start, end)` reads that tag.
+///
+/// The voter's tag is read from the next action slot up to the last one, so
+/// nothing outside the action's own votes ahead is read. A run of
+/// [`MISSES_BEFORE_SEEK`] voter slots that the action does not name ends in a
+/// seek at the next action slot. Each seek passes at least one action slot,
+/// so a voter costs at most that many reads per vote block of the action
+/// ahead, however often it votes on other actions.
+fn next_shared_slot<I>(
+    action_slots: &BTreeSet<BlockSlot>,
+    mut from: BlockSlot,
+    mut voter_slots: impl FnMut(BlockSlot, BlockSlot) -> Result<I, ArchiveError>,
+) -> Result<Option<BlockSlot>, Error>
+where
+    I: Iterator<Item = Result<BlockSlot, ArchiveError>>,
+{
+    let Some(&last) = action_slots.last() else {
+        return Ok(None);
+    };
+
+    'seek: while let Some(&next) = action_slots.range(from..).next() {
+        let voter = voter_slots(next, last).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        for (read, slot) in voter.enumerate() {
+            let slot = slot.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            if action_slots.contains(&slot) {
+                return Ok(Some(slot));
+            }
+
+            if read + 1 == MISSES_BEFORE_SEEK {
+                from = slot;
+                continue 'seek;
+            }
+        }
+
+        return Ok(None);
+    }
+
+    Ok(None)
+}
+
+/// The newest vote of each voter on a resolved proposal, found by the
+/// `action_votes` walk instead of the vote maps its final row dropped.
+///
+/// A page reads a prefix of the listing, in whole blocks. Read newest first,
+/// that prefix holds every vote newer than a row on the page. Read oldest
+/// first, a newer vote can sit past it, in a block that both the action's
+/// `action_votes` tag and the voter's `voter_votes` tag name
+/// ([`next_shared_slot`]), so the check reads only those blocks. No vote
+/// lands on a proposal once it is resolved, and the archive holds its votes
+/// by the boundary after, so nothing newer hides past the visible tip.
+///
+/// The blocks the check reads draw on the request's budget, as the listing's
+/// do. So any oldest-first page of a resolved proposal, the first one
+/// included, can exceed a budget that the same page of its live row fits in.
+/// The check reads no more blocks than the action has vote blocks up to the
+/// visible tip.
+struct WalkedNewest<'a, D: Domain> {
+    domain: &'a D,
+    key: ProposalKey,
+    action: GovActionId,
+
+    /// The newest position of each voter among the rows the page read.
+    read: BTreeMap<Voter, (BlockSlot, TxOrder)>,
+
+    /// The slots past the rows read, inclusive, where an oldest-first page
+    /// looks for newer votes; `None` newest first.
+    ahead: Option<(BlockSlot, BlockSlot)>,
+
+    /// The action's tagged slots in [`Self::ahead`], read on first use.
+    action_slots: Option<BTreeSet<BlockSlot>>,
+
+    /// The blocks past the rows read, by slot, read on first use.
+    blocks: HashMap<BlockSlot, Vec<ProposalVoteRow>>,
+}
+
+impl<'a, D: Domain> WalkedNewest<'a, D> {
+    fn new(
+        domain: &'a D,
+        key: &ProposalKey,
+        action: &GovActionId,
+        rows: &[ProposalVoteRow],
+        descending: bool,
+        visible: BlockSlot,
+    ) -> Self {
+        let mut read: BTreeMap<Voter, (BlockSlot, TxOrder)> = BTreeMap::new();
+
+        for row in rows {
+            let position = (row.slot, row.tx_order);
+            let newest = read.entry(row.voter.clone()).or_insert(position);
+            *newest = (*newest).max(position);
+        }
+
+        let last = rows.iter().map(|row| row.slot).max();
+
+        let ahead = match last {
+            Some(last) if !descending && last < visible => Some((last + 1, visible)),
+            _ => None,
+        };
+
+        Self {
+            domain,
+            key: *key,
+            action: action.clone(),
+            read,
+            ahead,
+            action_slots: None,
+            blocks: HashMap::new(),
+        }
+    }
+
+    /// Whether `row` holds its voter's newest vote on the action.
+    fn is_newest(&mut self, row: &ProposalVoteRow, budget: &mut usize) -> Result<bool, Error> {
+        let position = (row.slot, row.tx_order);
+
+        if self
+            .read
+            .get(&row.voter)
+            .is_some_and(|newest| *newest > position)
+        {
+            return Ok(false);
+        }
+
+        let Some((from, to)) = self.ahead else {
+            return Ok(true);
+        };
+
+        let archive = self.domain.archive();
+
+        if self.action_slots.is_none() {
+            let slots = archive
+                .slots_by_action_votes(&self.key, from, to)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .collect::<Result<BTreeSet<_>, _>>()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            self.action_slots = Some(slots);
+        }
+
+        let action_slots = self.action_slots.as_ref().expect("read above");
+        let voter = pallas_extras::voter_id_bytes(&row.voter);
+        let mut from = from;
+
+        while let Some(slot) = next_shared_slot(action_slots, from, |start, end| {
+            archive.slots_by_voter_votes(&voter, start, end)
+        })? {
+            from = slot + 1;
+
+            if !self.blocks.contains_key(&slot) {
+                // The same budget the listing draws on.
+                if *budget == 0 {
+                    return Err(Error::ScanBudgetExceeded);
+                }
+
+                *budget -= 1;
+
+                // A tagged block the archive no longer holds leaves the
+                // walk, as it leaves the listing.
+                let rows = match archive
+                    .get_block_by_slot(&slot)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                {
+                    Some(body) => {
+                        let block = MultiEraBlock::decode(&body)
+                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                        proposal_votes_in_block(&block, &self.action)
+                    }
+                    None => vec![],
+                };
+
+                self.blocks.insert(slot, rows);
+            }
+
+            if self.blocks[&slot]
+                .iter()
+                .any(|later| later.voter == row.voter)
+            {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+}
+
 const STABLE_CURSOR_ATTEMPTS: usize = 3;
 
 /// Whether two cursors are the same commit: same variant, slot and hash.
@@ -309,9 +506,10 @@ fn read_at_stable_cursor<T, E: From<StatusCode>>(
 /// the list, and the votes after it move up, like the other history endpoints
 /// under rolling history.
 ///
-/// Only the newest vote of a voter can count, and the proposal's state row
-/// holds that vote's position (`VoteEntry`), so only the rows on the page pay
-/// for the `counted` check.
+/// Only the newest vote of a voter can count. A live proposal's state row
+/// holds that vote's position (`VoteEntry`); a resolved proposal's final row
+/// has no vote maps, and the walk finds it instead ([`WalkedNewest`]). Either
+/// way only the rows on the page pay for the `counted` check.
 ///
 /// The `counted` flags compare the archive rows with the proposal row and
 /// with the DRep rows, so the whole page is read between two reads of the
@@ -352,14 +550,9 @@ fn read_votes_at<D: Domain>(
 ) -> Result<Vec<ProposalVotesInner>, Error> {
     let key = ProposalKey::new(tx, idx);
 
-    let state = domain
-        .state()
-        .read_entity_typed::<ProposalState>(&key)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     // Blockfrost joins against db-sync and sends whatever rows come back, so
     // an unknown proposal is an empty listing rather than a 404.
-    let Some(state) = state else {
+    let Some(proposal) = read_proposal_row(domain, &key)? else {
         return Ok(vec![]);
     };
 
@@ -415,11 +608,14 @@ fn read_votes_at<D: Domain>(
     // The last slot whose deregistration can still drop a vote: the one
     // before the epoch that the proposal closes in, capped at the visible
     // tip.
-    let end = match proposal_closed_epoch(&state, current_epoch) {
+    let end = match proposal_closed_epoch(proposal.state(), current_epoch) {
         Some(closed) => chain.epoch_start(closed).saturating_sub(1),
         None => BlockSlot::MAX,
     }
     .min(visible);
+
+    let mut walked = matches!(proposal, ProposalRow::Final(_))
+        .then(|| WalkedNewest::new(domain, &key, &action, &rows, descending, visible));
 
     let page = rows
         .into_iter()
@@ -429,11 +625,17 @@ fn read_votes_at<D: Domain>(
     let mut out = Vec::new();
 
     for mut row in page {
-        // Only the newest vote of a voter can count. The vote map of the
-        // state row pins its position.
-        row.counted = state
-            .vote_entry(&row.voter)
-            .is_some_and(|entry| entry.newest.0 == row.slot && entry.newest_order == row.tx_order);
+        // Only the newest vote of a voter can count. The vote map of a live
+        // proposal's row pins its position; a final row's comes from the walk.
+        row.counted = match walked.as_mut() {
+            Some(walked) => walked.is_newest(&row, budget)?,
+            None => proposal
+                .state()
+                .vote_entry(&row.voter)
+                .is_some_and(|entry| {
+                    entry.newest.0 == row.slot && entry.newest_order == row.tx_order
+                }),
+        };
 
         let drep = match &row.voter {
             Voter::DRepKey(hash) => Some(StakeCredential::AddrKeyhash(*hash)),
@@ -537,21 +739,15 @@ mod tests {
         routes::governance::testing::*,
         test_support::{TestApp, TestFault},
     };
+    use dolos_cardano::model::ProposalState;
     use dolos_core::StateWriter as _;
     use dolos_testing::{
+        measured::MeasuredStores,
         synthetic::{SyntheticBlockConfig, SyntheticVectors},
-        toy_domain::ToyDomain,
+        toy_domain::{MemoryStores, ToyDomain},
     };
     use itertools::Itertools;
     use pallas::ledger::primitives::{conway::GovAction, Epoch};
-
-    fn cc_script_voter() -> Voter {
-        Voter::ConstitutionalCommitteeScript([0xAAu8; 28].into())
-    }
-
-    fn cc_key_voter() -> Voter {
-        Voter::ConstitutionalCommitteeKey([0xBBu8; 28].into())
-    }
 
     /// Block 0 proposes three actions in one tx. Block 1 votes on action 0
     /// with all three voter roles — its drep votes on action 1 too, so the
@@ -756,11 +952,10 @@ mod tests {
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
-    /// Two txs of one block carry a vote of the same DRep on the same
-    /// proposal. Both rows are listed, and only the later one counts.
-    #[tokio::test]
-    async fn governance_proposal_votes_revote_in_one_block() {
-        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+    /// Block 0 proposes an action, and the two txs of block 1 each carry a
+    /// vote of the same DRep on it.
+    fn revote_in_one_block_cfg() -> SyntheticBlockConfig {
+        SyntheticBlockConfig {
             block_count: 2,
             txs_per_block: 2,
             gov_actions_by_block: vec![vec![vec![GovAction::Information], vec![]], vec![]],
@@ -772,7 +967,14 @@ mod tests {
                 ],
             ],
             ..Default::default()
-        });
+        }
+    }
+
+    /// Two txs of one block carry a vote of the same DRep on the same
+    /// proposal. Both rows are listed, and only the later one counts.
+    #[tokio::test]
+    async fn governance_proposal_votes_revote_in_one_block() {
+        let app = TestApp::new_with_cfg(revote_in_one_block_cfg());
 
         let proposal_tx = tx_hash_of_block(&app, 0);
         let path = format!("/governance/proposals/{proposal_tx}/0/votes");
@@ -790,6 +992,32 @@ mod tests {
                 (txs[0].clone(), proposal_votes_inner::Vote::Yes, false),
                 (txs[1].clone(), proposal_votes_inner::Vote::No, true),
             ]
+        );
+    }
+
+    /// The re-vote of the test above on a resolved proposal: the walk orders
+    /// the DRep's two rows by tx within the block, as the vote map did.
+    #[tokio::test]
+    async fn governance_proposal_votes_revote_in_one_block_of_a_resolved_proposal() {
+        let app = |moved| {
+            TestApp::new_with_cfg_and_setup(revote_in_one_block_cfg(), move |domain, _| {
+                enact_proposals(domain, moved)
+            })
+        };
+        let (live, moved) = (app(false), app(true));
+
+        let proposal_tx = tx_hash_of_block(&live, 0);
+        let base = format!("/governance/proposals/{proposal_tx}/0/votes");
+
+        for path in [base.clone(), format!("{base}?order=desc")] {
+            let rows = get_votes(&moved, &path).await;
+            assert_eq!(rows, get_votes(&live, &path).await, "{path}");
+        }
+
+        let rows = get_votes(&moved, &base).await;
+        assert_eq!(
+            rows.iter().map(|row| row.counted).collect_vec(),
+            [false, true]
         );
     }
 
@@ -1537,5 +1765,303 @@ mod tests {
         // the committee row alone reads no certificate block
         let rows = read_votes(&domain, tx, 0, &page(1), 1).expect("the page fits the budget");
         assert_eq!(rows.len(), 1);
+    }
+
+    /// Runs [`next_shared_slot`] from slot 0 over a voter tag held in memory,
+    /// and returns every shared slot, the seeks of the tag and the entries
+    /// pulled from it.
+    fn shared_slots(action: &[BlockSlot], voter: &[BlockSlot]) -> (Vec<BlockSlot>, usize, usize) {
+        use std::cell::Cell;
+
+        let action: BTreeSet<BlockSlot> = action.iter().copied().collect();
+        let seeks = Cell::new(0);
+        let pulled = Cell::new(0);
+
+        let mut shared = vec![];
+        let mut from = 0;
+
+        while let Some(slot) = next_shared_slot(&action, from, |start, end| {
+            seeks.set(seeks.get() + 1);
+
+            Ok(voter
+                .iter()
+                .copied()
+                .filter(move |slot| (start..=end).contains(slot))
+                .inspect(|_| pulled.set(pulled.get() + 1))
+                .map(Ok))
+        })
+        .expect("the walk failed")
+        {
+            shared.push(slot);
+            from = slot + 1;
+        }
+
+        (shared, seeks.get(), pulled.get())
+    }
+
+    /// A voter's walk reads its tag only over the action's own vote blocks
+    /// ahead, at most [`MISSES_BEFORE_SEEK`] entries per block, never its
+    /// votes on other actions before or after them.
+    #[test]
+    fn next_shared_slot_walks_the_action_slots() {
+        let others = (2..=11).collect_vec();
+
+        // nothing on the action ahead: no seek at all
+        assert_eq!(shared_slots(&[], &others), (vec![], 0, 0));
+
+        // one action slot past ten votes on other actions: one seek, which
+        // finds nothing from that slot on
+        assert_eq!(shared_slots(&[12], &others), (vec![], 1, 0));
+
+        // the voter's slots between the action's are read in one pass
+        assert_eq!(shared_slots(&[2, 5, 9], &[3, 4, 9]), (vec![9], 1, 3));
+
+        // a dense action and a sparse voter: the voter's slots bound the walk
+        let dense = (1..=100).collect_vec();
+        assert_eq!(shared_slots(&dense, &[50, 150]), (vec![50], 2, 1));
+
+        // every shared slot, in order
+        assert_eq!(
+            shared_slots(&[1, 2, 3, 7], &[2, 3, 4, 7]),
+            (vec![2, 3, 7], 3, 3)
+        );
+
+        // a long run of votes on other actions between two action slots ends
+        // in a seek at the next one, whatever the run's length
+        let run = (11..=999).collect_vec();
+        let misses = MISSES_BEFORE_SEEK;
+        assert_eq!(shared_slots(&[10, 1000], &run), (vec![], 2, misses));
+
+        let run_then_vote = (11..=1000).collect_vec();
+        assert_eq!(
+            shared_slots(&[10, 1000], &run_then_vote),
+            (vec![1000], 2, misses + 1)
+        );
+
+        // the seek after a run starts past the run's last slot, not at the
+        // action slot the run passed without the voter
+        let run_past_15 = (11..=14).chain(16..=999).collect_vec();
+        assert_eq!(
+            shared_slots(&[10, 15, 1000], &run_past_15),
+            (vec![], 2, misses)
+        );
+    }
+
+    /// Block 0 proposes two actions, block 1 holds the DRep's vote on action
+    /// 0, and blocks 2 to 11 hold its votes on action 1.
+    fn other_action_votes_cfg() -> SyntheticBlockConfig {
+        let mut gov_actions_by_block = vec![vec![]; 12];
+        gov_actions_by_block[0] = vec![vec![GovAction::Information, GovAction::Information]];
+
+        let mut votes_by_block = vec![vec![]; 12];
+        votes_by_block[1] = vec![vec![synthetic_vote(drep_key_voter(), 0, 0, 0, Vote::Yes)]];
+
+        for block in &mut votes_by_block[2..] {
+            *block = vec![vec![synthetic_vote(drep_key_voter(), 0, 0, 1, Vote::No)]];
+        }
+
+        SyntheticBlockConfig {
+            block_count: 12,
+            txs_per_block: 1,
+            gov_actions_by_block,
+            votes_by_block,
+            ..Default::default()
+        }
+    }
+
+    /// The DRep's later votes on another action leave nothing for the walk of
+    /// a resolved proposal to read ([`next_shared_slot_walks_the_action_slots`]
+    /// counts the seeks), and the listing answers as its live row did.
+    #[tokio::test]
+    async fn governance_proposal_votes_walk_past_votes_on_other_actions() {
+        let app = |moved| {
+            TestApp::new_with_cfg_and_setup(other_action_votes_cfg(), move |domain, _| {
+                enact_proposals(domain, moved)
+            })
+        };
+        let (live, moved) = (app(false), app(true));
+
+        let proposal_tx = tx_hash_of_block(&live, 0);
+        let path = format!("/governance/proposals/{proposal_tx}/0/votes");
+        let rows = get_votes(&moved, &path).await;
+
+        assert_eq!(rows, get_votes(&live, &path).await);
+        assert_eq!(rows.iter().map(|row| row.counted).collect_vec(), [true]);
+    }
+
+    /// The page of the test above reads as many tag entries from the resolved
+    /// proposal as from its live row: the walk reads none of the DRep's ten
+    /// later votes on action 1.
+    #[test]
+    fn governance_proposal_votes_walk_reads_no_tag_entry_past_the_action() {
+        let tag_entries = |moved| {
+            let (domain, vectors) =
+                TestDomainBuilder::<MeasuredStores<MemoryStores>>::new_with_synthetic_in(
+                    other_action_votes_cfg(),
+                    |_| (),
+                )
+                .finish();
+            enact_proposals(&domain, moved);
+
+            let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
+                .parse()
+                .expect("failed to parse the proposal tx");
+            let counters = &domain.archive().counters;
+
+            let before = counters.snapshot().tag_candidates;
+            let rows = read_votes(&domain, tx, 0, &Pagination::default(), 100)
+                .expect("the page fits the budget");
+            assert_eq!(rows.iter().map(|row| row.counted).collect_vec(), [true]);
+
+            counters.snapshot().tag_candidates - before
+        };
+
+        assert_eq!(tag_entries(true), tag_entries(false));
+    }
+
+    /// Block 0 proposes two actions, block 1 holds the DRep's vote on action
+    /// 0 and block 6 the pool's. Blocks 2 to 5 and 7 to 11 hold the DRep's
+    /// votes on action 1.
+    fn vote_ahead_cfg() -> SyntheticBlockConfig {
+        let mut cfg = other_action_votes_cfg();
+        cfg.votes_by_block[6] = vec![vec![synthetic_vote(spo_voter(), 0, 0, 0, Vote::Yes)]];
+        cfg
+    }
+
+    /// An oldest-first page of one row, over block 1, has one vote block of
+    /// the action ahead. The walk of the resolved proposal reads that slot
+    /// from the action's tag, and none of the DRep's votes on action 1 before
+    /// or after it.
+    #[test]
+    fn governance_proposal_votes_walk_reads_the_voter_tag_only_at_action_slots_ahead() {
+        let tag_entries = |moved| {
+            let (domain, vectors) =
+                TestDomainBuilder::<MeasuredStores<MemoryStores>>::new_with_synthetic_in(
+                    vote_ahead_cfg(),
+                    |_| (),
+                )
+                .finish();
+            enact_proposals(&domain, moved);
+
+            let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
+                .parse()
+                .expect("failed to parse the proposal tx");
+            let page = Pagination {
+                count: 1,
+                ..Default::default()
+            };
+            let counters = &domain.archive().counters;
+
+            let before = counters.snapshot().tag_candidates;
+            let rows = read_votes(&domain, tx, 0, &page, 100).expect("the page fits the budget");
+            assert_eq!(rows.iter().map(|row| row.counted).collect_vec(), [true]);
+
+            counters.snapshot().tag_candidates - before
+        };
+
+        assert_eq!(tag_entries(true), tag_entries(false) + 1);
+    }
+
+    /// The walk of a resolved proposal reads its blocks from the request's
+    /// budget. The DRep row of an oldest-first page over block 1 walks
+    /// block 2, which both tags name, and block 3, which holds its re-vote:
+    /// three blocks with the listing's one. The live row's vote map needs
+    /// none of them.
+    #[test]
+    fn governance_proposal_votes_walk_draws_on_the_budget() {
+        let domain = |moved| {
+            let (domain, vectors) =
+                TestDomainBuilder::new_with_synthetic(resolved_votes_cfg()).finish();
+            enact_proposals(&domain, moved);
+            (domain, vectors)
+        };
+
+        let (moved, vectors) = domain(true);
+        let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
+            .parse()
+            .expect("failed to parse the proposal tx");
+        let page = Pagination {
+            count: 2,
+            ..Default::default()
+        };
+
+        let rows = read_votes(&moved, tx, 0, &page, 3).expect("the page fits the budget");
+        assert_eq!(
+            rows.iter().map(|row| row.counted).collect_vec(),
+            [true, false]
+        );
+
+        assert!(matches!(
+            read_votes(&moved, tx, 0, &page, 2),
+            Err(Error::ScanBudgetExceeded)
+        ));
+
+        let (live, _) = domain(false);
+        let rows = read_votes(&live, tx, 0, &page, 1).expect("the page fits the budget");
+        assert_eq!(
+            rows.iter().map(|row| row.counted).collect_vec(),
+            [true, false]
+        );
+    }
+
+    /// Block 0 proposes an action. One tx of block 1 holds the DRep's and the
+    /// pool's votes on it, and one tx of block 2 holds both their re-votes.
+    fn shared_revote_cfg() -> SyntheticBlockConfig {
+        let both = |vote: Vote| {
+            vec![vec![
+                synthetic_vote(drep_key_voter(), 0, 0, 0, vote.clone()),
+                synthetic_vote(spo_voter(), 0, 0, 0, vote),
+            ]]
+        };
+
+        SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![vec![vec![GovAction::Information]], vec![], vec![]],
+            votes_by_block: vec![vec![], both(Vote::Yes), both(Vote::No)],
+            ..Default::default()
+        }
+    }
+
+    /// The rows of one page share the blocks their walks read. An
+    /// oldest-first page over block 1 holds the DRep's and the pool's votes,
+    /// and both walks find a re-vote in block 2. The page reads block 2 once
+    /// more than its live row does, and charges it once: two blocks with the
+    /// listing's one.
+    #[test]
+    fn governance_proposal_votes_walks_of_one_page_read_a_block_once() {
+        let read = |moved, budget| {
+            let (domain, vectors) =
+                TestDomainBuilder::<MeasuredStores<MemoryStores>>::new_with_synthetic_in(
+                    shared_revote_cfg(),
+                    |_| (),
+                )
+                .finish();
+            enact_proposals(&domain, moved);
+
+            let tx: Hash<32> = vectors.blocks[0].tx_hashes[0]
+                .parse()
+                .expect("failed to parse the proposal tx");
+            let page = Pagination {
+                count: 2,
+                ..Default::default()
+            };
+            let counters = &domain.archive().counters;
+
+            let before = counters.snapshot().block_reads;
+            let counted = read_votes(&domain, tx, 0, &page, budget)
+                .map(|rows| rows.iter().map(|row| row.counted).collect_vec());
+
+            (counted, counters.snapshot().block_reads - before)
+        };
+
+        let (live, live_reads) = read(false, 1);
+        assert_eq!(live.expect("the page fits the budget"), [false, false]);
+
+        let (moved, moved_reads) = read(true, 2);
+        assert_eq!(moved.expect("the page fits the budget"), [false, false]);
+        assert_eq!(moved_reads, live_reads + 1);
+
+        assert!(matches!(read(true, 1).0, Err(Error::ScanBudgetExceeded)));
     }
 }

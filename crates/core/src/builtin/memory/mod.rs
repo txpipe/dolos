@@ -17,8 +17,8 @@ mod cache;
 mod state;
 
 pub use archive::{
-    MemoryArchiveStore, MemoryArchiveWriter, MemoryBlockIter, MemoryExactIter, MemoryLogIter,
-    MemorySlotIter, MemoryTagIter,
+    MemoryArchiveStore, MemoryArchiveWriter, MemoryBlockIter, MemoryEntityRecordIter,
+    MemoryExactIter, MemoryLogIter, MemorySlotIter, MemoryTagIter,
 };
 pub use cache::{Inserted, MemoryCacheTier};
 pub use state::{MemoryEntityIter, MemoryStateStore, MemoryStateWriter, MemoryUtxoIter};

@@ -359,10 +359,11 @@ fn select_mempool_utxos<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Memp
             debug!(txoref = %txoref, "checking mempool utxo");
 
             if refs.contains(&txoref) {
-                let era_cbor = EraCbor::from(inflight);
+                // a pending output has no block, so no position
+                let value = UtxoValue::new(EraCbor::from(inflight), None);
                 debug!(txoref = %txoref, "selected utxo available inmempool tx");
                 refs.remove(&txoref);
-                map.insert(txoref, Arc::new(era_cbor));
+                map.insert(txoref, Arc::new(value));
             }
         }
     }

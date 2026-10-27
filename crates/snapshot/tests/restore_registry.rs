@@ -47,8 +47,8 @@ mod watcher;
 
 use dolos_cardano::indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta};
 use dolos_core::{
-    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, StateStore,
-    TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    ArchiveStore, ChainPoint, Domain as _, EntityKey, ExactRecord, LogKey, StateStore, TagOrder,
+    TagRecord, TagStart, TxoRef, UtxoSet, UtxoSetDelta, UtxoValue,
 };
 use dolos_snapshot::{
     export::Plan,
@@ -774,7 +774,7 @@ fn assert_utxo_tags_match<S: StateStore>(left: &S, right: &S) {
     let rebuilt = utxo_index_delta_from_utxo_delta(&delta);
     let mut asked = 0usize;
 
-    for (txo, tags) in &rebuilt.produced {
+    for (txo, _, tags) in &rebuilt.produced {
         for tag in tags {
             let a: UtxoSet = left.utxos_by_tag(tag.dimension, &tag.key).unwrap();
             let b: UtxoSet = right.utxos_by_tag(tag.dimension, &tag.key).unwrap();
@@ -785,6 +785,27 @@ fn assert_utxo_tags_match<S: StateStore>(left: &S, right: &S) {
                 tag.dimension
             );
             assert_eq!(a, b, "utxos under {}", tag.dimension);
+
+            for order in [TagOrder::Asc, TagOrder::Desc] {
+                let page = |store: &S| {
+                    store
+                        .utxos_by_tag_page(
+                            tag.dimension,
+                            &tag.key,
+                            order,
+                            TagStart::Skip(0),
+                            usize::MAX,
+                        )
+                        .unwrap()
+                };
+
+                assert_eq!(
+                    page(left),
+                    page(right),
+                    "{order:?} order under {}",
+                    tag.dimension
+                );
+            }
 
             asked += 1;
         }
@@ -804,7 +825,7 @@ fn entities_of<S: StateStore>(store: &S, ns: &'static str) -> Vec<(EntityKey, Ve
         .collect()
 }
 
-fn utxos_of<S: StateStore>(store: &S) -> std::collections::BTreeMap<TxoRef, EraCbor> {
+fn utxos_of<S: StateStore>(store: &S) -> std::collections::BTreeMap<TxoRef, UtxoValue> {
     store.iter_utxos().unwrap().map(Result::unwrap).collect()
 }
 

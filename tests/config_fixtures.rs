@@ -148,7 +148,6 @@ fn the_full_reference_parses() {
 
     let grpc = serve.grpc.as_ref().unwrap();
     assert_eq!(grpc.listen_address, "[::]:50051");
-    assert_eq!(grpc.tls_client_ca_root, Some("./client-ca.pem".into()));
     assert!(grpc.permissive_cors());
     assert!(!grpc.http2_adaptive_window());
     assert_eq!(grpc.http2_initial_stream_window_size, Some(8_388_608));
@@ -248,6 +247,7 @@ fn the_ephemeral_example_parses() {
 
     assert_eq!(config.storage.state, StateStoreConfig::ephemeral());
     assert_eq!(config.storage.archive, ArchiveStoreConfig::ephemeral());
+    assert!(!config.storage.cache.enabled);
     assert_eq!(config.storage.state_path(), None);
     assert_eq!(config.storage.archive_path(), None);
     assert_eq!(config.wal_path(), None);
@@ -838,6 +838,164 @@ fn config_check_prints_the_network_and_stores() {
         ],
     );
     assert!(!dir.path().join("dolos.toml").exists());
+}
+
+fn repo_path(path: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
+}
+
+/// The directories under `dir` that hold a `dolos.toml`.
+fn config_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.join("dolos.toml").is_file())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// The files of `source`, copied into a fresh directory.
+fn copy_files(source: &Path) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+
+    for entry in std::fs::read_dir(source).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            std::fs::copy(&path, dir.path().join(path.file_name().unwrap())).unwrap();
+        }
+    }
+
+    dir
+}
+
+/// `config check` on `dir/dolos.toml`, run from `dir`, which must pass and
+/// create nothing.
+fn assert_config_check_passes(dir: &Path, name: &str) {
+    let path = dir.join("dolos.toml");
+    let before = std::fs::read_dir(dir).unwrap().count();
+
+    let output = run_dolos(
+        dir,
+        &["--config", path.to_str().unwrap(), "config", "check"],
+    );
+    assert!(
+        output.status.success(),
+        "{name}: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read_dir(dir).unwrap().count(),
+        before,
+        "{name}: check created a file"
+    );
+}
+
+/// Every configuration the repository ships passes `config check`: each
+/// example with the files beside it, each e2e scenario once its genesis is
+/// written as the e2e harness writes it, and each `xtask` template.
+#[test]
+fn shipped_configurations_pass_config_check() {
+    let examples = config_dirs(&repo_path("examples"));
+    assert!(!examples.is_empty());
+
+    for example in examples {
+        let dir = copy_files(&example);
+        assert_config_check_passes(dir.path(), &example.display().to_string());
+    }
+
+    let scenarios = config_dirs(&repo_path("tests/e2e/scenarios"));
+    assert!(!scenarios.is_empty());
+
+    for scenario in scenarios {
+        let name = scenario.display().to_string();
+        let dir = copy_files(&scenario);
+
+        let output = run_dolos(dir.path(), &["doctor", "reset-genesis"]);
+        assert!(
+            output.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert_config_check_passes(dir.path(), &name);
+    }
+
+    let mut templates: Vec<PathBuf> = std::fs::read_dir(repo_path("xtask/templates"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+        .collect();
+    templates.sort();
+    assert!(!templates.is_empty());
+
+    for template in templates {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(&template, dir.path().join("dolos.toml")).unwrap();
+        assert_config_check_passes(dir.path(), &template.display().to_string());
+    }
+}
+
+/// The TOML blocks of a Markdown page, in order.
+fn toml_blocks(page: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut lines = page.lines();
+
+    while let Some(line) = lines.next() {
+        if line.trim() == "```toml" {
+            let block: Vec<&str> = lines.by_ref().take_while(|x| x.trim() != "```").collect();
+            blocks.push(block.join("\n"));
+        }
+    }
+
+    blocks
+}
+
+/// A block of the reference as a whole file: as written when it declares
+/// `compatibility`, else over the least file the schema accepts, whose
+/// `[chain]` it may replace.
+fn as_config_file(block: &str) -> String {
+    if block.contains("compatibility") {
+        return block.to_string();
+    }
+
+    let mut file = String::from("compatibility = \"v2-alpha.1\"\n\n");
+
+    if !block.lines().any(|line| line.trim() == "[chain]") {
+        file.push_str("[chain]\nprotocol = \"cardano\"\nnetwork = \"mainnet\"\n\n");
+    }
+
+    file.push_str(block);
+    file.push('\n');
+    file
+}
+
+/// Every TOML block in the schema reference loads and validates, and the
+/// ordinary, full and ephemeral examples there are the fixtures' own.
+#[test]
+#[serial]
+fn every_toml_block_in_the_schema_reference_parses() {
+    let page = std::fs::read_to_string(repo_path("docs/content/configuration/schema.mdx")).unwrap();
+    let blocks = toml_blocks(&page);
+    assert!(!blocks.is_empty());
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dolos.toml");
+
+    let configs: Vec<RootConfig> = blocks
+        .iter()
+        .map(|block| {
+            std::fs::write(&path, as_config_file(block)).unwrap();
+            load(Some(&path)).unwrap_or_else(|error| panic!("{error}:\n{block}"))
+        })
+        .collect();
+
+    for name in ["ordinary.toml", "full.toml", "ephemeral.toml"] {
+        let fixture = load(Some(&fixture(name))).unwrap();
+        assert!(configs.contains(&fixture), "{name} is not on the page");
+    }
 }
 
 /// `init` reads a custom network's genesis like any other command, so a
@@ -1540,7 +1698,7 @@ fn a_table_and_a_key_in_it_are_not_overridden_together() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dolos.toml");
     let config = std::fs::read_to_string(fixture("minimal.toml")).unwrap()
-        + "\n[serve.grpc]\nlisten_address = \"[::]:50051\"\ntls_client_ca_root = \"missing-ca.pem\"\n";
+        + "\n[serve.grpc]\nlisten_address = \"[::]:50051\"\npermissive_cors = false\n";
     std::fs::write(&path, config).unwrap();
 
     let overlapping = variables(&[
@@ -1557,6 +1715,28 @@ fn a_table_and_a_key_in_it_are_not_overridden_together() {
             "{error}"
         );
     }
+}
+
+/// `serve.grpc.tls_client_ca_root` is removed: TLS is terminated at a proxy.
+/// A file that still sets it is refused, naming the field.
+#[test]
+#[serial]
+fn a_grpc_tls_client_ca_root_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dolos.toml");
+    let config = std::fs::read_to_string(fixture("minimal.toml")).unwrap()
+        + "\n[serve.grpc]\nlisten_address = \"[::]:50051\"\ntls_client_ca_root = \"ca.pem\"\n";
+    std::fs::write(&path, config).unwrap();
+
+    let error = load_with_env(&path, &[]).unwrap_err();
+
+    assert!(matches!(error, ConfigError::Read { .. }), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown field `tls_client_ca_root`"),
+        "{error}"
+    );
 }
 
 /// The environment is read in lowercase, so two variables that differ only in
