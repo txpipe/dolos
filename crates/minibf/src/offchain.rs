@@ -472,25 +472,11 @@ where
         return cached;
     }
 
-    let fill = fill_body(cache.clone(), location.clone(), namespaces, fetch());
-
-    // A detached fill survives cancellation of the request that started it.
-    let filled = match cache
-        .get_or_fill_async(namespaces.bodies, &location.hash, fill)
-        .await
-    {
-        Err(CacheError::Overloaded) => match on_overload {
-            OnOverload::Unfetched => return MetadataBody::Unfetched,
-            OnOverload::Inline => {
-                let fill = fill_body(cache.clone(), location.clone(), namespaces, fetch());
-                cache
-                    .fill_inline(namespaces.bodies, &location.hash, fill)
-                    .await
-            }
-        },
+    let filled = match shared_fill(cache, location, namespaces, on_overload, &fetch).await {
+        None => return MetadataBody::Unfetched,
         // a namespace that failed to register, which `register` warned of:
         // fetch without the cache
-        Err(CacheError::UnknownNamespace(_)) => {
+        Some(Err(CacheError::UnknownNamespace(_))) => {
             tracing::debug!(
                 namespace = namespaces.bodies,
                 url = %location.url,
@@ -502,22 +488,22 @@ where
                 Err(failed) => MetadataBody::Failed(failed.error),
             };
         }
-        filled => filled,
+        Some(filled) => filled,
     };
 
-    // A joined fetch of the same hash can fail at another URL.
-    let filled = match filled {
-        Err(error)
-            if error
-                .downcast_fill::<FetchFailed>()
-                .is_some_and(|failed| failed.url != location.url) =>
-        {
-            let fill = fill_body(cache.clone(), location.clone(), namespaces, fetch());
-            cache
-                .fill_inline(namespaces.bodies, &location.hash, fill)
-                .await
+    // A joined fetch of the same hash can fail at another URL. The retry of
+    // the own URL is shared too, so the requests waiting on that URL make one
+    // fetch, which outlives them; a second failure elsewhere fetches inline.
+    let filled = if failed_elsewhere(&filled, location) {
+        match shared_fill(cache, location, namespaces, on_overload, &fetch).await {
+            None => return MetadataBody::Unfetched,
+            Some(filled) if failed_elsewhere(&filled, location) => {
+                inline_fill(cache, location, namespaces, fetch()).await
+            }
+            Some(filled) => filled,
         }
-        filled => filled,
+    } else {
+        filled
     };
 
     match filled {
@@ -531,6 +517,61 @@ where
             }
         },
     }
+}
+
+/// Joins or starts the fetch of `location`'s hash. A started fetch runs on
+/// its own task, so it survives cancellation of the request that started it.
+/// Past the pending limit, `on_overload` decides, and `None` means unfetched.
+async fn shared_fill<C, F, Fut>(
+    cache: &C,
+    location: &MetadataLocation,
+    namespaces: MetadataCache,
+    on_overload: OnOverload,
+    fetch: &F,
+) -> Option<Result<Bytes, CacheError>>
+where
+    C: CacheStore,
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, Option<DrepsInnerMetadataError>>> + Send + 'static,
+{
+    let fill = fill_body(cache.clone(), location.clone(), namespaces, fetch());
+
+    match cache
+        .get_or_fill_async(namespaces.bodies, &location.hash, fill)
+        .await
+    {
+        Err(CacheError::Overloaded) => match on_overload {
+            OnOverload::Unfetched => None,
+            OnOverload::Inline => Some(inline_fill(cache, location, namespaces, fetch()).await),
+        },
+        filled => Some(filled),
+    }
+}
+
+/// Fetches `location` in the caller's task, under the concurrent limit.
+async fn inline_fill<C, Fut>(
+    cache: &C,
+    location: &MetadataLocation,
+    namespaces: MetadataCache,
+    fetch: Fut,
+) -> Result<Bytes, CacheError>
+where
+    C: CacheStore,
+    Fut: Future<Output = Result<Vec<u8>, Option<DrepsInnerMetadataError>>> + Send,
+{
+    let fill = fill_body(cache.clone(), location.clone(), namespaces, fetch);
+
+    cache
+        .fill_inline(namespaces.bodies, &location.hash, fill)
+        .await
+}
+
+fn failed_elsewhere(filled: &Result<Bytes, CacheError>, location: &MetadataLocation) -> bool {
+    filled.as_ref().is_err_and(|error| {
+        error
+            .downcast_fill::<FetchFailed>()
+            .is_some_and(|failed| failed.url != location.url)
+    })
 }
 
 async fn fill_body<C, Fut>(
@@ -1238,6 +1279,99 @@ mod tests {
         assert_eq!(fetched.unwrap().ticker, "POOL");
         assert!(error.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// `wait`'s output, or a test failure after five seconds rather than a
+    /// hang.
+    async fn within<F: Future>(wait: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .expect("the test waited more than five seconds")
+    }
+
+    // see `concurrent_pool_misses_share_one_fetch`: each closure call marks a
+    // join, the first of the shared fetch, the second of the shared retry
+    #[tokio::test]
+    async fn waiters_at_another_url_share_one_retry_that_outlives_them() {
+        let cache = memory_cache();
+        let dead = pool_metadata(POOL_BODY);
+        let mut moved = dead.clone();
+        moved.url = "https://mirror.invalid/pool.json".to_string();
+        let failure = crate::mapping::pool_connection_error(&dead.url);
+        let (started, ready) = tokio::sync::oneshot::channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let first = tokio::spawn({
+            let (cache, dead, failure, release) = (
+                cache.clone(),
+                dead.clone(),
+                failure.clone(),
+                release.clone(),
+            );
+            let started = std::sync::Mutex::new(Some(started));
+            async move {
+                load_pool_metadata(&cache, &dead, OnOverload::Inline, move |_| {
+                    let (failure, release) = (failure.clone(), release.clone());
+                    let started = started.lock().unwrap().take();
+                    async move {
+                        if let Some(started) = started {
+                            let _ = started.send(());
+                        }
+                        release.notified().await;
+                        Err(Some(failure))
+                    }
+                })
+                .await
+            }
+        });
+
+        // the fetch at the dead URL holds the flight before any waiter comes
+        within(ready).await.unwrap();
+
+        let gated = Gated::default();
+        let joined = Arc::new(AtomicUsize::new(0));
+        let waiters: Vec<_> = (0..8)
+            .map(|_| {
+                let (cache, moved, gated, joined) =
+                    (cache.clone(), moved.clone(), gated.clone(), joined.clone());
+                tokio::spawn(async move {
+                    load_pool_metadata(&cache, &moved, OnOverload::Inline, |_| {
+                        joined.fetch_add(1, Ordering::SeqCst);
+                        let fetched = gated.fetch(POOL_BODY.to_vec())(anchor(POOL_BODY));
+                        async move { fetched.await.map_err(Some) }
+                    })
+                    .await
+                })
+            })
+            .collect();
+
+        let joins = |n: usize| {
+            let joined = joined.clone();
+            within(async move {
+                while joined.load(Ordering::SeqCst) < n {
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        joins(8).await;
+        release.notify_one();
+        assert_eq!(within(first).await.unwrap().1, Some(failure));
+        joins(16).await;
+
+        // every waiter is cancelled, as a page deadline would
+        for waiter in waiters {
+            waiter.abort();
+            assert!(within(waiter).await.unwrap_err().is_cancelled());
+        }
+        gated.open();
+
+        let location = MetadataLocation::from(&moved);
+        within(async {
+            while cached_body(&cache, &location, POOL_CACHE).await.is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert_eq!(gated.calls.load(Ordering::SeqCst), 1);
     }
 
     /// A page answers by its deadline: a slow load leaves its row unsettled,
