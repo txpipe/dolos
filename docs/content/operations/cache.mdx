@@ -58,6 +58,8 @@ These figures size the `totals` namespace on mainnet. They were measured with do
 
 All of `--scan` fits the 4 GiB default disk budget, and the benchmark set fits the 512 MiB default memory budget. All of `--scan` does not fit the memory budget: it exceeds 512 MiB (536,870,912 bytes) by 2.1 MB. Under the default, a node whose clients read every kept key serves its lowest cost-per-byte entries from the disk tier. To keep the whole namespace in memory, raise `storage.cache.memory_mb` above 514 (539 MB); the namespace grows with the chain, so leave headroom.
 
+The `assets` namespace holds one entry per asset. On preprod, at commit `31b01efb`, `dolos cache warm --namespace assets --scan` built all 1,502,407 assets a sealed epoch first minted, up to watermark 304, in 125 s on an SSD. They hold 203.9 MB of entry bytes, 136 bytes per asset, in a cache file of 1.11 GB. That fits both default budgets. Mainnet has about 11.2 million assets, so its whole namespace is about 1.5 GB of entry bytes, inside the default disk budget and three times the default memory budget. A read that misses the memory tier is served from the disk tier.
+
 ## Commands
 
 The `dolos cache` commands work on the cache file directly, so they run with the node stopped. While a running node, or another `dolos` command, holds the cache file, they exit with an error asking you to stop it first. They print the cache's warnings, such as a cache file found corrupt and recreated empty, on stderr.
