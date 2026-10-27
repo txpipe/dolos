@@ -748,6 +748,25 @@ mod tests {
         assert_eq!(calidus(&entity).unwrap().nonce, 9);
     }
 
+    /// A pool moved with its key live, registering again in a transaction
+    /// that replays that key's registration: the nonce equals the floor's, so
+    /// only the floor landing first keeps the key off the fresh row.
+    #[test]
+    fn an_equal_nonce_replay_of_a_live_key_is_ignored() {
+        let mut live = Some(pool_state());
+        roll(
+            &metadata_block(1_000, registration(8, [0x57; 32]), true),
+            &mut live,
+        );
+        let floors = CalidusFloors::from_final_rows([(pool(), live.unwrap())]);
+
+        let replay = synthetic_chain(registration(8, [0x57; 32]));
+        let mut entity = None;
+        roll_with_floors(&[&replay[0]], floors, &mut entity);
+        assert_eq!(pub_key(&entity), None);
+        assert_eq!(calidus(&entity).unwrap().nonce, 8);
+    }
+
     /// Undoing the registration undoes its floor with it.
     #[test]
     fn undo_of_a_registration_after_a_move_leaves_no_row() {

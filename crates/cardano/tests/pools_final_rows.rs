@@ -5,6 +5,8 @@
 //! makes a fresh row: its deposit set, and no calidus key. The harness is
 //! `ToyDomain` on the devnet genesis; ESTART runs through `execute_work_unit`,
 //! and the deltas a block or EWRAP would emit are applied to the row directly.
+//! The `import` tests instead roll blocks through `import_blocks` on the
+//! preview genesis, to cover the calidus floors read once per batch.
 
 use std::sync::Arc;
 
@@ -445,7 +447,7 @@ mod import {
             .state()
             .read_entity_typed::<PoolState>(&PoolKey(pool()))
             .unwrap()
-            .expect("the second block registers the pool")
+            .expect("the last block registers the pool")
     }
 
     /// The floor read ahead of the batch reaches the block that spends it:
