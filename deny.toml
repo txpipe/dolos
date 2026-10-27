@@ -44,6 +44,15 @@ unmaintained = "none"
 # acceptance, so justify it.
 ignore = [
     # "RUSTSEC-0000-0000", # reason — <issue link>
+    #
+    # zstd 0.13 / zstd-safe 7 remain in the graph only through `stelae`, whose
+    # every release so far (v0.2.0 pinned by crates/snapshot, v0.3.1 latest)
+    # pins zstd 0.13.3; the workspace and mithril-client are on zstd 0.14 /
+    # zstd-safe 8. Stopgap until a stelae release builds on zstd 0.14 and the
+    # pin moves; drop all three with that bump.
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13 reached only through stelae, pending a stelae release on zstd 0.14" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7 reached only through stelae, pending a stelae release on zstd 0.14" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7 reached only through stelae, pending a stelae release on zstd 0.14" },
 ]
 
 # Building Dolos must not require a C toolchain beyond what `cc` gives you.

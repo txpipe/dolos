@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 rayon.workspace = true
 tempfile = "3"
-zstd = "0.13"
+zstd = "0.14"
 
 [dev-dependencies]
 sha2 = "0.10"
