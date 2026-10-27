@@ -14,7 +14,7 @@ use pallas::{crypto::hash::Hash, ledger::primitives::conway::Anchor};
 use crate::{
     error::Error,
     mapping::{bech32_gov_action, parse_gov_action_id},
-    offchain::{fetch_anchor_metadata, OnOverload},
+    offchain::fetch_proposal_metadata,
     Facade,
 };
 
@@ -32,7 +32,7 @@ async fn proposal_metadata_parts<C: CacheStore>(
     ipfs_gateways: &[String],
 ) -> Result<(String, DrepsInnerMetadata), StatusCode> {
     let id = bech32_gov_action(tx, idx)?;
-    let metadata = fetch_anchor_metadata(cache, ipfs_gateways, anchor, OnOverload::Inline).await;
+    let metadata = fetch_proposal_metadata(cache, ipfs_gateways, anchor).await;
 
     Ok((id, metadata))
 }
@@ -170,7 +170,13 @@ mod tests {
             writer.commit().unwrap();
 
             if first_start {
-                crate::offchain::cache_verified_body(facade.cache(), &anchor, body).await;
+                crate::offchain::cache_verified_body(
+                    facade.cache(),
+                    crate::offchain::PROPOSAL_OFFCHAIN.name,
+                    &anchor,
+                    body,
+                )
+                .await;
             }
 
             for path in [

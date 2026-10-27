@@ -21,15 +21,21 @@ pub const MAX_PENDING_LOADS: usize = 4 * MAX_CONCURRENT_FETCHES;
 
 const FAILURE_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// Verified governance-anchor bodies, keyed by content hash, in memory and on
-/// disk.
+/// Verified DRep bodies, keyed by content hash, in memory and on disk.
 pub const OFFCHAIN: CacheNamespace = CacheNamespace::immutable("offchain", 1)
     .with_fill_limits(MAX_CONCURRENT_FETCHES, MAX_PENDING_LOADS);
 
-/// Failed governance-anchor fetches, keyed by content hash and URL, in memory
-/// only.
+/// Failed DRep fetches, keyed by content hash and URL, in memory only.
 pub const OFFCHAIN_FAILURES: CacheNamespace =
     CacheNamespace::tip_scoped("offchain-failures", 1, FAILURE_TTL);
+
+/// Verified proposal bodies, keyed by content hash, in memory and on disk.
+pub const PROPOSAL_OFFCHAIN: CacheNamespace = CacheNamespace::immutable("proposal-offchain", 1)
+    .with_fill_limits(MAX_CONCURRENT_FETCHES, MAX_PENDING_LOADS);
+
+/// Failed proposal fetches, keyed by content hash and URL, in memory only.
+pub const PROPOSAL_OFFCHAIN_FAILURES: CacheNamespace =
+    CacheNamespace::tip_scoped("proposal-offchain-failures", 1, FAILURE_TTL);
 
 /// Verified pool bodies, keyed by content hash, in memory and on disk.
 pub const POOL_OFFCHAIN: CacheNamespace = CacheNamespace::immutable("pool-offchain", 1)
@@ -45,9 +51,14 @@ struct MetadataCache {
     failures: &'static str,
 }
 
-const ANCHOR_CACHE: MetadataCache = MetadataCache {
+const DREP_CACHE: MetadataCache = MetadataCache {
     bodies: OFFCHAIN.name,
     failures: OFFCHAIN_FAILURES.name,
+};
+
+const PROPOSAL_CACHE: MetadataCache = MetadataCache {
+    bodies: PROPOSAL_OFFCHAIN.name,
+    failures: PROPOSAL_OFFCHAIN_FAILURES.name,
 };
 
 const POOL_CACHE: MetadataCache = MetadataCache {
@@ -91,11 +102,13 @@ impl From<&PoolMetadata> for MetadataLocation {
 
 const LEGACY_DIR: &str = "offchain";
 
-/// Registers the pool and governance metadata cache namespaces.
+/// Registers the pool, DRep and proposal metadata cache namespaces.
 pub fn register<C: CacheStore>(cache: &C) {
     for namespace in [
         OFFCHAIN,
         OFFCHAIN_FAILURES,
+        PROPOSAL_OFFCHAIN,
+        PROPOSAL_OFFCHAIN_FAILURES,
         POOL_OFFCHAIN,
         POOL_OFFCHAIN_FAILURES,
     ] {
@@ -215,20 +228,45 @@ async fn cached_body<C: CacheStore>(
         .flatten()
 }
 
-/// Returns cached governance-anchor metadata without a network request.
-pub async fn cached_anchor_metadata<C: CacheStore>(
+/// Returns cached DRep metadata without a network request.
+pub async fn cached_drep_metadata<C: CacheStore>(
     cache: &C,
     anchor: &Anchor,
 ) -> Option<DrepsInnerMetadata> {
-    cached_body(cache, &MetadataLocation::from(anchor), ANCHOR_CACHE)
+    cached_body(cache, &MetadataLocation::from(anchor), DREP_CACHE)
         .await
         .map(|body| anchor_metadata(anchor, body))
 }
 
-/// Returns governance-anchor metadata from the cache, or fetches and caches its
-/// body.
-pub async fn fetch_anchor_metadata<C: CacheStore>(
+/// Returns DRep metadata from the cache, or fetches and caches its body.
+pub async fn fetch_drep_metadata<C: CacheStore>(
     cache: &C,
+    ipfs_gateways: &[String],
+    anchor: &Anchor,
+    on_overload: OnOverload,
+) -> DrepsInnerMetadata {
+    fetch_anchor_metadata(cache, DREP_CACHE, ipfs_gateways, anchor, on_overload).await
+}
+
+/// Returns proposal metadata from the cache, or fetches and caches its body.
+pub async fn fetch_proposal_metadata<C: CacheStore>(
+    cache: &C,
+    ipfs_gateways: &[String],
+    anchor: &Anchor,
+) -> DrepsInnerMetadata {
+    fetch_anchor_metadata(
+        cache,
+        PROPOSAL_CACHE,
+        ipfs_gateways,
+        anchor,
+        OnOverload::Inline,
+    )
+    .await
+}
+
+async fn fetch_anchor_metadata<C: CacheStore>(
+    cache: &C,
+    namespaces: MetadataCache,
     ipfs_gateways: &[String],
     anchor: &Anchor,
     on_overload: OnOverload,
@@ -239,11 +277,12 @@ pub async fn fetch_anchor_metadata<C: CacheStore>(
         async move { anchor_offchain_body(&anchor.url, anchor.content_hash.as_ref(), &gateways).await }
     };
 
-    load_anchor_metadata(cache, anchor, on_overload, fetch).await
+    load_anchor_metadata(cache, namespaces, anchor, on_overload, fetch).await
 }
 
 async fn load_anchor_metadata<C, F, Fut>(
     cache: &C,
+    namespaces: MetadataCache,
     anchor: &Anchor,
     on_overload: OnOverload,
     fetch: F,
@@ -256,7 +295,7 @@ where
     let body = load_body(
         cache,
         &MetadataLocation::from(anchor),
-        ANCHOR_CACHE,
+        namespaces,
         on_overload,
         || {
             let fetched = fetch(anchor.clone());
@@ -431,14 +470,19 @@ fn keep_failure<C: CacheStore>(
     }
 }
 
-/// Keeps `body` in the cache as the verified body of `anchor`, as a fetch
+/// Keeps `body` in `namespace` as the verified body of `anchor`, as a fetch
 /// would.
 #[cfg(test)]
-pub(crate) async fn cache_verified_body<C: CacheStore>(cache: &C, anchor: &Anchor, body: &[u8]) {
+pub(crate) async fn cache_verified_body<C: CacheStore>(
+    cache: &C,
+    namespace: &str,
+    anchor: &Anchor,
+    body: &[u8],
+) {
     let body = body.to_vec();
 
     cache
-        .get_or_fill_async(OFFCHAIN.name, anchor.content_hash.as_ref(), async move {
+        .get_or_fill_async(namespace, anchor.content_hash.as_ref(), async move {
             Ok::<_, Infallible>(CacheEntry::new(body, 0))
         })
         .await
@@ -725,13 +769,55 @@ mod tests {
             url: metadata.url.clone(),
             content_hash: Hasher::<256>::hash(POOL_BODY),
         };
-        cache_verified_body(&cache, &anchor, POOL_BODY).await;
+        cache_verified_body(&cache, OFFCHAIN.name, &anchor, POOL_BODY).await;
         let (missing, error) = fetch_pool_metadata(&cache, &metadata).await;
         assert!(missing.is_none());
         assert_eq!(error.unwrap().code, MetadataError::ConnectionError);
-        let drep = fetch_anchor_metadata(&cache, &[], &anchor, OnOverload::Inline).await;
+        let drep = fetch_drep_metadata(&cache, &[], &anchor, OnOverload::Inline).await;
         assert!(drep.error.is_none());
         assert!(drep.json_metadata.is_some());
+    }
+
+    #[tokio::test]
+    async fn proposal_fetches_do_not_wait_for_drep_fetch_slots() {
+        let cache = memory_cache();
+        let gated = Gated::default();
+        let held: Vec<_> = (0..MAX_CONCURRENT_FETCHES)
+            .map(|i| {
+                let body = format!("{{\"drep\":{i}}}").into_bytes();
+                let (cache, anchor, fetch) = (cache.clone(), anchor(&body), gated.fetch(body));
+                tokio::spawn(async move {
+                    load_anchor_metadata(&cache, DREP_CACHE, &anchor, OnOverload::Inline, fetch)
+                        .await
+                })
+            })
+            .collect();
+        gated.wait_for_running(MAX_CONCURRENT_FETCHES).await;
+
+        let body = br#"{"proposal":1}"#;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let proposal = tokio::time::timeout(
+            Duration::from_secs(1),
+            load_anchor_metadata(
+                &cache,
+                PROPOSAL_CACHE,
+                &anchor(body),
+                OnOverload::Inline,
+                serving(body, &calls),
+            ),
+        )
+        .await
+        .expect("the proposal fetch waited for a DRep fetch slot");
+        assert_eq!(
+            proposal.json_metadata,
+            Some(serde_json::json!({"proposal": 1}))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        gated.open();
+        for request in held {
+            assert!(request.await.unwrap().error.is_none());
+        }
     }
 
     #[tokio::test]
@@ -825,7 +911,8 @@ mod tests {
         let anchor = anchor(br#"{"body":"expected"}"#);
 
         let fetch = serving(br#"{"body":"tampered"}"#, &calls);
-        let got = load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await;
+        let got =
+            load_anchor_metadata(&cache, DREP_CACHE, &anchor, OnOverload::Unfetched, fetch).await;
 
         assert_eq!(got.error.unwrap().code, MetadataError::HashMismatch);
         assert!(got.bytes.is_none());
@@ -837,17 +924,18 @@ mod tests {
         let cache = memory_cache();
         let anchor = anchor(br#"{"body":"hello"}"#);
 
-        cache_verified_body(&cache, &anchor, b"corrupted").await;
+        cache_verified_body(&cache, OFFCHAIN.name, &anchor, b"corrupted").await;
         assert!(cache
             .get(OFFCHAIN.name, anchor.content_hash.as_ref())
             .is_some());
 
-        assert_eq!(cached_anchor_metadata(&cache, &anchor).await, None);
+        assert_eq!(cached_drep_metadata(&cache, &anchor).await, None);
         assert_eq!(cache.get(OFFCHAIN.name, anchor.content_hash.as_ref()), None);
 
         let calls = Arc::new(AtomicUsize::new(0));
         let fetch = serving(br#"{"body":"hello"}"#, &calls);
-        let got = load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await;
+        let got =
+            load_anchor_metadata(&cache, DREP_CACHE, &anchor, OnOverload::Unfetched, fetch).await;
 
         assert_eq!(
             got.json_metadata,
@@ -875,6 +963,7 @@ mod tests {
         let domain = persistent_domain(&dir);
         let fetched = load_anchor_metadata(
             domain.cache(),
+            DREP_CACHE,
             &anchor,
             OnOverload::Unfetched,
             serving(body, &calls),
@@ -886,6 +975,7 @@ mod tests {
         let domain = persistent_domain(&dir);
         let kept = load_anchor_metadata(
             domain.cache(),
+            DREP_CACHE,
             &anchor,
             OnOverload::Unfetched,
             serving(body, &calls),
@@ -936,25 +1026,30 @@ mod tests {
             }
         };
 
-        let failed = load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, &failing).await;
+        let failed =
+            load_anchor_metadata(&cache, DREP_CACHE, &anchor, OnOverload::Unfetched, &failing)
+                .await;
         assert_eq!(
             failed.error.as_ref().unwrap().code,
             MetadataError::ConnectionError
         );
 
         // the failure lands from a fill of its own
-        while cached_anchor_metadata(&cache, &anchor).await.is_none() {
+        while cached_drep_metadata(&cache, &anchor).await.is_none() {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
 
-        let served = load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, &failing).await;
+        let served =
+            load_anchor_metadata(&cache, DREP_CACHE, &anchor, OnOverload::Unfetched, &failing)
+                .await;
         assert_eq!(served, failed);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         tokio::time::sleep(ttl).await;
 
         let fetch = serving(br#"{"body":"later"}"#, &calls);
-        let refetched = load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await;
+        let refetched =
+            load_anchor_metadata(&cache, DREP_CACHE, &anchor, OnOverload::Unfetched, fetch).await;
         assert!(refetched.error.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
@@ -971,7 +1066,8 @@ mod tests {
                 let (cache, anchor, fetch) =
                     (cache.clone(), anchor.clone(), gated.fetch(body.clone()));
                 tokio::spawn(async move {
-                    load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await
+                    load_anchor_metadata(&cache, DREP_CACHE, &anchor, OnOverload::Unfetched, fetch)
+                        .await
                 })
             })
             .collect();
@@ -1001,7 +1097,8 @@ mod tests {
                 let body = format!("{{\"body\":{i}}}").into_bytes();
                 let (cache, anchor, fetch) = (cache.clone(), anchor(&body), gated.fetch(body));
                 tokio::spawn(async move {
-                    load_anchor_metadata(&cache, &anchor, OnOverload::Unfetched, fetch).await
+                    load_anchor_metadata(&cache, DREP_CACHE, &anchor, OnOverload::Unfetched, fetch)
+                        .await
                 })
             })
             .collect();
@@ -1040,7 +1137,9 @@ mod tests {
         let holding = tokio::spawn({
             let (cache, held, fetch) =
                 (cache.clone(), held.clone(), gated.fetch(held_body.clone()));
-            async move { load_anchor_metadata(&cache, &held, OnOverload::Unfetched, fetch).await }
+            async move {
+                load_anchor_metadata(&cache, DREP_CACHE, &held, OnOverload::Unfetched, fetch).await
+            }
         });
 
         gated.wait_for_running(1).await;
@@ -1049,13 +1148,25 @@ mod tests {
         let body: &'static [u8] = br#"{"body":"past"}"#;
         let past = anchor(body);
 
-        let unfetched_row =
-            load_anchor_metadata(&cache, &past, OnOverload::Unfetched, serving(body, &calls)).await;
+        let unfetched_row = load_anchor_metadata(
+            &cache,
+            DREP_CACHE,
+            &past,
+            OnOverload::Unfetched,
+            serving(body, &calls),
+        )
+        .await;
         assert_eq!(unfetched_row, unfetched(&past));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
 
-        let inline =
-            load_anchor_metadata(&cache, &past, OnOverload::Inline, serving(body, &calls)).await;
+        let inline = load_anchor_metadata(
+            &cache,
+            DREP_CACHE,
+            &past,
+            OnOverload::Inline,
+            serving(body, &calls),
+        )
+        .await;
         assert_eq!(
             inline.json_metadata,
             Some(serde_json::json!({"body": "past"}))
@@ -1064,7 +1175,9 @@ mod tests {
 
         let joined = tokio::spawn({
             let (cache, held, fetch) = (cache.clone(), held.clone(), gated.fetch(held_body));
-            async move { load_anchor_metadata(&cache, &held, OnOverload::Unfetched, fetch).await }
+            async move {
+                load_anchor_metadata(&cache, DREP_CACHE, &held, OnOverload::Unfetched, fetch).await
+            }
         });
 
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1086,9 +1199,9 @@ mod tests {
         let load = |i: usize, on_overload: OnOverload| {
             let body = format!("{{\"body\":{i}}}").into_bytes();
             let (cache, anchor, fetch) = (cache.clone(), anchor(&body), gated.fetch(body));
-            tokio::spawn(
-                async move { load_anchor_metadata(&cache, &anchor, on_overload, fetch).await },
-            )
+            tokio::spawn(async move {
+                load_anchor_metadata(&cache, DREP_CACHE, &anchor, on_overload, fetch).await
+            })
         };
 
         let mut requests: Vec<_> = (0..2).map(|i| load(i, OnOverload::Unfetched)).collect();

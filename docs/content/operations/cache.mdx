@@ -14,8 +14,10 @@ The cache is split into namespaces, one per use. Each namespace has a format ver
 | -------------------- | ---------- | ------------------------------------------------------------------------------------------------------------- |
 | `totals`             | immutable  | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total`           |
 | `network`            | tip-scoped | the `/network` body, for 30 seconds                                                                           |
-| `offchain`           | immutable  | verified DRep and proposal metadata under `/governance`, by content hash |
-| `offchain-failures`  | tip-scoped | failed DRep and proposal metadata fetches, for 10 minutes, keyed by content hash and URL                   |
+| `offchain`           | immutable  | verified DRep metadata of `/governance/dreps` and `/governance/dreps/{drep_id}/metadata`, by content hash |
+| `offchain-failures`  | tip-scoped | failed DRep metadata fetches, for 10 minutes, keyed by content hash and URL |
+| `proposal-offchain` | immutable | verified proposal metadata for both `/governance/proposals` metadata endpoints, by content hash |
+| `proposal-offchain-failures` | tip-scoped | failed proposal metadata fetches, for 10 minutes, keyed by content hash and URL |
 | `pool-offchain` | immutable | verified pool metadata for `/pools/{pool_id}/metadata`, `/pools/extended`, and `/txs/{hash}/pool_updates`, by content hash |
 | `pool-offchain-failures` | tip-scoped | failed pool metadata fetches, for 10 minutes, keyed by content hash and URL |
 | `pool-registrations` | immutable  | where each pool first registered, for the order of `/pools` and `/pools/extended`                             |
@@ -23,15 +25,13 @@ The cache is split into namespaces, one per use. Each namespace has a format ver
 
 A namespace has one of two validity models:
 
-- **Immutable** entries are never stale. The `offchain` and `pool-offchain` bodies are pinned by their advertised content hashes. Every read checks the hash again. The other immutable entries are built from sealed data only, so they are at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. The `pool-registrations` and `pool-blocks` namespaces each hold a single entry that covers every pool, up to the last slot or epoch no rollback can undo, and a read adds what came after. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
-- **Tip-scoped** entries are valid for a while. After that, a `network` entry is served stale while one rebuild replaces it, and an `offchain-failures` or `pool-offchain-failures` entry is ignored, so the next request fetches again. They are kept in memory only.
+- **Immutable** entries are never stale. The `offchain`, `proposal-offchain` and `pool-offchain` bodies are pinned by their advertised content hashes. Every read checks the hash again. The other immutable entries are built from sealed data only, so they are at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. The `pool-registrations` and `pool-blocks` namespaces each hold a single entry that covers every pool, up to the last slot or epoch no rollback can undo, and a read adds what came after. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
+- **Tip-scoped** entries are valid for a while. After that, a `network` entry is served stale while one rebuild replaces it, and an `offchain-failures`, `proposal-offchain-failures` or `pool-offchain-failures` entry is ignored, so the next request fetches again. They are kept in memory only.
 
 The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file found corrupt, cut short, or laid out by another release, such as one you rolled back from, is recreated empty; one that fails to open for another reason, such as its permissions, is an error and the node does not start.
 
-DRep and proposal metadata share the `offchain` cache and its governance fetch policy.
-Both proposal metadata endpoints use this cache.
-Pool metadata uses the same cache loader, with separate namespaces for its fetch policy.
-Each metadata cache permits 16 concurrent fetches and 64 pending loads.
+DRep, proposal and pool metadata use the same cache loader, each with its own namespaces.
+Each metadata cache permits 16 concurrent fetches and 64 pending loads, so one kind never waits for another kind's fetches.
 A pool fetch keeps its five-second timeout and 512-byte limit.
 Pool extended listings wait at most five seconds for metadata.
 Up to 64 fetches continue in the background after that deadline and store their results.

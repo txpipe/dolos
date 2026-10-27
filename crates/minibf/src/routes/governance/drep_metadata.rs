@@ -9,7 +9,7 @@ use dolos_core::Domain;
 
 use crate::{
     mapping::governance::dreps::parse_drep_id,
-    offchain::{fetch_anchor_metadata, OnOverload},
+    offchain::{fetch_drep_metadata, OnOverload},
     Facade,
 };
 
@@ -59,7 +59,7 @@ pub async fn drep_metadata<D: Domain>(
     // the cache the list fills, so one anchor reads alike on both endpoints
     // and a verified body is fetched once
     let metadata =
-        fetch_anchor_metadata(domain.inner.cache(), &gateways, anchor, OnOverload::Inline).await;
+        fetch_drep_metadata(domain.inner.cache(), &gateways, anchor, OnOverload::Inline).await;
 
     Ok(Json(DrepMetadata {
         drep_id: parsed.drep_id,
@@ -136,7 +136,13 @@ mod tests {
             }
         });
 
-        crate::offchain::cache_verified_body(app.facade().inner.cache(), &anchor, body).await;
+        crate::offchain::cache_verified_body(
+            app.facade().inner.cache(),
+            crate::offchain::OFFCHAIN.name,
+            &anchor,
+            body,
+        )
+        .await;
 
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}/metadata");
