@@ -56,7 +56,7 @@ where
     let walk = if lovelace {
         UtxoWalk::AdaOnly(address_tag.clone())
     } else {
-        let asset = crate::routes::assets::decode_asset_subject(&asset)?;
+        let asset = crate::mapping::assets::decode_asset_subject(&asset)?;
         let asset_tag = Tag::new(utxo_dimensions::ASSET, asset.clone());
 
         let (smaller, walked, other) = crate::routes::utxos::smaller_tag(

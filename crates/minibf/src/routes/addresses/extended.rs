@@ -13,8 +13,7 @@ use futures_util::{StreamExt, TryStreamExt};
 
 use crate::{
     error::Error,
-    mapping::{AddressExtendedModelBuilder, IntoModel},
-    routes::assets::AssetAmountExtras,
+    mapping::{assets::AssetAmountExtras, AddressExtendedModelBuilder, IntoModel},
     Facade,
 };
 
