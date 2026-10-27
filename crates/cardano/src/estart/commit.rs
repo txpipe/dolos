@@ -6,7 +6,8 @@
 //! the shard's account-range slice in that same pass and flush
 //! `EpochState`'s `EStartProgress`; the finalize commit applies the
 //! queued pool / drep / proposal transitions, the closing
-//! `EpochTransition` and optional era-summary writes, and advances the
+//! `EpochTransition` and optional era-summary writes, moves the
+//! boundary's final rows from state to the archive, and advances the
 //! cursor.
 
 use std::collections::BTreeMap;
@@ -199,8 +200,8 @@ impl super::WorkContext {
     }
 
     /// Commit the finalize half: pool / drep / proposal transitions + the
-    /// closing `EpochTransition` + (optional) era-summary writes + cursor
-    /// advance.
+    /// closing `EpochTransition` + (optional) era-summary writes + the moves
+    /// to the final-row log + cursor advance.
     ///
     /// `AccountState` is intentionally **not** streamed here — per-account
     /// snapshot transitions were committed by the preceding per-shard
@@ -211,10 +212,15 @@ impl super::WorkContext {
     /// It is also where the Shelley→Allegra AVVM reclamation deletes its
     /// UTxOs — see [`crate::estart::avvm`] for why that belongs in the same
     /// transaction as the pot delta.
+    ///
+    /// The final rows commit to the archive before the state deletes them, as
+    /// the period seals do: a crash in between re-runs finalize over the same
+    /// rows, which writes the same log rows again.
     #[instrument(skip_all)]
     pub fn commit_finalize<D: Domain>(
         &mut self,
         state: &D::State,
+        archive: &D::Archive,
         slot: BlockSlot,
     ) -> Result<(), ChainError> {
         debug!("committing estart finalize changes");
@@ -240,6 +246,12 @@ impl super::WorkContext {
         let era_transition = self.collect_era_transition(state)?;
 
         let writer = state.start_writer()?;
+
+        // A moved row takes no boundary delta: the log keeps the row the
+        // visitors read, and the state row goes.
+        for key in self.finals.keys() {
+            self.deltas.entities.remove(key);
+        }
 
         // Skip AccountState — committed earlier by per-shard runs.
 
@@ -289,6 +301,17 @@ impl super::WorkContext {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted deltas");
         }
 
+        if !self.finals.is_empty() {
+            debug!(
+                count = self.finals.len(),
+                "moving final rows to the archive"
+            );
+
+            let archive_writer = archive.start_writer()?;
+            self.finals.write(&writer, &archive_writer)?;
+            archive_writer.commit()?;
+        }
+
         // Set cursor — only in finalize, never in shards.
         writer.set_cursor(ChainPoint::Slot(slot))?;
 
@@ -320,6 +343,7 @@ mod tests {
             tally_protocol: EraKey::from(9),
             deltas: Default::default(),
             active_stake: None,
+            finals: Default::default(),
         }
     }
 

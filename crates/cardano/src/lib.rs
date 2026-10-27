@@ -26,6 +26,7 @@ pub mod cip25;
 pub mod cip68;
 pub mod consensus;
 pub mod eras;
+pub mod final_rows;
 pub mod forks;
 pub mod hacks;
 pub mod indexes;

@@ -4,7 +4,7 @@ use dolos_cardano::{
     model::{AccountState, ProposalState},
     pallas_extras, AccountKey, ChainSummary,
 };
-use dolos_core::Domain;
+use dolos_core::{ArchiveStore as _, Domain};
 use futures_util::StreamExt;
 use pallas::{
     crypto::hash::{Hash, Hasher},
@@ -104,6 +104,8 @@ fn parse_account_key_param(address: &str, network: Network) -> Result<AccountKey
     Ok(AccountKeyParam { address, account })
 }
 
+/// Whether a proposal names the credential as its return account: a live one
+/// in state, or a resolved one in the final-row log.
 fn account_appears_in_proposals<D>(
     domain: &Facade<D>,
     account: &AccountKey,
@@ -112,12 +114,28 @@ where
     Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
+    let names =
+        |proposal: &ProposalState| proposal.reward_account.as_ref() == Some(account.credential());
+
     for item in domain.iter_cardano_entities::<ProposalState>(None)? {
         let (_, proposal) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if proposal.reward_account.as_ref() == Some(account.credential()) {
+        if names(&proposal) {
             return Ok(true);
         }
     }
+
+    let logged = domain
+        .archive()
+        .iter_logs_typed::<ProposalState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for item in logged {
+        let (_, _, proposal) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if names(&proposal) {
+            return Ok(true);
+        }
+    }
+
     Ok(false)
 }
 
@@ -351,7 +369,7 @@ mod tests {
     use blockfrost_openapi::models::{
         account_addresses_total::AccountAddressesTotal, account_content::AccountContent,
     };
-    use dolos_core::{ArchiveStore as _, StateStore as _, StateWriter as _};
+    use dolos_core::{StateStore as _, StateWriter as _};
     use dolos_testing::synthetic::SyntheticBlockConfig;
 
     fn encode_bech32(hrp: &str, payload: &[u8]) -> String {
@@ -480,7 +498,10 @@ mod tests {
         raw
     }
 
-    async fn assert_proposal_account_endpoints(valid: bool, resolved: bool) {
+    /// The account endpoints of an account that only proposals name as their
+    /// return account: proposals that are `valid`, `resolved` and, when
+    /// `moved`, moved to the final-row log as ESTART moves them.
+    async fn assert_proposal_account_endpoints(valid: bool, resolved: bool, moved: bool) {
         use dolos_core::import::ImportExt as _;
 
         let mut imported = None;
@@ -518,6 +539,18 @@ mod tests {
                 }
                 writer.commit().unwrap();
             }
+
+            if moved {
+                crate::routes::governance::testing::move_proposals_to_log(domain, true);
+
+                assert!(domain
+                    .state()
+                    .iter_entities_typed::<ProposalState>(None)
+                    .unwrap()
+                    .next()
+                    .is_none());
+            }
+
             imported = Some(domain.clone());
         });
 
@@ -591,20 +624,42 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+
+        // an account that no proposal names stays unknown
+        let unnamed = StakeAddress::new(
+            Network::Testnet,
+            StakePayload::Stake(Hash::from([0x94; 28])),
+        )
+        .to_bech32()
+        .unwrap();
+        for path in [
+            format!("/accounts/{unnamed}"),
+            format!("/accounts/{unnamed}/registrations"),
+        ] {
+            let (status, _) = app.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        }
     }
 
     #[tokio::test]
     async fn accounts_named_only_by_proposal_returns_need_no_account_state() {
-        assert_proposal_account_endpoints(true, false).await;
+        assert_proposal_account_endpoints(true, false, false).await;
     }
 
     #[tokio::test]
     async fn accounts_named_only_by_resolved_proposals_remain_known() {
-        assert_proposal_account_endpoints(true, true).await;
+        assert_proposal_account_endpoints(true, true, false).await;
+    }
+
+    /// The final-row log still names the account once ESTART has moved the
+    /// proposals out of state.
+    #[tokio::test]
+    async fn accounts_named_only_by_moved_proposals_remain_known() {
+        assert_proposal_account_endpoints(true, true, true).await;
     }
 
     #[tokio::test]
     async fn accounts_named_only_by_invalid_proposals_remain_unknown() {
-        assert_proposal_account_endpoints(false, false).await;
+        assert_proposal_account_endpoints(false, false, false).await;
     }
 }

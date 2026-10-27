@@ -189,6 +189,7 @@ mod tests {
             tally_protocol: active_protocol,
             deltas: Default::default(),
             active_stake: None,
+            finals: Default::default(),
         }
     }
 

@@ -4311,7 +4311,7 @@ mod ratification_tests {
         .unwrap();
         let slot = estart.chain_summary.epoch_start(estart.starting_epoch_no());
         estart
-            .commit_finalize::<ToyDomain>(domain.state(), slot)
+            .commit_finalize::<ToyDomain>(domain.state(), domain.archive(), slot)
             .unwrap();
 
         let after = crate::load_epoch::<ToyDomain>(domain.state()).unwrap();
