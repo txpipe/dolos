@@ -2339,6 +2339,9 @@ mod tests {
     fn a_stele_witnessing_scripts_in_state_refuses_the_restore() {
         let (kind, namespace) = STATE_WITNESSED_KINDS[0];
 
+        // The names an earlier publisher wrote: `ScriptState`'s namespace.
+        assert_eq!((kind.name(), namespace), ("script", "scripts"));
+
         for rev in [json!(1), json!(99), json!("1")] {
             let mut witnessed = inscription(state_layers());
             witnessed.parameters["schemas"][namespace] = rev;
