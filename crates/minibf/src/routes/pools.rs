@@ -1639,8 +1639,8 @@ where
 
     // Blockfrost 404s a pool that db-sync never saw. A `PoolState` row, in
     // state or in the final-row log, covers every pool that registered on
-    // chain, and a pool must register before it can mint. The index acts as a second proof of existence, for
-    // any issuer that has no entity.
+    // chain, and a pool must register before it can mint. The index acts as a
+    // second proof of existence, for any issuer that has no entity.
     if !minted_any && !pool_exists(&domain.inner, pool)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
