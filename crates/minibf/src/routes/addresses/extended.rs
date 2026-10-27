@@ -25,8 +25,8 @@ use super::{amount_for_refs, is_address_in_chain, parse_address, refs_for_parsed
 /// This constant sets how many units of an address ask the off-chain registry
 /// for their metadata at the same time. Each unit needs one request to the
 /// registry. One request at a time is slow for an address that holds many
-/// tokens. Their on-chain reads run on the query limiter, as many at once as
-/// one request may run there.
+/// tokens. Their on-chain reads run before, on the query limiter, as many at
+/// once as one request may run there.
 const EXTENDED_ASSET_CONCURRENCY: usize = 16;
 
 pub async fn extended<D>(
@@ -69,7 +69,12 @@ where
         })
         .collect();
 
-    let amount = futures_util::stream::iter(units)
+    // every on-chain read ends before the first registry request starts. a
+    // stage waiting on a slow registry stops polling the reads queued behind
+    // it, and the limiter hands a read queued for a permit its permit whether
+    // it is polled or not, so the permit would sit idle until the registry
+    // answers
+    let onchain: Vec<_> = futures_util::stream::iter(units)
         .map(|(entry, budget)| {
             let domain = &domain;
 
@@ -84,7 +89,11 @@ where
             }
         })
         .buffered(domain.inner.query_limiter().fan_out())
-        .map_ok(|(entry, extras)| async move {
+        .try_collect()
+        .await?;
+
+    let amount = futures_util::stream::iter(onchain)
+        .map(|(entry, extras)| async move {
             let extras = extras.with_registry().await?;
 
             Ok::<_, Error>(AddressContentExtendedAmountInner {
@@ -94,7 +103,7 @@ where
                 has_nft_onchain_metadata: extras.has_nft_onchain_metadata,
             })
         })
-        .try_buffered(EXTENDED_ASSET_CONCURRENCY)
+        .buffered(EXTENDED_ASSET_CONCURRENCY)
         .try_collect()
         .await?;
 
@@ -269,11 +278,43 @@ mod tests {
         assert!((1..=fan_out).contains(&peak), "{peak} unit reads at once");
     }
 
-    /// The label-100 walks of one request: two CIP-68 user tokens held at the
-    /// address, each reference token minted with a datum and then moved
-    /// [`MOVES`] times without one, so that each walk reads `MOVES + 1`
-    /// blocks to find it.
-    mod walks {
+    /// Finding YT4 of the fourth QA review of dolos#1524: a held asset with no
+    /// first mint, on a node whose history window pruned it or a store an
+    /// earlier build synced, answers bare, and the address still answers.
+    #[tokio::test]
+    async fn a_held_asset_with_no_first_mint_answers_bare() {
+        use chain::*;
+
+        let ghost: Token = ([0x6f; 28], b"GHOST".to_vec());
+
+        let app = app_with(minibf(), |tip, address| {
+            vec![
+                block(
+                    tip + 1,
+                    None,
+                    &[],
+                    vec![output(address, holding(std::slice::from_ref(&ghost)), None)],
+                )
+                .0,
+            ]
+        });
+
+        let (status, _) = app.get_bytes(&format!("/assets/{}", unit_of(&ghost))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let item = extended_of(&app).await;
+        let entry = item
+            .amount
+            .iter()
+            .find(|x| x.unit == unit_of(&ghost))
+            .expect("the held asset");
+
+        assert_eq!(entry.decimals, None);
+        assert!(!entry.has_nft_onchain_metadata);
+    }
+
+    /// Blocks built past the tip of a five-block synthetic chain.
+    mod chain {
         use std::collections::BTreeMap;
 
         use dolos_core::{config::MinibfConfig, import::ImportExt as _, RawBlock, StateStore as _};
@@ -300,26 +341,36 @@ mod tests {
         use super::*;
         use crate::test_support::TestDomainBuilder;
 
-        const MOVES: u64 = 3;
-        const WALK: u64 = MOVES + 1;
-        const POLICIES: [[u8; 28]; 2] = [[0xa1; 28], [0xb2; 28]];
-        const REFERENCE: &[u8] = b"\x00\x06\x43\xb0QA";
-        const USER: &[u8] = b"\x00\x0d\xe1\x40QA";
+        pub const LABEL_100: [u8; 4] = [0x00, 0x06, 0x43, 0xb0];
+        pub const LABEL_222: [u8; 4] = [0x00, 0x0d, 0xe1, 0x40];
+        pub const LABEL_333: [u8; 4] = [0x00, 0x14, 0xdf, 0x10];
 
-        fn holding(policy: [u8; 28], name: &[u8]) -> Value {
-            Value::Multiasset(
-                0,
-                BTreeMap::from([(
-                    policy.into(),
-                    BTreeMap::from([(
-                        Bytes::from(name.to_vec()),
-                        PositiveCoin::try_from(1).unwrap(),
-                    )]),
-                )]),
-            )
+        /// A policy and an asset name.
+        pub type Token = ([u8; 28], Vec<u8>);
+
+        pub fn labelled(label: [u8; 4], name: &[u8]) -> Vec<u8> {
+            [label.as_slice(), name].concat()
         }
 
-        fn output(
+        pub fn unit_of((policy, name): &Token) -> String {
+            format!("{}{}", hex::encode(policy), hex::encode(name))
+        }
+
+        /// One of each of `tokens`.
+        pub fn holding(tokens: &[Token]) -> Value {
+            let mut map: BTreeMap<Hash<28>, BTreeMap<Bytes, PositiveCoin>> = BTreeMap::new();
+
+            for (policy, name) in tokens {
+                map.entry(Hash::from(*policy)).or_default().insert(
+                    Bytes::from(name.clone()),
+                    PositiveCoin::try_from(1).unwrap(),
+                );
+            }
+
+            Value::Multiasset(0, map)
+        }
+
+        pub fn output(
             address: &[u8],
             value: Value,
             datum: Option<PlutusData>,
@@ -333,19 +384,22 @@ mod tests {
             }))
         }
 
-        /// A CIP-68 v1 datum naming the token.
-        fn metadata_datum() -> PlutusData {
-            let text = |x: &str| PlutusData::BoundedBytes(x.as_bytes().to_vec().into());
+        pub fn text(x: &str) -> PlutusData {
+            PlutusData::BoundedBytes(x.as_bytes().to_vec().into())
+        }
 
+        pub fn int(x: i64) -> PlutusData {
+            PlutusData::BigInt(BigInt::Int(x.into()))
+        }
+
+        /// A CIP-68 v1 datum with `fields` as its metadata.
+        pub fn cip68_datum(fields: Vec<(PlutusData, PlutusData)>) -> PlutusData {
             PlutusData::Constr(Constr {
                 tag: 121,
                 any_constructor: None,
                 fields: MaybeIndefArray::Def(vec![
-                    PlutusData::Map(KeyValuePairs::Def(vec![
-                        (text("name"), text("QA")),
-                        (text("image"), text("ipfs://qa")),
-                    ])),
-                    PlutusData::BigInt(BigInt::Int(1.into())),
+                    PlutusData::Map(KeyValuePairs::Def(fields)),
+                    int(1),
                     PlutusData::Constr(Constr {
                         tag: 121,
                         any_constructor: None,
@@ -356,24 +410,23 @@ mod tests {
         }
 
         /// A block at `slot` whose one tx spends output 0 of `input`, if any,
-        /// mints `policy`'s pair, if any, and pays `outputs`.
-        fn block(
+        /// mints one of each of `mints` and pays `outputs`.
+        pub fn block(
             slot: u64,
             input: Option<Hash<32>>,
-            policy: Option<[u8; 28]>,
+            mints: &[Token],
             outputs: Vec<TransactionOutput<'static>>,
         ) -> (RawBlock, Hash<32>) {
-            let mint = policy.map(|policy| {
-                BTreeMap::from([(
-                    policy.into(),
-                    BTreeMap::from([
-                        (
-                            Bytes::from(REFERENCE.to_vec()),
-                            NonZeroInt::try_from(1).unwrap(),
-                        ),
-                        (Bytes::from(USER.to_vec()), NonZeroInt::try_from(1).unwrap()),
-                    ]),
-                )])
+            let mint = (!mints.is_empty()).then(|| {
+                let mut map: BTreeMap<Hash<28>, BTreeMap<Bytes, NonZeroInt>> = BTreeMap::new();
+
+                for (policy, name) in mints {
+                    map.entry(Hash::from(*policy))
+                        .or_default()
+                        .insert(Bytes::from(name.clone()), NonZeroInt::try_from(1).unwrap());
+                }
+
+                map
             });
 
             let inputs: Vec<TransactionInput> = input
@@ -420,54 +473,26 @@ mod tests {
             (raw, tx)
         }
 
-        /// Each policy's pair, the user token paid to `address` and the
-        /// reference token elsewhere with its datum, then the reference token
-        /// moved [`MOVES`] times without one.
-        fn pairs(after: u64, address: &[u8]) -> Vec<RawBlock> {
-            let elsewhere = ShelleyAddress::new(
+        /// An address the tests never read.
+        pub fn elsewhere() -> Vec<u8> {
+            ShelleyAddress::new(
                 Network::Testnet,
                 ShelleyPaymentPart::Key([0x99; 28].into()),
                 ShelleyDelegationPart::Null,
             )
-            .to_vec();
-
-            let mut out = vec![];
-            let mut slot = after;
-
-            for policy in POLICIES {
-                slot += 1;
-                let (minted, mut input) = block(
-                    slot,
-                    None,
-                    Some(policy),
-                    vec![
-                        output(
-                            &elsewhere,
-                            holding(policy, REFERENCE),
-                            Some(metadata_datum()),
-                        ),
-                        output(address, holding(policy, USER), None),
-                    ],
-                );
-                out.push(minted);
-
-                for _ in 0..MOVES {
-                    slot += 1;
-                    let (moved, tx) = block(
-                        slot,
-                        Some(input),
-                        None,
-                        vec![output(&elsewhere, holding(policy, REFERENCE), None)],
-                    );
-                    out.push(moved);
-                    input = tx;
-                }
-            }
-
-            out
+            .to_vec()
         }
 
-        fn app(max_scan_items: u64) -> TestApp {
+        pub fn minibf() -> MinibfConfig {
+            MinibfConfig::new("[::]:0".parse().unwrap())
+        }
+
+        /// The chain, then what `blocks` builds from its tip slot and the
+        /// address of its vectors, served with `minibf`.
+        pub fn app_with(
+            minibf: MinibfConfig,
+            blocks: impl FnOnce(u64, &[u8]) -> Vec<RawBlock>,
+        ) -> TestApp {
             let cfg = SyntheticBlockConfig {
                 block_count: 5,
                 txs_per_block: 3,
@@ -477,17 +502,12 @@ mod tests {
             let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
             let tip = domain.state().read_cursor().unwrap().unwrap().slot();
             let address = Address::from_bech32(&vectors.address).unwrap().to_vec();
-            domain.import_blocks(pairs(tip, &address)).unwrap();
-
-            let minibf =
-                MinibfConfig::new("[::]:0".parse().unwrap()).with_max_scan_items(max_scan_items);
+            domain.import_blocks(blocks(tip, &address)).unwrap();
 
             TestApp::from_domain(domain, vectors, None, minibf)
         }
 
-        /// Whether each policy's user token reports on-chain metadata, which
-        /// it takes from its reference token's datum, in unit order.
-        async fn flags(app: &TestApp) -> Vec<bool> {
+        pub async fn extended_of(app: &TestApp) -> AddressContentExtended {
             let path = format!("/addresses/{}/extended", app.vectors().address);
             let (status, bytes) = app.get_bytes(&path).await;
             assert_eq!(
@@ -497,19 +517,100 @@ mod tests {
                 String::from_utf8_lossy(&bytes)
             );
 
-            let item: AddressContentExtended = serde_json::from_slice(&bytes).unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+    }
+
+    /// The label-100 walks of one request: CIP-68 user tokens held at the
+    /// address, each reference token minted with a datum and then moved
+    /// [`MOVES`] times without one, so that each walk reads `MOVES + 1`
+    /// blocks to find it.
+    mod walks {
+        use dolos_core::RawBlock;
+
+        use super::{chain::*, *};
+
+        const MOVES: u64 = 3;
+        const WALK: u64 = MOVES + 1;
+        const POLICIES: [[u8; 28]; 2] = [[0xa1; 28], [0xb2; 28]];
+
+        fn reference(policy: [u8; 28]) -> Token {
+            (policy, labelled(LABEL_100, b"QA"))
+        }
+
+        fn user(policy: [u8; 28]) -> Token {
+            (policy, labelled(LABEL_222, b"QA"))
+        }
+
+        /// `policy`'s pair minted at `slot`, the user token paid to `address`
+        /// and the reference token to `holder` with a datum naming the token,
+        /// then the reference token moved [`MOVES`] times to `holder` without
+        /// one.
+        fn pair(slot: u64, policy: [u8; 28], address: &[u8], holder: &[u8]) -> Vec<RawBlock> {
+            let datum = cip68_datum(vec![
+                (text("name"), text("QA")),
+                (text("image"), text("ipfs://qa")),
+            ]);
+
+            let (minted, mut input) = block(
+                slot,
+                None,
+                &[reference(policy), user(policy)],
+                vec![
+                    output(holder, holding(&[reference(policy)]), Some(datum)),
+                    output(address, holding(&[user(policy)]), None),
+                ],
+            );
+
+            let mut out = vec![minted];
+
+            for slot in slot + 1..=slot + MOVES {
+                let (moved, tx) = block(
+                    slot,
+                    Some(input),
+                    &[],
+                    vec![output(holder, holding(&[reference(policy)]), None)],
+                );
+                out.push(moved);
+                input = tx;
+            }
+
+            out
+        }
+
+        /// Every policy's pair, each reference token held elsewhere.
+        fn app(max_scan_items: u64) -> TestApp {
+            app_with(
+                minibf().with_max_scan_items(max_scan_items),
+                |tip, address| {
+                    POLICIES
+                        .iter()
+                        .zip(0..)
+                        .flat_map(|(policy, i)| {
+                            pair(tip + 1 + i * WALK, *policy, address, &elsewhere())
+                        })
+                        .collect()
+                },
+            )
+        }
+
+        /// Whether `token` reports on-chain metadata.
+        fn flag(item: &AddressContentExtended, token: &Token) -> bool {
+            item.amount
+                .iter()
+                .find(|x| x.unit == unit_of(token))
+                .expect("the token is held")
+                .has_nft_onchain_metadata
+        }
+
+        /// Whether each policy's user token reports on-chain metadata, which
+        /// it takes from its reference token's datum, in unit order.
+        async fn flags(app: &TestApp) -> Vec<bool> {
+            let item = extended_of(app).await;
 
             POLICIES
                 .iter()
-                .map(|policy| {
-                    let unit = format!("{}{}", hex::encode(policy), hex::encode(USER));
-
-                    item.amount
-                        .iter()
-                        .find(|x| x.unit == unit)
-                        .expect("the user token")
-                        .has_nft_onchain_metadata
-                })
+                .map(|policy| flag(&item, &user(*policy)))
                 .collect()
         }
 
@@ -526,6 +627,289 @@ mod tests {
 
             // half a walk each
             assert_eq!(flags(&app(WALK)).await, [false, false]);
+        }
+
+        /// Whether the user token reports on-chain metadata with both tokens
+        /// of its pair held at the address.
+        async fn held_pair_flag(max_scan_items: u64) -> bool {
+            let [policy, _] = POLICIES;
+
+            let app = app_with(
+                minibf().with_max_scan_items(max_scan_items),
+                |tip, address| pair(tip + 1, policy, address, address),
+            );
+
+            let item = extended_of(&app).await;
+            let held = |token: &Token| item.amount.iter().any(|x| x.unit == unit_of(token));
+            assert!(held(&reference(policy)) && held(&user(policy)));
+
+            flag(&item, &user(policy))
+        }
+
+        /// Finding YT3 of the fourth QA review of dolos#1524: a reference
+        /// token held at the address walks on a share of its own, which comes
+        /// before its user token's, since it sorts first.
+        #[tokio::test]
+        async fn a_held_reference_token_takes_a_share_of_its_own() {
+            // a share of WALK each
+            assert!(held_pair_flag(2 * WALK).await);
+
+            // WALK for the reference token, a block short for the user token
+            assert!(!held_pair_flag(2 * WALK - 1).await);
+        }
+    }
+
+    /// The decimal places of units: the chain's where it declares them, the
+    /// token registry's where it does not.
+    mod decimals {
+        use std::{
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Arc, Mutex,
+            },
+            time::{Duration, Instant},
+        };
+
+        use dolos_core::{QueryLimiter, RawBlock};
+        use dolos_testing::{faults::FaultyToyDomain, synthetic::SyntheticBlockConfig};
+
+        use super::{chain::*, *};
+        use crate::test_support::TestDomainBuilder;
+
+        fn fungible() -> (Token, Token) {
+            let policy = [0xf7; 28];
+
+            (
+                (policy, labelled(LABEL_100, b"FT")),
+                (policy, labelled(LABEL_333, b"FT")),
+            )
+        }
+
+        /// A CIP-68 fungible pair whose reference datum declares 6 decimal
+        /// places, the reference token paid elsewhere and the user token
+        /// (label 333) to `address`.
+        fn fungible_pair(slot: u64, address: &[u8]) -> RawBlock {
+            let (reference, user) = fungible();
+
+            let datum = cip68_datum(vec![
+                (text("name"), text("QA FT")),
+                (text("description"), text("a fungible QA token")),
+                (text("decimals"), int(6)),
+            ]);
+
+            block(
+                slot,
+                None,
+                &[reference.clone(), user.clone()],
+                vec![
+                    output(&elsewhere(), holding(&[reference]), Some(datum)),
+                    output(address, holding(&[user]), None),
+                ],
+            )
+            .0
+        }
+
+        /// Finding YT1 of the fourth QA review of dolos#1524: with no token
+        /// registry, which is the default, a CIP-68 fungible user token
+        /// answers the decimals its reference datum declares.
+        #[tokio::test]
+        async fn a_fungible_user_token_answers_its_datum_decimals() {
+            let app = app_with(minibf(), |tip, address| {
+                vec![fungible_pair(tip + 1, address)]
+            });
+
+            let item = extended_of(&app).await;
+            let (_, user) = fungible();
+            let entry = item
+                .amount
+                .iter()
+                .find(|x| x.unit == unit_of(&user))
+                .expect("the user token");
+
+            assert_eq!(entry.decimals, Some(6));
+            assert!(entry.has_nft_onchain_metadata);
+        }
+
+        /// Finding YT2 of the fourth QA review of dolos#1524: the registry is
+        /// asked only for the units the chain declares no decimals for, and
+        /// each answers the registry's. The units keep `/addresses/{a}`'s
+        /// order, although the registry answers the first one last.
+        #[tokio::test]
+        async fn the_registry_answers_the_decimals_the_chain_does_not_declare() {
+            let order: Arc<Mutex<Vec<String>>> = Default::default();
+            let asked: Arc<Mutex<Vec<String>>> = Default::default();
+
+            let registry = axum::Router::new().fallback({
+                let (order, asked) = (order.clone(), asked.clone());
+
+                move |uri: axum::http::Uri| {
+                    let (order, asked) = (order.clone(), asked.clone());
+
+                    async move {
+                        let unit = uri.path().rsplit('/').next().unwrap_or_default();
+                        asked.lock().unwrap().push(unit.to_string());
+
+                        let (position, len) = {
+                            let order = order.lock().unwrap();
+                            (order.iter().position(|x| x == unit), order.len())
+                        };
+
+                        let Some(position) = position else {
+                            return (StatusCode::NOT_FOUND, String::new());
+                        };
+
+                        // the earlier a unit is listed, the later it is answered
+                        let delay = 80 * (len - position) as u64;
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+
+                        let body = serde_json::json!({
+                            "name": { "value": format!("unit {position}") },
+                            "description": { "value": "registered" },
+                            "decimals": { "value": 10 + position },
+                        });
+
+                        (StatusCode::OK, body.to_string())
+                    }
+                }
+            });
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut config = minibf();
+            config.token_registry_url = Some(format!("http://{}", listener.local_addr().unwrap()));
+            let server =
+                tokio::spawn(async move { axum::serve(listener, registry).await.unwrap() });
+
+            let app = app_with(config, |tip, address| {
+                let natives: Vec<Token> = (0..5)
+                    .map(|i| ([0x7e; 28], format!("N{i}").into_bytes()))
+                    .collect();
+
+                vec![
+                    fungible_pair(tip + 1, address),
+                    block(
+                        tip + 2,
+                        None,
+                        &natives,
+                        vec![output(address, holding(&natives), None)],
+                    )
+                    .0,
+                ]
+            });
+
+            let path = format!("/addresses/{}", app.vectors().address);
+            let (status, bytes) = app.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let plain: AddressContent = serde_json::from_slice(&bytes).unwrap();
+            let units: Vec<String> = plain.amount.iter().map(|x| x.unit.clone()).collect();
+            *order.lock().unwrap() = units.clone();
+
+            let (_, user) = fungible();
+            let declared = ["lovelace".to_string(), unit_of(&user)];
+            assert!(
+                units.len() >= 8 && units.contains(&declared[1]),
+                "{units:?}"
+            );
+
+            let item = extended_of(&app).await;
+            server.abort();
+
+            let answered: Vec<_> = item.amount.iter().map(|x| x.unit.clone()).collect();
+            assert_eq!(answered, units);
+
+            for (position, entry) in item.amount.iter().enumerate() {
+                let expected = if declared.contains(&entry.unit) {
+                    6
+                } else {
+                    10 + position as i32
+                };
+
+                assert_eq!(entry.decimals, Some(expected), "{}", entry.unit);
+            }
+
+            let mut asked = asked.lock().unwrap().clone();
+            asked.sort();
+            let mut undeclared: Vec<_> = units
+                .into_iter()
+                .filter(|x| !declared.contains(x))
+                .collect();
+            undeclared.sort();
+            assert_eq!(asked, undeclared);
+        }
+
+        /// Finding Y1 of the fourth QA review of dolos#1524: every unit's
+        /// on-chain read ends before the first registry request starts. A
+        /// read still queued for a query permit while the registry stalls
+        /// would be handed one it cannot use until the registry answers. The
+        /// address holds more units than the registry's 16 and the reads'
+        /// fan-out together, and the registry never answers.
+        #[tokio::test]
+        async fn every_onchain_read_ends_before_the_first_registry_request() {
+            const HELD: usize = 40;
+
+            // entity reads run when the registry accepts each request
+            let reads = Arc::new(AtomicUsize::new(0));
+            let seen: Arc<Mutex<Vec<usize>>> = Default::default();
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut config = minibf();
+            config.token_registry_url = Some(format!("http://{}", listener.local_addr().unwrap()));
+
+            let registry = tokio::spawn({
+                let (reads, seen) = (reads.clone(), seen.clone());
+
+                async move {
+                    let mut held = vec![];
+
+                    while let Ok((stream, _)) = listener.accept().await {
+                        seen.lock().unwrap().push(reads.load(Ordering::SeqCst));
+                        held.push(stream);
+                    }
+                }
+            });
+
+            let mints = (0..HELD)
+                .map(|i| ([0x5a; 28], format!("M{i:02}"), 1))
+                .collect();
+
+            let cfg = SyntheticBlockConfig {
+                block_count: 5,
+                txs_per_block: 1,
+                mints_by_block: vec![vec![mints]],
+                ..Default::default()
+            };
+
+            let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+            let domain = domain.with_query_limiter(QueryLimiter::new(8));
+            let app = TestApp::from_domain(domain, vectors, None, config);
+            let facade = app.facade();
+
+            facade.inner.during_entity_slots({
+                let reads = reads.clone();
+
+                move || {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+
+            let request = tokio::spawn(extended::<FaultyToyDomain>(
+                Path(app.vectors().address.clone()),
+                State(facade.clone()),
+            ));
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while seen.lock().unwrap().len() < EXTENDED_ASSET_CONCURRENCY {
+                assert!(Instant::now() < deadline, "{:?}", seen.lock().unwrap());
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+
+            let in_use = facade.inner.query_limiter().in_use();
+            request.abort();
+            registry.abort();
+
+            let seen = seen.lock().unwrap().clone();
+            assert!(seen.iter().all(|x| *x >= HELD), "{seen:?}");
+            assert_eq!(in_use, 0);
         }
     }
 }

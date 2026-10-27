@@ -381,6 +381,41 @@ fn token_registry_client() -> &'static reqwest::Client {
     })
 }
 
+/// Asks the token registry at `url` for the metadata of `asset`.
+async fn token_registry_metadata(
+    url: &str,
+    asset: &str,
+) -> Result<Option<OffchainMetadata>, StatusCode> {
+    // TODO: apply memory cache
+    let url = format!("{url}/metadata/{asset}");
+
+    // The off-chain metadata adds to the response. It is not necessary.
+    // If the token registry does not answer, or sends data that does not
+    // parse, the code reports no metadata. The request does not fail.
+    let Ok(res) = token_registry_client()
+        .get(&url)
+        .timeout(TOKEN_REGISTRY_TIMEOUT)
+        .send()
+        .await
+    else {
+        return Ok(None);
+    };
+
+    if res.status() != StatusCode::OK {
+        return Ok(None);
+    }
+
+    let Ok(metadata) = res.json::<TokenRegistryMetadata>().await else {
+        return Ok(None);
+    };
+
+    if metadata.name.is_none() || metadata.description.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(metadata.into()))
+}
+
 pub struct AssetModelBuilder {
     pub subject: Vec<u8>,
     pub unit: String,
@@ -389,7 +424,8 @@ pub struct AssetModelBuilder {
     pub registry_url: Option<String>,
     chain: ChainSummary,
     tip: Epoch,
-    /// The request's label-100 walks, shared with the reference token's.
+    /// The request's label-100 walks, or its unit's share of them in
+    /// `/addresses/{address}/extended`, shared with the reference token's.
     budget: WalkBudget,
 }
 
@@ -470,38 +506,10 @@ impl AssetModelBuilder {
     }
 
     async fn offchain_metadata(&self, asset: &str) -> Result<Option<OffchainMetadata>, StatusCode> {
-        // TODO: apply memory cache
-        let Some(url) = &self.registry_url else {
-            return Ok(None);
-        };
-
-        let url = format!("{url}/metadata/{asset}");
-
-        // The off-chain metadata adds to the response. It is not necessary.
-        // If the token registry does not answer, or sends data that does not
-        // parse, the code reports no metadata. The request does not fail.
-        let Ok(res) = token_registry_client()
-            .get(&url)
-            .timeout(TOKEN_REGISTRY_TIMEOUT)
-            .send()
-            .await
-        else {
-            return Ok(None);
-        };
-
-        if res.status() != StatusCode::OK {
-            return Ok(None);
+        match &self.registry_url {
+            Some(url) => token_registry_metadata(url, asset).await,
+            None => Ok(None),
         }
-
-        let Ok(metadata) = res.json::<TokenRegistryMetadata>().await else {
-            return Ok(None);
-        };
-
-        if metadata.name.is_none() || metadata.description.is_none() {
-            return Ok(None);
-        }
-
-        Ok(Some(metadata.into()))
     }
 
     pub async fn into_model<D>(self, domain: &Facade<D>) -> Result<Asset, StatusCode>
@@ -604,18 +612,23 @@ impl AssetAmountExtras {
         // the registry request reaches an external service. the on-chain datum
         // already declares the decimal places of every CIP-68 fungible asset,
         // so a known value makes the request unnecessary
-        Ok(OnchainExtras {
-            extras,
-            registry: decimals.is_none().then_some(builder),
-        })
+        let registry = match (decimals, builder.registry_url) {
+            (None, Some(url)) => Some((url, builder.unit)),
+            _ => None,
+        };
+
+        Ok(OnchainExtras { extras, registry })
     }
 }
 
-/// A unit's extras as the chain gives them, and the asset to ask the token
-/// registry for its decimal places where the chain declares none.
+/// A unit's extras as the chain gives them, and the unit to ask the token
+/// registry for its decimal places where the chain declares none. It keeps
+/// nothing else of the unit's reads, so a request can hold every unit's at
+/// once.
 pub(crate) struct OnchainExtras {
     extras: AssetAmountExtras,
-    registry: Option<AssetModelBuilder>,
+    /// The registry's URL and the unit to ask it for.
+    registry: Option<(String, String)>,
 }
 
 impl OnchainExtras {
@@ -628,14 +641,17 @@ impl OnchainExtras {
 
     /// The extras, with the registry's decimal places where it is asked.
     pub async fn with_registry(self) -> Result<AssetAmountExtras, Error> {
-        let Some(builder) = self.registry else {
+        let Some((url, unit)) = self.registry else {
             return Ok(self.extras);
         };
 
-        let registry = builder.offchain_metadata(&builder.unit).await?;
+        let registry = token_registry_metadata(&url, &unit).await?;
 
         Ok(AssetAmountExtras {
-            decimals: registry.and_then(|metadata| metadata.decimals),
+            decimals: self
+                .extras
+                .decimals
+                .or_else(|| registry.and_then(|metadata| metadata.decimals)),
             ..self.extras
         })
     }

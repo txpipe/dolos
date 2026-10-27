@@ -629,9 +629,11 @@ struct Head {
 ///
 /// A label-100 token's metadata tx walks the token's tagged blocks past the
 /// cached epochs, newest first, within `budget`, which the request's later
-/// reads share. If none of the blocks it reads sets it, the read keeps the one
-/// the cached epochs found, or the newest mint whose CIP-25 metadata names the
-/// token; with no entry behind the read, that can be none.
+/// reads share; in `/addresses/{address}/extended` it is one unit's share,
+/// which only that unit's later reads share. If none of the blocks it reads
+/// sets it, the read keeps the one the cached epochs found, or the newest mint
+/// whose CIP-25 metadata names the token; with no entry behind the read, that
+/// can be none.
 pub async fn asset_summary<D: Domain>(
     domain: &D,
     chain: &ChainSummary,
