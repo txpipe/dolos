@@ -52,4 +52,4 @@ dolos-testing = { path = "../testing" }
 # libzstd alone and decodes the blocks it appends afterwards.
 dolos-fjall = { path = "../fjall" }
 pallas = { workspace = true }
-zstd = "0.13"
+zstd = "0.14"
