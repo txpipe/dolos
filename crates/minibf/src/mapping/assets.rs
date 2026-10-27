@@ -12,8 +12,8 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     cip25::{cip25_metadata_is_valid, Cip25MetadataVersion},
     cip68::{
-        cip68_metadata_is_valid, cip_68_reference_asset, encode_to_hex, parse_cip68_metadata_map,
-        Cip68TokenStandard,
+        cip68_metadata_is_valid, cip_68_reference_asset, encode_to_hex,
+        parse_cip67_label_from_asset_name, parse_cip68_metadata_map, Cip68TokenStandard,
     },
     indexes::AsyncCardanoQueryExt,
     periods::assets::{self, AssetSummary, WalkBudget},
@@ -571,15 +571,15 @@ impl AssetAmountExtras {
         }
     }
 
-    /// Derives the metadata facts of a single unit. If the standard declares
-    /// decimal places, they come from the CIP-68 reference datum. If it does
-    /// not, they come from the off-chain token registry. Its label-100 walks
-    /// draw on `budget`, which the request's other units share.
-    pub async fn resolve<D>(
+    /// Derives the on-chain metadata facts of a single unit. If the standard
+    /// declares decimal places, they come from the CIP-68 reference datum. If
+    /// it does not, [`OnchainExtras::with_registry`] takes them from the
+    /// off-chain token registry. Its label-100 walks draw on `budget`.
+    pub async fn onchain<D>(
         domain: &Facade<D>,
         unit: &str,
         budget: &WalkBudget,
-    ) -> Result<Self, Error>
+    ) -> Result<OnchainExtras, Error>
     where
         D: Domain + Clone + Send + Sync + 'static,
     {
@@ -588,28 +588,69 @@ impl AssetAmountExtras {
             // an asset that a live utxo holds always has minting state. a
             // missing state must not make the whole address request fail
             Err(Error::InvalidAsset) | Err(Error::Code(StatusCode::NOT_FOUND)) => {
-                return Ok(Self::bare())
+                return Ok(OnchainExtras::known(Self::bare()))
             }
             Err(err) => return Err(err),
         };
 
         let onchain = builder.onchain_metadata(domain).await?;
+        let decimals = onchain.as_ref().and_then(OnchainMetadata::decimals);
+
+        let extras = Self {
+            decimals,
+            has_nft_onchain_metadata: onchain.is_some_and(|x| x.is_present()),
+        };
 
         // the registry request reaches an external service. the on-chain datum
         // already declares the decimal places of every CIP-68 fungible asset,
         // so a known value makes the request unnecessary
-        let onchain_decimals = onchain.as_ref().and_then(OnchainMetadata::decimals);
-        let registry = if onchain_decimals.is_some() {
-            None
-        } else {
-            builder.offchain_metadata(unit).await?
-        };
-
-        Ok(Self {
-            decimals: onchain_decimals.or_else(|| registry.and_then(|metadata| metadata.decimals)),
-            has_nft_onchain_metadata: onchain.is_some_and(|x| x.is_present()),
+        Ok(OnchainExtras {
+            extras,
+            registry: decimals.is_none().then_some(builder),
         })
     }
+}
+
+/// A unit's extras as the chain gives them, and the asset to ask the token
+/// registry for its decimal places where the chain declares none.
+pub(crate) struct OnchainExtras {
+    extras: AssetAmountExtras,
+    registry: Option<AssetModelBuilder>,
+}
+
+impl OnchainExtras {
+    pub fn known(extras: AssetAmountExtras) -> Self {
+        Self {
+            extras,
+            registry: None,
+        }
+    }
+
+    /// The extras, with the registry's decimal places where it is asked.
+    pub async fn with_registry(self) -> Result<AssetAmountExtras, Error> {
+        let Some(builder) = self.registry else {
+            return Ok(self.extras);
+        };
+
+        let registry = builder.offchain_metadata(&builder.unit).await?;
+
+        Ok(AssetAmountExtras {
+            decimals: registry.and_then(|metadata| metadata.decimals),
+            ..self.extras
+        })
+    }
+}
+
+/// Whether resolving `unit` walks a CIP-68 reference token's blocks for its
+/// metadata tx: the unit is one (label 100), or a user token whose metadata
+/// one holds.
+pub(crate) fn walks_reference_token(unit: &str) -> bool {
+    let Ok(subject) = decode_asset_subject(unit) else {
+        return false;
+    };
+
+    parse_cip67_label_from_asset_name(&subject[28..]) == Some(100)
+        || matches!(cip68_reference_from_unit(unit), Ok(Some(_)))
 }
 
 /// Decodes an asset subject: a 56 hex char policy id plus up to 64 hex chars

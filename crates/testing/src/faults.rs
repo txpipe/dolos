@@ -120,6 +120,17 @@ impl FaultyToyDomain {
     pub fn after_read_logs(&self, hook: impl FnOnce() + Send + 'static) {
         *self.archive.read_logs_hook.lock().expect("read logs hook") = Some(Box::new(hook));
     }
+
+    /// Runs `hook` after every [`ArchiveStore::entity_slots`] read, before the
+    /// caller gets the slots, and at once for reads that run at once: how many
+    /// readers are in flight.
+    pub fn during_entity_slots(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self
+            .archive
+            .each_entity_slots_hook
+            .lock()
+            .expect("entity slots hook") = Some(Arc::new(hook));
+    }
 }
 
 type TagPageHook = Box<dyn FnMut(&[TagEntry], &MemoryStateStore) + Send>;
@@ -127,6 +138,8 @@ type TagPageHook = Box<dyn FnMut(&[TagEntry], &MemoryStateStore) + Send>;
 type EntitySlotsHook = Box<dyn FnOnce() + Send>;
 
 type ReadLogsHook = Box<dyn FnOnce() + Send>;
+
+type EachEntitySlotsHook = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
 pub struct FaultyStateStore {
@@ -357,6 +370,7 @@ pub struct FaultyArchiveStore {
     fault: TestFault,
     commits: Arc<AtomicU32>,
     entity_slots_hook: Arc<Mutex<Option<EntitySlotsHook>>>,
+    each_entity_slots_hook: Arc<Mutex<Option<EachEntitySlotsHook>>>,
     read_logs_hook: Arc<Mutex<Option<ReadLogsHook>>>,
 }
 
@@ -371,6 +385,7 @@ impl FaultyArchiveStore {
             fault,
             commits,
             entity_slots_hook: Default::default(),
+            each_entity_slots_hook: Default::default(),
             read_logs_hook: Default::default(),
         }
     }
@@ -533,6 +548,17 @@ impl ArchiveStore for FaultyArchiveStore {
 
         if let Some(hook) = hook {
             hook();
+        }
+
+        // cloned out, so that readers in flight run it at once
+        let each = self
+            .each_entity_slots_hook
+            .lock()
+            .expect("entity slots hook")
+            .clone();
+
+        if let Some(each) = each {
+            each();
         }
 
         Ok(slots)

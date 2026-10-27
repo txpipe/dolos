@@ -295,40 +295,58 @@ fn read_staged_mints<D: Domain>(
 
 /// The blocks the label-100 walks of one request may read between them:
 /// minibf gives each request `max_scan_items`, whatever the number of tokens
-/// it reads.
+/// it reads. Clones share the blocks, so reads that run one after another can
+/// share a budget; reads that run at once take a share each ([`Self::split`]).
 #[derive(Debug, Clone)]
-pub struct WalkBudget(Arc<Budget>);
-
-#[derive(Debug)]
-struct Budget {
-    left: AtomicU64,
-    warned: AtomicBool,
+pub struct WalkBudget {
+    left: Arc<AtomicU64>,
+    /// Shared by the shares of one request's budget, which warns once.
+    warned: Arc<AtomicBool>,
 }
 
 impl WalkBudget {
     pub fn new(blocks: u64) -> Self {
-        Self(Arc::new(Budget {
-            left: AtomicU64::new(blocks),
-            warned: AtomicBool::new(false),
-        }))
+        Self {
+            left: Arc::new(AtomicU64::new(blocks)),
+            warned: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// `units` budgets that split `blocks` in order: each takes
+    /// `blocks / units`, and the first `blocks % units` one block more. A unit
+    /// whose walks run on its own share answers by the chain and its place in
+    /// the order, never by how the units' walks interleave. The shares warn
+    /// once between them.
+    pub fn split(blocks: u64, units: usize) -> Vec<Self> {
+        let warned = Arc::new(AtomicBool::new(false));
+        let units = units as u64;
+
+        (0..units)
+            .map(|unit| Self {
+                left: Arc::new(AtomicU64::new(
+                    blocks / units + u64::from(unit < blocks % units),
+                )),
+                warned: warned.clone(),
+            })
+            .collect()
     }
 
     /// Takes one block, or answers false once the budget is spent, warning
     /// the first time.
     fn take(&self, subject: &[u8]) -> bool {
         let taken = self
-            .0
             .left
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
                 left.checked_sub(1)
             })
             .is_ok();
 
-        if !taken && !self.0.warned.swap(true, Ordering::Relaxed) {
+        if !taken && !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 subject = hex::encode(subject),
-                "label-100 metadata walk stopped at the request's max_scan_items; a token \
-                 updated in the blocks left unread answers an older metadata tx, or none"
+                "label-100 metadata walk stopped at the request's max_scan_items, or its unit's \
+                 share of it; a token updated in the blocks left unread answers an older \
+                 metadata tx, or none"
             );
         }
 
@@ -610,7 +628,7 @@ struct Head {
 /// an asset never minted.
 ///
 /// A label-100 token's metadata tx walks the token's tagged blocks past the
-/// cached epochs, newest first, within `budget`, which the request's other
+/// cached epochs, newest first, within `budget`, which the request's later
 /// reads share. If none of the blocks it reads sets it, the read keeps the one
 /// the cached epochs found, or the newest mint whose CIP-25 metadata names the
 /// token; with no entry behind the read, that can be none.
@@ -818,4 +836,90 @@ pub fn count_unindexed<D: Domain>(domain: &D, subjects: &[Vec<u8>]) -> Result<us
     }
 
     Ok(missing)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    /// The blocks left in `budget`, read without taking one: a take refused
+    /// would warn, and only [`a_request_warns_once_that_its_walks_stopped`]
+    /// may reach the warning, as tracing caches whether a subscriber listens
+    /// to it across this binary's test threads.
+    fn left(budget: &WalkBudget) -> u64 {
+        budget.left.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn a_split_hands_the_remainder_to_the_first_units() {
+        let shares = |blocks, units| {
+            WalkBudget::split(blocks, units)
+                .iter()
+                .map(left)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(shares(7, 3), [3, 2, 2]);
+        assert_eq!(shares(6, 3), [2, 2, 2]);
+        assert_eq!(shares(2, 3), [1, 1, 0]);
+        assert_eq!(shares(7, 0), [0u64; 0]);
+    }
+
+    #[test]
+    fn a_share_spent_leaves_the_others_whole() {
+        let shares = WalkBudget::split(4, 2);
+        let clone = shares[0].clone();
+
+        assert!(clone.take(b"") && clone.take(b""));
+        assert_eq!((left(&shares[0]), left(&shares[1])), (0, 2));
+    }
+
+    /// What `f` logs, as the node's formatter writes it.
+    fn logs_of(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buffer = Buffer::default();
+        let sink = buffer.clone();
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, f);
+
+        let bytes = buffer.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// A request warns once that its walks stopped, however many of its reads,
+    /// or of its units' shares, stop: here two requests.
+    #[test]
+    fn a_request_warns_once_that_its_walks_stopped() {
+        let logs = logs_of(|| {
+            let budget = WalkBudget::new(0);
+            assert!(!budget.take(b"a"));
+            assert!(!budget.clone().take(b"b"));
+
+            for share in WalkBudget::split(1, 3) {
+                while share.take(b"c") {}
+            }
+        });
+
+        assert_eq!(logs.matches("metadata walk stopped").count(), 2, "{logs}");
+    }
 }

@@ -2210,3 +2210,279 @@ async fn a_lagging_read_decodes_each_block_once() {
     // the read: the moves, then the update; the extension: the update
     assert_eq!(decoded() - before, MOVES + 1 + 1);
 }
+
+/// Finding TA3 of the third QA review of dolos#1524: a read past a stale entry
+/// (another first mint) adds the tail's mints to the epochs it folds up to the
+/// watermark.
+#[tokio::test]
+async fn a_stale_entry_read_adds_the_tail() {
+    const P: [u8; 28] = [0x91; 28];
+
+    let blocks = 14;
+    let mints_by_block = (0..blocks)
+        .map(|i| match i {
+            0 => vec![vec![(P, "X".to_string(), 5)]],
+            6 => vec![vec![(P, "X".to_string(), 3)]],
+            // slot 3500, epoch 7: past the watermark, 5
+            13 => vec![vec![(P, "X".to_string(), 2)]],
+            _ => vec![vec![(P, "FILL".to_string(), 1)]],
+        })
+        .collect();
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: blocks,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        mints_by_block,
+        ..Default::default()
+    });
+
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain =
+        ToyDomain::new_with_genesis_and_config(genesis_with(500, 5, 9), chain_config, None, None);
+    assert!(assets::register_assets_cache(&domain).unwrap());
+
+    let tip = domain.import_blocks(raw).unwrap();
+    let chain = chain_of(&domain);
+    let watermark = assets::assets_watermark(&domain, &chain, chain.slot_epoch(tip).0).unwrap();
+    assert_eq!(watermark, 5);
+
+    let x = subject(P, "X");
+    let stale = assets::build_asset_entry(&domain, &chain, &x, 3, watermark).unwrap();
+    domain
+        .cache()
+        .get_or_fill(ASSETS.name, &x, move || {
+            Ok::<_, dolos_core::ChainError>(stale)
+        })
+        .await
+        .unwrap();
+    assert_eq!(cached_entry(&domain, &x).unwrap().start, 3);
+
+    let read = read_asset(&domain, tip, &x).await;
+    assert_read_as_kept(&read, state_kept(&domain, &x), "stale entry, tail mint");
+    assert_eq!(read.unwrap().quantity, 10);
+}
+
+/// Finding TA4 of the third QA review of dolos#1524: a lagging entry's read
+/// answers the tail's naming mint over one in the epochs between the entry and
+/// the tail.
+#[tokio::test]
+async fn a_lagging_read_takes_the_tail_naming_mint() {
+    let mint = |policy, name: &str, amount| (policy, name.to_string(), amount);
+
+    let blocks = 14;
+    let mints_by_block = (0..blocks)
+        .map(|i| match i {
+            // epochs 0 (the entry), 4 (between), 7 (the tail)
+            0 | 8 | 13 => vec![vec![mint(TEXT_KEYS, "A", 1)]],
+            _ => vec![vec![mint([0x92; 28], "FILL", 1)]],
+        })
+        .collect();
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: blocks,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        mints_by_block,
+        metadata_entries: vec![label_721()],
+        ..Default::default()
+    });
+
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain =
+        ToyDomain::new_with_genesis_and_config(genesis_with(500, 5, 9), chain_config, None, None);
+    assert!(assets::register_assets_cache(&domain).unwrap());
+
+    let a = subject(TEXT_KEYS, "A");
+
+    // tip in epoch 5: the entry fills at watermark 3
+    let early = domain.import_blocks(raw[..10].to_vec()).unwrap();
+    read_asset(&domain, early, &a).await.unwrap();
+    assert_eq!(cached_entry(&domain, &a).unwrap().watermark, 3);
+
+    // tip in epoch 7, watermark 5: between is 4..=5, the tail 6..=7
+    let tip = domain.import_blocks(raw[10..].to_vec()).unwrap();
+    assert_eq!(cached_entry(&domain, &a).unwrap().watermark, 3);
+
+    let lagging = read_asset(&domain, tip, &a).await;
+    assert_read_as_kept(
+        &lagging,
+        state_kept(&domain, &a),
+        "lagging, between and tail",
+    );
+}
+
+/// Finding TA5 of the third QA review of dolos#1524: a label-100 token named by
+/// a CIP-25 mint without a datum, then given a datum, answers the datum's tx,
+/// as AssetState kept it: in the tail, and inside an entry's range.
+#[tokio::test]
+async fn a_datum_after_a_naming_mint_wins() {
+    // inside the entry's range: epoch 0
+    let old_policy = [0x94; 28];
+    let old = reference_subject(old_policy);
+    let (named, named_tx) =
+        reference_block_with(260, &old, None, Some(1), false, naming(old_policy, &old));
+    let (updated, _) = reference_block(270, &old, Some(named_tx), None, true);
+
+    let (domain, mut raw) = label_100_chain(Some(named));
+    raw.insert(2, updated);
+    domain.import_blocks(raw).unwrap();
+
+    // in the tail: epoch 7, past the watermark
+    let young_policy = [0x93; 28];
+    let young = reference_subject(young_policy);
+    let (named, named_tx) = reference_block_with(
+        3510,
+        &young,
+        None,
+        Some(1),
+        false,
+        naming(young_policy, &young),
+    );
+    let (updated, update_tx) = reference_block(3520, &young, Some(named_tx), None, true);
+    let tip = domain.import_blocks(vec![named, updated]).unwrap();
+
+    assert_eq!(state_kept(&domain, &young).unwrap().4, Some(update_tx));
+
+    for (what, subject) in [("in the entry", &old), ("in the tail", &young)] {
+        let read = read_asset(&domain, tip, subject).await;
+        assert_read_as_kept(&read, state_kept(&domain, subject), what);
+    }
+}
+
+/// Finding TA2 of the third QA review of dolos#1524: with the cache off, a read
+/// whose tail walk finds the metadata tx walks no block before the tail.
+#[tokio::test]
+async fn a_tail_hit_walks_nothing_before_the_tail() {
+    use dolos_core::config::CacheConfig;
+    use dolos_testing::{
+        measured::MeasuredStores,
+        toy_domain::{MemoryStores, ToyStores as _},
+    };
+    use std::sync::atomic::Ordering;
+
+    type Measured = ToyDomain<MeasuredStores<MemoryStores>>;
+
+    const MANY: u64 = 20;
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 14,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        ..Default::default()
+    });
+
+    let (mut raw, _, chain_config) = build_synthetic_blocks(cfg);
+
+    let domain = ToyDomain::with_stores(
+        genesis_with(500, 5, 9),
+        chain_config,
+        None,
+        None,
+        MeasuredStores::new(MemoryStores::open()),
+    )
+    .with_cache_config(CacheConfig {
+        enabled: false,
+        ..CacheConfig::default()
+    });
+
+    assert!(!assets::register_assets_cache(&domain).unwrap());
+
+    // minted with a datum, then moved MANY times without one, in epoch 0
+    let reference = reference_subject([0x95; 28]);
+    let (minted, mint_tx) = reference_block(260, &reference, None, Some(1), true);
+    raw.insert(1, minted);
+
+    let mut input = mint_tx;
+
+    for i in 0..MANY {
+        let (moved, tx) = reference_block(261 + 10 * i, &reference, Some(input), None, false);
+        raw.insert(2 + i as usize, moved);
+        input = tx;
+    }
+
+    domain.import_blocks(raw).unwrap();
+
+    // updated with a datum in the tail, epoch 7
+    let (updated, update_tx) = reference_block(3510, &reference, Some(input), None, true);
+    let tip = domain.import_blocks(vec![updated]).unwrap();
+
+    let chain = dolos_cardano::eras::load_era_summary::<Measured>(domain.state()).unwrap();
+    let (epoch, _) = chain.slot_epoch(tip);
+
+    let decoded = || {
+        domain
+            .archive()
+            .counters
+            .block_reads
+            .load(Ordering::Relaxed)
+    };
+
+    let before = decoded();
+    let summary = assets::asset_summary(&domain, &chain, epoch, reference, &WalkBudget::new(WALK))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        (summary.fold.metadata_tx, decoded() - before),
+        (Some(update_tx), 1)
+    );
+}
+
+/// Finding W1 of the third QA review of dolos#1524: the units of one request
+/// walk on shares of its budget, so each answers by its share whether the
+/// walks run one after another, in either order, or at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn walks_on_shares_answer_by_their_share_alone() {
+    let (domain, raw) = label_100_chain(None);
+    domain.import_blocks(raw).unwrap();
+
+    // two young tokens, each minted with a datum, then moved without one, so
+    // that a walk reads MOVES + 1 blocks to find its mint, interleaved
+    let (a, b) = (reference_subject([0x7d; 28]), reference_subject([0x7e; 28]));
+    let (minted_a, mint_a) = reference_block(3510, &a, None, Some(1), true);
+    let (minted_b, mint_b) = reference_block(3515, &b, None, Some(1), true);
+
+    let mut tail = vec![minted_a, minted_b];
+
+    for (moved_a, moved_b) in moves(&a, mint_a, 3520, MOVES)
+        .into_iter()
+        .zip(moves(&b, mint_b, 3525, MOVES))
+    {
+        tail.extend([moved_a, moved_b]);
+    }
+
+    let tip = domain.import_blocks(tail).unwrap();
+    let chain = chain_of(&domain);
+    let (epoch, _) = chain.slot_epoch(tip);
+
+    // a walk for a, a block short of one for b
+    let shares = || WalkBudget::split(2 * (MOVES + 1) - 1, 2);
+    let expected = (Some(mint_a), None);
+
+    let [for_a, for_b] = <[WalkBudget; 2]>::try_from(shares()).unwrap();
+    let b_first = metadata_within(&domain, tip, &b, &for_b).await;
+    assert_eq!(
+        (metadata_within(&domain, tip, &a, &for_a).await, b_first),
+        expected
+    );
+
+    for round in 0..20 {
+        let [for_a, for_b] = <[WalkBudget; 2]>::try_from(shares()).unwrap();
+
+        let (x, y) = tokio::join!(
+            assets::asset_summary(&domain, &chain, epoch, a.clone(), &for_a),
+            assets::asset_summary(&domain, &chain, epoch, b.clone(), &for_b),
+        );
+
+        let answers = (
+            x.unwrap().unwrap().fold.metadata_tx,
+            y.unwrap().unwrap().fold.metadata_tx,
+        );
+        assert_eq!(answers, expected, "round {round}");
+    }
+}

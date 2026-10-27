@@ -882,4 +882,98 @@ mod tests {
         );
         assert_eq!(window(&lens, SlotOrder::Desc, 7, 9), vec![(0, 0..3)]);
     }
+
+    fn toy_chain(domain: &dolos_testing::toy_domain::ToyDomain) -> ChainSummary {
+        use dolos_core::Domain as _;
+
+        crate::eras::load_era_summary::<dolos_testing::toy_domain::ToyDomain>(domain.state())
+            .unwrap()
+    }
+
+    /// Finding TA6 of the third QA review of dolos#1524: the epochs a boundary
+    /// seals that the boundary before it could not.
+    #[test]
+    fn newly_sealable_is_what_this_boundary_seals_first() {
+        use dolos_core::Domain as _;
+        use dolos_testing::toy_domain::ToyDomain;
+
+        let domain = ToyDomain::new(None, None);
+        let chain = toy_chain(&domain);
+        let mutable = crate::utils::mutable_slots(&domain.genesis());
+
+        for boundary in 1..=12 {
+            let expected: Vec<Epoch> = (0..boundary)
+                .filter(|epoch| {
+                    is_sealable(&chain, mutable, *epoch, boundary)
+                        && !is_sealable(&chain, mutable, *epoch, boundary - 1)
+                })
+                .collect();
+
+            assert_eq!(
+                newly_sealable(&chain, mutable, boundary),
+                expected,
+                "boundary {boundary}"
+            );
+        }
+    }
+
+    /// A first-mint list an earlier boundary sealed, naming a subject the
+    /// index lacks (as a seal before the index did), is left alone by a later
+    /// boundary: only `dolos doctor rebuild-state --rewrite-logs` rewrites it.
+    #[test]
+    fn a_later_boundary_leaves_a_pre_index_list_alone() {
+        use dolos_core::{ArchiveStore as _, ArchiveWriter as _, Domain as _};
+        use dolos_testing::toy_domain::ToyDomain;
+
+        use crate::{FirstMintChunk, PolicyKey, PolicyMintChunk};
+
+        let domain = ToyDomain::new(None, None);
+        let chain = toy_chain(&domain);
+        let mutable = crate::utils::mutable_slots(&domain.genesis());
+
+        let policy = [0x44; 28];
+        let subject = [policy.as_slice(), b"OLD"].concat();
+        let slot = chain.epoch_start(3);
+        let policy_key = (PolicyKey(policy.into()), 0u32);
+
+        let writer = domain.archive().start_writer().unwrap();
+        writer
+            .write_log_typed(slot, &0u32, &FirstMintChunk::new(1, vec![subject.clone()]))
+            .unwrap();
+        writer
+            .write_log_typed(
+                slot,
+                &policy_key,
+                &PolicyMintChunk::new(1, vec![b"OLD".to_vec()]),
+            )
+            .unwrap();
+        writer.commit().unwrap();
+
+        let boundary = 8;
+        assert!(is_sealable(&chain, mutable, 3, boundary - 1));
+
+        first_mints::seal::<ToyDomain>(
+            domain.state(),
+            domain.archive(),
+            &chain,
+            &|epoch| is_sealable(&chain, mutable, epoch, boundary),
+            &newly_sealable(&chain, mutable, boundary),
+            2,
+        )
+        .unwrap();
+
+        let listed = domain
+            .archive()
+            .read_log_typed::<FirstMintChunk>(slot, &0)
+            .unwrap()
+            .map(|chunk| chunk.into_items());
+        assert_eq!(listed, Some(vec![subject]));
+
+        let names = domain
+            .archive()
+            .read_log_typed::<PolicyMintChunk>(slot, &policy_key)
+            .unwrap()
+            .map(|chunk| chunk.into_items());
+        assert_eq!(names, Some(vec![b"OLD".to_vec()]));
+    }
 }

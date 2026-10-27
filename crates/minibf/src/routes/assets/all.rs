@@ -406,4 +406,20 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         assert_status(&app, "/assets", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
+
+    /// Finding TA9 of the third QA review of dolos#1524: a page reads as many
+    /// assets at once as one request may run on the query limiter, here 4 of
+    /// 8 permits, whatever the page's size.
+    #[tokio::test]
+    async fn a_page_reads_as_many_assets_at_once_as_the_limiter_allows() {
+        let app = crate::test_support::many_assets_app(12, 8);
+        let fan_out = app.facade().inner.query_limiter().fan_out();
+        assert_eq!(fan_out, 4);
+
+        let (peak, page) =
+            crate::test_support::readers_at_once(&app, get_assets(&app, "?count=100")).await;
+
+        assert!(page.len() > fan_out, "{} assets", page.len());
+        assert!((1..=fan_out).contains(&peak), "{peak} asset reads at once");
+    }
 }
