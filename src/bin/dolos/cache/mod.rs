@@ -19,7 +19,10 @@ use std::{
 use bytes::Bytes;
 use clap::{ArgGroup, Parser, Subcommand};
 use dolos_cardano::{
-    periods::stats::{register_totals_cache, TOTALS},
+    periods::{
+        assets::{register_assets_cache, ASSETS},
+        stats::{register_totals_cache, TOTALS},
+    },
     pool_history::{register_pool_caches, POOL_BLOCKS, POOL_REGISTRATIONS},
 };
 use dolos_core::{
@@ -34,7 +37,7 @@ use pallas::crypto::hash::Hasher;
 
 mod uses;
 
-pub use uses::{CacheUse, Totals, Watermark};
+pub use uses::{Assets, CacheUse, Totals, Watermark};
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -237,6 +240,16 @@ pub fn register<D: Domain>(domain: &D) -> miette::Result<Namespaces<D>> {
     } else {
         namespaces.off.push(Off {
             name: TOTALS.name,
+            why: "rolling history prunes the archive",
+        });
+    }
+
+    if register_assets_cache(domain).into_diagnostic()? {
+        let assets = Assets::new(domain).map_err(report)?;
+        namespaces.uses.push(Arc::new(assets));
+    } else {
+        namespaces.off.push(Off {
+            name: ASSETS.name,
             why: "rolling history prunes the archive",
         });
     }
@@ -1415,7 +1428,12 @@ mod tests {
         let off: Vec<_> = stats.off.iter().map(|ns| ns.name).collect();
         assert_eq!(
             off,
-            [TOTALS.name, POOL_REGISTRATIONS.name, POOL_BLOCKS.name]
+            [
+                TOTALS.name,
+                ASSETS.name,
+                POOL_REGISTRATIONS.name,
+                POOL_BLOCKS.name
+            ]
         );
 
         let totals = &stats.off[0];
@@ -1456,6 +1474,75 @@ mod tests {
             let wiped = clear(&domain, &namespaces, &Target::One(name)).unwrap();
             assert_eq!(wiped, [(name, 0)]);
         }
+    }
+
+    /// The chain of [`chain`] with a new asset minted in every block.
+    fn minting(dir: &Path) -> ToyDomain {
+        let genesis = Arc::new(dolos_cardano::include::preview::load());
+
+        let (blocks, _, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
+            ada_only_by_block: vec![],
+            asset_names_by_block: (0..12).map(|i| format!("W{i:02}")).collect(),
+            ..chain()
+        });
+
+        let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None)
+            .with_cache_config(CacheConfig::default())
+            .with_persistent_cache(dir)
+            .unwrap();
+
+        domain.import_blocks(blocks).unwrap();
+
+        domain
+    }
+
+    /// `warm --scan` fills `assets` whole: one entry per asset a sealed epoch
+    /// first minted, each the fold a read would keep, which `verify` rebuilds
+    /// and a second run finds current. A key file takes subjects in hex.
+    #[tokio::test]
+    async fn warm_scan_fills_every_sealed_asset() {
+        let dir = tempfile::tempdir().unwrap();
+        let domain = minting(dir.path());
+        let namespaces = register(&domain).unwrap();
+
+        let sealed = dolos_cardano::periods::assets::sealed_subjects(&domain).unwrap();
+        assert!(sealed.len() > 1, "{} sealed subjects", sealed.len());
+
+        let warmed = warm(&domain, &namespaces, ASSETS.name, &Source::Scan)
+            .await
+            .unwrap();
+
+        assert_eq!(warmed.keys, sealed.len() as u64);
+        assert_eq!(warmed.kept, sealed.len() as u64);
+        assert!(warmed.failed.is_empty(), "{:?}", warmed.failed);
+        assert_eq!(
+            domain.cache().disk().entries(ASSETS.name).unwrap(),
+            sealed.len() as u64
+        );
+
+        let verified = verify(&domain, &namespaces, Some(ASSETS.name), 100).unwrap();
+        assert_eq!(verified.checked, sealed.len() as u64);
+        assert!(verified.mismatches.is_empty(), "{:?}", verified.mismatches);
+
+        let file = dir.path().join("subjects.txt");
+        let text: Vec<_> = sealed.iter().map(hex::encode).collect();
+        std::fs::write(&file, text.join("\n")).unwrap();
+
+        let again = warm(&domain, &namespaces, ASSETS.name, &Source::Keys(file))
+            .await
+            .unwrap();
+        assert_eq!(again.current, sealed.len() as u64);
+
+        let bad = dir.path().join("bad.txt");
+        std::fs::write(&bad, "abcd\n").unwrap();
+
+        let error = warm(&domain, &namespaces, ASSETS.name, &Source::Keys(bad))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not an asset subject"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

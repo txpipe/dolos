@@ -3,7 +3,6 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::asset::Asset;
-use dolos_cardano::model::AssetState;
 use dolos_core::Domain;
 
 use crate::{error::Error, mapping::assets::load_asset_builder, Facade};
@@ -13,7 +12,6 @@ pub async fn by_subject<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Asset>, Error>
 where
-    Option<AssetState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let model = load_asset_builder(&domain, unit).await?;

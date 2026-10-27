@@ -6,11 +6,12 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::assets_inner::AssetsInner;
-use dolos_cardano::{indexes::SlotOrder, model::AssetState, periods::first_mints};
+use dolos_cardano::{indexes::SlotOrder, periods::first_mints};
 use dolos_core::{Domain, DomainError};
 
 use crate::{
     error::Error,
+    mapping::assets::asset_summaries,
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -26,7 +27,6 @@ pub async fn all<D>(
 ) -> Result<Json<Vec<AssetsInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<AssetState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -52,19 +52,14 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut items = Vec::with_capacity(subjects.len());
-
-    for subject in subjects {
-        let asset_key = dolos_cardano::AssetKey::of(&subject);
-        let asset_state = domain
-            .read_cardano_entity::<AssetState>(&asset_key)?
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        items.push(AssetsInner {
+    let items = asset_summaries(&domain, subjects)
+        .await?
+        .into_iter()
+        .map(|(subject, summary)| AssetsInner {
             asset: hex::encode(&subject),
-            quantity: asset_state.quantity().to_string(),
-        });
-    }
+            quantity: summary.fold.quantity().to_string(),
+        })
+        .collect();
 
     Ok(Json(items))
 }
@@ -86,17 +81,46 @@ mod tests {
     use crate::pagination::Order;
 
     /// The scan the period logs replaced: every block from Mary on, a tx's
-    /// subjects in byte order, kept where the tx is the asset's `initial_tx`.
+    /// subjects in byte order, kept where the tx is the asset's first mint.
     mod scan {
-        use std::collections::BTreeSet;
+        use std::collections::{BTreeSet, HashMap};
 
-        use dolos_cardano::model::{AssetKey, AssetState};
-        use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
-        use pallas::ledger::traverse::{MultiEraBlock, MultiEraTx};
+        use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
+        use pallas::{
+            crypto::hash::Hash,
+            ledger::traverse::{MultiEraBlock, MultiEraTx},
+        };
 
         use crate::pagination::Order;
 
-        fn first_minted_subjects<D: Domain>(domain: &D, tx: &MultiEraTx<'_>) -> Vec<Vec<u8>> {
+        /// Each subject's first mint: the first valid tx minting it with a
+        /// non-zero quantity, the roll's rule.
+        pub fn first_mint_txs<D: Domain>(domain: &D) -> HashMap<Vec<u8>, Hash<32>> {
+            let mut out = HashMap::new();
+
+            for (_, body) in domain.archive().get_range(None, None).unwrap() {
+                let block = MultiEraBlock::decode(&body).unwrap();
+
+                for tx in block.txs().iter().filter(|tx| tx.is_valid()) {
+                    for policy_assets in tx.mints() {
+                        for asset in policy_assets.assets() {
+                            if asset.mint_coin().unwrap_or_default() != 0 {
+                                let subject =
+                                    [policy_assets.policy().as_slice(), asset.name()].concat();
+                                out.entry(subject).or_insert(tx.hash());
+                            }
+                        }
+                    }
+                }
+            }
+
+            out
+        }
+
+        fn first_minted_subjects(
+            firsts: &HashMap<Vec<u8>, Hash<32>>,
+            tx: &MultiEraTx<'_>,
+        ) -> Vec<Vec<u8>> {
             let mut subjects = BTreeSet::new();
 
             for policy_assets in tx.mints() {
@@ -105,31 +129,17 @@ mod tests {
                 }
             }
 
-            let subjects: Vec<_> = subjects.into_iter().collect();
-
-            let keys: Vec<AssetKey> = subjects
-                .iter()
-                .map(|subject| AssetKey::of(subject))
-                .collect();
-
-            let states = domain
-                .state()
-                .read_entities_typed::<AssetState>(&keys.iter().collect::<Vec<_>>())
-                .unwrap();
-
             let tx_hash = tx.hash();
 
             subjects
                 .into_iter()
-                .zip(states)
-                .filter_map(|(subject, state)| {
-                    (state.and_then(|x| x.initial_tx) == Some(tx_hash)).then_some(subject)
-                })
+                .filter(|subject| firsts.get(subject) == Some(&tx_hash))
                 .collect()
         }
 
         pub fn first_mints<D: Domain>(
             domain: &D,
+            firsts: &HashMap<Vec<u8>, Hash<32>>,
             start: BlockSlot,
             order: Order,
             needed: usize,
@@ -153,7 +163,7 @@ mod tests {
                 };
 
                 for tx in txs {
-                    let mut minted = first_minted_subjects(domain, tx);
+                    let mut minted = first_minted_subjects(firsts, tx);
 
                     if matches!(order, Order::Desc) {
                         minted.reverse();
@@ -294,14 +304,15 @@ mod tests {
 
         let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
         let start = chain.epoch_start(chain.first_mary_epoch().unwrap());
-        let total = scan::first_mints(&domain, start, Order::Asc, usize::MAX).len();
+        let firsts = scan::first_mint_txs(&domain);
+        let total = scan::first_mints(&domain, &firsts, start, Order::Asc, usize::MAX).len();
         assert!(total > 300, "{total} first mints");
 
         for (order, name) in [(Order::Asc, "asc"), (Order::Desc, "desc")] {
             for count in [1, 7, 100] {
                 for page in 1..=total.div_ceil(count) + 1 {
                     let skip = (page - 1) * count;
-                    let expected = scan::first_mints(&domain, start, order, skip + count)
+                    let expected = scan::first_mints(&domain, &firsts, start, order, skip + count)
                         .into_iter()
                         .skip(skip)
                         .take(count)

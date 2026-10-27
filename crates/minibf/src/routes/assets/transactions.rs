@@ -4,17 +4,14 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::asset_transactions_inner::AssetTransactionsInner;
-use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, SlotOrder},
-    model::AssetState,
-};
+use dolos_cardano::indexes::{AsyncCardanoQueryExt, SlotOrder};
 use dolos_core::Domain;
 use futures_util::StreamExt;
 
 use crate::{
     error::Error,
     inputs::InputDeps,
-    mapping::assets::resolve_asset_state,
+    mapping::assets::resolve_asset,
     pagination::{Pagination, PaginationParameters},
     Facade,
 };
@@ -28,12 +25,11 @@ pub async fn by_subject_transactions<D>(
 ) -> Result<Json<Vec<AssetTransactionsInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<AssetState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
-    let (subject, _) = resolve_asset_state(&domain, &subject)?;
+    let (subject, _) = resolve_asset(&domain, &subject)?;
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let stream = domain.query().blocks_by_asset_stream(

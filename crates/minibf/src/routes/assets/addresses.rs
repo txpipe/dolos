@@ -6,14 +6,14 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::asset_addresses_inner::AssetAddressesInner;
-use dolos_cardano::{indexes::CardanoStateIndexExt, model::AssetState};
+use dolos_cardano::indexes::CardanoStateIndexExt;
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _, TxoRef};
 use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraOutput;
 
 use crate::{
     error::Error,
-    mapping::assets::resolve_asset_state,
+    mapping::assets::resolve_asset,
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -34,10 +34,9 @@ pub async fn by_subject_addresses<D>(
 ) -> Result<Json<Vec<AssetAddressesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<AssetState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    let (asset, _) = resolve_asset_state(&domain, &subject)?;
+    let (asset, _) = resolve_asset(&domain, &subject)?;
 
     let addresses = asset_holdings(&domain, asset, ASSET_ADDRESS_CHUNK).await?;
 

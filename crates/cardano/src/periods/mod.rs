@@ -32,6 +32,7 @@ use crate::{indexes::SlotOrder, ChainSummary};
 
 pub mod account_addresses;
 pub mod asset_mints;
+pub mod assets;
 pub mod first_mints;
 pub mod first_scripts;
 pub mod stats;
@@ -259,6 +260,26 @@ pub fn unsealed_epochs(
     }
 
     oldest..=epoch
+}
+
+/// The epochs whose staged rows may still be in state with the chain in
+/// `epoch` and the ledger in `ledger`, the epoch the last boundary opened:
+/// from the oldest one that boundary could not seal up to `epoch`.
+///
+/// On a chain rolled block by block the two are the same epoch, and this is
+/// [`unsealed_epochs`]. A chain that starts past the genesis epoch, as the
+/// synthetic chains of the API tests do, opens one ledger epoch per boundary
+/// it crosses, so the ledger's count trails the slots'; the seal follows the
+/// ledger's, and leaves older epochs staged.
+pub fn staged_epochs(
+    chain: &ChainSummary,
+    mutable_slots: u64,
+    ledger: Epoch,
+    epoch: Epoch,
+) -> RangeInclusive<Epoch> {
+    let oldest = *unsealed_epochs(chain, mutable_slots, ledger.min(epoch)).start();
+
+    oldest..=epoch.max(ledger)
 }
 
 /// Seal every staged epoch that is immutable at the boundary opening
@@ -783,6 +804,46 @@ mod tests {
             assert!(!is_sealable(&chain, mutable, epoch, epoch + 6), "{epoch}");
             assert!(is_sealable(&chain, mutable, epoch, epoch + 7), "{epoch}");
         }
+    }
+
+    /// On a chain rolled block by block the staged epochs are the unsealed
+    /// ones; with the ledger's epoch trailing the slots', they reach back to
+    /// the oldest epoch the ledger's boundary could not seal.
+    #[test]
+    fn staged_epochs_follow_the_ledger_seal() {
+        let mut chain = ChainSummary::default();
+        chain.append_era(
+            7,
+            crate::EraState {
+                start: crate::EraBoundary {
+                    epoch: 0,
+                    slot: 0,
+                    timestamp: 0,
+                },
+                end: None,
+                epoch_length: 100,
+                slot_length: 1,
+                protocol: 7,
+            },
+        );
+
+        // an epoch seals at the second boundary after it
+        let mutable = 30;
+
+        for epoch in 1..10 {
+            assert_eq!(
+                staged_epochs(&chain, mutable, epoch, epoch),
+                unsealed_epochs(&chain, mutable, epoch)
+            );
+            assert_eq!(
+                staged_epochs(&chain, mutable, epoch, epoch),
+                epoch - 1..=epoch
+            );
+        }
+
+        // the ledger two epochs behind: its boundary sealed up to epoch 2
+        assert_eq!(staged_epochs(&chain, mutable, 4, 6), 3..=6);
+        assert_eq!(staged_epochs(&chain, mutable, 0, 2), 0..=2);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::asset_history_inner::{Action, AssetHistoryInner};
-use dolos_cardano::{indexes::SlotOrder, model::AssetState, periods::asset_mints};
+use dolos_cardano::{indexes::SlotOrder, periods::asset_mints};
 use dolos_core::{Domain, DomainError};
 use pallas::crypto::hash::Hash;
 
@@ -45,7 +45,6 @@ pub async fn by_subject_history<D>(
 ) -> Result<Json<Vec<AssetHistoryInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<AssetState>: From<D::Entity>,
 {
     // Blockfrost does not define `from`/`to` here and ignores them
     params.from = None;
@@ -53,11 +52,7 @@ where
 
     let pagination = Pagination::try_from(params)?;
 
-    let (subject, state) = crate::mapping::assets::resolve_asset_state(&domain, &subject)?;
-
-    let Some(initial_slot) = state.initial_slot else {
-        return Ok(Json(vec![]));
-    };
+    let (subject, initial_slot) = crate::mapping::assets::resolve_asset(&domain, &subject)?;
 
     let chain = domain.get_chain_summary()?;
     let (first_epoch, _) = chain.slot_epoch(initial_slot);

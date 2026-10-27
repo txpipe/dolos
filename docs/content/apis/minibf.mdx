@@ -227,6 +227,14 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 
 pallas 1.3 decodes no Plutus V2 or V3 scripts in auxiliary data, so a script only auxiliary data ever carried in those languages is missing from the list.
 
+## Asset reads and data synced by an earlier version
+
+`/assets/{subject}`, the asset lists and `/addresses/{address}/extended` report each asset's supply, mint and burn count, first mint and the tx holding its on-chain metadata. No state namespace keeps them: the node folds them from the asset-mint period logs, keeping each asset's fold over the epochs no rollback can reach in the `assets` cache namespace, and adds the epochs after them on every read. A CIP-68 reference token's metadata tx is the newest output carrying it with a datum, or the newest mint whose CIP-25 metadata names it, read from the blocks that carry the token. Whether an asset exists, and the slot of its first mint, come from the archive's entity index, which the seal writes for the first mint of every sealed epoch, and the staged first mints of the epochs not yet sealed: an asset in neither is not found, without folding anything.
+
+An archive whose seals ran on an earlier version wrote no `asset` entries to the entity index, and its state stages a re-mint as a first mint: until it is rebuilt, an asset first minted in a sealed epoch is not found, and a re-mint after the upgrade is listed by `/assets` a second time. Run `dolos doctor rebuild-state --rewrite-logs` (or bootstrap again) to build both from the start of the chain. A stele snapshot published by such a version still declares the `assets` state namespace; a restore refuses it by name, so bootstrap from a stele published by a version that carries the `asset` entries.
+
+A rolling `history` window prunes the asset-mint logs and the entity index by slot, so a pruned node does not find an asset first minted before its window, and reports one first minted inside it from the mints the window holds, which are all of them. A node without an archive keeps neither, so it finds only the assets first minted in its unsealed epochs.
+
 ## DRep listing on stores synced by an older release
 
 `/governance/dreps` lists every DRep a certificate of a valid tx ever named, vote-delegation targets and the special DReps included, in the order a certificate first named it, with the latest anchor a registration or update carried. It reads them from the `drep-sightings` state namespace, which the roll writes. A state store synced by a release without that namespace has no sightings for the blocks it applied before: it lists only the DReps certificates named since, at the position of that later certificate. Syncing forward does not recover what is behind the cursor; resync the instance, or bootstrap it from a snapshot that carries `state-drep-sightings`, to get the full list in its exact order.

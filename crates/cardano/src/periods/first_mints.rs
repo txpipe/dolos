@@ -3,8 +3,10 @@
 //!
 //! A sealed epoch holds two lists, in mint order: every subject it first
 //! minted, at `epoch_start(e) ‖ chunk`, and each policy's names, at
-//! `epoch_start(e) ‖ policy ‖ chunk`. `AssetState.initial_slot` is the witness
-//! that keeps re-mints out, at seal time and when reading staged rows.
+//! `epoch_start(e) ‖ policy ‖ chunk`. The roll's witness decides which mint
+//! is an asset's first, so every staged row is listed, and the seal records
+//! each one in the archive's entity index, where the witness finds it once
+//! the staged row is gone.
 
 use std::{collections::BTreeMap, ops::RangeInclusive};
 
@@ -15,36 +17,12 @@ use pallas::{crypto::hash::Hash, ledger::primitives::Epoch};
 
 use super::{Period, Segment};
 use crate::{
-    indexes::SlotOrder, AssetKey, AssetState, ChainSummary, FirstMintChunk, FirstMintSet,
-    FixedNamespace as _, PolicyKey, PolicyMintChunk,
+    indexes::{entities, SlotOrder},
+    ChainSummary, FirstMintChunk, FirstMintSet, FixedNamespace as _, PolicyKey, PolicyMintChunk,
 };
-
-/// Asset states read per state call when telling first mints from re-mints.
-const LOOKUP_BATCH: usize = 1_000;
 
 fn policy_key(policy: &Hash<28>, chunk: u32) -> (PolicyKey, u32) {
     (PolicyKey(*policy), chunk)
-}
-
-/// Whether each staged row is its asset's first mint ever: the asset's
-/// `initial_slot` is the row's slot.
-fn first_mint_flags<'a, S: StateStore>(
-    state: &S,
-    rows: impl IntoIterator<Item = &'a FirstMintSet>,
-) -> Result<Vec<bool>, ChainError> {
-    let rows: Vec<&FirstMintSet> = rows.into_iter().collect();
-    let mut flags = Vec::with_capacity(rows.len());
-
-    for batch in rows.chunks(LOOKUP_BATCH) {
-        let keys: Vec<AssetKey> = batch.iter().map(|row| row.asset_key()).collect();
-        let assets = state.read_entities_typed::<AssetState>(&keys.iter().collect::<Vec<_>>())?;
-
-        for (row, asset) in batch.iter().zip(assets) {
-            flags.push(asset.and_then(|x| x.initial_slot) == Some(row.slot));
-        }
-    }
-
-    Ok(flags)
 }
 
 /// Seal the staged first mints of every epoch `sealable` accepts.
@@ -53,6 +31,10 @@ fn first_mint_flags<'a, S: StateStore>(
 /// is written first, whole and in one archive commit, before any of those rows
 /// is deleted; a re-run that finds it sealed leaves it alone. The per-policy
 /// lists depend on their group only, and seal chunk by chunk.
+///
+/// Each chunk's archive commit also writes its rows' entity index entries,
+/// before the state commit deletes the rows, so the roll's witness finds every
+/// sealed first mint in one of the two.
 pub(crate) fn seal<D: Domain>(
     state: &D::State,
     archive: &D::Archive,
@@ -74,14 +56,10 @@ pub(crate) fn seal<D: Domain>(
         return Ok(());
     }
 
-    let flags = first_mint_flags(state, rows.iter().map(|(_, row)| row))?;
-
     let mut epochs: BTreeMap<Epoch, Vec<&FirstMintSet>> = BTreeMap::new();
 
-    for ((_, row), first) in rows.iter().zip(&flags) {
-        if *first {
-            epochs.entry(row.epoch).or_default().push(row);
-        }
+    for (_, row) in &rows {
+        epochs.entry(row.epoch).or_default().push(row);
     }
 
     for (epoch, mut mints) in epochs {
@@ -107,18 +85,14 @@ pub(crate) fn seal<D: Domain>(
         writer.commit()?;
     }
 
-    let rows = rows
-        .into_iter()
-        .zip(flags)
-        .map(|((key, row), first)| Ok((key, (row, first))));
+    let rows = rows.into_iter().map(Ok);
 
     super::seal_groups::<D, FirstMintSet, _, _, _>(state, archive, rows, batch, |chunk, writer| {
         let mut groups: BTreeMap<(Epoch, Hash<28>), Vec<&FirstMintSet>> = BTreeMap::new();
 
-        for (_, (row, first)) in chunk {
-            if *first {
-                groups.entry((row.epoch, row.policy)).or_default().push(row);
-            }
+        for (key, row) in chunk {
+            writer.write_entity(entities::ASSET, key.member.0.as_slice(), row.slot)?;
+            groups.entry((row.epoch, row.policy)).or_default().push(row);
         }
 
         for ((epoch, policy), mut mints) in groups {
@@ -140,8 +114,7 @@ pub(crate) fn seal<D: Domain>(
 
 /// Per-epoch segments of one list: staged epochs keep their first mints in
 /// mint order, sealed ones their count.
-fn segments<S: StateStore>(
-    state: &S,
+fn segments(
     periods: BTreeMap<Epoch, Period<FirstMintSet, EntityValue>>,
     item: impl Fn(FirstMintSet) -> Vec<u8>,
 ) -> Result<Vec<Segment<Vec<u8>>>, ChainError> {
@@ -149,15 +122,7 @@ fn segments<S: StateStore>(
 
     for (epoch, period) in periods {
         let segment = match period {
-            Period::Staged(rows) => {
-                let flags = first_mint_flags(state, &rows)?;
-
-                let mut mints: Vec<FirstMintSet> = rows
-                    .into_iter()
-                    .zip(flags)
-                    .filter_map(|(row, first)| first.then_some(row))
-                    .collect();
-
+            Period::Staged(mut mints) => {
                 mints.sort_by_key(|row| row.mint_order());
 
                 Segment::Staged(mints.into_iter().map(&item).collect())
@@ -191,7 +156,7 @@ pub fn all_page<D: Domain>(
 
     let sealed = super::read_sealed::<_, FirstMintChunk>(archive, chain, epochs, |_| 0)?;
 
-    let segments = segments(state, super::join(staged, sealed), |row| row.subject())?;
+    let segments = segments(super::join(staged, sealed), |row| row.subject())?;
 
     super::page::<FirstMintChunk>(segments, order, skip, count, |epoch, chunks| {
         super::load_chunks(archive, chain, epoch, chunks, |i| i)
@@ -220,7 +185,7 @@ pub fn policy_page<D: Domain>(
         policy_key(policy, 0)
     })?;
 
-    let segments = segments(state, super::join(staged, sealed), |row| row.name)?;
+    let segments = segments(super::join(staged, sealed), |row| row.name)?;
 
     if segments.iter().all(Segment::is_empty) {
         return Ok(None);
@@ -250,6 +215,7 @@ mod tests {
 
     use super::*;
     use crate::periods::{is_sealable, GroupKey, GroupRow as _};
+    use crate::AssetKey;
 
     /// The epoch the sealing boundary opens: 5 and 6 are immutable at it, 7 is
     /// not.
@@ -270,9 +236,9 @@ mod tests {
         crate::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap()
     }
 
-    /// Staged first mints in epochs 5 to 7, the asset states that witness
-    /// them, and one re-mint of an asset first minted in epoch 5. `Q` mints
-    /// more names in epoch 6 than a sealed chunk holds.
+    /// Staged first mints in epochs 5 to 7, one row per asset as the roll's
+    /// witness stages them. `Q` mints more names in epoch 6 than a sealed
+    /// chunk holds.
     fn seeded() -> ToyDomain {
         let domain = ToyDomain::new(None, None);
         let chain = chain(&domain);
@@ -305,23 +271,7 @@ mod tests {
 
         for row in &rows {
             writer.write_entity_typed(&row.key(), row).unwrap();
-
-            let asset = AssetState {
-                initial_slot: Some(row.slot),
-                ..Default::default()
-            };
-            writer.write_entity_typed(&row.asset_key(), &asset).unwrap();
         }
-
-        // P's "A" again in epoch 6: staged, but its asset was first minted in 5
-        let remint = FirstMintSet {
-            policy: P.into(),
-            name: b"A".to_vec(),
-            epoch: 6,
-            slot: chain.epoch_start(6) + 1,
-            tx_index: 0,
-        };
-        writer.write_entity_typed(&remint.key(), &remint).unwrap();
 
         writer.commit().unwrap();
 
@@ -443,7 +393,8 @@ mod tests {
             ]
         );
 
-        // the re-mint of P's "A" is in no list
+        // every staged row is listed: the roll's witness stages first mints
+        // only, so the seal applies none
         let p = policy_page(
             &domain,
             &chain(&domain),
@@ -455,7 +406,72 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(p.iter().filter(|s| s[28..] == *b"A").count(), 1);
+        let names: Vec<_> = p.iter().map(|s| s[28..].to_vec()).collect();
+        assert_eq!(names, [b"E", b"B", b"A", b"D", b"C", b"F", b"G"]);
+    }
+
+    /// Each staged row's first-mint slot in the entity index, `None` where
+    /// the index holds none.
+    fn indexed(domain: &ToyDomain, rows: &[FirstMintSet]) -> Vec<Option<BlockSlot>> {
+        let keys: Vec<AssetKey> = rows.iter().map(FirstMintSet::asset_key).collect();
+        let keys: Vec<&[u8]> = keys.iter().map(|k| k.0.as_slice()).collect();
+
+        domain
+            .archive()
+            .entity_slots(entities::ASSET, &keys)
+            .unwrap()
+    }
+
+    /// The seal records every sealed first mint's slot in the entity index, in
+    /// the archive commit that seals its group, and a crash at any commit
+    /// leaves the same entries after the re-run. Between the commits an asset
+    /// is in the index or staged, never in neither.
+    #[test]
+    fn the_seal_indexes_each_sealed_asset_once_whatever_commit_it_dies_at() {
+        let clean = seeded();
+        let rows: Vec<FirstMintSet> = staged(&clean).into_iter().map(|(_, r)| r).collect();
+        seal_as(&clean, &clean).unwrap();
+
+        let expected: Vec<_> = rows
+            .iter()
+            .map(|r| (r.epoch < 7).then_some(r.slot))
+            .collect();
+        assert_eq!(indexed(&clean, &rows), expected);
+
+        let mut crash_after = 0;
+
+        loop {
+            let domain = seeded();
+            let crashing =
+                FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(crash_after));
+
+            if seal_as(&crashing, &domain).is_ok() {
+                break;
+            }
+
+            let still: std::collections::HashSet<_> =
+                staged(&domain).into_iter().map(|(k, _)| k.member).collect();
+
+            for (row, slot) in rows.iter().zip(indexed(&domain, &rows)) {
+                assert!(
+                    slot.is_some() || still.contains(&row.asset_key()),
+                    "lost {} after commit {crash_after}",
+                    hex::encode(row.subject())
+                );
+            }
+
+            seal_as(&domain, &domain).expect("re-run");
+            assert_eq!(
+                indexed(&domain, &rows),
+                expected,
+                "crash after commit {crash_after}"
+            );
+
+            crash_after += 1;
+        }
+
+        // the epoch-wide commit plus a pair per group chunk
+        assert!(crash_after > 4, "only {crash_after} commits");
     }
 
     /// Done criterion 1, seal idempotence: whichever commit the seal dies
@@ -549,7 +565,7 @@ mod tests {
         )
         .unwrap();
 
-        let all = segments(state, crate::periods::join(staged_all, sealed_all), |row| {
+        let all = segments(crate::periods::join(staged_all, sealed_all), |row| {
             row.subject()
         })
         .unwrap();
@@ -560,10 +576,7 @@ mod tests {
         let expected = all_page(&fresh, &chain, 0..=BOUNDARY, SlotOrder::Asc, 0, 400).unwrap();
         assert_eq!(all, expected);
 
-        let q = segments(state, crate::periods::join(staged_q, sealed_q), |row| {
-            row.name
-        })
-        .unwrap();
+        let q = segments(crate::periods::join(staged_q, sealed_q), |row| row.name).unwrap();
         let q = crate::periods::page::<PolicyMintChunk>(q, SlotOrder::Desc, 3, 290, |e, c| {
             crate::periods::load_chunks(archive, &chain, e, c, |i| policy_key(&Q.into(), i))
         })

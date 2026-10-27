@@ -16,15 +16,16 @@ use dolos_cardano::{
         Cip68TokenStandard,
     },
     indexes::AsyncCardanoQueryExt,
-    model::AssetState,
+    periods::assets::{self, AssetSummary},
+    ChainSummary,
 };
-use dolos_core::{Domain, EraCbor};
+use dolos_core::{BlockSlot, Domain, EraCbor};
 
 use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
     ledger::{
-        primitives::{BigInt, Metadatum, PlutusData},
+        primitives::{BigInt, Epoch, Metadatum, PlutusData},
         traverse::{MultiEraOutput, MultiEraTx},
         validate::phase2::to_plutus_data::ToPlutusData,
     },
@@ -382,9 +383,11 @@ fn token_registry_client() -> &'static reqwest::Client {
 pub struct AssetModelBuilder {
     pub subject: Vec<u8>,
     pub unit: String,
-    pub asset_state: AssetState,
+    pub summary: AssetSummary,
     pub initial_tx: Option<EraCbor>,
     pub registry_url: Option<String>,
+    chain: ChainSummary,
+    tip: Epoch,
 }
 
 impl AssetModelBuilder {
@@ -394,7 +397,6 @@ impl AssetModelBuilder {
     ) -> Result<Option<OnchainMetadata>, StatusCode>
     where
         D: Domain + Clone + Send + Sync + 'static,
-        Option<AssetState>: From<D::Entity>,
     {
         let cip68_reference = match cip68_reference_from_unit(&self.unit)? {
             Some((ref_asset, standard)) => {
@@ -406,10 +408,16 @@ impl AssetModelBuilder {
         };
 
         if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
-            let asset_key = dolos_cardano::AssetKey::of(ref_asset_bytes);
-            let ref_state = domain.read_cardano_entity::<AssetState>(&asset_key)?;
+            let reference = assets::asset_summary(
+                &domain.inner,
+                &self.chain,
+                self.tip,
+                ref_asset_bytes.clone(),
+            )
+            .await
+            .map_err(log_500)?;
 
-            if let Some(metadata_tx) = ref_state.and_then(|state| state.metadata_tx) {
+            if let Some(metadata_tx) = reference.and_then(|x| x.fold.metadata_tx) {
                 if let Some(EraCbor(era, cbor)) = domain
                     .query()
                     .tx_cbor(metadata_tx.as_slice().to_vec())
@@ -428,8 +436,8 @@ impl AssetModelBuilder {
         }
 
         let mut cip25_tx = self.initial_tx.clone();
-        if let Some(metadata_tx) = self.asset_state.metadata_tx {
-            if Some(metadata_tx) != self.asset_state.initial_tx {
+        if let Some(metadata_tx) = self.summary.fold.metadata_tx {
+            if Some(metadata_tx) != self.summary.fold.initial_tx {
                 let metadata_cbor = domain
                     .query()
                     .tx_cbor(metadata_tx.as_slice().to_vec())
@@ -495,7 +503,6 @@ impl AssetModelBuilder {
     pub async fn into_model<D>(self, domain: &Facade<D>) -> Result<Asset, StatusCode>
     where
         D: Domain + Clone + Send + Sync + 'static,
-        Option<AssetState>: From<D::Entity>,
     {
         let policy = self.subject[..28].to_vec();
         let asset = self.subject[28..].to_vec();
@@ -516,13 +523,14 @@ impl AssetModelBuilder {
             policy_id: hex::encode(policy),
             asset_name,
             fingerprint: asset_fingerprint(&self.subject)?,
-            quantity: self.asset_state.quantity().to_string(),
+            quantity: self.summary.fold.quantity().to_string(),
             initial_mint_tx_hash: self
-                .asset_state
+                .summary
+                .fold
                 .initial_tx
                 .map(|h| h.to_string())
                 .unwrap_or_default(),
-            mint_or_burn_count: self.asset_state.mint_tx_count as i32,
+            mint_or_burn_count: self.summary.fold.mint_tx_count as i32,
             onchain_metadata,
             onchain_metadata_standard,
             onchain_metadata_extra,
@@ -565,7 +573,6 @@ impl AssetAmountExtras {
     pub async fn resolve<D>(domain: &Facade<D>, unit: &str) -> Result<Self, Error>
     where
         D: Domain + Clone + Send + Sync + 'static,
-        Option<AssetState>: From<D::Entity>,
     {
         let builder = match load_asset_builder(domain, unit.to_string()).await {
             Ok(builder) => builder,
@@ -607,39 +614,78 @@ pub(crate) fn decode_asset_subject(subject: &str) -> Result<Vec<u8>, Error> {
     hex::decode(subject).map_err(|_| Error::InvalidAsset)
 }
 
-/// Decodes the subject and loads its state. Blockfrost returns 404 for a
-/// valid but unknown asset.
-pub(crate) fn resolve_asset_state<D>(
+fn log_500(error: impl std::fmt::Debug) -> StatusCode {
+    tracing::error!(?error, "failed to read an asset");
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
+/// Decodes the subject and finds the slot of its first mint. Blockfrost
+/// returns 404 for a valid but unknown asset.
+pub(crate) fn resolve_asset<D>(
     domain: &Facade<D>,
     subject: &str,
-) -> Result<(Vec<u8>, AssetState), Error>
+) -> Result<(Vec<u8>, BlockSlot), Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<AssetState>: From<D::Entity>,
 {
     let subject = decode_asset_subject(subject)?;
 
-    let asset_key = dolos_cardano::AssetKey::of(&subject);
-    let state = domain
-        .read_cardano_entity::<AssetState>(&asset_key)?
+    let chain = domain.get_chain_summary()?;
+    let (tip, _) = chain.slot_epoch(domain.get_tip_slot()?);
+
+    let slot = assets::first_mint_slot(&domain.inner, &chain, tip, &subject)
+        .map_err(log_500)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok((subject, state))
+    Ok((subject, slot))
 }
 
-/// Loads the minting state and the minting transaction that holds the
-/// metadata of an asset.
+/// The summary of each subject, in order: the supply, mint count and first
+/// and metadata txs that the asset routes report.
+pub(crate) async fn asset_summaries<D>(
+    domain: &Facade<D>,
+    subjects: Vec<Vec<u8>>,
+) -> Result<Vec<(Vec<u8>, AssetSummary)>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let chain = domain.get_chain_summary()?;
+    let (tip, _) = chain.slot_epoch(domain.get_tip_slot()?);
+
+    let mut out = Vec::with_capacity(subjects.len());
+
+    for subject in subjects {
+        let summary = assets::asset_summary(&domain.inner, &chain, tip, subject.clone())
+            .await
+            .map_err(log_500)?
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        out.push((subject, summary));
+    }
+
+    Ok(out)
+}
+
+/// Loads the summary of an asset and the minting transaction that holds its
+/// metadata.
 pub(crate) async fn load_asset_builder<D>(
     domain: &Facade<D>,
     unit: String,
 ) -> Result<AssetModelBuilder, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<AssetState>: From<D::Entity>,
 {
-    let (subject, asset_state) = resolve_asset_state(domain, &unit)?;
+    let subject = decode_asset_subject(&unit)?;
 
-    let initial_tx = if let Some(initial_tx) = asset_state.initial_tx {
+    let chain = domain.get_chain_summary()?;
+    let (tip, _) = chain.slot_epoch(domain.get_tip_slot()?);
+
+    let summary = assets::asset_summary(&domain.inner, &chain, tip, subject.clone())
+        .await
+        .map_err(log_500)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let initial_tx = if let Some(initial_tx) = summary.fold.initial_tx {
         domain
             .query()
             .tx_cbor(initial_tx.as_slice().to_vec())
@@ -652,9 +698,11 @@ where
     Ok(AssetModelBuilder {
         subject,
         unit,
-        asset_state,
+        summary,
         initial_tx,
         registry_url: domain.config.token_registry_url.clone(),
+        chain,
+        tip,
     })
 }
 

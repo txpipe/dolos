@@ -4,12 +4,13 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::asset_policy_inner::AssetPolicyInner;
-use dolos_cardano::{indexes::SlotOrder, model::AssetState, periods::first_mints};
+use dolos_cardano::{indexes::SlotOrder, periods::first_mints};
 use dolos_core::{Domain, DomainError};
 use pallas::crypto::hash::Hash;
 
 use crate::{
     error::Error,
+    mapping::assets::asset_summaries,
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -23,7 +24,6 @@ pub async fn by_policy<D>(
 ) -> Result<Json<Vec<AssetPolicyInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<AssetState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -64,19 +64,14 @@ where
     // Blockfrost returns 404 when the policy has no mint operations.
     let subjects = subjects.ok_or(StatusCode::NOT_FOUND)?;
 
-    let mut items = Vec::with_capacity(subjects.len());
-
-    for subject in subjects {
-        let asset_key = dolos_cardano::AssetKey::of(&subject);
-        let asset_state = domain
-            .read_cardano_entity::<AssetState>(&asset_key)?
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        items.push(AssetPolicyInner {
+    let items = asset_summaries(&domain, subjects)
+        .await?
+        .into_iter()
+        .map(|(subject, summary)| AssetPolicyInner {
             asset: hex::encode(&subject),
-            quantity: asset_state.quantity().to_string(),
-        });
-    }
+            quantity: summary.fold.quantity().to_string(),
+        })
+        .collect();
 
     Ok(Json(items))
 }

@@ -7,7 +7,6 @@ use blockfrost_openapi::models::{
     address_content_extended::AddressContentExtended,
     address_content_extended_amount_inner::AddressContentExtendedAmountInner,
 };
-use dolos_cardano::model::AssetState;
 use dolos_core::Domain;
 use futures_util::{StreamExt, TryStreamExt};
 
@@ -30,7 +29,6 @@ pub async fn extended<D>(
 ) -> Result<Json<AddressContentExtended>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<AssetState>: From<D::Entity>,
 {
     let parsed = parse_address(&address)?;
     let refs = refs_for_parsed_address(&domain, &parsed)?;

@@ -9,16 +9,19 @@ use std::{
 use dolos_cardano::{
     indexes::{archive_dimensions::SCRIPT, entities, AsyncCardanoQueryExt as _},
     model::{
-        AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, AssetState,
-        FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet,
+        AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, FirstMintChunk,
+        FirstMintSet, FirstScriptChunk, FirstScriptSet,
     },
-    periods::is_sealable,
-    AccountKey, AssetKey, CardanoDelta,
+    periods::{
+        assets::{self, AssetEntry, ASSETS},
+        is_sealable,
+    },
+    AccountKey, AssetKey, CardanoDelta, ChainSummary,
 };
 use dolos_core::{
     import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ArchiveWriter as _,
-    AsyncQueryFacade, ChainPoint, Domain as _, Genesis, RangeOf, StateStore as _, StateWriter as _,
-    WalStore as _,
+    AsyncQueryFacade, CacheStore as _, ChainPoint, Domain as _, Genesis, RangeOf, StateStore as _,
+    StateWriter as _, WalStore as _,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
@@ -273,7 +276,7 @@ fn rollback_unstages_exactly_the_mints_its_block_created() {
     assert_eq!(staged_mints(&domain), after[0]);
 }
 
-/// A zero-quantity entry stages no first mint and no mint stats, beside a real
+/// A zero-quantity entry stages no first mint and no mint row, beside a real
 /// mint in the same tx that does.
 #[test]
 fn zero_mint_stages_no_first_mint() {
@@ -325,7 +328,7 @@ fn zero_mint_stages_no_first_mint() {
     let count = |f: fn(&CardanoDelta) -> bool| entry.delta.iter().filter(|x| f(x)).count();
 
     assert_eq!(count(|x| matches!(x, CardanoDelta::StageFirstMint(_))), 1);
-    assert_eq!(count(|x| matches!(x, CardanoDelta::MintStatsUpdate(_))), 1);
+    assert_eq!(count(|x| matches!(x, CardanoDelta::StageAssetMint(_))), 1);
 }
 
 /// The `(epoch, script hash, slot)` of each script staged as first seen.
@@ -842,9 +845,9 @@ fn mint_flags_follow_the_cip25_predicate() {
 }
 
 /// Across sealed chunks and staged rows, an asset's newest flagged mint is
-/// the `metadata_tx` its state holds, and an asset never flagged holds none.
-#[test]
-fn the_newest_flagged_mint_is_the_metadata_tx() {
+/// the `metadata_tx` its read answers, and an asset never flagged has none.
+#[tokio::test]
+async fn the_newest_flagged_mint_is_the_metadata_tx() {
     let genesis = genesis_with(500, 5, 9);
     let mint = |policy, name: &str, amount| (policy, name.to_string(), amount);
 
@@ -875,7 +878,7 @@ fn the_newest_flagged_mint_is_the_metadata_tx() {
 
     let (raw, _, chain_config) = build_synthetic_blocks(cfg);
     let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
-    domain.import_blocks(raw).unwrap();
+    let tip = domain.import_blocks(raw).unwrap();
 
     let sealed: Vec<(AssetKey, AssetMintSet)> = domain
         .archive()
@@ -889,11 +892,13 @@ fn the_newest_flagged_mint_is_the_metadata_tx() {
 
     assert!(!sealed.is_empty(), "nothing sealed");
 
-    for (key, flagged) in [
-        (asset(TEXT_KEYS, "A"), true),
-        (asset(TEXT_KEYS, "B"), false),
-        (asset(BYTE_KEYS, "C"), true),
+    for (policy, name, flagged) in [
+        (TEXT_KEYS, "A", true),
+        (TEXT_KEYS, "B", false),
+        (BYTE_KEYS, "C", true),
     ] {
+        let key = asset(policy, name);
+
         let staged = domain
             .state()
             .iter_entities_typed::<AssetMintSet>(Some(RangeOf::prefix(&key)))
@@ -913,14 +918,412 @@ fn the_newest_flagged_mint_is_the_metadata_tx() {
             .find(|x| x.names_asset)
             .map(|x| x.tx_hash);
 
-        let state = domain
-            .state()
-            .read_entity_typed::<AssetState>(&key)
-            .unwrap()
-            .unwrap();
+        let read = read_asset(&domain, tip, &subject(policy, name)).await;
 
         assert_eq!(newest.is_some(), flagged);
-        assert_eq!(newest, state.metadata_tx);
+        assert_eq!(newest, read.unwrap().fold.metadata_tx);
         assert!(mints.last().is_some_and(|x| x.amount < 0) || key != asset(TEXT_KEYS, "A"));
     }
+}
+
+fn subject(policy: [u8; 28], name: &str) -> Vec<u8> {
+    [policy.as_slice(), name.as_bytes()].concat()
+}
+
+/// What `/assets/{asset}` reads of `subject` with the tip at `tip`.
+async fn read_asset(domain: &ToyDomain, tip: u64, subject: &[u8]) -> Option<Facts> {
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let (epoch, _) = chain.slot_epoch(tip);
+
+    assets::asset_summary(domain, &chain, epoch, subject.to_vec())
+        .await
+        .unwrap()
+        .map(|x| Facts {
+            quantity: x.fold.quantity(),
+            mint_tx_count: x.fold.mint_tx_count,
+            initial_tx: x.fold.initial_tx,
+            initial_slot: x.initial_slot,
+            fold: x.fold,
+        })
+}
+
+/// An asset's facts, with the fold they came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Facts {
+    quantity: i128,
+    mint_tx_count: u64,
+    initial_tx: Option<Hash<32>>,
+    initial_slot: u64,
+    fold: assets::AssetFold,
+}
+
+/// `subject`'s facts as `AssetState` kept them, from every block the archive
+/// holds: each non-zero mint or burn of a valid tx counts, the first sets the
+/// initial tx and slot, and the newest output carrying a label-100 token with
+/// a datum, or valid mint whose CIP-25 metadata names the asset, sets the
+/// metadata tx. `None` for an asset never minted.
+fn state_kept(
+    domain: &ToyDomain,
+    subject: &[u8],
+) -> Option<(i128, u64, Hash<32>, u64, Option<Hash<32>>)> {
+    use dolos_cardano::{
+        cip25::{cip25_metadata_for_tx, cip25_mint_names_asset},
+        cip68::{has_cip25_metadata, parse_cip67_label_from_asset_name},
+    };
+
+    let (policy, name) = subject.split_at(28);
+    let policy = Hash::<28>::from(policy);
+    let reference = parse_cip67_label_from_asset_name(name) == Some(100);
+
+    let (mut quantity, mut count, mut initial, mut metadata) = (0i128, 0u64, None, None);
+
+    for (_, body) in domain.archive().get_range(None, None).unwrap() {
+        let block = MultiEraBlock::decode(&body).unwrap();
+
+        for tx in block.txs() {
+            if reference {
+                for (_, output) in tx.produces() {
+                    let holds = output.value().assets().iter().any(|x| {
+                        *x.policy() == policy && x.assets().iter().any(|a| a.name() == name)
+                    });
+
+                    if holds && output.datum().is_some() {
+                        metadata = Some(tx.hash());
+                    }
+                }
+            }
+
+            if !tx.is_valid() {
+                continue;
+            }
+
+            let cip25 = has_cip25_metadata(&tx)
+                .then(|| cip25_metadata_for_tx(&tx))
+                .flatten();
+
+            for mint in tx.mints().iter().filter(|x| *x.policy() == policy) {
+                for asset in mint.assets().iter().filter(|x| x.name() == name) {
+                    let amount = asset.mint_coin().unwrap_or_default();
+
+                    if amount == 0 {
+                        continue;
+                    }
+
+                    quantity += i128::from(amount);
+                    count += 1;
+                    initial.get_or_insert((tx.hash(), block.slot()));
+
+                    if cip25_mint_names_asset(cip25.as_ref(), &policy, name, amount) {
+                        metadata = Some(tx.hash());
+                    }
+                }
+            }
+        }
+    }
+
+    initial.map(|(tx, slot)| (quantity, count, tx, slot, metadata))
+}
+
+fn assert_read_as_kept(
+    facts: &Option<Facts>,
+    kept: Option<(i128, u64, Hash<32>, u64, Option<Hash<32>>)>,
+    what: &str,
+) {
+    let got = facts.as_ref().map(|x| {
+        (
+            x.quantity,
+            x.mint_tx_count,
+            x.initial_tx.unwrap(),
+            x.initial_slot,
+            x.fold.metadata_tx,
+        )
+    });
+
+    assert_eq!(got, kept, "{what}");
+}
+
+fn chain_of(domain: &ToyDomain) -> ChainSummary {
+    dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap()
+}
+
+fn cached_entry(domain: &ToyDomain, subject: &[u8]) -> Option<AssetEntry> {
+    let value = domain.cache().get(ASSETS.name, subject)?;
+    Some(AssetEntry::decode(&value).unwrap())
+}
+
+/// The merge of the cached epochs with the tail, against the facts
+/// `AssetState` kept: an asset minted only in sealed epochs, only in the
+/// unsealed tail, and in both; a full burn; a CIP-25 metadata tx in the tail;
+/// and an entry behind the watermark, read before the background extension
+/// and after it.
+#[tokio::test]
+async fn the_asset_read_merges_the_cached_epochs_with_the_tail() {
+    const P: [u8; 28] = [0x61; 28];
+
+    let genesis = genesis_with(500, 5, 9);
+    let mint = |policy, name: &str, amount| (policy, name.to_string(), amount);
+
+    let blocks = 14;
+    let mints_by_block: Vec<_> = (0..blocks)
+        .map(|i| {
+            let mut mints = vec![];
+
+            match i {
+                0 => {
+                    mints.push(mint(P, "SEAL", 5));
+                    mints.push(mint(P, "BOTH", 7));
+                    mints.push(mint(TEXT_KEYS, "A", 1));
+                }
+                1 => {
+                    mints.push(mint(P, "SEAL", 2));
+                    mints.push(mint(P, "BURN", 3));
+                    mints.push(mint(BYTE_KEYS, "C", 1));
+                }
+                2 => mints.push(mint(P, "SEAL", -4)),
+                3 => mints.push(mint(P, "BURN", -3)),
+                5 => mints.push(mint(TEXT_KEYS, "A", -1)),
+                12 => mints.push(mint(P, "BOTH", -2)),
+                13 => {
+                    mints.push(mint(P, "BOTH", 4));
+                    mints.push(mint(P, "TAIL", 9));
+                    mints.push(mint(TEXT_KEYS, "A", 2));
+                }
+                _ => mints.push(mint(P, "FILL", 1)),
+            }
+
+            vec![mints]
+        })
+        .collect();
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: blocks,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        mints_by_block,
+        metadata_entries: vec![label_721()],
+        ..Default::default()
+    });
+
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    assert!(assets::register_assets_cache(&domain).unwrap());
+
+    let subjects: Vec<(&str, Vec<u8>)> = vec![
+        ("sealed only", subject(P, "SEAL")),
+        ("both", subject(P, "BOTH")),
+        ("tail only", subject(P, "TAIL")),
+        ("full burn", subject(P, "BURN")),
+        ("CIP-25 in the tail", subject(TEXT_KEYS, "A")),
+        ("CIP-25 sealed", subject(BYTE_KEYS, "C")),
+        ("never minted", subject(P, "NONE")),
+    ];
+
+    // the first ten blocks: the entries fill at the watermark then
+    let early = domain.import_blocks(raw[..10].to_vec()).unwrap();
+    let chain = chain_of(&domain);
+    let early_watermark =
+        assets::assets_watermark(&domain, &chain, chain.slot_epoch(early).0).unwrap();
+
+    for (what, subject) in &subjects {
+        let cold = read_asset(&domain, early, subject).await;
+        assert_read_as_kept(&cold, state_kept(&domain, subject), what);
+
+        let warm = read_asset(&domain, early, subject).await;
+        assert_eq!(warm, cold, "{what} warm");
+    }
+
+    let entry = cached_entry(&domain, &subject(P, "SEAL")).expect("an entry for SEAL");
+    assert_eq!(entry.watermark, early_watermark);
+    assert!(cached_entry(&domain, &subject(P, "NONE")).is_none());
+
+    // the rest: every entry is now behind the watermark
+    let tip = domain.import_blocks(raw[10..].to_vec()).unwrap();
+    let watermark = assets::assets_watermark(&domain, &chain, chain.slot_epoch(tip).0).unwrap();
+    assert!(
+        watermark > early_watermark,
+        "{watermark} after {early_watermark}"
+    );
+
+    for (what, subject) in &subjects {
+        let lagging = read_asset(&domain, tip, subject).await;
+        assert_read_as_kept(&lagging, state_kept(&domain, subject), what);
+    }
+
+    // the background extension catches the entries up
+    for _ in 0..100 {
+        let entry = cached_entry(&domain, &subject(P, "SEAL")).unwrap();
+
+        if entry.watermark == watermark {
+            break;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    for (what, subject) in &subjects {
+        let warm = read_asset(&domain, tip, subject).await;
+        assert_read_as_kept(&warm, state_kept(&domain, subject), what);
+    }
+
+    let entry = cached_entry(&domain, &subject(P, "SEAL")).unwrap();
+    assert_eq!(entry.watermark, watermark);
+
+    // first minted past the watermark: the tail alone, nothing cached
+    let (first, _) = chain.slot_epoch(
+        read_asset(&domain, tip, &subject(P, "TAIL"))
+            .await
+            .unwrap()
+            .initial_slot,
+    );
+    assert!(first > watermark);
+    assert!(cached_entry(&domain, &subject(P, "TAIL")).is_none());
+
+    // the full burn
+    let burn = read_asset(&domain, tip, &subject(P, "BURN")).await.unwrap();
+    assert_eq!((burn.quantity, burn.mint_tx_count), (0, 2));
+}
+
+/// A Conway block at `slot` with one valid tx spending `input`, if any, and
+/// minting `minted` of `subject`, whose one output carries one `subject`,
+/// with a datum or without. No lovelace moves, so the pots hold.
+fn reference_block(
+    slot: u64,
+    subject: &[u8],
+    input: Option<Hash<32>>,
+    minted: Option<i64>,
+    datum: bool,
+) -> (dolos_core::RawBlock, Hash<32>) {
+    use pallas::{
+        codec::utils::{Bytes, KeepRaw, NonZeroInt, PositiveCoin, Set},
+        ledger::primitives::conway::{
+            DatumOption, PostAlonzoTransactionOutput, TransactionBody, TransactionOutput, Value,
+        },
+    };
+
+    let (policy, name) = subject.split_at(28);
+    let policy = Hash::<28>::from(policy);
+    let name = Bytes::from(name.to_vec());
+
+    let address = Address::from_bech32(&SyntheticBlockConfig::default().address).unwrap();
+
+    let held = std::collections::BTreeMap::from([(
+        policy,
+        std::collections::BTreeMap::from([(name.clone(), PositiveCoin::try_from(1).unwrap())]),
+    )]);
+
+    let output = PostAlonzoTransactionOutput {
+        address: Bytes::from(address.to_vec()),
+        value: Value::Multiasset(0, held),
+        datum_option: datum.then(|| KeepRaw::from(DatumOption::Hash(Hash::from([0x42; 32])))),
+        script_ref: None,
+    };
+
+    let mint = minted.map(|amount| {
+        std::collections::BTreeMap::from([(
+            policy,
+            std::collections::BTreeMap::from([(
+                name.clone(),
+                NonZeroInt::try_from(amount).unwrap(),
+            )]),
+        )])
+    });
+
+    let inputs: Vec<_> = input
+        .map(|transaction_id| TransactionInput {
+            transaction_id,
+            index: 0,
+        })
+        .into_iter()
+        .collect();
+
+    let body = TransactionBody {
+        inputs: Set::from(inputs),
+        outputs: vec![TransactionOutput::PostAlonzo(KeepRaw::from(output))],
+        fee: 0,
+        ttl: None,
+        certificates: None,
+        withdrawals: None,
+        auxiliary_data_hash: None,
+        validity_interval_start: None,
+        mint,
+        script_data_hash: None,
+        collateral: None,
+        required_signers: None,
+        network_id: None,
+        collateral_return: None,
+        total_collateral: None,
+        reference_inputs: None,
+        voting_procedures: None,
+        proposal_procedures: None,
+        treasury_value: None,
+        donation: None,
+    };
+
+    let (_, raw) = dolos_testing::blocks::make_conway_block_with_txs_at(
+        slot,
+        slot,
+        None,
+        vec![(body, true)],
+        None,
+    );
+
+    let tx = MultiEraBlock::decode(&raw).unwrap().txs()[0].hash();
+
+    (raw, tx)
+}
+
+/// A CIP-68 reference token (label 100) is updated by an output carrying it
+/// with a datum, which is not a mint: its read walks the token's tagged
+/// blocks newest first, past one that carries it without a datum, and the
+/// entry's walk and the tail's agree with what `AssetState` kept.
+#[tokio::test]
+async fn a_label_100_token_takes_its_newest_datum_output() {
+    let genesis = genesis_with(500, 5, 9);
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 14,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        ..Default::default()
+    });
+
+    let (mut raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    assert!(assets::register_assets_cache(&domain).unwrap());
+
+    // label 100's prefix, then a name
+    let reference = [[0x71; 28].as_slice(), &[0x00, 0x06, 0x43, 0xb0], b"REF"].concat();
+
+    // minted in epoch 0, with a datum
+    let (minted, mint_tx) = reference_block(260, &reference, None, Some(1), true);
+    raw.insert(1, minted);
+
+    let early = domain.import_blocks(raw).unwrap();
+
+    let read = read_asset(&domain, early, &reference).await;
+    assert_read_as_kept(&read, state_kept(&domain, &reference), "minted");
+    assert_eq!(read.unwrap().fold.metadata_tx, Some(mint_tx));
+
+    let entry = cached_entry(&domain, &reference).expect("an entry for the token");
+    assert_eq!(entry.fold.metadata_tx, Some(mint_tx));
+
+    // in the tail: moved with a new datum, then moved again without one
+    let (updated, update_tx) = reference_block(3510, &reference, Some(mint_tx), None, true);
+    let (moved, move_tx) = reference_block(3520, &reference, Some(update_tx), None, false);
+
+    let tip = domain.import_blocks(vec![updated, moved]).unwrap();
+
+    let read = read_asset(&domain, tip, &reference).await;
+    assert_read_as_kept(
+        &read,
+        state_kept(&domain, &reference),
+        "updated in the tail",
+    );
+
+    let read = read.unwrap();
+    assert_eq!(read.fold.metadata_tx, Some(update_tx));
+    assert_ne!(read.fold.metadata_tx, Some(move_tx));
+    assert_eq!((read.quantity, read.initial_tx), (1, Some(mint_tx)));
 }

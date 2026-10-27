@@ -17,8 +17,8 @@ use pallas::{
 use tracing::{debug, instrument};
 
 use crate::{
-    load_effective_pparams, load_gov, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor,
-    utxoset, Cache, DRepKey, DRepState, FixedNamespace as _, PParamsSet,
+    load_gov, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor, utxoset, Cache,
+    DRepKey, DRepState, FixedNamespace as _, PParamsSet,
 };
 
 // Sub-modules
@@ -41,7 +41,7 @@ pub use batch::{WorkBatch, WorkBlock, WorkDeltas};
 pub use work_unit::RollWorkUnit;
 
 use accounts::AccountVisitor;
-use assets::AssetStateVisitor;
+use assets::{block_minted_assets, AssetMintVisitor, MintWitnessContext};
 use datums::DatumVisitor;
 use dreps::{DRepStateVisitor, DormancyContext};
 use epochs::EpochStateVisitor;
@@ -226,7 +226,7 @@ pub struct DeltaBuilder<'a> {
     utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
 
     account_state: AccountVisitor,
-    asset_state: AssetStateVisitor,
+    asset_mints: AssetMintVisitor,
     datum_state: DatumVisitor,
     drep_state: DRepStateVisitor,
     epoch_state: EpochStateVisitor,
@@ -260,7 +260,7 @@ impl<'a> DeltaBuilder<'a> {
             protocol,
             utxos,
             account_state: Default::default(),
-            asset_state: Default::default(),
+            asset_mints: Default::default(),
             datum_state: Default::default(),
             drep_state: DRepStateVisitor::new(dormancy),
             epoch_state: Default::default(),
@@ -287,6 +287,18 @@ impl<'a> DeltaBuilder<'a> {
         self.script_registry.take_context()
     }
 
+    /// Hand the first-mint witness to this block's mint visitor.
+    pub fn with_mint_witness(mut self, witness: MintWitnessContext) -> Self {
+        self.asset_mints = AssetMintVisitor::new(witness);
+        self
+    }
+
+    /// The first-mint witness after this block's deltas: the assets it
+    /// minted first.
+    pub fn take_mint_witness(&mut self) -> MintWitnessContext {
+        self.asset_mints.take_witness()
+    }
+
     pub fn crawl(&mut self) -> Result<(), ChainError> {
         let block = self.work.decoded();
         let block = block.view();
@@ -301,7 +313,7 @@ impl<'a> DeltaBuilder<'a> {
             self.epoch_start,
             self.protocol,
         )?;
-        self.asset_state.visit_root(
+        self.asset_mints.visit_root(
             &mut deltas,
             block,
             &self.genesis,
@@ -395,7 +407,7 @@ impl<'a> DeltaBuilder<'a> {
         for (order, tx) in block.txs().iter().enumerate() {
             self.account_state
                 .visit_tx(&mut deltas, block, tx, self.utxos)?;
-            self.asset_state
+            self.asset_mints
                 .visit_tx(&mut deltas, block, tx, self.utxos)?;
             self.datum_state
                 .visit_tx(&mut deltas, block, tx, self.utxos)?;
@@ -422,7 +434,7 @@ impl<'a> DeltaBuilder<'a> {
                 resolved.with_dependent(|_, resolved| {
                     self.account_state
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
-                    self.asset_state
+                    self.asset_mints
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
                     self.datum_state
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
@@ -453,7 +465,7 @@ impl<'a> DeltaBuilder<'a> {
                     index as u32,
                     &output,
                 )?;
-                self.asset_state.visit_output(
+                self.asset_mints.visit_output(
                     &mut deltas,
                     block,
                     tx,
@@ -526,7 +538,7 @@ impl<'a> DeltaBuilder<'a> {
                 for mint in tx.mints() {
                     self.account_state
                         .visit_mint(&mut deltas, block, tx, &order, &mint)?;
-                    self.asset_state
+                    self.asset_mints
                         .visit_mint(&mut deltas, block, tx, &order, &mint)?;
                     self.datum_state
                         .visit_mint(&mut deltas, block, tx, &order, &mint)?;
@@ -549,7 +561,7 @@ impl<'a> DeltaBuilder<'a> {
                 for cert in tx.certs() {
                     self.account_state
                         .visit_cert(&mut deltas, block, tx, &order, &cert)?;
-                    self.asset_state
+                    self.asset_mints
                         .visit_cert(&mut deltas, block, tx, &order, &cert)?;
                     self.datum_state
                         .visit_cert(&mut deltas, block, tx, &order, &cert)?;
@@ -572,7 +584,7 @@ impl<'a> DeltaBuilder<'a> {
                 for (account, amount) in tx.withdrawals().collect::<Vec<_>>() {
                     self.account_state
                         .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
-                    self.asset_state
+                    self.asset_mints
                         .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
                     self.datum_state
                         .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
@@ -600,7 +612,7 @@ impl<'a> DeltaBuilder<'a> {
                 if let Some(update) = tx.update() {
                     self.account_state
                         .visit_update(&mut deltas, block, Some(tx), &update)?;
-                    self.asset_state
+                    self.asset_mints
                         .visit_update(&mut deltas, block, Some(tx), &update)?;
                     self.datum_state
                         .visit_update(&mut deltas, block, Some(tx), &update)?;
@@ -624,7 +636,7 @@ impl<'a> DeltaBuilder<'a> {
             for datum in tx.plutus_data() {
                 self.account_state
                     .visit_datums(&mut deltas, block, tx, datum)?;
-                self.asset_state
+                self.asset_mints
                     .visit_datums(&mut deltas, block, tx, datum)?;
                 self.datum_state
                     .visit_datums(&mut deltas, block, tx, datum)?;
@@ -648,7 +660,7 @@ impl<'a> DeltaBuilder<'a> {
                 for (idx, proposal) in tx.gov_proposals().iter().enumerate() {
                     self.account_state
                         .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
-                    self.asset_state
+                    self.asset_mints
                         .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
                     self.datum_state
                         .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
@@ -672,7 +684,7 @@ impl<'a> DeltaBuilder<'a> {
             for redeemer in tx.redeemers() {
                 self.account_state
                     .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
-                self.asset_state
+                self.asset_mints
                     .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
                 self.datum_state
                     .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
@@ -696,7 +708,7 @@ impl<'a> DeltaBuilder<'a> {
         if let Some(update) = block.update() {
             self.account_state
                 .visit_update(&mut deltas, block, None, &update)?;
-            self.asset_state
+            self.asset_mints
                 .visit_update(&mut deltas, block, None, &update)?;
             self.datum_state
                 .visit_update(&mut deltas, block, None, &update)?;
@@ -716,7 +728,7 @@ impl<'a> DeltaBuilder<'a> {
         }
 
         self.account_state.flush(&mut deltas)?;
-        self.asset_state.flush(&mut deltas)?;
+        self.asset_mints.flush(&mut deltas)?;
         self.datum_state.flush(&mut deltas)?;
         self.drep_state.flush(&mut deltas)?;
         self.epoch_state.flush(&mut deltas)?;
@@ -752,7 +764,8 @@ pub(crate) fn compute_delta<D: Domain>(
         "computing delta"
     );
 
-    let active_params = load_effective_pparams::<D>(state)?;
+    let ledger = crate::load_epoch::<D>(state)?;
+    let active_params = ledger.pparams.unwrap_live().clone();
 
     // Governance dormancy context for the DRep visitor: the dormant-epoch
     // counter and — only when it's non-zero, which is rare — the dreps key
@@ -789,11 +802,29 @@ pub(crate) fn compute_delta<D: Domain>(
         .map(|block| block_script_sightings(block.decoded().view()))
         .collect();
 
-    let unsealed =
-        crate::periods::unsealed_epochs(&cache.eras, crate::utils::mutable_slots(&genesis), epoch);
+    let unsealed = crate::periods::staged_epochs(
+        &cache.eras,
+        crate::utils::mutable_slots(&genesis),
+        ledger.number,
+        epoch,
+    );
 
-    let mut script_registry =
-        ScriptRegistryContext::load(state, archive, &carried, batch.first_slot(), unsealed)?;
+    let mut script_registry = ScriptRegistryContext::load(
+        state,
+        archive,
+        &carried,
+        batch.first_slot(),
+        unsealed.clone(),
+    )?;
+
+    // First-mint witness: the same rule, for the assets the batch mints.
+    let minted = batch
+        .blocks
+        .iter()
+        .flat_map(|block| block_minted_assets(block.decoded().view()));
+
+    let mut mint_witness =
+        MintWitnessContext::load(state, archive, minted, batch.first_slot(), unsealed)?;
 
     for (block, carried) in batch.blocks.iter_mut().zip(carried) {
         let mut builder = DeltaBuilder::new(
@@ -806,12 +837,14 @@ pub(crate) fn compute_delta<D: Domain>(
             &batch.utxos_decoded,
             std::mem::take(&mut dormancy),
             ScriptRegistryVisitor::new(std::mem::take(&mut script_registry), carried),
-        );
+        )
+        .with_mint_witness(std::mem::take(&mut mint_witness));
 
         builder.crawl()?;
 
         dormancy = builder.take_dormancy();
         script_registry = builder.take_script_registry();
+        mint_witness = builder.take_mint_witness();
 
         // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
         // this into the entity system. (#1042)
@@ -1045,7 +1078,8 @@ mod tests {
             "accounts",
             "dreps",
             "proposals",
-            "assets",
+            "asset-mints",
+            "first-mints",
             "metadata-labels",
         ] {
             assert!(
@@ -1194,7 +1228,8 @@ mod tests {
             "accounts",
             "dreps",
             "proposals",
-            "assets",
+            "asset-mints",
+            "first-mints",
             "pools",
             "metadata-labels",
         ] {
