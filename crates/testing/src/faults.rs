@@ -619,6 +619,10 @@ impl ArchiveWriter for FaultyArchiveWriter {
         self.inner.write_log(ns, key, value)
     }
 
+    fn delete_log(&self, ns: Namespace, key: &LogKey) -> Result<(), ArchiveError> {
+        self.inner.delete_log(ns, key)
+    }
+
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
         self.inner.undo(point)
     }

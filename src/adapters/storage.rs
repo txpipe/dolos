@@ -1291,6 +1291,15 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
         }
     }
 
+    fn delete_log(&self, ns: Namespace, key: &LogKey) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(w) => w.delete_log(ns, key),
+            Self::LogsOnly(w) => w.delete_log(ns, key),
+            Self::Fjall(w) => w.delete_log(ns, key),
+            Self::NoOp(w) => w.delete_log(ns, key),
+        }
+    }
+
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
         match self {
             Self::Memory(w) => w.undo(point),

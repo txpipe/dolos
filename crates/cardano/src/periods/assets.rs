@@ -16,7 +16,14 @@
 //! The [`ASSETS`] cache namespace (decision 0059) keeps each asset's fold over
 //! the epochs immutable when it was built; a read adds the epochs after them.
 
-use std::{collections::BTreeMap, ops::RangeInclusive};
+use std::{
+    collections::{BTreeMap, HashSet},
+    ops::RangeInclusive,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use dolos_core::{
     cache::Cost, config::HistoryMode, ArchiveStore as _, BlockSlot, CacheEntry, CacheError,
@@ -53,10 +60,13 @@ use crate::{
 pub const ASSETS: CacheNamespace = CacheNamespace::immutable("assets", 1);
 
 /// Register [`ASSETS`], unless rolling history prunes the archive, whose
-/// sealed mints it drops: there every read folds as without a cache. Answers
-/// whether it registered.
+/// sealed mints it drops, or the cache is off and would keep no entry, where
+/// every miss would walk a label-100 token's whole history: there every read
+/// folds as without a cache. Answers whether it registered.
 pub fn register_assets_cache<D: Domain>(domain: &D) -> Result<bool, CacheError> {
-    if domain.history_config().mode == HistoryMode::Rolling {
+    if domain.history_config().mode == HistoryMode::Rolling
+        || !domain.storage_config().cache.enabled
+    {
         return Ok(false);
     }
 
@@ -171,6 +181,11 @@ impl AssetEntry {
         })
     }
 
+    /// The start of a stored entry, read from its trailer alone.
+    pub fn start_of(value: &[u8]) -> Option<Epoch> {
+        split_trailer(value).map(|(_, [start, _, _])| start)
+    }
+
     /// The watermark of a stored entry, read from its trailer alone.
     pub fn watermark_of(value: &[u8]) -> Option<Epoch> {
         split_trailer(value).map(|(_, [_, watermark, _])| watermark)
@@ -278,31 +293,88 @@ fn read_staged_mints<D: Domain>(
     super::read_staged::<_, AssetMintSet>(domain.state(), RangeOf::prefix(key))
 }
 
+/// The blocks the label-100 walks of one request may read between them:
+/// minibf gives each request `max_scan_items`, whatever the number of tokens
+/// it reads.
+#[derive(Debug, Clone)]
+pub struct WalkBudget(Arc<Budget>);
+
+#[derive(Debug)]
+struct Budget {
+    left: AtomicU64,
+    warned: AtomicBool,
+}
+
+impl WalkBudget {
+    pub fn new(blocks: u64) -> Self {
+        Self(Arc::new(Budget {
+            left: AtomicU64::new(blocks),
+            warned: AtomicBool::new(false),
+        }))
+    }
+
+    /// Takes one block, or answers false once the budget is spent, warning
+    /// the first time.
+    fn take(&self, subject: &[u8]) -> bool {
+        let taken = self
+            .0
+            .left
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok();
+
+        if !taken && !self.0.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                subject = hex::encode(subject),
+                "label-100 metadata walk stopped at the request's max_scan_items; a token \
+                 updated in the blocks left unread answers an older metadata tx, or none"
+            );
+        }
+
+        taken
+    }
+}
+
 /// How far a fold walks a label-100 token's tagged blocks for its metadata
-/// tx. A walk that finds none leaves the fold's metadata tx unset, so a merge
-/// keeps the one before the walked epochs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// tx. A walk that finds none leaves the fold's metadata tx to its mints, so
+/// a merge keeps the one before the walked epochs where they set none.
+#[derive(Debug, Clone)]
 enum Walk {
-    /// No walk, for a read of the supply alone.
+    /// No walk, for a read of the supply alone, or of epochs before a tail
+    /// whose walk found the metadata tx.
     Skip,
-    /// At most this many blocks, for a read that answers a request.
-    Upto(u64),
+    /// The blocks a budget shared by one request's walks allows.
+    Budget(WalkBudget),
     /// Every block, for an entry the cache keeps.
     Whole,
+}
+
+impl Walk {
+    /// Whether one more block may be read.
+    fn take(&self, subject: &[u8]) -> bool {
+        match self {
+            Walk::Skip => false,
+            Walk::Budget(budget) => budget.take(subject),
+            Walk::Whole => true,
+        }
+    }
 }
 
 /// `subject`'s fold over `epochs`, and the sealed chunks and blocks it read.
 ///
 /// Per epoch the sealed chunks win, and `staged` holds the asset's staged
 /// rows, read before them. A label-100 token takes its metadata tx from a walk
-/// of the epochs' slots instead.
+/// of the epochs' slots instead. A walk that stops before it finds one keeps
+/// the newest mint whose CIP-25 metadata names the token, which is older than
+/// the blocks it read.
 fn fold<D: Domain>(
     domain: &D,
     chain: &ChainSummary,
     subject: &[u8],
     epochs: RangeInclusive<Epoch>,
     staged: &BTreeMap<Epoch, Vec<AssetMintSet>>,
-    walk: Walk,
+    walk: &Walk,
 ) -> Result<(AssetFold, Cost), ChainError> {
     let mut out = AssetFold::default();
 
@@ -355,7 +427,7 @@ fn fold<D: Domain>(
         let (metadata_tx, blocks) =
             reference_metadata_tx(domain, subject, &policy, first..=last, walk)?;
 
-        out.metadata_tx = metadata_tx;
+        out.metadata_tx = metadata_tx.or(out.metadata_tx);
         cost += blocks;
     }
 
@@ -372,13 +444,11 @@ fn reference_metadata_tx<D: Domain>(
     subject: &[u8],
     policy: &Hash<28>,
     slots: RangeInclusive<BlockSlot>,
-    walk: Walk,
+    walk: &Walk,
 ) -> Result<(Option<Hash<32>>, Cost), ChainError> {
-    let limit = match walk {
-        Walk::Skip => return Ok((None, 0)),
-        Walk::Upto(limit) => limit,
-        Walk::Whole => u64::MAX,
-    };
+    if let Walk::Skip = walk {
+        return Ok((None, 0));
+    }
 
     let archive = domain.archive();
     let name = &subject[28..];
@@ -392,18 +462,13 @@ fn reference_metadata_tx<D: Domain>(
     )?;
 
     for slot in tagged.rev() {
-        if blocks == limit {
-            tracing::warn!(
-                subject = hex::encode(subject),
-                blocks,
-                "label-100 metadata walk stopped at its limit; the read keeps the metadata tx \
-                 found before the walked epochs"
-            );
+        let slot = slot?;
 
+        if !walk.take(subject) {
             break;
         }
 
-        let Some(body) = archive.get_block_by_slot(&slot?)? else {
+        let Some(body) = archive.get_block_by_slot(&slot)? else {
             continue;
         };
 
@@ -478,7 +543,7 @@ pub fn build_asset_entry<D: Domain>(
         subject,
         start..=watermark,
         &staged,
-        Walk::Whole,
+        &Walk::Whole,
     )?;
 
     let entry = AssetEntry {
@@ -517,7 +582,7 @@ fn extend_asset_entry<D: Domain>(
         subject,
         from..=watermark,
         &staged,
-        Walk::Whole,
+        &Walk::Whole,
     )?;
 
     let entry = AssetEntry {
@@ -544,22 +609,26 @@ struct Head {
 /// What minibf reads of `subject` with the tip in epoch `tip`, or `None` for
 /// an asset never minted.
 ///
-/// A label-100 token's metadata tx walks at most `walk` of the token's tagged
-/// blocks past the cached epochs, newest first. If none of them sets it, the
-/// read keeps the one the cached epochs found.
+/// A label-100 token's metadata tx walks the token's tagged blocks past the
+/// cached epochs, newest first, within `budget`, which the request's other
+/// reads share. If none of the blocks it reads sets it, the read keeps the one
+/// the cached epochs found, or the newest mint whose CIP-25 metadata names the
+/// token; with no entry behind the read, that can be none.
 pub async fn asset_summary<D: Domain>(
     domain: &D,
     chain: &ChainSummary,
     tip: Epoch,
     subject: Vec<u8>,
-    walk: u64,
+    budget: &WalkBudget,
 ) -> Result<Option<AssetSummary>, DomainError> {
-    read(domain, chain, tip, subject, Walk::Upto(walk)).await
+    read(domain, chain, tip, subject, Walk::Budget(budget.clone())).await
 }
 
 /// The supply of `subject` with the tip in epoch `tip`, or `None` for an
 /// asset never minted: [`asset_summary`] without the label-100 walk, for the
 /// lists, which report the supply alone.
+///
+/// A miss still builds the asset's entry, whose walk is not bounded.
 pub async fn asset_quantity<D: Domain>(
     domain: &D,
     chain: &ChainSummary,
@@ -572,13 +641,19 @@ pub async fn asset_quantity<D: Domain>(
 }
 
 /// The epochs up to the entry's watermark come from the cache: a miss folds
-/// them into the entry it offers. The epochs after it, the unsealed ones
-/// included, fold as without a cache, and an entry behind the current
-/// watermark is extended in the background. An entry that started at another
-/// epoch than the first mint, or past the current watermark, is rebuilt in the
-/// background, and the read folds as without a cache. With the namespace
-/// unregistered, or the first mint past the watermark, the read folds as
-/// without a cache. `walk` bounds every walk but the entry's.
+/// them into the entry it offers, walking a label-100 token's tagged blocks
+/// back to the newest that sets its metadata, whatever `walk` is. The epochs
+/// after it, the unsealed ones included, fold as without a cache, and an entry
+/// behind the current watermark is extended in the background. An entry that
+/// started at another epoch than the first mint, or past the current
+/// watermark, is rebuilt in the background, and the read folds as without a
+/// cache. With the namespace unregistered, or the first mint past the
+/// watermark, the read folds as without a cache.
+///
+/// `walk` bounds every walk but the entry's. The tail past the watermark walks
+/// first, and the epochs between it and the entry, or the first mint, walk
+/// only where the tail found no metadata tx, so the walks read each block
+/// once, newest first.
 ///
 /// Async, and never inside a blocking closure: a miss waits on a fill that
 /// takes a query permit of its own.
@@ -590,7 +665,7 @@ async fn read<D: Domain>(
     walk: Walk,
 ) -> Result<Option<AssetSummary>, DomainError> {
     let head = blocking(domain, chain, {
-        let subject = subject.clone();
+        let (subject, walk) = (subject.clone(), walk.clone());
 
         move |domain, chain| {
             let Some(initial_slot) = first_mint_slot(domain, chain, tip, &subject)? else {
@@ -603,7 +678,7 @@ async fn read<D: Domain>(
 
             let watermark = assets_watermark(domain, chain, tip).filter(|w| *w >= start);
             let from = watermark.map_or(start, |w| w + 1);
-            let (tail, _) = fold(domain, chain, &subject, from..=tip, &staged, walk)?;
+            let (tail, _) = fold(domain, chain, &subject, from..=tip, &staged, &walk)?;
 
             Ok(Some(Head {
                 initial_slot,
@@ -616,29 +691,38 @@ async fn read<D: Domain>(
     })
     .await?;
 
-    let Some(head) = head else {
+    let Some(Head {
+        initial_slot,
+        start,
+        watermark,
+        staged,
+        tail,
+    }) = head
+    else {
         return Ok(None);
     };
 
-    let summary = |fold| AssetSummary {
-        initial_slot: head.initial_slot,
-        fold,
-    };
+    let summary = |fold| AssetSummary { initial_slot, fold };
 
-    let Some(watermark) = head.watermark else {
-        return Ok(Some(summary(head.tail)));
+    let Some(watermark) = watermark else {
+        return Ok(Some(summary(tail)));
     };
-
-    let start = head.start;
 
     let fill = {
         let (domain, chain, subject) = (domain.clone(), chain.clone(), subject.clone());
         move || build_asset_entry(&domain, &chain, &subject, start, watermark)
     };
 
-    let uncached = |staged: BTreeMap<Epoch, Vec<AssetMintSet>>, subject: Vec<u8>| {
+    // the fold of `epochs`, all before the tail, as without a cache
+    let before_tail = |epochs: RangeInclusive<Epoch>| {
+        let subject = subject.clone();
+        let walk = match tail.metadata_tx {
+            Some(_) => Walk::Skip,
+            None => walk,
+        };
+
         blocking(domain, chain, move |domain, chain| {
-            Ok(fold(domain, chain, &subject, start..=tip, &staged, walk)?.0)
+            Ok(fold(domain, chain, &subject, epochs, &staged, &walk)?.0)
         })
     };
 
@@ -652,11 +736,13 @@ async fn read<D: Domain>(
             return Err(DomainError::Internal(format!("asset fold: {error}")))
         }
         Err(CacheError::UnknownNamespace(_)) => {
-            return Ok(Some(summary(uncached(head.staged, subject).await?)))
+            let fold = before_tail(start..=watermark).await?;
+            return Ok(Some(summary(fold.then(&tail))));
         }
         Err(error) => {
             tracing::warn!(%error, "assets cache unavailable, folding uncached");
-            return Ok(Some(summary(uncached(head.staged, subject).await?)));
+            let fold = before_tail(start..=watermark).await?;
+            return Ok(Some(summary(fold.then(&tail))));
         }
     };
 
@@ -666,20 +752,12 @@ async fn read<D: Domain>(
     let current = entry.start == start && entry.watermark == watermark;
 
     let fold = if current {
-        entry.fold.then(&head.tail)
+        entry.fold.then(&tail)
     } else if entry.start != start || entry.watermark > watermark {
-        uncached(head.staged, subject.clone()).await?
+        before_tail(start..=watermark).await?.then(&tail)
     } else {
-        let (staged, subject) = (head.staged, subject.clone());
-        let entry = entry.clone();
-
-        blocking(domain, chain, move |domain, chain| {
-            let from = entry.watermark + 1;
-            let (rest, _) = fold(domain, chain, &subject, from..=tip, &staged, walk)?;
-
-            Ok(entry.fold.then(&rest))
-        })
-        .await?
+        let between = before_tail(entry.watermark + 1..=watermark).await?;
+        entry.fold.then(&between).then(&tail)
     };
 
     if !current {
@@ -712,20 +790,30 @@ pub fn sealed_subjects<D: Domain>(domain: &D) -> Result<Vec<Vec<u8>>, ChainError
     Ok(out)
 }
 
-/// How many of `subjects` have no first mint in the entity index. A sealed
-/// subject has one unless the seal that listed it predates the index.
+/// How many of `subjects` have neither a first mint in the entity index nor a
+/// staged one. A sealed subject has one of the two unless the seal that
+/// listed it predates the index: a seal cut short between an epoch's list and
+/// its groups leaves the epoch's subjects staged, and the node's next start
+/// seals them.
 pub fn count_unindexed<D: Domain>(domain: &D, subjects: &[Vec<u8>]) -> Result<usize, ChainError> {
+    let mut staged = HashSet::new();
+
+    for row in domain.state().iter_entities_typed::<FirstMintSet>(None)? {
+        let (key, _) = row?;
+        staged.insert(key.member);
+    }
+
     let mut missing = 0;
 
     for batch in subjects.chunks(1_000) {
         let keys: Vec<AssetKey> = batch.iter().map(|subject| AssetKey::of(subject)).collect();
-        let keys: Vec<&[u8]> = keys.iter().map(|key| key.0.as_slice()).collect();
+        let raw: Vec<&[u8]> = keys.iter().map(|key| key.0.as_slice()).collect();
+        let slots = domain.archive().entity_slots(entities::ASSET, &raw)?;
 
-        missing += domain
-            .archive()
-            .entity_slots(entities::ASSET, &keys)?
+        missing += keys
             .iter()
-            .filter(|slot| slot.is_none())
+            .zip(slots)
+            .filter(|(key, slot)| slot.is_none() && !staged.contains(*key))
             .count();
     }
 

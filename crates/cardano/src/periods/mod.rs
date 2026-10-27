@@ -282,6 +282,19 @@ pub fn staged_epochs(
     oldest..=epoch.max(ledger)
 }
 
+/// The epochs the boundary opening `boundary` seals that the boundary before
+/// it could not. Sealability is monotone in the epoch, so they follow the
+/// last one the boundary before could seal.
+pub fn newly_sealable(chain: &ChainSummary, mutable_slots: u64, boundary: Epoch) -> Vec<Epoch> {
+    let sealed_before =
+        |epoch| boundary > 0 && is_sealable(chain, mutable_slots, epoch, boundary - 1);
+
+    (0..boundary)
+        .skip_while(|epoch| sealed_before(*epoch))
+        .take_while(|epoch| is_sealable(chain, mutable_slots, *epoch, boundary))
+        .collect()
+}
+
 /// Seal every staged epoch that is immutable at the boundary opening
 /// `boundary`.
 ///
@@ -296,8 +309,9 @@ pub fn seal_staged<D: Domain>(
 ) -> Result<(), ChainError> {
     let mutable_slots = crate::utils::mutable_slots(genesis);
     let sealable = |epoch| is_sealable(chain, mutable_slots, epoch, boundary);
+    let newly = newly_sealable(chain, mutable_slots, boundary);
 
-    first_mints::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
+    first_mints::seal::<D>(state, archive, chain, &sealable, &newly, SEAL_BATCH)?;
     first_scripts::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
     asset_mints::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
     account_addresses::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;

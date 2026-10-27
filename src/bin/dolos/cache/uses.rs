@@ -44,6 +44,18 @@ pub trait CacheUse<D: Domain>: Send + Sync + 'static {
     /// The watermark of a stored entry.
     fn watermark(&self, value: &[u8]) -> Option<Watermark>;
 
+    /// Whether `value`, the stored entry of `key`, is the one a build up to
+    /// `watermark` makes: one at that watermark.
+    fn is_current(
+        &self,
+        _domain: &D,
+        _key: &[u8],
+        value: &[u8],
+        watermark: Watermark,
+    ) -> Result<bool, FillError> {
+        Ok(self.watermark(value) == Some(watermark))
+    }
+
     /// The part of a stored entry `verify` compares: what it answers.
     fn compared<'a>(&self, value: &'a [u8]) -> &'a [u8] {
         value
@@ -124,6 +136,14 @@ impl Assets {
 
         Ok(Some(self.chain.slot_epoch(tip.slot()).0))
     }
+
+    /// The epoch of `subject`'s first mint, none for an asset never minted.
+    fn start<D: Domain>(&self, domain: &D, subject: &[u8]) -> Result<Option<u64>, FillError> {
+        let tip = self.tip(domain)?.ok_or("the node holds no block")?;
+        let first = first_mint_slot(domain, &self.chain, tip, subject)?;
+
+        Ok(first.map(|slot| self.chain.slot_epoch(slot).0))
+    }
 }
 
 impl<D: Domain> CacheUse<D> for Assets {
@@ -154,17 +174,13 @@ impl<D: Domain> CacheUse<D> for Assets {
     }
 
     fn build(&self, domain: &D, key: &[u8], watermark: Watermark) -> Result<CacheEntry, FillError> {
-        let tip = self.tip(domain)?.ok_or("the node holds no block")?;
-
-        let first = first_mint_slot(domain, &self.chain, tip, key)?.ok_or_else(|| {
+        let start = self.start(domain, key)?.ok_or_else(|| {
             format!(
                 "asset {} has no first mint: it was never minted, or the archive's seals \
                  predate its asset index (run `dolos doctor rebuild-state --rewrite-logs`)",
                 hex::encode(key)
             )
         })?;
-
-        let (start, _) = self.chain.slot_epoch(first);
 
         Ok(build_asset_entry(
             domain,
@@ -179,6 +195,23 @@ impl<D: Domain> CacheUse<D> for Assets {
         AssetEntry::watermark_of(value)
     }
 
+    /// One at `watermark` that also started at the epoch of the asset's first
+    /// mint, which `dolos doctor rebuild-state --rewrite-logs` may have moved
+    /// since it was built.
+    fn is_current(
+        &self,
+        domain: &D,
+        key: &[u8],
+        value: &[u8],
+        watermark: Watermark,
+    ) -> Result<bool, FillError> {
+        if AssetEntry::watermark_of(value) != Some(watermark) {
+            return Ok(false);
+        }
+
+        Ok(AssetEntry::start_of(value) == self.start(domain, key)?)
+    }
+
     /// Without the cost: an entry extended across a label-100 update records
     /// more blocks than one built afresh.
     fn compared<'a>(&self, value: &'a [u8]) -> &'a [u8] {
@@ -188,7 +221,8 @@ impl<D: Domain> CacheUse<D> for Assets {
     /// Every asset a sealed epoch first minted. An archive whose seals
     /// predate the asset index lists assets it holds no first mint for, and
     /// every build of those would fail: refuse it once, naming the rebuild
-    /// that indexes them.
+    /// that indexes them. A seal cut short leaves its assets staged, where
+    /// the builds find them.
     fn candidates(&self, domain: &D) -> Result<Vec<Vec<u8>>, FillError> {
         let subjects = sealed_subjects(domain)?;
         let unindexed = count_unindexed(domain, &subjects)?;

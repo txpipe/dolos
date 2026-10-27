@@ -7,6 +7,7 @@ use blockfrost_openapi::models::{
     address_content_extended::AddressContentExtended,
     address_content_extended_amount_inner::AddressContentExtendedAmountInner,
 };
+use dolos_cardano::periods::assets::WalkBudget;
 use dolos_core::Domain;
 use futures_util::{StreamExt, TryStreamExt};
 
@@ -37,15 +38,19 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
+    // one max_scan_items for the request's label-100 walks, whatever the
+    // number of units it holds
+    let budget = WalkBudget::new(domain.config.max_scan_items());
+
     let amount = futures_util::stream::iter(amount_for_refs(&domain, refs)?)
         .map(|entry| {
-            let domain = &domain;
+            let (domain, budget) = (&domain, &budget);
 
             async move {
                 let extras = if entry.unit == "lovelace" {
                     AssetAmountExtras::lovelace()
                 } else {
-                    AssetAmountExtras::resolve(domain, &entry.unit).await?
+                    AssetAmountExtras::resolve(domain, &entry.unit, budget).await?
                 };
 
                 Ok::<_, Error>(AddressContentExtendedAmountInner {

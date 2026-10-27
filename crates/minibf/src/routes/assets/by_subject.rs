@@ -3,6 +3,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::asset::Asset;
+use dolos_cardano::periods::assets::WalkBudget;
 use dolos_core::Domain;
 
 use crate::{error::Error, mapping::assets::load_asset_builder, Facade};
@@ -14,7 +15,8 @@ pub async fn by_subject<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let model = load_asset_builder(&domain, unit).await?;
+    let budget = WalkBudget::new(domain.config.max_scan_items());
+    let model = load_asset_builder(&domain, unit, &budget).await?;
 
     Ok(Json(model.into_model(&domain).await?))
 }

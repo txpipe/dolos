@@ -16,7 +16,7 @@ use dolos_cardano::{
         Cip68TokenStandard,
     },
     indexes::AsyncCardanoQueryExt,
-    periods::assets::{self, AssetSummary},
+    periods::assets::{self, AssetSummary, WalkBudget},
     ChainSummary,
 };
 use dolos_core::{BlockSlot, Domain, EraCbor};
@@ -389,6 +389,8 @@ pub struct AssetModelBuilder {
     pub registry_url: Option<String>,
     chain: ChainSummary,
     tip: Epoch,
+    /// The request's label-100 walks, shared with the reference token's.
+    budget: WalkBudget,
 }
 
 impl AssetModelBuilder {
@@ -414,7 +416,7 @@ impl AssetModelBuilder {
                 &self.chain,
                 self.tip,
                 ref_asset_bytes.clone(),
-                domain.config.max_scan_items(),
+                &self.budget,
             )
             .await
             .map_err(log_500)?;
@@ -571,12 +573,17 @@ impl AssetAmountExtras {
 
     /// Derives the metadata facts of a single unit. If the standard declares
     /// decimal places, they come from the CIP-68 reference datum. If it does
-    /// not, they come from the off-chain token registry.
-    pub async fn resolve<D>(domain: &Facade<D>, unit: &str) -> Result<Self, Error>
+    /// not, they come from the off-chain token registry. Its label-100 walks
+    /// draw on `budget`, which the request's other units share.
+    pub async fn resolve<D>(
+        domain: &Facade<D>,
+        unit: &str,
+        budget: &WalkBudget,
+    ) -> Result<Self, Error>
     where
         D: Domain + Clone + Send + Sync + 'static,
     {
-        let builder = match load_asset_builder(domain, unit.to_string()).await {
+        let builder = match load_asset_builder(domain, unit.to_string(), budget).await {
             Ok(builder) => builder,
             // an asset that a live utxo holds always has minting state. a
             // missing state must not make the whole address request fail
@@ -648,14 +655,13 @@ where
     Ok((subject, slot))
 }
 
-/// The asset reads a list page runs at once.
-const LIST_CONCURRENCY: usize = 16;
-
-/// The supply of each listed subject, in order.
+/// The supply of each listed subject, in order, read as many at once as one
+/// request may run on the query limiter.
 ///
-/// A subject with no first mint is left out with a warning: only a sealed
-/// list that predates the archive's asset index names one, and its node needs
-/// `dolos doctor rebuild-state --rewrite-logs`.
+/// A subject with no first mint is left out with a warning. A rollback
+/// between the list read and the supply read removes a staged first mint,
+/// once; a sealed list that predates the archive's asset index names one on
+/// every read, and its node needs `dolos doctor rebuild-state --rewrite-logs`.
 pub(crate) async fn asset_quantities<D>(
     domain: &Facade<D>,
     subjects: Vec<Vec<u8>>,
@@ -678,7 +684,7 @@ where
                 Ok::<_, Error>((subject, quantity))
             }
         })
-        .buffered(LIST_CONCURRENCY)
+        .buffered(domain.inner.query_limiter().fan_out())
         .try_collect()
         .await?;
 
@@ -688,8 +694,10 @@ where
         let Some(quantity) = quantity else {
             tracing::warn!(
                 asset = hex::encode(&subject),
-                "a sealed first-mint list names an asset with no first mint in the entity \
-                 index; run `dolos doctor rebuild-state --rewrite-logs` to index it"
+                "an asset list names an asset with no first mint: a rollback removed it since \
+                 the list was read, or, if this repeats for the asset, a sealed first-mint list \
+                 predates the archive's asset index and `dolos doctor rebuild-state \
+                 --rewrite-logs` indexes it"
             );
 
             continue;
@@ -702,10 +710,12 @@ where
 }
 
 /// Loads the summary of an asset and the minting transaction that holds its
-/// metadata.
+/// metadata. Its label-100 walks, and its reference token's, draw on
+/// `budget`.
 pub(crate) async fn load_asset_builder<D>(
     domain: &Facade<D>,
     unit: String,
+    budget: &WalkBudget,
 ) -> Result<AssetModelBuilder, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
@@ -715,9 +725,7 @@ where
     let chain = domain.get_chain_summary()?;
     let (tip, _) = chain.slot_epoch(domain.get_tip_slot()?);
 
-    let walk = domain.config.max_scan_items();
-
-    let summary = assets::asset_summary(&domain.inner, &chain, tip, subject.clone(), walk)
+    let summary = assets::asset_summary(&domain.inner, &chain, tip, subject.clone(), budget)
         .await
         .map_err(log_500)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -740,6 +748,7 @@ where
         registry_url: domain.config.token_registry_url.clone(),
         chain,
         tip,
+        budget: budget.clone(),
     })
 }
 

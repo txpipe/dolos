@@ -456,7 +456,11 @@ where
     let name = cache_use.namespace();
 
     if let Some(value) = cache.get(name, key) {
-        if cache_use.watermark(&value) == Some(watermark) {
+        let current = cache_use
+            .is_current(domain, key, &value, watermark)
+            .map_err(|error| CacheError::Fill(error.into()))?;
+
+        if current {
             return Ok(Warm::Current);
         }
 
@@ -1705,5 +1709,107 @@ mod tests {
         assert_eq!(picked.len(), 10);
 
         assert_eq!(sampled(keys, 100, 7).len(), 50);
+    }
+
+    /// An entry built from another first mint than the index's, as a read
+    /// before `rebuild-state --rewrite-logs` kept it, is not current at the
+    /// same watermark: `warm` builds it again from the first mint, and
+    /// `verify` then passes.
+    #[tokio::test]
+    async fn warm_builds_again_an_entry_from_another_first_mint() {
+        use dolos_cardano::periods::assets::{build_asset_entry, first_mint_slot, AssetEntry};
+        use dolos_core::StateStore as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let domain = minting(dir.path());
+        let namespaces = register(&domain).unwrap();
+
+        let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+        let assets = Assets::new(&domain).unwrap();
+        let watermark = CacheUse::<ToyDomain>::current_watermark(&assets, &domain)
+            .unwrap()
+            .unwrap();
+
+        let x = dolos_cardano::periods::assets::sealed_subjects(&domain).unwrap()[0].clone();
+        let tip = domain.state().read_cursor().unwrap().unwrap().slot();
+        let (tip, _) = chain.slot_epoch(tip);
+        let first = first_mint_slot(&domain, &chain, tip, &x).unwrap().unwrap();
+        let (start, _) = chain.slot_epoch(first);
+        assert!(start < watermark, "start {start}, watermark {watermark}");
+
+        let stale = build_asset_entry(&domain, &chain, &x, start + 1, watermark).unwrap();
+        let disk = domain.cache().disk();
+        disk.put(ASSETS.name, &x, &stale.value, stale.cost).unwrap();
+        disk.flush().unwrap();
+
+        let file = dir.path().join("x.txt");
+        std::fs::write(&file, hex::encode(&x)).unwrap();
+
+        let warmed = warm(&domain, &namespaces, ASSETS.name, &Source::Keys(file))
+            .await
+            .unwrap();
+        assert_eq!((warmed.current, warmed.kept), (0, 1));
+
+        let kept = AssetEntry::decode(&disk.get(ASSETS.name, &x).unwrap().unwrap().value).unwrap();
+        assert_eq!(kept.start, start);
+
+        let verified = verify(&domain, &namespaces, Some(ASSETS.name), 100).unwrap();
+        assert!(verified.mismatches.is_empty(), "{:?}", verified.mismatches);
+    }
+
+    /// `verify` compares an `assets` entry without its cost, which an
+    /// extension across a label-100 update raises, and flags one whose fold
+    /// differs.
+    #[tokio::test]
+    async fn verify_compares_an_asset_entry_without_its_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let domain = minting(dir.path());
+        let namespaces = register(&domain).unwrap();
+
+        warm(&domain, &namespaces, ASSETS.name, &Source::Scan)
+            .await
+            .unwrap();
+
+        let disk = domain.cache().disk();
+        let keys = disk.keys(ASSETS.name).unwrap();
+        let (a, b) = (keys[0].clone(), keys[1].clone());
+
+        let entry = disk.get(ASSETS.name, &a).unwrap().unwrap();
+        let mut costlier = entry.value.to_vec();
+        let at = costlier.len() - 8;
+        let cost = u64::from_be_bytes(costlier[at..].try_into().unwrap()) + 1;
+        costlier[at..].copy_from_slice(&cost.to_be_bytes());
+        disk.put(ASSETS.name, &a, &costlier, cost).unwrap();
+
+        let verified = verify(&domain, &namespaces, Some(ASSETS.name), 100).unwrap();
+        assert!(
+            verified.mismatches.is_empty(),
+            "the cost alone differs: {:?}",
+            verified.mismatches
+        );
+
+        let entry = disk.get(ASSETS.name, &b).unwrap().unwrap();
+        let mut corrupted = entry.value.to_vec();
+        corrupted[1] ^= 0xff;
+        disk.put(ASSETS.name, &b, &corrupted, entry.cost).unwrap();
+
+        let verified = verify(&domain, &namespaces, Some(ASSETS.name), 100).unwrap();
+        assert_eq!(verified.mismatches.len(), 1, "{:?}", verified.mismatches);
+        assert_eq!(verified.mismatches[0].key, hex::encode(&b));
+    }
+
+    /// The count of unindexed subjects sums every batch it reads the index
+    /// in: an un-rebuilt store lists its oldest subjects unindexed.
+    #[test]
+    fn the_unindexed_count_covers_every_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let domain = minting(dir.path());
+
+        let unindexed = [[0xee; 28].as_slice(), b"OLD"].concat();
+        let mut subjects = vec![unindexed; 1_000];
+        subjects.extend(dolos_cardano::periods::assets::sealed_subjects(&domain).unwrap());
+
+        let missing = dolos_cardano::periods::assets::count_unindexed(&domain, &subjects).unwrap();
+        assert_eq!(missing, 1_000);
     }
 }
