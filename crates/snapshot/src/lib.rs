@@ -209,6 +209,16 @@ pub const ENTITY_KINDS: [(&str, EntityKind); 2] = [
     ("entity-script", entities::SCRIPT),
 ];
 
+/// The entity kinds an earlier profile witnessed in a state namespace, with
+/// that namespace.
+///
+/// A publisher that still declares the namespace in `parameters.schemas`
+/// kept the kind's first sightings there, so its seals wrote none of the
+/// kind's entries even where it declares the kind. This build reads the
+/// witness from the entity index and does not restore the namespace, so a
+/// restore refuses such a stele before a store is opened.
+pub const STATE_WITNESSED_KINDS: [(EntityKind, Namespace); 1] = [(entities::SCRIPT, "scripts")];
+
 /// The entity kinds alone, in [`ENTITY_KINDS`] order: what an export walks
 /// the archive's entity index for.
 pub const ENTITY_INDEX_KINDS: [EntityKind; ENTITY_KINDS.len()] = {
@@ -721,6 +731,18 @@ pub enum Error {
          it would leave that kind's first sightings silently empty"
     )]
     UndeclaredEntityKind { kind: &'static str },
+
+    /// An entity kind the stele's publisher witnessed in a state namespace
+    /// ([`STATE_WITNESSED_KINDS`]), so the stele holds none of its entries.
+    #[error(
+        "this stele's publisher keeps entity kind {kind:?}'s first sightings in state namespace \
+         {namespace:?} and wrote no {kind} entries; restoring it would take every known {kind} \
+         for a first sighting"
+    )]
+    StateWitnessedEntityKind {
+        kind: &'static str,
+        namespace: Namespace,
+    },
 
     /// An entity kind the stele declares at a different id width than this
     /// build registers: its ids could not be the ids this build looks up.
