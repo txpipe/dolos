@@ -23,11 +23,12 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     cip151,
+    final_rows::newest_final_row,
     indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
     model::{AccountState, CalidusRegistration, PoolState},
     pallas_extras, pool_history, AccountKey, PoolEpochLog, PoolHash, PoolKey,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
 use futures::{future::join_all, StreamExt};
 use itertools::Itertools;
 use pallas::{
@@ -36,7 +37,7 @@ use pallas::{
         addresses::Network,
         primitives::{
             conway::{Vote, Voter},
-            StakeCredential,
+            Epoch, StakeCredential,
         },
         traverse::MultiEraBlock,
     },
@@ -571,6 +572,121 @@ where
     }))
 }
 
+/// The retiring epoch the pool's newest certificate in a valid transaction
+/// names, `None` when that certificate registers the pool or the archive holds
+/// none of its certificates.
+fn newest_retirement<D: Domain>(domain: &D, pool: &PoolHash) -> Result<Option<Epoch>, StatusCode> {
+    let archive = domain.archive();
+
+    let slot = archive
+        .slots_by_pool_certs(pool.as_slice(), 0, BlockSlot::MAX)
+        .map_err(log_and_500("failed to read the pool certs index"))?
+        .next_back()
+        .transpose()
+        .map_err(log_and_500("failed to read the pool certs index"))?;
+
+    let Some(slot) = slot else {
+        return Ok(None);
+    };
+
+    let Some(body) = archive
+        .get_block_by_slot(&slot)
+        .map_err(log_and_500("failed to read a pool certs block"))?
+    else {
+        return Ok(None);
+    };
+
+    let block =
+        MultiEraBlock::decode(&body).map_err(log_and_500("failed to decode a pool certs block"))?;
+
+    let mut newest = None;
+
+    for tx in block.txs().iter().filter(|tx| tx.is_valid()) {
+        for cert in tx.certs() {
+            if pallas_extras::cert_as_pool_registration(&cert)
+                .is_some_and(|cert| &cert.operator == pool)
+            {
+                newest = None;
+            }
+
+            if let Some(cert) =
+                pallas_extras::cert_as_pool_retirement(&cert).filter(|cert| &cert.operator == pool)
+            {
+                newest = Some(cert.epoch);
+            }
+        }
+    }
+
+    Ok(newest)
+}
+
+/// A pool's row: the state row, then its final row in the log.
+///
+/// ESTART commits a final row before it deletes the state row, so a state
+/// miss read first finds a moved pool in the log. The final row is keyed at
+/// the epoch [`PoolState::final_row_epoch`] derives from the retirement the
+/// pool's newest certificate makes. Where that misses, a pruned archive
+/// without the certificate for one, the log is scanned for the newest row.
+pub(crate) fn read_pool_row<D: Domain>(
+    domain: &D,
+    pool: PoolHash,
+) -> Result<Option<PoolState>, StatusCode> {
+    let key = PoolKey(pool);
+
+    let live = domain
+        .state()
+        .read_entity_typed::<PoolState>(&key)
+        .map_err(log_and_500("failed to read pool state"))?;
+
+    if live.is_some() {
+        return Ok(live);
+    }
+
+    if let Some(retiring) = newest_retirement(domain, &pool)? {
+        let chain = dolos_cardano::eras::load_era_summary::<D>(domain.state())
+            .map_err(log_and_500("failed to load era summary"))?;
+        let slot = chain.epoch_start(PoolState::final_row_epoch(retiring));
+
+        let logged = domain
+            .archive()
+            .read_log_typed::<PoolState>(slot, &key)
+            .map_err(log_and_500("failed to read the pools log"))?;
+
+        if logged.is_some() {
+            return Ok(logged);
+        }
+    }
+
+    let logged = newest_final_row::<PoolState>(domain.archive(), &key)
+        .map_err(log_and_500("failed to read the pools log"))?;
+
+    Ok(logged.map(|(_, row)| row))
+}
+
+/// Whether the pool ever registered: it has a row in state or in the log.
+pub(crate) fn pool_exists<D: Domain>(domain: &D, pool: PoolHash) -> Result<bool, StatusCode> {
+    Ok(read_pool_row(domain, pool)?.is_some())
+}
+
+/// The newest final row of every pool in the log, in no particular order.
+fn logged_pools<D: Domain>(domain: &D) -> Result<Vec<PoolState>, StatusCode> {
+    let rows = domain
+        .archive()
+        .iter_logs_typed::<PoolState>(None)
+        .map_err(log_and_500("failed to iterate the pools log"))?;
+
+    let mut newest = HashMap::new();
+
+    // the log is keyed slot first, so a later row of a pool replaces an
+    // earlier one
+    for row in rows {
+        let (_, key, row) = row.map_err(log_and_500("failed to read the pools log"))?;
+        newest.insert(key, row);
+    }
+
+    Ok(newest.into_values().collect())
+}
+
 pub async fn by_id<D>(
     Path(id): Path<String>,
     State(domain): State<Facade<D>>,
@@ -583,9 +699,7 @@ where
     let Some(hash) = parse_pool_id_unbounded(&id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    let pool = domain
-        .read_cardano_entity::<PoolState>(&PoolKey(hash))?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let pool = read_pool_row(&domain.inner, hash)?.ok_or(StatusCode::NOT_FOUND)?;
 
     let snapshot = pool
         .snapshot
@@ -1229,13 +1343,17 @@ fn retire_list_model(list: Vec<(u64, PoolHash)>) -> Result<Vec<PoolListRetireInn
 }
 
 /// Reads every pool state and returns one page of the pools that `select`
-/// keeps.
+/// keeps. With `logged`, the newest final row of each pool the log holds and
+/// state does not joins them: a pool live again is read from state only.
 ///
 /// The pool states are read in chunks on the blocking pool. The page then
-/// reads the archive in one more blocking task.
+/// reads the log and the archive in one more blocking task. State is read
+/// first, so a pool that moves between the two reads is in both, and is read
+/// from state.
 async fn load_retirement_page<D, F>(
     domain: Facade<D>,
     pagination: Pagination,
+    logged: bool,
     select: F,
 ) -> Result<Vec<PoolListRetireInner>, StatusCode>
 where
@@ -1243,12 +1361,22 @@ where
     Option<PoolState>: From<D::Entity>,
     F: FnOnce(Vec<PoolState>) -> Vec<(u64, PoolHash)> + Send + 'static,
 {
-    let pools = EntityScan::<PoolState>::all(ENTITY_CHUNK)
+    let mut pools = EntityScan::<PoolState>::all(ENTITY_CHUNK)
         .filter_map(&domain, |_, pool| Some(pool))
         .await?;
 
     domain
         .blocking(move |domain| {
+            if logged {
+                let live: HashSet<PoolHash> = pools.iter().map(|pool| pool.operator).collect();
+
+                pools.extend(
+                    logged_pools(&domain.inner)?
+                        .into_iter()
+                        .filter(|pool| !live.contains(&pool.operator)),
+                );
+            }
+
             let page = page_retirements(&domain.inner, select(pools), &pagination)?;
 
             retire_list_model(page)
@@ -1270,7 +1398,8 @@ where
     let summary = domain.get_chain_summary()?;
     let (current_epoch, _) = summary.slot_epoch(tip);
 
-    let out = load_retirement_page(domain, pagination, move |pools| {
+    // a pool in the log retired epochs ago, so only state holds retiring ones
+    let out = load_retirement_page(domain, pagination, false, move |pools| {
         retiring_candidates(pools, current_epoch)
     })
     .await?;
@@ -1288,7 +1417,7 @@ where
 {
     let pagination = Pagination::try_from(params)?;
 
-    let out = load_retirement_page(domain, pagination, retired_candidates).await?;
+    let out = load_retirement_page(domain, pagination, true, retired_candidates).await?;
 
     Ok(Json(out))
 }
@@ -1303,9 +1432,7 @@ where
     let Some(hash) = parse_pool_id_bounded(&id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    let pool = domain
-        .read_cardano_entity::<PoolState>(&PoolKey(hash))?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let pool = read_pool_row(&domain.inner, hash)?.ok_or(StatusCode::NOT_FOUND)?;
 
     let onchain = pool
         .snapshot
@@ -1328,9 +1455,7 @@ where
     let Some(hash) = parse_pool_id_bounded(&id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    let pool = domain
-        .read_cardano_entity::<PoolState>(&PoolKey(hash))?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let pool = read_pool_row(&domain.inner, hash)?.ok_or(StatusCode::NOT_FOUND)?;
 
     let relays = pool
         .snapshot
@@ -1512,11 +1637,11 @@ where
         })
         .await?;
 
-    // Blockfrost 404s a pool that db-sync never saw. The `PoolState` entity
-    // covers every pool that registered on chain, and a pool must register
-    // before it can mint. The index acts as a second proof of existence, for
+    // Blockfrost 404s a pool that db-sync never saw. A `PoolState` row, in
+    // state or in the final-row log, covers every pool that registered on
+    // chain, and a pool must register before it can mint. The index acts as a second proof of existence, for
     // any issuer that has no entity.
-    if !minted_any && !domain.cardano_entity_exists::<PoolState>(&PoolKey(pool))? {
+    if !minted_any && !pool_exists(&domain.inner, pool)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1583,7 +1708,7 @@ where
     let Some(hash) = parse_pool_id_bounded(&id)? else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(hash))? {
+    if !pool_exists(&domain.inner, hash)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1686,7 +1811,7 @@ where
     let Some(hash) = hash else {
         return Err(StatusCode::NOT_FOUND.into());
     };
-    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(hash))? {
+    if !pool_exists(&domain.inner, hash)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1738,7 +1863,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
 
-    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(pool))? {
+    if !pool_exists(&domain.inner, pool)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1803,7 +1928,7 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     };
 
-    if !domain.cardano_entity_exists::<PoolState>(&PoolKey(pool))? {
+    if !pool_exists(&domain.inner, pool)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1849,7 +1974,7 @@ mod tests {
     use dolos_cardano::model::{
         DRepDelegation, EpochValue, PoolDelegation, PoolParams, PoolSnapshot, Stake,
     };
-    use dolos_core::{StateStore as _, StateWriter as _};
+    use dolos_core::StateWriter as _;
     use dolos_testing::synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote};
     use pallas::{
         codec::utils::Bytes,
@@ -4403,5 +4528,316 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+/// A pool in each phase of a retirement: retired in state, moved to the
+/// final-row log as ESTART moves it, and registered again as a fresh row.
+#[cfg(test)]
+mod retired_pool_phases {
+    use axum::http::StatusCode;
+    use blockfrost_openapi::models::{pool::Pool, pool_list_retire_inner::PoolListRetireInner};
+    use dolos_cardano::{
+        final_rows::FinalRows, pallas_extras::MultiEraPoolRegistration, CalidusRegistration,
+        PoolHash, PoolKey, PoolRegistration, PoolState,
+    };
+    use dolos_core::{
+        ArchiveStore as _, ArchiveWriter as _, BlockSlot, Domain as _, EntityDelta as _,
+        StateStore as _, StateWriter as _,
+    };
+    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
+    use pallas::{
+        crypto::hash::Hash,
+        ledger::{
+            addresses::{Network, StakeAddress, StakePayload},
+            primitives::conway::Certificate,
+        },
+    };
+    use serde_json::Value;
+
+    use crate::{mapping::bech32_pool, test_support::TestApp};
+
+    /// The epoch the pool retires at: the synthetic chain's first, so it has
+    /// retired by the tip.
+    const RETIRING: u64 = 0;
+
+    /// An owner only the retired pool's registration names: no account and no
+    /// other pool knows it.
+    const LOGGED_OWNER: [u8; 28] = [0x95; 28];
+
+    /// The operator of the pool the chain registers.
+    const OPERATOR: [u8; 28] = [0x71; 28];
+
+    fn epoch_start(domain: &ToyDomain, epoch: u64) -> BlockSlot {
+        dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+            .unwrap()
+            .epoch_start(epoch)
+    }
+
+    /// The default chain's pool, retired by a certificate in the last
+    /// transaction of block `retire_in`, and its state row as the EWRAP that
+    /// retires it leaves it: `live` retired, also naming [`LOGGED_OWNER`],
+    /// and with a calidus key. `then` moves it on from there.
+    fn retired_pool_app(
+        retire_in: usize,
+        then: impl FnOnce(&ToyDomain, PoolHash, PoolState),
+    ) -> TestApp {
+        let pool = PoolHash::from(OPERATOR);
+        let retire = Certificate::PoolRetirement(pool, RETIRING);
+
+        let cfg = SyntheticBlockConfig {
+            pool_id: bech32_pool(pool).unwrap(),
+            block_count: 3,
+            txs_per_block: 2,
+            extra_certs_by_block: (0..3)
+                .map(|block| match block == retire_in {
+                    true => vec![vec![], vec![retire.clone()]],
+                    false => vec![vec![], vec![]],
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let key = PoolKey(pool);
+            let mut row = domain
+                .state()
+                .read_entity_typed::<PoolState>(&key)
+                .unwrap()
+                .expect("the synthetic chain registers the pool");
+
+            row.retiring_epoch = Some(RETIRING);
+            row.deposit = 0;
+            row.calidus = Some(CalidusRegistration {
+                pub_key: Some([0x57; 32]),
+                nonce: 1,
+                tx_hash: [0xaa; 32].into(),
+                slot: vectors.blocks[0].slot,
+            });
+
+            let live = row.snapshot.unwrap_live_mut();
+            live.is_retired = true;
+            live.params.pool_owners.push(LOGGED_OWNER.into());
+
+            let writer = domain.state().start_writer().unwrap();
+            writer.write_entity_typed(&key, &row).unwrap();
+            writer.commit().unwrap();
+
+            then(domain, pool, row);
+        })
+    }
+
+    /// Move the pool's row to the log at `slot`, as the ESTART finalize
+    /// commit does: the archive commits first, then the state deletes it.
+    fn move_to_log(domain: &ToyDomain, pool: PoolHash, row: &PoolState, slot: BlockSlot) {
+        let mut finals = FinalRows::default();
+        finals.push(slot, &PoolKey(pool), row);
+
+        let archive = domain.archive().start_writer().unwrap();
+        let state = domain.state().start_writer().unwrap();
+        finals.write(&state, &archive).unwrap();
+        archive.commit().unwrap();
+        state.commit().unwrap();
+
+        assert!(domain
+            .state()
+            .read_entity_typed::<PoolState>(&PoolKey(pool))
+            .unwrap()
+            .is_none());
+    }
+
+    /// Where ESTART keys the pool's final row.
+    fn final_row_slot(domain: &ToyDomain) -> BlockSlot {
+        epoch_start(domain, PoolState::final_row_epoch(RETIRING))
+    }
+
+    fn moved_app() -> TestApp {
+        retired_pool_app(2, |domain, pool, row| {
+            move_to_log(domain, pool, &row, final_row_slot(domain));
+        })
+    }
+
+    fn logged_owner_address() -> String {
+        StakeAddress::new(
+            Network::Testnet,
+            StakePayload::Stake(Hash::from(LOGGED_OWNER)),
+        )
+        .to_bech32()
+        .unwrap()
+    }
+
+    /// The routes a pool answers, and an account only its registration names.
+    fn paths(app: &TestApp) -> Vec<String> {
+        let pool = &app.vectors().pool_id;
+        let owner = logged_owner_address();
+
+        vec![
+            format!("/pools/{pool}"),
+            format!("/pools/{pool}/metadata"),
+            format!("/pools/{pool}/relays"),
+            format!("/pools/{pool}/history"),
+            format!("/pools/{pool}/delegators"),
+            format!("/pools/{pool}/updates"),
+            format!("/pools/{pool}/blocks"),
+            format!("/pools/{pool}/votes"),
+            format!("/epochs/1/stakes/{pool}"),
+            format!("/epochs/1/blocks/{pool}"),
+            "/pools/retired".to_string(),
+            "/pools/retiring".to_string(),
+            format!("/accounts/{owner}/addresses"),
+        ]
+    }
+
+    async fn answers(app: &TestApp) -> Vec<(String, StatusCode, Value)> {
+        let mut out = vec![];
+
+        for path in paths(app) {
+            let (status, bytes) = app.get_bytes(&path).await;
+            let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            out.push((path, status, body));
+        }
+
+        out
+    }
+
+    /// Done criterion of the route tests: once moved to the log, the pool
+    /// answers every route as it did from state, the account only its
+    /// registration names stays known, and `/pools/retired` still lists it.
+    #[tokio::test]
+    async fn a_moved_pool_answers_as_it_did_from_state() {
+        let retired = retired_pool_app(2, |_, _, _| ());
+        let moved = moved_app();
+
+        let before = answers(&retired).await;
+        let after = answers(&moved).await;
+
+        for ((path, status, body), (_, moved_status, moved_body)) in before.iter().zip(&after) {
+            assert_eq!(status, moved_status, "{path}");
+            assert_eq!(body, moved_body, "{path}");
+        }
+
+        let ok = |path: &str| {
+            before
+                .iter()
+                .find(|(x, ..)| x.as_str() == path)
+                .map(|(_, status, body)| (*status, body.clone()))
+                .unwrap()
+        };
+
+        let pool_id = &moved.vectors().pool_id;
+        let (status, body) = ok(&format!("/pools/{pool_id}"));
+        assert_eq!(status, StatusCode::OK);
+        let pool: Pool = serde_json::from_value(body).unwrap();
+        assert!(!pool.retirement.is_empty());
+        assert!(pool.calidus_key.is_some());
+
+        let (status, body) = ok("/pools/retired");
+        assert_eq!(status, StatusCode::OK);
+        let retired: Vec<PoolListRetireInner> = serde_json::from_value(body).unwrap();
+        assert_eq!(
+            retired,
+            vec![PoolListRetireInner {
+                pool_id: pool_id.clone(),
+                epoch: RETIRING as i32,
+            }]
+        );
+
+        let (status, _) = ok(&format!("/accounts/{}/addresses", logged_owner_address()));
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// The point read keys the log at the epoch the newest retirement names,
+    /// rather than scanning it: a decoy row keyed later, which a scan would
+    /// take for the newest, is not served.
+    #[tokio::test]
+    async fn the_point_read_keys_the_log_by_the_newest_retirement() {
+        let app = retired_pool_app(2, |domain, pool, row| {
+            move_to_log(domain, pool, &row, final_row_slot(domain));
+
+            let mut decoy = row.clone();
+            decoy.snapshot.unwrap_live_mut().params.pledge = 999;
+
+            let writer = domain.archive().start_writer().unwrap();
+            writer
+                .write_log_typed(final_row_slot(domain) + 1, &PoolKey(pool), &decoy)
+                .unwrap();
+            writer.commit().unwrap();
+        });
+
+        let (status, bytes) = app
+            .get_bytes(&format!("/pools/{}", app.vectors().pool_id))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let pool: Pool = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(pool.declared_pledge, "0");
+    }
+
+    /// A row the newest retirement does not key, as in an archive pruned of
+    /// the certificate, is found by a scan of the log.
+    #[tokio::test]
+    async fn a_row_off_the_retirement_key_is_found_by_a_scan() {
+        let moved = moved_app();
+        let elsewhere = retired_pool_app(2, |domain, pool, row| {
+            move_to_log(domain, pool, &row, final_row_slot(domain) - 1);
+        });
+
+        let before = answers(&moved).await;
+        let after = answers(&elsewhere).await;
+
+        for ((path, status, body), (_, other_status, other_body)) in before.iter().zip(&after) {
+            assert_eq!(status, other_status, "{path}");
+            assert_eq!(body, other_body, "{path}");
+        }
+    }
+
+    /// Registered again after the move: a fresh row in state, its deposit set
+    /// and no calidus key, serves the pool, and `/pools/retired` drops it,
+    /// while the log keeps the old row.
+    #[tokio::test]
+    async fn a_pool_registered_again_is_served_from_its_fresh_row() {
+        let app = retired_pool_app(1, |domain, pool, row| {
+            move_to_log(domain, pool, &row, final_row_slot(domain));
+
+            let params = row.snapshot.live().unwrap().params.clone();
+            let cert = MultiEraPoolRegistration {
+                operator: pool,
+                vrf_keyhash: params.vrf_keyhash,
+                pledge: 7,
+                cost: params.cost,
+                margin: params.margin,
+                reward_account: params.reward_account,
+                pool_owners: params.pool_owners,
+                relays: params.relays,
+                pool_metadata: params.pool_metadata,
+            };
+
+            let epoch = dolos_cardano::load_epoch::<ToyDomain>(domain.state())
+                .unwrap()
+                .number;
+            let mut fresh = None;
+            PoolRegistration::new(cert, epoch_start(domain, epoch), epoch, 500).apply(&mut fresh);
+            let fresh = fresh.unwrap();
+
+            assert_eq!(fresh.deposit, 500);
+            assert_eq!(fresh.calidus, None);
+
+            let writer = domain.state().start_writer().unwrap();
+            writer.write_entity_typed(&PoolKey(pool), &fresh).unwrap();
+            writer.commit().unwrap();
+        });
+
+        let pool_id = &app.vectors().pool_id;
+        let (status, bytes) = app.get_bytes(&format!("/pools/{pool_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let pool: Pool = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(pool.declared_pledge, "7");
+        assert!(pool.calidus_key.is_none());
+
+        let (status, bytes) = app.get_bytes("/pools/retired").await;
+        assert_eq!(status, StatusCode::OK);
+        let retired: Vec<PoolListRetireInner> = serde_json::from_slice(&bytes).unwrap();
+        assert!(retired.is_empty());
     }
 }

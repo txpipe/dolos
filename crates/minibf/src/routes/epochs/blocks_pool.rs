@@ -5,10 +5,7 @@ use axum::{
 };
 use std::{iter::Peekable, ops::Range};
 
-use dolos_cardano::{
-    model::{PoolKey, PoolState},
-    PoolHash,
-};
+use dolos_cardano::{model::PoolState, PoolHash};
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use pallas::crypto::hash::Hasher;
 
@@ -17,7 +14,7 @@ use crate::{
     log_and_500,
     mapping::blocks::decode_block_header,
     pagination::{Order, Pagination, PaginationParameters},
-    routes::pools::parse_pool_id_bounded,
+    routes::pools::{parse_pool_id_bounded, pool_exists},
     Facade,
 };
 
@@ -158,8 +155,8 @@ where
     .await?;
 
     // Blockfrost 404s a pool db-sync never saw. A pool registers before it
-    // mints, so a block found here proves it as well as a `PoolState` does.
-    if !minted_here && !domain.cardano_entity_exists::<PoolState>(&PoolKey(hash))? {
+    // mints, so a block found here proves it as well as a `PoolState` row does.
+    if !minted_here && !pool_exists(&domain.inner, hash)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
