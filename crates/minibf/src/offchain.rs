@@ -1,11 +1,17 @@
 use axum::body::Bytes;
 use blockfrost_openapi::models::{DrepsInnerMetadata, DrepsInnerMetadataError};
 use dolos_core::{CacheEntry, CacheError, CacheNamespace, CacheStore};
+use futures::{stream, FutureExt as _, StreamExt as _};
 use pallas::{
     crypto::hash::Hasher,
     ledger::primitives::{conway::Anchor, PoolMetadata},
 };
-use std::{convert::Infallible, future::Future, path::Path, time::Duration};
+use std::{
+    convert::Infallible,
+    future::Future,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use crate::mapping::{
     anchor_metadata_from_body, anchor_offchain_body, offchain_hash_mismatch_error,
@@ -20,6 +26,14 @@ pub const MAX_CONCURRENT_FETCHES: usize = 16;
 pub const MAX_PENDING_LOADS: usize = 4 * MAX_CONCURRENT_FETCHES;
 
 const FAILURE_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// How long a single-pool request waits for its metadata, the wait for a
+/// fetch slot included.
+const POOL_REQUEST_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How long a proposal metadata request waits for its metadata, the wait for
+/// a fetch slot included.
+const PROPOSAL_REQUEST_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Verified DRep bodies, keyed by content hash, in memory and on disk.
 pub const OFFCHAIN: CacheNamespace = CacheNamespace::immutable("offchain", 1)
@@ -165,6 +179,37 @@ enum MetadataBody {
     Unfetched,
 }
 
+/// Pool metadata and the error of its last failed fetch.
+pub type PoolMetadataLoad = (
+    Option<PoolOffchainMetadata>,
+    Option<DrepsInnerMetadataError>,
+);
+
+/// Runs `loads`, at most `concurrency` at a time, and returns, in order, what
+/// each one settled to within `deadline`: `None` for a load still running or
+/// never started. Every load is dropped at the deadline, so one that should
+/// outlive it has to detach its own work, the way the metadata loaders do.
+pub(crate) async fn settle_within<F: Future>(
+    loads: Vec<F>,
+    concurrency: usize,
+    deadline: Duration,
+) -> Vec<Option<F::Output>> {
+    let mut settled: Vec<_> = loads.iter().map(|_| None).collect();
+
+    let mut running = stream::iter(loads.into_iter().enumerate())
+        .map(|(index, load)| load.map(move |value| (index, value)))
+        .buffer_unordered(concurrency);
+
+    let _ = tokio::time::timeout(deadline, async {
+        while let Some((index, value)) = running.next().await {
+            settled[index] = Some(value);
+        }
+    })
+    .await;
+
+    settled
+}
+
 /// The metadata of `anchor` before any fetch: the anchor fields alone.
 pub fn unfetched(anchor: &Anchor) -> DrepsInnerMetadata {
     DrepsInnerMetadata {
@@ -248,20 +293,24 @@ pub async fn fetch_drep_metadata<C: CacheStore>(
     fetch_anchor_metadata(cache, DREP_CACHE, ipfs_gateways, anchor, on_overload).await
 }
 
-/// Returns proposal metadata from the cache, or fetches and caches its body.
+/// Returns proposal metadata from the cache, or fetches and caches its body,
+/// within [`PROPOSAL_REQUEST_DEADLINE`].
 pub async fn fetch_proposal_metadata<C: CacheStore>(
     cache: &C,
     ipfs_gateways: &[String],
     anchor: &Anchor,
 ) -> DrepsInnerMetadata {
-    fetch_anchor_metadata(
+    let load = fetch_anchor_metadata(
         cache,
         PROPOSAL_CACHE,
         ipfs_gateways,
         anchor,
         OnOverload::Inline,
-    )
-    .await
+    );
+
+    tokio::time::timeout(PROPOSAL_REQUEST_DEADLINE, load)
+        .await
+        .unwrap_or_else(|_| unfetched(anchor))
 }
 
 async fn fetch_anchor_metadata<C: CacheStore>(
@@ -307,31 +356,83 @@ where
     anchor_metadata(anchor, body)
 }
 
-/// Returns pool metadata and its error from the cache, or fetches and caches
-/// its body.
+fn pool_metadata_of(body: MetadataBody) -> PoolMetadataLoad {
+    match body {
+        MetadataBody::Verified(body) => (serde_json::from_slice(&body).ok(), None),
+        MetadataBody::Failed(error) => (None, error),
+        MetadataBody::Unfetched => (None, None),
+    }
+}
+
+/// Returns cached pool metadata and its error without a network request.
+pub async fn cached_pool_metadata<C: CacheStore>(
+    cache: &C,
+    metadata: &PoolMetadata,
+) -> Option<PoolMetadataLoad> {
+    cached_body(cache, &MetadataLocation::from(metadata), POOL_CACHE)
+        .await
+        .map(pool_metadata_of)
+}
+
+/// Returns pool metadata and its error for a single-pool request, from the
+/// cache or a fetch, within [`POOL_REQUEST_DEADLINE`].
 pub async fn fetch_pool_metadata<C: CacheStore>(
     cache: &C,
     metadata: &PoolMetadata,
-) -> (
-    Option<PoolOffchainMetadata>,
-    Option<DrepsInnerMetadataError>,
-) {
-    load_pool_metadata(cache, metadata, |metadata| async move {
-        pool_offchain_body(&metadata.url)
-            .await
-            .map_err(|error| pool_fetch_error(&metadata.url, error))
-    })
+) -> PoolMetadataLoad {
+    load_pool_metadata_within(
+        cache,
+        metadata,
+        POOL_REQUEST_DEADLINE,
+        OnOverload::Inline,
+        fetch_pool_body,
+    )
     .await
+}
+
+/// Returns pool metadata and its error for a list row, from the cache or a
+/// fetch. A miss past the pending fetch limit returns no metadata.
+pub async fn fetch_listed_pool_metadata<C: CacheStore>(
+    cache: &C,
+    metadata: &PoolMetadata,
+) -> PoolMetadataLoad {
+    load_pool_metadata(cache, metadata, OnOverload::Unfetched, fetch_pool_body).await
+}
+
+async fn fetch_pool_body(
+    metadata: PoolMetadata,
+) -> Result<Vec<u8>, Option<DrepsInnerMetadataError>> {
+    pool_offchain_body(&metadata.url)
+        .await
+        .map_err(|error| pool_fetch_error(&metadata.url, error))
+}
+
+async fn load_pool_metadata_within<C, F, Fut>(
+    cache: &C,
+    metadata: &PoolMetadata,
+    deadline: Duration,
+    on_overload: OnOverload,
+    fetch: F,
+) -> PoolMetadataLoad
+where
+    C: CacheStore,
+    F: Fn(PoolMetadata) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, Option<DrepsInnerMetadataError>>> + Send + 'static,
+{
+    tokio::time::timeout(
+        deadline,
+        load_pool_metadata(cache, metadata, on_overload, fetch),
+    )
+    .await
+    .unwrap_or((None, None))
 }
 
 async fn load_pool_metadata<C, F, Fut>(
     cache: &C,
     metadata: &PoolMetadata,
+    on_overload: OnOverload,
     fetch: F,
-) -> (
-    Option<PoolOffchainMetadata>,
-    Option<DrepsInnerMetadataError>,
-)
+) -> PoolMetadataLoad
 where
     C: CacheStore,
     F: Fn(PoolMetadata) -> Fut,
@@ -341,18 +442,16 @@ where
         cache,
         &MetadataLocation::from(metadata),
         POOL_CACHE,
-        OnOverload::Inline,
+        on_overload,
         || fetch(metadata.clone()),
     )
     .await;
 
-    match body {
-        MetadataBody::Verified(body) => (serde_json::from_slice(&body).ok(), None),
-        MetadataBody::Failed(error) => (None, error),
-        MetadataBody::Unfetched => (None, None),
-    }
+    pool_metadata_of(body)
 }
 
+/// The body of `location`: cached, joined from a fetch under way, or fetched
+/// and kept. Past the pending limit, `on_overload` decides.
 async fn load_body<C, F, Fut>(
     cache: &C,
     location: &MetadataLocation,
@@ -385,6 +484,13 @@ where
                     .await
             }
         },
+        // a namespace that failed to register: fetch without the cache
+        Err(CacheError::UnknownNamespace(_)) => {
+            return match fill_body(cache.clone(), location.clone(), namespaces, fetch()).await {
+                Ok(entry) => MetadataBody::Verified(entry.value),
+                Err(failed) => MetadataBody::Failed(failed.error),
+            };
+        }
         filled => filled,
     };
 
@@ -426,6 +532,8 @@ where
     C: CacheStore,
     Fut: Future<Output = Result<Vec<u8>, Option<DrepsInnerMetadataError>>>,
 {
+    let started = Instant::now();
+
     let fetched = fetch.await.and_then(|body| {
         if location.holds_hash(&body) {
             return Ok(body);
@@ -439,10 +547,15 @@ where
         )))
     });
 
+    // an entry costs the time its fetch took
+    let cost = u64::try_from(started.elapsed().as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+
     match fetched {
-        Ok(body) => Ok(CacheEntry::new(body, 0)),
+        Ok(body) => Ok(CacheEntry::new(body, cost)),
         Err(failure) => {
-            keep_failure(&cache, &location, namespaces, &failure);
+            keep_failure(&cache, &location, namespaces, &failure, cost).await;
             Err(FetchFailed {
                 url: location.url,
                 error: failure,
@@ -451,19 +564,23 @@ where
     }
 }
 
-fn keep_failure<C: CacheStore>(
+/// Keeps `failure` before the fetch answers, so no request can miss it.
+async fn keep_failure<C: CacheStore>(
     cache: &C,
     location: &MetadataLocation,
     namespaces: MetadataCache,
     failure: &Option<DrepsInnerMetadataError>,
+    cost: u64,
 ) {
     let Ok(value) = serde_json::to_vec(failure) else {
         return;
     };
 
-    let kept = cache.refill(namespaces.failures, &location.failure_key(), move || {
-        Ok::<_, Infallible>(CacheEntry::new(value, 0))
-    });
+    let kept = cache
+        .fill_inline(namespaces.failures, &location.failure_key(), async move {
+            Ok::<_, Infallible>(CacheEntry::new(value, cost))
+        })
+        .await;
 
     if let Err(error) = kept {
         tracing::warn!(url = %location.url, %error, "cannot keep off-chain metadata failure");
@@ -487,6 +604,23 @@ pub(crate) async fn cache_verified_body<C: CacheStore>(
         })
         .await
         .unwrap();
+}
+
+/// Keeps `error` as the failure of a pool fetch, as a failed fetch would.
+#[cfg(test)]
+pub(crate) async fn cache_pool_failure<C: CacheStore>(
+    cache: &C,
+    metadata: &PoolMetadata,
+    error: DrepsInnerMetadataError,
+) {
+    keep_failure(
+        cache,
+        &MetadataLocation::from(metadata),
+        POOL_CACHE,
+        &Some(error),
+        1,
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -623,14 +757,27 @@ mod tests {
         }
     }
 
+    fn failing_pool(failure: &DrepsInnerMetadataError) -> impl Fn(PoolMetadata) -> PoolFetch {
+        let failure = failure.clone();
+        move |_| {
+            let failure = failure.clone();
+            Box::pin(async move { Err(Some(failure)) })
+        }
+    }
+
     #[tokio::test]
     async fn pool_metadata_survives_restart_and_an_unavailable_url() {
         let dir = temp_root("pool-restart");
         let metadata = pool_metadata(POOL_BODY);
         let calls = Arc::new(AtomicUsize::new(0));
         let domain = persistent_domain(&dir);
-        let (fetched, error) =
-            load_pool_metadata(domain.cache(), &metadata, serving_pool(POOL_BODY, &calls)).await;
+        let (fetched, error) = load_pool_metadata(
+            domain.cache(),
+            &metadata,
+            OnOverload::Inline,
+            serving_pool(POOL_BODY, &calls),
+        )
+        .await;
         assert_eq!(fetched.unwrap().ticker, "POOL");
         assert!(error.is_none());
         domain.cache().flush().unwrap();
@@ -650,18 +797,24 @@ mod tests {
         let cache = memory_cache();
         let metadata = pool_metadata(POOL_BODY);
         let calls = Arc::new(AtomicUsize::new(0));
-        load_pool_metadata(&cache, &metadata, serving_pool(POOL_BODY, &calls)).await;
+        let load = |metadata, body| {
+            load_pool_metadata(
+                &cache,
+                metadata,
+                OnOverload::Inline,
+                serving_pool(body, &calls),
+            )
+        };
+        load(&metadata, POOL_BODY).await;
 
         let changed = br#"{"name":"Other","description":"Changed","ticker":"NEW","homepage":"https://example.com"}"#;
-        let (kept, error) =
-            load_pool_metadata(&cache, &metadata, serving_pool(changed, &calls)).await;
+        let (kept, error) = load(&metadata, changed).await;
         assert_eq!(kept.unwrap().ticker, "POOL");
         assert!(error.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         cache.wipe(POOL_OFFCHAIN.name).unwrap();
-        let (missing, error) =
-            load_pool_metadata(&cache, &metadata, serving_pool(changed, &calls)).await;
+        let (missing, error) = load(&metadata, changed).await;
         assert!(missing.is_none());
         assert_eq!(error.unwrap().code, MetadataError::HashMismatch);
         assert!(cache
@@ -669,108 +822,117 @@ mod tests {
             .is_none());
 
         let updated = pool_metadata(changed);
-        let (fetched, error) =
-            load_pool_metadata(&cache, &updated, serving_pool(changed, &calls)).await;
+        let (fetched, error) = load(&updated, changed).await;
         assert_eq!(fetched.unwrap().ticker, "NEW");
         assert!(error.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
-    async fn pool_failures_expire_and_a_different_url_retries_immediately() {
-        let ttl = Duration::from_millis(500);
+    async fn pool_failures_answer_until_they_expire_and_a_new_url_retries() {
         let cache = memory_cache();
-        cache
-            .register(CacheNamespace::tip_scoped(
-                POOL_OFFCHAIN_FAILURES.name,
-                1,
-                ttl,
-            ))
-            .unwrap();
         let metadata = pool_metadata(POOL_BODY);
         let calls = Arc::new(AtomicUsize::new(0));
         let failure = crate::mapping::pool_connection_error(&metadata.url);
-        let (missing, error) = load_pool_metadata(&cache, &metadata, |_| {
-            let failure = failure.clone();
-            async move { Err(Some(failure)) }
-        })
+        let (missing, error) = load_pool_metadata(
+            &cache,
+            &metadata,
+            OnOverload::Inline,
+            failing_pool(&failure),
+        )
         .await;
         assert!(missing.is_none());
         assert_eq!(error.unwrap(), failure);
 
-        let location = MetadataLocation::from(&metadata);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while cached_body(&cache, &location, POOL_CACHE).await.is_none() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the failure was never cached");
+        // the failure answers without a fetch
+        let serve = || serving_pool(POOL_BODY, &calls);
         let (missing, error) =
-            load_pool_metadata(&cache, &metadata, serving_pool(POOL_BODY, &calls)).await;
+            load_pool_metadata(&cache, &metadata, OnOverload::Inline, serve()).await;
         assert!(missing.is_none());
         assert_eq!(error.unwrap(), failure);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
 
-        tokio::time::sleep(ttl).await;
+        // the failure of one URL does not hold back another URL
+        let mut moved = metadata.clone();
+        moved.url.push_str("?mirror");
         let (fetched, error) =
-            load_pool_metadata(&cache, &metadata, serving_pool(POOL_BODY, &calls)).await;
+            load_pool_metadata(&cache, &moved, OnOverload::Inline, serve()).await;
         assert_eq!(fetched.unwrap().ticker, "POOL");
         assert!(error.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
+        // past its TTL the failure no longer answers
         cache.wipe(POOL_OFFCHAIN.name).unwrap();
-        load_pool_metadata(&cache, &metadata, |_| {
-            let failure = failure.clone();
-            async move { Err(Some(failure)) }
-        })
-        .await;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while cached_body(&cache, &location, POOL_CACHE).await.is_none() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the failure was never cached");
-        let mut moved = metadata.clone();
-        moved.url.push_str("?mirror");
+        cache
+            .register(CacheNamespace::tip_scoped(
+                POOL_OFFCHAIN_FAILURES.name,
+                1,
+                Duration::ZERO,
+            ))
+            .unwrap();
         let (fetched, error) =
-            load_pool_metadata(&cache, &moved, serving_pool(POOL_BODY, &calls)).await;
+            load_pool_metadata(&cache, &metadata, OnOverload::Inline, serve()).await;
         assert_eq!(fetched.unwrap().ticker, "POOL");
         assert!(error.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
+    async fn a_failure_is_kept_before_the_fetch_answers() {
+        let cache = memory_cache();
+        let metadata = pool_metadata(POOL_BODY);
+        let failure = crate::mapping::pool_connection_error(&metadata.url);
+        load_pool_metadata(
+            &cache,
+            &metadata,
+            OnOverload::Inline,
+            failing_pool(&failure),
+        )
+        .await;
+
+        let kept = cached_body(&cache, &MetadataLocation::from(&metadata), POOL_CACHE).await;
+        assert!(matches!(kept, Some(MetadataBody::Failed(Some(error))) if error == failure));
+    }
+
+    #[tokio::test]
     async fn pool_metadata_keeps_silent_failures_and_invalid_json_behavior() {
         let cache = memory_cache();
         let metadata = pool_metadata(POOL_BODY);
-        let (missing, error) = load_pool_metadata(&cache, &metadata, |_| async { Err(None) }).await;
+        let (missing, error) =
+            load_pool_metadata(&cache, &metadata, OnOverload::Inline, |_| async {
+                Err(None)
+            })
+            .await;
         assert!(missing.is_none());
         assert!(error.is_none());
-        while cached_body(&cache, &MetadataLocation::from(&metadata), POOL_CACHE)
-            .await
-            .is_none()
-        {
-            tokio::task::yield_now().await;
-        }
+
         let calls = Arc::new(AtomicUsize::new(0));
-        let (missing, error) =
-            load_pool_metadata(&cache, &metadata, serving_pool(POOL_BODY, &calls)).await;
+        let (missing, error) = load_pool_metadata(
+            &cache,
+            &metadata,
+            OnOverload::Inline,
+            serving_pool(POOL_BODY, &calls),
+        )
+        .await;
         assert!(missing.is_none());
         assert!(error.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
 
         for body in [b"not json".as_slice(), b"{}".as_slice()] {
-            let (missing, error) =
-                load_pool_metadata(&cache, &pool_metadata(body), serving_pool(body, &calls)).await;
+            let (missing, error) = load_pool_metadata(
+                &cache,
+                &pool_metadata(body),
+                OnOverload::Inline,
+                serving_pool(body, &calls),
+            )
+            .await;
             assert!(missing.is_none());
             assert!(error.is_none());
         }
     }
 
     #[tokio::test]
-    async fn pool_and_drep_fetch_policies_do_not_share_entries_or_failures() {
+    async fn pool_and_drep_metadata_share_neither_entries_nor_failures() {
         let cache = memory_cache();
         let metadata = pool_metadata(POOL_BODY);
         let anchor = Anchor {
@@ -778,12 +940,142 @@ mod tests {
             content_hash: Hasher::<256>::hash(POOL_BODY),
         };
         cache_verified_body(&cache, OFFCHAIN.name, &anchor, POOL_BODY).await;
-        let (missing, error) = fetch_pool_metadata(&cache, &metadata).await;
+
+        let failure = crate::mapping::pool_connection_error(&metadata.url);
+        let (missing, error) = load_pool_metadata(
+            &cache,
+            &metadata,
+            OnOverload::Inline,
+            failing_pool(&failure),
+        )
+        .await;
         assert!(missing.is_none());
-        assert_eq!(error.unwrap().code, MetadataError::ConnectionError);
-        let drep = fetch_drep_metadata(&cache, &[], &anchor, OnOverload::Inline).await;
+        assert_eq!(error, Some(failure));
+
+        let key = MetadataLocation::from(&metadata).failure_key();
+        assert!(cache.get(POOL_OFFCHAIN_FAILURES.name, &key).is_some());
+        assert!(cache.get(OFFCHAIN_FAILURES.name, &key).is_none());
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let drep = load_anchor_metadata(
+            &cache,
+            DREP_CACHE,
+            &anchor,
+            OnOverload::Inline,
+            serving(POOL_BODY, &calls),
+        )
+        .await;
         assert!(drep.error.is_none());
         assert!(drep.json_metadata.is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn entries_cost_the_time_their_fetch_took() {
+        let cache = memory_cache();
+        let metadata = pool_metadata(POOL_BODY);
+        let fetch = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(POOL_BODY.to_vec())
+        };
+
+        let entry = fill_body(cache, MetadataLocation::from(&metadata), POOL_CACHE, fetch)
+            .await
+            .unwrap();
+        assert!(entry.cost >= 20, "{}", entry.cost);
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_namespace_fetches_without_the_cache() {
+        let cache = TieredCache::memory(&CacheConfig::default(), QueryLimiter::default());
+        let metadata = pool_metadata(POOL_BODY);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        for expected in [1, 2] {
+            let (fetched, error) = load_pool_metadata(
+                &cache,
+                &metadata,
+                OnOverload::Inline,
+                serving_pool(POOL_BODY, &calls),
+            )
+            .await;
+            assert_eq!(fetched.unwrap().ticker, "POOL");
+            assert!(error.is_none());
+            assert_eq!(calls.load(Ordering::SeqCst), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_disabled_cache_fetches_on_every_request() {
+        let config = CacheConfig {
+            enabled: false,
+            ..CacheConfig::default()
+        };
+        let cache = TieredCache::memory(&config, QueryLimiter::default());
+        register(&cache);
+        let metadata = pool_metadata(POOL_BODY);
+        let failure = crate::mapping::pool_connection_error(&metadata.url);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let (_, error) = load_pool_metadata(
+            &cache,
+            &metadata,
+            OnOverload::Inline,
+            failing_pool(&failure),
+        )
+        .await;
+        assert_eq!(error, Some(failure));
+
+        for expected in [1, 2] {
+            let (fetched, _) = load_pool_metadata(
+                &cache,
+                &metadata,
+                OnOverload::Inline,
+                serving_pool(POOL_BODY, &calls),
+            )
+            .await;
+            assert_eq!(fetched.unwrap().ticker, "POOL");
+            assert_eq!(calls.load(Ordering::SeqCst), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_single_pool_request_answers_by_its_deadline() {
+        let cache = memory_cache();
+        let metadata = pool_metadata(POOL_BODY);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let held = {
+            let release = release.clone();
+            move |_| {
+                let release = release.clone();
+                Box::pin(async move {
+                    release.notified().await;
+                    Ok(POOL_BODY.to_vec())
+                }) as PoolFetch
+            }
+        };
+
+        let (missing, error) = load_pool_metadata_within(
+            &cache,
+            &metadata,
+            Duration::from_millis(100),
+            OnOverload::Inline,
+            held,
+        )
+        .await;
+        assert!(missing.is_none());
+        assert!(error.is_none());
+
+        // the fetch outlives the request and keeps its body
+        release.notify_one();
+        let location = MetadataLocation::from(&metadata);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while cached_body(&cache, &location, POOL_CACHE).await.is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the detached fetch never kept its body");
     }
 
     #[tokio::test]
@@ -828,26 +1120,36 @@ mod tests {
         }
     }
 
+    // The test runtime runs one task at a time. `load_body` calls the fetch
+    // closure just before it joins the fetch under way, with no await between,
+    // so a request that has called its closure has joined.
     #[tokio::test]
     async fn concurrent_pool_misses_share_one_fetch() {
         let cache = memory_cache();
         let metadata = pool_metadata(POOL_BODY);
         let gated = Gated::default();
+        let joined = Arc::new(AtomicUsize::new(0));
         let requests: Vec<_> = (0..8)
             .map(|_| {
-                let (cache, metadata, gated) = (cache.clone(), metadata.clone(), gated.clone());
+                let (cache, metadata, gated, joined) = (
+                    cache.clone(),
+                    metadata.clone(),
+                    gated.clone(),
+                    joined.clone(),
+                );
                 tokio::spawn(async move {
-                    load_pool_metadata(&cache, &metadata, |_| {
-                        let fetch = gated.fetch(POOL_BODY.to_vec());
-                        let fetched = fetch(anchor(POOL_BODY));
+                    load_pool_metadata(&cache, &metadata, OnOverload::Inline, |_| {
+                        joined.fetch_add(1, Ordering::SeqCst);
+                        let fetched = gated.fetch(POOL_BODY.to_vec())(anchor(POOL_BODY));
                         async move { fetched.await.map_err(Some) }
                     })
                     .await
                 })
             })
             .collect();
-        gated.wait_for_running(1).await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        while joined.load(Ordering::SeqCst) < 8 {
+            tokio::task::yield_now().await;
+        }
         gated.open();
         for request in requests {
             let (metadata, error) = request.await.unwrap();
@@ -875,7 +1177,7 @@ mod tests {
             );
             let started = std::sync::Mutex::new(Some(started));
             async move {
-                load_pool_metadata(&cache, &dead, move |_| {
+                load_pool_metadata(&cache, &dead, OnOverload::Inline, move |_| {
                     let (failure, release) = (failure.clone(), release.clone());
                     let started = started.lock().unwrap().take();
                     async move {
@@ -891,16 +1193,25 @@ mod tests {
         });
         ready.await.unwrap();
 
+        // see `concurrent_pool_misses_share_one_fetch`: the closure call
+        // marks the join
         let calls = Arc::new(AtomicUsize::new(0));
+        let (joining, joined) = tokio::sync::oneshot::channel::<()>();
+        let joining = std::sync::Mutex::new(Some(joining));
+        let serve = serving_pool(POOL_BODY, &calls);
         let second = tokio::spawn({
-            let (cache, moved, fetch) = (
-                cache.clone(),
-                moved.clone(),
-                serving_pool(POOL_BODY, &calls),
-            );
-            async move { load_pool_metadata(&cache, &moved, fetch).await }
+            let (cache, moved) = (cache.clone(), moved.clone());
+            async move {
+                load_pool_metadata(&cache, &moved, OnOverload::Inline, move |metadata| {
+                    if let Some(joining) = joining.lock().unwrap().take() {
+                        let _ = joining.send(());
+                    }
+                    serve(metadata)
+                })
+                .await
+            }
         });
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        joined.await.unwrap();
         release.notify_one();
 
         let (missing, error) = first.await.unwrap();
@@ -910,6 +1221,47 @@ mod tests {
         assert_eq!(fetched.unwrap().ticker, "POOL");
         assert!(error.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A page answers by its deadline: a slow load leaves its row unsettled,
+    /// and the deadline drops it along with every load not started yet, so a
+    /// page leaves nothing of its own running once it has answered.
+    #[tokio::test]
+    async fn settle_within_answers_by_the_deadline_and_drops_the_rest() {
+        let (_release, released) = tokio::sync::oneshot::channel::<()>();
+        let (dropped, was_dropped) = tokio::sync::oneshot::channel::<()>();
+
+        let slow = async move {
+            // dropped with the load, which closes the channel
+            let _dropped = dropped;
+            let _ = released.await;
+            2
+        }
+        .boxed();
+
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let queued = {
+            let started = started.clone();
+
+            async move {
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
+                3
+            }
+            .boxed()
+        };
+
+        // one at a time: the slow load holds the only slot past the deadline
+        let loads = vec![async { 1 }.boxed(), slow, queued];
+
+        let settled = settle_within(loads, 1, Duration::from_millis(100)).await;
+
+        assert_eq!(settled, vec![Some(1), None, None]);
+
+        // the deadline dropped the slow load rather than leaving it running,
+        // and the queued one never started
+        assert!(was_dropped.await.is_err());
+        assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -999,13 +1351,28 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_is_kept_for_ten_minutes() {
-        assert_eq!(
-            OFFCHAIN_FAILURES.validity,
-            dolos_core::cache::Validity::TipScoped {
-                ttl: Duration::from_secs(600)
-            }
-        );
+    fn metadata_namespaces_keep_their_validity_and_limits() {
+        use dolos_core::cache::{FillLimits, Validity};
+
+        for failures in [
+            OFFCHAIN_FAILURES,
+            PROPOSAL_OFFCHAIN_FAILURES,
+            POOL_OFFCHAIN_FAILURES,
+        ] {
+            let ten_minutes = Validity::TipScoped {
+                ttl: Duration::from_secs(600),
+            };
+            assert_eq!(failures.validity, ten_minutes, "{}", failures.name);
+        }
+
+        for bodies in [OFFCHAIN, PROPOSAL_OFFCHAIN, POOL_OFFCHAIN] {
+            assert_eq!(bodies.validity, Validity::Immutable, "{}", bodies.name);
+            let limits = FillLimits {
+                concurrent: 16,
+                pending: 64,
+            };
+            assert_eq!(bodies.fill_limits, Some(limits), "{}", bodies.name);
+        }
     }
 
     /// A failure answers until its TTL passes, then the anchor is fetched
@@ -1042,10 +1409,8 @@ mod tests {
             MetadataError::ConnectionError
         );
 
-        // the failure lands from a fill of its own
-        while cached_drep_metadata(&cache, &anchor).await.is_none() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
+        // the failure is kept before the fetch answers
+        assert!(cached_drep_metadata(&cache, &anchor).await.is_some());
 
         let served =
             load_anchor_metadata(&cache, DREP_CACHE, &anchor, OnOverload::Unfetched, &failing)

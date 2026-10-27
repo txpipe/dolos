@@ -469,8 +469,10 @@ pub(crate) fn pool_fetch_error(
     error: OffchainFetchError,
 ) -> Option<DrepsInnerMetadataError> {
     match error {
-        OffchainFetchError::Client | OffchainFetchError::Body => None,
-        OffchainFetchError::Connection => Some(pool_connection_error(url)),
+        OffchainFetchError::Client => None,
+        OffchainFetchError::Connection | OffchainFetchError::Body => {
+            Some(pool_connection_error(url))
+        }
         OffchainFetchError::HttpResponse(status) => Some(pool_http_response_error(url, status)),
         OffchainFetchError::SizeExceeded => Some(pool_size_error(url)),
     }

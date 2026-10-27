@@ -10,18 +10,18 @@ Dolos keeps a cache of answers it derives from its other stores, so that an expe
 
 The cache is split into namespaces, one per use. Each namespace has a format version; an upgrade that changes a namespace's encoding bumps it, and the entries kept under the old version are wiped when the node starts.
 
-| namespace            | validity   | serves                                                                                                        |
-| -------------------- | ---------- | ------------------------------------------------------------------------------------------------------------- |
-| `totals`             | immutable  | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total`           |
-| `network`            | tip-scoped | the `/network` body, for 30 seconds                                                                           |
-| `offchain`           | immutable  | verified DRep metadata of `/governance/dreps` and `/governance/dreps/{drep_id}/metadata`, by content hash |
-| `offchain-failures`  | tip-scoped | failed DRep metadata fetches, for 10 minutes, keyed by content hash and URL |
-| `proposal-offchain` | immutable | verified proposal metadata for both `/governance/proposals` metadata endpoints, by content hash |
-| `proposal-offchain-failures` | tip-scoped | failed proposal metadata fetches, for 10 minutes, keyed by content hash and URL |
-| `pool-offchain` | immutable | verified pool metadata for `/pools/{pool_id}/metadata`, `/pools/extended`, and `/txs/{hash}/pool_updates`, by content hash |
-| `pool-offchain-failures` | tip-scoped | failed pool metadata fetches, for 10 minutes, keyed by content hash and URL |
-| `pool-registrations` | immutable  | where each pool first registered, for the order of `/pools` and `/pools/extended`                             |
-| `pool-blocks`        | immutable  | each pool's lifetime blocks, for `blocks_minted` in `/pools/extended` and `/pools/{pool_id}`                  |
+| namespace                    | validity   | serves                                                                                                                     |
+| ---------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `totals`                     | immutable  | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total`                        |
+| `network`                    | tip-scoped | the `/network` body, for 30 seconds                                                                                        |
+| `offchain`                   | immutable  | verified DRep metadata of `/governance/dreps` and `/governance/dreps/{drep_id}/metadata`, by content hash                  |
+| `offchain-failures`          | tip-scoped | failed DRep metadata fetches, for 10 minutes, keyed by content hash and URL                                                |
+| `proposal-offchain`          | immutable  | verified proposal metadata for both `/governance/proposals` metadata endpoints, by content hash                            |
+| `proposal-offchain-failures` | tip-scoped | failed proposal metadata fetches, for 10 minutes, keyed by content hash and URL                                            |
+| `pool-offchain`              | immutable  | verified pool metadata for `/pools/{pool_id}/metadata`, `/pools/extended`, and `/txs/{hash}/pool_updates`, by content hash |
+| `pool-offchain-failures`     | tip-scoped | failed pool metadata fetches, for 10 minutes, keyed by content hash and URL                                                |
+| `pool-registrations`         | immutable  | where each pool first registered, for the order of `/pools` and `/pools/extended`                                          |
+| `pool-blocks`                | immutable  | each pool's lifetime blocks, for `blocks_minted` in `/pools/extended` and `/pools/{pool_id}`                               |
 
 A namespace has one of two validity models:
 
@@ -30,18 +30,22 @@ A namespace has one of two validity models:
 
 The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file found corrupt, cut short, or laid out by another release, such as one you rolled back from, is recreated empty; one that fails to open for another reason, such as its permissions, is an error and the node does not start.
 
-DRep, proposal and pool metadata use the same cache loader, each with its own namespaces.
-Each metadata cache permits 16 concurrent fetches and 64 pending loads, so one kind never waits for another kind's fetches.
-A pool fetch keeps its five-second timeout and 512-byte limit.
-Pool extended listings wait at most five seconds for metadata.
-Up to 64 fetches continue in the background after that deadline and store their results.
-Fetches past that limit stop at the deadline.
+DRep, proposal and pool metadata use the same cache loader, each kind with its own namespaces.
+Each kind runs at most 16 fetches at once and keeps at most 64 in progress, so one kind never waits for another kind's fetches.
+A fetch in progress continues after its request ends and stores its result.
 
-Once cached, a verified pool body remains available during an upstream outage until eviction or deletion.
+A pool fetch keeps its five-second timeout and 512-byte limit.
+`/pools/extended` fetches at most 16 of its rows at a time and waits at most five seconds, the wait for a fetch slot included.
+Rows not started by then show no metadata, and a later request fetches them.
+`/pools/{pool_id}/metadata` and `/txs/{hash}/pool_updates` wait at most 10 seconds for a fetch, and the proposal metadata routes at most 15 seconds.
+A fetch past that deadline continues and stores its result for the next request.
+
+Once cached, a verified body remains available during an upstream outage until eviction or deletion.
 A new advertised hash triggers a new fetch.
 Failures stay in memory for 10 minutes, then the next request retries.
 There is no background retry timer.
-Disabling the cache makes each request fetch again.
+With the cache disabled, nothing is kept, so each request fetches again.
+The fetch limits and deadlines still apply.
 
 ## Budgets and admission
 
@@ -53,7 +57,7 @@ Disabling the cache makes each request fetch again.
 
 When a tier is full, it evicts the entries with the lowest build cost per byte first, and the least recently used among equals.
 
-An entry is kept only if building it cost at least its namespace's admission threshold, so cheap answers do not crowd out expensive ones. A `totals` entry's cost is the number of per-epoch unit sums its build read, and it is kept from 100,000. Set `[storage.cache.admission]` to change a threshold, for example `totals = 20000` to keep more credentials. See the [`storage.cache`](../configuration/schema#storagecache) section for every setting.
+An entry is kept only if building it cost at least its namespace's admission threshold, so cheap answers do not crowd out expensive ones. A `totals` entry's cost is the number of per-epoch unit sums its build read, and it is kept from 100,000. An off-chain metadata entry's cost is the time its fetch took, in milliseconds. Set `[storage.cache.admission]` to change a threshold, for example `totals = 20000` to keep more credentials. See the [`storage.cache`](../configuration/schema#storagecache) section for every setting.
 
 ## Footprint
 
@@ -119,4 +123,4 @@ That makes the pool lists slower with the cache off, since `/pools` and `/pools/
 | `/pools?count=100`          | 2.3 ms   | 26.7 ms         | 158 ms                |
 | `/pools/extended?count=100` | 5.32 s   | 5.45 s          | 5.53 s                |
 
-The cost grows with the number of pools, so on mainnet it is several times larger. `/pools/{pool_id}` reads only its own pool and is not affected.
+The `/pools/extended` row was measured before pool metadata was cached, so it shows a page whose metadata is not cached yet. The cost grows with the number of pools, so on mainnet it is several times larger. `/pools/{pool_id}` reads only its own pool and is not affected.

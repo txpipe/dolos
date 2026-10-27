@@ -308,46 +308,13 @@ impl<'a> TxModelBuilder<'a> {
             .tx()?
             .certs()
             .iter()
-            .filter_map(|cert| match cert {
-                MultiEraCert::AlonzoCompatible(cow) => {
-                    if let AlonzoCert::PoolRegistration {
-                        operator,
-                        ref pool_metadata,
-                        ..
-                    } = *(**cow).clone()
-                    {
-                        pool_metadata
-                            .as_ref()
-                            .map(|meta| (operator, meta.url.clone(), meta.hash.clone()))
-                    } else {
-                        None
-                    }
-                }
-                MultiEraCert::Conway(cow) => {
-                    if let ConwayCert::PoolRegistration {
-                        operator,
-                        ref pool_metadata,
-                        ..
-                    } = *(**cow).clone()
-                    {
-                        pool_metadata
-                            .as_ref()
-                            .map(|meta| (operator, meta.url.clone(), meta.hash.clone()))
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
+            .filter_map(pallas_extras::cert_as_pool_registration)
+            .filter_map(|reg| reg.pool_metadata.map(|metadata| (reg.operator, metadata)))
             .collect_vec();
 
         self.pool_metadata = join_all(pool_registrations.iter().map(
-            |(pool_hash, url, hash)| async move {
-                let metadata = pallas::ledger::primitives::PoolMetadata {
-                    url: url.clone(),
-                    hash: hash.clone(),
-                };
-                crate::offchain::fetch_pool_metadata(cache, &metadata)
+            |(pool_hash, metadata)| async move {
+                crate::offchain::fetch_pool_metadata(cache, metadata)
                     .await
                     .0
                     .map(|meta| (*pool_hash, meta))

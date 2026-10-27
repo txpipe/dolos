@@ -123,6 +123,55 @@ mod tests {
         assert!(single["error"].is_null());
     }
 
+    #[tokio::test]
+    async fn the_pool_list_and_metadata_routes_share_a_cached_failure() {
+        use dolos_testing::synthetic::SyntheticBlockConfig;
+        use pallas::ledger::primitives::{
+            conway::Certificate, Bytes, PoolMetadata, RationalNumber, Set,
+        };
+
+        let metadata = PoolMetadata {
+            url: "https://example.invalid/failed.json".to_string(),
+            hash: vec![7u8; 32].into(),
+        };
+        let operator = [0x7a; 28];
+        let registration = Certificate::PoolRegistration {
+            operator: operator.into(),
+            vrf_keyhash: [1u8; 32].into(),
+            pledge: 0,
+            cost: 0,
+            margin: RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account: Bytes::from([&[0xe0][..], &[0x22; 28][..]].concat()),
+            pool_owners: Set::from(vec![[3u8; 28].into()]),
+            relays: vec![],
+            pool_metadata: Some(metadata.clone()),
+        };
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 1,
+            extra_certs_by_block: vec![vec![vec![registration]]],
+            ..Default::default()
+        });
+        let error = crate::mapping::pool_connection_error(&metadata.url);
+        crate::offchain::cache_pool_failure(app.facade().inner.cache(), &metadata, error.clone())
+            .await;
+
+        let pool_id = crate::mapping::bech32_pool(operator).unwrap();
+        let expected = serde_json::to_value(&error).unwrap();
+        let single: serde_json::Value = get_ok(&app, &format!("/pools/{pool_id}/metadata")).await;
+        let extended: Vec<serde_json::Value> = get_ok(&app, "/pools/extended").await;
+        let listed = extended
+            .iter()
+            .find(|row| row["pool_id"] == pool_id)
+            .unwrap();
+        assert_eq!(single["error"], expected);
+        assert_eq!(listed["metadata"]["error"], expected);
+        assert!(listed["metadata"]["ticker"].is_null());
+    }
+
     /// db-sync's rule: a certificate registers a pool that was not registered
     /// at the end of the previous block, because it never registered or its
     /// retirement took effect, and otherwise updates it, cancelling a pending
