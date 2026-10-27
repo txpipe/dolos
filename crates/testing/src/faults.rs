@@ -102,9 +102,22 @@ impl FaultyToyDomain {
     ) {
         *self.state.tag_page_hook.lock().expect("tag page hook") = Some(Box::new(hook));
     }
+
+    /// Runs `hook` once, after the next [`ArchiveStore::entity_slots`] read
+    /// answers and before the caller gets the slots: a write that lands
+    /// between a lookup's index read and its next read.
+    pub fn after_entity_slots(&self, hook: impl FnOnce() + Send + 'static) {
+        *self
+            .archive
+            .entity_slots_hook
+            .lock()
+            .expect("entity slots hook") = Some(Box::new(hook));
+    }
 }
 
 type TagPageHook = Box<dyn FnMut(&[TagEntry], &MemoryStateStore) + Send>;
+
+type EntitySlotsHook = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone)]
 pub struct FaultyStateStore {
@@ -334,6 +347,7 @@ pub struct FaultyArchiveStore {
     inner: MemoryArchiveStore,
     fault: TestFault,
     commits: Arc<AtomicU32>,
+    entity_slots_hook: Arc<Mutex<Option<EntitySlotsHook>>>,
 }
 
 impl FaultyArchiveStore {
@@ -346,6 +360,7 @@ impl FaultyArchiveStore {
             inner,
             fault,
             commits,
+            entity_slots_hook: Default::default(),
         }
     }
 
@@ -489,7 +504,19 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.entity_slots(kind, keys)
+        let slots = self.inner.entity_slots(kind, keys)?;
+
+        let hook = self
+            .entity_slots_hook
+            .lock()
+            .expect("entity slots hook")
+            .take();
+
+        if let Some(hook) = hook {
+            hook();
+        }
+
+        Ok(slots)
     }
 
     fn slots_by_tag(

@@ -204,7 +204,8 @@ const WAL_METADATA_VERSION_KEY: &str = "version";
 ///    asset.
 /// 6: the DRep and pool deltas drop the fields minibf now derives, and
 ///    `DRepAnchorUpdate` and `DRepPowerUpdate` retire.
-pub const CURRENT_WAL_VERSION: u32 = 6;
+/// 7: `ScriptFirstSeen` retires.
+pub const CURRENT_WAL_VERSION: u32 = 7;
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 

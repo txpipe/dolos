@@ -114,7 +114,7 @@ use dolos_cardano::model::{
     DRepState, DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolEpochLog, PoolState, ProposalState, ScriptState,
+    PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{ChainPoint, EntityKind, Namespace};
 use serde_json::json;
@@ -209,6 +209,16 @@ pub const ENTITY_KINDS: [(&str, EntityKind); 2] = [
     ("entity-script", entities::SCRIPT),
 ];
 
+/// The entity kinds an earlier profile witnessed in a state namespace, with
+/// that namespace.
+///
+/// A publisher that still declares the namespace in `parameters.schemas`
+/// kept the kind's first sightings there, so its seals wrote none of the
+/// kind's entries even where it declares the kind. This build reads the
+/// witness from the entity index and does not restore the namespace, so a
+/// restore refuses such a stele before a store is opened.
+pub const STATE_WITNESSED_KINDS: [(EntityKind, Namespace); 1] = [(entities::SCRIPT, "scripts")];
+
 /// The entity kinds alone, in [`ENTITY_KINDS`] order: what an export walks
 /// the archive's entity index for.
 pub const ENTITY_INDEX_KINDS: [EntityKind; ENTITY_KINDS.len()] = {
@@ -259,12 +269,12 @@ pub fn entity_kind_for(kind: &str) -> Option<EntityKind> {
 /// not a constructor (`state_kinds_derive_from_their_namespaces`).
 ///
 /// The shard count is **specification, never tuning**: the namespaces whose
-/// populations are chain-scale — the UTxO set, accounts, assets, datums and
-/// scripts — shard sixteen ways by the first key nibble, and every other
+/// populations are chain-scale — the UTxO set, accounts, assets and datums —
+/// shard sixteen ways by the first key nibble, and every other
 /// namespace is a single blob. Re-sharding a namespace is a media-type-version
 /// event for that namespace's kind, decided by the format's owner; it is not a
 /// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 23] = [
+pub const STATE_KINDS: [(&str, Namespace, u8); 22] = [
     ("state-account-addresses", AccountAddressSet::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
@@ -286,7 +296,6 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 23] = [
     ("state-pending-rewards", PendingRewardState::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
-    ("state-scripts", ScriptState::NS, 16),
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 
@@ -722,6 +731,18 @@ pub enum Error {
          it would leave that kind's first sightings silently empty"
     )]
     UndeclaredEntityKind { kind: &'static str },
+
+    /// An entity kind the stele's publisher witnessed in a state namespace
+    /// ([`STATE_WITNESSED_KINDS`]), so the stele holds none of its entries.
+    #[error(
+        "this stele's publisher keeps entity kind {kind:?}'s first sightings in state namespace \
+         {namespace:?} and wrote no {kind} entries; restoring it would take every known {kind} \
+         for a first sighting"
+    )]
+    StateWitnessedEntityKind {
+        kind: &'static str,
+        namespace: Namespace,
+    },
 
     /// An entity kind the stele declares at a different id width than this
     /// build registers: its ids could not be the ids this build looks up.
