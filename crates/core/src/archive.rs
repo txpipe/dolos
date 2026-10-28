@@ -209,6 +209,19 @@ pub trait ArchiveWriter: Send + Sync + 'static {
         self.write_log(ns, &LogKey::of(slot, key), &raw)
     }
 
+    /// Remove the log row at `key`, as a seal does when it writes a list
+    /// shorter than the one an earlier run sealed. Removing a row that is
+    /// not there does nothing.
+    fn delete_log(&self, ns: Namespace, key: &LogKey) -> Result<(), ArchiveError>;
+
+    fn delete_log_typed<E: LogEntity>(
+        &self,
+        slot: BlockSlot,
+        key: &E::Key,
+    ) -> Result<(), ArchiveError> {
+        self.delete_log(E::NS, &LogKey::of(slot, key))
+    }
+
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError>;
 
     /// Record in the entity index the slot an entity was first seen at.

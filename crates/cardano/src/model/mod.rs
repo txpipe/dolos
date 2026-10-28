@@ -153,7 +153,6 @@ pub use stats::*;
 pub enum CardanoEntity {
     EraState(Box<EraState>),
     AccountState(Box<AccountState>),
-    AssetState(Box<AssetState>),
     PoolState(Box<PoolState>),
     EpochState(Box<EpochState>),
     DRepState(Box<DRepState>),
@@ -205,7 +204,6 @@ macro_rules! variant_boilerplate {
 
 variant_boilerplate!(EraState);
 variant_boilerplate!(AccountState);
-variant_boilerplate!(AssetState);
 variant_boilerplate!(PoolState);
 variant_boilerplate!(EpochState);
 variant_boilerplate!(DRepState);
@@ -240,7 +238,6 @@ impl dolos_core::Entity for CardanoEntity {
         match ns {
             EraState::NS => EraState::decode_entity(ns, value).map(Into::into),
             AccountState::NS => AccountState::decode_entity(ns, value).map(Into::into),
-            AssetState::NS => AssetState::decode_entity(ns, value).map(Into::into),
             PoolState::NS => PoolState::decode_entity(ns, value).map(Into::into),
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
             DRepState::NS => DRepState::decode_entity(ns, value).map(Into::into),
@@ -281,7 +278,6 @@ impl dolos_core::Entity for CardanoEntity {
         match value {
             Self::EraState(x) => EraState::encode_entity(x),
             Self::AccountState(x) => AccountState::encode_entity(x),
-            Self::AssetState(x) => AssetState::encode_entity(x),
             Self::PoolState(x) => PoolState::encode_entity(x),
             Self::EpochState(x) => EpochState::encode_entity(x),
             Self::DRepState(x) => DRepState::encode_entity(x),
@@ -330,7 +326,6 @@ pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
     register_state::<EraState>(&mut schema);
     register_state::<AccountState>(&mut schema);
-    register_state::<AssetState>(&mut schema);
     register_state::<PoolState>(&mut schema);
     register_state::<EpochState>(&mut schema);
     register_state::<DRepState>(&mut schema);
@@ -433,8 +428,11 @@ pub enum CardanoDelta {
     PoolRegistration(Box<PoolRegistration>),
     PoolDeRegistration(Box<PoolDeRegistration>),
     MintedBlocksInc(Box<MintedBlocksInc>),
-    MintStatsUpdate(Box<MintStatsUpdate>),
-    MetadataTxUpdate(Box<MetadataTxUpdate>),
+    /// `MintStatsUpdate`, which kept `AssetState`'s supply, mint count and
+    /// first mint; the asset-mint period logs derive them.
+    RetiredMintStatsUpdate(RetiredDelta),
+    /// `MetadataTxUpdate`, which kept `AssetState`'s metadata tx.
+    RetiredMetadataTxUpdate(RetiredDelta),
     EpochStatsUpdate(Box<EpochStatsUpdate>),
     DRepRegistration(Box<DRepRegistration>),
     DRepUnRegistration(Box<DRepUnRegistration>),
@@ -562,8 +560,6 @@ delta_from!(StakeDeregistration);
 delta_from!(PoolRegistration);
 delta_from!(PoolDeRegistration);
 delta_from!(MintedBlocksInc);
-delta_from!(MintStatsUpdate);
-delta_from!(MetadataTxUpdate);
 delta_from!(EpochStatsUpdate);
 delta_from!(DRepRegistration);
 delta_from!(DRepUnRegistration);
@@ -649,8 +645,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolRegistration(x) => x.key(),
             Self::PoolDeRegistration(x) => x.key(),
             Self::MintedBlocksInc(x) => x.key(),
-            Self::MintStatsUpdate(x) => x.key(),
-            Self::MetadataTxUpdate(x) => x.key(),
             Self::EpochStatsUpdate(x) => x.key(),
             Self::DRepRegistration(x) => x.key(),
             Self::DRepActivity(x) => x.key(),
@@ -717,7 +711,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::CommitteeDissolve(x) => x.key(),
             Self::CommitteeReseat(x) => x.key(),
             Self::PoolCalidusUpdate(x) => x.key(),
-            Self::RetiredDRepAnchorUpdate(x)
+            Self::RetiredMintStatsUpdate(x)
+            | Self::RetiredMetadataTxUpdate(x)
+            | Self::RetiredDRepAnchorUpdate(x)
             | Self::RetiredDRepPowerUpdate(x)
             | Self::RetiredScriptFirstSeen(x) => x.unreachable(),
         }
@@ -733,8 +729,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolDeRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::MintedBlocksInc(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::MintStatsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::MetadataTxUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::EpochStatsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepUnRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -801,7 +795,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::CommitteeDissolve(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::CommitteeReseat(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolCalidusUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
-            Self::RetiredDRepAnchorUpdate(x)
+            Self::RetiredMintStatsUpdate(x)
+            | Self::RetiredMetadataTxUpdate(x)
+            | Self::RetiredDRepAnchorUpdate(x)
             | Self::RetiredDRepPowerUpdate(x)
             | Self::RetiredScriptFirstSeen(x) => x.unreachable(),
         }
@@ -817,8 +813,6 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolDeRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::MintedBlocksInc(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::MintStatsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::MetadataTxUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::EpochStatsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepUnRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
@@ -885,7 +879,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::CommitteeDissolve(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::CommitteeReseat(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolCalidusUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
-            Self::RetiredDRepAnchorUpdate(x)
+            Self::RetiredMintStatsUpdate(x)
+            | Self::RetiredMetadataTxUpdate(x)
+            | Self::RetiredDRepAnchorUpdate(x)
             | Self::RetiredDRepPowerUpdate(x)
             | Self::RetiredScriptFirstSeen(x) => x.unreachable(),
         }
@@ -903,6 +899,8 @@ mod wal_tests {
         let account = AccountKey(StakeCredential::AddrKeyhash([0x11; 28].into()));
         let deltas: Vec<(u32, CardanoDelta)> = vec![
             // retired, never reused
+            (8, CardanoDelta::RetiredMintStatsUpdate(RetiredDelta)),
+            (9, CardanoDelta::RetiredMetadataTxUpdate(RetiredDelta)),
             (45, CardanoDelta::RetiredDRepAnchorUpdate(RetiredDelta)),
             (58, CardanoDelta::RetiredDRepPowerUpdate(RetiredDelta)),
             (

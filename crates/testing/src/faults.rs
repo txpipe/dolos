@@ -128,6 +128,24 @@ impl FaultyToyDomain {
             .lock()
             .expect("entity slots hook") = Some(Box::new(hook));
     }
+
+    /// Runs `hook` once, after the next [`ArchiveStore::read_logs`] read
+    /// answers and before the caller gets the rows: a seal that lands between
+    /// a read of sealed rows and the reader's next read.
+    pub fn after_read_logs(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.archive.read_logs_hook.lock().expect("read logs hook") = Some(Box::new(hook));
+    }
+
+    /// Runs `hook` after every [`ArchiveStore::entity_slots`] read, before the
+    /// caller gets the slots, and at once for reads that run at once: how many
+    /// readers are in flight.
+    pub fn during_entity_slots(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self
+            .archive
+            .each_entity_slots_hook
+            .lock()
+            .expect("entity slots hook") = Some(Arc::new(hook));
+    }
 }
 
 type TagPageHook = Box<dyn FnMut(&[TagEntry], &MemoryStateStore) + Send>;
@@ -135,6 +153,10 @@ type TagPageHook = Box<dyn FnMut(&[TagEntry], &MemoryStateStore) + Send>;
 type EntityReadHook = (Namespace, Box<dyn FnMut(&MemoryStateStore) + Send>);
 
 type EntitySlotsHook = Box<dyn FnOnce() + Send>;
+
+type ReadLogsHook = Box<dyn FnOnce() + Send>;
+
+type EachEntitySlotsHook = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
 pub struct FaultyStateStore {
@@ -380,6 +402,8 @@ pub struct FaultyArchiveStore {
     fault: TestFault,
     commits: Arc<AtomicU32>,
     entity_slots_hook: Arc<Mutex<Option<EntitySlotsHook>>>,
+    each_entity_slots_hook: Arc<Mutex<Option<EachEntitySlotsHook>>>,
+    read_logs_hook: Arc<Mutex<Option<ReadLogsHook>>>,
 }
 
 impl FaultyArchiveStore {
@@ -393,6 +417,8 @@ impl FaultyArchiveStore {
             fault,
             commits,
             entity_slots_hook: Default::default(),
+            each_entity_slots_hook: Default::default(),
+            read_logs_hook: Default::default(),
         }
     }
 
@@ -434,7 +460,15 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.read_logs(ns, keys)
+        let rows = self.inner.read_logs(ns, keys)?;
+
+        let hook = self.read_logs_hook.lock().expect("read logs hook").take();
+
+        if let Some(hook) = hook {
+            hook();
+        }
+
+        Ok(rows)
     }
 
     fn iter_logs(
@@ -548,6 +582,17 @@ impl ArchiveStore for FaultyArchiveStore {
             hook();
         }
 
+        // cloned out, so that readers in flight run it at once
+        let each = self
+            .each_entity_slots_hook
+            .lock()
+            .expect("entity slots hook")
+            .clone();
+
+        if let Some(each) = each {
+            each();
+        }
+
         Ok(slots)
     }
 
@@ -630,6 +675,10 @@ impl ArchiveWriter for FaultyArchiveWriter {
         value: &dolos_core::EntityValue,
     ) -> Result<(), ArchiveError> {
         self.inner.write_log(ns, key, value)
+    }
+
+    fn delete_log(&self, ns: Namespace, key: &LogKey) -> Result<(), ArchiveError> {
+        self.inner.delete_log(ns, key)
     }
 
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {

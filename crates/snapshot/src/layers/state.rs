@@ -46,7 +46,7 @@
 //!
 //! ## Sharding
 //!
-//! The chain-scale namespaces (`utxos`, `accounts`, `assets`, `datums`)
+//! The chain-scale namespaces (`utxos`, `accounts`, `datums`)
 //! split sixteen ways by the first nibble of the first key byte. Keys are
 //! hash-derived (transaction hashes, credentials, script hashes), so the split
 //! is uniform without a hash of its own; shards can be fetched in parallel and
@@ -312,7 +312,7 @@ impl OrderCheck {
 mod tests {
     use dolos_cardano::model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-        AddressStats, AssetKey, AssetMintChunk, AssetMintSet, AssetState, DRepState, EpochState,
+        AddressStats, AssetMintChunk, AssetMintSet, DRepState, DatumKey, DatumState, EpochState,
         EraState, FirstMintSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressSet,
         PaymentStats, PoolState, ProposalState, PrunedAccountState,
     };
@@ -320,9 +320,9 @@ mod tests {
     use super::*;
     use crate::UTXOS;
 
-    /// An asset key: 32 bytes, any of them, so a byte picks its shard.
+    /// A datum key: 32 bytes, any of them, so a byte picks its shard.
     fn entity_key(byte: u8) -> EntityKey {
-        EntityKey::of(&AssetKey([byte; 32].into()))
+        EntityKey::of(&DatumKey([byte; 32].into()))
     }
 
     fn txo(byte: u8, index: u32) -> TxoRef {
@@ -343,8 +343,8 @@ mod tests {
     fn an_entity_record_round_trips() {
         let original = entity(&entity_key(0x5a), &vec![0x82, 0x01, 0x02]);
 
-        let encoded = encode(AssetState::NS, &original).unwrap();
-        let decoded = decode(AssetState::NS, encoded.as_bytes()).unwrap();
+        let encoded = encode(DatumState::NS, &original).unwrap();
+        let decoded = decode(DatumState::NS, encoded.as_bytes()).unwrap();
 
         assert_eq!(decoded, original);
         assert_eq!(as_entity(&decoded), entity_key(0x5a));
@@ -566,15 +566,15 @@ mod tests {
         let utxo_record = utxo(&txo(1, 0), &unpositioned(1, Vec::new())).unwrap();
 
         assert!(as_utxo(&entity_record).is_err());
-        assert!(encode(AssetState::NS, &utxo_record).is_err());
+        assert!(encode(DatumState::NS, &utxo_record).is_err());
         assert!(encode(UTXOS, &entity_record).is_err());
     }
 
     #[test]
     fn a_wrong_width_key_is_refused() {
         for (ns, width) in [
-            (AssetState::NS, UTXO_KEY_LEN),
-            (AssetState::NS, 0),
+            (DatumState::NS, UTXO_KEY_LEN),
+            (DatumState::NS, 0),
             (UTXOS, 32),
             (UTXOS, UTXO_KEY_LEN + 1),
         ] {
@@ -620,7 +620,7 @@ mod tests {
 
         assert!(encode("receipts", &record).is_err());
 
-        let wire = encode(AssetState::NS, &record).unwrap();
+        let wire = encode(DatumState::NS, &record).unwrap();
         assert!(decode("receipts", wire.as_bytes()).is_err());
     }
 

@@ -8,13 +8,14 @@ use serde::{Deserialize, Serialize};
 use super::AssetKey;
 use crate::periods::{ChunkRow, GroupKey, GroupRow, StageIfAbsent};
 
-/// The first mint of an asset within one epoch, held in state until the epoch
-/// seals into a [`FirstMintChunk`] and a [`PolicyMintChunk`].
+/// The first mint of an asset, held in state until its epoch seals into a
+/// [`FirstMintChunk`], a [`PolicyMintChunk`] and the asset's entity index
+/// entry.
 ///
 /// Keyed `policy ‖ epoch ‖ asset key`, so one prefix scan returns every
-/// unsealed epoch of a policy, and nothing else. Re-mints of an asset
-/// first minted in an earlier epoch are staged too; readers and the seal keep
-/// only the rows whose slot is the asset's `initial_slot`.
+/// unsealed epoch of a policy, and nothing else. The roll's witness stages a
+/// row only for an asset that neither the entity index nor another staged row
+/// knows, so every row is a first mint ever.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 pub struct FirstMintSet {
     #[n(0)]
@@ -60,7 +61,7 @@ impl FirstMintSet {
         (self.slot, self.tx_index, self.subject())
     }
 
-    /// The `AssetState` key of the minted asset.
+    /// The key of the minted asset.
     pub fn asset_key(&self) -> AssetKey {
         AssetKey::of_parts(self.policy.as_slice(), &self.name)
     }
