@@ -294,9 +294,16 @@ pub async fn cached_drep_metadata<C: CacheStore>(
     cache: &C,
     anchor: &Anchor,
 ) -> Option<DrepsInnerMetadata> {
-    cached_body(cache, &MetadataLocation::from(anchor), DREP_CACHE)
-        .await
-        .map(|body| anchor_metadata(anchor, body))
+    let (cache, anchor) = (cache.clone(), anchor.clone());
+
+    // a DRep page renders up to 100 bodies, so the render stays off the worker
+    tokio::task::spawn_blocking(move || {
+        cached(&cache, &MetadataLocation::from(&anchor), DREP_CACHE)
+            .map(|body| anchor_metadata(&anchor, body))
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// The metadata of `anchor`, from the cache, else fetched and kept.
