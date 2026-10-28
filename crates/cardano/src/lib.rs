@@ -6,9 +6,9 @@ use tracing::info;
 pub use pallas;
 
 use dolos_core::{
-    config::CustomUtxo, BlockSlot, ChainError, ChainPoint, Domain, DomainError, Genesis,
-    MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore, TipEvent, UtxoValue,
-    WorkUnit,
+    config::CustomUtxo, BlockSlot, ChainError, ChainPoint, Domain, DomainError, EntityMap, Genesis,
+    MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, NsKey, RawBlock, StateError, StateStore,
+    TipEvent, UtxoValue, WorkUnit,
 };
 
 use crate::{
@@ -563,6 +563,21 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
     fn rolling_back<D: Domain>(domain: &D, to: &ChainPoint) {
         estart::stake::warn_on_dropped_rows(domain, to);
+    }
+
+    fn restore_for_undo<S: StateStore>(
+        state: &S,
+        key: &NsKey,
+    ) -> Result<Option<CardanoEntity>, StateError> {
+        estart::prune::restore_for_undo(state, key)
+    }
+
+    fn settle_undo<S: StateStore>(
+        state: &S,
+        entities: &mut EntityMap<CardanoEntity>,
+        restored: &[NsKey],
+    ) -> Result<(), StateError> {
+        estart::prune::settle_undo(state, entities, restored)
     }
 
     fn decode_utxo(&self, utxo: Arc<UtxoValue>) -> Result<Self::Utxo, ChainError> {

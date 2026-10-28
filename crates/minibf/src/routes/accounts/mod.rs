@@ -169,6 +169,43 @@ where
     Ok(stake_tag_seen(domain, account)? || account_appears_in_proposals(domain, account)?)
 }
 
+/// A credential's live row and remainder, as one commit left them
+/// ([`agreeing`]). Each read takes its own snapshot, and two commits move
+/// history between the namespaces: an ESTART shard deletes a dead row and
+/// adds it to the remainder, and a rollback across the boundary restores the
+/// row and takes it back out.
+fn read_rows<D: Domain>(
+    domain: &Facade<D>,
+    account: &AccountKey,
+) -> Result<(Option<AccountState>, Option<PrunedAccountState>), StatusCode> {
+    agreeing(
+        || domain.read_cardano_entity::<AccountState>(account),
+        || domain.read_cardano_entity::<PrunedAccountState>(account),
+    )
+}
+
+/// Read `live`, then `other`, then `live` again, until both reads of `live`
+/// agree: a commit that lands between the first two reads and changes both
+/// changes `live` too, so it is read again. Each retry takes a commit that
+/// changed `live` between two reads.
+fn agreeing<L: PartialEq, O, E>(
+    mut live: impl FnMut() -> Result<L, E>,
+    mut other: impl FnMut() -> Result<O, E>,
+) -> Result<(L, O), E> {
+    let mut first = live()?;
+
+    loop {
+        let second = other()?;
+        let again = live()?;
+
+        if again == first {
+            return Ok((first, second));
+        }
+
+        first = again;
+    }
+}
+
 /// The account `/accounts/{stake}` serves for a credential: its live row, or
 /// a fresh one at `epoch` when state holds none, with the history ESTART
 /// pruned from the credential's earlier lives added back. `None` when no
@@ -185,8 +222,7 @@ where
     Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let live = domain.read_cardano_entity::<AccountState>(account)?;
-    let pruned = domain.read_cardano_entity::<PrunedAccountState>(account)?;
+    let (live, pruned) = read_rows(domain, account)?;
 
     let mut served = match live {
         Some(live) => live,
@@ -209,9 +245,9 @@ where
     Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
-    if domain.cardano_entity_exists::<AccountState>(account)?
-        || domain.cardano_entity_exists::<PrunedAccountState>(account)?
-    {
+    let (live, pruned) = read_rows(domain, account)?;
+
+    if live.is_some() || pruned.is_some() {
         return Ok(true);
     }
 
@@ -827,6 +863,20 @@ mod tests {
     /// answers the same again.
     #[tokio::test]
     async fn a_pruned_deregistered_account_answers_as_main_does() {
+        assert_pruned_twice_answers_as_main_does(0).await;
+    }
+
+    /// As above, with the second life deregistering in a later epoch than the
+    /// first: `active_epoch` comes from the live row's own deregistration, not
+    /// the remainder's.
+    #[tokio::test]
+    async fn an_account_deregistered_again_in_a_later_epoch_answers_as_main_does() {
+        assert_pruned_twice_answers_as_main_does(1).await;
+    }
+
+    /// The pruned credential of the two tests above, its second life
+    /// `later_epochs` after its first.
+    async fn assert_pruned_twice_answers_as_main_does(later_epochs: u64) {
         use dolos_cardano::model::{
             AssignRewards, ControlledAmountDec, ControlledAmountInc, StakeDelegation,
             StakeDeregistration, StakeRegistration, WithdrawalInc,
@@ -835,6 +885,7 @@ mod tests {
         let app = TestApp::new();
         let epoch = app.tip_epoch();
         let slot = app.epoch_start(epoch);
+        let second = app.epoch_start(epoch + later_epochs);
         let credential = StakeCredential::AddrKeyhash([0x6e; 28].into());
         let key = AccountKey::from(&credential);
 
@@ -881,11 +932,11 @@ mod tests {
         let mut fresh = None;
         for step in [
             ControlledAmountInc::new(credential.clone(), false, 4_000_000, epoch).into(),
-            StakeRegistration::new(credential.clone(), slot + 3, epoch, 2_000_000).into(),
+            StakeRegistration::new(credential.clone(), second + 3, epoch, 2_000_000).into(),
             AssignRewards::new(key.clone(), 120_000).into(),
             WithdrawalInc::new(credential.clone(), 100_000).into(),
             WithdrawalInc::new(credential.clone(), 20_000).into(),
-            StakeDeregistration::new(credential.clone(), slot + 4, epoch).into(),
+            StakeDeregistration::new(credential.clone(), second + 4, epoch).into(),
             ControlledAmountDec::new(credential.clone(), false, 4_000_000).into(),
         ] {
             roll_both(&mut main, &mut fresh, step);
@@ -911,7 +962,7 @@ mod tests {
                 key,
                 PrunedAccountState {
                     lifetime_rewards: 570_000,
-                    deregistered_at: Some(slot + 4),
+                    deregistered_at: Some(second + 4),
                 }
             )]
         );
@@ -944,5 +995,31 @@ mod tests {
 
         assert!(read_remainders(&app).is_empty());
         assert_eq!(answers(&app, &credential).await, expected);
+    }
+
+    /// An ESTART shard that prunes the row between the read of the live row
+    /// and the read of the remainder: the reads start again and return the
+    /// pruned pair, never the live row beside the remainder that counts it.
+    #[test]
+    fn a_prune_between_the_reads_is_read_again() {
+        use std::cell::Cell;
+
+        // (live row, remainder): one life's rewards, before and after the prune
+        let before = (Some(450_000), None);
+        let after = (None, Some(450_000));
+
+        let pruned = Cell::new(false);
+        let rows = || if pruned.get() { after } else { before };
+
+        let read = agreeing::<_, _, ()>(
+            || {
+                let live = rows().0;
+                pruned.set(true);
+                Ok(live)
+            },
+            || Ok(rows().1),
+        );
+
+        assert_eq!(read, Ok(after));
     }
 }

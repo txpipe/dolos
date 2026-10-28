@@ -135,7 +135,8 @@ impl super::WorkContext {
     /// accounts of the shard's key ranges once, adding each to the shard's
     /// tally and writing its stake-only account-epoch row to the archive as
     /// it stands, then rotating it and writing it back, or deleting it when
-    /// it is dead ([`super::prune`]). The shard's `EStartProgress` (carrying
+    /// it is dead and not deregistered in the closing epoch
+    /// ([`super::prune`]). The shard's `EStartProgress` (carrying
     /// the tally) applies to `EpochState` in the same transaction, after the
     /// rows reach the archive.
     ///
@@ -161,6 +162,7 @@ impl super::WorkContext {
 
         let next_epoch = self.starting_epoch_no();
         let slot = self.account_epoch_slot();
+        let closing_start = self.chain_summary.epoch_start(self.ended_state().number);
         let mut tally = BTreeMap::new();
         let mut pruned = 0u64;
         let mut remainders = 0u64;
@@ -177,7 +179,7 @@ impl super::WorkContext {
 
                 account.rotate(next_epoch);
 
-                if account.is_dead() {
+                if super::prune::prunes(&account, closing_start) {
                     pruned += 1;
 
                     if super::prune::prune_account(state, &writer, &account_id, &account)? {

@@ -539,6 +539,15 @@ impl PrunedAccountState {
             account.deregistered_at = self.deregistered_at;
         }
     }
+
+    /// Take back `rewards`, the lifetime rewards of a pruned life a rollback
+    /// restored, which the restored row counts again. `None` when nothing is
+    /// left.
+    pub fn without(mut self, rewards: u64) -> Option<Self> {
+        self.lifetime_rewards = sub!(self.lifetime_rewards, rewards);
+
+        (self != Self::default()).then_some(self)
+    }
 }
 
 // --- Deltas ---
