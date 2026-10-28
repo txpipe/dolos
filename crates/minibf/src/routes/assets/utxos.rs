@@ -219,16 +219,15 @@ mod tests {
             .collect();
         assert!(in_block.len() > 1, "need a block with several rows");
 
+        // a reversed index included: Blockfrost compares the heights alone
         for query in [
             format!("from={height}:2&to={height}"),
             format!("from={height}&to={height}:0"),
             format!("from={height}:1&to={height}:1"),
+            format!("from={height}:2&to={height}:1"),
         ] {
             assert_eq!(get(query).await, in_block);
         }
-
-        let path = format!("/assets/{asset}/utxos?from={height}:2&to={height}:1");
-        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     /// Bounds Blockfrost rejects (empty parts, a third part, a number past
@@ -322,6 +321,172 @@ mod tests {
                 .collect();
             assert!(!expected.is_empty(), "{query} selects nothing");
             assert_eq!(parse_utxos(&bytes), expected, "{query}");
+        }
+    }
+
+    /// A fork between the tag read and the value read can move a row's
+    /// transaction to a block outside the range, while its tag entry inside
+    /// the range is the one the walk read. The row is held against the height
+    /// of the block it is in: it is no row of the page.
+    #[tokio::test]
+    async fn assets_by_subject_utxos_hold_a_moved_row_against_the_range() {
+        use dolos_cardano::indexes::utxo_tags;
+        use dolos_core::{
+            indexes::UtxoIndexDelta, StateStore as _, StateWriter as _, TxoRef, UtxoPosition,
+        };
+        use pallas::ledger::traverse::MultiEraOutput;
+
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 2,
+            ..Default::default()
+        });
+        let asset = app.vectors().asset_unit.clone();
+        let blocks = app.vectors().blocks.clone();
+        let (from, to) = (blocks[1].block_number, blocks[3].block_number);
+        let path = format!("/assets/{asset}/utxos?from={from}&to={to}");
+
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+        let within = parse_utxos(&bytes);
+        assert!(within
+            .iter()
+            .all(|x| (from..=to).contains(&(x.block_height as u64))));
+
+        let (status, bytes) = app.get_bytes(&format!("/assets/{asset}/utxos")).await;
+        assert_eq!(status, StatusCode::OK);
+        let moved = parse_utxos(&bytes)
+            .into_iter()
+            .find(|x| x.block_height as u64 == blocks[4].block_number)
+            .expect("a row past the range");
+
+        // the tag entry of a row of the last block sits inside the range,
+        // off its edges, as a fork that moved the row there would leave it
+        let domain = app.facade().inner;
+        let txo = TxoRef(
+            moved.tx_hash.parse().expect("tx hash"),
+            moved.output_index as u32,
+        );
+        let value = domain
+            .state()
+            .get_utxos(vec![txo.clone()])
+            .expect("utxo read")
+            .remove(&txo)
+            .expect("the moved row's value");
+        let output = MultiEraOutput::try_from(value.as_ref()).expect("output");
+        let position = Some(UtxoPosition::new(blocks[2].slot, 0));
+        let delta = UtxoIndexDelta {
+            produced: vec![(txo, position, utxo_tags(&output))],
+            consumed: vec![],
+        };
+        let writer = domain.state().start_writer().expect("state writer");
+        writer.apply_utxo_tags(&delta).expect("apply tags");
+        writer.commit().expect("commit");
+
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parse_utxos(&bytes), within);
+    }
+
+    fn five_blocks() -> SyntheticBlockConfig {
+        SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 2,
+            ..Default::default()
+        }
+    }
+
+    /// The five-block chain with one more tag entry in block `block`: beside
+    /// the asset row of the block's first transaction, for a ref of that
+    /// transaction that is not live. It is what a walk holds of a UTxO spent
+    /// between its tag read and its value read.
+    fn chain_with_a_spent_entry_in(block: usize) -> TestApp {
+        use dolos_cardano::indexes::utxo_tags;
+        use dolos_core::{
+            indexes::UtxoIndexDelta, StateStore as _, StateWriter as _, TxoRef, UtxoPosition,
+        };
+        use pallas::ledger::traverse::MultiEraOutput;
+
+        TestApp::new_with_cfg_and_setup(five_blocks(), move |domain, vectors| {
+            let at = &vectors.blocks[block];
+            let tx_hash = at.tx_hashes[0].parse().expect("tx hash");
+            let row = TxoRef(tx_hash, 0);
+
+            let value = domain
+                .state()
+                .get_utxos(vec![row.clone()])
+                .expect("utxo read")
+                .remove(&row)
+                .expect("the asset row of the block's first transaction");
+            let output = MultiEraOutput::try_from(value.as_ref()).expect("output");
+
+            let spent = TxoRef(tx_hash, u32::MAX - 1);
+            let position = Some(UtxoPosition::new(at.slot, 0));
+            let delta = UtxoIndexDelta {
+                produced: vec![(spent, position, utxo_tags(&output))],
+                consumed: vec![],
+            };
+
+            let writer = domain.state().start_writer().expect("state writer");
+            writer.apply_utxo_tags(&delta).expect("apply tags");
+            writer.commit().expect("commit");
+        })
+    }
+
+    /// The one-row page of `query` past `skip` rows.
+    async fn row_past(app: &TestApp, query: &str, skip: usize) -> Vec<AssetUtxoContentInner> {
+        let asset = app.vectors().asset_unit.as_str();
+        let page = skip + 1;
+        let path = format!("/assets/{asset}/utxos?{query}&count=1&page={page}");
+
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+
+        parse_utxos(&bytes)
+    }
+
+    /// An offset means the same on an edge zone as off it. A UTxO spent since
+    /// its tag read holds its place in the offset when its block is in the
+    /// range, as an entry counted unread does off the edges, and holds none
+    /// when its block is outside the range.
+    #[tokio::test]
+    async fn assets_by_subject_utxos_count_a_spent_edge_row_as_off_the_edges() {
+        let plain = TestApp::new_with_cfg(five_blocks());
+        let asset = plain.vectors().asset_unit.clone();
+        let blocks = plain.vectors().blocks.clone();
+        let (below, from) = (blocks[1].block_number, blocks[2].block_number);
+
+        // `from` puts its own block and the one below it on the edge; from
+        // the block below, the same rows are off the edge
+        let on_edge = format!("from={from}");
+        let off_edge = format!("from={below}");
+
+        let listing = |query: &str| format!("/assets/{asset}/utxos?{query}&count=100");
+        let (_, bytes) = plain.get_bytes(&listing(&on_edge)).await;
+        let rows = parse_utxos(&bytes);
+        let (_, bytes) = plain.get_bytes(&listing(&off_edge)).await;
+        let lead = parse_utxos(&bytes).len() - rows.len();
+        assert!(rows.len() > 2 && lead > 0, "the fixture lists too few rows");
+
+        // spent in the first block of the range: it holds a place in the
+        // offset wherever the range puts its block
+        let app = chain_with_a_spent_entry_in(2);
+        let mut shifted = false;
+
+        for skip in 0..=rows.len() {
+            let row = row_past(&app, &on_edge, skip).await;
+            assert_eq!(row, row_past(&app, &off_edge, skip + lead).await, "{skip}");
+            shifted |= row.first() != rows.get(skip);
+        }
+
+        assert!(shifted, "the spent entry held no place in the offset");
+
+        // spent in the block below the range: not a row of it, so no place
+        let app = chain_with_a_spent_entry_in(1);
+
+        for skip in 0..=rows.len() {
+            let expected: Vec<_> = rows.get(skip).cloned().into_iter().collect();
+            assert_eq!(row_past(&app, &on_edge, skip).await, expected, "{skip}");
         }
     }
 

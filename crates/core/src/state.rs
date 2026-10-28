@@ -4,8 +4,8 @@ use itertools::Itertools;
 
 use crate::{
     keys::{EntityKey, KeyCodec, KeyError, KeyRange, RangeOf},
-    ChainError, ChainLogic, ChainPoint, Domain, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap,
-    UtxoPosition, UtxoSet, UtxoSetDelta, UtxoValue, TAG_ORDER_LEN,
+    BlockSlot, ChainError, ChainLogic, ChainPoint, Domain, TagDimension, TxoRef, UtxoIndexDelta,
+    UtxoMap, UtxoPosition, UtxoSet, UtxoSetDelta, UtxoValue, TAG_ORDER_LEN,
 };
 
 pub type Namespace = &'static str;
@@ -205,6 +205,36 @@ impl TagEntry {
             order: UtxoPosition::tag_order(position),
             txo,
         }
+    }
+
+    /// The position the entry's order names; `None` for a UTxO without one.
+    pub fn position(&self) -> Option<UtxoPosition> {
+        UtxoPosition::from_tag_order(&self.order)
+    }
+
+    /// A bound for [`TagStart::After`] that every entry created at `slot` or
+    /// later sorts after, and every entry created before `slot` sorts before.
+    /// At slot 0 it still sorts after the entries without a position.
+    pub fn before_slot(slot: BlockSlot) -> Self {
+        let position = slot
+            .checked_sub(1)
+            .map(|previous| UtxoPosition::new(previous, UtxoPosition::MAX_TX_INDEX));
+
+        Self::new(position, Self::last_txo())
+    }
+
+    /// A bound for [`TagStart::After`] that every entry created at `slot` or
+    /// earlier sorts before.
+    pub fn past_slot(slot: BlockSlot) -> Self {
+        let position = UtxoPosition::new(slot, UtxoPosition::MAX_TX_INDEX);
+
+        Self::new(Some(position), Self::last_txo())
+    }
+
+    /// The ref every real entry sorts before: no transaction hashes to all
+    /// ones.
+    fn last_txo() -> TxoRef {
+        TxoRef([0xff; 32].into(), u32::MAX)
     }
 }
 

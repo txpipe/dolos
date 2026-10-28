@@ -1939,13 +1939,8 @@ impl<'a> IntoModel<ScriptUtxosInner> for UtxoOutputModelBuilder<'a> {
 }
 
 impl<'a> IntoModel<AssetUtxoContentInner> for UtxoOutputModelBuilder<'a> {
-    type SortKey = (u64, usize, u32);
-
-    fn sort_key(&self) -> Option<Self::SortKey> {
-        self.block_data
-            .as_ref()
-            .map(|data| (data.slot, data.tx_index, self.txo_ref.1))
-    }
+    // the rows come in the walk's order and are not sorted again
+    type SortKey = ();
 
     fn into_model(self) -> Result<AssetUtxoContentInner, StatusCode> {
         let inline_datum = self.output.datum().and_then(|x| match x {

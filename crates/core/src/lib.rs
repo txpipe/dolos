@@ -253,6 +253,16 @@ impl UtxoPosition {
 
         bytes
     }
+
+    /// The position [`Self::tag_order`] wrote into `order`; `None` for the
+    /// all-zero order of a UTxO without one.
+    pub fn from_tag_order(order: &[u8; TAG_ORDER_LEN]) -> Option<Self> {
+        let (slot, index) = order.split_at(8);
+        let slot = BlockSlot::from_be_bytes(slot.try_into().expect("eight slot bytes"));
+        let index = u16::from_be_bytes(index.try_into().expect("two index bytes"));
+
+        Some(Self::new(slot, index.checked_sub(1)?))
+    }
 }
 
 /// A live UTxO as the state store keeps it: the output, and the position of
@@ -1131,6 +1141,50 @@ mod tests {
         }
 
         assert_eq!(order(None), [0; TAG_ORDER_LEN]);
+    }
+
+    /// The slot bounds sit between the entries of two slots: past every
+    /// entry of the slots on one side, before every entry of the other.
+    #[test]
+    fn tag_entry_slot_bounds_split_the_entries_by_slot() {
+        let entry = |position: Option<(u64, u16)>, index: u32| {
+            TagEntry::new(
+                position.map(|(slot, tx)| UtxoPosition::new(slot, tx)),
+                TxoRef([0xfe; 32].into(), index),
+            )
+        };
+
+        let unpositioned = entry(None, u32::MAX);
+        let last_of_4 = entry(Some((4, UtxoPosition::MAX_TX_INDEX)), u32::MAX);
+        let first_of_5 = entry(Some((5, 0)), 0);
+        let last_of_5 = entry(Some((5, UtxoPosition::MAX_TX_INDEX)), u32::MAX);
+        let first_of_6 = entry(Some((6, 0)), 0);
+
+        assert!(last_of_4 < TagEntry::before_slot(5));
+        assert!(TagEntry::before_slot(5) < first_of_5);
+
+        assert!(last_of_5 < TagEntry::past_slot(5));
+        assert!(TagEntry::past_slot(5) < first_of_6);
+
+        // at slot 0 the entries without a position stay behind the bound
+        assert!(unpositioned < TagEntry::before_slot(0));
+        assert!(TagEntry::before_slot(0) < entry(Some((0, 0)), 0));
+
+        assert_eq!(first_of_5.position(), Some(UtxoPosition::new(5, 0)));
+        assert_eq!(unpositioned.position(), None);
+    }
+
+    #[test]
+    fn tag_order_reads_back_as_the_position() {
+        for position in [
+            None,
+            Some(UtxoPosition::new(0, 0)),
+            Some(UtxoPosition::new(7, 3)),
+            Some(UtxoPosition::new(u64::MAX, UtxoPosition::MAX_TX_INDEX)),
+        ] {
+            let order = UtxoPosition::tag_order(position);
+            assert_eq!(UtxoPosition::from_tag_order(&order), position);
+        }
     }
 
     #[test]

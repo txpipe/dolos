@@ -471,6 +471,41 @@ impl ArchiveStore {
         }
     }
 
+    /// The bodies at the locations `pick` keeps of those recorded at `slot`,
+    /// in the order it gives them, read from `snapshot` first.
+    ///
+    /// A prune deletes a segment file after committing the removal of its
+    /// entries, but a snapshot taken before that commit can still name a
+    /// location in it. A body that fails to read is read again from a fresh
+    /// snapshot while the slot's locations keep changing, so a block a prune
+    /// took reads as a block not held, and is an error once they stay.
+    fn read_bodies_at(
+        &self,
+        mut snapshot: Snapshot,
+        slot: BlockSlot,
+        pick: impl Fn(Vec<BlockLocation>) -> Vec<BlockLocation>,
+    ) -> Result<Vec<BlockBody>, ArchiveError> {
+        let mut failed: Option<Vec<BlockLocation>> = None;
+
+        loop {
+            let locations = pick(self.stored_locations(&snapshot, slot)?);
+
+            let bodies: std::io::Result<Vec<BlockBody>> = locations
+                .iter()
+                .map(|loc| self.flatfiles.read(loc))
+                .collect();
+
+            match bodies {
+                Ok(bodies) => return Ok(bodies),
+                Err(error) if failed.as_ref() == Some(&locations) => return Err(io_err(error)),
+                Err(_) => {
+                    failed = Some(locations);
+                    snapshot = self.db.snapshot();
+                }
+            }
+        }
+    }
+
     /// Resume one pass within a shared row budget, or finish all work when
     /// uncapped. `true` means no active or currently due pass remains; a
     /// sub-threshold tail of expired entries can still await the next
@@ -1142,25 +1177,20 @@ impl CoreArchiveStore for ArchiveStore {
     }
 
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
-        let snapshot = self.db.snapshot();
-        let locations = self.stored_locations(&snapshot, *slot)?;
+        let bodies = self.read_bodies_at(self.db.snapshot(), *slot, |mut locations| {
+            locations.truncate(1);
+            locations
+        })?;
 
-        match locations.first() {
-            Some(loc) => Ok(Some(self.flatfiles.read(loc).map_err(io_err)?)),
-            None => Ok(None),
-        }
+        Ok(bodies.into_iter().next())
     }
 
     /// Every block the archive holds at `slot`, in chain order.
     fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
-        let snapshot = self.db.snapshot();
-        let locations = self.stored_locations(&snapshot, *slot)?;
-
-        locations
-            .into_iter()
-            .rev()
-            .map(|loc| self.flatfiles.read(&loc).map_err(io_err))
-            .collect()
+        self.read_bodies_at(self.db.snapshot(), *slot, |mut locations| {
+            locations.reverse();
+            locations
+        })
     }
 
     fn get_range<'a>(
@@ -1229,6 +1259,52 @@ impl CoreArchiveStore for ArchiveStore {
         let body = self.flatfiles.read(&loc).map_err(io_err)?;
 
         Ok(Some((slot, body)))
+    }
+
+    /// The first index entry and, of the blocks at it, the first in chain
+    /// order, the one [`Self::get_range`] yields first: at a slot a Byron
+    /// boundary block shares with the main block after it, the boundary
+    /// block, which the packed value lists last. Read as [`Self::get_tip`]
+    /// reads the tip, so a body the flat files cannot serve is an error here,
+    /// where the block iterator would step over it to the next block.
+    ///
+    /// The body is read as [`Self::read_bodies_at`] reads any slot's, so a
+    /// prune that takes the oldest slot under this read leaves it holding no
+    /// block, and the read moves on to the entry that is the oldest by then.
+    fn get_oldest(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+        let mut emptied: Option<BlockSlot> = None;
+
+        loop {
+            let snapshot = self.db.snapshot();
+
+            let Some(guard) = snapshot.first_key_value(&self.blocks) else {
+                return Ok(None);
+            };
+
+            let key = guard.key().map_err(fjall_err)?;
+
+            let slot_bytes: [u8; 8] = key
+                .as_ref()
+                .get(..8)
+                .and_then(|b| b.try_into().ok())
+                .ok_or_else(|| ArchiveError::InternalError("malformed blocks key".to_string()))?;
+            let slot = u64::from_be_bytes(slot_bytes);
+
+            let bodies = self.read_bodies_at(snapshot, slot, |locations| {
+                locations.into_iter().last().into_iter().collect()
+            })?;
+
+            match bodies.into_iter().next() {
+                Some(body) => return Ok(Some((slot, body))),
+                // still the first entry, and still without a location
+                None if emptied == Some(slot) => {
+                    return Err(ArchiveError::InternalError(
+                        "empty blocks value".to_string(),
+                    ))
+                }
+                None => emptied = Some(slot),
+            }
+        }
     }
 
     fn prune_history(
@@ -1304,11 +1380,6 @@ impl CoreArchiveStore for ArchiveStore {
             batch.remove(&self.blocks, key);
         }
 
-        let threshold_segment = BlockLocation::segment_for_slot(prune_before);
-        self.flatfiles
-            .delete_segments_before(threshold_segment)
-            .map_err(io_err)?;
-
         // Log rows with a temporal prefix strictly before the cutoff, per
         // namespace — the price of the shared keyspace's hash prefix.
         for (&ns, _) in self.schema.iter() {
@@ -1324,6 +1395,14 @@ impl CoreArchiveStore for ArchiveStore {
 
         let batch = batch.durability(Some(PersistMode::Buffer));
         batch.commit().map_err(fjall_err)?;
+
+        // The segment files go after the commit, so a read of a fresh index
+        // never names a deleted file. A crash in between leaves segments the
+        // next prune deletes, which is harmless.
+        let threshold_segment = BlockLocation::segment_for_slot(prune_before);
+        self.flatfiles
+            .delete_segments_before(threshold_segment)
+            .map_err(io_err)?;
 
         // Index work shares one row budget, even after block pruning converges.
         let indexes_done = self.sweep_indexes(&snapshot, prune_before, max_slots, max_entries)?;
@@ -1539,6 +1618,83 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
+    }
+
+    /// The oldest block is the first slot's body, whatever order the blocks
+    /// were written in; an empty store holds none.
+    #[test]
+    fn oldest_block_is_the_first_slot_held() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        assert_eq!(store.get_oldest().unwrap(), None);
+
+        write(&store, &[(20, body(20, 1)), (10, body(10, 1))]);
+
+        assert_eq!(
+            store.get_oldest().unwrap(),
+            Some((10, body(10, 1).to_vec()))
+        );
+        assert_eq!(store.get_tip().unwrap(), Some((20, body(20, 1).to_vec())));
+
+        // a second block at the oldest slot, as a Byron boundary block shares
+        // its slot with the main block after it: the oldest is still the
+        // first in chain order, the one the range yields first
+        write(&store, &[(10, body(10, 2))]);
+
+        assert_eq!(
+            store.get_oldest().unwrap(),
+            Some((10, body(10, 1).to_vec()))
+        );
+        assert_eq!(
+            store.get_range(None, None).unwrap().next(),
+            Some((10, body(10, 1).to_vec()))
+        );
+    }
+
+    /// A body the flat files cannot serve is an error, as for the tip, unless
+    /// a prune moved the oldest entry past it in the meantime.
+    #[test]
+    fn oldest_block_without_its_file_is_an_error() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(10, body(10, 1)), (20, body(20, 1))]);
+
+        std::fs::remove_file(store.flatfiles.segment_path(0)).unwrap();
+
+        assert!(store.get_oldest().is_err());
+        assert!(store.get_tip().is_err());
+    }
+
+    /// A slot a prune took after the reader's snapshot reads as a slot with no
+    /// block, where the snapshot's location alone fails on the deleted file.
+    #[test]
+    fn slot_pruned_under_a_reader_holds_no_block() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(10, body(10, 1))]);
+
+        // What a prune does to the slot, in its order: the entry, then the
+        // segment file.
+        let stale = store.db.snapshot();
+        let mut batch = store.db.batch();
+        batch.remove(&store.blocks, 10u64.to_be_bytes().to_vec());
+        batch.commit().unwrap();
+        std::fs::remove_file(store.flatfiles.segment_path(0)).unwrap();
+
+        assert_eq!(store.stored_locations(&stale, 10).unwrap().len(), 1);
+
+        let bodies = store.read_bodies_at(stale, 10, |locations| locations);
+        assert!(bodies.unwrap().is_empty());
+    }
+
+    /// A slot still held whose file is gone is an error: reading again finds
+    /// the same locations.
+    #[test]
+    fn held_slot_without_its_file_is_an_error() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(10, body(10, 1))]);
+
+        std::fs::remove_file(store.flatfiles.segment_path(0)).unwrap();
+
+        assert!(store.get_block_by_slot(&10).is_err());
+        assert!(store.get_blocks_by_slot(&10).is_err());
     }
 
     #[test]
