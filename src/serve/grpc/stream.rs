@@ -1,6 +1,7 @@
 use crate::prelude::*;
 use dolos_core::crawl::ChainCrawler;
 use futures_core::Stream;
+use tracing::warn;
 
 pub struct ChainStream;
 
@@ -18,8 +19,27 @@ impl ChainStream {
         Ok(Some(async_stream::stream! {
             yield TipEvent::Mark(intersected.clone());
 
-            while let Some((point, block)) = crawler.next_block() {
-                yield TipEvent::Apply(point, block);
+            loop {
+                match crawler.next_block() {
+                    Ok(Some((point, block))) => yield TipEvent::Apply(point, block),
+                    Ok(None) => break,
+                    Err(err) => {
+                        // Lost the archive/WAL overlap mid-stream. Re-seek from
+                        // where we stalled rather than ending the stream; give up
+                        // only if that point is gone from both stores.
+                        warn!(%err, "crawler lost its overlap, re-seeking from the last point");
+
+                        match crawler.last_point().cloned() {
+                            Some(point) => match ChainCrawler::<D>::start(&domain, &[point]) {
+                                Ok(Some((next, _))) => {
+                                    crawler = next;
+                                }
+                                _ => return,
+                            },
+                            None => return,
+                        }
+                    }
+                }
             }
 
             loop {
