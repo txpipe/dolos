@@ -828,6 +828,29 @@ pub trait ChainLogic: Sized + Send + Sync {
     /// default does nothing.
     fn rolling_back<D: Domain>(_domain: &D, _to: &ChainPoint) {}
 
+    /// The entity a rollback undoes a delta keyed `key` on when it finds the
+    /// entity absent: the delta's own apply removed it, or boundary work
+    /// deleted it after the delta applied, and the undo of a later delta may
+    /// have removed the one that came after it. The default restores nothing,
+    /// and the delta undoes on the absent entity.
+    fn restore_for_undo<S: StateStore>(
+        _state: &S,
+        _key: &NsKey,
+    ) -> Result<Option<Self::Entity>, StateError> {
+        Ok(None)
+    }
+
+    /// Settle `entities` once a rollback has undone every delta, before it
+    /// saves them. `state` still holds what the rollback started from, which
+    /// can be nothing: a fresh node's first rollback, to the origin, comes
+    /// before genesis and undoes nothing. The default does nothing.
+    fn settle_undo<S: StateStore>(
+        _state: &S,
+        _entities: &mut EntityMap<Self::Entity>,
+    ) -> Result<(), StateError> {
+        Ok(())
+    }
+
     // TODO: remove from the interface - this is Cardano-specific
     fn decode_utxo(&self, utxo: Arc<UtxoValue>) -> Result<Self::Utxo, ChainError>;
 

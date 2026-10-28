@@ -72,7 +72,7 @@ Key layouts (decision 0051): every key is the encoding of one typed key struct p
 
 | Namespace | State key | Log key, after `slot(8)` |
 |---|---|---|
-| `accounts`, `pending-rewards`, `pending-mirs` | `AccountKey`: CBOR stake credential, `0x82 ‖ variant ‖ 0x58 0x1c ‖ hash(28)`, 32 B | — |
+| `accounts`, `pending-rewards`, `pending-mirs`, `pruned-accounts` | `AccountKey`: CBOR stake credential, `0x82 ‖ variant ‖ 0x58 0x1c ‖ hash(28)`, 32 B | — |
 | `account-address-chunks` | — | `AccountKey`, 32 B |
 | `account-addresses` | `GroupKey<AccountKey, AddressKey>`: `account(32) ‖ epoch(8) ‖` the `address-stats` log key, last, 101 B for a base address | — |
 | `account-epochs` | — | `AccountKey`, 32 B |
@@ -108,6 +108,8 @@ A state row under a log-only namespace (`—` in the state key column) is never 
 `state-pools` carries `PoolState` values. Field 17, `calidus`, is the pool's highest-nonce CIP-151 registration signed by its cold key in a valid transaction, as `[pub_key, nonce, tx_hash, slot]`: the 32-byte public key, or null for a revocation (an all-zero key), the registration's nonce, and the transaction and slot that made it. A registration replaces it only with a higher nonce, so a revocation keeps its nonce. It is absent before any registration.
 
 `state-metadata-labels` carries `MetadataLabelState` values as CBOR `[tx_count: uint]`, with `tx_count` at field 0. Its key is the metadata label in big-endian byte order. Revision 2 uses the exact 8-byte u64 key; the value encoding is unchanged.
+
+`state-pruned-accounts` carries `PrunedAccountState` values as CBOR `[lifetime_rewards: uint, deregistered_at: uint / null]`, keyed by `AccountKey`. ESTART deletes an account that is dead once rotated (unregistered, no balance, every stake snapshot empty and every delegation snapshot undelegated, no retired pool) from `state-accounts`, unless it deregistered in the closing epoch, in which case a later boundary deletes it; it adds the deleted account's history here: its lifetime rewards, which equal its lifetime withdrawals since a dead row holds no reward balance, summed over every pruned life of the credential, and its newest deregistration slot. A credential's row exists only once it was pruned while carrying rewards or a deregistration; the API reads it, and no sync pass does.
 
 State kinds: one per state namespace, and the set is closed — each spelled `state-` followed by the namespace with `_` rewritten to `-`, by the same rule and for the same reasons as the log kinds below. The namespace is therefore **not** in the record — it is the layer — which is what puts the fail-closed edge of a breaking change on exactly the namespace that broke, and lets a reader skip a namespace this profile does not define at the transport rather than choking on one shared layer. The shard count is **specification, never tuning**: `utxos`, `accounts` and `datums` split 16 ways, every other namespace is a single blob, and `parameters.shards` reports the map so a reader never has to discover it from the data. Re-sharding a namespace is a media-type-version event for that namespace's kind. Every shard of every kind is published, empty ones included, so tip completeness is structural: a restore requires every state kind and, per kind, exactly the shards its count promises.
 
