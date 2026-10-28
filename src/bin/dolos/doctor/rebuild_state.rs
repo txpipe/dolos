@@ -41,6 +41,12 @@
 //! the chunks past each new list's length. An `assets` cache entry built from
 //! such a re-mint records the epoch it started at, so the first read, or
 //! `dolos cache warm`, after the rebuild builds it again.
+//!
+//! Nor does such an archive hold `stake` entries if its seals predate them.
+//! No sync pass reads those, so state rebuilds the same without them, but
+//! `/accounts/{stake}` finds a pruned never-registered credential last seen
+//! in a sealed epoch through them alone; the same `--rewrite-logs` rebuild
+//! writes them.
 
 use std::io::IsTerminal as _;
 use std::path::PathBuf;

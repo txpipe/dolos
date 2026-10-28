@@ -205,9 +205,10 @@ pub const LOG_KINDS: [(&str, Namespace); 14] = [
 /// Epoch `e`'s entries are written by the seal at the boundary opening
 /// `e + 2`, so the first stele whose `e` window carries one is cut there,
 /// exactly as for `log-first-script-chunks`.
-pub const ENTITY_KINDS: [(&str, EntityKind); 2] = [
+pub const ENTITY_KINDS: [(&str, EntityKind); 3] = [
     ("entity-asset", entities::ASSET),
     ("entity-script", entities::SCRIPT),
+    ("entity-stake", entities::STAKE),
 ];
 
 /// The entity kinds an earlier profile witnessed in a state namespace, with
