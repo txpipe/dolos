@@ -5,8 +5,8 @@ use dolos_cardano::{
     eras::load_chain_summary_from_state,
     eras::log_epoch_range_to_key_range,
     model::{
-        AccountEpochLog, AccountKey, DRepEpochLog, DRepKey, PParamKind, PoolKey, PoolState,
-        ProposalKey, ProposalState,
+        AccountEpochLog, AccountKey, DRepEpochLog, DRepKey, DRepState, PParamKind, PoolKey,
+        PoolState, ProposalKey, ProposalState,
     },
     ChainSummary, EpochState, PoolEpochLog,
 };
@@ -356,6 +356,46 @@ impl TableRow for DRepEpochLog {
             epoch_of(slot, ctx),
             self.voting_power.to_string(),
             self.registered.to_string(),
+        ]
+    }
+}
+
+/// A moved DRep's final row (`dolos_cardano::final_rows`). The epoch is the
+/// key's, the one the boundary that moved it closed.
+impl TableRow for DRepState {
+    type Log = DRepState;
+
+    fn view(log: Self::Log) -> Self {
+        log
+    }
+
+    fn header(format: OutputFormat) -> Vec<&'static str> {
+        if matches!(format, OutputFormat::Dbsync) {
+            todo!("dbsync format not supported for dreps logs");
+        }
+        vec![
+            "drep",
+            "epoch",
+            "registered slot",
+            "unregistered slot",
+            "deposit",
+        ]
+    }
+
+    fn row(&self, slot: BlockSlot, drep: &DRepKey, ctx: &RowContext) -> Vec<String> {
+        if matches!(ctx.format, OutputFormat::Dbsync) {
+            todo!("dbsync format not supported for dreps logs");
+        }
+
+        let at =
+            |x: Option<(BlockSlot, _)>| x.map_or("-".to_string(), |(slot, _)| slot.to_string());
+
+        vec![
+            bech32::encode::<bech32::Bech32>(DREP_HRP, &dolos_core::keys::encode(drep)).unwrap(),
+            epoch_of(slot, ctx),
+            at(self.registered_at),
+            at(self.unregistered_at),
+            self.deposit.to_string(),
         ]
     }
 }
@@ -753,7 +793,12 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         || matches!(args.format, OutputFormat::Dbsync)
         || matches!(
             args.namespace.as_str(),
-            "pool-epochs" | "drep-epochs" | "pools" | "proposals" | "account-epochs/rewards"
+            "pool-epochs"
+                | "drep-epochs"
+                | "dreps"
+                | "pools"
+                | "proposals"
+                | "account-epochs/rewards"
         );
     let summary = if need_summary {
         let state = crate::common::open_state_store(config)?;
@@ -787,6 +832,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         "drep-epochs" => {
             dump_logs::<DRepEpochLog>(&archive, skip, take, &ctx, start_slot, end_slot, range)?
         }
+        "dreps" => dump_logs::<DRepState>(&archive, skip, take, &ctx, start_slot, end_slot, range)?,
         "pools" => dump_logs::<PoolState>(&archive, skip, take, &ctx, start_slot, end_slot, range)?,
         "proposals" => {
             dump_logs::<ProposalState>(&archive, skip, take, &ctx, start_slot, end_slot, range)?

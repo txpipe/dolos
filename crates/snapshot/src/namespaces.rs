@@ -193,6 +193,7 @@ pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         AddressStats::NS => exact::<<AddressStats as LogEntity>::Key>(key),
         AssetMintChunk::NS => exact::<<AssetMintChunk as LogEntity>::Key>(key),
         DRepEpochLog::NS => exact::<<DRepEpochLog as LogEntity>::Key>(key),
+        DRepState::NS => exact::<<DRepState as LogEntity>::Key>(key),
         EpochState::NS => exact::<<EpochState as LogEntity>::Key>(key),
         FirstMintChunk::NS => exact::<<FirstMintChunk as LogEntity>::Key>(key),
         FirstScriptChunk::NS => exact::<<FirstScriptChunk as LogEntity>::Key>(key),

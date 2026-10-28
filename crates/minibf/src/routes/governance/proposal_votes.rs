@@ -8,7 +8,7 @@ use axum::{
 use blockfrost_openapi::models::proposal_votes_inner::{self, ProposalVotesInner};
 use dolos_cardano::{
     indexes::CardanoArchiveIndexExt as _,
-    model::{DRepKey, DRepState, ProposalKey},
+    model::{DRepKey, ProposalKey},
     pallas_extras,
 };
 use dolos_core::{
@@ -35,7 +35,7 @@ use crate::{
     Facade,
 };
 
-use super::{collect_block_rows, read_proposal_row, ProposalRow};
+use super::{collect_block_rows, read_drep_row, read_proposal_row, DRepReads, ProposalRow};
 
 struct ProposalVoteRow {
     tx: Hash<32>,
@@ -170,9 +170,13 @@ fn scan_drep_deregistration<D: Domain>(
 /// `DRepState.unregistered_at` holds the newest deregistration, so most rows
 /// need no block read. Only when that deregistration sits past `end` can an
 /// older one hide between the vote and `end`: that case scans the certificate
-/// blocks of the DRep.
+/// blocks of the DRep. A DRep that left state is read from its final row. A
+/// registration after that makes a fresh row, without the deregistration the
+/// DRep left under, so a vote cast before the row's registration scans the
+/// certificate blocks too.
 fn drep_vote_counts<D: Domain>(
     domain: &D,
+    reads: &DRepReads,
     cred: &StakeCredential,
     vote_at: (BlockSlot, TxOrder),
     end: BlockSlot,
@@ -184,17 +188,19 @@ fn drep_vote_counts<D: Domain>(
 
     let drep = DRepKey(pallas_extras::stake_cred_to_drep(cred));
 
-    let newest_dereg = domain
-        .state()
-        .read_entity_typed::<DRepState>(&drep)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .and_then(|state| state.unregistered_at);
+    let Some(row) = read_drep_row(domain, reads, &drep)? else {
+        return Ok(true);
+    };
 
-    match newest_dereg {
-        None => Ok(true),
+    let fresh_since_vote = row
+        .registered_at
+        .is_some_and(|registered| registered > vote_at);
+
+    match row.unregistered_at {
+        None if !fresh_since_vote => Ok(true),
         Some(dereg) if dereg < vote_at => Ok(true),
         Some((slot, _)) if slot <= end => Ok(false),
-        Some(_) => scan_drep_deregistration(
+        _ => scan_drep_deregistration(
             domain,
             &pallas_extras::drep_id_bytes(cred),
             vote_at,
@@ -622,6 +628,7 @@ fn read_votes_at<D: Domain>(
         .skip(pagination.skip())
         .take(pagination.count);
 
+    let reads = DRepReads::new(&chain);
     let mut out = Vec::new();
 
     for mut row in page {
@@ -647,7 +654,7 @@ fn read_votes_at<D: Domain>(
         if row.counted {
             if let Some(cred) = drep {
                 row.counted =
-                    drep_vote_counts(domain, &cred, (row.slot, row.tx_order), end, budget)?;
+                    drep_vote_counts(domain, &reads, &cred, (row.slot, row.tx_order), end, budget)?;
             }
         }
 
@@ -739,7 +746,7 @@ mod tests {
         routes::governance::testing::*,
         test_support::{TestApp, TestFault},
     };
-    use dolos_cardano::model::ProposalState;
+    use dolos_cardano::model::{DRepState, ProposalState};
     use dolos_core::StateWriter as _;
     use dolos_testing::{
         measured::MeasuredStores,
