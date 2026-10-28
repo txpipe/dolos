@@ -41,7 +41,7 @@ use stelae::{
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 64] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 65] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -127,8 +127,14 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 64] = [
         95,
     ),
     (
+        "log-pools",
+        "sha256:8cad266834a870a8f4c14a59a9ed20fe979e85cca819f9020f67252c2d54ac35",
+        2,
+        89,
+    ),
+    (
         "log-proposals",
-        "sha256:8d8990b6d7874faadef34630c88f6073c5313d2a15c915ccc22f6fb1af802330",
+        "sha256:bb6566fcadc86f92be8168fead3bfc57906caa9b2e085ab834ffa87ec68608f5",
         2,
         101,
     ),
@@ -430,7 +436,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 64] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:626d38cc1a2b45a5e6da8346dbb2cdf9b26f2aa0e35f4a6a8ed3e825f700dab0";
+    "sha256:3317f67341e4e03108c5d34dcd89b4a9288ed278fbe4cadece23243e4e3358bb";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -671,7 +677,10 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:c02fef757b3b8f5a65c04642cdc1e9c11a37f817528e43dcac261fbc983031a1","kind":"log-pool-epochs","#,
     r#""mediaType":"application/vnd.dolos.stele.log-pool-epochs.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":95},"#,
-    r#"{"diffId":"sha256:8d8990b6d7874faadef34630c88f6073c5313d2a15c915ccc22f6fb1af802330","kind":"log-proposals","#,
+    r#"{"diffId":"sha256:8cad266834a870a8f4c14a59a9ed20fe979e85cca819f9020f67252c2d54ac35","kind":"log-pools","#,
+    r#""mediaType":"application/vnd.dolos.stele.log-pools.v1+zstd","records":2,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":89},"#,
+    r#"{"diffId":"sha256:bb6566fcadc86f92be8168fead3bfc57906caa9b2e085ab834ffa87ec68608f5","kind":"log-proposals","#,
     r#""mediaType":"application/vnd.dolos.stele.log-proposals.v1+zstd","records":2,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":101},"#,
     r#"{"diffId":"sha256:b820744b499226137d7521dce605dae7c0f17fb1964dd5b8967d0ec2669a233c","kind":"entity-asset","#,

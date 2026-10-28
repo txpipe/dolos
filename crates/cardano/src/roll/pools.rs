@@ -1,7 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 
-use dolos_core::{ChainError, Genesis, TxOrder, TxoRef};
+use dolos_core::{
+    keys, ArchiveStore, BlockSlot, ChainError, Entity as _, Genesis, KeyRange, StateStore, TxOrder,
+    TxoRef,
+};
 use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::primitives::Epoch;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
@@ -11,19 +14,146 @@ use crate::owned::OwnedMultiEraOutput;
 use crate::roll::BlockVisitor;
 use crate::{cip151, pallas_extras};
 use crate::{
-    CalidusRegistration, MintedBlocksInc, PParamsSet, PoolCalidusUpdate, PoolDeRegistration,
-    PoolRegistration,
+    CalidusRegistration, FixedNamespace as _, MintedBlocksInc, PParamsSet, PoolCalidusUpdate,
+    PoolDeRegistration, PoolHash, PoolKey, PoolRegistration, PoolState,
 };
+
+/// The pools a block registers, from its valid transactions.
+pub fn block_pool_registrations(block: &MultiEraBlock) -> Vec<PoolHash> {
+    block
+        .txs()
+        .iter()
+        .filter(|tx| tx.is_valid())
+        .flat_map(|tx| tx.certs())
+        .filter_map(|cert| pallas_extras::cert_as_pool_registration(&cert))
+        .map(|cert| cert.operator)
+        .collect()
+}
+
+/// The CIP-151 nonce floors of the pools a batch registers while only the
+/// final-row log holds them.
+///
+/// A moved pool that registers again gets a fresh row without the calidus key
+/// its final row carried (founder ruling, 2026-10-25), but the nonce stays: on
+/// a node that holds the final row, a signed registration replayed with a
+/// lower nonce is still rejected. A node that has pruned the final row has no
+/// floor and accepts the replay. The floor is the final row's registration
+/// with no key, seeded right after the certificate that makes the fresh row,
+/// so the transaction's own registration lands on top of it. A visitor cannot
+/// read the stores, so the floors are read once per batch, ahead of the crawl,
+/// and each is spent by the registration that seeds it.
+#[derive(Debug, Default, Clone)]
+pub struct CalidusFloors {
+    floors: HashMap<PoolHash, CalidusRegistration>,
+}
+
+impl CalidusFloors {
+    /// Read the floors for a batch starting at `first_slot` whose blocks
+    /// register `registered`.
+    ///
+    /// Only pools without a state row read the log, in one pass over it. The
+    /// slot bound keeps a re-roll over an archive that already holds later
+    /// moves (`doctor rebuild-state`) from reading a final row the pool has
+    /// not reached yet: a row is keyed after the registration that precedes
+    /// its retirement.
+    pub fn load<S: StateStore, A: ArchiveStore>(
+        state: &S,
+        archive: &A,
+        registered: &[Vec<PoolHash>],
+        first_slot: BlockSlot,
+    ) -> Result<Self, ChainError> {
+        let pools: Vec<PoolHash> = registered
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let keys: Vec<PoolKey> = pools.into_iter().map(PoolKey).collect();
+        let rows = state.read_entities_typed::<PoolState>(&keys.iter().collect::<Vec<_>>())?;
+
+        let wanted: HashMap<Vec<u8>, PoolHash> = keys
+            .iter()
+            .zip(rows)
+            .filter(|(_, row)| row.is_none())
+            .map(|(key, _)| (keys::encode(key).to_vec(), key.0))
+            .collect();
+
+        if wanted.is_empty() {
+            return Ok(Self::default());
+        }
+
+        // the log is keyed slot first, so a later row of a pool replaces an
+        // earlier one
+        let mut newest = HashMap::new();
+
+        for row in archive.iter_logs(PoolState::NS, KeyRange::slots(0..first_slot))? {
+            let (log_key, value) = row?;
+
+            if let Some(pool) = wanted.get(log_key.entity()) {
+                newest.insert(*pool, value);
+            }
+        }
+
+        let rows = newest
+            .into_iter()
+            .map(|(pool, value)| Ok((pool, PoolState::decode_entity(PoolState::NS, &value)?)))
+            .collect::<Result<Vec<_>, ChainError>>()?;
+
+        Ok(Self::from_final_rows(rows))
+    }
+
+    /// The floors of moved pools, from each one's newest final row.
+    pub fn from_final_rows(rows: impl IntoIterator<Item = (PoolHash, PoolState)>) -> Self {
+        let floors = rows
+            .into_iter()
+            .filter_map(|(pool, row)| {
+                let calidus = row.calidus?;
+
+                Some((
+                    pool,
+                    CalidusRegistration {
+                        pub_key: None,
+                        ..calidus
+                    },
+                ))
+            })
+            .collect();
+
+        Self { floors }
+    }
+
+    /// The floor a registration of `pool` would seed.
+    pub fn floor(&self, pool: &PoolHash) -> Option<&CalidusRegistration> {
+        self.floors.get(pool)
+    }
+}
 
 #[derive(Default, Clone)]
 pub struct PoolStateVisitor {
     epoch: Option<Epoch>,
     deposit: Option<u64>,
+    floors: CalidusFloors,
 
     /// The current transaction's CIP-151 registration, emitted after its
     /// certificates: it finds the row its own transaction creates, and none
     /// a later transaction creates.
     calidus: Option<PoolCalidusUpdate>,
+}
+
+impl PoolStateVisitor {
+    pub fn new(floors: CalidusFloors) -> Self {
+        Self {
+            floors,
+            ..Default::default()
+        }
+    }
+
+    /// The floors this block's registrations have not spent.
+    pub fn take_floors(&mut self) -> CalidusFloors {
+        std::mem::take(&mut self.floors)
+    }
 }
 
 impl BlockVisitor for PoolStateVisitor {
@@ -110,6 +240,10 @@ impl BlockVisitor for PoolStateVisitor {
                 epoch,
                 deposit,
             ));
+
+            if let Some(floor) = self.floors.floors.remove(&cert.operator) {
+                deltas.add_for_entity(PoolCalidusUpdate::new(cert.operator, floor));
+            }
         }
 
         match cert {
@@ -200,15 +334,16 @@ mod tests {
 
     /// Visit the transactions of `raws` as one block, the way the crawl
     /// does: the first block's root, then each transaction and the
-    /// certificates of the valid ones, then the flush.
-    fn deltas_of(raws: &[&RawBlock]) -> WorkDeltas {
+    /// certificates of the valid ones, then the flush, with the batch's
+    /// calidus floors.
+    fn deltas_of(raws: &[&RawBlock], floors: CalidusFloors) -> WorkDeltas {
         let blocks: Vec<_> = raws
             .iter()
             .map(|raw| OwnedMultiEraBlock::decode((*raw).clone()).unwrap())
             .collect();
         let genesis = crate::include::devnet::load();
         let pparams = PParamsSet::default().with(Val::PoolDeposit(500_000_000));
-        let mut visitor = PoolStateVisitor::default();
+        let mut visitor = PoolStateVisitor::new(floors);
         let mut deltas = WorkDeltas::default();
 
         visitor
@@ -241,7 +376,16 @@ mod tests {
     /// Apply the deltas the transactions of `raws`, as one block, make for
     /// [`pool`] to `entity`, in order, and return them for undo.
     fn roll_txs(raws: &[&RawBlock], entity: &mut Option<PoolState>) -> Vec<CardanoDelta> {
-        let mut deltas = deltas_of(raws);
+        roll_with_floors(raws, CalidusFloors::default(), entity)
+    }
+
+    /// [`roll_txs`], with the batch's calidus floors.
+    fn roll_with_floors(
+        raws: &[&RawBlock],
+        floors: CalidusFloors,
+        entity: &mut Option<PoolState>,
+    ) -> Vec<CardanoDelta> {
+        let mut deltas = deltas_of(raws, floors);
         let key = dolos_core::NsKey::of::<PoolState>(&crate::PoolKey(pool()));
         let mut group = deltas.entities.remove(&key).unwrap_or_default();
 
@@ -535,6 +679,113 @@ mod tests {
         undo(&deltas, &mut entity);
 
         assert_eq!(entity, before);
+    }
+
+    /// The pool's row once its registrations of `first` and `revoked` have
+    /// landed, as ESTART logs it when it moves the pool: the key revoked.
+    fn revoked_final_row(first: u64, revoked: u64) -> PoolState {
+        let mut entity = Some(pool_state());
+        roll(
+            &metadata_block(1_000, registration(first, [0x57; 32]), true),
+            &mut entity,
+        );
+        roll(
+            &metadata_block(2_000, registration(revoked, [0; 32]), true),
+            &mut entity,
+        );
+
+        assert_eq!(pub_key(&entity), None);
+        entity.unwrap()
+    }
+
+    /// Registered again after the move, the fresh row gets no key, but keeps
+    /// the final row's nonce: the replayed registration of the revoked key is
+    /// ignored, and a higher nonce registers a key.
+    #[test]
+    fn a_registration_after_a_move_keeps_the_nonce_floor() {
+        let floors = CalidusFloors::from_final_rows([(pool(), revoked_final_row(100, 200))]);
+        assert_eq!(floors.floor(&pool()).unwrap().pub_key, None);
+
+        let blocks = synthetic_chain(vec![]);
+        let mut entity = None;
+        roll_with_floors(&[&blocks[0]], floors, &mut entity);
+
+        let fresh = entity.as_ref().expect("the registration makes a fresh row");
+        assert_eq!(fresh.deposit, 500_000_000);
+        assert_eq!(pub_key(&entity), None);
+        assert_eq!(calidus(&entity).unwrap().nonce, 200);
+
+        roll(
+            &metadata_block(3_000, registration(100, [0x57; 32]), true),
+            &mut entity,
+        );
+        assert_eq!(pub_key(&entity), None);
+        assert_eq!(calidus(&entity).unwrap().nonce, 200);
+
+        roll(
+            &metadata_block(4_000, registration(201, [0x58; 32]), true),
+            &mut entity,
+        );
+        assert_eq!(pub_key(&entity), Some([0x58; 32]));
+    }
+
+    /// The floor lands before the registering transaction's own CIP-151
+    /// registration: a lower nonce there is ignored, a higher one kept.
+    #[test]
+    fn the_floor_lands_before_the_registering_transactions_key() {
+        let floors = || CalidusFloors::from_final_rows([(pool(), revoked_final_row(7, 8))]);
+
+        let lower = synthetic_chain(registration(5, [0x57; 32]));
+        let mut entity = None;
+        roll_with_floors(&[&lower[0]], floors(), &mut entity);
+        assert_eq!(pub_key(&entity), None);
+        assert_eq!(calidus(&entity).unwrap().nonce, 8);
+
+        let higher = synthetic_chain(registration(9, [0x57; 32]));
+        let mut entity = None;
+        roll_with_floors(&[&higher[0]], floors(), &mut entity);
+        assert_eq!(pub_key(&entity), Some([0x57; 32]));
+        assert_eq!(calidus(&entity).unwrap().nonce, 9);
+    }
+
+    /// A pool moved with its key live, registering again in a transaction
+    /// that replays that key's registration: the nonce equals the floor's, so
+    /// only the floor landing first keeps the key off the fresh row.
+    #[test]
+    fn an_equal_nonce_replay_of_a_live_key_is_ignored() {
+        let mut live = Some(pool_state());
+        roll(
+            &metadata_block(1_000, registration(8, [0x57; 32]), true),
+            &mut live,
+        );
+        let floors = CalidusFloors::from_final_rows([(pool(), live.unwrap())]);
+
+        let replay = synthetic_chain(registration(8, [0x57; 32]));
+        let mut entity = None;
+        roll_with_floors(&[&replay[0]], floors, &mut entity);
+        assert_eq!(pub_key(&entity), None);
+        assert_eq!(calidus(&entity).unwrap().nonce, 8);
+    }
+
+    /// Undoing the registration undoes its floor with it.
+    #[test]
+    fn undo_of_a_registration_after_a_move_leaves_no_row() {
+        let floors = CalidusFloors::from_final_rows([(pool(), revoked_final_row(7, 8))]);
+
+        let blocks = synthetic_chain(vec![]);
+        let mut entity = None;
+        let deltas = roll_with_floors(&[&blocks[0]], floors, &mut entity);
+        assert!(calidus(&entity).is_some());
+
+        undo(&deltas, &mut entity);
+        assert_eq!(entity, None);
+    }
+
+    /// A final row without a registration seeds nothing.
+    #[test]
+    fn a_final_row_without_a_registration_has_no_floor() {
+        let floors = CalidusFloors::from_final_rows([(pool(), pool_state())]);
+        assert_eq!(floors.floor(&pool()), None);
     }
 
     /// A chain that opens on Byron's pparams carries no pool deposit, so a
