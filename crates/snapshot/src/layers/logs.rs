@@ -127,7 +127,7 @@ mod tests {
     use dolos_cardano::model::{
         AccountAddressChunk, AccountStats, AddressStats, AssetMintChunk, DRepEpochLog, DRepState,
         EpochState, FirstMintChunk, FirstScriptChunk, FixedNamespace as _, PaymentAddressChunk,
-        PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, ProposalState,
+        PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalState,
     };
 
     use super::*;
@@ -159,7 +159,7 @@ mod tests {
     /// Each log takes exactly the keys of its kind after the slot: none for
     /// the epoch log, a chunk index for first mints and first scripts, a policy
     /// and a chunk for the per-policy list, an asset key and a chunk for an
-    /// asset's mints, a proposal or a DRep for its final row.
+    /// asset's mints, a pool, a proposal or a DRep for its final row.
     #[test]
     fn keys_are_held_to_their_namespace_kind() {
         let slot = 7u64.to_be_bytes();
@@ -171,6 +171,7 @@ mod tests {
             (PolicyMintChunk::NS, 32),
             (AssetMintChunk::NS, 36),
             (PoolEpochLog::NS, 28),
+            (PoolState::NS, 28),
             (ProposalState::NS, 36),
         ] {
             let key = [slot.as_slice(), &vec![1; len]].concat();
@@ -229,6 +230,7 @@ mod tests {
             (PaymentAddressChunk::NS, 32),
             (PoolEpochLog::NS, 32),
             (PoolEpochLog::NS, 0),
+            (PoolState::NS, 32),
             (ProposalState::NS, 32),
             (ProposalState::NS, 37),
         ] {

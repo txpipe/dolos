@@ -158,7 +158,7 @@ use crate::{
     log_ns_for, preflight, read_position,
     reporting::Cursor,
     state_ns_for, DolosProfile, Error, Position, BLOCKS, DIGESTS, ENTITY_KINDS, INDEXES,
-    NAMESPACES, RETIRED_SCHEMA_REV, SCOPE_REQUIRED, STATE_KINDS, UTXOS,
+    NAMESPACES, RETIRED_SCHEMA_REV, SCOPE_REQUIRED, STATE_KINDS, STATE_WITNESSED_KINDS, UTXOS,
 };
 
 pub use stelae_driver::restore::{Budget, Checkpoint, Outlook};
@@ -615,6 +615,11 @@ fn check_namespaces(inscription: &Inscription) -> Result<(), Error> {
 /// A declared kind this build does not register is not a refusal: its layers
 /// are of a kind this build does not implement, which [`unknown_layers`]
 /// skips and reports, and nothing here reads it.
+///
+/// A declared kind is still refused when the stele also declares the state
+/// namespace an earlier profile witnessed it in ([`STATE_WITNESSED_KINDS`])
+/// at any revision but the retired one: that publisher's seals wrote none of
+/// the kind's entries.
 fn check_entities(inscription: &Inscription) -> Result<(), Error> {
     let declared =
         match inscription.parameters.get("entities") {
@@ -640,6 +645,24 @@ fn check_entities(inscription: &Inscription) -> Result<(), Error> {
                 kind: kind.name(),
                 declared: width,
                 registered: kind.key_len(),
+            });
+        }
+    }
+
+    let schemas = inscription
+        .parameters
+        .get("schemas")
+        .and_then(serde_json::Value::as_object);
+
+    for (kind, namespace) in STATE_WITNESSED_KINDS {
+        let witnessed = schemas
+            .and_then(|map| map.get(namespace))
+            .is_some_and(|rev| rev.as_u64() != Some(RETIRED_SCHEMA_REV));
+
+        if witnessed {
+            return Err(Error::StateWitnessedEntityKind {
+                kind: kind.name(),
+                namespace,
             });
         }
     }
@@ -2306,6 +2329,58 @@ mod tests {
             plan(&stele, MAINNET_MAGIC, None),
             Err(Error::UndeclaredEntityKind { .. })
         ));
+    }
+
+    /// A stele that still declares `assets` or `scripts` was published by a
+    /// build that witnessed first mints or scripts in state and sealed no
+    /// entries of the kind, though it declares it: restoring it would take
+    /// every known asset or script for a first sighting.
+    #[test]
+    fn a_stele_witnessing_a_kind_in_state_refuses_the_restore() {
+        // The names an earlier publisher wrote: `AssetState`'s and
+        // `ScriptState`'s namespaces.
+        let names: Vec<_> = STATE_WITNESSED_KINDS
+            .iter()
+            .map(|(kind, namespace)| (kind.name(), *namespace))
+            .collect();
+        assert_eq!(names, [("asset", "assets"), ("script", "scripts")]);
+
+        for (kind, namespace) in STATE_WITNESSED_KINDS {
+            for rev in [json!(1), json!(99), json!("1")] {
+                let mut witnessed = inscription(state_layers());
+                witnessed.parameters["schemas"][namespace] = rev;
+
+                let err = check_entities(&witnessed).unwrap_err();
+                assert!(
+                    matches!(
+                        err,
+                        Error::StateWitnessedEntityKind { kind: refused, namespace: ns }
+                            if refused == kind.name() && ns == namespace
+                    ),
+                    "{err:?}"
+                );
+            }
+
+            // Retired, the namespace says its publisher no longer witnesses
+            // there.
+            let mut retired = inscription(state_layers());
+            retired.parameters["schemas"][namespace] = json!(RETIRED_SCHEMA_REV);
+
+            check_entities(&retired).unwrap();
+
+            // And `plan` asks before a store could be opened.
+            let mut bare = inscription(vec![]);
+            bare.parameters["schemas"][namespace] = json!(1);
+
+            let temp = tempfile::tempdir().unwrap();
+            let stele = stelae::dir::SteleDir::create(temp.path()).unwrap();
+            stelae::SteleWriter::seal(&stele, &DolosProfile, &bare).unwrap();
+
+            assert!(matches!(
+                plan(&stele, MAINNET_MAGIC, None),
+                Err(Error::StateWitnessedEntityKind { .. })
+            ));
+        }
     }
 
     #[test]

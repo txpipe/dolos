@@ -648,6 +648,15 @@ impl CoreArchiveWriter for ArchiveWriter {
         Ok(())
     }
 
+    fn delete_log(&self, ns: Namespace, key: &LogKey) -> Result<(), ArchiveError> {
+        self.store.check_namespace(ns)?;
+
+        let mut batch = self.batch.lock().unwrap();
+        batch.remove(&self.store.logs, build_log_key(ns, key).as_slice());
+
+        Ok(())
+    }
+
     /// Undo the block at `point`.
     ///
     /// A rollback walks the chain backwards, so at a slot holding more than

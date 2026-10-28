@@ -8,8 +8,8 @@
 use dolos_core::{BlockSlot, ChainError};
 
 use crate::{
-    estart::{DRepId, ProposalId},
-    DRepState, ProposalState,
+    estart::{DRepId, PoolId, ProposalId},
+    DRepState, PoolState, ProposalState,
 };
 
 #[derive(Default)]
@@ -25,6 +25,19 @@ pub struct BoundaryVisitor {
 }
 
 impl super::BoundaryVisitor for BoundaryVisitor {
+    fn visit_pool(
+        &mut self,
+        ctx: &mut super::WorkContext,
+        id: &PoolId,
+        pool: &PoolState,
+    ) -> Result<(), ChainError> {
+        if pool.leaves_state() {
+            ctx.move_to_log(id, pool);
+        }
+
+        Ok(())
+    }
+
     fn visit_drep(
         &mut self,
         ctx: &mut super::WorkContext,

@@ -179,9 +179,46 @@ hash_key!(
 
 display_as_stored!(PoolKey);
 
-entity_boilerplate!(PoolState, "pools", state = PoolKey);
+entity_boilerplate!(PoolState, "pools", state = PoolKey, log = PoolKey);
+
+/// A retired pool's final row is its last state row: the API serves its
+/// parameters and calidus key from it.
+impl crate::final_rows::FinalRow for PoolState {
+    fn final_row(&self) -> Self {
+        self.clone()
+    }
+}
 
 impl PoolState {
+    /// Whether the boundary about to rotate this row moves it to the
+    /// final-row log (`crate::final_rows`): once rotated, every snapshot is
+    /// retired. The rotation makes `live` the new `mark`, `mark` the new `set`
+    /// and `set` the new `go`, and the new `live` is `next`, or a copy of
+    /// `live` when nothing is scheduled, so those are the snapshots it checks.
+    /// A pool always holds `mark` and `set` by then, since it registered
+    /// before the epoch it retires at; a row without them stays.
+    ///
+    /// No ledger rule reads such a pool: RUPD last reads it in the epoch after
+    /// its retiring one, and every other reader takes the branch of an absent
+    /// row on a retired snapshot. A pool retiring at epoch `r` moves at the
+    /// boundary opening `r + 3` (see [`Self::final_row_epoch`]).
+    pub fn leaves_state(&self) -> bool {
+        let retired = |snapshot: Option<&PoolSnapshot>| snapshot.is_some_and(|x| x.is_retired);
+
+        retired(self.snapshot.live())
+            && retired(self.snapshot.mark())
+            && retired(self.snapshot.set())
+            && self.snapshot.next().is_none_or(|x| x.is_retired)
+    }
+
+    /// The epoch a pool retiring at `retiring_epoch` keys its final row at:
+    /// the epoch the boundary that moves it closes. Its snapshot of
+    /// `retiring_epoch - 1` is the last one not retired, and the rotation that
+    /// takes it out of `go` is the boundary opening `retiring_epoch + 3`.
+    pub fn final_row_epoch(retiring_epoch: Epoch) -> Epoch {
+        retiring_epoch + 2
+    }
+
     pub fn live_saturation(&self) -> RationalNumber {
         // TODO: implement
         RationalNumber {

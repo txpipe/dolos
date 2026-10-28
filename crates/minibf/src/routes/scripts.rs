@@ -586,47 +586,38 @@ mod tests {
         assert!(item.json.is_some());
     }
 
-    /// An archive written before auxiliary scripts were tagged has no tag
-    /// for them, while a state rebuilt by `doctor rebuild-state` lists them.
-    /// The lookup starts from the `scripts` witness row, so it still
-    /// resolves.
+    /// A script a phase-2-invalid tx carried first among its witnesses is
+    /// staged at the first valid carrier, the block that counts it and its
+    /// first `script` tag, and resolves there.
     #[tokio::test]
-    async fn scripts_by_hash_listed_script_without_archive_tag() {
+    async fn scripts_by_hash_first_tag_is_the_counting_block() {
         use dolos_cardano::indexes::archive_dimensions::SCRIPT;
-        use dolos_core::{
-            indexes::{ArchiveIndexDelta, Tag},
-            ArchiveStore as _, ArchiveWriter as _,
+        use dolos_core::ArchiveStore as _;
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 1,
+            invalid_txs_by_block: vec![vec![0], vec![], vec![]],
+            ..Default::default()
         };
 
-        let app = TestApp::new_with_cfg_and_setup(Default::default(), |domain, vectors| {
-            let hash = hex::decode(dolos_testing::synthetic::aux_script_hash()).unwrap();
-            let deltas: Vec<_> = vectors
-                .blocks
-                .iter()
-                .map(|block| ArchiveIndexDelta {
-                    slot: block.slot,
-                    block_hash: vec![],
-                    block_number: None,
-                    tx_hashes: vec![],
-                    tags: vec![Tag::new(SCRIPT, hash.clone())],
-                })
-                .collect();
+        let mut first_tag = None;
 
-            let writer = domain.archive().start_writer().unwrap();
-            writer.undo_index(&deltas).unwrap();
-            writer.commit().unwrap();
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let hash = hex::decode(&vectors.plutus_script_hash).unwrap();
 
-            // the archive index alone no longer finds it
-            let tagged = domain
+            first_tag = domain
                 .archive()
                 .slots_by_tag(SCRIPT, &hash, 0, u64::MAX)
                 .unwrap()
-                .count();
-            assert_eq!(tagged, 0);
+                .next()
+                .transpose()
+                .unwrap();
         });
 
-        let script_hash = dolos_testing::synthetic::aux_script_hash();
-        let script_hash = script_hash.as_str();
+        assert_eq!(first_tag, Some(app.vectors().blocks[1].slot));
+
+        let script_hash = app.vectors().plutus_script_hash.clone();
         let (status, bytes) = app.get_bytes(&format!("/scripts/{script_hash}")).await;
         assert_eq!(
             status,
@@ -637,7 +628,6 @@ mod tests {
 
         let item: Script = serde_json::from_slice(&bytes).expect("failed to parse script");
         assert_eq!(item.script_hash, script_hash);
-        assert_eq!(item.r#type, ScriptType::Timelock);
     }
 
     #[tokio::test]

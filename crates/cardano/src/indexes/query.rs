@@ -14,9 +14,10 @@ use dolos_core::{
     StateStore as _, TagDimension, TxHash, TxoRef,
 };
 
-use crate::indexes::dimensions::archive;
-use crate::model::{DatumKey, DatumState, ScriptKey, ScriptState};
+use crate::indexes::{dimensions::archive, entities};
+use crate::model::{DatumKey, DatumState, FirstScriptKey, FirstScriptSet, ScriptKey};
 use crate::pallas_extras;
+use crate::periods::{GroupKey, Ungrouped};
 
 use futures_core::Stream;
 
@@ -206,9 +207,10 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
     /// cardano-db-sync's `script` table has it: a script only a
     /// phase-2-invalid tx witnessed is not found.
     ///
-    /// The `scripts` witness points at the block that carried the script
-    /// first, so no archive tag is needed to find it. Without a witness row,
-    /// or with that block pruned, it falls back to the archive index.
+    /// The entity index (sealed epochs) or a staged `first-scripts` row
+    /// (unsealed epochs) gives the block that counted the script first, and
+    /// that block returns it. A script in neither is not found, with no tag
+    /// walk; nor is one whose first block the archive no longer holds.
     async fn script_by_hash(
         &self,
         script_hash: &Hash<28>,
@@ -565,23 +567,18 @@ where
         script_hash: &Hash<28>,
     ) -> Result<Option<ScriptData>, DomainError> {
         let script_hash = *script_hash;
-        let key = ScriptKey(script_hash);
 
-        let (first_slot, first_blocks) = self
+        let blocks = self
             .run_blocking(move |domain| {
-                let row: Option<ScriptState> =
-                    domain.state().read_entity_typed::<ScriptState>(&key)?;
-
-                let Some(row) = row else {
-                    return Ok((None, vec![]));
+                let Some(slot) = first_seen_script_slot(&domain, script_hash)? else {
+                    return Ok(vec![]);
                 };
 
-                let blocks = domain.archive().get_blocks_by_slot(&row.slot)?;
-                Ok((Some(row.slot), blocks))
+                Ok(domain.archive().get_blocks_by_slot(&slot)?)
             })
             .await?;
 
-        for raw in first_blocks {
+        for raw in blocks {
             let block = MultiEraBlock::decode(raw.as_slice())
                 .map_err(|e| DomainError::ChainError(ChainError::DecodingError(e)))?;
 
@@ -590,22 +587,7 @@ where
             }
         }
 
-        // no witness row (data synced before the witness existed) or its
-        // first block pruned by rolling history: the archive index still
-        // knows every later carrier. An archive written before auxiliary-data
-        // scripts were tagged learns theirs from `doctor rebuild-state
-        // --rewrite-logs`, which re-applies the index of every block it replays
-        let end_slot = archive_tip_slot(self).await?;
-
-        find_first_by_tag(
-            self,
-            archive::SCRIPT,
-            script_hash.as_slice().to_vec(),
-            first_slot.unwrap_or(0),
-            end_slot,
-            |block| script_in_block(block, script_hash),
-        )
-        .await
+        Ok(None)
     }
 
     async fn tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, DomainError> {
@@ -784,20 +766,62 @@ fn reference_script(script_ref: ScriptRef, script_hash: Hash<28>) -> Option<Scri
     (hash == script_hash).then_some(ScriptData { language, script })
 }
 
-/// Slot of the archive tip, 0 for an empty archive.
-async fn archive_tip_slot<D>(facade: &AsyncQueryFacade<D>) -> Result<BlockSlot, DomainError>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    facade
-        .run_blocking(move |domain| {
-            Ok(domain
-                .archive()
-                .get_tip()?
-                .map(|(slot, _)| slot)
-                .unwrap_or_default())
+/// The slot of the block that counted a script first, or `None` for a
+/// script never seen.
+///
+/// The entity index first, then the staged rows, then the index again: a seal
+/// running beside the read writes the index entry before it deletes the
+/// staged row, so a script the first index read missed is in whichever of the
+/// two the read reaches after it.
+fn first_seen_script_slot<D: Domain>(
+    domain: &D,
+    script_hash: Hash<28>,
+) -> Result<Option<BlockSlot>, DomainError> {
+    let index = || -> Result<Option<BlockSlot>, DomainError> {
+        let slots = domain
+            .archive()
+            .entity_slots(entities::SCRIPT, &[script_hash.as_slice()])?;
+
+        Ok(slots.into_iter().next().flatten())
+    };
+
+    if let Some(slot) = index()? {
+        return Ok(Some(slot));
+    }
+
+    if let Some(slot) = staged_script_slot(domain, script_hash)? {
+        return Ok(Some(slot));
+    }
+
+    index()
+}
+
+/// The slot a staged `first-scripts` row of an unsealed epoch gives a script.
+fn staged_script_slot<D: Domain>(
+    domain: &D,
+    script_hash: Hash<28>,
+) -> Result<Option<BlockSlot>, DomainError> {
+    let state = domain.state();
+
+    let Some(cursor) = state.read_cursor()? else {
+        return Ok(None);
+    };
+
+    let chain = crate::eras::load_era_summary::<D>(state)?;
+    let (epoch, _) = chain.slot_epoch(cursor.slot());
+    let mutable = crate::utils::mutable_slots(&domain.genesis());
+
+    let keys: Vec<FirstScriptKey> = crate::periods::unsealed_epochs(&chain, mutable, epoch)
+        .map(|epoch| GroupKey {
+            group: Ungrouped,
+            epoch,
+            member: ScriptKey(script_hash),
         })
-        .await
+        .collect();
+
+    let rows = state.read_entities_typed::<FirstScriptSet>(&keys.iter().collect::<Vec<_>>())?;
+
+    Ok(rows.into_iter().flatten().map(|row| row.slot).min())
 }
 
 /// Find the first match in blocks tagged with a specific dimension/key.

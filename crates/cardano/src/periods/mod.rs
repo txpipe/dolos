@@ -15,7 +15,10 @@
 //! group and epoch. `PaymentStats` lives in state only too, sealing into the
 //! same `Chunk` as its `Set`.
 
-use std::{collections::BTreeMap, ops::Range};
+use std::{
+    collections::BTreeMap,
+    ops::{Range, RangeInclusive},
+};
 
 use dolos_core::{
     ArchiveError, ArchiveStore, ArchiveWriter as _, ChainError, Domain, EntityDelta, EntityValue,
@@ -29,6 +32,7 @@ use crate::{indexes::SlotOrder, ChainSummary};
 
 pub mod account_addresses;
 pub mod asset_mints;
+pub mod assets;
 pub mod first_mints;
 pub mod first_scripts;
 pub mod stats;
@@ -239,6 +243,58 @@ pub fn is_sealable(
     chain.epoch_start(epoch + 1) + mutable_slots <= chain.epoch_start(boundary)
 }
 
+/// The epochs whose staged rows are still in state while the chain stands
+/// in `epoch`: every epoch the boundary opening `epoch` could not seal.
+///
+/// Sealability is monotone in the epoch, so the range runs from the oldest
+/// unsealable epoch to `epoch` itself.
+pub fn unsealed_epochs(
+    chain: &ChainSummary,
+    mutable_slots: u64,
+    epoch: Epoch,
+) -> RangeInclusive<Epoch> {
+    let mut oldest = epoch;
+
+    while oldest > 0 && !is_sealable(chain, mutable_slots, oldest - 1, epoch) {
+        oldest -= 1;
+    }
+
+    oldest..=epoch
+}
+
+/// The epochs whose staged rows may still be in state with the chain in
+/// `epoch` and the ledger in `ledger`, the epoch the last boundary opened:
+/// from the oldest one that boundary could not seal up to `epoch`.
+///
+/// On a chain rolled block by block the two are the same epoch, and this is
+/// [`unsealed_epochs`]. A chain that starts past the genesis epoch, as the
+/// synthetic chains of the API tests do, opens one ledger epoch per boundary
+/// it crosses, so the ledger's count trails the slots'; the seal follows the
+/// ledger's, and leaves older epochs staged.
+pub fn staged_epochs(
+    chain: &ChainSummary,
+    mutable_slots: u64,
+    ledger: Epoch,
+    epoch: Epoch,
+) -> RangeInclusive<Epoch> {
+    let oldest = *unsealed_epochs(chain, mutable_slots, ledger.min(epoch)).start();
+
+    oldest..=epoch.max(ledger)
+}
+
+/// The epochs the boundary opening `boundary` seals that the boundary before
+/// it could not. Sealability is monotone in the epoch, so they follow the
+/// last one the boundary before could seal.
+pub fn newly_sealable(chain: &ChainSummary, mutable_slots: u64, boundary: Epoch) -> Vec<Epoch> {
+    let sealed_before =
+        |epoch| boundary > 0 && is_sealable(chain, mutable_slots, epoch, boundary - 1);
+
+    (0..boundary)
+        .skip_while(|epoch| sealed_before(*epoch))
+        .take_while(|epoch| is_sealable(chain, mutable_slots, *epoch, boundary))
+        .collect()
+}
+
 /// Seal every staged epoch that is immutable at the boundary opening
 /// `boundary`.
 ///
@@ -253,8 +309,9 @@ pub fn seal_staged<D: Domain>(
 ) -> Result<(), ChainError> {
     let mutable_slots = crate::utils::mutable_slots(genesis);
     let sealable = |epoch| is_sealable(chain, mutable_slots, epoch, boundary);
+    let newly = newly_sealable(chain, mutable_slots, boundary);
 
-    first_mints::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
+    first_mints::seal::<D>(state, archive, chain, &sealable, &newly, SEAL_BATCH)?;
     first_scripts::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
     asset_mints::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
     account_addresses::seal::<D>(state, archive, chain, &sealable, SEAL_BATCH)?;
@@ -763,6 +820,46 @@ mod tests {
         }
     }
 
+    /// On a chain rolled block by block the staged epochs are the unsealed
+    /// ones; with the ledger's epoch trailing the slots', they reach back to
+    /// the oldest epoch the ledger's boundary could not seal.
+    #[test]
+    fn staged_epochs_follow_the_ledger_seal() {
+        let mut chain = ChainSummary::default();
+        chain.append_era(
+            7,
+            crate::EraState {
+                start: crate::EraBoundary {
+                    epoch: 0,
+                    slot: 0,
+                    timestamp: 0,
+                },
+                end: None,
+                epoch_length: 100,
+                slot_length: 1,
+                protocol: 7,
+            },
+        );
+
+        // an epoch seals at the second boundary after it
+        let mutable = 30;
+
+        for epoch in 1..10 {
+            assert_eq!(
+                staged_epochs(&chain, mutable, epoch, epoch),
+                unsealed_epochs(&chain, mutable, epoch)
+            );
+            assert_eq!(
+                staged_epochs(&chain, mutable, epoch, epoch),
+                epoch - 1..=epoch
+            );
+        }
+
+        // the ledger two epochs behind: its boundary sealed up to epoch 2
+        assert_eq!(staged_epochs(&chain, mutable, 4, 6), 3..=6);
+        assert_eq!(staged_epochs(&chain, mutable, 0, 2), 0..=2);
+    }
+
     #[test]
     fn window_walks_segments_in_page_order() {
         let lens = [3, 0, 5, 2];
@@ -784,5 +881,99 @@ mod tests {
             vec![(2, 0..5), (0, 2..3)]
         );
         assert_eq!(window(&lens, SlotOrder::Desc, 7, 9), vec![(0, 0..3)]);
+    }
+
+    fn toy_chain(domain: &dolos_testing::toy_domain::ToyDomain) -> ChainSummary {
+        use dolos_core::Domain as _;
+
+        crate::eras::load_era_summary::<dolos_testing::toy_domain::ToyDomain>(domain.state())
+            .unwrap()
+    }
+
+    /// Finding TA6 of the third QA review of dolos#1524: the epochs a boundary
+    /// seals that the boundary before it could not.
+    #[test]
+    fn newly_sealable_is_what_this_boundary_seals_first() {
+        use dolos_core::Domain as _;
+        use dolos_testing::toy_domain::ToyDomain;
+
+        let domain = ToyDomain::new(None, None);
+        let chain = toy_chain(&domain);
+        let mutable = crate::utils::mutable_slots(&domain.genesis());
+
+        for boundary in 1..=12 {
+            let expected: Vec<Epoch> = (0..boundary)
+                .filter(|epoch| {
+                    is_sealable(&chain, mutable, *epoch, boundary)
+                        && !is_sealable(&chain, mutable, *epoch, boundary - 1)
+                })
+                .collect();
+
+            assert_eq!(
+                newly_sealable(&chain, mutable, boundary),
+                expected,
+                "boundary {boundary}"
+            );
+        }
+    }
+
+    /// A first-mint list an earlier boundary sealed, naming a subject the
+    /// index lacks (as a seal before the index did), is left alone by a later
+    /// boundary: only `dolos doctor rebuild-state --rewrite-logs` rewrites it.
+    #[test]
+    fn a_later_boundary_leaves_a_pre_index_list_alone() {
+        use dolos_core::{ArchiveStore as _, ArchiveWriter as _, Domain as _};
+        use dolos_testing::toy_domain::ToyDomain;
+
+        use crate::{FirstMintChunk, PolicyKey, PolicyMintChunk};
+
+        let domain = ToyDomain::new(None, None);
+        let chain = toy_chain(&domain);
+        let mutable = crate::utils::mutable_slots(&domain.genesis());
+
+        let policy = [0x44; 28];
+        let subject = [policy.as_slice(), b"OLD"].concat();
+        let slot = chain.epoch_start(3);
+        let policy_key = (PolicyKey(policy.into()), 0u32);
+
+        let writer = domain.archive().start_writer().unwrap();
+        writer
+            .write_log_typed(slot, &0u32, &FirstMintChunk::new(1, vec![subject.clone()]))
+            .unwrap();
+        writer
+            .write_log_typed(
+                slot,
+                &policy_key,
+                &PolicyMintChunk::new(1, vec![b"OLD".to_vec()]),
+            )
+            .unwrap();
+        writer.commit().unwrap();
+
+        let boundary = 8;
+        assert!(is_sealable(&chain, mutable, 3, boundary - 1));
+
+        first_mints::seal::<ToyDomain>(
+            domain.state(),
+            domain.archive(),
+            &chain,
+            &|epoch| is_sealable(&chain, mutable, epoch, boundary),
+            &newly_sealable(&chain, mutable, boundary),
+            2,
+        )
+        .unwrap();
+
+        let listed = domain
+            .archive()
+            .read_log_typed::<FirstMintChunk>(slot, &0)
+            .unwrap()
+            .map(|chunk| chunk.into_items());
+        assert_eq!(listed, Some(vec![subject]));
+
+        let names = domain
+            .archive()
+            .read_log_typed::<PolicyMintChunk>(slot, &policy_key)
+            .unwrap()
+            .map(|chunk| chunk.into_items());
+        assert_eq!(names, Some(vec![b"OLD".to_vec()]));
     }
 }
