@@ -14,7 +14,7 @@ use crate::{
     Facade,
 };
 
-use super::{chain_context, drep_distribution, drep_key, read_drep_row};
+use super::{drep_distribution, drep_key, read_drep_row};
 
 pub async fn drep_by_id<D: Domain>(
     Path(drep): Path<String>,
@@ -26,14 +26,17 @@ where
     let parsed = parse_drep_id(&drep)?;
     let key = drep_key(&parsed.encoded)?;
 
-    let (chain, tip, pparams) = chain_context(&domain)?;
+    let chain = domain.get_chain_summary()?;
 
     // the special DReps have no row
-    let drep_state = read_drep_row(&domain.inner, &chain, tip, &key)?;
+    let drep_state = read_drep_row(&domain.inner, &chain, &key)?;
 
     if drep_state.is_none() && !parsed.is_special {
         return Err(StatusCode::NOT_FOUND);
     }
+
+    let tip = domain.get_tip_slot()?;
+    let pparams = domain.get_current_effective_pparams()?;
 
     let amount = drep_amount(&key.0, drep_state.as_ref(), &drep_distribution(&domain)?);
 

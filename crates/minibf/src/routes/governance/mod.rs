@@ -164,21 +164,44 @@ pub(crate) fn visit_proposals<D: Domain>(
     Ok(())
 }
 
+/// The epoch starts after a DRep's newest certificate that the point read
+/// probes for its final row. A proposal holds an unregistered DRep in state
+/// for `govActionLifetime` epochs at most, 6 on mainnet and the testnets, so
+/// a moved DRep's row keys within a few epochs of its unregistration.
+const FINAL_ROW_PROBE_EPOCHS: u64 = 8;
+
 /// A DRep's row: the state row, then its final row in the log.
 ///
 /// ESTART commits a final row before it deletes the state row, so a state
-/// miss read first finds a moved DRep in the log. A moved DRep's newest
-/// `drep_certs` certificate is the unregistration it moved under: a
-/// registration after the move makes a fresh state row, and only a registered
-/// DRep updates. Its final row keys at the start of an epoch after that
-/// unregistration, a few at most, since every proposal that held it in state
-/// predates the unregistration and expires. The log is read at each epoch
-/// start from there, up to `tip`'s epoch; an older final row keys before the
-/// unregistration.
+/// miss read first finds a moved DRep in the log. The point read probes for
+/// it after the newest certificate ([`probe_final_row`]). Where that misses,
+/// the log is scanned for the DRep's newest row: the newest certificate can be
+/// a phase-2-invalid transaction's, a registration that state has already
+/// rolled back, or pruned from the archive with the final row still held.
 pub(crate) fn read_drep_row<D: Domain>(
     domain: &D,
     chain: &ChainSummary,
-    tip: BlockSlot,
+    key: &DRepKey,
+) -> Result<Option<DRepState>, StatusCode> {
+    if let Some(row) = point_read_drep_row(domain, chain, key)? {
+        return Ok(Some(row));
+    }
+
+    if matches!(key.0, DRep::Abstain | DRep::NoConfidence) {
+        return Ok(None);
+    }
+
+    let logged = newest_final_row::<DRepState>(domain.archive(), key)
+        .map_err(log_and_500("failed to read the dreps log"))?;
+
+    Ok(logged.map(|(_, row)| row))
+}
+
+/// A DRep's row from state, or from the log by [`probe_final_row`], with no
+/// log scan.
+pub(crate) fn point_read_drep_row<D: Domain>(
+    domain: &D,
+    chain: &ChainSummary,
     key: &DRepKey,
 ) -> Result<Option<DRepState>, StatusCode> {
     let live = domain
@@ -190,6 +213,22 @@ pub(crate) fn read_drep_row<D: Domain>(
         return Ok(live);
     }
 
+    probe_final_row(domain, chain, key)
+}
+
+/// A moved DRep's final row, read at each of the [`FINAL_ROW_PROBE_EPOCHS`]
+/// epoch starts after its newest `drep_certs` certificate.
+///
+/// That certificate is normally the unregistration the DRep moved under: a
+/// registration after the move makes a fresh state row, and only a registered
+/// DRep updates. Its final row keys at the start of the epoch the moving
+/// boundary closed, after the unregistration; an older final row keys before
+/// it.
+fn probe_final_row<D: Domain>(
+    domain: &D,
+    chain: &ChainSummary,
+    key: &DRepKey,
+) -> Result<Option<DRepState>, StatusCode> {
     let newest_cert = domain
         .archive()
         .slots_by_drep_certs(&dolos_core::keys::encode(key), 0, BlockSlot::MAX)
@@ -198,15 +237,13 @@ pub(crate) fn read_drep_row<D: Domain>(
         .transpose()
         .map_err(log_and_500("failed to read the drep certificates"))?;
 
-    // a DRep no certificate names has no row in either store
     let Some(unregistered) = newest_cert else {
         return Ok(None);
     };
 
     let (unregistered_epoch, _) = chain.slot_epoch(unregistered);
-    let (tip_epoch, _) = chain.slot_epoch(tip);
 
-    for epoch in unregistered_epoch + 1..=tip_epoch {
+    for epoch in unregistered_epoch + 1..=unregistered_epoch + FINAL_ROW_PROBE_EPOCHS {
         let logged = domain
             .archive()
             .read_log_typed::<DRepState>(chain.epoch_start(epoch), key)
@@ -1153,23 +1190,39 @@ mod final_row_tests {
     }
 
     mod moved_dreps {
+        use std::collections::HashMap;
+
         use axum::http::StatusCode;
-        use dolos_cardano::{final_rows::FinalRows, model::DRepState, pallas_extras};
-        use dolos_core::ChainPoint;
+        use dolos_cardano::{
+            final_rows::FinalRows,
+            indexes::{archive_dimensions, CardanoIndexDeltaBuilder},
+            model::DRepState,
+            pallas_extras,
+        };
         use dolos_core::{
-            ArchiveStore as _, ArchiveWriter as _, Domain as _, StateStore as _, StateWriter as _,
+            ArchiveStore as _, ArchiveWriter as _, BlockSlot, ChainPoint, Domain as _,
+            StateStore as _, StateWriter as _,
         };
         use dolos_testing::{
             synthetic::{SyntheticBlockConfig, SyntheticVectors},
             toy_domain::ToyDomain,
         };
-        use pallas::ledger::primitives::{
-            conway::{Certificate, DRep, GovAction, Vote},
-            StakeCredential,
+        use pallas::{
+            codec::utils::{NonEmptySet, Set},
+            ledger::{
+                primitives::{
+                    conway::{Certificate, DRep, GovAction, TransactionBody, Vote},
+                    StakeCredential,
+                },
+                traverse::MultiEraBlock,
+            },
         };
 
-        use super::super::testing::*;
-        use crate::{mapping::bech32_drep, test_support::TestApp};
+        use super::super::{drep_final_rows, point_read_drep_row, read_drep_row, testing::*};
+        use crate::{
+            mapping::bech32_drep,
+            test_support::{TestApp, TestDomainBuilder},
+        };
 
         fn cred() -> StakeCredential {
             StakeCredential::AddrKeyhash([0x66u8; 28].into())
@@ -1222,16 +1275,24 @@ mod final_row_tests {
                 .unwrap()
         }
 
-        /// Moves the DRep's row to the final-row log, keyed at the start of
-        /// the epoch after its unregistration, as the ESTART that moves it
-        /// does at the earliest: the archive commits first, then the state
-        /// deletes the row.
-        fn move_to_log(domain: &ToyDomain, row: &DRepState) {
+        /// The start of the epoch `epochs` after the one holding `slot`.
+        fn epoch_start_after(domain: &ToyDomain, slot: BlockSlot, epochs: u64) -> BlockSlot {
             let summary =
                 dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
-            let (unregistered, _) = row.unregistered_at.expect("an unregistered drep");
-            let slot = summary.epoch_start(summary.slot_epoch(unregistered).0 + 1);
+            summary.epoch_start(summary.slot_epoch(slot).0 + epochs)
+        }
 
+        /// Moves the DRep's row to the final-row log, keyed at the start of
+        /// the epoch after its unregistration, as the ESTART that moves it
+        /// does at the earliest.
+        fn move_to_log(domain: &ToyDomain, row: &DRepState) {
+            let (unregistered, _) = row.unregistered_at.expect("an unregistered drep");
+            move_to_log_at(domain, row, epoch_start_after(domain, unregistered, 1));
+        }
+
+        /// Moves the DRep's row to the final-row log keyed at `slot`: the
+        /// archive commits first, then the state deletes the row.
+        fn move_to_log_at(domain: &ToyDomain, row: &DRepState, slot: BlockSlot) {
             let mut finals = FinalRows::default();
             finals.push(slot, &key(), row);
 
@@ -1240,6 +1301,53 @@ mod final_row_tests {
             finals.write(&state, &archive).unwrap();
             archive.commit().unwrap();
             state.commit().unwrap();
+        }
+
+        /// Appends to the archive a Conway block at `slot` whose one
+        /// transaction, valid or phase-2-invalid, carries `cert` for the
+        /// DRep, indexed by the real `CardanoIndexDeltaBuilder`. State is
+        /// untouched.
+        fn append_cert_block(domain: &ToyDomain, slot: BlockSlot, cert: Certificate, valid: bool) {
+            let body = TransactionBody {
+                inputs: Set::from(vec![]),
+                outputs: vec![],
+                fee: 0,
+                ttl: None,
+                certificates: Some(NonEmptySet::try_from(vec![cert]).unwrap()),
+                withdrawals: None,
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: None,
+                script_data_hash: None,
+                collateral: None,
+                required_signers: None,
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: None,
+                voting_procedures: None,
+                proposal_procedures: None,
+                treasury_value: None,
+                donation: None,
+            };
+
+            let (point, raw) =
+                dolos_testing::blocks::make_conway_block_with_tx(slot, body, None, valid);
+            let block = MultiEraBlock::decode(&raw).unwrap();
+            assert_eq!(block.txs()[0].is_valid(), valid);
+
+            let mut builder = CardanoIndexDeltaBuilder::new();
+            builder.index_block(&block, &HashMap::new());
+            let deltas = builder.build();
+            assert!(deltas[0]
+                .tags
+                .iter()
+                .any(|tag| tag.dimension == archive_dimensions::DREP_CERTS));
+
+            let writer = domain.archive().start_writer().unwrap();
+            writer.apply(&point, &raw).unwrap();
+            writer.apply_index(&deltas).unwrap();
+            writer.commit().unwrap();
         }
 
         /// Moves the state cursor into the epoch after the chain's last
@@ -1390,6 +1498,126 @@ mod final_row_tests {
                     "{path}"
                 );
             }
+        }
+
+        /// Every route answers alike for `a` and `b`.
+        async fn assert_same_answers(a: &TestApp, b: &TestApp) {
+            for path in paths(b) {
+                assert_eq!(json(a, &path).await, json(b, &path).await, "{path}");
+            }
+        }
+
+        /// The unregistered DRep in state and moved, each with `extra`
+        /// applied to its store after the move.
+        fn held_and_moved(extra: fn(&ToyDomain, &SyntheticVectors)) -> (TestApp, TestApp) {
+            let held = TestApp::new_with_cfg_and_setup(cfg(true, false), |domain, vectors| {
+                advance_tip(domain, vectors);
+                extra(domain, vectors);
+                assert!(read_row(domain).is_some(), "the row stays in state");
+            });
+
+            let moved = TestApp::new_with_cfg_and_setup(cfg(true, false), |domain, vectors| {
+                advance_tip(domain, vectors);
+                move_to_log(domain, &read_row(domain).expect("the drep row"));
+                extra(domain, vectors);
+                assert!(read_row(domain).is_none(), "the row left state");
+            });
+
+            (held, moved)
+        }
+
+        /// A certificate in a phase-2-invalid transaction after the move is
+        /// tagged under `drep_certs` though the ledger skips it: the probe
+        /// after it misses and the log scan finds the final row.
+        #[tokio::test]
+        async fn an_invalid_certificate_after_the_move_hides_no_row() {
+            let (held, moved) = held_and_moved(|domain, vectors| {
+                let slot = epoch_start_after(domain, vectors.blocks[2].slot, 1) + 1;
+                let cert = Certificate::RegDRepCert(cred(), 500, None);
+                append_cert_block(domain, slot, cert, false);
+            });
+
+            assert_eq!(drep_model(&moved).await["retired"], true);
+            assert_eq!(counted(&moved).await, [false]);
+            assert_same_answers(&moved, &held).await;
+        }
+
+        /// A registration after the move that state has rolled back, while
+        /// the archive, committed after it, still holds its certificate.
+        #[tokio::test]
+        async fn a_rolled_back_registration_after_the_move_hides_no_row() {
+            let (held, moved) = held_and_moved(|domain, vectors| {
+                let slot = epoch_start_after(domain, vectors.blocks[2].slot, 2) + 1;
+                let cert = Certificate::RegDRepCert(cred(), 500, None);
+                append_cert_block(domain, slot, cert, true);
+            });
+
+            assert_eq!(drep_model(&moved).await["retired"], true);
+            assert_same_answers(&moved, &held).await;
+        }
+
+        /// A final row keyed before the newest certificate, where the probe
+        /// cannot reach it, as when an archive pruned of the unregistration
+        /// holds a later certificate only, is found by a scan of the log.
+        #[tokio::test]
+        async fn a_row_before_the_newest_certificate_is_found_by_a_scan() {
+            let (held, _) = apps(true, false);
+            let elsewhere = TestApp::new_with_cfg_and_setup(cfg(true, false), |domain, vectors| {
+                advance_tip(domain, vectors);
+                move_to_log_at(domain, &read_row(domain).expect("the drep row"), 0);
+            });
+
+            assert_same_answers(&elsewhere, &held).await;
+        }
+
+        /// A DRep moved twice, the second time held through two boundaries
+        /// after its unregistration: the point read probes past the closing
+        /// epoch and finds the newer final row with no scan, and the list
+        /// takes the newer row too.
+        #[test]
+        fn a_drep_moved_twice_reads_its_newer_final_row() {
+            let (domain, vectors) =
+                TestDomainBuilder::new_with_synthetic(cfg(true, false)).finish();
+
+            let first = read_row(&domain).expect("the drep row");
+            move_to_log(&domain, &first);
+
+            let unregistered = vectors.blocks[2].slot;
+            let registered_again = epoch_start_after(&domain, unregistered, 2) + 1;
+            let unregistered_again = epoch_start_after(&domain, unregistered, 3) + 1;
+
+            let register = Certificate::RegDRepCert(cred(), 500, None);
+            append_cert_block(&domain, registered_again, register, true);
+            let unregister = Certificate::UnRegDRepCert(cred(), 500);
+            append_cert_block(&domain, unregistered_again, unregister, true);
+
+            let second = DRepState {
+                registered_at: Some((registered_again, 0)),
+                unregistered_at: Some((unregistered_again, 0)),
+                last_active_slot: Some(unregistered_again),
+                ..first.clone()
+            };
+            assert_ne!(second, first);
+            move_to_log_at(
+                &domain,
+                &second,
+                epoch_start_after(&domain, unregistered_again, 3),
+            );
+
+            let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+
+            assert_eq!(
+                point_read_drep_row(&domain, &chain, &key()).unwrap(),
+                Some(second.clone())
+            );
+            assert_eq!(
+                read_drep_row(&domain, &chain, &key()).unwrap(),
+                Some(second.clone())
+            );
+            assert_eq!(
+                drep_final_rows(&domain).unwrap().remove(&key()),
+                Some(second)
+            );
         }
     }
 }

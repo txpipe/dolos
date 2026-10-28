@@ -28,7 +28,7 @@ use crate::{
     Facade,
 };
 
-use super::{chain_context, drep_distribution, drep_final_rows, read_drep_row};
+use super::{chain_context, drep_distribution, drep_final_rows, point_read_drep_row};
 
 /// How many anchors one page loads at a time. A page asks for up to 100 rows
 /// and every miss costs a round trip capped at the fetch timeout, so the bound
@@ -238,10 +238,12 @@ where
 }
 
 /// The ledger rows of one page's DReps, by point reads in one blocking task.
+/// The DReps the point read misses, among them those only a vote delegation
+/// named, take their final rows from one scan of the log, as in
+/// [`super::read_drep_row`].
 async fn read_drep_states<D>(
     domain: &Facade<D>,
     chain: &ChainSummary,
-    tip: BlockSlot,
     sightings: Vec<(DRepKey, DRepSightingState)>,
 ) -> Result<Vec<DrepRow>, StatusCode>
 where
@@ -251,10 +253,10 @@ where
 
     domain
         .blocking(move |facade| {
-            sightings
+            let mut rows = sightings
                 .into_iter()
                 .map(|(key, sighting)| {
-                    let state = read_drep_row(&facade.inner, &chain, tip, &key)?;
+                    let state = point_read_drep_row(&facade.inner, &chain, &key)?;
 
                     Ok(DrepRow {
                         key,
@@ -262,7 +264,21 @@ where
                         state,
                     })
                 })
-                .collect()
+                .collect::<Result<Vec<_>, StatusCode>>()?;
+
+            let missed = |row: &DrepRow| {
+                row.state.is_none() && !matches!(row.key.0, DRep::Abstain | DRep::NoConfidence)
+            };
+
+            if rows.iter().any(missed) {
+                let mut finals = drep_final_rows(&facade.inner)?;
+
+                for row in rows.iter_mut().filter(|row| missed(row)) {
+                    row.state = finals.remove(&row.key);
+                }
+            }
+
+            Ok(rows)
         })
         .await
 }
@@ -301,7 +317,7 @@ where
             .take(pagination.count)
             .collect();
 
-        let rows = read_drep_states(domain, &chain, tip, page).await?;
+        let rows = read_drep_states(domain, &chain, page).await?;
 
         return Ok(DrepsPage {
             rows,

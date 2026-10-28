@@ -136,6 +136,10 @@ impl DRepState {
     ///   which the rule requires to be resolved.
     /// - **The closing epoch.** A rollback can reach that epoch's last blocks,
     ///   and undoing an unregistration needs the row.
+    /// - **One transaction.** A DRep registered and unregistered in the same
+    ///   transaction carries equal stamps, as one unregistered and registered
+    ///   again there does, so [`Self::is_unregistered`] is false and the row
+    ///   stays.
     pub fn leaves_state_at(
         &self,
         closing_start: BlockSlot,

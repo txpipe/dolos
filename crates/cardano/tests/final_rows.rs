@@ -305,8 +305,6 @@ fn a_crash_at_any_commit_moves_the_same_rows() {
     );
 }
 
-// --- DReps ---
-
 /// Unregistered before `VOTED` was submitted.
 const EARLY: u8 = 0xb1;
 /// Votes on `VOTED`, then unregisters while it is live.
@@ -547,10 +545,76 @@ fn the_drep_rule_holds_what_a_reader_could_still_need() {
     };
     assert!(!reregistered.leaves_state_at(closing_start, None));
 
+    // registered again where the DRep deposit is zero
+    let free = DRepState {
+        deposit: 0,
+        ..reregistered
+    };
+    assert!(!free.leaves_state_at(closing_start, None));
+
+    // registered and unregistered in one transaction: the stamps are equal
+    let one_tx = DRepState {
+        registered_at: Some((500, 0)),
+        ..unregistered.clone()
+    };
+    assert!(!one_tx.leaves_state_at(closing_start, None));
+
     // a deposit not yet refunded
     let unrefunded = DRepState {
         deposit: 1,
         ..unregistered
     };
     assert!(!unrefunded.leaves_state_at(closing_start, None));
+}
+
+/// The earliest live submission decides: a DRep unregistered between two live
+/// proposals stays while the earlier one lives, and leaves once only the later
+/// one does.
+#[test]
+fn the_earliest_live_proposal_holds_a_drep() {
+    let domain = ToyDomain::new_with_genesis(devnet(), None, None);
+
+    let earlier = ProposalState {
+        slot: SUBMITTED,
+        max_epoch: Some(100),
+        ..proposal(VOTED, None, None)
+    };
+    let later = ProposalState {
+        slot: SUBMITTED + 20,
+        max_epoch: Some(100),
+        ..proposal(LIVE, None, None)
+    };
+    let between = drep(HELD, Some(SUBMITTED + 10));
+
+    let writer = domain.state().start_writer().unwrap();
+    writer.write_entity_typed(&earlier.key(), &earlier).unwrap();
+    writer.write_entity_typed(&later.key(), &later).unwrap();
+    writer
+        .write_entity_typed(&drep_key(HELD), &between)
+        .unwrap();
+    writer.commit().unwrap();
+
+    // openings 1 and 2: the closing epoch, then the earlier proposal, hold it
+    open_next_epoch(&domain).unwrap();
+    open_next_epoch(&domain).unwrap();
+    assert_eq!(keys_of(&dreps_in_state(&domain)), vec![drep_key(HELD)]);
+    assert!(dreps_logged(&domain).is_empty());
+
+    // in epoch 2 the earlier proposal is enacted; the later one stays live
+    let enacted = ProposalState {
+        ratified_epoch: Some(2),
+        ..earlier
+    };
+    let writer = domain.state().start_writer().unwrap();
+    writer.write_entity_typed(&enacted.key(), &enacted).unwrap();
+    writer.commit().unwrap();
+
+    // opening 3: only a proposal submitted after the unregistration lives
+    open_next_epoch(&domain).unwrap();
+    assert!(dreps_in_state(&domain).is_empty());
+    assert_eq!(
+        dreps_logged(&domain)[&drep_key(HELD)],
+        (epoch_start(&domain, 2), between)
+    );
+    assert!(in_state(&domain).contains_key(&later.key()));
 }
