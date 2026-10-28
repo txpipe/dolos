@@ -127,8 +127,8 @@ fn current_epoch<S: StateStore>(state: &S) -> Result<Epoch, StateError> {
 /// sets only the live stake value, so each row keeps the snapshots and the
 /// epoch the store held:
 /// - A rotated row was in state through the boundary, so ESTART did not prune
-///   it. That holds even when a crashed rollback's catch-up replayed it
-///   without the boundary's payment and the undos give that payment back.
+///   it. That holds even when a crashed rollback's catch-up replayed it without
+///   the boundary's payment and the undos give that payment back.
 /// - A row that a closing-epoch block created, that a crashed rollback deleted
 ///   and that catch-up created again is at that block's epoch. The credential
 ///   had no row before the block, and the boundary paid the row only while it
