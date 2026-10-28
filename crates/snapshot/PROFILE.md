@@ -202,7 +202,7 @@ and the meaning of `sequence`:
   "position": { "network": {"magic": 764824073, "name": "mainnet"},
                 "point": {"slot": 152236812, "hash": "…"},
                 "epoch": 550 },
-  "parameters": { "entities": {"asset": 32, "script": 28},
+  "parameters": { "entities": {"asset": 32, "script": 28, "stake": 29},
                    "indexKeyHash": "xxh3-64",
                    "shards": {"accounts": 16, "datums": 16, "utxos": 16, "…": 1},
                    "schemas": {"accounts": 1, "utxos": 1, "…": 1},
@@ -246,8 +246,9 @@ retained state dump; `EPOCH_KINDS` and `STATE_KINDS` give the current terms.
 For mainnet at 20 retained epochs, the ceiling of what a publisher is
 expected to configure, that bound sits well inside the ceiling, and it is
 loose in the direction that helps: log and entity layers are omitted when
-empty, and early eras carry few kinds of log and no entity of either kind at
-all — mainnet's entity layers add 793 descriptors to epoch 646. **This is the arithmetic that
+empty, and early eras carry few kinds of log and no entity of any kind at
+all — mainnet's `asset` and `script` layers add 793 descriptors to epoch 646,
+and its `stake` layers at most one per window from Shelley's first epoch, 208. **This is the arithmetic that
 bounds the retained list**, and the reason per-epoch dumps were rejected:
 one per epoch would put the state layers alone at several times the
 ceiling. (The Rationale's "~1,700 manifest descriptors" is decision-time

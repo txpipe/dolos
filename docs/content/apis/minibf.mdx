@@ -246,7 +246,7 @@ A rolling `history` window prunes the asset-mint logs by epoch and the entity in
 
 `/accounts/{stake_address}` and the routes that answer 404 for an unknown account find a credential state no longer holds, a never-registered one pruned once it emptied, through the archive's entity index: the seal of an immutable epoch records the first slot of every stake address the epoch's outputs paid. For the epochs not yet sealed, the `stake` tag answers instead. An archive whose seals ran on an earlier version wrote no `stake` entries, so a pruned credential last seen before the upgrade is not found until `dolos doctor rebuild-state --rewrite-logs` (or a new bootstrap) indexes every epoch from the start of the chain. A stele published by such a version does not declare the `stake` kind, and a restore refuses it by name.
 
-A rolling `history` window prunes the entity index by slot, so a pruned node finds a pruned credential only when it was first seen inside its window or seen again in an epoch not yet sealed.
+A rolling `history` window prunes the entity index by slot. A pruned node therefore finds a pruned credential first seen before its window only if it was seen again in an epoch not yet sealed, or paid again in an epoch sealed after the prune dropped its earlier entry.
 
 ## DRep listing on stores synced by an older release
 
