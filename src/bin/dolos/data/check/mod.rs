@@ -842,7 +842,7 @@ mod tests {
     }
 
     /// A DRep moved twice: the newer final row replaces the older one, so a
-    /// delegation between the two registrations owes the second retirement's
+    /// delegation between the two retirements owes the second retirement's
     /// drop.
     #[test]
     fn a_newer_final_row_replaces_an_older_one() {

@@ -787,8 +787,10 @@ fn dangling_pool_referents(account: &AccountState, referents: &Referents) -> Vec
 ///    state or in the retained log never registered, or retired and had its
 ///    final row pruned. Either way a delegation to it made *before* the
 ///    migration boundary is a missing drop, the migration's or the
-///    retirement's. One made after the boundary is legitimate again, and is not
-///    reported: that is the shape the two preprod accounts have.
+///    retirement's. One made after the boundary is not reported: to a
+///    credential that never registered it is legitimate again, the shape the
+///    two preprod accounts have, and against a pruned retirement it cannot be
+///    judged.
 ///
 /// Rules 2 and 3 each need a position on the chain the store may not be able
 /// to place; without it the rule does not run. See [`Anchors`].
