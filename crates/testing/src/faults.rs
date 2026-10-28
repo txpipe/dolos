@@ -44,6 +44,9 @@ pub enum TestFault {
     /// [`StateStore::iter_entities`] sleeps this long before answering, as a
     /// scan of a large store would.
     SlowStateScans(Duration),
+    /// [`StateStore::read_cursor`] answers `None`, as before the first block
+    /// is applied; every other call succeeds.
+    NoCursor,
 }
 
 /// Whether a commit under `fault` comes after the crash, counting it if not.
@@ -218,6 +221,9 @@ impl StateStore for FaultyStateStore {
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
         if self.should_fault() {
             return Err(self.fault_err());
+        }
+        if matches!(self.fault, TestFault::NoCursor) {
+            return Ok(None);
         }
         self.inner.read_cursor()
     }

@@ -9,7 +9,7 @@ use blockfrost_openapi::models::proposal_votes_inner::{self, ProposalVotesInner}
 use dolos_cardano::{
     indexes::CardanoArchiveIndexExt as _,
     model::{DRepKey, ProposalKey},
-    pallas_extras, ChainSummary,
+    pallas_extras,
 };
 use dolos_core::{
     ArchiveError, ArchiveStore as _, BlockSlot, ChainPoint, Domain, StateStore as _, TxOrder,
@@ -35,7 +35,7 @@ use crate::{
     Facade,
 };
 
-use super::{collect_block_rows, read_drep_row, read_proposal_row, ProposalRow};
+use super::{collect_block_rows, read_drep_row, read_proposal_row, DRepReads, ProposalRow};
 
 struct ProposalVoteRow {
     tx: Hash<32>,
@@ -176,7 +176,7 @@ fn scan_drep_deregistration<D: Domain>(
 /// certificate blocks too.
 fn drep_vote_counts<D: Domain>(
     domain: &D,
-    chain: &ChainSummary,
+    reads: &DRepReads,
     cred: &StakeCredential,
     vote_at: (BlockSlot, TxOrder),
     end: BlockSlot,
@@ -188,7 +188,7 @@ fn drep_vote_counts<D: Domain>(
 
     let drep = DRepKey(pallas_extras::stake_cred_to_drep(cred));
 
-    let Some(row) = read_drep_row(domain, chain, &drep)? else {
+    let Some(row) = read_drep_row(domain, reads, &drep)? else {
         return Ok(true);
     };
 
@@ -628,6 +628,7 @@ fn read_votes_at<D: Domain>(
         .skip(pagination.skip())
         .take(pagination.count);
 
+    let reads = DRepReads::new(&chain);
     let mut out = Vec::new();
 
     for mut row in page {
@@ -653,7 +654,7 @@ fn read_votes_at<D: Domain>(
         if row.counted {
             if let Some(cred) = drep {
                 row.counted =
-                    drep_vote_counts(domain, &chain, &cred, (row.slot, row.tx_order), end, budget)?;
+                    drep_vote_counts(domain, &reads, &cred, (row.slot, row.tx_order), end, budget)?;
             }
         }
 

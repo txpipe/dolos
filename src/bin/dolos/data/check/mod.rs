@@ -330,7 +330,7 @@ mod tests {
         let anchors = totals::load_anchors(domain.state(), &epoch, boundaries.pv10_epoch).unwrap();
 
         let (found, referent_issues) =
-            totals::recompute(domain.state(), anchors, |_, _| {}).unwrap();
+            totals::recompute(domain.state(), domain.archive(), anchors, |_, _| {}).unwrap();
         issues.extend(referent_issues);
         issues.extend(
             totals::check_pots(
@@ -542,8 +542,13 @@ mod tests {
         writer.write_entity_typed(&key, &account).unwrap();
         writer.commit().unwrap();
 
-        let (found, issues) =
-            totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
+        let (found, issues) = totals::recompute(
+            domain.state(),
+            domain.archive(),
+            Default::default(),
+            |_, _| {},
+        )
+        .unwrap();
 
         assert!(issues.is_empty(), "{issues:#?}");
         assert_eq!(found.registered_pools, 1);
@@ -570,7 +575,13 @@ mod tests {
         writer.write_entity_typed(&key, &account).unwrap();
         writer.commit().unwrap();
 
-        let (_, issues) = totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
+        let (_, issues) = totals::recompute(
+            domain.state(),
+            domain.archive(),
+            Default::default(),
+            |_, _| {},
+        )
+        .unwrap();
 
         assert_eq!(issues.len(), 1, "{issues:#?}");
         assert!(
@@ -692,7 +703,13 @@ mod tests {
         write_drep(&domain, &DRep::Key(hash), DRep::Script(hash), None);
         write_voter(&domain, 0x52, DRep::Key(hash), 100);
 
-        let (_, issues) = totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
+        let (_, issues) = totals::recompute(
+            domain.state(),
+            domain.archive(),
+            Default::default(),
+            |_, _| {},
+        )
+        .unwrap();
 
         assert_eq!(issues.len(), 1, "{issues:#?}");
         assert!(
@@ -723,16 +740,55 @@ mod tests {
             pv10_boundary: None,
         };
 
-        let (_, issues) = totals::recompute(domain.state(), anchors, |_, _| {}).unwrap();
+        let (_, issues) =
+            totals::recompute(domain.state(), domain.archive(), anchors, |_, _| {}).unwrap();
+
+        assert_eq!(issues.len(), 1, "{issues:#?}");
+        assert!(issues[0].detail.contains("owed a drop"), "{}", issues[0]);
+    }
+
+    /// The same missing drop once ESTART has moved the retired DRep to the
+    /// final-row log: the check reads the final row as it read the state row.
+    #[test]
+    fn a_drop_a_moved_drep_was_owed_is_reported() {
+        let domain = ToyDomain::new(None, None);
+        let drep = DRep::Key(pallas::crypto::hash::Hash::<28>::from([0x57; 28]));
+
+        write_drep(&domain, &drep, drep.clone(), Some((200, 0)));
+        write_voter(&domain, 0x58, drep.clone(), 100);
+
+        let key = DRepKey::from(&drep);
+        let row = domain
+            .state()
+            .read_entity_typed::<dolos_cardano::model::DRepState>(&key)
+            .unwrap()
+            .unwrap();
+
+        let mut finals = dolos_cardano::final_rows::FinalRows::default();
+        finals.push(300, &key, &row);
+
+        let archive = domain.archive().start_writer().unwrap();
+        let state = domain.state().start_writer().unwrap();
+        finals.write(&state, &archive).unwrap();
+        archive.commit().unwrap();
+        state.commit().unwrap();
+
+        let anchors = totals::Anchors {
+            live_epoch_start: Some(500),
+            pv10_boundary: Some(50),
+        };
+
+        let (_, issues) =
+            totals::recompute(domain.state(), domain.archive(), anchors, |_, _| {}).unwrap();
 
         assert_eq!(issues.len(), 1, "{issues:#?}");
         assert!(issues[0].detail.contains("owed a drop"), "{}", issues[0]);
     }
 
     /// A live delegation to a credential with no row at all, made before the
-    /// protocol-10 boundary whose migration drops exactly those. A row is
-    /// never deleted, so the absence is not history — it is the migration
-    /// missing, or the row.
+    /// protocol-10 boundary whose migration drops exactly those. A DRep that
+    /// leaves state keeps its final row in the log, so the absence is not
+    /// history — it is the migration missing, or the row.
     ///
     /// The companion case — the same delegation made *after* that boundary,
     /// which is the shape the two legitimate preprod accounts have — is the
@@ -750,7 +806,8 @@ mod tests {
             pv10_boundary: Some(500),
         };
 
-        let (_, issues) = totals::recompute(domain.state(), anchors, |_, _| {}).unwrap();
+        let (_, issues) =
+            totals::recompute(domain.state(), domain.archive(), anchors, |_, _| {}).unwrap();
 
         assert_eq!(issues.len(), 1, "{issues:#?}");
         assert!(

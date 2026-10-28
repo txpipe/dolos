@@ -14,13 +14,14 @@ use crate::{
     Facade,
 };
 
-use super::{drep_distribution, drep_key, read_drep_row};
+use super::{drep_distribution, drep_key, point_read_drep_row, scan_drep_row, DRepReads};
 
-pub async fn drep_by_id<D: Domain>(
+pub async fn drep_by_id<D>(
     Path(drep): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<blockfrost_openapi::models::drep::Drep>, StatusCode>
 where
+    D: Domain + Clone + Send + Sync + 'static,
     Option<DRepState>: From<D::Entity>,
 {
     let parsed = parse_drep_id(&drep)?;
@@ -29,14 +30,23 @@ where
     let chain = domain.get_chain_summary()?;
 
     // the special DReps have no row
-    let drep_state = read_drep_row(&domain.inner, &chain, &key)?;
+    let reads = DRepReads::new(&chain);
+    let mut drep_state = point_read_drep_row(&domain.inner, &reads, &key)?;
 
     if drep_state.is_none() && !parsed.is_special {
-        return Err(StatusCode::NOT_FOUND);
+        let scanned = key.clone();
+
+        drep_state = domain
+            .blocking(move |facade| scan_drep_row(&facade.inner, &scanned))
+            .await?;
+
+        if drep_state.is_none() {
+            return Err(StatusCode::NOT_FOUND);
+        }
     }
 
     let tip = domain.get_tip_slot()?;
-    let pparams = domain.get_current_effective_pparams()?;
+    let pparams = reads.pparams(&domain.inner)?;
 
     let amount = drep_amount(&key.0, drep_state.as_ref(), &drep_distribution(&domain)?);
 
@@ -47,7 +57,7 @@ where
         is_special: parsed.is_special,
         state: drep_state,
         amount,
-        pparams: &pparams,
+        pparams,
         chain: &chain,
         tip,
     };
@@ -85,6 +95,16 @@ mod tests {
         let app = TestApp::new();
         let missing = missing_drep();
         let path = format!("/governance/dreps/{missing}");
+
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    /// The row is read before the tip, so a DRep with no row answers 404
+    /// before a state cursor exists.
+    #[tokio::test]
+    async fn governance_drep_not_found_before_a_cursor() {
+        let app = TestApp::new_with_fault(Some(TestFault::NoCursor));
+        let path = format!("/governance/dreps/{}", missing_drep());
 
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
