@@ -1,8 +1,8 @@
 //! The entity kinds Cardano declares for the archive's entity index: the
 //! entities whose first-seen slot the seal records (decision 0064).
 //!
-//! Declared only. The seal writes no entry yet; the first-script and
-//! first-mint witnesses that will are pieces of their own.
+//! The first-script seal writes `SCRIPT` entries; no seal writes `ASSET`
+//! entries yet, the first-mint witness that will is a piece of its own.
 //!
 //! The widths are the key types' own, so a kind and the id the witness hands
 //! the index cannot disagree.

@@ -1,15 +1,19 @@
 //! First-seen scripts.
 //!
-//! Records where each script was first seen (the `scripts` witness, see
-//! `model/scripts.rs`) and stages it in the `first-scripts` row of that
-//! block's epoch. A visitor cannot read the store and deltas only meet their
-//! entity once the whole batch is crawled, so which of the batch's scripts the
-//! witness already holds is read once per batch, ahead of the crawl, and kept
+//! Stages each script in the `first-scripts` row of the epoch of the block
+//! that carries it first. The witness that tells a first sighting from a
+//! repeat is the archive's entity index, which the seal writes for every
+//! sealed epoch, plus the staged rows of the unsealed epochs (decision 0064).
+//! A visitor cannot read the stores, so which of the batch's scripts an
+//! earlier block carried is read once per batch, ahead of the crawl, and kept
 //! current by hand from block to block.
 
-use std::collections::{BTreeSet, HashSet};
+use std::{
+    collections::{BTreeSet, HashSet},
+    ops::RangeInclusive,
+};
 
-use dolos_core::{ChainError, Genesis, StateStore};
+use dolos_core::{ArchiveStore, ChainError, Genesis, StateStore};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -20,8 +24,11 @@ use pallas::{
 
 use super::{BlockVisitor, WorkDeltas};
 use crate::{
-    model::FirstScriptSet, pallas_extras, PParamsSet, ScriptFirstSeen, ScriptKey, ScriptState,
-    StageFirstScript,
+    indexes::entities,
+    model::{FirstScriptKey, FirstScriptSet, ScriptKey},
+    pallas_extras,
+    periods::{GroupKey, Ungrouped},
+    PParamsSet, StageFirstScript,
 };
 
 fn reference_script(output: &MultiEraOutput) -> Option<Hash<28>> {
@@ -103,38 +110,74 @@ fn sightings(slot: u64, txs: &[MultiEraTx<'_>]) -> Vec<(Hash<28>, FirstScriptSet
 /// What the roll knows about the witness while it crawls a batch.
 #[derive(Debug, Default)]
 pub struct ScriptRegistryContext {
-    /// The scripts the batch carries that the witness holds already, plus the
+    /// The scripts the batch carries that a block before it carried, plus the
     /// ones the batch has seen so far.
     known: HashSet<Hash<28>>,
 }
 
 impl ScriptRegistryContext {
-    /// Read the witness for a batch whose blocks carry `carried`.
-    pub fn load<S: StateStore>(
+    /// Read the witness for a batch starting at `first_slot` whose blocks
+    /// carry `carried`, while `unsealed` are the epochs whose staged rows are
+    /// still in state.
+    ///
+    /// A script is seen when the entity index holds a slot for it below the
+    /// batch, or a staged `first-scripts` row of an unsealed epoch names it.
+    /// The seal writes the index entry before it deletes the staged row, so a
+    /// sealed script is always in one of the two. The slot bound keeps a
+    /// re-roll over an archive that already indexes the batch (`doctor
+    /// rebuild-state`) from reading the batch's own entries.
+    pub fn load<S: StateStore, A: ArchiveStore>(
         state: &S,
+        archive: &A,
         carried: &[Vec<(Hash<28>, FirstScriptSet)>],
+        first_slot: u64,
+        unsealed: RangeInclusive<Epoch>,
     ) -> Result<Self, ChainError> {
         let scripts: Vec<Hash<28>> = carried
             .iter()
             .flatten()
-            .map(|(hash, _)| *hash)
+            .map(|(x, _)| *x)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
 
-        if scripts.is_empty() {
-            return Ok(Self::default());
+        let mut known = HashSet::new();
+
+        let keys: Vec<&[u8]> = scripts.iter().map(|x| x.as_slice()).collect();
+        let slots = archive.entity_slots(entities::SCRIPT, &keys)?;
+
+        let mut rest = Vec::new();
+
+        for (script, slot) in scripts.iter().zip(slots) {
+            match slot {
+                Some(slot) if slot < first_slot => {
+                    known.insert(*script);
+                }
+                _ => rest.push(*script),
+            }
         }
 
-        let keys: Vec<ScriptKey> = scripts.iter().map(|x| ScriptKey(*x)).collect();
+        if rest.is_empty() {
+            return Ok(Self { known });
+        }
 
-        let found = state.read_entities_typed::<ScriptState>(&keys.iter().collect::<Vec<_>>())?;
-
-        let known = scripts
-            .into_iter()
-            .zip(found)
-            .filter_map(|(script, row)| row.map(|_| script))
+        let keys: Vec<FirstScriptKey> = unsealed
+            .flat_map(|epoch| {
+                rest.iter().map(move |script| GroupKey {
+                    group: Ungrouped,
+                    epoch,
+                    member: ScriptKey(*script),
+                })
+            })
             .collect();
+
+        let rows = state.read_entities_typed::<FirstScriptSet>(&keys.iter().collect::<Vec<_>>())?;
+
+        for (key, row) in keys.iter().zip(rows) {
+            if row.is_some() {
+                known.insert(key.member.0);
+            }
+        }
 
         Ok(Self { known })
     }
@@ -157,14 +200,13 @@ impl ScriptRegistryVisitor {
         std::mem::take(&mut self.context)
     }
 
-    /// Record and stage the carried scripts the witness does not hold.
+    /// Stage the carried scripts no earlier block carried.
     fn register(&mut self, deltas: &mut WorkDeltas, epoch: Epoch) {
         for (script, first) in std::mem::take(&mut self.carried) {
             if !self.context.known.insert(script) {
                 continue;
             }
 
-            deltas.add_for_entity(ScriptFirstSeen::new(script, first.into()));
             deltas.add_for_entity(StageFirstScript::new(epoch, script, first));
         }
     }
@@ -189,7 +231,11 @@ impl BlockVisitor for ScriptRegistryVisitor {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use dolos_core::{builtin::MemoryStateStore, Entity as _, EntityDelta as _, StateWriter as _};
+    use dolos_core::{
+        builtin::{MemoryArchiveStore, MemoryStateStore},
+        ArchiveStore as _, ArchiveWriter as _, Entity as _, EntityDelta as _, FixedNamespace as _,
+        StateStore, StateWriter as _,
+    };
 
     use crate::CardanoEntity;
     use pallas::{
@@ -546,97 +592,182 @@ pub(crate) mod tests {
         }
     }
 
-    fn staged(state: &MemoryStateStore) -> Vec<(Epoch, Hash<28>, FirstScriptSet)> {
+    fn state_rows(state: &MemoryStateStore) -> Vec<(FirstScriptKey, FirstScriptSet)> {
         state
             .iter_entities_typed::<FirstScriptSet>(None)
             .unwrap()
-            .map(|row| {
-                let (key, row) = row.unwrap();
-                (key.epoch, key.member.0, row)
-            })
+            .map(Result::unwrap)
             .collect()
     }
 
-    fn witnessed(state: &MemoryStateStore) -> Vec<(Hash<28>, ScriptState)> {
-        state
-            .iter_entities_typed::<ScriptState>(None)
-            .unwrap()
-            .map(|row| {
-                let (key, row) = row.unwrap();
-                (key.0, row)
-            })
+    fn staged(state: &MemoryStateStore) -> Vec<(Epoch, Hash<28>, FirstScriptSet)> {
+        state_rows(state)
+            .into_iter()
+            .map(|(key, row)| (key.epoch, key.member.0, row))
             .collect()
     }
 
-    /// Run `blocks` through one batch's visitors, each block `(epoch,
-    /// sightings)`, and commit them.
-    fn roll(state: &MemoryStateStore, blocks: Vec<(Epoch, Vec<(Hash<28>, FirstScriptSet)>)>) {
-        let carried: Vec<_> = blocks.iter().map(|(_, x)| x.clone()).collect();
-        let mut context = ScriptRegistryContext::load(state, &carried).unwrap();
+    /// A state and archive pair, the stores the roll reads and writes.
+    struct Stores {
+        state: MemoryStateStore,
+        archive: MemoryArchiveStore,
+    }
 
-        for (epoch, carried) in blocks {
-            let mut visitor = ScriptRegistryVisitor::new(std::mem::take(&mut context), carried);
-            let mut deltas = WorkDeltas::default();
+    impl Stores {
+        fn new() -> Self {
+            Self {
+                state: MemoryStateStore::new(),
+                archive: MemoryArchiveStore::new(crate::model::build_log_schema()),
+            }
+        }
 
-            visitor.register(&mut deltas, epoch);
+        /// Seal the staged rows of `epochs` as the seal does: index each
+        /// script at its row's slot in the archive, then delete the row.
+        fn seal(&self, epochs: RangeInclusive<Epoch>) {
+            let rows: Vec<_> = state_rows(&self.state)
+                .into_iter()
+                .filter(|(key, _)| epochs.contains(&key.epoch))
+                .collect();
 
-            context = visitor.take_context();
-            commit(state, deltas);
+            let writer = self.archive.start_writer().unwrap();
+
+            for (key, row) in &rows {
+                writer
+                    .write_entity(entities::SCRIPT, key.member.0.as_slice(), row.slot)
+                    .unwrap();
+            }
+
+            writer.commit().unwrap();
+
+            let writer = self.state.start_writer().unwrap();
+
+            for (key, _) in &rows {
+                writer
+                    .delete_entity(FirstScriptSet::NS, &dolos_core::EntityKey::of(key))
+                    .unwrap();
+            }
+
+            writer.commit().unwrap();
+        }
+
+        /// Run `blocks` through one batch's visitors, each block `(epoch,
+        /// sightings)`, and commit them. Every epoch up to the batch's is
+        /// taken as unsealed. Returns each block's applied deltas.
+        fn roll(&self, blocks: Vec<(Epoch, Vec<(Hash<28>, FirstScriptSet)>)>) -> Vec<WorkDeltas> {
+            let carried: Vec<_> = blocks.iter().map(|(_, x)| x.clone()).collect();
+            let first_slot = carried.iter().flatten().map(|(_, x)| x.slot).min();
+            let last_epoch = blocks.iter().map(|(epoch, _)| *epoch).max().unwrap_or(0);
+            let mut context = ScriptRegistryContext::load(
+                &self.state,
+                &self.archive,
+                &carried,
+                first_slot.unwrap_or(0),
+                0..=last_epoch,
+            )
+            .unwrap();
+
+            let mut applied = vec![];
+
+            for (epoch, carried) in blocks {
+                let mut visitor =
+                    ScriptRegistryVisitor::new(std::mem::take(&mut context), carried.clone());
+                let mut deltas = WorkDeltas::default();
+
+                visitor.register(&mut deltas, epoch);
+
+                context = visitor.take_context();
+                applied.push(commit(&self.state, deltas));
+            }
+
+            applied
         }
     }
 
     #[test]
     fn a_batch_records_each_script_once_where_first_seen() {
-        let state = MemoryStateStore::new();
+        let stores = Stores::new();
 
         // three blocks of one batch: the second repeats a script of the first,
         // and nothing is committed in between
-        roll(
-            &state,
-            vec![
-                (
-                    4,
-                    vec![(script(1), at(10, 0, 0)), (script(2), at(10, 0, 1))],
-                ),
-                (
-                    4,
-                    vec![(script(2), at(11, 0, 0)), (script(3), at(11, 1, 0))],
-                ),
-                (4, vec![]),
-            ],
-        );
+        stores.roll(vec![
+            (
+                4,
+                vec![(script(1), at(10, 0, 0)), (script(2), at(10, 0, 1))],
+            ),
+            (
+                4,
+                vec![(script(2), at(11, 0, 0)), (script(3), at(11, 1, 0))],
+            ),
+            (4, vec![]),
+        ]);
 
-        // the next batch knows what is recorded
+        // the next batch knows what the staged rows hold
         let carried = vec![vec![(script(3), at(20, 0, 0)), (script(4), at(20, 0, 1))]];
-        let context = ScriptRegistryContext::load(&state, &carried).unwrap();
+        let context =
+            ScriptRegistryContext::load(&stores.state, &stores.archive, &carried, 20, 0..=5)
+                .unwrap();
         assert_eq!(context.known, HashSet::from([script(3)]));
 
-        roll(
-            &state,
-            vec![(
-                5,
-                vec![(script(3), at(20, 0, 0)), (script(4), at(20, 0, 1))],
-            )],
-        );
+        stores.roll(vec![(
+            5,
+            vec![(script(3), at(20, 0, 0)), (script(4), at(20, 0, 1))],
+        )]);
 
         assert_eq!(
-            witnessed(&state),
-            vec![
-                (script(1), ScriptState { slot: 10 }),
-                (script(2), ScriptState { slot: 10 }),
-                (script(3), ScriptState { slot: 11 }),
-                (script(4), ScriptState { slot: 20 }),
-            ]
-        );
-
-        assert_eq!(
-            staged(&state),
+            staged(&stores.state),
             vec![
                 (4, script(1), at(10, 0, 0)),
                 (4, script(2), at(10, 0, 1)),
                 (4, script(3), at(11, 1, 0)),
                 (5, script(4), at(20, 0, 1)),
             ]
+        );
+    }
+
+    /// The witness across epochs: a script sealed into the entity index, a
+    /// script staged in an unsealed epoch and a new one, then a re-roll of
+    /// the batch that first saw the indexed script.
+    #[test]
+    fn the_witness_reads_the_index_below_the_batch_and_the_staged_rows() {
+        let stores = Stores::new();
+
+        // script 1 first seen at slot 10, in epoch 1, and sealed
+        stores.roll(vec![(1, vec![(script(1), at(10, 0, 0))])]);
+        stores.seal(1..=1);
+        assert!(staged(&stores.state).is_empty());
+
+        // script 2 staged in epoch 6
+        stores.roll(vec![(6, vec![(script(2), at(50, 0, 0))])]);
+
+        let carried = vec![vec![
+            (script(1), at(60, 0, 0)),
+            (script(2), at(60, 0, 1)),
+            (script(3), at(60, 0, 2)),
+        ]];
+
+        let context =
+            ScriptRegistryContext::load(&stores.state, &stores.archive, &carried, 60, 6..=7)
+                .unwrap();
+        assert_eq!(context.known, HashSet::from([script(1), script(2)]));
+
+        // a staged row outside the unsealed epochs is not read
+        let context =
+            ScriptRegistryContext::load(&stores.state, &stores.archive, &carried, 60, 7..=7)
+                .unwrap();
+        assert_eq!(context.known, HashSet::from([script(1)]));
+
+        // the index entry at the batch's own first slot is not below it
+        let context =
+            ScriptRegistryContext::load(&stores.state, &stores.archive, &carried, 10, 7..=7)
+                .unwrap();
+        assert!(context.known.is_empty());
+
+        // across the boundary: the next epoch's batch stages script 3 alone
+        stores.roll(vec![(7, carried.concat())]);
+
+        assert_eq!(
+            staged(&stores.state),
+            vec![(6, script(2), at(50, 0, 0)), (7, script(3), at(60, 0, 2))]
         );
     }
 
@@ -648,10 +779,10 @@ pub(crate) mod tests {
         let cbor = tx.cbor();
         let tx = MultiEraTx::decode(&cbor).unwrap();
 
-        let state = MemoryStateStore::new();
-        roll(&state, vec![(3, sightings(77, std::slice::from_ref(&tx)))]);
+        let stores = Stores::new();
+        stores.roll(vec![(3, sightings(77, std::slice::from_ref(&tx)))]);
 
-        let mut listed: Vec<_> = staged(&state)
+        let mut listed: Vec<_> = staged(&stores.state)
             .into_iter()
             .map(|(_, hash, row)| (row, hash))
             .collect();
@@ -687,40 +818,86 @@ pub(crate) mod tests {
             MultiEraTx::decode(&valid).unwrap(),
         ];
 
-        let state = MemoryStateStore::new();
-        roll(&state, vec![(3, sightings(50, &txs))]);
+        let stores = Stores::new();
+        stores.roll(vec![(3, sightings(50, &txs))]);
 
         assert_eq!(
-            witnessed(&state),
-            vec![(witness.compute_hash(), ScriptState { slot: 50 })]
-        );
-        assert_eq!(
-            staged(&state),
+            staged(&stores.state),
             vec![(3, witness.compute_hash(), at(50, 1, 0))]
         );
     }
 
-    /// Undoing a block's deltas leaves no witness or set row of it, and the
-    /// rows of the block before it stay.
+    /// A batch never reads its own index entries: re-rolling it over an
+    /// archive that already indexes every sealed script, as `doctor
+    /// rebuild-state` does, stages the rows the first roll staged.
+    #[test]
+    fn a_re_roll_over_a_full_archive_stages_the_same_rows() {
+        let batches = vec![
+            vec![
+                (
+                    4,
+                    vec![(script(1), at(10, 0, 0)), (script(2), at(10, 0, 1))],
+                ),
+                (4, vec![(script(1), at(11, 0, 0))]),
+            ],
+            vec![(
+                5,
+                vec![(script(2), at(20, 0, 0)), (script(3), at(20, 0, 1))],
+            )],
+        ];
+
+        let first = Stores::new();
+
+        for batch in batches.clone() {
+            first.roll(batch);
+        }
+
+        let rows = staged(&first.state);
+
+        // the replay's state starts empty, its archive indexes every script
+        first.seal(4..=5);
+
+        let replay = Stores {
+            state: MemoryStateStore::new(),
+            archive: first.archive.clone(),
+        };
+
+        for batch in batches {
+            replay.roll(batch);
+        }
+
+        assert_eq!(staged(&replay.state), rows);
+        assert_eq!(
+            staged(&replay.state),
+            vec![
+                (4, script(1), at(10, 0, 0)),
+                (4, script(2), at(10, 0, 1)),
+                (5, script(3), at(20, 0, 1)),
+            ]
+        );
+    }
+
+    /// Undoing a block's deltas leaves no set row of it, and the rows of the
+    /// block before it stay.
     #[test]
     fn undoing_a_block_removes_its_rows() {
-        let state = MemoryStateStore::new();
+        let stores = Stores::new();
 
-        roll(&state, vec![(4, vec![(script(1), at(10, 0, 0))])]);
+        stores.roll(vec![(4, vec![(script(1), at(10, 0, 0))])]);
 
-        let before = (witnessed(&state), staged(&state));
+        let before = staged(&stores.state);
 
-        let carried = vec![vec![(script(1), at(11, 0, 0)), (script(2), at(11, 0, 1))]];
-        let context = ScriptRegistryContext::load(&state, &carried).unwrap();
-        let mut visitor = ScriptRegistryVisitor::new(context, carried[0].clone());
-        let mut deltas = WorkDeltas::default();
-        visitor.register(&mut deltas, 4);
-        let applied = commit(&state, deltas);
+        let applied = stores.roll(vec![(
+            4,
+            vec![(script(1), at(11, 0, 0)), (script(2), at(11, 0, 1))],
+        )]);
 
-        assert_eq!(witnessed(&state).len(), 2);
+        assert_eq!(staged(&stores.state).len(), 2);
 
-        undo(&state, applied);
+        for deltas in applied {
+            undo(&stores.state, deltas);
+        }
 
-        assert_eq!((witnessed(&state), staged(&state)), before);
+        assert_eq!(staged(&stores.state), before);
     }
 }

@@ -9,7 +9,7 @@ use dolos_cardano::{
     model::{AccountState, PoolState, ProposalState},
     periods::account_addresses,
 };
-use dolos_core::{Domain, DomainError};
+use dolos_core::{ArchiveStore as _, Domain, DomainError};
 use pallas::ledger::addresses::{Address, StakeAddress, StakePayload};
 
 use crate::{
@@ -20,8 +20,9 @@ use crate::{
 
 use super::{account_exists, parse_account_key_param};
 
-/// Whether a pool registration the pool state still holds names the
-/// credential, as reward account or owner.
+/// Whether a pool registration a pool row still holds names the credential,
+/// as reward account or owner: a row in state, or a retired pool's final row
+/// in the log.
 ///
 /// db-sync registers a credential the moment a certificate names it, so
 /// Blockfrost answers `200 []` for a credential seen only as a pool reward
@@ -29,8 +30,8 @@ use super::{account_exists, parse_account_key_param};
 /// existence guard would 404. This scan runs only on the would-be-404 path,
 /// so the hot path pays nothing.
 ///
-/// Known gap: `PoolState` keeps only the `next`, `live`, `mark`, `set` and
-/// `go` parameter versions. A second registration in the same epoch
+/// Known gap: a `PoolState` row keeps only the `next`, `live`, `mark`, `set`
+/// and `go` parameter versions. A second registration in the same epoch
 /// overwrites `next`, and each epoch transition rotates the oldest version
 /// out of `go`. A credential named only by such a replaced registration is
 /// gone from every version, so it still 404s. db-sync remembers it forever.
@@ -51,13 +52,10 @@ where
         StakePayload::Script(_) => None,
     };
 
-    for item in domain.iter_cardano_entities::<PoolState>(None)? {
-        let (_, pool) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        // Check every snapshot slot the entity still holds, so a credential a
-        // recent re-registration replaced is still found: `live` for a new
-        // pool, `next` for a mid-epoch re-registration, `mark`/`set`/`go` for
-        // the older values.
+    // Check every snapshot slot the row holds, so a credential a recent
+    // re-registration replaced is still found: `live` for a new pool, `next`
+    // for a mid-epoch re-registration, `mark`/`set`/`go` for the older values.
+    let names = |pool: &PoolState| {
         let snapshots = [
             pool.snapshot.live(),
             pool.snapshot.next(),
@@ -66,14 +64,30 @@ where
             pool.snapshot.go(),
         ];
 
-        for snapshot in snapshots.into_iter().flatten() {
-            if snapshot.params.reward_account == reward_account {
-                return Ok(true);
-            }
+        snapshots.into_iter().flatten().any(|snapshot| {
+            snapshot.params.reward_account == reward_account
+                || owner_hash.is_some_and(|hash| snapshot.params.pool_owners.contains(&hash))
+        })
+    };
 
-            if owner_hash.is_some_and(|hash| snapshot.params.pool_owners.contains(&hash)) {
-                return Ok(true);
-            }
+    for item in domain.iter_cardano_entities::<PoolState>(None)? {
+        let (_, pool) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if names(&pool) {
+            return Ok(true);
+        }
+    }
+
+    let logged = domain
+        .archive()
+        .iter_logs_typed::<PoolState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for item in logged {
+        let (_, _, pool) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if names(&pool) {
+            return Ok(true);
         }
     }
 
@@ -158,7 +172,7 @@ mod tests {
         model::{EpochValue, PoolParams, PoolSnapshot},
         pallas_extras,
     };
-    use dolos_core::{ArchiveStore as _, StateStore as _, StateWriter as _};
+    use dolos_core::{StateStore as _, StateWriter as _};
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use futures_util::StreamExt;
     use pallas::{
