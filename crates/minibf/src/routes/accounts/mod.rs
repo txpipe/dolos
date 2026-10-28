@@ -1058,42 +1058,35 @@ mod tests {
     }
 
     /// A pruned never-registered credential whose only sighting is a `stake`
-    /// tag in the ledger's epoch, two behind the tip's: the seal follows the
-    /// ledger and has not reached it, so the tag still answers, and every
-    /// account route answers as its all-zero row did.
+    /// tag in the ledger's epoch, two behind the tip's, which the tip's epoch
+    /// alone would take for sealed: the seal follows the ledger and has not
+    /// reached it, so the tag still answers, and every account route answers
+    /// as its all-zero row did.
     #[tokio::test]
     async fn a_pruned_never_registered_account_tagged_in_the_ledger_epoch_answers_as_its_row_did() {
         use dolos_cardano::{
             indexes::archive_dimensions::STAKE,
             model::{ControlledAmountDec, ControlledAmountInc},
+            periods::is_sealable,
         };
-        use dolos_core::{ArchiveIndexDelta, ArchiveWriter as _, Tag};
+        use dolos_core::{ArchiveIndexDelta, ArchiveWriter as _, Domain as _, Tag};
+        use dolos_testing::faults::FaultyToyDomain;
 
         let app = TestApp::new();
+        let facade = app.facade();
         let epoch = app.tip_epoch();
-        let ledger = dolos_cardano::load_epoch::<dolos_testing::faults::FaultyToyDomain>(
-            app.facade().state(),
-        )
-        .unwrap()
-        .number;
+        let ledger = dolos_cardano::load_epoch::<FaultyToyDomain>(facade.state())
+            .unwrap()
+            .number;
         assert_eq!(ledger + 2, epoch, "the fixture's ledger trails its slots");
 
-        // a credential the synthetic chain never pays, tagged in the ledger's epoch
-        let credential = StakeCredential::AddrKeyhash([0x5b; 28].into());
-        let network = app.facade().get_network_id().unwrap();
-        let stake = mapping::stake_cred_to_address(&credential, network).to_vec();
+        let chain =
+            dolos_cardano::eras::load_era_summary::<FaultyToyDomain>(facade.state()).unwrap();
+        let mutable = dolos_cardano::mutable_slots(&facade.inner.genesis());
+        assert!(is_sealable(&chain, mutable, ledger, epoch));
 
-        let writer = app.facade().archive().start_writer().unwrap();
-        writer
-            .apply_index(&[ArchiveIndexDelta {
-                slot: app.epoch_start(ledger) + 1,
-                block_hash: vec![0xab; 32],
-                block_number: None,
-                tx_hashes: vec![],
-                tags: vec![Tag::new(STAKE, stake)],
-            }])
-            .unwrap();
-        writer.commit().unwrap();
+        // a credential the synthetic chain never pays
+        let credential = StakeCredential::AddrKeyhash([0x5b; 28].into());
 
         let mut row = Some(AccountState::new(epoch, credential.clone()));
         ControlledAmountInc::new(credential.clone(), false, 3_000_000, epoch).apply(&mut row);
@@ -1106,8 +1099,24 @@ mod tests {
 
         store(&app, &credential, None, None);
         prune(&app, &credential, &row);
-
         assert!(read_remainders(&app).is_empty());
+        assert_eq!(answer(&app, &credential, "").await.1, 404);
+
+        let network = facade.get_network_id().unwrap();
+        let stake = mapping::stake_cred_to_address(&credential, network).to_vec();
+
+        let writer = facade.archive().start_writer().unwrap();
+        writer
+            .apply_index(&[ArchiveIndexDelta {
+                slot: app.epoch_start(ledger) + 1,
+                block_hash: vec![0xab; 32],
+                block_number: None,
+                tx_hashes: vec![],
+                tags: vec![Tag::new(STAKE, stake)],
+            }])
+            .unwrap();
+        writer.commit().unwrap();
+
         assert_eq!(answers(&app, &credential).await, expected);
     }
 

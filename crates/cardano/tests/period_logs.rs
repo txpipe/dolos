@@ -754,15 +754,25 @@ fn stake_seen_reads_the_index_then_the_staged_tags() {
     tag_stake(&domain, &late, tip);
     assert!(seen(&late));
 
-    // the oldest staged epoch, before the tip's: the walk starts there
+    // the walk starts at the oldest staged epoch, the one before the tip's,
+    // and takes no tag of the sealed epoch before it
     let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
     let mutable = dolos_cardano::mutable_slots(&genesis);
     let (tip_epoch, _) = chain.slot_epoch(tip);
+    let ledger = dolos_cardano::load_epoch::<ToyDomain>(domain.state())
+        .unwrap()
+        .number;
+    assert_eq!(ledger, tip_epoch);
     assert!(!is_sealable(&chain, mutable, tip_epoch - 1, tip_epoch));
+    assert!(is_sealable(&chain, mutable, tip_epoch - 2, tip_epoch));
 
     let previous = [0xe4; 29];
     tag_stake(&domain, &previous, chain.epoch_start(tip_epoch - 1));
     assert!(seen(&previous));
+
+    let sealed = [0xe5; 29];
+    tag_stake(&domain, &sealed, chain.epoch_start(tip_epoch - 1) - 1);
+    assert!(!seen(&sealed));
 
     assert!(!seen(&[0xe2; 29]));
 }
