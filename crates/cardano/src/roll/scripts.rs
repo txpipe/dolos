@@ -534,7 +534,7 @@ pub(crate) mod tests {
 
     /// Apply a block's deltas, the way the roll does after the crawl, and
     /// return them for undoing.
-    fn commit(state: &MemoryStateStore, deltas: WorkDeltas) -> WorkDeltas {
+    pub(crate) fn commit(state: &MemoryStateStore, deltas: WorkDeltas) -> WorkDeltas {
         let writer = state.start_writer().unwrap();
         let mut applied = WorkDeltas::default();
 
@@ -554,7 +554,7 @@ pub(crate) mod tests {
         applied
     }
 
-    fn undo(state: &MemoryStateStore, deltas: WorkDeltas) {
+    pub(crate) fn undo(state: &MemoryStateStore, deltas: WorkDeltas) {
         let writer = state.start_writer().unwrap();
 
         for (ns_key, deltas) in deltas.entities {
