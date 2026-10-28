@@ -1,10 +1,12 @@
 use axum::http::StatusCode;
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt as _, SlotOrder},
+    indexes::{AsyncCardanoQueryExt, SlotOrder},
     model::{AccountState, ProposalState, PrunedAccountState},
-    pallas_extras, AccountKey, ChainSummary,
+    pallas_extras,
+    periods::account_addresses,
+    AccountKey, ChainSummary,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
+use dolos_core::{ArchiveStore as _, Domain};
 use futures_util::StreamExt;
 use pallas::{
     crypto::hash::{Hash, Hasher},
@@ -139,34 +141,27 @@ where
     Ok(false)
 }
 
-/// Whether the archive tags a block with the credential's stake address: an
-/// output paid to, or an input spending, an address it controls. ESTART
-/// prunes a never-registered account once it empties, and leaves no
-/// remainder, so this is what still knows it.
-fn stake_tag_seen<D: Domain>(domain: &Facade<D>, account: &AccountKey) -> Result<bool, StatusCode> {
+/// Whether the chain ever paid or spent an address under the credential's
+/// stake address: the entity index, or the `stake` tag where the index holds
+/// nothing yet (`account_addresses::stake_seen`). ESTART prunes a
+/// never-registered account once it empties, and leaves no remainder, so this
+/// is what still knows it.
+fn stake_seen<D: Domain>(domain: &Facade<D>, account: &AccountKey) -> Result<bool, StatusCode> {
     let address = mapping::stake_cred_to_address(account.credential(), domain.get_network_id()?);
 
-    let seen = domain
-        .archive()
-        .slots_by_stake(&address.to_vec(), 0, BlockSlot::MAX)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .next()
-        .transpose()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .is_some();
-
-    Ok(seen)
+    account_addresses::stake_seen(&domain.inner, &address.to_vec())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Whether anything but the account rows knows a credential that has
-/// neither a live row nor a remainder: the `stake` tag, then a proposal
-/// naming it as its return account.
+/// neither a live row nor a remainder: its stake address's sightings, then a
+/// proposal naming it as its return account.
 fn known_without_rows<D>(domain: &Facade<D>, account: &AccountKey) -> Result<bool, StatusCode>
 where
     Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
-    Ok(stake_tag_seen(domain, account)? || account_appears_in_proposals(domain, account)?)
+    Ok(stake_seen(domain, account)? || account_appears_in_proposals(domain, account)?)
 }
 
 /// A credential's live row and remainder, as one commit left them
@@ -1017,6 +1012,48 @@ mod tests {
         prune(&app, &credential, &row);
 
         assert!(read_remainders(&app).is_empty());
+        assert_eq!(answers(&app, &credential).await, expected);
+    }
+
+    /// A pruned never-registered credential that the entity index alone knows,
+    /// as it knows one first seen in a sealed epoch: every account route
+    /// answers as its all-zero row did, and without the entry it is unknown.
+    #[tokio::test]
+    async fn a_pruned_never_registered_account_the_index_holds_answers_as_its_row_did() {
+        use dolos_cardano::{
+            indexes::entities,
+            model::{ControlledAmountDec, ControlledAmountInc},
+        };
+        use dolos_core::ArchiveWriter as _;
+
+        let app = TestApp::new();
+        let epoch = app.tip_epoch();
+
+        // a credential the synthetic chain never pays, so it has no tag
+        let credential = StakeCredential::AddrKeyhash([0x5a; 28].into());
+
+        let mut row = Some(AccountState::new(epoch, credential.clone()));
+        ControlledAmountInc::new(credential.clone(), false, 3_000_000, epoch).apply(&mut row);
+        ControlledAmountDec::new(credential.clone(), false, 3_000_000).apply(&mut row);
+        let row = row.unwrap();
+
+        store(&app, &credential, Some(&row), None);
+        let expected = answers(&app, &credential).await;
+        assert_eq!(expected[0].1, 200, "{:?}", expected[0]);
+
+        store(&app, &credential, None, None);
+        prune(&app, &credential, &row);
+        assert_eq!(answer(&app, &credential, "").await.1, 404);
+
+        let network = app.facade().get_network_id().unwrap();
+        let stake = mapping::stake_cred_to_address(&credential, network).to_vec();
+
+        let writer = app.facade().archive().start_writer().unwrap();
+        writer
+            .write_entity(entities::STAKE, &stake, app.epoch_start(0))
+            .unwrap();
+        writer.commit().unwrap();
+
         assert_eq!(answers(&app, &credential).await, expected);
     }
 

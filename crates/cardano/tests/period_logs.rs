@@ -7,21 +7,25 @@ use std::{
 };
 
 use dolos_cardano::{
-    indexes::{archive_dimensions::SCRIPT, entities, AsyncCardanoQueryExt as _},
+    indexes::{
+        archive_dimensions::{SCRIPT, STAKE},
+        entities, AsyncCardanoQueryExt as _,
+    },
     model::{
         AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, FirstMintChunk,
         FirstMintSet, FirstScriptChunk, FirstScriptSet,
     },
     periods::{
+        account_addresses,
         assets::{self, AssetEntry, WalkBudget, ASSETS},
         is_sealable,
     },
     AccountKey, AssetKey, CardanoDelta, ChainSummary,
 };
 use dolos_core::{
-    import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ArchiveWriter as _,
-    AsyncQueryFacade, CacheStore as _, ChainPoint, Domain as _, Genesis, RangeOf, StateStore as _,
-    StateWriter as _, WalStore as _,
+    import::ImportExt as _, sync::SyncExt as _, ArchiveIndexDelta, ArchiveStore as _,
+    ArchiveWriter as _, AsyncQueryFacade, BlockSlot, CacheStore as _, ChainPoint, Domain as _,
+    Genesis, RangeOf, StateStore as _, StateWriter as _, Tag, WalStore as _,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
@@ -608,6 +612,171 @@ async fn script_by_hash_finds_a_script_sealed_during_the_lookup() {
     assert!(scripts(&domain)
         .iter()
         .all(|(_, staged, _)| *staged != *hash));
+}
+
+/// The stake address the `stake` tag files `address` under, if any.
+fn stake_of(address: &[u8]) -> Option<Vec<u8>> {
+    match Address::from_bytes(address).unwrap() {
+        Address::Shelley(x) => {
+            dolos_cardano::pallas_extras::shelley_address_to_stake_address(&x).map(|x| x.to_vec())
+        }
+        Address::Stake(x) => Some(x.to_vec()),
+        Address::Byron(_) => None,
+    }
+}
+
+/// The stake address of the synthetic chain's own account.
+fn primary_stake() -> Vec<u8> {
+    let address = Address::from_bech32(&SyntheticBlockConfig::default().address).unwrap();
+    stake_of(&address.to_vec()).unwrap()
+}
+
+/// The slot of the first block the `stake` tag files under `stake`.
+fn first_tag(domain: &ToyDomain, stake: &[u8]) -> Option<BlockSlot> {
+    domain
+        .archive()
+        .slots_by_tag(STAKE, stake, 0, BlockSlot::MAX)
+        .unwrap()
+        .next()
+        .transpose()
+        .unwrap()
+}
+
+/// File `stake` under the `stake` tag at `slot`, as a block there would.
+fn tag_stake(domain: &ToyDomain, stake: &[u8], slot: BlockSlot) {
+    let writer = domain.archive().start_writer().unwrap();
+    writer
+        .apply_index(&[ArchiveIndexDelta {
+            slot,
+            block_hash: vec![0xab; 32],
+            block_number: None,
+            tx_hashes: vec![],
+            tags: vec![Tag::new(STAKE, stake.to_vec())],
+        }])
+        .unwrap();
+    writer.commit().unwrap();
+}
+
+/// Sixteen blocks, 350 slots apart, over 700-slot epochs: the first epochs
+/// seal, the last stay staged. Returns the domain, its tip and the genesis.
+fn sealed_chain() -> (ToyDomain, BlockSlot, Arc<Genesis>) {
+    let (blocks, step) = (16, 350);
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: blocks,
+        txs_per_block: 1,
+        slot: step,
+        slot_step: step,
+        ..Default::default()
+    });
+
+    let genesis = genesis_with(700, 10, 6);
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis.clone(), chain_config, None, None);
+    let tip = domain.import_blocks(raw).unwrap();
+
+    (domain, tip, genesis)
+}
+
+/// The seal indexes every stake address the sealed account addresses file
+/// under, at the slot of its first `stake` tag, and nothing an unsealed epoch
+/// saw first.
+#[test]
+fn the_seal_indexes_each_stake_address_at_its_first_tag() {
+    let (domain, tip, genesis) = sealed_chain();
+
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let mutable = dolos_cardano::mutable_slots(&genesis);
+    let (tip_epoch, _) = chain.slot_epoch(tip);
+
+    let indexed: HashMap<Vec<u8>, BlockSlot> = domain
+        .archive()
+        .iter_entity_records(&[entities::STAKE], 0..u64::MAX)
+        .unwrap()
+        .map(|record| {
+            let record = record.unwrap();
+            (record.key().to_vec(), record.slot)
+        })
+        .collect();
+
+    let primary = primary_stake();
+    assert_eq!(indexed.get(&primary), Some(&350));
+
+    for (stake, slot) in &indexed {
+        assert_eq!(
+            first_tag(&domain, stake),
+            Some(*slot),
+            "{}",
+            hex::encode(stake)
+        );
+
+        let (epoch, _) = chain.slot_epoch(*slot);
+        assert!(
+            is_sealable(&chain, mutable, epoch, tip_epoch),
+            "epoch {epoch}"
+        );
+    }
+
+    let sealed: Vec<(BlockSlot, AccountKey, AccountAddressChunk)> = domain
+        .archive()
+        .iter_logs_typed::<AccountAddressChunk>(None)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    assert!(!sealed.is_empty());
+
+    for (_, _, chunk) in sealed {
+        for address in chunk.addresses {
+            let stake = stake_of(&address).unwrap();
+            assert!(indexed.contains_key(&stake), "{}", hex::encode(stake));
+        }
+    }
+}
+
+/// `stake_seen` takes the index for the sealed epochs and the `stake` tag for
+/// the staged ones: a tag below the staged epochs that the index lacks is not
+/// walked, and a tag in them is found.
+#[test]
+fn stake_seen_reads_the_index_then_the_staged_tags() {
+    let (domain, tip, _) = sealed_chain();
+
+    let seen = |stake: &[u8]| account_addresses::stake_seen(&domain, stake).unwrap();
+
+    let primary = primary_stake();
+    assert!(seen(&primary));
+
+    let early = [0xe0; 29];
+    tag_stake(&domain, &early, 350);
+    assert!(!seen(&early));
+
+    let late = [0xe1; 29];
+    tag_stake(&domain, &late, tip);
+    assert!(seen(&late));
+
+    assert!(!seen(&[0xe2; 29]));
+}
+
+/// A seal that lands between `stake_seen`'s first index read and its tag read
+/// moves the sighting's epoch out of the staged ones; the second index read
+/// finds the entry the seal committed.
+#[test]
+fn stake_seen_finds_a_stake_address_sealed_during_the_lookup() {
+    let (domain, _, _) = sealed_chain();
+
+    let stake = [0xe3; 29];
+    tag_stake(&domain, &stake, 350);
+
+    let faulty = FaultyToyDomain::new(domain.clone(), TestFault::None);
+
+    let sealer = domain.clone();
+    faulty.after_entity_slots(move || {
+        let writer = sealer.archive().start_writer().unwrap();
+        writer.write_entity(entities::STAKE, &stake, 350).unwrap();
+        writer.commit().unwrap();
+    });
+
+    assert!(account_addresses::stake_seen(&faulty, &stake).unwrap());
 }
 
 /// A copy of the devnet genesis with `epoch_length`-slot epochs, security

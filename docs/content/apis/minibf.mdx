@@ -242,6 +242,12 @@ The rebuild repairs all of it: it writes each first-mint list again where an ear
 
 A rolling `history` window prunes the asset-mint logs by epoch and the entity index by slot. A pruned node does not find an asset first minted before its window, until the asset is minted or burned inside it: the node then takes that mint or burn for the first, reports the supply and mint count of the window's mints and burns alone, and lists the asset again. An asset first minted inside the window, but in the epoch the window starts in, is found and folded without that epoch's mints. A node without an archive keeps neither, so it finds only the assets first minted in its unsealed epochs, and takes a later mint or burn of an older asset for its first.
 
+## Account reads and data synced by an earlier version
+
+`/accounts/{stake_address}` and the routes that answer 404 for an unknown account find a credential state no longer holds, a never-registered one pruned once it emptied, through the archive's entity index: the seal of an immutable epoch records the first slot of every stake address the epoch's outputs paid. For the epochs not yet sealed, the `stake` tag answers instead. An archive whose seals ran on an earlier version wrote no `stake` entries, so a pruned credential last seen before the upgrade is not found until `dolos doctor rebuild-state --rewrite-logs` (or a new bootstrap) indexes every epoch from the start of the chain. A stele published by such a version does not declare the `stake` kind, and a restore refuses it by name.
+
+A rolling `history` window prunes the entity index by slot, so a pruned node finds a pruned credential only when it was first seen inside its window or seen again in an epoch not yet sealed.
+
 ## DRep listing on stores synced by an older release
 
 `/governance/dreps` lists every DRep a certificate of a valid tx ever named, vote-delegation targets and the special DReps included, in the order a certificate first named it, with the latest anchor a registration or update carried. It reads them from the `drep-sightings` state namespace, which the roll writes. A state store synced by a release without that namespace has no sightings for the blocks it applied before: it lists only the DReps certificates named since, at the position of that later certificate. Syncing forward does not recover what is behind the cursor; resync the instance, or bootstrap it from a snapshot that carries `state-drep-sightings`, to get the full list in its exact order.
