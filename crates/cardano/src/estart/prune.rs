@@ -123,8 +123,8 @@ fn current_epoch<S: StateStore>(state: &S) -> Result<Epoch, StateError> {
 ///   onto the stripped row, and their undos set its value from before the
 ///   boundary again.
 ///
-/// Every other row keeps what the undos leave, as on `main`. A block's undo
-/// sets only the live stake value, so each row keeps the stake value's
+/// Every other row keeps what the undos leave, as on `main`. Of the stake
+/// value, a block's undo sets only the live one, so each row keeps the
 /// snapshots and epoch the store held:
 /// - A rotated row was in state through the boundary, so ESTART did not prune
 ///   it. That holds even when a crashed rollback's catch-up replayed it without
@@ -296,7 +296,7 @@ mod tests {
 
     /// The settle reads the epoch only for a row with lifetime rewards and no
     /// `mark`, so it needs none when the rollback undid nothing, as a fresh
-    /// node's first does before genesis, or left only rows it keeps.
+    /// node's first does before genesis, or left no such row.
     #[test]
     fn a_settle_with_nothing_to_strip_reads_no_epoch() {
         let state = dolos_testing::toy_domain::empty_state_store();
@@ -320,6 +320,23 @@ mod tests {
 
         settle_undo(&state, &mut entities).unwrap();
 
+        assert_eq!(encoded(&entities), expected);
+    }
+
+    /// Once a row may need stripping, a settle that cannot read the epoch
+    /// fails and changes nothing, so the rollback commits no restored life
+    /// beside its remainder.
+    #[test]
+    fn a_settle_that_cannot_read_the_epoch_fails() {
+        let state = dolos_testing::toy_domain::empty_state_store();
+
+        let restored = row(0x01, 7, (450_000, 450_000), Kind::Restored);
+        let mut entities = EntityMap::default();
+        entities.insert(key(&restored), Some(restored.into()));
+
+        let expected = encoded(&entities);
+
+        assert!(settle_undo(&state, &mut entities).is_err());
         assert_eq!(encoded(&entities), expected);
     }
 }
