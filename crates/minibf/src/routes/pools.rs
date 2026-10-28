@@ -23,14 +23,12 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     cip151,
-    final_rows::newest_final_row,
+    final_rows::{first_final_row_from, newest_final_row},
     indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, SlotOrder},
-    model::{AccountState, CalidusRegistration, FixedNamespace as _, PoolState},
+    model::{AccountState, CalidusRegistration, PoolState},
     pallas_extras, pool_history, AccountKey, PoolEpochLog, PoolHash, PoolKey,
 };
-use dolos_core::{
-    keys, ArchiveStore as _, BlockSlot, Domain, Entity as _, KeyRange, StateStore as _,
-};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
 use futures::{future::join_all, StreamExt};
 use itertools::Itertools;
 use pallas::{
@@ -594,34 +592,6 @@ fn newest_cert_slot<D: Domain>(
 /// final row, at most `eMax` + 2 epochs of moves: a few dozen on mainnet.
 const FORWARD_READ_ROWS: usize = 256;
 
-/// The first final row of `key` among the [`FORWARD_READ_ROWS`] rows at or
-/// after `from`, decoding only its rows.
-fn first_final_row_from<D: Domain>(
-    domain: &D,
-    key: &PoolKey,
-    from: BlockSlot,
-) -> Result<Option<PoolState>, StatusCode> {
-    let wanted = keys::encode(key);
-
-    let rows = domain
-        .archive()
-        .iter_logs(PoolState::NS, KeyRange::slots(from..BlockSlot::MAX))
-        .map_err(log_and_500("failed to iterate the pools log"))?;
-
-    for row in rows.take(FORWARD_READ_ROWS) {
-        let (log_key, value) = row.map_err(log_and_500("failed to read the pools log"))?;
-
-        if log_key.entity() == wanted.as_slice() {
-            let row = PoolState::decode_entity(PoolState::NS, &value)
-                .map_err(log_and_500("failed to decode a pools log row"))?;
-
-            return Ok(Some(row));
-        }
-    }
-
-    Ok(None)
-}
-
 /// A pool's row from state, or from the log by its newest certificate.
 fn point_read_pool_row<D: Domain>(
     domain: &D,
@@ -639,7 +609,8 @@ fn point_read_pool_row<D: Domain>(
     }
 
     match newest_cert_slot(domain, &pool)? {
-        Some(slot) => first_final_row_from(domain, &key, slot),
+        Some(slot) => first_final_row_from(domain.archive(), &key, slot, FORWARD_READ_ROWS)
+            .map_err(log_and_500("failed to read the pools log")),
         None => Ok(None),
     }
 }

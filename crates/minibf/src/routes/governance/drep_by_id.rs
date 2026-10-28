@@ -14,7 +14,7 @@ use crate::{
     Facade,
 };
 
-use super::{drep_distribution, drep_key, point_read_drep_row, scan_drep_row, DRepReads};
+use super::{drep_distribution, drep_key, point_read_drep_row, scan_drep_row};
 
 pub async fn drep_by_id<D>(
     Path(drep): Path<String>,
@@ -30,8 +30,7 @@ where
     let chain = domain.get_chain_summary()?;
 
     // the special DReps have no row
-    let reads = DRepReads::new(&chain);
-    let mut drep_state = point_read_drep_row(&domain.inner, &reads, &key)?;
+    let mut drep_state = point_read_drep_row(&domain.inner, &chain, &key)?;
 
     if drep_state.is_none() && !parsed.is_special {
         let scanned = key.clone();
@@ -46,7 +45,7 @@ where
     }
 
     let tip = domain.get_tip_slot()?;
-    let pparams = reads.pparams(&domain.inner)?;
+    let pparams = domain.get_current_effective_pparams()?;
 
     let amount = drep_amount(&key.0, drep_state.as_ref(), &drep_distribution(&domain)?);
 
@@ -57,7 +56,7 @@ where
         is_special: parsed.is_special,
         state: drep_state,
         amount,
-        pparams,
+        pparams: &pparams,
         chain: &chain,
         tip,
     };

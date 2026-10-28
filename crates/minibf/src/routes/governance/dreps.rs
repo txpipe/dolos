@@ -28,7 +28,7 @@ use crate::{
     Facade,
 };
 
-use super::{chain_context, drep_distribution, drep_final_rows, point_read_drep_row, DRepReads};
+use super::{chain_context, drep_distribution, drep_final_rows, point_read_drep_row};
 
 /// How many anchors one page loads at a time. A page asks for up to 100 rows
 /// and every miss costs a round trip capped at the fetch timeout, so the bound
@@ -253,12 +253,10 @@ where
 
     domain
         .blocking(move |facade| {
-            let reads = DRepReads::new(&chain);
-
             let mut rows = sightings
                 .into_iter()
                 .map(|(key, sighting)| {
-                    let state = point_read_drep_row(&facade.inner, &reads, &key)?;
+                    let state = point_read_drep_row(&facade.inner, &chain, &key)?;
 
                     Ok(DrepRow {
                         key,

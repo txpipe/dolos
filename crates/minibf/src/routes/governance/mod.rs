@@ -1,11 +1,8 @@
-use std::{
-    cell::OnceCell,
-    collections::{BTreeMap, HashMap, HashSet},
-};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use axum::http::StatusCode;
 use dolos_cardano::{
-    final_rows::newest_final_row,
+    final_rows::{first_final_row_from, newest_final_row},
     indexes::CardanoArchiveIndexExt as _,
     model::{gov::GovState, DRepKey, DRepState, ProposalKey, ProposalState},
     ChainSummary, PParamsSet,
@@ -167,74 +164,31 @@ pub(crate) fn visit_proposals<D: Domain>(
     Ok(())
 }
 
-/// How many epoch starts past `govActionLifetime` the point read probes for a
-/// moved DRep's final row.
-///
-/// A proposal holds an unregistered DRep in state while the next boundary can
-/// still ratify it: up to `govActionLifetime` epochs after its submission, and
-/// the epoch it is dropped in. So the final row keys at most
-/// `govActionLifetime + 1` epoch starts after the unregistration, and the
-/// probe reads one more.
-const FINAL_ROW_PROBE_MARGIN: u64 = 2;
-
-/// What a DRep point read takes from state besides the row: the era summary
-/// that dates the DRep's newest certificate, and the protocol parameters that
-/// bound the probe after it, loaded on the first probe.
-pub(crate) struct DRepReads<'a> {
-    chain: &'a ChainSummary,
-    pparams: OnceCell<PParamsSet>,
-}
-
-impl<'a> DRepReads<'a> {
-    pub(crate) fn new(chain: &'a ChainSummary) -> Self {
-        Self {
-            chain,
-            pparams: OnceCell::new(),
-        }
-    }
-
-    /// The current effective protocol parameters, loaded once.
-    pub(crate) fn pparams<D: Domain>(&self, domain: &D) -> Result<&PParamsSet, StatusCode> {
-        if let Some(pparams) = self.pparams.get() {
-            return Ok(pparams);
-        }
-
-        let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state())
-            .map_err(log_and_500("failed to load effective pparams"))?;
-
-        Ok(self.pparams.get_or_init(|| pparams))
-    }
-
-    /// The epoch starts [`probe_final_row`] reads. A proposal submitted under
-    /// a longer `govActionLifetime` than the current one can hold a DRep past
-    /// them; the scan in [`read_drep_row`] finds its row.
-    fn probe_epochs<D: Domain>(&self, domain: &D) -> Result<u64, StatusCode> {
-        let lifetime = self
-            .pparams(domain)?
-            .governance_action_validity_period_or_default();
-
-        Ok(lifetime + FINAL_ROW_PROBE_MARGIN)
-    }
-}
+/// The log rows the point read passes over before it leaves a moved DRep to
+/// the scan. They are the rows of DReps moved between the epoch after the
+/// unregistration and the final row: the moves of the `govActionLifetime` + 1
+/// epochs a proposal can hold the DRep for, a few dozen on mainnet.
+const FORWARD_READ_ROWS: usize = 256;
 
 /// A DRep's row: the state row, then its final row in the log.
 ///
 /// ESTART commits a final row before it deletes the state row, so a state
-/// miss read first finds a moved DRep in the log. The point read probes for
-/// it after the newest certificate ([`probe_final_row`]). Where that misses,
-/// the log is scanned for the DRep's newest row ([`scan_drep_row`]): the
-/// newest certificate can be a phase-2-invalid transaction's, a registration
-/// that state has already rolled back, or pruned from the archive with the
-/// final row still held.
+/// miss read first finds a moved DRep in the log. The point read reads the log
+/// forward from the newest certificate ([`probe_final_row`]). Where that
+/// misses, the log is scanned for the DRep's newest row ([`scan_drep_row`]):
+/// the newest certificate can be a phase-2-invalid transaction's, a
+/// registration that state has already rolled back, or pruned from the archive
+/// with the final row still held, and more moved rows than the forward read
+/// passes over can sit before the final row.
 ///
 /// For a caller already on the blocking pool; a handler reads the row with
 /// [`point_read_drep_row`] and runs the scan there.
 pub(crate) fn read_drep_row<D: Domain>(
     domain: &D,
-    reads: &DRepReads,
+    chain: &ChainSummary,
     key: &DRepKey,
 ) -> Result<Option<DRepState>, StatusCode> {
-    if let Some(row) = point_read_drep_row(domain, reads, key)? {
+    if let Some(row) = point_read_drep_row(domain, chain, key)? {
         return Ok(Some(row));
     }
 
@@ -245,7 +199,7 @@ pub(crate) fn read_drep_row<D: Domain>(
 /// log scan.
 pub(crate) fn point_read_drep_row<D: Domain>(
     domain: &D,
-    reads: &DRepReads,
+    chain: &ChainSummary,
     key: &DRepKey,
 ) -> Result<Option<DRepState>, StatusCode> {
     let live = domain
@@ -257,7 +211,7 @@ pub(crate) fn point_read_drep_row<D: Domain>(
         return Ok(live);
     }
 
-    probe_final_row(domain, reads, key)
+    probe_final_row(domain, chain, key)
 }
 
 /// A DRep's newest final row, by a scan of the `dreps` log. The special DReps
@@ -276,8 +230,8 @@ pub(crate) fn scan_drep_row<D: Domain>(
     Ok(logged.map(|(_, row)| row))
 }
 
-/// A moved DRep's final row, read at each epoch start after its newest
-/// `drep_certs` certificate, as far as [`DRepReads::probe_epochs`].
+/// A moved DRep's final row, the DRep's first among the [`FORWARD_READ_ROWS`]
+/// log rows from the epoch after its newest `drep_certs` certificate.
 ///
 /// That certificate is normally the unregistration the DRep moved under: a
 /// registration after the move makes a fresh state row, and only a registered
@@ -286,11 +240,9 @@ pub(crate) fn scan_drep_row<D: Domain>(
 /// it. A state with no era rows dates no certificate, and the probe misses.
 fn probe_final_row<D: Domain>(
     domain: &D,
-    reads: &DRepReads,
+    chain: &ChainSummary,
     key: &DRepKey,
 ) -> Result<Option<DRepState>, StatusCode> {
-    let chain = reads.chain;
-
     if chain.is_empty() {
         return Ok(None);
     }
@@ -308,20 +260,14 @@ fn probe_final_row<D: Domain>(
     };
 
     let (unregistered_epoch, _) = chain.slot_epoch(unregistered);
-    let probe_epochs = reads.probe_epochs(domain)?;
 
-    for epoch in unregistered_epoch + 1..=unregistered_epoch + probe_epochs {
-        let logged = domain
-            .archive()
-            .read_log_typed::<DRepState>(chain.epoch_start(epoch), key)
-            .map_err(log_and_500("failed to read the dreps log"))?;
-
-        if logged.is_some() {
-            return Ok(logged);
-        }
-    }
-
-    Ok(None)
+    first_final_row_from(
+        domain.archive(),
+        key,
+        chain.epoch_start(unregistered_epoch + 1),
+        FORWARD_READ_ROWS,
+    )
+    .map_err(log_and_500("failed to read the dreps log"))
 }
 
 /// The newest final row of every DRep that has left state.
@@ -1286,8 +1232,7 @@ mod final_row_tests {
         };
 
         use super::super::{
-            drep_final_rows, point_read_drep_row, read_drep_row, testing::*, DRepReads,
-            FINAL_ROW_PROBE_MARGIN,
+            drep_final_rows, point_read_drep_row, read_drep_row, testing::*, FORWARD_READ_ROWS,
         };
         use crate::{
             mapping::bech32_drep,
@@ -1641,13 +1586,13 @@ mod final_row_tests {
         }
 
         /// The unregistering chain of [`cfg`] bootstrapped in Conway, whose
-        /// protocol parameters set the `govActionLifetime` the probe reads by.
+        /// protocol parameters set a `govActionLifetime`.
         fn conway_domain() -> (ToyDomain, SyntheticVectors) {
             TestDomainBuilder::new_with_synthetic_and_protocol(cfg(true, false), Some(9)).finish()
         }
 
         /// A DRep moved twice, the second time held through two boundaries
-        /// after its unregistration: the point read probes past the closing
+        /// after its unregistration: the point read reads past the closing
         /// epoch and finds the newer final row with no scan, and the list
         /// takes the newer row too.
         #[test]
@@ -1680,14 +1625,13 @@ mod final_row_tests {
             );
 
             let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
-            let reads = DRepReads::new(&chain);
 
             assert_eq!(
-                point_read_drep_row(&domain, &reads, &key()).unwrap(),
+                point_read_drep_row(&domain, &chain, &key()).unwrap(),
                 Some(second.clone())
             );
             assert_eq!(
-                read_drep_row(&domain, &reads, &key()).unwrap(),
+                read_drep_row(&domain, &chain, &key()).unwrap(),
                 Some(second.clone())
             );
             assert_eq!(
@@ -1720,32 +1664,72 @@ mod final_row_tests {
 
         /// The point read finds the final row with no scan at every epoch
         /// start the rule can key it at: the first after the unregistration,
-        /// and `govActionLifetime + 1` after it, where a proposal submitted
-        /// just before the unregistration releases it. Past the probe, the
-        /// scan finds it.
+        /// `govActionLifetime + 1` after it, where a proposal submitted just
+        /// before the unregistration releases it, and later, where a proposal
+        /// submitted under a longer lifetime held it.
         #[test]
-        fn the_probe_reaches_every_epoch_a_final_row_keys_at() {
+        fn the_forward_read_reaches_every_epoch_a_final_row_keys_at() {
             let lifetime = gov_action_lifetime(&moved_after(1).0);
             assert!(lifetime > 0, "the Conway chain sets govActionLifetime");
 
-            for epochs in [1, lifetime + 1] {
+            for epochs in [1, lifetime + 1, 10 * (lifetime + 1)] {
                 let (domain, row) = moved_after(epochs);
                 let chain =
                     dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
 
                 assert_eq!(
-                    point_read_drep_row(&domain, &DRepReads::new(&chain), &key()).unwrap(),
+                    point_read_drep_row(&domain, &chain, &key()).unwrap(),
                     Some(row),
                     "keyed {epochs} epochs after the unregistration"
                 );
             }
+        }
 
-            let (domain, row) = moved_after(lifetime + FINAL_ROW_PROBE_MARGIN + 1);
+        /// The unregistered DRep, moved to the log after `others` rows of
+        /// another DRep, keyed from the start of the epoch after its
+        /// unregistration.
+        fn moved_after_rows(others: usize) -> (ToyDomain, DRepState) {
+            let (domain, _) = conway_domain();
+
+            let row = read_row(&domain).expect("the drep row");
+            let (unregistered, _) = row.unregistered_at.expect("an unregistered drep");
+            let from = epoch_start_after(&domain, unregistered, 1);
+
+            let other = dolos_cardano::model::DRepKey(DRep::Key([0x10u8; 28].into()));
+            let mut finals = FinalRows::default();
+
+            for i in 0..others {
+                finals.push(from + i as BlockSlot, &other, &row);
+            }
+
+            let archive = domain.archive().start_writer().unwrap();
+            let state = domain.state().start_writer().unwrap();
+            finals.write(&state, &archive).unwrap();
+            archive.commit().unwrap();
+            state.commit().unwrap();
+
+            move_to_log_at(&domain, &row, from + others as BlockSlot);
+
+            (domain, row)
+        }
+
+        /// The point read passes over at most [`FORWARD_READ_ROWS`] log rows,
+        /// whatever the lifetime: the final row past them is the scan's.
+        #[test]
+        fn a_row_past_the_forward_read_is_found_by_a_scan() {
+            let (domain, row) = moved_after_rows(FORWARD_READ_ROWS - 1);
             let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
-            let reads = DRepReads::new(&chain);
 
-            assert_eq!(point_read_drep_row(&domain, &reads, &key()).unwrap(), None);
-            assert_eq!(read_drep_row(&domain, &reads, &key()).unwrap(), Some(row));
+            assert_eq!(
+                point_read_drep_row(&domain, &chain, &key()).unwrap(),
+                Some(row)
+            );
+
+            let (domain, row) = moved_after_rows(FORWARD_READ_ROWS);
+            let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+
+            assert_eq!(point_read_drep_row(&domain, &chain, &key()).unwrap(), None);
+            assert_eq!(read_drep_row(&domain, &chain, &key()).unwrap(), Some(row));
         }
 
         /// A state with no era rows dates no certificate: the probe misses

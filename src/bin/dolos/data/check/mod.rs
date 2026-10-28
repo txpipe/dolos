@@ -691,6 +691,53 @@ mod tests {
         writer.commit().unwrap();
     }
 
+    /// Write `drep`'s own row, registered at `registered` and unregistered at
+    /// `unregistered`.
+    fn write_drep_span(
+        domain: &ToyDomain,
+        drep: &DRep,
+        registered: u64,
+        unregistered: Option<u64>,
+    ) {
+        let mut row = dolos_cardano::model::DRepState::new(
+            drep.clone(),
+            dolos_cardano::model::DRepExpiry::new(0, 0),
+        );
+        row.registered_at = Some((registered, 0));
+        row.unregistered_at = unregistered.map(|slot| (slot, 0));
+
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(&DRepKey::from(drep), &row)
+            .unwrap();
+        writer.commit().unwrap();
+    }
+
+    fn read_drep(domain: &ToyDomain, key: &DRepKey) -> dolos_cardano::model::DRepState {
+        domain
+            .state()
+            .read_entity_typed::<dolos_cardano::model::DRepState>(key)
+            .unwrap()
+            .expect("the drep row")
+    }
+
+    /// Move `drep`'s state row to the final-row log keyed at `slot`, by the
+    /// write ESTART makes: the archive commits first, then the state deletes
+    /// the row.
+    fn move_drep_to_log(domain: &ToyDomain, drep: &DRep, slot: u64) {
+        let key = DRepKey::from(drep);
+        let row = read_drep(domain, &key);
+
+        let mut finals = dolos_cardano::final_rows::FinalRows::default();
+        finals.push(slot, &key, &row);
+
+        let archive = domain.archive().start_writer().unwrap();
+        let state = domain.state().start_writer().unwrap();
+        finals.write(&state, &archive).unwrap();
+        archive.commit().unwrap();
+        state.commit().unwrap();
+    }
+
     /// A DRep row reached through a `DRep::Key` that identifies itself as a
     /// `DRep::Script`. The key is derived from the identifier, so no node
     /// wrote this — and it takes the real store to prove the check reaches
@@ -756,22 +803,7 @@ mod tests {
 
         write_drep(&domain, &drep, drep.clone(), Some((200, 0)));
         write_voter(&domain, 0x58, drep.clone(), 100);
-
-        let key = DRepKey::from(&drep);
-        let row = domain
-            .state()
-            .read_entity_typed::<dolos_cardano::model::DRepState>(&key)
-            .unwrap()
-            .unwrap();
-
-        let mut finals = dolos_cardano::final_rows::FinalRows::default();
-        finals.push(300, &key, &row);
-
-        let archive = domain.archive().start_writer().unwrap();
-        let state = domain.state().start_writer().unwrap();
-        finals.write(&state, &archive).unwrap();
-        archive.commit().unwrap();
-        state.commit().unwrap();
+        move_drep_to_log(&domain, &drep, 300);
 
         let anchors = totals::Anchors {
             live_epoch_start: Some(500),
@@ -785,10 +817,61 @@ mod tests {
         assert!(issues[0].detail.contains("owed a drop"), "{}", issues[0]);
     }
 
+    /// A moved DRep that registered again: its fresh state row, never
+    /// unregistered, replaces the final row, so a delegation older than the
+    /// logged retirement owes no drop.
+    #[test]
+    fn a_fresh_state_row_replaces_the_final_row() {
+        let domain = ToyDomain::new(None, None);
+        let drep = DRep::Key(pallas::crypto::hash::Hash::<28>::from([0x59; 28]));
+
+        write_drep_span(&domain, &drep, 1, Some(200));
+        move_drep_to_log(&domain, &drep, 300);
+        write_drep_span(&domain, &drep, 600, None);
+        write_voter(&domain, 0x5a, drep, 100);
+
+        let anchors = totals::Anchors {
+            live_epoch_start: Some(500),
+            pv10_boundary: Some(50),
+        };
+
+        let (_, issues) =
+            totals::recompute(domain.state(), domain.archive(), anchors, |_, _| {}).unwrap();
+
+        assert!(issues.is_empty(), "{issues:#?}");
+    }
+
+    /// A DRep moved twice: the newer final row replaces the older one, so a
+    /// delegation between the two registrations owes the second retirement's
+    /// drop.
+    #[test]
+    fn a_newer_final_row_replaces_an_older_one() {
+        let domain = ToyDomain::new(None, None);
+        let drep = DRep::Key(pallas::crypto::hash::Hash::<28>::from([0x5b; 28]));
+
+        write_drep_span(&domain, &drep, 1, Some(200));
+        move_drep_to_log(&domain, &drep, 300);
+        write_drep_span(&domain, &drep, 600, Some(900));
+        move_drep_to_log(&domain, &drep, 950);
+        write_voter(&domain, 0x5c, drep, 700);
+
+        let anchors = totals::Anchors {
+            live_epoch_start: Some(1000),
+            pv10_boundary: None,
+        };
+
+        let (_, issues) =
+            totals::recompute(domain.state(), domain.archive(), anchors, |_, _| {}).unwrap();
+
+        assert_eq!(issues.len(), 1, "{issues:#?}");
+        assert!(issues[0].detail.contains("owed a drop"), "{}", issues[0]);
+    }
+
     /// A live delegation to a credential with no row at all, made before the
     /// protocol-10 boundary whose migration drops exactly those. A DRep that
-    /// leaves state keeps its final row in the log, so the absence is not
-    /// history — it is the migration missing, or the row.
+    /// leaves state keeps its final row in the log until pruning drops it, so
+    /// the absence is the migration missing, the row, or a pruned retirement
+    /// whose drop is missing.
     ///
     /// The companion case — the same delegation made *after* that boundary,
     /// which is the shape the two legitimate preprod accounts have — is the

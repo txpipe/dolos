@@ -125,3 +125,32 @@ pub fn newest_final_row<E: FinalRow>(
         })
         .transpose()
 }
+
+/// The first final row of `key` among the first `rows` rows of the
+/// namespace's log at or after `from`. Only the rows of `key` are decoded.
+///
+/// A reader that knows a slot before the entity's final row reads forward to
+/// it from one seek, passing over the rows of entities moved in between.
+pub fn first_final_row_from<E: FinalRow>(
+    archive: &impl ArchiveStore,
+    key: &<E as StateEntity>::Key,
+    from: BlockSlot,
+    rows: usize,
+) -> Result<Option<E>, ArchiveError> {
+    let wanted = keys::encode(key);
+
+    for row in archive
+        .iter_logs(E::NS, KeyRange::slots(from..BlockSlot::MAX))?
+        .take(rows)
+    {
+        let (log_key, value) = row?;
+
+        if log_key.entity() == wanted.as_slice() {
+            return E::decode_entity(E::NS, &value)
+                .map(Some)
+                .map_err(|err| ArchiveError::EntityDecodingError(err.to_string()));
+        }
+    }
+
+    Ok(None)
+}
