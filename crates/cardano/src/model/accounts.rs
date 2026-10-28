@@ -453,11 +453,13 @@ impl AccountState {
         }
     }
 
-    /// Whether ESTART deletes the row: the account is unregistered, holds no
+    /// Whether the row is dead: the account is unregistered, holds no
     /// balance, every stake snapshot is empty and every delegation snapshot
     /// undelegated, and no retired pool is left to serve. Registration
     /// history does not keep a row alive: [`Self::remainder`] keeps what the
-    /// API serves of it.
+    /// API serves of it. ESTART deletes a dead row, unless it deregistered in
+    /// the closing epoch, which waits for the next boundary
+    /// ([`crate::estart::prune::prunes`]).
     pub fn is_dead(&self) -> bool {
         !self.is_registered()
             && self.retired_pool.is_none()

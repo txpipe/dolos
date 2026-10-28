@@ -473,7 +473,10 @@ mod tests {
         account_addresses_total::AccountAddressesTotal, account_content::AccountContent,
     };
     use dolos_cardano::{CardanoDelta, CardanoEntity};
-    use dolos_core::{EntityDelta as _, StateStore as _, StateWriter as _};
+    use dolos_core::{
+        builtin::MemoryStateStore, EntityDelta as _, FixedNamespace as _, StateStore,
+        StateWriter as _,
+    };
     use dolos_testing::synthetic::SyntheticBlockConfig;
     use pallas::ledger::primitives::StakeCredential;
 
@@ -786,20 +789,29 @@ mod tests {
     ];
 
     async fn answers(app: &TestApp, credential: &StakeCredential) -> Vec<(String, u16, String)> {
+        let mut out = vec![];
+
+        for route in ACCOUNT_ROUTES {
+            out.push(answer(app, credential, route).await);
+        }
+
+        out
+    }
+
+    async fn answer(
+        app: &TestApp,
+        credential: &StakeCredential,
+        route: &str,
+    ) -> (String, u16, String) {
         let network = app.facade().get_network_id().unwrap();
         let address = mapping::stake_cred_to_address(credential, network)
             .to_bech32()
             .unwrap();
 
-        let mut out = vec![];
+        let path = format!("/accounts/{address}{route}");
+        let (status, body) = app.get_bytes(&path).await;
 
-        for route in ACCOUNT_ROUTES {
-            let path = format!("/accounts/{address}{route}");
-            let (status, body) = app.get_bytes(&path).await;
-            out.push((path, status.as_u16(), String::from_utf8(body).unwrap()));
-        }
-
-        out
+        (path, status.as_u16(), String::from_utf8(body).unwrap())
     }
 
     /// Store `credential`'s live row and remainder, deleting the absent ones.
@@ -809,11 +821,23 @@ mod tests {
         live: Option<&AccountState>,
         pruned: Option<&PrunedAccountState>,
     ) {
-        let facade = app.facade();
-        let key = AccountKey::from(credential);
-        let writer = facade.state().start_writer().unwrap();
-        writer.save_entity_typed(&key, live).unwrap();
-        writer.save_entity_typed(&key, pruned).unwrap();
+        put(
+            app.facade().state(),
+            &AccountKey::from(credential),
+            live,
+            pruned,
+        );
+    }
+
+    fn put<S: StateStore>(
+        state: &S,
+        key: &AccountKey,
+        live: Option<&AccountState>,
+        pruned: Option<&PrunedAccountState>,
+    ) {
+        let writer = state.start_writer().unwrap();
+        writer.save_entity_typed(key, live).unwrap();
+        writer.save_entity_typed(key, pruned).unwrap();
         writer.commit().unwrap();
     }
 
@@ -1021,5 +1045,139 @@ mod tests {
         );
 
         assert_eq!(read, Ok(after));
+    }
+
+    type Commit = Box<dyn FnOnce(&MemoryStateStore) + Send>;
+
+    /// Land `commits` in the store one at a time, each right after the next
+    /// read of `accounts` answers: commits that land between a lookup's reads.
+    fn between_reads(app: &TestApp, commits: Vec<Commit>) {
+        let mut commits = commits.into_iter();
+
+        app.facade()
+            .inner
+            .after_entity_read(AccountState::NS, move |state| {
+                if let Some(commit) = commits.next() {
+                    commit(state);
+                }
+            });
+    }
+
+    /// Prune `row` from `state` as an ESTART shard does.
+    fn prune_in(state: &MemoryStateStore, key: &AccountKey, row: &AccountState) {
+        let writer = state.start_writer().unwrap();
+        dolos_cardano::estart::prune::prune_account(state, &writer, key, row).unwrap();
+        writer.commit().unwrap();
+    }
+
+    /// A dead row whose life earned and withdrew rewards and deregistered.
+    fn dead_life(app: &TestApp, credential: &StakeCredential) -> AccountState {
+        let epoch = app.tip_epoch();
+
+        let mut row = AccountState::new(epoch, credential.clone());
+        let live = row.stake.unwrap_live_mut();
+        live.rewards_sum = 450_000;
+        live.withdrawals_sum = 450_000;
+        row.deregistered_at = Some(app.epoch_start(epoch) + 2);
+
+        assert!(row.is_dead());
+        row
+    }
+
+    /// `/accounts/{stake}` while an ESTART shard prunes the row between the
+    /// read of the live row and the read of the remainder: it serves the
+    /// pruned life once, as `main` serves the row.
+    #[tokio::test]
+    async fn a_prune_between_the_reads_serves_the_account_once() {
+        let app = TestApp::new();
+        let credential = StakeCredential::AddrKeyhash([0x6f; 28].into());
+        let key = AccountKey::from(&credential);
+        let row = dead_life(&app, &credential);
+
+        store(&app, &credential, Some(&row), None);
+        let expected = answer(&app, &credential, "").await;
+        assert_eq!(expected.1, 200, "{expected:?}");
+
+        let (pruned, at) = (row.clone(), key.clone());
+        between_reads(
+            &app,
+            vec![Box::new(move |state| prune_in(state, &at, &pruned))],
+        );
+
+        assert_eq!(answer(&app, &credential, "").await, expected);
+        assert_eq!(
+            read_remainders(&app),
+            vec![(key, row.remainder().unwrap())],
+            "pruned during the read"
+        );
+    }
+
+    /// A gated subroute while a rollback restores a never-registered row,
+    /// which left no remainder, between the reads: `account_exists` reads
+    /// again and finds the row. Its value sits only at a pointer address, so
+    /// no `stake` tag knows the credential either.
+    #[tokio::test]
+    async fn a_restore_between_the_reads_finds_the_account() {
+        let app = TestApp::new();
+        let credential = StakeCredential::AddrKeyhash([0x70; 28].into());
+        let key = AccountKey::from(&credential);
+
+        let mut row = AccountState::new(app.tip_epoch(), credential.clone());
+        row.stake.unwrap_live_mut().utxo_sum_at_pointer_addresses = 3_000_000;
+
+        store(&app, &credential, Some(&row), None);
+        let expected = answer(&app, &credential, "/registrations").await;
+        assert_eq!(expected.1, 200, "{expected:?}");
+
+        store(&app, &credential, None, None);
+        assert_eq!(answer(&app, &credential, "/registrations").await.1, 404);
+
+        between_reads(
+            &app,
+            vec![Box::new(move |state| put(state, &key, Some(&row), None))],
+        );
+
+        assert_eq!(answer(&app, &credential, "/registrations").await, expected);
+    }
+
+    /// `/accounts/{stake}` while two commits land within its reads: a
+    /// rollback restores the pruned row after the first read, and a prune
+    /// takes it again after the second. Each retry reads both namespaces
+    /// again, so it serves the pruned life once.
+    #[tokio::test]
+    async fn two_commits_within_the_reads_serve_the_account_once() {
+        let app = TestApp::new();
+        let credential = StakeCredential::AddrKeyhash([0x71; 28].into());
+        let key = AccountKey::from(&credential);
+        let row = dead_life(&app, &credential);
+
+        store(&app, &credential, Some(&row), None);
+        let expected = answer(&app, &credential, "").await;
+        assert_eq!(expected.1, 200, "{expected:?}");
+
+        store(&app, &credential, None, None);
+        prune(&app, &credential, &row);
+        let pruned = read_remainders(&app);
+
+        // the rollback's settle leaves the deregistration in the remainder
+        let settled = row.remainder().unwrap().without(450_000);
+        assert!(settled.is_some());
+
+        let (restored, restore_at) = (row.clone(), key.clone());
+        let (again, prune_at) = (row.clone(), key.clone());
+        between_reads(
+            &app,
+            vec![
+                Box::new(move |state| put(state, &restore_at, Some(&restored), settled.as_ref())),
+                Box::new(move |state| prune_in(state, &prune_at, &again)),
+            ],
+        );
+
+        assert_eq!(answer(&app, &credential, "").await, expected);
+        assert_eq!(
+            read_remainders(&app),
+            pruned,
+            "pruned again during the read"
+        );
     }
 }

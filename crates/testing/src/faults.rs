@@ -103,6 +103,21 @@ impl FaultyToyDomain {
         *self.state.tag_page_hook.lock().expect("tag page hook") = Some(Box::new(hook));
     }
 
+    /// Runs `hook` after every [`StateStore::read_entities`] read of `ns`,
+    /// with the store under the adapter, before the caller gets the values: a
+    /// write that lands between two reads of one lookup.
+    pub fn after_entity_read(
+        &self,
+        ns: Namespace,
+        hook: impl FnMut(&MemoryStateStore) + Send + 'static,
+    ) {
+        *self
+            .state
+            .entity_read_hook
+            .lock()
+            .expect("entity read hook") = Some((ns, Box::new(hook)));
+    }
+
     /// Runs `hook` once, after the next [`ArchiveStore::entity_slots`] read
     /// answers and before the caller gets the slots: a write that lands
     /// between a lookup's index read and its next read.
@@ -117,6 +132,8 @@ impl FaultyToyDomain {
 
 type TagPageHook = Box<dyn FnMut(&[TagEntry], &MemoryStateStore) + Send>;
 
+type EntityReadHook = (Namespace, Box<dyn FnMut(&MemoryStateStore) + Send>);
+
 type EntitySlotsHook = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone)]
@@ -126,6 +143,7 @@ pub struct FaultyStateStore {
     commits: Arc<AtomicU32>,
     scans: Arc<AtomicUsize>,
     tag_page_hook: Arc<Mutex<Option<TagPageHook>>>,
+    entity_read_hook: Arc<Mutex<Option<EntityReadHook>>>,
 }
 
 impl FaultyStateStore {
@@ -140,6 +158,7 @@ impl FaultyStateStore {
             commits,
             scans: Default::default(),
             tag_page_hook: Default::default(),
+            entity_read_hook: Default::default(),
         }
     }
 
@@ -189,7 +208,20 @@ impl StateStore for FaultyStateStore {
         if self.should_fault_ns(ns) {
             return Err(self.fault_err());
         }
-        self.inner.read_entities(ns, keys)
+        let values = self.inner.read_entities(ns, keys)?;
+
+        if let Some((hooked, hook)) = self
+            .entity_read_hook
+            .lock()
+            .expect("entity read hook")
+            .as_mut()
+        {
+            if *hooked == ns {
+                hook(&self.inner);
+            }
+        }
+
+        Ok(values)
     }
 
     fn start_writer(&self) -> Result<Self::Writer, StateError> {

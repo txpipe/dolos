@@ -5,9 +5,10 @@
 //! state transaction: it tallies the stake distribution the boundary
 //! freezes (`stake`), writes the opening epoch's stake-only account-epoch
 //! row to the archive, rotates each account and writes it back, or deletes
-//! it when it is dead (`prune`). `finalize()` runs the global Estart pass (pool
-//! / drep / proposal transitions, nonce, `EpochTransition`, era transitions)
-//! and is the only phase that advances the cursor.
+//! it when it is dead and did not deregister in the closing epoch (`prune`).
+//! `finalize()` runs the global Estart pass (pool / drep / proposal
+//! transitions, nonce, `EpochTransition`, era transitions) and is the only
+//! phase that advances the cursor.
 //!
 //! `WorkContext` lives here and is shared between the shard body and the
 //! finalize pass; the shard's only delta is its `EStartProgress`. The

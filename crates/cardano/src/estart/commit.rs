@@ -4,7 +4,8 @@
 //! Both code paths stream: each entity namespace is read one record at a
 //! time and the result is written immediately. Per-shard commits rotate
 //! the shard's account-range slice in that same pass, deleting the dead
-//! accounts, and flush `EpochState`'s `EStartProgress`; the finalize commit
+//! accounts that did not deregister in the closing epoch, and flush
+//! `EpochState`'s `EStartProgress`; the finalize commit
 //! applies the queued pool / drep / proposal transitions, the closing
 //! `EpochTransition` and optional era-summary writes, moves the
 //! boundary's final rows from state to the archive, and advances the

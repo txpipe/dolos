@@ -2,9 +2,10 @@
 //! boundary takes them back.
 //!
 //! A shard deletes each account that is dead once rotated
-//! ([`AccountState::is_dead`]) instead of writing it back ([`prunes`]). The
-//! history the API serves of it ([`AccountState::remainder`]) adds to the
-//! credential's `pruned-accounts` row in the same commit.
+//! ([`AccountState::is_dead`]) and did not deregister in the closing epoch,
+//! instead of writing it back ([`prunes`]). The history the API serves of it
+//! ([`AccountState::remainder`]) adds to the credential's `pruned-accounts`
+//! row in the same commit.
 //!
 //! ESTART is never undone, but a rollback across the boundary undoes the
 //! closing epoch's last blocks, and their account deltas can reach a row the
@@ -16,13 +17,18 @@
 //!   no trace in the row. The rollback restores the row for the undo
 //!   ([`restore_for_undo`]) and takes the restored life's history back out of
 //!   the remainder ([`settle_undo`]).
+//!
+//! Both hold while the rollback window is shorter than an epoch, as on every
+//! shipped network: a longer one could undo a deregistration that the next
+//! boundary pruned, and the remainder would keep it.
 
 use dolos_core::{
     BlockSlot, ChainError, EntityMap, FixedNamespace as _, InvariantViolation, NsKey, StateError,
     StateStore, StateWriter as _,
 };
+use tracing::debug;
 
-use crate::{AccountKey, AccountState, CardanoEntity, EpochState, PrunedAccountState};
+use crate::{sub, AccountKey, AccountState, CardanoEntity, EpochState, PrunedAccountState};
 
 /// Whether the shard deletes `account`, rotated: it is dead, and it did not
 /// deregister in the closing epoch, which starts at `closing_start`.
@@ -91,15 +97,26 @@ pub fn restore_for_undo<S: StateStore>(
     Ok(Some(AccountState::new(epoch, account.0).into()))
 }
 
-/// Once a rollback has undone every delta, take the lifetime rewards of each
-/// row it restored back out of the credential's remainder. Undoing a value
-/// delta puts back the restored life's own lifetime sums, which its prune
-/// had moved to the remainder, so the two would count them twice. Its
-/// deregistration, older than the closing epoch, stays in the remainder,
-/// which serves it while the row has neither date.
+/// Once a rollback has undone every delta, settle the remainder of each
+/// credential whose row it restored. Rewards are paid only at a boundary,
+/// which no rollback undoes, and the closing boundary paid the unregistered
+/// pruned row nothing. So the rollback leaves the credential's lifetime
+/// rewards, row and remainder together, as it found them: the remainder
+/// gives up what the restored row holds beyond the row the rollback started
+/// from, which the store still holds.
 ///
-/// A restored row the undos removed again began inside the rollback. It was
-/// never registered, so its prune moved no history.
+/// That row is absent, or fresh from the opening epoch, with no rewards, and
+/// the remainder gives up the restored life's: the undo of a value delta put
+/// them back in the row. Or it is the restored row itself: an earlier attempt
+/// at this rollback committed the state and died before the WAL was
+/// truncated, catch-up replayed the logged deltas onto the restored row, and
+/// a `was_new` logged before the rollback deletes it again. The remainder,
+/// settled once, gives up nothing.
+///
+/// The restored life's deregistration, older than the closing epoch, stays in
+/// the remainder, which serves it while the row has neither date. A restored
+/// row the undos removed again began inside the rollback. It was never
+/// registered, so its prune moved no history.
 pub fn settle_undo<S: StateStore>(
     state: &S,
     entities: &mut EntityMap<CardanoEntity>,
@@ -110,13 +127,21 @@ pub fn settle_undo<S: StateStore>(
             continue;
         };
 
-        let rewards = row.stake.live().map(|x| x.rewards_sum).unwrap_or_default();
+        let account = key.key().decode::<AccountKey>()?;
+        let found = state.read_entity_typed::<AccountState>(&account)?;
+        let rewards = sub!(
+            lifetime_rewards(Some(row)),
+            lifetime_rewards(found.as_ref())
+        );
+
+        debug!(
+            ?account,
+            rewards, "restored a pruned account for the rollback"
+        );
 
         if rewards == 0 {
             continue;
         }
-
-        let account = key.key().decode::<AccountKey>()?;
 
         let Some(remainder) = state.read_entity_typed::<PrunedAccountState>(&account)? else {
             continue;
@@ -129,4 +154,10 @@ pub fn settle_undo<S: StateStore>(
     }
 
     Ok(())
+}
+
+fn lifetime_rewards(row: Option<&AccountState>) -> u64 {
+    row.and_then(|x| x.stake.live())
+        .map(|x| x.rewards_sum)
+        .unwrap_or_default()
 }
