@@ -911,5 +911,225 @@ mod tests {
             assert!(seen.iter().all(|x| *x >= HELD), "{seen:?}");
             assert_eq!(in_use, 0);
         }
+
+        /// A token registry that answers only at `/metadata/{unit}`, with the
+        /// body `answers` gives the unit, and records the units it is asked
+        /// for.
+        async fn registry_at_its_metadata_path(
+            answers: Vec<(String, serde_json::Value)>,
+        ) -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+            let asked: Arc<Mutex<Vec<String>>> = Default::default();
+
+            let registry = axum::Router::new().route(
+                "/metadata/{unit}",
+                axum::routing::get({
+                    let asked = asked.clone();
+
+                    move |Path(unit): Path<String>| {
+                        let asked = asked.clone();
+                        let answer = answers
+                            .iter()
+                            .find(|(x, _)| *x == unit)
+                            .map(|(_, body)| body.to_string());
+
+                        async move {
+                            asked.lock().unwrap().push(unit);
+
+                            match answer {
+                                Some(body) => (StatusCode::OK, body),
+                                None => (StatusCode::NOT_FOUND, String::new()),
+                            }
+                        }
+                    }
+                }),
+            );
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server =
+                tokio::spawn(async move { axum::serve(listener, registry).await.unwrap() });
+
+            (url, asked, server)
+        }
+
+        /// The chain, then a block that mints one of each of `tokens` to the
+        /// address, served with the token registry at `url`.
+        fn app_holding(url: String, tokens: &[Token]) -> TestApp {
+            let mut config = minibf();
+            config.token_registry_url = Some(url);
+
+            app_with(config, |tip, address| {
+                vec![
+                    block(
+                        tip + 1,
+                        None,
+                        tokens,
+                        vec![output(address, holding(tokens), None)],
+                    )
+                    .0,
+                ]
+            })
+        }
+
+        /// Findings T2 and T3 of the fifth QA review of dolos#1524: the
+        /// registry is asked at `/metadata/{unit}`, by `/assets/{asset}` for
+        /// its metadata and by `/addresses/{a}/extended` for its decimals.
+        #[tokio::test]
+        async fn the_registry_is_asked_at_its_metadata_path() {
+            let native: Token = ([0x7c; 28], b"REG".to_vec());
+
+            let (url, asked, server) = registry_at_its_metadata_path(vec![(
+                unit_of(&native),
+                serde_json::json!({
+                    "name": { "value": "registered" },
+                    "description": { "value": "a registered token" },
+                    "ticker": { "value": "REG" },
+                    "decimals": { "value": 4 },
+                }),
+            )])
+            .await;
+
+            let app = app_holding(url, std::slice::from_ref(&native));
+
+            let path = format!("/assets/{}", unit_of(&native));
+            let (status, bytes) = app.get_bytes(&path).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+
+            let asset: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(asset["metadata"]["name"], "registered");
+            assert_eq!(asset["metadata"]["ticker"], "REG");
+            assert_eq!(asset["metadata"]["decimals"], 4);
+
+            let item = extended_of(&app).await;
+            server.abort();
+
+            let entry = item
+                .amount
+                .iter()
+                .find(|x| x.unit == unit_of(&native))
+                .expect("the native token");
+            assert_eq!(entry.decimals, Some(4));
+
+            let asked = asked.lock().unwrap().clone();
+            let times = asked.iter().filter(|x| **x == unit_of(&native)).count();
+            assert_eq!(times, 2, "{asked:?}");
+        }
+
+        /// Finding T2 of the fifth QA review of dolos#1524: a registry entry
+        /// without a name or a description is no metadata. Its unit answers
+        /// no decimals, its asset no metadata, and neither request fails.
+        #[tokio::test]
+        async fn a_registry_entry_without_a_name_or_a_description_is_no_metadata() {
+            let nameless: Token = ([0x7d; 28], b"NONAME".to_vec());
+            let undescribed: Token = ([0x7d; 28], b"NODESC".to_vec());
+
+            let (url, asked, server) = registry_at_its_metadata_path(vec![
+                (
+                    unit_of(&nameless),
+                    serde_json::json!({
+                        "description": { "value": "a token with no name" },
+                        "decimals": { "value": 4 },
+                    }),
+                ),
+                (
+                    unit_of(&undescribed),
+                    serde_json::json!({
+                        "name": { "value": "undescribed" },
+                        "decimals": { "value": 5 },
+                    }),
+                ),
+            ])
+            .await;
+
+            let app = app_holding(url, &[nameless.clone(), undescribed.clone()]);
+
+            for token in [&nameless, &undescribed] {
+                let path = format!("/assets/{}", unit_of(token));
+                let (status, bytes) = app.get_bytes(&path).await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "{}",
+                    String::from_utf8_lossy(&bytes)
+                );
+
+                let asset: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert!(asset["metadata"].is_null(), "{asset}");
+            }
+
+            let item = extended_of(&app).await;
+            server.abort();
+
+            for token in [&nameless, &undescribed] {
+                let entry = item
+                    .amount
+                    .iter()
+                    .find(|x| x.unit == unit_of(token))
+                    .expect("the native token");
+                assert_eq!(entry.decimals, None, "{}", entry.unit);
+            }
+
+            let asked = asked.lock().unwrap().clone();
+            for token in [&nameless, &undescribed] {
+                let times = asked.iter().filter(|x| **x == unit_of(token)).count();
+                assert_eq!(times, 2, "{asked:?}");
+            }
+        }
+
+        /// Finding T1 of the fifth QA review of dolos#1524: a request asks the
+        /// registry for at most [`EXTENDED_ASSET_CONCURRENCY`] units at once.
+        /// The registry never answers, and the address holds twice as many
+        /// units the chain declares no decimals for.
+        #[tokio::test]
+        async fn the_registry_is_asked_for_a_bounded_number_of_units_at_once() {
+            let accepted = Arc::new(AtomicUsize::new(0));
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+
+            let registry = tokio::spawn({
+                let accepted = accepted.clone();
+
+                async move {
+                    let mut held = vec![];
+
+                    while let Ok((stream, _)) = listener.accept().await {
+                        accepted.fetch_add(1, Ordering::SeqCst);
+                        held.push(stream);
+                    }
+                }
+            });
+
+            let natives: Vec<Token> = (0..2 * EXTENDED_ASSET_CONCURRENCY)
+                .map(|i| ([0x7b; 28], format!("U{i:02}").into_bytes()))
+                .collect();
+
+            let app = app_holding(url, &natives);
+
+            let request = tokio::spawn(extended::<FaultyToyDomain>(
+                Path(app.vectors().address.clone()),
+                State(app.facade()),
+            ));
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while accepted.load(Ordering::SeqCst) < EXTENDED_ASSET_CONCURRENCY {
+                assert!(Instant::now() < deadline, "{accepted:?}");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+
+            // the registry stage asks for no more units while its requests
+            // are pending
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let accepted = accepted.load(Ordering::SeqCst);
+            request.abort();
+            registry.abort();
+
+            assert_eq!(accepted, EXTENDED_ASSET_CONCURRENCY);
+        }
     }
 }
