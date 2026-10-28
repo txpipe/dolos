@@ -219,16 +219,15 @@ mod tests {
             .collect();
         assert!(in_block.len() > 1, "need a block with several rows");
 
+        // a reversed index included: Blockfrost compares the heights alone
         for query in [
             format!("from={height}:2&to={height}"),
             format!("from={height}&to={height}:0"),
             format!("from={height}:1&to={height}:1"),
+            format!("from={height}:2&to={height}:1"),
         ] {
             assert_eq!(get(query).await, in_block);
         }
-
-        let path = format!("/assets/{asset}/utxos?from={height}:2&to={height}:1");
-        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     /// Bounds Blockfrost rejects (empty parts, a third part, a number past
@@ -323,6 +322,70 @@ mod tests {
             assert!(!expected.is_empty(), "{query} selects nothing");
             assert_eq!(parse_utxos(&bytes), expected, "{query}");
         }
+    }
+
+    /// A fork between the tag read and the value read can move a row's
+    /// transaction to a block outside the range, while its tag entry inside
+    /// the range is the one the walk read. The row is held against the height
+    /// of the block it is in: it is no row of the page.
+    #[tokio::test]
+    async fn assets_by_subject_utxos_hold_a_moved_row_against_the_range() {
+        use dolos_cardano::indexes::utxo_tags;
+        use dolos_core::{
+            indexes::UtxoIndexDelta, StateStore as _, StateWriter as _, TxoRef, UtxoPosition,
+        };
+        use pallas::ledger::traverse::MultiEraOutput;
+
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 2,
+            ..Default::default()
+        });
+        let asset = app.vectors().asset_unit.clone();
+        let blocks = app.vectors().blocks.clone();
+        let (from, to) = (blocks[1].block_number, blocks[3].block_number);
+        let path = format!("/assets/{asset}/utxos?from={from}&to={to}");
+
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+        let within = parse_utxos(&bytes);
+        assert!(within
+            .iter()
+            .all(|x| (from..=to).contains(&(x.block_height as u64))));
+
+        let (status, bytes) = app.get_bytes(&format!("/assets/{asset}/utxos")).await;
+        assert_eq!(status, StatusCode::OK);
+        let moved = parse_utxos(&bytes)
+            .into_iter()
+            .find(|x| x.block_height as u64 == blocks[4].block_number)
+            .expect("a row past the range");
+
+        // the tag entry of a row of the last block sits inside the range,
+        // off its edges, as a fork that moved the row there would leave it
+        let domain = app.facade().inner;
+        let txo = TxoRef(
+            moved.tx_hash.parse().expect("tx hash"),
+            moved.output_index as u32,
+        );
+        let value = domain
+            .state()
+            .get_utxos(vec![txo.clone()])
+            .expect("utxo read")
+            .remove(&txo)
+            .expect("the moved row's value");
+        let output = MultiEraOutput::try_from(value.as_ref()).expect("output");
+        let position = Some(UtxoPosition::new(blocks[2].slot, 0));
+        let delta = UtxoIndexDelta {
+            produced: vec![(txo, position, utxo_tags(&output))],
+            consumed: vec![],
+        };
+        let writer = domain.state().start_writer().expect("state writer");
+        writer.apply_utxo_tags(&delta).expect("apply tags");
+        writer.commit().expect("commit");
+
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parse_utxos(&bytes), within);
     }
 
     /// A block pruned between the index read and the block read leaves its

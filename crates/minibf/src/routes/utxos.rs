@@ -9,10 +9,10 @@ use std::{
     sync::Arc,
 };
 
-use dolos_cardano::indexes::AsyncCardanoQueryExt as _;
+use dolos_cardano::{indexes::AsyncCardanoQueryExt as _, mutable_slots};
 use dolos_core::{
-    ArchiveStore as _, BlockSlot, Domain, StateStore as _, Tag, TagEntry, TagOrder, TagStart,
-    TxHash, TxoRef, UtxoValue, TAG_ORDER_LEN,
+    ArchiveStore as _, BlockRefMeta, BlockSlot, Domain, StateStore as _, Tag, TagEntry, TagOrder,
+    TagStart, TxHash, TxoRef, UtxoValue, TAG_ORDER_LEN,
 };
 
 use crate::{
@@ -38,6 +38,18 @@ const FIRST_WINDOW: usize = if cfg!(test) { 2 } else { 256 };
 ///
 /// Tests take four, so a fixture walk reaches it.
 const MAX_WINDOW: usize = if cfg!(test) { 4 } else { 1024 };
+
+/// The first slot a rollback can still reach: the tip less the chain's
+/// mutable window. Refs created before it are immutable, so a walk keeps no
+/// record of counting them.
+fn mutable_from<D>(domain: &Facade<D>) -> Result<BlockSlot, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let tip = domain.get_tip_slot()?;
+
+    Ok(tip.saturating_sub(mutable_slots(&domain.genesis())))
+}
 
 /// The tag order a page order walks.
 fn tag_order(order: &Order) -> TagOrder {
@@ -164,15 +176,22 @@ impl Walk {
 /// value read leaves the ref to the entry the fork block writes.
 struct Rows {
     rows: Vec<(TxoRef, Arc<UtxoValue>)>,
+    /// The refs the walk has counted that a fork can still re-create ahead
+    /// of it: the ones created at or after `mutable_from`. An older ref sits
+    /// in the immutable chain, so its entry is the only one the walk can
+    /// meet and it is not kept: a deep page over a busy tag holds the refs
+    /// of the mutable window, not of its whole offset.
     counted: HashSet<TxoRef>,
+    mutable_from: BlockSlot,
     count: usize,
 }
 
 impl Rows {
-    fn new(count: usize) -> Self {
+    fn new(count: usize, mutable_from: BlockSlot) -> Self {
         Self {
             rows: Vec::with_capacity(count),
             counted: HashSet::new(),
+            mutable_from,
             count,
         }
     }
@@ -197,8 +216,14 @@ impl Rows {
 
     /// Counts the refs of `entries`.
     fn count_entries(&mut self, entries: &[TagEntry]) {
-        self.counted
-            .extend(entries.iter().map(|entry| entry.txo.clone()));
+        let mutable_from = self.mutable_from;
+
+        self.counted.extend(
+            entries
+                .iter()
+                .filter(|entry| entry_slot(entry) >= mutable_from)
+                .map(|entry| entry.txo.clone()),
+        );
     }
 
     /// Loads the UTxOs behind the uncounted entries of `entries`, as
@@ -214,8 +239,15 @@ impl Rows {
     {
         let loaded = load_values(domain, self.uncounted(entries), ada_only).await?;
 
-        self.counted
-            .extend(loaded.iter().map(|(txo, _)| txo.clone()));
+        // a UTxO no block produced has no position and is kept, as before
+        let mutable_from = self.mutable_from;
+
+        self.counted.extend(
+            loaded
+                .iter()
+                .filter(|(_, value)| value.position().is_none_or(|at| at.slot >= mutable_from))
+                .map(|(txo, _)| txo.clone()),
+        );
 
         Ok(loaded)
     }
@@ -240,7 +272,7 @@ where
 {
     let order = tag_order(&pagination.order);
     let mut walk = Walk::tag(tag.clone(), order, TagStart::Skip(pagination.skip()));
-    let mut rows = Rows::new(pagination.count);
+    let mut rows = Rows::new(pagination.count, mutable_from(domain)?);
 
     while !rows.full() {
         let entries = walk.next(domain, rows.missing().min(MAX_WINDOW)).await?;
@@ -318,9 +350,8 @@ where
         .blocking(|domain| {
             let Some((slot, body)) = domain
                 .archive()
-                .get_range(None, None)
+                .get_oldest()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .next()
             else {
                 return Ok(None);
             };
@@ -459,7 +490,9 @@ fn entry_slot(entry: &TagEntry) -> BlockSlot {
 /// starts at the first row inside it and stops at the first one past it. The
 /// offset costs tag entries, as a plain listing's does; the page's rows are
 /// read, and so are the rows of the edge slots, whose block decides whether
-/// they are in the range at all.
+/// they are in the range at all. The blocks read for that decision are the
+/// ones the models report, so a block pruned after the walk passed it cannot
+/// drop a row from the page.
 pub async fn load_tag_page_in_heights<D, T>(
     domain: &Facade<D>,
     tag: &Tag,
@@ -489,7 +522,8 @@ where
     };
 
     let mut walk = Walk::tag(tag.clone(), order, start);
-    let mut rows = Rows::new(pagination.count);
+    let mut rows = Rows::new(pagination.count, mutable_from(domain)?);
+    let mut metas = HashMap::new();
     let mut skip = pagination.skip();
     let mut ended = false;
 
@@ -508,7 +542,11 @@ where
 
         // The entries come in runs on and off the edge zones. Off them the
         // offset is counted in entries, their values unread; on them every
-        // row is read and held against its block's height first.
+        // row is read and held against its block's height first. A ref the
+        // walk has counted, re-created by a fork ahead of it, counts no more,
+        // and a row a fork moved out of the range since its tag read is no
+        // row of the page.
+        let entries = rows.uncounted(entries);
         let mut rest = entries.as_slice();
 
         while !rest.is_empty() && !rows.full() {
@@ -522,12 +560,12 @@ where
 
             if on_edge {
                 let loaded = rows.load(domain, run.to_vec(), false).await?;
-                let heights = block_heights(domain, &loaded).await?;
+                metas.extend(block_metas(domain, &loaded).await?);
 
                 for (txo_ref, value) in loaded {
-                    match heights.get(&txo_ref.0) {
+                    match metas.get(&txo_ref.0) {
                         // outside the range: not a row of this listing
-                        Some(height) if !bounds.heights.holds(*height) => continue,
+                        Some(meta) if !bounds.heights.holds(meta.height) => continue,
                         // its block is gone: it keeps its place in the offset
                         // and drops out of the page, as a spent row does
                         None if skip > 0 => skip -= 1,
@@ -545,10 +583,12 @@ where
 
                 if !page.is_empty() {
                     let loaded = rows.load(domain, page.to_vec(), false).await?;
-                    let heights = block_heights(domain, &loaded).await?;
-                    let located = loaded
-                        .into_iter()
-                        .filter(|(txo_ref, _)| heights.contains_key(&txo_ref.0));
+                    metas.extend(block_metas(domain, &loaded).await?);
+                    let located = loaded.into_iter().filter(|(txo_ref, _)| {
+                        metas
+                            .get(&txo_ref.0)
+                            .is_some_and(|meta| bounds.heights.holds(meta.height))
+                    });
                     rows.rows.extend(located);
                     rows.rows.truncate(rows.count);
                 }
@@ -556,17 +596,17 @@ where
         }
     }
 
-    into_located_models(domain, rows.rows).await
+    located_models(domain, rows.rows, &metas)
 }
 
-/// The height of the creating block of each row of `rows` whose block the
-/// archive holds, with the row's transaction at its position, by tx hash. A
-/// row whose block is gone has no entry: it is left out of a page so the page
-/// is topped up from the next rows, as a spent row is.
-async fn block_heights<D>(
+/// The creating block of each row of `rows` whose block the archive holds,
+/// with the row's transaction at its position, by tx hash. A row whose block
+/// is gone has no entry: it is left out of a page so the page is topped up
+/// from the next rows, as a spent row is.
+async fn block_metas<D>(
     domain: &Facade<D>,
     rows: &[(TxoRef, Arc<UtxoValue>)],
-) -> Result<HashMap<TxHash, u64>, StatusCode>
+) -> Result<HashMap<TxHash, BlockRefMeta>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -575,16 +615,11 @@ where
         .filter_map(|(txo_ref, value)| Some((txo_ref.0, value.position()?)))
         .collect::<Vec<_>>();
 
-    let held = domain
+    domain
         .query()
         .block_meta_by_positions(positions)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(held
-        .into_iter()
-        .map(|(tx_hash, meta)| (tx_hash, meta.height))
-        .collect())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// What a filtered listing walks, in creation order.
@@ -627,7 +662,7 @@ where
         UtxoWalk::Intersection { entries, other } => (Walk::entries(entries, order), Some(other)),
     };
 
-    let mut rows = Rows::new(pagination.count);
+    let mut rows = Rows::new(pagination.count, mutable_from(domain)?);
     let mut skip = pagination.skip();
     let mut matched = false;
     let mut window = FIRST_WINDOW;
@@ -819,6 +854,39 @@ where
         .await
 }
 
+/// The models of `rows`, in the order given, over the blocks `metas` holds:
+/// a row `metas` lacks is left out, for the models that report the creating
+/// block. No consumer is looked up: a live UTxO has none.
+fn located_models<D, T>(
+    domain: &Facade<D>,
+    rows: Vec<(TxoRef, Arc<UtxoValue>)>,
+    metas: &HashMap<TxHash, BlockRefMeta>,
+) -> Result<Vec<T>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    T: serde::Serialize,
+    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
+{
+    let chain = domain.get_chain_summary()?;
+
+    rows.into_iter()
+        .filter_map(|(txo_ref, value)| {
+            let meta = metas.get(&txo_ref.0)?.clone();
+            Some((txo_ref, value, meta))
+        })
+        .map(|(TxoRef(tx_hash, txo_idx), value, meta)| {
+            let output = MultiEraOutput::try_from(value.as_ref())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let block_time = chain.slot_time(meta.slot);
+
+            UtxoOutputModelBuilder::from_output(tx_hash, txo_idx, output)
+                .with_block_data(meta)
+                .with_block_time(block_time)
+                .into_model()
+        })
+        .collect()
+}
+
 /// The models of a page's rows, in the rows' order. The block hash comes from
 /// the block at each row's creation position; a row without one (genesis,
 /// configured) or whose block was pruned gets none.
@@ -831,33 +899,6 @@ where
 async fn into_models<D, T>(
     domain: &Facade<D>,
     rows: Vec<(TxoRef, Arc<UtxoValue>)>,
-) -> Result<Vec<T>, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-    T: serde::Serialize,
-    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
-{
-    build_models(domain, rows, false).await
-}
-
-/// As [`into_models`], leaving out every row whose creating block the archive
-/// does not hold, for the models that report that block.
-async fn into_located_models<D, T>(
-    domain: &Facade<D>,
-    rows: Vec<(TxoRef, Arc<UtxoValue>)>,
-) -> Result<Vec<T>, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-    T: serde::Serialize,
-    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
-{
-    build_models(domain, rows, true).await
-}
-
-async fn build_models<D, T>(
-    domain: &Facade<D>,
-    rows: Vec<(TxoRef, Arc<UtxoValue>)>,
-    located_only: bool,
 ) -> Result<Vec<T>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
@@ -889,7 +930,6 @@ where
                 let block_time = chain.slot_time(x.slot);
                 builder.with_block_data(x).with_block_time(block_time)
             }
-            None if located_only => continue,
             None => builder,
         };
 
@@ -1371,6 +1411,29 @@ mod tests {
         assert_eq!(page_rows(&app, &lovelace_path).await, lovelace);
     }
 
+    /// A counted ref is remembered only while a fork can still re-create its
+    /// entry ahead of the walk: from the mutable window on. The immutable
+    /// ones before it are forgotten, so a deep offset holds the window, not
+    /// the whole tag.
+    #[test]
+    fn counted_refs_are_kept_from_the_mutable_window_on() {
+        let entry = |slot: u64, index: u32| TagEntry {
+            order: UtxoPosition::tag_order(Some(UtxoPosition::new(slot, 0))),
+            txo: TxoRef(Hash::from([slot as u8; 32]), index),
+        };
+        let immutable = entry(50, 0);
+        let mutable = entry(150, 0);
+
+        let mut rows = Rows::new(2, 100);
+        rows.count_entries(&[immutable.clone(), mutable.clone()]);
+
+        assert_eq!(rows.counted.len(), 1);
+        assert!(rows.counted.contains(&mutable.txo));
+
+        let again = rows.uncounted(vec![immutable.clone(), mutable.clone()]);
+        assert_eq!(again, vec![immutable]);
+    }
+
     /// A ref counts once its value loads. A rollback that removes a UTxO
     /// between its tag read and its value read leaves the ref uncounted, so
     /// the entry the fork block writes for it further on is a row.
@@ -1380,7 +1443,7 @@ mod tests {
         let facade = app.facade();
 
         let mut walk = Walk::tag(address_tag(&app), TagOrder::Asc, TagStart::Skip(0));
-        let mut rows = Rows::new(100);
+        let mut rows = Rows::new(100, 0);
 
         let first = walk.next(&facade, MAX_WINDOW).await.expect("first read");
         let gone = first

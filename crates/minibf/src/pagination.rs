@@ -178,16 +178,11 @@ impl TryFrom<PaginationParameters> for Pagination {
             .map(PaginationNumberAndIndex::parse)
             .transpose()?;
 
+        // Blockfrost refuses a `from` height past the `to` height; the
+        // indexes alone it does not compare, so `10:5` to `10:2` passes.
         if let (Some(from), Some(to)) = (from.as_ref(), to.as_ref()) {
             if from.number > to.number {
                 return Err(PaginationError::InvalidFromTo);
-            }
-            if from.number == to.number {
-                if let (Some(from_idx), Some(to_idx)) = (from.index, to.index) {
-                    if from_idx > to_idx {
-                        return Err(PaginationError::InvalidFromTo);
-                    }
-                }
             }
         }
 
@@ -345,6 +340,31 @@ mod tests {
         ] {
             assert!(parse(value).is_err(), "{value:?} parsed");
         }
+    }
+
+    #[test]
+    fn from_and_to_compare_heights_only() {
+        let bounds = |from: &str, to: &str| {
+            Pagination::try_from(PaginationParameters {
+                count: None,
+                page: None,
+                order: None,
+                from: Some(from.to_string()),
+                to: Some(to.to_string()),
+            })
+        };
+
+        assert!(bounds("10", "20").is_ok());
+        assert!(bounds("10:5", "10:2").is_ok());
+        assert!(bounds("10:9", "10").is_ok());
+        assert!(matches!(
+            bounds("20", "10"),
+            Err(PaginationError::InvalidFromTo)
+        ));
+        assert!(matches!(
+            bounds("11:0", "10:9"),
+            Err(PaginationError::InvalidFromTo)
+        ));
     }
 
     #[tokio::test]
