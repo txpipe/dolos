@@ -88,6 +88,17 @@ These figures size the `totals` namespace on mainnet. They were measured with do
 
 All of `--scan` fits the 4 GiB default disk budget, and the benchmark set fits the 512 MiB default memory budget. All of `--scan` does not fit the memory budget: it exceeds 512 MiB (536,870,912 bytes) by 2.1 MB. Under the default, a node whose clients read every kept key serves its lowest cost-per-byte entries from the disk tier. To keep the whole namespace in memory, raise `storage.cache.memory_mb` above 514 (539 MB); the namespace grows with the chain, so leave headroom.
 
+The off-chain metadata namespaces were measured at commit `4b60d5d3` by requesting every `/pools/extended` page twice and every proposal's metadata once:
+
+| namespace           | network | entries | bytes on disk | per entry |
+| ------------------- | ------- | ------- | ------------- | --------- |
+| `pool-offchain`     | mainnet | 1,729   | 465,665       | 269 B     |
+| `pool-offchain`     | preview | 356     | 79,141        | 222 B     |
+| `proposal-offchain` | mainnet | 55      | 770,060       | 14.0 KB   |
+| `proposal-offchain` | preview | 161     | 4,129,183     | 25.6 KB   |
+
+Mainnet listed 2,885 pools and 161 proposals, preview 731 pools and 1,583 proposals. The other rows have no metadata, or their fetch failed; failures stay in memory only. Every namespace fits both default budgets.
+
 ## Commands
 
 The `dolos cache` commands work on the cache file directly, so they run with the node stopped. While a running node, or another `dolos` command, holds the cache file, they exit with an error asking you to stop it first. They print the cache's warnings, such as a cache file found corrupt and recreated empty, on stderr.
