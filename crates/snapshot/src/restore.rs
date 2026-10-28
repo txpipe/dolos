@@ -2331,50 +2331,56 @@ mod tests {
         ));
     }
 
-    /// A stele that still declares `scripts` was published by a build that
-    /// witnessed scripts in state and sealed no script entries, though it
-    /// declares the kind: restoring it would take every known script for a
-    /// first sighting.
+    /// A stele that still declares `assets` or `scripts` was published by a
+    /// build that witnessed first mints or scripts in state and sealed no
+    /// entries of the kind, though it declares it: restoring it would take
+    /// every known asset or script for a first sighting.
     #[test]
-    fn a_stele_witnessing_scripts_in_state_refuses_the_restore() {
-        let (kind, namespace) = STATE_WITNESSED_KINDS[0];
+    fn a_stele_witnessing_a_kind_in_state_refuses_the_restore() {
+        // The names an earlier publisher wrote: `AssetState`'s and
+        // `ScriptState`'s namespaces.
+        let names: Vec<_> = STATE_WITNESSED_KINDS
+            .iter()
+            .map(|(kind, namespace)| (kind.name(), *namespace))
+            .collect();
+        assert_eq!(names, [("asset", "assets"), ("script", "scripts")]);
 
-        // The names an earlier publisher wrote: `ScriptState`'s namespace.
-        assert_eq!((kind.name(), namespace), ("script", "scripts"));
+        for (kind, namespace) in STATE_WITNESSED_KINDS {
+            for rev in [json!(1), json!(99), json!("1")] {
+                let mut witnessed = inscription(state_layers());
+                witnessed.parameters["schemas"][namespace] = rev;
 
-        for rev in [json!(1), json!(99), json!("1")] {
-            let mut witnessed = inscription(state_layers());
-            witnessed.parameters["schemas"][namespace] = rev;
+                let err = check_entities(&witnessed).unwrap_err();
+                assert!(
+                    matches!(
+                        err,
+                        Error::StateWitnessedEntityKind { kind: refused, namespace: ns }
+                            if refused == kind.name() && ns == namespace
+                    ),
+                    "{err:?}"
+                );
+            }
 
-            let err = check_entities(&witnessed).unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    Error::StateWitnessedEntityKind { kind: refused, namespace: ns }
-                        if refused == kind.name() && ns == namespace
-                ),
-                "{err:?}"
-            );
+            // Retired, the namespace says its publisher no longer witnesses
+            // there.
+            let mut retired = inscription(state_layers());
+            retired.parameters["schemas"][namespace] = json!(RETIRED_SCHEMA_REV);
+
+            check_entities(&retired).unwrap();
+
+            // And `plan` asks before a store could be opened.
+            let mut bare = inscription(vec![]);
+            bare.parameters["schemas"][namespace] = json!(1);
+
+            let temp = tempfile::tempdir().unwrap();
+            let stele = stelae::dir::SteleDir::create(temp.path()).unwrap();
+            stelae::SteleWriter::seal(&stele, &DolosProfile, &bare).unwrap();
+
+            assert!(matches!(
+                plan(&stele, MAINNET_MAGIC, None),
+                Err(Error::StateWitnessedEntityKind { .. })
+            ));
         }
-
-        // Retired, the namespace says its publisher no longer witnesses there.
-        let mut retired = inscription(state_layers());
-        retired.parameters["schemas"][namespace] = json!(RETIRED_SCHEMA_REV);
-
-        check_entities(&retired).unwrap();
-
-        // And `plan` asks before a store could be opened.
-        let mut bare = inscription(vec![]);
-        bare.parameters["schemas"][namespace] = json!(1);
-
-        let temp = tempfile::tempdir().unwrap();
-        let stele = stelae::dir::SteleDir::create(temp.path()).unwrap();
-        stelae::SteleWriter::seal(&stele, &DolosProfile, &bare).unwrap();
-
-        assert!(matches!(
-            plan(&stele, MAINNET_MAGIC, None),
-            Err(Error::StateWitnessedEntityKind { .. })
-        ));
     }
 
     #[test]

@@ -24,7 +24,7 @@ use dolos_cardano::{
     indexes::archive_dimensions,
     model::{
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountKey, AccountState,
-        AccountStats, AddressKey, AddressStats, AssetKey, AssetMintChunk, AssetMintSet, AssetState,
+        AccountStats, AddressKey, AddressStats, AssetKey, AssetMintChunk, AssetMintSet,
         DRepEpochLog, DRepKey, DRepSightingState, DRepState, DatumKey, DatumState, EpochState,
         EraKey, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet,
         FixedNamespace as _, GovState, MetadataLabelState, PaymentAddressChunk, PaymentAddressKey,
@@ -116,7 +116,6 @@ pub fn state_key(ns: Namespace, byte: u8) -> Vec<u8> {
             epoch: u64::from(byte),
             member: (),
         }),
-        AssetState::NS => keys::encode(&AssetKey([byte; 32].into())),
         AssetMintChunk::NS => keys::encode(&(AssetKey([byte; 32].into()), u32::from(byte))),
         AssetMintSet::NS => keys::encode(&GroupKey {
             group: AssetKey([byte; 32].into()),
@@ -281,8 +280,8 @@ pub fn entities(kind: EntityKind) -> Vec<EntityRecord> {
 /// inscription order.
 ///
 /// One layer per namespace, so a kind's shards are the ones its spec'd count
-/// allows and its fixture keys reach: both of [`SHARDS`] for `assets`,
-/// `datums` and `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`,
+/// allows and its fixture keys reach: both of [`SHARDS`] for `datums` and
+/// `utxos`, [`ACCOUNT_SHARD`] alone for `accounts`,
 /// and shard 0 for every single blob. Every state namespace is among them —
 /// which is what `the_golden_state_layers_cover_every_namespace` holds this
 /// to.

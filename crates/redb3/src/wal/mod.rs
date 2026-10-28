@@ -205,7 +205,9 @@ const WAL_METADATA_VERSION_KEY: &str = "version";
 /// 6: the DRep and pool deltas drop the fields minibf now derives, and
 ///    `DRepAnchorUpdate` and `DRepPowerUpdate` retire.
 /// 7: `ScriptFirstSeen` retires.
-pub const CURRENT_WAL_VERSION: u32 = 8;
+/// 8: `MintStatsUpdate` and `MetadataTxUpdate` retire.
+/// 9: `NewProposalV2` carries whether its proposal includes cost models.
+pub const CURRENT_WAL_VERSION: u32 = 9;
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 
