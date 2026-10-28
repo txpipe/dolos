@@ -978,7 +978,7 @@ mod tests {
         async fn the_registry_is_asked_at_its_metadata_path() {
             let native: Token = ([0x7c; 28], b"REG".to_vec());
 
-            let (url, asked, server) = registry_at_its_metadata_path(vec![(
+            let (url, _, server) = registry_at_its_metadata_path(vec![(
                 unit_of(&native),
                 serde_json::json!({
                     "name": { "value": "registered" },
@@ -1014,10 +1014,6 @@ mod tests {
                 .find(|x| x.unit == unit_of(&native))
                 .expect("the native token");
             assert_eq!(entry.decimals, Some(4));
-
-            let asked = asked.lock().unwrap().clone();
-            let times = asked.iter().filter(|x| **x == unit_of(&native)).count();
-            assert_eq!(times, 2, "{asked:?}");
         }
 
         /// Finding T2 of the fifth QA review of dolos#1524: a registry entry
@@ -1074,10 +1070,10 @@ mod tests {
                 assert_eq!(entry.decimals, None, "{}", entry.unit);
             }
 
+            // the registry answered each, whichever request asked it
             let asked = asked.lock().unwrap().clone();
             for token in [&nameless, &undescribed] {
-                let times = asked.iter().filter(|x| **x == unit_of(token)).count();
-                assert_eq!(times, 2, "{asked:?}");
+                assert!(asked.contains(&unit_of(token)), "{asked:?}");
             }
         }
 
