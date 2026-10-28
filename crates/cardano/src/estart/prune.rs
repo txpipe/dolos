@@ -124,8 +124,8 @@ fn current_epoch<S: StateStore>(state: &S) -> Result<Epoch, StateError> {
 ///   boundary again.
 ///
 /// Every other row keeps what the undos leave, as on `main`. A block's undo
-/// sets only the live stake value, so each row keeps the snapshots and the
-/// epoch the store held:
+/// sets only the live stake value, so each row keeps the stake value's
+/// snapshots and epoch the store held:
 /// - A rotated row was in state through the boundary, so ESTART did not prune
 ///   it. That holds even when a crashed rollback's catch-up replayed it without
 ///   the boundary's payment and the undos give that payment back.
@@ -136,30 +136,38 @@ fn current_epoch<S: StateStore>(state: &S) -> Result<Epoch, StateError> {
 ///   that payment.
 ///
 /// Both sums lose the same amount, so the balance the ledger reads stays.
+///
+/// The epoch is read only once a row with no `mark` and with rewards is found.
+/// A fresh node's first rollback, to the origin, comes before genesis has
+/// written any state, and has nothing to strip.
 pub fn settle_undo<S: StateStore>(
     state: &S,
     entities: &mut EntityMap<CardanoEntity>,
 ) -> Result<(), StateError> {
-    strip_restored_lives(current_epoch(state)?, entities);
-
-    Ok(())
+    strip_restored_lives(|| current_epoch(state), entities)
 }
 
-fn strip_restored_lives(epoch: Epoch, entities: &mut EntityMap<CardanoEntity>) {
-    for entity in entities.values_mut() {
-        let Some(CardanoEntity::AccountState(row)) = entity else {
-            continue;
-        };
+fn strip_restored_lives(
+    epoch: impl FnOnce() -> Result<Epoch, StateError>,
+    entities: &mut EntityMap<CardanoEntity>,
+) -> Result<(), StateError> {
+    let mut unrotated = entities
+        .values_mut()
+        .filter_map(|entity| match entity {
+            Some(CardanoEntity::AccountState(row)) => Some(row),
+            _ => None,
+        })
+        .filter(|row| row.stake.mark().is_none() && rewards(row) > 0)
+        .peekable();
 
-        if row.stake.mark().is_some() || !row.stake.is_at_epoch(epoch) {
-            continue;
-        }
+    if unrotated.peek().is_none() {
+        return Ok(());
+    }
 
-        let rewards = row.stake.live().map(|x| x.rewards_sum).unwrap_or_default();
+    let epoch = epoch()?;
 
-        if rewards == 0 {
-            continue;
-        }
+    for row in unrotated.filter(|row| row.stake.is_at_epoch(epoch)) {
+        let rewards = rewards(row);
 
         debug!(
             account = %AccountKey::from(&row.credential),
@@ -170,6 +178,12 @@ fn strip_restored_lives(epoch: Epoch, entities: &mut EntityMap<CardanoEntity>) {
         live.rewards_sum = 0;
         live.withdrawals_sum = sub!(live.withdrawals_sum, rewards);
     }
+
+    Ok(())
+}
+
+fn rewards(row: &AccountState) -> u64 {
+    row.stake.live().map(|x| x.rewards_sum).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -274,9 +288,38 @@ mod tests {
                 entities.insert(other, Some(remainder.into()));
             }
 
-            strip_restored_lives(EPOCH, &mut entities);
+            strip_restored_lives(|| Ok(EPOCH), &mut entities).unwrap();
 
             assert_eq!(encoded(&entities), encoded(&expected));
         }
+    }
+
+    /// The settle reads the epoch only for a row with lifetime rewards and no
+    /// `mark`, so it needs none when the rollback undid nothing, as a fresh
+    /// node's first does before genesis, or left only rows it keeps.
+    #[test]
+    fn a_settle_with_nothing_to_strip_reads_no_epoch() {
+        let state = dolos_testing::toy_domain::empty_state_store();
+
+        let mut entities = EntityMap::default();
+        settle_undo(&state, &mut entities).unwrap();
+        assert!(entities.is_empty());
+
+        for kept in [
+            row(0x40, 7, (150_000, 100_000), Kind::Rotated),
+            row(0x50, 0, (150_000, 150_000), Kind::Rotated),
+            row(0x80, 7, (0, 0), Kind::Restored),
+            row(0xa0, 7, (0, 0), Kind::Recreated),
+        ] {
+            entities.insert(key(&kept), Some(kept.into()));
+        }
+
+        entities.insert(key(&row(0xc0, 7, (0, 0), Kind::Restored)), None);
+
+        let expected = encoded(&entities);
+
+        settle_undo(&state, &mut entities).unwrap();
+
+        assert_eq!(encoded(&entities), expected);
     }
 }

@@ -12,12 +12,13 @@ use std::sync::Arc;
 
 use dolos_cardano::{
     estart::EstartWorkUnit, AccountKey, AccountState, AssignRewards, CardanoWorkUnit,
-    ControlledAmountDec, ControlledAmountInc, PrunedAccountState, StakeDelegation,
+    ControlledAmountDec, ControlledAmountInc, EpochState, PrunedAccountState, StakeDelegation,
     StakeDeregistration, StakeRegistration, WithdrawalInc,
 };
 use dolos_core::{
-    sync::execute_work_unit, Domain, DomainError, EntityDelta, FixedNamespace, Genesis, Namespace,
-    RangeOf, StateStore as _, StateWriter as _,
+    sync::{execute_work_unit, SyncExt as _},
+    ChainPoint, Domain, DomainError, EntityDelta, FixedNamespace, Genesis, Namespace, RangeOf,
+    StateStore as _, StateWriter as _,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
@@ -453,6 +454,21 @@ fn a_resumed_boundary_prunes_the_same_rows() {
         crash_after > 1,
         "the boundary committed too little to crash between shards"
     );
+}
+
+/// A fresh node's first rollback is to the origin, before genesis: genesis
+/// waits for the first block, and the peer's first reply rolls back to the
+/// intersection. It undoes nothing, so it reads none of the state genesis
+/// writes. `ToyDomain` runs genesis eagerly, so its epoch is removed first.
+#[test]
+fn a_rollback_before_genesis_reads_no_epoch() {
+    let domain = fresh();
+
+    let writer = domain.state().start_writer().unwrap();
+    writer.save_entity_typed::<EpochState>(&(), None).unwrap();
+    writer.commit().unwrap();
+
+    domain.rollback(&ChainPoint::Origin).unwrap();
 }
 
 /// Rollbacks across ESTART on a chain of real blocks: the roll writes the

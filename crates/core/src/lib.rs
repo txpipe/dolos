@@ -841,8 +841,9 @@ pub trait ChainLogic: Sized + Send + Sync {
     }
 
     /// Settle `entities` once a rollback has undone every delta, before it
-    /// saves them. `state` still holds what the rollback started from. The
-    /// default does nothing.
+    /// saves them. `state` still holds what the rollback started from, which
+    /// can be nothing: a fresh node's first rollback, to the origin, comes
+    /// before genesis and undoes nothing. The default does nothing.
     fn settle_undo<S: StateStore>(
         _state: &S,
         _entities: &mut EntityMap<Self::Entity>,
