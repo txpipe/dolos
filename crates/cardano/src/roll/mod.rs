@@ -46,7 +46,7 @@ use datums::DatumVisitor;
 use dreps::{DRepStateVisitor, DormancyContext};
 use epochs::EpochStateVisitor;
 use metadata_labels::MetadataLabelVisitor;
-use pools::PoolStateVisitor;
+use pools::{block_pool_registrations, CalidusFloors, PoolStateVisitor};
 use scripts::{block_script_sightings, ScriptRegistryContext, ScriptRegistryVisitor};
 use stats::StatsVisitor;
 use txs::TxLogVisitor;
@@ -250,6 +250,7 @@ impl<'a> DeltaBuilder<'a> {
         utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
         dormancy: DormancyContext,
         script_registry: ScriptRegistryVisitor,
+        calidus_floors: CalidusFloors,
     ) -> Self {
         Self {
             genesis,
@@ -265,7 +266,7 @@ impl<'a> DeltaBuilder<'a> {
             drep_state: DRepStateVisitor::new(dormancy),
             epoch_state: Default::default(),
             metadata_labels: Default::default(),
-            pool_state: Default::default(),
+            pool_state: PoolStateVisitor::new(calidus_floors),
             tx_logs: Default::default(),
             proposal_logs: Default::default(),
             stats: Default::default(),
@@ -285,6 +286,11 @@ impl<'a> DeltaBuilder<'a> {
     /// first.
     pub fn take_script_registry(&mut self) -> ScriptRegistryContext {
         self.script_registry.take_context()
+    }
+
+    /// The calidus floors this block's registrations left unspent.
+    pub fn take_calidus_floors(&mut self) -> CalidusFloors {
+        self.pool_state.take_floors()
     }
 
     pub fn crawl(&mut self) -> Result<(), ChainError> {
@@ -795,6 +801,17 @@ pub(crate) fn compute_delta<D: Domain>(
     let mut script_registry =
         ScriptRegistryContext::load(state, archive, &carried, batch.first_slot(), unsealed)?;
 
+    // Calidus floors: the nonces of the pools the batch registers that only
+    // the final-row log holds. Each registration spends its pool's floor, so
+    // the floors are taken back after each crawl too.
+    let registered: Vec<_> = batch
+        .blocks
+        .iter()
+        .map(|block| block_pool_registrations(block.decoded().view()))
+        .collect();
+
+    let mut calidus_floors = CalidusFloors::load(state, archive, &registered, batch.first_slot())?;
+
     for (block, carried) in batch.blocks.iter_mut().zip(carried) {
         let mut builder = DeltaBuilder::new(
             genesis.clone(),
@@ -806,12 +823,14 @@ pub(crate) fn compute_delta<D: Domain>(
             &batch.utxos_decoded,
             std::mem::take(&mut dormancy),
             ScriptRegistryVisitor::new(std::mem::take(&mut script_registry), carried),
+            std::mem::take(&mut calidus_floors),
         );
 
         builder.crawl()?;
 
         dormancy = builder.take_dormancy();
         script_registry = builder.take_script_registry();
+        calidus_floors = builder.take_calidus_floors();
 
         // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
         // this into the entity system. (#1042)
@@ -991,6 +1010,7 @@ mod tests {
             &utxos,
             DormancyContext::default(),
             ScriptRegistryVisitor::default(),
+            CalidusFloors::default(),
         );
 
         builder.crawl().unwrap();
@@ -1152,6 +1172,7 @@ mod tests {
             &utxos,
             DormancyContext::default(),
             ScriptRegistryVisitor::default(),
+            CalidusFloors::default(),
         )
         .crawl()
         .unwrap();
