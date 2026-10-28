@@ -31,32 +31,9 @@ A namespace has one of two validity models:
 
 The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file found corrupt, cut short, or laid out by another release, such as one you rolled back from, is recreated empty; one that fails to open for another reason, such as its permissions, is an error and the node does not start.
 
-DRep, proposal and pool metadata use the same cache loader, each kind with its own namespaces.
-Each kind has its own fetch limits, so one kind never waits for another kind's fetches:
+DRep, proposal and pool metadata each have their own namespaces and fetch limits. One kind never waits for the fetches of another. DRep and proposal metadata run at most 16 fetches at once and keep at most 64 in progress, because such a body can reach 3 MB. Pool metadata runs at most 64 fetches at once and keeps at most 128 in progress, because a pool body is at most 512 bytes. A fetch continues after its request ends and keeps its result for the next request.
 
-| Kind | Fetches at once | Fetches in progress |
-| --- | --- | --- |
-| DRep | 16 | 64 |
-| Proposal | 16 | 64 |
-| Pool | 64 | 128 |
-
-A DRep or proposal body can reach 3 MB, so its lower limit also caps memory. A pool body is at most 512 bytes.
-A fetch in progress continues after its request ends and stores its result.
-
-A pool fetch keeps its five-second timeout and 512-byte limit.
-`/pools/extended` fetches at most 64 of its rows at a time and waits at most five seconds, the wait for a fetch slot included.
-Rows not fetched by then show no metadata. A fetch already started continues for the next request, and a later request fetches the rest.
-`/pools/{pool_id}/metadata` and `/txs/{hash}/pool_updates` wait at most 10 seconds for a fetch.
-The proposal metadata routes wait 15 seconds for each URL they try, and an `ipfs://` anchor tries each configured gateway in turn.
-A fetch past that deadline continues and stores its result for the next request.
-While the kind's fetches in progress are at their limit, these routes fetch within the request instead, and that fetch stops at the deadline.
-
-Once cached, a verified body remains available during an upstream outage until eviction or deletion.
-A new advertised hash triggers a new fetch.
-Failures stay in memory for 10 minutes, then the next request retries.
-There is no background retry timer.
-With the cache disabled, nothing is kept, so each request fetches again.
-The fetch limits and deadlines still apply.
+A verified body stays available during an upstream outage until a tier evicts it. A new advertised hash starts a new fetch.
 
 ## Budgets and admission
 
