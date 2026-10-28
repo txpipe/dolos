@@ -552,10 +552,10 @@ pub fn apply_delta_chunk<D: Domain>(
 /// keyed to the same entity must be reversed last-first to correctly walk
 /// back through the apply chain.
 ///
-/// A delta can find its entity absent: boundary work deleted the entity
-/// after the delta applied, and the undo of a later delta may have removed
-/// the one that came after it. The chain may restore the entity for the
-/// undo ([`ChainLogic::restore_for_undo`]).
+/// A delta can find its entity absent: its own apply removed it, or boundary
+/// work deleted it after the delta applied, and the undo of a later delta may
+/// have removed the one that came after it. The chain may restore the entity
+/// for the undo ([`ChainLogic::restore_for_undo`]).
 pub fn undo_delta_chunk<D: Domain>(
     entities: &mut EntityMap<D::Entity>,
     store: &D::State,

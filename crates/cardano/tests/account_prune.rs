@@ -509,7 +509,11 @@ mod rollback {
 
     /// A base address `C` stakes.
     fn staked(payment: u8) -> Vec<u8> {
-        shelley(payment, ShelleyDelegationPart::Key(C.into()))
+        staked_to(C, payment)
+    }
+
+    fn staked_to(credential: [u8; 28], payment: u8) -> Vec<u8> {
+        shelley(payment, ShelleyDelegationPart::Key(credential.into()))
     }
 
     fn enterprise(payment: u8) -> Vec<u8> {
@@ -625,16 +629,28 @@ mod rollback {
     }
 
     fn account(domain: &ToyDomain) -> Option<AccountState> {
+        account_of(domain, C)
+    }
+
+    fn account_of(domain: &ToyDomain, credential: [u8; 28]) -> Option<AccountState> {
+        let credential = StakeCredential::AddrKeyhash(credential.into());
+
         domain
             .state()
-            .read_entity_typed::<AccountState>(&AccountKey::from(&cred()))
+            .read_entity_typed::<AccountState>(&AccountKey::from(&credential))
             .unwrap()
     }
 
     fn remainder(domain: &ToyDomain) -> Option<PrunedAccountState> {
+        remainder_of(domain, C)
+    }
+
+    fn remainder_of(domain: &ToyDomain, credential: [u8; 28]) -> Option<PrunedAccountState> {
+        let credential = StakeCredential::AddrKeyhash(credential.into());
+
         domain
             .state()
-            .read_entity_typed::<PrunedAccountState>(&AccountKey::from(&cred()))
+            .read_entity_typed::<PrunedAccountState>(&AccountKey::from(&credential))
             .unwrap()
     }
 
@@ -815,7 +831,11 @@ mod rollback {
 
     /// `C`'s live value, `(utxo_sum, rewards_sum, withdrawals_sum)`.
     fn sums(domain: &ToyDomain) -> Option<(u64, u64, u64)> {
-        account(domain)
+        sums_of(domain, C)
+    }
+
+    fn sums_of(domain: &ToyDomain, credential: [u8; 28]) -> Option<(u64, u64, u64)> {
+        account_of(domain, credential)
             .and_then(|x| x.stake.live().cloned())
             .map(|x| (x.utxo_sum, x.rewards_sum, x.withdrawals_sum))
     }
@@ -978,9 +998,11 @@ mod rollback {
     }
 
     /// A rollback to before B1 commits its state and dies before the WAL
-    /// truncation, and the restart's catch-up replays the logged blocks onto
-    /// the restored row.
-    fn crash_rolling_back_to_b1(domain: &ToyDomain, blocks: &[(ChainPoint, RawBlock)]) {
+    /// truncation. Returns the tip the restart's catch-up replays to.
+    fn crash_before_truncation(
+        domain: &ToyDomain,
+        blocks: &[(ChainPoint, RawBlock)],
+    ) -> ChainPoint {
         let to = blocks[2].0.clone();
         let tip = blocks.last().unwrap().0.clone();
 
@@ -997,6 +1019,15 @@ mod rollback {
             Some(tip.clone()),
             "the WAL keeps the undone blocks"
         );
+
+        tip
+    }
+
+    /// The crashed rollback to before B1, and the restart's catch-up, which
+    /// replays the logged blocks onto the restored row.
+    fn crash_rolling_back_to_b1(domain: &ToyDomain, blocks: &[(ChainPoint, RawBlock)]) {
+        let tip = crash_before_truncation(domain, blocks);
+
         assert_eq!(sums(domain), Some((0, 0, 0)), "restored, stripped");
         assert_eq!(remainder(domain), both_lives(), "the rollback leaves it");
 
@@ -1121,19 +1152,192 @@ mod rollback {
         }
     }
 
-    /// A registered row that recreated a pruned credential and earned
-    /// rewards, funded and spent across the boundary, which pays it more: the
-    /// rollback undoes the values on the row itself and restores nothing.
-    /// The boundary's payment goes with the undone values, as on `main`, and
-    /// the remainder of the earlier life stays as it was.
+    /// The rewards of the registered row below, before the boundary.
+    const REWARDS: u64 = 120_000;
+
+    /// What the boundary's EWRAP pays it.
+    const PAID: u64 = 30_000;
+
+    /// The earlier life of the registered row below, in its remainder.
+    fn earlier_life() -> Option<PrunedAccountState> {
+        Some(PrunedAccountState {
+            lifetime_rewards: EARLIER,
+            deregistered_at: Some(300),
+        })
+    }
+
+    /// A registered row that recreated a pruned credential, earned
+    /// [`REWARDS`] and withdrew `withdrawn` of them. B1 (940) pays `C`, B2
+    /// (960) spends it, and the boundary at 1010 keeps the row and pays it
+    /// [`PAID`]. With `fund_again`, B3 (1030) pays `C` again, so its WAL entry
+    /// captures the paid value.
+    fn paid_at_the_boundary(
+        withdrawn: u64,
+        fund_again: bool,
+    ) -> (ToyDomain, Vec<(ChainPoint, RawBlock)>) {
+        let [fund, spend] = fund_and_spend();
+
+        let mut chain = vec![
+            (420, vec![]),
+            (510, vec![]),
+            (920, vec![]),
+            (940, vec![fund]),
+            (960, vec![spend]),
+            (1010, vec![]),
+        ];
+
+        if fund_again {
+            let again = tx(&[seed(1)], vec![(staked(0x03), 5 * ADA)], 15 * ADA, vec![]);
+            chain.push((1030, vec![again]));
+        }
+
+        let blocks = blocks(chain);
+        let domain = domain(2);
+
+        domain.roll_forward(blocks[0].1.clone()).unwrap();
+        domain.roll_forward(blocks[1].1.clone()).unwrap();
+        assert_eq!(epoch(&domain), 1);
+
+        let mut row = AccountState::new(1, cred());
+        row.registered_at = Some(600);
+        let live = row.stake.unwrap_live_mut();
+        live.rewards_sum = REWARDS;
+        live.withdrawals_sum = withdrawn;
+
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(&AccountKey::from(&cred()), &row)
+            .unwrap();
+        writer
+            .write_entity_typed(&AccountKey::from(&cred()), &earlier_life().unwrap())
+            .unwrap();
+        writer.commit().unwrap();
+
+        for (_, raw) in &blocks[2..6] {
+            domain.roll_forward(raw.clone()).unwrap();
+        }
+
+        assert_eq!(epoch(&domain), 2);
+        let mut kept = account(&domain).unwrap();
+        assert!(kept.is_registered(), "kept");
+
+        // what the boundary's EWRAP pays the live value, ahead of the rotation
+        kept.stake.unwrap_live_mut().rewards_sum += PAID;
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(&AccountKey::from(&cred()), &kept)
+            .unwrap();
+        writer.commit().unwrap();
+
+        for (_, raw) in &blocks[6..] {
+            domain.roll_forward(raw.clone()).unwrap();
+        }
+
+        let funded = if fund_again { 5 * ADA } else { 0 };
+        assert_eq!(sums(&domain), Some((funded, REWARDS + PAID, withdrawn)));
+        assert_eq!(remainder(&domain), earlier_life());
+
+        (domain, blocks)
+    }
+
+    /// The registered row funded and spent across the boundary: the rollback
+    /// undoes the values on the row itself and restores nothing. The
+    /// boundary's payment goes with the undone values, as on `main`, and the
+    /// remainder of the earlier life stays as it was.
     #[test]
     #[cfg_attr(feature = "strict", ignore = "EpochStatsUpdate::undo, see the module")]
     fn a_rollback_over_a_recreated_row_leaves_its_remainder() {
-        const REWARDS: u64 = 120_000;
         const WITHDRAWN: u64 = 100_000;
-        const PAID: u64 = 30_000;
 
-        let [fund, spend] = fund_and_spend();
+        let (domain, blocks) = paid_at_the_boundary(WITHDRAWN, false);
+
+        roll_back(&domain, &blocks[2].0);
+
+        assert_eq!(sums(&domain), Some((0, REWARDS, WITHDRAWN)));
+        assert_eq!(remainder(&domain), earlier_life());
+    }
+
+    /// After a crashed rollback to before B1, the peer keeps the boundary but
+    /// not B3, and the node rolls back only that far. B2's undo took the
+    /// payment from the row (`main`'s defect), and catch-up replayed B1..B3
+    /// without the boundary, so B3's undo gives the payment back, as on
+    /// `main`. The boundary rotated the row, so ESTART never pruned it and the
+    /// settle leaves it, whatever was withdrawn.
+    #[test]
+    #[cfg_attr(feature = "strict", ignore = "EpochStatsUpdate::undo, see the module")]
+    fn a_shallower_rollback_after_a_crashed_one_keeps_the_boundary_payment() {
+        for withdrawn in [100_000, 10_000, 0] {
+            for crash in [false, true] {
+                let case = format!("withdrawn {withdrawn}, crash: {crash}");
+                let (domain, blocks) = paid_at_the_boundary(withdrawn, true);
+
+                if crash {
+                    let tip = crash_before_truncation(&domain, &blocks);
+
+                    assert_eq!(sums(&domain), Some((0, REWARDS, withdrawn)), "{case}");
+
+                    domain.bootstrap().unwrap();
+
+                    assert_eq!(domain.state().read_cursor().unwrap(), Some(tip));
+                    assert_eq!(
+                        sums(&domain),
+                        Some((5 * ADA, REWARDS, withdrawn)),
+                        "replayed without the payment, {case}"
+                    );
+                }
+
+                roll_back(&domain, &blocks[5].0);
+
+                let live = account(&domain).unwrap().stake.live().cloned().unwrap();
+
+                assert_eq!(
+                    live.withdrawable(),
+                    REWARDS + PAID - withdrawn,
+                    "ledger balance, {case}"
+                );
+                assert_eq!(
+                    sums(&domain),
+                    Some((0, REWARDS + PAID, withdrawn)),
+                    "lifetime sums, {case}"
+                );
+                assert_eq!(remainder(&domain), earlier_life(), "{case}");
+            }
+        }
+    }
+
+    /// One rollback over five credentials: `C` and `C2` with pruned lives,
+    /// `D` registered with rewards, `E` holding value through the boundary,
+    /// and `F`, never registered, pruned with no history. Each rollback
+    /// strips both restored lives and leaves every other row as on `main`.
+    #[test]
+    #[cfg_attr(feature = "strict", ignore = "EpochStatsUpdate::undo, see the module")]
+    fn a_rollback_strips_each_restored_life_and_no_other_row() {
+        const C2: [u8; 28] = [0xc2; 28];
+        const D: [u8; 28] = [0xd1; 28];
+        const E: [u8; 28] = [0xe1; 28];
+        const F: [u8; 28] = [0xf1; 28];
+        const PRUNED2: u64 = 280_000;
+        const WITHDRAWN: u64 = 100_000;
+
+        let fund = tx(
+            &[seed(0)],
+            vec![
+                (staked_to(C, 0x01), 4 * ADA),
+                (staked_to(C2, 0x01), 4 * ADA),
+                (staked_to(D, 0x01), 4 * ADA),
+                (staked_to(E, 0x01), 4 * ADA),
+                (staked_to(F, 0x01), 3_900_000),
+            ],
+            100_000,
+            vec![],
+        );
+        let funded = fund.compute_hash();
+        let spend = tx(
+            &[0, 1, 2, 4].map(|index| TxoRef(funded, index)),
+            vec![(staked_to(E, 0x02), ADA), (enterprise(0x02), 14_800_000)],
+            100_000,
+            vec![],
+        );
 
         let blocks = blocks(vec![
             (420, vec![]),
@@ -1150,24 +1354,27 @@ mod rollback {
         domain.roll_forward(blocks[1].1.clone()).unwrap();
         assert_eq!(epoch(&domain), 1);
 
-        let mut row = AccountState::new(1, cred());
-        row.registered_at = Some(600);
-        let live = row.stake.unwrap_live_mut();
-        live.rewards_sum = REWARDS;
-        live.withdrawals_sum = WITHDRAWN;
-
-        let earlier = PrunedAccountState {
-            lifetime_rewards: EARLIER,
-            deregistered_at: Some(300),
-        };
-
+        // two lives that earned, withdrew and deregistered in epoch 0, and a
+        // registered row with rewards
         let writer = domain.state().start_writer().unwrap();
-        writer
-            .write_entity_typed(&AccountKey::from(&cred()), &row)
-            .unwrap();
-        writer
-            .write_entity_typed(&AccountKey::from(&cred()), &earlier)
-            .unwrap();
+
+        for (credential, rewards, withdrawn, registered_at, deregistered_at) in [
+            (C, PRUNED, PRUNED, None, Some(300)),
+            (C2, PRUNED2, PRUNED2, None, Some(300)),
+            (D, REWARDS, WITHDRAWN, Some(600), None),
+        ] {
+            let mut row = AccountState::new(1, StakeCredential::AddrKeyhash(credential.into()));
+            row.registered_at = registered_at;
+            row.deregistered_at = deregistered_at;
+            let live = row.stake.unwrap_live_mut();
+            live.rewards_sum = rewards;
+            live.withdrawals_sum = withdrawn;
+
+            writer
+                .write_entity_typed(&AccountKey::from(&row.credential), &row)
+                .unwrap();
+        }
+
         writer.commit().unwrap();
 
         for (_, raw) in &blocks[2..] {
@@ -1175,20 +1382,41 @@ mod rollback {
         }
 
         assert_eq!(epoch(&domain), 2);
-        let mut kept = account(&domain).unwrap();
-        assert!(kept.is_registered(), "kept");
 
-        // what the boundary's EWRAP pays the live value, ahead of the rotation
-        kept.stake.unwrap_live_mut().rewards_sum += PAID;
-        let writer = domain.state().start_writer().unwrap();
-        writer
-            .write_entity_typed(&AccountKey::from(&cred()), &kept)
-            .unwrap();
-        writer.commit().unwrap();
+        for credential in [C, C2, F] {
+            assert_eq!(account_of(&domain, credential), None, "pruned");
+        }
 
+        for credential in [D, E] {
+            let kept = account_of(&domain, credential).expect("kept");
+            assert!(kept.stake.mark().is_some(), "rotated");
+        }
+
+        let remainders = |domain: &ToyDomain| {
+            [C, C2, D, E, F].map(|x| remainder_of(domain, x).map(|x| x.lifetime_rewards))
+        };
+
+        let pruned = [Some(PRUNED), Some(PRUNED2), None, None, None];
+        assert_eq!(remainders(&domain), pruned);
+
+        // undoes the spend, restoring C, C2 and F
+        roll_back(&domain, &blocks[3].0);
+
+        assert_eq!(sums_of(&domain, C), Some((4 * ADA, 0, 0)));
+        assert_eq!(sums_of(&domain, C2), Some((4 * ADA, 0, 0)));
+        assert_eq!(sums_of(&domain, D), Some((4 * ADA, REWARDS, WITHDRAWN)));
+        assert_eq!(sums_of(&domain, E), Some((4 * ADA, 0, 0)));
+        assert_eq!(sums_of(&domain, F), Some((3_900_000, 0, 0)));
+        assert_eq!(remainders(&domain), pruned);
+
+        // and the funding, on the restored rows
         roll_back(&domain, &blocks[2].0);
 
-        assert_eq!(sums(&domain), Some((0, REWARDS, WITHDRAWN)));
-        assert_eq!(remainder(&domain), Some(earlier));
+        assert_eq!(sums_of(&domain, C), Some((0, 0, 0)));
+        assert_eq!(sums_of(&domain, C2), Some((0, 0, 0)));
+        assert_eq!(sums_of(&domain, D), Some((0, REWARDS, WITHDRAWN)));
+        assert_eq!(account_of(&domain, E), None);
+        assert_eq!(account_of(&domain, F), None);
+        assert_eq!(remainders(&domain), pruned);
     }
 }

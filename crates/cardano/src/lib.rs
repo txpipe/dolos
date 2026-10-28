@@ -572,11 +572,8 @@ impl dolos_core::ChainLogic for CardanoLogic {
         estart::prune::restore_for_undo(state, key)
     }
 
-    fn settle_undo<S: StateStore>(
-        state: &S,
-        entities: &mut EntityMap<CardanoEntity>,
-    ) -> Result<(), StateError> {
-        estart::prune::settle_undo(state, entities)
+    fn settle_undo(entities: &mut EntityMap<CardanoEntity>) {
+        estart::prune::settle_undo(entities)
     }
 
     fn decode_utxo(&self, utxo: Arc<UtxoValue>) -> Result<Self::Utxo, ChainError> {

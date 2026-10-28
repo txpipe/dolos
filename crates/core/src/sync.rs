@@ -152,7 +152,7 @@ impl<D: Domain> SyncExt for D {
             info!(%point, "block undone");
         }
 
-        D::Chain::settle_undo(self.state(), &mut entities)?;
+        D::Chain::settle_undo(&mut entities);
 
         // Persist the undone entities (`Some` upserts, `None` deletes).
         crate::state::save_entities::<Self>(&writer, &entities)?;
