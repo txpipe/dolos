@@ -841,8 +841,14 @@ pub trait ChainLogic: Sized + Send + Sync {
     }
 
     /// Settle `entities` once a rollback has undone every delta, before it
-    /// saves them. The default does nothing.
-    fn settle_undo(_entities: &mut EntityMap<Self::Entity>) {}
+    /// saves them. `state` still holds what the rollback started from. The
+    /// default does nothing.
+    fn settle_undo<S: StateStore>(
+        _state: &S,
+        _entities: &mut EntityMap<Self::Entity>,
+    ) -> Result<(), StateError> {
+        Ok(())
+    }
 
     // TODO: remove from the interface - this is Cardano-specific
     fn decode_utxo(&self, utxo: Arc<UtxoValue>) -> Result<Self::Utxo, ChainError>;

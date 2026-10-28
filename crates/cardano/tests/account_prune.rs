@@ -1262,11 +1262,12 @@ mod rollback {
     /// payment from the row (`main`'s defect), and catch-up replayed B1..B3
     /// without the boundary, so B3's undo gives the payment back, as on
     /// `main`. The boundary rotated the row, so ESTART never pruned it and the
-    /// settle leaves it, whatever was withdrawn.
+    /// settle leaves it, whatever was withdrawn. With every reward withdrawn,
+    /// the rotated `mark` holds no balance.
     #[test]
     #[cfg_attr(feature = "strict", ignore = "EpochStatsUpdate::undo, see the module")]
     fn a_shallower_rollback_after_a_crashed_one_keeps_the_boundary_payment() {
-        for withdrawn in [100_000, 10_000, 0] {
+        for withdrawn in [100_000, 10_000, 0, REWARDS] {
             for crash in [false, true] {
                 let case = format!("withdrawn {withdrawn}, crash: {crash}");
                 let (domain, blocks) = paid_at_the_boundary(withdrawn, true);
@@ -1301,6 +1302,210 @@ mod rollback {
                     "lifetime sums, {case}"
                 );
                 assert_eq!(remainder(&domain), earlier_life(), "{case}");
+            }
+        }
+    }
+
+    /// A credential with no row before the closing epoch.
+    const W: [u8; 28] = [0xa1; 28];
+
+    /// How a closing-epoch block creates `W`'s row, and how B3 touches it
+    /// again.
+    #[derive(Clone, Copy, Debug)]
+    enum NewRow {
+        /// B1 registers `W`, and B3 pays an address `W` stakes 5 ADA.
+        RegisteredPaidAgain,
+        /// B1 registers `W`, and B3 withdraws the boundary's payment.
+        RegisteredWithdrawn,
+        /// B1 pays `W` 10 ADA, B2 registers it, and B3 pays it 5 ADA more.
+        FundedPaidAgain,
+    }
+
+    struct NewRowChain {
+        domain: ToyDomain,
+        blocks: Vec<(ChainPoint, RawBlock)>,
+        /// `W`'s live sums before B3, which B3's undo gives back.
+        before_b3: (u64, u64, u64),
+        /// `W`'s live sums as catch-up replays B1..B3, without the boundary.
+        replayed: (u64, u64, u64),
+    }
+
+    /// B1 (940) creates `W`'s row, its delta `was_new`, the boundary at 1010
+    /// keeps and rotates the row and pays it [`PAID`], and B3 (1030) touches
+    /// it again, so its WAL entry captures the paid value.
+    fn new_row_paid_at_the_boundary(case: NewRow) -> NewRowChain {
+        let stake = StakeCredential::AddrKeyhash(W.into());
+
+        let (b1, b2) = match case {
+            NewRow::FundedPaidAgain => {
+                let fund = tx(
+                    &[seed(0)],
+                    vec![
+                        (staked_to(W, 0x01), 10 * ADA),
+                        (enterprise(0x02), 9_900_000),
+                    ],
+                    100_000,
+                    vec![],
+                );
+                let register = tx(
+                    &[TxoRef(fund.compute_hash(), 1)],
+                    vec![(enterprise(0x04), 7_800_000)],
+                    100_000,
+                    vec![Certificate::StakeRegistration(stake.clone())],
+                );
+                (fund, vec![register])
+            }
+            NewRow::RegisteredPaidAgain | NewRow::RegisteredWithdrawn => {
+                let register = tx(
+                    &[seed(0)],
+                    vec![(enterprise(0x02), 17_900_000)],
+                    100_000,
+                    vec![Certificate::StakeRegistration(stake.clone())],
+                );
+                (register, vec![])
+            }
+        };
+
+        let b3 = match case {
+            NewRow::RegisteredWithdrawn => {
+                let mut withdraw = tx(
+                    &[seed(1)],
+                    vec![(enterprise(0x03), 20 * ADA + PAID - 100_000)],
+                    100_000,
+                    vec![],
+                );
+                let mut reward_account = vec![0xe0];
+                reward_account.extend_from_slice(&W);
+                withdraw.withdrawals = Some(
+                    [(reward_account.into(), PAID)]
+                        .into_iter()
+                        .collect::<std::collections::BTreeMap<_, _>>(),
+                );
+                withdraw
+            }
+            NewRow::RegisteredPaidAgain | NewRow::FundedPaidAgain => tx(
+                &[seed(1)],
+                vec![(staked_to(W, 0x03), 5 * ADA)],
+                15 * ADA,
+                vec![],
+            ),
+        };
+
+        let held = match case {
+            NewRow::FundedPaidAgain => 10 * ADA,
+            NewRow::RegisteredPaidAgain | NewRow::RegisteredWithdrawn => 0,
+        };
+
+        let (after_b3, replayed) = match case {
+            NewRow::RegisteredPaidAgain => ((5 * ADA, PAID, 0), (5 * ADA, 0, 0)),
+            NewRow::RegisteredWithdrawn => ((0, PAID, PAID), (0, 0, PAID)),
+            NewRow::FundedPaidAgain => ((15 * ADA, PAID, 0), (15 * ADA, 0, 0)),
+        };
+
+        let blocks = blocks(vec![
+            (420, vec![]),
+            (510, vec![]),
+            (920, vec![]),
+            (940, vec![b1]),
+            (960, b2),
+            (1010, vec![]),
+            (1030, vec![b3]),
+        ]);
+
+        let domain = domain(2);
+
+        for (_, raw) in &blocks[..6] {
+            domain.roll_forward(raw.clone()).unwrap();
+        }
+
+        assert_eq!(epoch(&domain), 2);
+
+        let mut kept = account_of(&domain, W).expect("kept by the boundary");
+        assert!(kept.is_registered(), "{case:?}");
+        assert!(kept.stake.mark().is_some(), "rotated, {case:?}");
+        assert_eq!(sums_of(&domain, W), Some((held, 0, 0)), "{case:?}");
+
+        // what the boundary's EWRAP pays it: a pool deposit refund or a leader
+        // reward to the account registered that epoch
+        kept.stake.unwrap_live_mut().rewards_sum += PAID;
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(&AccountKey::from(&stake), &kept)
+            .unwrap();
+        writer.commit().unwrap();
+
+        domain.roll_forward(blocks[6].1.clone()).unwrap();
+
+        assert_eq!(sums_of(&domain, W), Some(after_b3), "{case:?}");
+        assert_eq!(remainder_of(&domain, W), None, "{case:?}");
+
+        NewRowChain {
+            domain,
+            blocks,
+            before_b3: (held, PAID, 0),
+            replayed,
+        }
+    }
+
+    /// After a crashed rollback to before B1, B1's `was_new` undo has deleted
+    /// `W`'s row, and catch-up creates it again at the closing epoch, with no
+    /// `mark` and without the boundary's payment. The peer keeps the boundary
+    /// but not B3, and B3's undo gives the payment back, as on `main`: the
+    /// boundary kept the row, so the settle leaves it.
+    #[test]
+    #[cfg_attr(feature = "strict", ignore = "EpochStatsUpdate::undo, see the module")]
+    fn a_shallower_rollback_after_a_crashed_one_keeps_a_new_rows_boundary_payment() {
+        for case in [
+            NewRow::RegisteredPaidAgain,
+            NewRow::RegisteredWithdrawn,
+            NewRow::FundedPaidAgain,
+        ] {
+            for crash in [false, true] {
+                let label = format!("{case:?}, crash: {crash}");
+
+                let NewRowChain {
+                    domain,
+                    blocks,
+                    before_b3,
+                    replayed,
+                } = new_row_paid_at_the_boundary(case);
+
+                if crash {
+                    let tip = crash_before_truncation(&domain, &blocks);
+
+                    assert_eq!(account_of(&domain, W), None, "B1 undone, {label}");
+
+                    domain.bootstrap().unwrap();
+
+                    assert_eq!(domain.state().read_cursor().unwrap(), Some(tip));
+
+                    let row = account_of(&domain, W).expect("B1 replayed");
+                    assert!(row.is_registered(), "{label}");
+                    assert!(row.stake.mark().is_none(), "{label}");
+                    assert!(row.stake.is_at_epoch(1), "{:?}, {label}", row.stake);
+                    assert_eq!(
+                        sums_of(&domain, W),
+                        Some(replayed),
+                        "replayed without the payment, {label}"
+                    );
+                }
+
+                roll_back(&domain, &blocks[5].0);
+
+                let live = account_of(&domain, W)
+                    .unwrap()
+                    .stake
+                    .live()
+                    .cloned()
+                    .unwrap();
+
+                assert_eq!(live.withdrawable(), PAID, "ledger balance, {label}");
+                assert_eq!(
+                    sums_of(&domain, W),
+                    Some(before_b3),
+                    "lifetime sums, {label}"
+                );
+                assert_eq!(remainder_of(&domain, W), None, "{label}");
             }
         }
     }
