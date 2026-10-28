@@ -12,19 +12,21 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     cip25::{cip25_metadata_is_valid, Cip25MetadataVersion},
     cip68::{
-        cip68_metadata_is_valid, cip_68_reference_asset, encode_to_hex, parse_cip68_metadata_map,
-        Cip68TokenStandard,
+        cip68_metadata_is_valid, cip_68_reference_asset, encode_to_hex,
+        parse_cip67_label_from_asset_name, parse_cip68_metadata_map, Cip68TokenStandard,
     },
     indexes::AsyncCardanoQueryExt,
-    model::AssetState,
+    periods::assets::{self, AssetSummary, WalkBudget},
+    ChainSummary,
 };
-use dolos_core::{Domain, EraCbor};
+use dolos_core::{BlockSlot, Domain, EraCbor};
+use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
     ledger::{
-        primitives::{BigInt, Metadatum, PlutusData},
+        primitives::{BigInt, Epoch, Metadatum, PlutusData},
         traverse::{MultiEraOutput, MultiEraTx},
         validate::phase2::to_plutus_data::ToPlutusData,
     },
@@ -379,12 +381,52 @@ fn token_registry_client() -> &'static reqwest::Client {
     })
 }
 
+/// Asks the token registry at `url` for the metadata of `asset`.
+async fn token_registry_metadata(
+    url: &str,
+    asset: &str,
+) -> Result<Option<OffchainMetadata>, StatusCode> {
+    // TODO: apply memory cache
+    let url = format!("{url}/metadata/{asset}");
+
+    // The off-chain metadata adds to the response. It is not necessary.
+    // If the token registry does not answer, or sends data that does not
+    // parse, the code reports no metadata. The request does not fail.
+    let Ok(res) = token_registry_client()
+        .get(&url)
+        .timeout(TOKEN_REGISTRY_TIMEOUT)
+        .send()
+        .await
+    else {
+        return Ok(None);
+    };
+
+    if res.status() != StatusCode::OK {
+        return Ok(None);
+    }
+
+    let Ok(metadata) = res.json::<TokenRegistryMetadata>().await else {
+        return Ok(None);
+    };
+
+    if metadata.name.is_none() || metadata.description.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(metadata.into()))
+}
+
 pub struct AssetModelBuilder {
     pub subject: Vec<u8>,
     pub unit: String,
-    pub asset_state: AssetState,
+    pub summary: AssetSummary,
     pub initial_tx: Option<EraCbor>,
     pub registry_url: Option<String>,
+    chain: ChainSummary,
+    tip: Epoch,
+    /// The request's label-100 walks, or its unit's share of them in
+    /// `/addresses/{address}/extended`, shared with the reference token's.
+    budget: WalkBudget,
 }
 
 impl AssetModelBuilder {
@@ -394,7 +436,6 @@ impl AssetModelBuilder {
     ) -> Result<Option<OnchainMetadata>, StatusCode>
     where
         D: Domain + Clone + Send + Sync + 'static,
-        Option<AssetState>: From<D::Entity>,
     {
         let cip68_reference = match cip68_reference_from_unit(&self.unit)? {
             Some((ref_asset, standard)) => {
@@ -406,10 +447,17 @@ impl AssetModelBuilder {
         };
 
         if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
-            let asset_key = dolos_cardano::AssetKey::of(ref_asset_bytes);
-            let ref_state = domain.read_cardano_entity::<AssetState>(&asset_key)?;
+            let reference = assets::asset_summary(
+                &domain.inner,
+                &self.chain,
+                self.tip,
+                ref_asset_bytes.clone(),
+                &self.budget,
+            )
+            .await
+            .map_err(log_500)?;
 
-            if let Some(metadata_tx) = ref_state.and_then(|state| state.metadata_tx) {
+            if let Some(metadata_tx) = reference.and_then(|x| x.fold.metadata_tx) {
                 if let Some(EraCbor(era, cbor)) = domain
                     .query()
                     .tx_cbor(metadata_tx.as_slice().to_vec())
@@ -428,8 +476,8 @@ impl AssetModelBuilder {
         }
 
         let mut cip25_tx = self.initial_tx.clone();
-        if let Some(metadata_tx) = self.asset_state.metadata_tx {
-            if Some(metadata_tx) != self.asset_state.initial_tx {
+        if let Some(metadata_tx) = self.summary.fold.metadata_tx {
+            if Some(metadata_tx) != self.summary.fold.initial_tx {
                 let metadata_cbor = domain
                     .query()
                     .tx_cbor(metadata_tx.as_slice().to_vec())
@@ -458,44 +506,15 @@ impl AssetModelBuilder {
     }
 
     async fn offchain_metadata(&self, asset: &str) -> Result<Option<OffchainMetadata>, StatusCode> {
-        // TODO: apply memory cache
-        let Some(url) = &self.registry_url else {
-            return Ok(None);
-        };
-
-        let url = format!("{url}/metadata/{asset}");
-
-        // The off-chain metadata adds to the response. It is not necessary.
-        // If the token registry does not answer, or sends data that does not
-        // parse, the code reports no metadata. The request does not fail.
-        let Ok(res) = token_registry_client()
-            .get(&url)
-            .timeout(TOKEN_REGISTRY_TIMEOUT)
-            .send()
-            .await
-        else {
-            return Ok(None);
-        };
-
-        if res.status() != StatusCode::OK {
-            return Ok(None);
+        match &self.registry_url {
+            Some(url) => token_registry_metadata(url, asset).await,
+            None => Ok(None),
         }
-
-        let Ok(metadata) = res.json::<TokenRegistryMetadata>().await else {
-            return Ok(None);
-        };
-
-        if metadata.name.is_none() || metadata.description.is_none() {
-            return Ok(None);
-        }
-
-        Ok(Some(metadata.into()))
     }
 
     pub async fn into_model<D>(self, domain: &Facade<D>) -> Result<Asset, StatusCode>
     where
         D: Domain + Clone + Send + Sync + 'static,
-        Option<AssetState>: From<D::Entity>,
     {
         let policy = self.subject[..28].to_vec();
         let asset = self.subject[28..].to_vec();
@@ -516,13 +535,14 @@ impl AssetModelBuilder {
             policy_id: hex::encode(policy),
             asset_name,
             fingerprint: asset_fingerprint(&self.subject)?,
-            quantity: self.asset_state.quantity().to_string(),
+            quantity: self.summary.fold.quantity().to_string(),
             initial_mint_tx_hash: self
-                .asset_state
+                .summary
+                .fold
                 .initial_tx
                 .map(|h| h.to_string())
                 .unwrap_or_default(),
-            mint_or_burn_count: self.asset_state.mint_tx_count as i32,
+            mint_or_burn_count: self.summary.fold.mint_tx_count as i32,
             onchain_metadata,
             onchain_metadata_standard,
             onchain_metadata_extra,
@@ -559,41 +579,94 @@ impl AssetAmountExtras {
         }
     }
 
-    /// Derives the metadata facts of a single unit. If the standard declares
-    /// decimal places, they come from the CIP-68 reference datum. If it does
-    /// not, they come from the off-chain token registry.
-    pub async fn resolve<D>(domain: &Facade<D>, unit: &str) -> Result<Self, Error>
+    /// Derives the on-chain metadata facts of a single unit. If the standard
+    /// declares decimal places, they come from the CIP-68 reference datum. If
+    /// it does not, [`OnchainExtras::with_registry`] takes them from the
+    /// off-chain token registry. Its label-100 walks draw on `budget`.
+    pub async fn onchain<D>(
+        domain: &Facade<D>,
+        unit: &str,
+        budget: &WalkBudget,
+    ) -> Result<OnchainExtras, Error>
     where
         D: Domain + Clone + Send + Sync + 'static,
-        Option<AssetState>: From<D::Entity>,
     {
-        let builder = match load_asset_builder(domain, unit.to_string()).await {
+        let builder = match load_asset_builder(domain, unit.to_string(), budget).await {
             Ok(builder) => builder,
             // an asset that a live utxo holds always has minting state. a
             // missing state must not make the whole address request fail
             Err(Error::InvalidAsset) | Err(Error::Code(StatusCode::NOT_FOUND)) => {
-                return Ok(Self::bare())
+                return Ok(OnchainExtras::known(Self::bare()))
             }
             Err(err) => return Err(err),
         };
 
         let onchain = builder.onchain_metadata(domain).await?;
+        let decimals = onchain.as_ref().and_then(OnchainMetadata::decimals);
+
+        let extras = Self {
+            decimals,
+            has_nft_onchain_metadata: onchain.is_some_and(|x| x.is_present()),
+        };
 
         // the registry request reaches an external service. the on-chain datum
         // already declares the decimal places of every CIP-68 fungible asset,
         // so a known value makes the request unnecessary
-        let onchain_decimals = onchain.as_ref().and_then(OnchainMetadata::decimals);
-        let registry = if onchain_decimals.is_some() {
-            None
-        } else {
-            builder.offchain_metadata(unit).await?
+        let registry = match (decimals, builder.registry_url) {
+            (None, Some(url)) => Some((url, builder.unit)),
+            _ => None,
         };
 
-        Ok(Self {
-            decimals: onchain_decimals.or_else(|| registry.and_then(|metadata| metadata.decimals)),
-            has_nft_onchain_metadata: onchain.is_some_and(|x| x.is_present()),
+        Ok(OnchainExtras { extras, registry })
+    }
+}
+
+/// A unit's extras as the chain gives them, and the unit to ask the token
+/// registry for its decimal places where the chain declares none. It keeps
+/// nothing else of the unit's reads, so a request can hold every unit's at
+/// once.
+pub(crate) struct OnchainExtras {
+    extras: AssetAmountExtras,
+    /// The registry's URL and the unit to ask it for.
+    registry: Option<(String, String)>,
+}
+
+impl OnchainExtras {
+    pub fn known(extras: AssetAmountExtras) -> Self {
+        Self {
+            extras,
+            registry: None,
+        }
+    }
+
+    /// The extras, with the registry's decimal places where it is asked.
+    pub async fn with_registry(self) -> Result<AssetAmountExtras, Error> {
+        let Some((url, unit)) = self.registry else {
+            return Ok(self.extras);
+        };
+
+        let registry = token_registry_metadata(&url, &unit).await?;
+
+        Ok(AssetAmountExtras {
+            decimals: self
+                .extras
+                .decimals
+                .or_else(|| registry.and_then(|metadata| metadata.decimals)),
+            ..self.extras
         })
     }
+}
+
+/// Whether resolving `unit` walks a CIP-68 reference token's blocks for its
+/// metadata tx: the unit is one (label 100), or a user token whose metadata
+/// one holds.
+pub(crate) fn walks_reference_token(unit: &str) -> bool {
+    let Ok(subject) = decode_asset_subject(unit) else {
+        return false;
+    };
+
+    parse_cip67_label_from_asset_name(&subject[28..]) == Some(100)
+        || matches!(cip68_reference_from_unit(unit), Ok(Some(_)))
 }
 
 /// Decodes an asset subject: a 56 hex char policy id plus up to 64 hex chars
@@ -607,39 +680,114 @@ pub(crate) fn decode_asset_subject(subject: &str) -> Result<Vec<u8>, Error> {
     hex::decode(subject).map_err(|_| Error::InvalidAsset)
 }
 
-/// Decodes the subject and loads its state. Blockfrost returns 404 for a
-/// valid but unknown asset.
-pub(crate) fn resolve_asset_state<D>(
+fn log_500(error: impl std::fmt::Debug) -> StatusCode {
+    tracing::error!(?error, "failed to read an asset");
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
+/// Decodes the subject and finds the slot of its first mint. Blockfrost
+/// returns 404 for a valid but unknown asset.
+pub(crate) async fn resolve_asset<D>(
     domain: &Facade<D>,
     subject: &str,
-) -> Result<(Vec<u8>, AssetState), Error>
+) -> Result<(Vec<u8>, BlockSlot), Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<AssetState>: From<D::Entity>,
 {
     let subject = decode_asset_subject(subject)?;
 
-    let asset_key = dolos_cardano::AssetKey::of(&subject);
-    let state = domain
-        .read_cardano_entity::<AssetState>(&asset_key)?
+    let chain = domain.get_chain_summary()?;
+    let (tip, _) = chain.slot_epoch(domain.get_tip_slot()?);
+
+    let slot = domain
+        .query()
+        .run_blocking({
+            let subject = subject.clone();
+            move |domain| Ok(assets::first_mint_slot(&domain, &chain, tip, &subject)?)
+        })
+        .await
+        .map_err(log_500)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok((subject, state))
+    Ok((subject, slot))
 }
 
-/// Loads the minting state and the minting transaction that holds the
-/// metadata of an asset.
+/// The supply of each listed subject, in order, read as many at once as one
+/// request may run on the query limiter.
+///
+/// A subject with no first mint is left out with a warning. A rollback
+/// between the list read and the supply read removes a staged first mint,
+/// once; a sealed list that predates the archive's asset index names one on
+/// every read, and its node needs `dolos doctor rebuild-state --rewrite-logs`.
+pub(crate) async fn asset_quantities<D>(
+    domain: &Facade<D>,
+    subjects: Vec<Vec<u8>>,
+) -> Result<Vec<(Vec<u8>, i128)>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let chain = domain.get_chain_summary()?;
+    let (tip, _) = chain.slot_epoch(domain.get_tip_slot()?);
+
+    let read: Vec<_> = futures_util::stream::iter(subjects)
+        .map(|subject| {
+            let chain = &chain;
+
+            async move {
+                let quantity = assets::asset_quantity(&domain.inner, chain, tip, subject.clone())
+                    .await
+                    .map_err(log_500)?;
+
+                Ok::<_, Error>((subject, quantity))
+            }
+        })
+        .buffered(domain.inner.query_limiter().fan_out())
+        .try_collect()
+        .await?;
+
+    let mut out = Vec::with_capacity(read.len());
+
+    for (subject, quantity) in read {
+        let Some(quantity) = quantity else {
+            tracing::warn!(
+                asset = hex::encode(&subject),
+                "an asset list names an asset with no first mint: a rollback removed it since \
+                 the list was read, or, if this repeats for the asset, a sealed first-mint list \
+                 predates the archive's asset index and `dolos doctor rebuild-state \
+                 --rewrite-logs` indexes it"
+            );
+
+            continue;
+        };
+
+        out.push((subject, quantity));
+    }
+
+    Ok(out)
+}
+
+/// Loads the summary of an asset and the minting transaction that holds its
+/// metadata. Its label-100 walks, and its reference token's, draw on
+/// `budget`.
 pub(crate) async fn load_asset_builder<D>(
     domain: &Facade<D>,
     unit: String,
+    budget: &WalkBudget,
 ) -> Result<AssetModelBuilder, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
-    Option<AssetState>: From<D::Entity>,
 {
-    let (subject, asset_state) = resolve_asset_state(domain, &unit)?;
+    let subject = decode_asset_subject(&unit)?;
 
-    let initial_tx = if let Some(initial_tx) = asset_state.initial_tx {
+    let chain = domain.get_chain_summary()?;
+    let (tip, _) = chain.slot_epoch(domain.get_tip_slot()?);
+
+    let summary = assets::asset_summary(&domain.inner, &chain, tip, subject.clone(), budget)
+        .await
+        .map_err(log_500)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let initial_tx = if let Some(initial_tx) = summary.fold.initial_tx {
         domain
             .query()
             .tx_cbor(initial_tx.as_slice().to_vec())
@@ -652,9 +800,12 @@ where
     Ok(AssetModelBuilder {
         subject,
         unit,
-        asset_state,
+        summary,
         initial_tx,
         registry_url: domain.config.token_registry_url.clone(),
+        chain,
+        tip,
+        budget: budget.clone(),
     })
 }
 

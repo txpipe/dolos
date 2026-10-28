@@ -1149,7 +1149,11 @@ async fn cached_totals<D: Domain>(
 }
 
 /// Run `f` on the blocking pool under the domain's query limiter.
-async fn blocking<D, T, F>(domain: &D, chain: &ChainSummary, f: F) -> Result<T, DomainError>
+pub(crate) async fn blocking<D, T, F>(
+    domain: &D,
+    chain: &ChainSummary,
+    f: F,
+) -> Result<T, DomainError>
 where
     D: Domain,
     T: Send + 'static,

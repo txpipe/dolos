@@ -1258,8 +1258,8 @@ impl ArchiveStoreBackend {
 
 pub enum ArchiveWriterBackend {
     Memory(Box<<MemoryArchiveStore as CoreArchiveStore>::Writer>),
-    /// Delegates `write_log`, `apply_index`, `write_entity` and `commit`;
-    /// discards `apply`,
+    /// Delegates `write_log`, `delete_log`, `apply_index`, `write_entity`
+    /// and `commit`; discards `apply`,
     /// `undo`, `undo_index` and `append_prehashed`. See
     /// [`ArchiveStoreBackend::LogsOnly`].
     LogsOnly(Box<ArchiveWriterBackend>),
@@ -1288,6 +1288,15 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
             Self::LogsOnly(w) => w.write_log(ns, key, value),
             Self::Fjall(w) => w.write_log(ns, key, value),
             Self::NoOp(w) => w.write_log(ns, key, value),
+        }
+    }
+
+    fn delete_log(&self, ns: Namespace, key: &LogKey) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(w) => w.delete_log(ns, key),
+            Self::LogsOnly(w) => w.delete_log(ns, key),
+            Self::Fjall(w) => w.delete_log(ns, key),
+            Self::NoOp(w) => w.delete_log(ns, key),
         }
     }
 
@@ -3067,6 +3076,65 @@ mod tests {
             .unwrap();
 
         assert_eq!(records, [EntityRecord::new(kind, id, 10).unwrap()]);
+    }
+
+    const DELETED_NS: &str = "deleted-logs";
+
+    fn deleted_schema() -> StateSchema {
+        let mut schema = StateSchema::default();
+        schema.insert(DELETED_NS, dolos_core::NamespaceType::KeyValue);
+        schema
+    }
+
+    /// A row written to `store` and deleted through `via`'s writer is gone.
+    fn deleted_through(store: &ArchiveStoreBackend, via: &ArchiveStoreBackend, entity: u8) {
+        let key = LogKey::of(10, &[entity; 32]);
+
+        let writer = store.start_writer().unwrap();
+        writer
+            .write_log(DELETED_NS, &key, &b"row".to_vec())
+            .unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(
+            store.read_logs(DELETED_NS, &[&key]).unwrap(),
+            [Some(b"row".to_vec())]
+        );
+
+        let writer = via.start_writer().unwrap();
+        writer.delete_log(DELETED_NS, &key).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(store.read_logs(DELETED_NS, &[&key]).unwrap(), [None]);
+    }
+
+    /// Finding TA8 of the third QA review of dolos#1524: `rebuild-state
+    /// --rewrite-logs` seals through the `LogsOnly` gate, and its rewrites
+    /// delete stale first-mint chunks, so the gate passes deletes through.
+    #[test]
+    fn the_logs_only_gate_passes_log_deletes_through() {
+        let store = ArchiveStoreBackend::in_memory(deleted_schema()).unwrap();
+        let gate = store.logs_only().unwrap();
+
+        deleted_through(&store, &gate, 1);
+    }
+
+    /// The node's archive deletes a log row, directly and through the gate.
+    #[test]
+    fn the_fjall_archive_deletes_a_log_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ArchiveStoreBackend::open_fjall(
+            temp.path(),
+            deleted_schema(),
+            None,
+            dolos_fjall::Preset::Standard,
+        )
+        .unwrap();
+
+        deleted_through(&store, &store, 1);
+
+        let gate = store.logs_only().unwrap();
+        deleted_through(&store, &gate, 2);
     }
 }
 
