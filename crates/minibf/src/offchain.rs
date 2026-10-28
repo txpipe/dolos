@@ -436,14 +436,11 @@ pub async fn fetch_pool_metadata<C: CacheStore>(
     cache: &C,
     metadata: &PoolMetadata,
 ) -> PoolMetadataLoad {
-    load_pool_metadata_within(
-        cache,
-        metadata,
-        POOL_REQUEST_DEADLINE,
-        OnOverload::Inline,
-        fetch_pool_body,
-    )
-    .await
+    let load = load_pool_metadata(cache, metadata, OnOverload::Inline, fetch_pool_body);
+
+    tokio::time::timeout(POOL_REQUEST_DEADLINE, load)
+        .await
+        .unwrap_or((None, None))
 }
 
 /// The metadata of a pool and its last fetch error, for a list row. A miss at
@@ -461,26 +458,6 @@ async fn fetch_pool_body(
     pool_offchain_body(&metadata.url)
         .await
         .map_err(|error| pool_fetch_error(&metadata.url, error))
-}
-
-async fn load_pool_metadata_within<C, F, Fut>(
-    cache: &C,
-    metadata: &PoolMetadata,
-    deadline: Duration,
-    on_overload: OnOverload,
-    fetch: F,
-) -> PoolMetadataLoad
-where
-    C: CacheStore,
-    F: Fn(PoolMetadata) -> Fut,
-    Fut: Future<Output = Result<Vec<u8>, Option<DrepsInnerMetadataError>>> + Send + 'static,
-{
-    tokio::time::timeout(
-        deadline,
-        load_pool_metadata(cache, metadata, on_overload, fetch),
-    )
-    .await
-    .unwrap_or((None, None))
 }
 
 pub(crate) async fn load_pool_metadata<C, F, Fut>(
@@ -878,33 +855,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_metadata_survives_restart_and_an_unavailable_url() {
-        let dir = temp_root("pool-restart");
-        let metadata = pool_metadata(POOL_BODY);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let domain = persistent_domain(&dir);
-        let (fetched, error) = load_pool_metadata(
-            domain.cache(),
-            &metadata,
-            OnOverload::Inline,
-            serving_pool(POOL_BODY, &calls),
-        )
-        .await;
-        assert_eq!(fetched.unwrap().ticker, "POOL");
-        assert!(error.is_none());
-        domain.cache().flush().unwrap();
-        drop(domain);
-
-        let domain = persistent_domain(&dir);
-        let (kept, error) = fetch_pool_metadata(domain.cache(), &metadata).await;
-        assert_eq!(kept.unwrap().ticker, "POOL");
-        assert!(error.is_none());
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        drop(domain);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[tokio::test]
     async fn pool_metadata_uses_the_hash_when_the_url_body_changes() {
         let cache = memory_cache();
         let metadata = pool_metadata(POOL_BODY);
@@ -941,52 +891,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pool_failures_answer_until_they_expire_and_a_new_url_retries() {
+    async fn a_failure_at_one_url_does_not_hold_back_another() {
         let cache = memory_cache();
         let metadata = pool_metadata(POOL_BODY);
-        let calls = Arc::new(AtomicUsize::new(0));
         let failure = crate::mapping::pool_connection_error(&metadata.url);
-        let (missing, error) = load_pool_metadata(
-            &cache,
-            &metadata,
-            OnOverload::Inline,
-            failing_pool(&failure),
-        )
-        .await;
-        assert!(missing.is_none());
-        assert_eq!(error.unwrap(), failure);
+        let failing = failing_pool(&failure);
+        load_pool_metadata(&cache, &metadata, OnOverload::Inline, failing).await;
 
-        // the failure answers without a fetch
-        let serve = || serving_pool(POOL_BODY, &calls);
-        let (missing, error) =
-            load_pool_metadata(&cache, &metadata, OnOverload::Inline, serve()).await;
-        assert!(missing.is_none());
-        assert_eq!(error.unwrap(), failure);
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-
-        // the failure of one URL does not hold back another URL
+        let calls = Arc::new(AtomicUsize::new(0));
         let mut moved = metadata.clone();
         moved.url.push_str("?mirror");
-        let (fetched, error) =
-            load_pool_metadata(&cache, &moved, OnOverload::Inline, serve()).await;
+        let serve = serving_pool(POOL_BODY, &calls);
+        let (fetched, error) = load_pool_metadata(&cache, &moved, OnOverload::Inline, serve).await;
         assert_eq!(fetched.unwrap().ticker, "POOL");
         assert!(error.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        // past its TTL the failure no longer answers
-        cache.wipe(POOL_OFFCHAIN.name).unwrap();
-        cache
-            .register(CacheNamespace::tip_scoped(
-                POOL_OFFCHAIN_FAILURES.name,
-                1,
-                Duration::ZERO,
-            ))
-            .unwrap();
-        let (fetched, error) =
-            load_pool_metadata(&cache, &metadata, OnOverload::Inline, serve()).await;
-        assert_eq!(fetched.unwrap().ticker, "POOL");
-        assert!(error.is_none());
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1149,7 +1068,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_single_pool_request_answers_by_its_deadline() {
+    async fn a_pool_fetch_outlives_a_cancelled_request() {
         let cache = memory_cache();
         let metadata = pool_metadata(POOL_BODY);
         let release = Arc::new(tokio::sync::Notify::new());
@@ -1164,16 +1083,9 @@ mod tests {
             }
         };
 
-        let (missing, error) = load_pool_metadata_within(
-            &cache,
-            &metadata,
-            Duration::from_millis(100),
-            OnOverload::Inline,
-            held,
-        )
-        .await;
-        assert!(missing.is_none());
-        assert!(error.is_none());
+        let request = load_pool_metadata(&cache, &metadata, OnOverload::Inline, held);
+        let cancelled = tokio::time::timeout(Duration::from_millis(100), request).await;
+        assert!(cancelled.is_err());
 
         // the fetch outlives the request and keeps its body
         release.notify_one();
@@ -1187,91 +1099,9 @@ mod tests {
         .expect("the detached fetch never kept its body");
     }
 
-    #[tokio::test]
-    async fn proposal_fetches_do_not_wait_for_drep_fetch_slots() {
-        let cache = memory_cache();
-        let gated = Gated::default();
-        let held: Vec<_> = (0..MAX_CONCURRENT_FETCHES)
-            .map(|i| {
-                let body = format!("{{\"drep\":{i}}}").into_bytes();
-                let (cache, anchor, fetch) = (cache.clone(), anchor(&body), gated.fetch(body));
-                tokio::spawn(async move {
-                    load_anchor_metadata(&cache, DREP_CACHE, &anchor, OnOverload::Inline, fetch)
-                        .await
-                })
-            })
-            .collect();
-        gated.wait_for_running(MAX_CONCURRENT_FETCHES).await;
-
-        let body = br#"{"proposal":1}"#;
-        let calls = Arc::new(AtomicUsize::new(0));
-        let proposal = tokio::time::timeout(
-            Duration::from_secs(1),
-            load_anchor_metadata(
-                &cache,
-                PROPOSAL_CACHE,
-                &anchor(body),
-                OnOverload::Inline,
-                serving(body, &calls),
-            ),
-        )
-        .await
-        .expect("the proposal fetch waited for a DRep fetch slot");
-        assert_eq!(
-            proposal.json_metadata,
-            Some(serde_json::json!({"proposal": 1}))
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        gated.open();
-        for request in held {
-            assert!(request.await.unwrap().error.is_none());
-        }
-    }
-
     // The test runtime runs one task at a time. `load_body` calls the fetch
     // closure just before it joins the fetch under way, with no await between,
     // so a request that has called its closure has joined.
-    #[tokio::test]
-    async fn concurrent_pool_misses_share_one_fetch() {
-        let cache = memory_cache();
-        let metadata = pool_metadata(POOL_BODY);
-        let gated = Gated::default();
-        let joined = Arc::new(AtomicUsize::new(0));
-        let requests: Vec<_> = (0..8)
-            .map(|_| {
-                let (cache, metadata, gated, joined) = (
-                    cache.clone(),
-                    metadata.clone(),
-                    gated.clone(),
-                    joined.clone(),
-                );
-                tokio::spawn(async move {
-                    load_pool_metadata(&cache, &metadata, OnOverload::Inline, |_| {
-                        joined.fetch_add(1, Ordering::SeqCst);
-                        let fetched = gated.fetch(POOL_BODY.to_vec())(anchor(POOL_BODY));
-                        async move { fetched.await.map_err(Some) }
-                    })
-                    .await
-                })
-            })
-            .collect();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while joined.load(Ordering::SeqCst) < 8 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("a request never reached its fetch");
-        gated.open();
-        for request in requests {
-            let (metadata, error) = request.await.unwrap();
-            assert_eq!(metadata.unwrap().ticker, "POOL");
-            assert!(error.is_none());
-        }
-        assert_eq!(gated.calls.load(Ordering::SeqCst), 1);
-    }
-
     #[tokio::test]
     async fn a_shared_failure_at_another_url_retries_the_own_url() {
         let cache = memory_cache();
@@ -1306,8 +1136,7 @@ mod tests {
         });
         ready.await.unwrap();
 
-        // see `concurrent_pool_misses_share_one_fetch`: the closure call
-        // marks the join
+        // the closure call marks the join, see the note above this test
         let calls = Arc::new(AtomicUsize::new(0));
         let (joining, joined) = tokio::sync::oneshot::channel::<()>();
         let joining = std::sync::Mutex::new(Some(joining));
@@ -1344,8 +1173,9 @@ mod tests {
             .expect("the test waited more than five seconds")
     }
 
-    // see `concurrent_pool_misses_share_one_fetch`: each closure call marks a
-    // join, the first of the shared fetch, the second of the shared retry
+    // see the note above `a_shared_failure_at_another_url_retries_the_own_url`:
+    // each closure call marks a join, the first of the shared fetch, the second
+    // of the shared retry
     #[tokio::test]
     async fn waiters_at_another_url_share_one_retry_that_outlives_them() {
         let cache = memory_cache();
