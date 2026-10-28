@@ -170,10 +170,9 @@ where
 }
 
 /// A credential's live row and remainder, as one commit left them
-/// ([`agreeing`]). Each read takes its own snapshot, and two commits move
-/// history between the namespaces: an ESTART shard deletes a dead row and
-/// adds it to the remainder, and a rollback across the boundary restores the
-/// row and takes it back out.
+/// ([`agreeing`]). Each read takes its own snapshot, and an ESTART shard
+/// deletes a dead row and adds its history to the remainder in one commit.
+/// A rollback across the boundary restores the row without that history.
 fn read_rows<D: Domain>(
     domain: &Facade<D>,
     account: &AccountKey,
@@ -474,7 +473,7 @@ mod tests {
     };
     use dolos_cardano::{CardanoDelta, CardanoEntity};
     use dolos_core::{
-        builtin::MemoryStateStore, EntityDelta as _, FixedNamespace as _, StateStore,
+        builtin::MemoryStateStore, EntityDelta as _, FixedNamespace as _, Namespace, StateStore,
         StateWriter as _,
     };
     use dolos_testing::synthetic::SyntheticBlockConfig;
@@ -1050,17 +1049,21 @@ mod tests {
     type Commit = Box<dyn FnOnce(&MemoryStateStore) + Send>;
 
     /// Land `commits` in the store one at a time, each right after the next
-    /// read of `accounts` answers: commits that land between a lookup's reads.
-    fn between_reads(app: &TestApp, commits: Vec<Commit>) {
+    /// read of `ns` answers: commits that land between a lookup's reads.
+    fn between_reads(app: &TestApp, ns: Namespace, commits: Vec<Commit>) {
         let mut commits = commits.into_iter();
 
-        app.facade()
-            .inner
-            .after_entity_read(AccountState::NS, move |state| {
-                if let Some(commit) = commits.next() {
-                    commit(state);
-                }
-            });
+        app.facade().inner.after_entity_read(ns, move |state| {
+            if let Some(commit) = commits.next() {
+                commit(state);
+            }
+        });
+    }
+
+    /// A commit that writes nothing: the read it follows sees the store as
+    /// the next one does.
+    fn nothing() -> Commit {
+        Box::new(|_| {})
     }
 
     /// Prune `row` from `state` as an ESTART shard does.
@@ -1101,6 +1104,7 @@ mod tests {
         let (pruned, at) = (row.clone(), key.clone());
         between_reads(
             &app,
+            AccountState::NS,
             vec![Box::new(move |state| prune_in(state, &at, &pruned))],
         );
 
@@ -1110,6 +1114,58 @@ mod tests {
             vec![(key, row.remainder().unwrap())],
             "pruned during the read"
         );
+    }
+
+    /// `/accounts/{stake}` while an ESTART shard prunes the row between the
+    /// read of the remainder, which found none, and the second read of the
+    /// live row: the reads start again and serve the pruned life, never the
+    /// pair that knows neither.
+    #[tokio::test]
+    async fn a_prune_after_the_remainder_read_serves_the_account() {
+        let app = TestApp::new();
+        let credential = StakeCredential::AddrKeyhash([0x72; 28].into());
+        let key = AccountKey::from(&credential);
+        let row = dead_life(&app, &credential);
+
+        store(&app, &credential, Some(&row), None);
+        let expected = answer(&app, &credential, "").await;
+        assert_eq!(expected.1, 200, "{expected:?}");
+
+        between_reads(
+            &app,
+            PrunedAccountState::NS,
+            vec![Box::new(move |state| prune_in(state, &key, &row))],
+        );
+
+        assert_eq!(answer(&app, &credential, "").await, expected);
+        assert_eq!(read_remainders(&app).len(), 1, "pruned during the read");
+    }
+
+    /// `/accounts/{stake}` while an ESTART shard prunes the row after the two
+    /// reads of the live row agree: the remainder is read between them, so
+    /// the answer is the row from before the prune, counted once.
+    #[tokio::test]
+    async fn a_prune_after_the_reads_agree_serves_the_account_once() {
+        let app = TestApp::new();
+        let credential = StakeCredential::AddrKeyhash([0x73; 28].into());
+        let key = AccountKey::from(&credential);
+        let row = dead_life(&app, &credential);
+
+        store(&app, &credential, Some(&row), None);
+        let expected = answer(&app, &credential, "").await;
+        assert_eq!(expected.1, 200, "{expected:?}");
+
+        between_reads(
+            &app,
+            AccountState::NS,
+            vec![
+                nothing(),
+                Box::new(move |state| prune_in(state, &key, &row)),
+            ],
+        );
+
+        assert_eq!(answer(&app, &credential, "").await, expected);
+        assert_eq!(read_remainders(&app).len(), 1, "pruned during the read");
     }
 
     /// A gated subroute while a rollback restores a never-registered row,
@@ -1134,16 +1190,17 @@ mod tests {
 
         between_reads(
             &app,
+            AccountState::NS,
             vec![Box::new(move |state| put(state, &key, Some(&row), None))],
         );
 
         assert_eq!(answer(&app, &credential, "/registrations").await, expected);
     }
 
-    /// `/accounts/{stake}` while two commits land within its reads: a
-    /// rollback restores the pruned row after the first read, and a prune
-    /// takes it again after the second. Each retry reads both namespaces
-    /// again, so it serves the pruned life once.
+    /// `/accounts/{stake}` while two commits land within its reads: a block
+    /// spends the row's last value after the first read, and an ESTART shard
+    /// prunes the emptied row after the second. Each retry reads both
+    /// namespaces again, so it serves the pruned life once.
     #[tokio::test]
     async fn two_commits_within_the_reads_serve_the_account_once() {
         let app = TestApp::new();
@@ -1155,29 +1212,26 @@ mod tests {
         let expected = answer(&app, &credential, "").await;
         assert_eq!(expected.1, 200, "{expected:?}");
 
-        store(&app, &credential, None, None);
-        prune(&app, &credential, &row);
-        let pruned = read_remainders(&app);
+        let mut funded = row.clone();
+        funded.stake.unwrap_live_mut().utxo_sum = 3_000_000;
+        store(&app, &credential, Some(&funded), None);
 
-        // the rollback's settle leaves the deregistration in the remainder
-        let settled = row.remainder().unwrap().without(450_000);
-        assert!(settled.is_some());
-
-        let (restored, restore_at) = (row.clone(), key.clone());
-        let (again, prune_at) = (row.clone(), key.clone());
+        let (spent, spend_at) = (row.clone(), key.clone());
+        let (emptied, prune_at) = (row.clone(), key.clone());
         between_reads(
             &app,
+            AccountState::NS,
             vec![
-                Box::new(move |state| put(state, &restore_at, Some(&restored), settled.as_ref())),
-                Box::new(move |state| prune_in(state, &prune_at, &again)),
+                Box::new(move |state| put(state, &spend_at, Some(&spent), None)),
+                Box::new(move |state| prune_in(state, &prune_at, &emptied)),
             ],
         );
 
         assert_eq!(answer(&app, &credential, "").await, expected);
         assert_eq!(
             read_remainders(&app),
-            pruned,
-            "pruned again during the read"
+            vec![(key, row.remainder().unwrap())],
+            "pruned during the read"
         );
     }
 }

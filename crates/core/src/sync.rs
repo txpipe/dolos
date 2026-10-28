@@ -113,7 +113,6 @@ impl<D: Domain> SyncExt for D {
         // touching the same entity unwind from the in-memory value instead of
         // re-reading the not-yet-committed store.
         let mut entities: EntityMap<Self::Entity> = EntityMap::default();
-        let mut restored = Vec::new();
 
         for (point, log) in undo_blocks.rev() {
             if point == *to {
@@ -122,12 +121,7 @@ impl<D: Domain> SyncExt for D {
                 break;
             }
 
-            crate::state::undo_delta_chunk::<Self>(
-                &mut entities,
-                &mut restored,
-                self.state(),
-                &log.delta,
-            )?;
+            crate::state::undo_delta_chunk::<Self>(&mut entities, self.state(), &log.delta)?;
 
             let block = Arc::new(log.block);
 
@@ -158,7 +152,7 @@ impl<D: Domain> SyncExt for D {
             info!(%point, "block undone");
         }
 
-        D::Chain::settle_undo(self.state(), &mut entities, &restored)?;
+        D::Chain::settle_undo(self.state(), &mut entities)?;
 
         // Persist the undone entities (`Some` upserts, `None` deletes).
         crate::state::save_entities::<Self>(&writer, &entities)?;

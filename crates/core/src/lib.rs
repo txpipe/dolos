@@ -829,8 +829,10 @@ pub trait ChainLogic: Sized + Send + Sync {
     fn rolling_back<D: Domain>(_domain: &D, _to: &ChainPoint) {}
 
     /// The entity a rollback undoes a delta keyed `key` on when it finds the
-    /// entity absent: boundary work deleted it after the delta applied. The
-    /// default restores nothing, and the delta undoes on the absent entity.
+    /// entity absent: boundary work deleted it after the delta applied, and
+    /// the undo of a later delta may have removed the one that came after
+    /// it. The default restores nothing, and the delta undoes on the absent
+    /// entity.
     fn restore_for_undo<S: StateStore>(
         _state: &S,
         _key: &NsKey,
@@ -838,13 +840,12 @@ pub trait ChainLogic: Sized + Send + Sync {
         Ok(None)
     }
 
-    /// Settle the entities [`Self::restore_for_undo`] restored, named by
-    /// `restored`, once a rollback has undone every delta and before it
-    /// saves `entities`. The default does nothing.
+    /// Settle `entities` once a rollback has undone every delta, before it
+    /// saves them. `state` still holds what the rollback started from. The
+    /// default does nothing.
     fn settle_undo<S: StateStore>(
         _state: &S,
         _entities: &mut EntityMap<Self::Entity>,
-        _restored: &[NsKey],
     ) -> Result<(), StateError> {
         Ok(())
     }

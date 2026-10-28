@@ -813,13 +813,29 @@ mod rollback {
         assert_eq!(remainder(&domain), None);
     }
 
+    /// `C`'s live value, `(utxo_sum, rewards_sum, withdrawals_sum)`.
+    fn sums(domain: &ToyDomain) -> Option<(u64, u64, u64)> {
+        account(domain)
+            .and_then(|x| x.stake.live().cloned())
+            .map(|x| (x.utxo_sum, x.rewards_sum, x.withdrawals_sum))
+    }
+
+    /// The lifetime rewards `/accounts/{stake}` serves for `C`: its row's and
+    /// its remainder's ([`PrunedAccountState::restore`]).
+    fn served(domain: &ToyDomain) -> u64 {
+        let row = sums(domain).map(|(_, rewards, _)| rewards).unwrap_or(0);
+        let pruned = remainder(domain).map(|x| x.lifetime_rewards).unwrap_or(0);
+
+        row + pruned
+    }
+
     /// A credential with a pruned life behind it, whose rewards are in its
     /// remainder, funded and spent again in the closing epoch: the rollback
-    /// restores its row with that life's lifetime sums and takes them back
-    /// out of the remainder, so the two count them once.
+    /// restores its row, which the undo sets to that life's lifetime sums,
+    /// and strips them from it again, so the remainder alone counts them.
     #[test]
     #[cfg_attr(feature = "strict", ignore = "EpochStatsUpdate::undo, see the module")]
-    fn a_rollback_takes_the_restored_life_back_out_of_the_remainder() {
+    fn a_rollback_strips_the_restored_life_from_the_row() {
         const REWARDS: u64 = 450_000;
 
         let [fund, spend] = fund_and_spend();
@@ -860,49 +876,43 @@ mod rollback {
 
         assert_eq!(epoch(&domain), 2);
         assert_eq!(account(&domain), None, "pruned at the boundary");
-        assert_eq!(
-            remainder(&domain),
-            Some(PrunedAccountState {
-                lifetime_rewards: REWARDS,
-                deregistered_at: Some(300),
-            })
-        );
+
+        let pruned = PrunedAccountState {
+            lifetime_rewards: REWARDS,
+            deregistered_at: Some(300),
+        };
+        assert_eq!(remainder(&domain), Some(pruned.clone()));
 
         // undoes the spending block on the pruned row
         roll_back(&domain, &blocks[3].0);
 
-        let row = account(&domain).expect("restored");
-        let live = row.stake.live().unwrap();
-        assert_eq!(live.utxo_sum, 10 * ADA);
-        assert_eq!(live.rewards_sum, REWARDS);
-        assert_eq!(live.withdrawals_sum, REWARDS);
-        assert_eq!(
-            remainder(&domain),
-            Some(PrunedAccountState {
-                lifetime_rewards: 0,
-                deregistered_at: Some(300),
-            })
-        );
+        assert_eq!(sums(&domain), Some((10 * ADA, 0, 0)), "restored, stripped");
+        assert_eq!(remainder(&domain), Some(pruned.clone()));
+        assert_eq!(served(&domain), REWARDS);
 
-        // and the funding block, on the restored row
+        // and the funding block, on the restored row, which it sets to the
+        // life's sums again
         roll_back(&domain, &blocks[2].0);
 
-        let live = account(&domain).unwrap().stake.live().cloned().unwrap();
-        assert_eq!(live.utxo_sum, 0);
-        assert_eq!(live.rewards_sum, REWARDS);
-        assert_eq!(
-            remainder(&domain).map(|x| x.lifetime_rewards),
-            Some(0),
-            "counted once"
-        );
+        assert_eq!(sums(&domain), Some((0, 0, 0)), "stripped again");
+        assert_eq!(remainder(&domain), Some(pruned));
+        assert_eq!(served(&domain), REWARDS, "counted once");
     }
 
     /// An earlier life of `C`, pruned before the chain starts.
     const EARLIER: u64 = 1_000_000;
 
-    /// The life ESTART prunes, below [`EARLIER`] so that taking it out twice
-    /// leaves a remainder instead of saturating at zero.
+    /// The life ESTART prunes.
     const PRUNED: u64 = 450_000;
+
+    /// Both lives, in the remainder after the prune, with the newest
+    /// deregistration. Every rollback below leaves it so.
+    fn both_lives() -> Option<PrunedAccountState> {
+        Some(PrunedAccountState {
+            lifetime_rewards: EARLIER + PRUNED,
+            deregistered_at: Some(300),
+        })
+    }
 
     /// B1 (940) pays `C` and B2 (960) spends it in epoch 1, ESTART at 1010
     /// prunes the row, and with `fund_again` B3 (1030) pays `C` again, so its
@@ -960,150 +970,168 @@ mod rollback {
         assert_eq!(epoch(&domain), 2);
         assert_eq!(
             remainder(&domain),
-            Some(PrunedAccountState {
-                lifetime_rewards: EARLIER + PRUNED,
-                deregistered_at: Some(300),
-            }),
+            both_lives(),
             "both lives in the remainder after the prune"
         );
 
         (domain, blocks)
     }
 
-    /// The rollback takes only the restored life out of the remainder, and
-    /// the earlier one stays, with the newest deregistration.
+    /// A rollback to before B1 commits its state and dies before the WAL
+    /// truncation, and the restart's catch-up replays the logged blocks onto
+    /// the restored row.
+    fn crash_rolling_back_to_b1(domain: &ToyDomain, blocks: &[(ChainPoint, RawBlock)]) {
+        let to = blocks[2].0.clone();
+        let tip = blocks.last().unwrap().0.clone();
+
+        // the state commit lands, the archive commit fails
+        raise_rolling_stats(domain);
+        let crashing = FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(1));
+        crashing
+            .rollback(&to)
+            .expect_err("dies after the state commit");
+
+        assert_eq!(domain.state().read_cursor().unwrap(), Some(to));
+        assert_eq!(
+            domain.wal().find_tip().unwrap().map(|(point, _)| point),
+            Some(tip.clone()),
+            "the WAL keeps the undone blocks"
+        );
+        assert_eq!(sums(domain), Some((0, 0, 0)), "restored, stripped");
+        assert_eq!(remainder(domain), both_lives(), "the rollback leaves it");
+
+        domain.bootstrap().unwrap();
+
+        assert_eq!(domain.state().read_cursor().unwrap(), Some(tip));
+        assert_eq!(remainder(domain), both_lives());
+    }
+
+    /// The rollback strips the restored life from the row, and the earlier
+    /// life stays in the remainder beside it.
     #[test]
     #[cfg_attr(feature = "strict", ignore = "EpochStatsUpdate::undo, see the module")]
-    fn a_rollback_leaves_an_earlier_life_in_the_remainder() {
+    fn a_rollback_leaves_both_lives_in_the_remainder() {
         let (domain, blocks) = two_lives(false);
 
         roll_back(&domain, &blocks[2].0);
 
-        let live = account(&domain).unwrap().stake.live().cloned().unwrap();
-        assert_eq!(live.utxo_sum, 0);
-        assert_eq!(live.rewards_sum, PRUNED);
-        assert_eq!(live.withdrawals_sum, PRUNED);
-        assert_eq!(
-            remainder(&domain),
-            Some(PrunedAccountState {
-                lifetime_rewards: EARLIER,
-                deregistered_at: Some(300),
-            })
-        );
+        assert_eq!(sums(&domain), Some((0, 0, 0)));
+        assert_eq!(remainder(&domain), both_lives());
+        assert_eq!(served(&domain), EARLIER + PRUNED);
     }
 
-    /// The first rollback to before B1 commits its state and dies before the
-    /// WAL truncation. The restart's catch-up replays B1..B3 onto the
-    /// restored row, and the same rollback runs again: B3's logged `was_new`
-    /// removes the row and B2's undo restores it a second time. The restored
-    /// life leaves the remainder once.
+    /// After the crashed rollback, catch-up replays B1..B3 onto the stripped
+    /// row, and the same rollback runs again: B3's logged `was_new` removes
+    /// the row, B2's undo restores it a second time, and the rollback strips
+    /// it again.
     #[test]
     #[cfg_attr(feature = "strict", ignore = "EpochStatsUpdate::undo, see the module")]
-    fn a_retried_rollback_takes_the_restored_life_out_of_the_remainder_once() {
+    fn a_retried_rollback_leaves_the_remainder_as_one_rollback_does() {
         let (domain, blocks) = two_lives(true);
-        let to = blocks[2].0.clone();
-        let tip = blocks.last().unwrap().0.clone();
 
-        let fresh = account(&domain).expect("funded again in epoch 2");
-        assert_eq!(fresh.stake.live().unwrap().utxo_sum, 5 * ADA);
-        assert_eq!(fresh.stake.live().unwrap().rewards_sum, 0);
+        assert_eq!(sums(&domain), Some((5 * ADA, 0, 0)), "funded again");
 
-        // the state commit lands, the archive commit fails
-        raise_rolling_stats(&domain);
-        let crashing = FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(1));
-        crashing
-            .rollback(&to)
-            .expect_err("dies after the state commit");
-
-        assert_eq!(domain.state().read_cursor().unwrap(), Some(to.clone()));
-        assert_eq!(
-            domain.wal().find_tip().unwrap().map(|(point, _)| point),
-            Some(tip.clone()),
-            "the WAL keeps B1..B3"
-        );
-        let restored = account(&domain).expect("restored");
-        assert_eq!(restored.stake.live().unwrap().rewards_sum, PRUNED);
-        assert_eq!(
-            remainder(&domain).map(|x| x.lifetime_rewards),
-            Some(EARLIER),
-            "the first rollback settles once"
-        );
-
-        // restart: catch-up replays the logged deltas onto the restored row
-        domain.bootstrap().unwrap();
-
-        assert_eq!(domain.state().read_cursor().unwrap(), Some(tip));
-        let live = account(&domain).unwrap().stake.live().cloned().unwrap();
-        assert_eq!(live.utxo_sum, 5 * ADA);
-        assert_eq!(live.rewards_sum, PRUNED);
-        assert_eq!(
-            remainder(&domain).map(|x| x.lifetime_rewards),
-            Some(EARLIER)
-        );
+        crash_rolling_back_to_b1(&domain, &blocks);
+        assert_eq!(sums(&domain), Some((5 * ADA, 0, 0)), "replayed");
 
         // the peer is still on the fork
-        roll_back(&domain, &to);
+        roll_back(&domain, &blocks[2].0);
 
-        let live = account(&domain)
-            .expect("restored again")
-            .stake
-            .live()
-            .cloned()
-            .unwrap();
-        assert_eq!(live.utxo_sum, 0);
-        assert_eq!(live.rewards_sum, PRUNED);
-        assert_eq!(
-            remainder(&domain),
-            Some(PrunedAccountState {
-                lifetime_rewards: EARLIER,
-                deregistered_at: Some(300),
-            }),
-            "the retried rollback leaves the remainder as one rollback does"
-        );
+        assert_eq!(sums(&domain), Some((0, 0, 0)), "restored again, stripped");
+        assert_eq!(remainder(&domain), both_lives());
+        assert_eq!(served(&domain), EARLIER + PRUNED);
     }
 
-    /// Without B3, nothing in the WAL says `was_new`: the replayed row
-    /// survives B2's undo, nothing is restored, and the retry settles
-    /// nothing.
+    /// Without B3, the replayed row survives B2's undo and nothing is
+    /// restored. B2's and B1's undos still set the row to the pruned life's
+    /// sums, and the rollback strips them.
     #[test]
     #[cfg_attr(feature = "strict", ignore = "EpochStatsUpdate::undo, see the module")]
-    fn without_a_fresh_row_a_retried_rollback_settles_nothing() {
+    fn without_a_fresh_row_a_retried_rollback_strips_the_replayed_row() {
         let (domain, blocks) = two_lives(false);
-        let to = blocks[2].0.clone();
 
         assert_eq!(account(&domain), None, "pruned at the boundary");
 
-        raise_rolling_stats(&domain);
-        let crashing = FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(1));
-        crashing
-            .rollback(&to)
-            .expect_err("dies after the state commit");
+        crash_rolling_back_to_b1(&domain, &blocks);
+        assert_eq!(sums(&domain), Some((0, 0, 0)), "replayed");
 
-        assert_eq!(
-            remainder(&domain).map(|x| x.lifetime_rewards),
-            Some(EARLIER)
-        );
+        roll_back(&domain, &blocks[2].0);
 
-        domain.bootstrap().unwrap();
-        roll_back(&domain, &to);
+        assert_eq!(sums(&domain), Some((0, 0, 0)));
+        assert_eq!(remainder(&domain), both_lives());
+        assert_eq!(served(&domain), EARLIER + PRUNED);
+    }
 
-        let live = account(&domain).unwrap().stake.live().cloned().unwrap();
-        assert_eq!(live.rewards_sum, PRUNED);
-        assert_eq!(
-            remainder(&domain).map(|x| x.lifetime_rewards),
-            Some(EARLIER)
-        );
+    /// After the crashed rollback, the peer keeps the boundary but not B3,
+    /// and the node rolls back only that far. B3's logged `was_new` removes
+    /// the replayed row, as it removes the fresh row without the crash, and
+    /// both lives stay in the remainder.
+    #[test]
+    #[cfg_attr(feature = "strict", ignore = "EpochStatsUpdate::undo, see the module")]
+    fn a_shallower_rollback_after_a_crashed_one_keeps_both_lives() {
+        for crash in [false, true] {
+            let (domain, blocks) = two_lives(true);
+
+            if crash {
+                crash_rolling_back_to_b1(&domain, &blocks);
+            }
+
+            roll_back(&domain, &blocks[5].0);
+
+            assert_eq!(account(&domain), None, "crash: {crash}");
+            assert_eq!(remainder(&domain), both_lives(), "crash: {crash}");
+            assert_eq!(served(&domain), EARLIER + PRUNED, "crash: {crash}");
+        }
+    }
+
+    /// The same shallower rollback, then B3' at 1031 on the new fork pays `C`
+    /// again, and a rollback to before B1 removes that fresh row, restores
+    /// the pruned one behind it and strips it.
+    #[test]
+    #[cfg_attr(feature = "strict", ignore = "EpochStatsUpdate::undo, see the module")]
+    fn a_deep_rollback_on_the_new_fork_keeps_both_lives() {
+        for crash in [false, true] {
+            let (domain, blocks) = two_lives(true);
+
+            if crash {
+                crash_rolling_back_to_b1(&domain, &blocks);
+            }
+
+            roll_back(&domain, &blocks[5].0);
+
+            let again = tx(&[seed(1)], vec![(staked(0x04), 6 * ADA)], 14 * ADA, vec![]);
+            // the mock header hashes only slot, number and prev: 1031 tells
+            // it apart from B3
+            let (point, raw) = make_conway_block_with_txs_at(
+                1031,
+                6,
+                blocks[5].0.hash(),
+                vec![(again, true)],
+                None,
+            );
+            assert_ne!(point, blocks[6].0);
+            domain.roll_forward(raw).unwrap();
+            assert_eq!(sums(&domain), Some((6 * ADA, 0, 0)), "crash: {crash}");
+
+            roll_back(&domain, &blocks[2].0);
+
+            assert_eq!(sums(&domain), Some((0, 0, 0)), "crash: {crash}");
+            assert_eq!(remainder(&domain), both_lives(), "crash: {crash}");
+            assert_eq!(served(&domain), EARLIER + PRUNED, "crash: {crash}");
+        }
     }
 
     /// A registered row that recreated a pruned credential and earned
-    /// rewards, funded and spent across the boundary: the rollback undoes the
-    /// values on the row itself, restores nothing, and leaves the remainder
-    /// of the earlier life as it was.
+    /// rewards, funded and spent across the boundary, which pays it more: the
+    /// rollback undoes the values on the row itself and restores nothing.
+    /// The boundary's payment goes with the undone values, as on `main`, and
+    /// the remainder of the earlier life stays as it was.
     #[test]
     #[cfg_attr(feature = "strict", ignore = "EpochStatsUpdate::undo, see the module")]
     fn a_rollback_over_a_recreated_row_leaves_its_remainder() {
         const REWARDS: u64 = 120_000;
         const WITHDRAWN: u64 = 100_000;
+        const PAID: u64 = 30_000;
 
         let [fund, spend] = fund_and_spend();
 
@@ -1147,14 +1175,20 @@ mod rollback {
         }
 
         assert_eq!(epoch(&domain), 2);
-        assert!(account(&domain).unwrap().is_registered(), "kept");
+        let mut kept = account(&domain).unwrap();
+        assert!(kept.is_registered(), "kept");
+
+        // what the boundary's EWRAP pays the live value, ahead of the rotation
+        kept.stake.unwrap_live_mut().rewards_sum += PAID;
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(&AccountKey::from(&cred()), &kept)
+            .unwrap();
+        writer.commit().unwrap();
 
         roll_back(&domain, &blocks[2].0);
 
-        let live = account(&domain).unwrap().stake.live().cloned().unwrap();
-        assert_eq!(live.utxo_sum, 0);
-        assert_eq!(live.rewards_sum, REWARDS);
-        assert_eq!(live.withdrawals_sum, WITHDRAWN);
+        assert_eq!(sums(&domain), Some((0, REWARDS, WITHDRAWN)));
         assert_eq!(remainder(&domain), Some(earlier));
     }
 }

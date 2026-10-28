@@ -552,12 +552,12 @@ pub fn apply_delta_chunk<D: Domain>(
 /// keyed to the same entity must be reversed last-first to correctly walk
 /// back through the apply chain.
 ///
-/// A delta that finds its entity absent applied before boundary work deleted
-/// it. The chain may restore the entity for the undo
-/// ([`ChainLogic::restore_for_undo`]), and its key joins `restored`.
+/// A delta can find its entity absent: boundary work deleted the entity
+/// after the delta applied, and the undo of a later delta may have removed
+/// the one that came after it. The chain may restore the entity for the
+/// undo ([`ChainLogic::restore_for_undo`]).
 pub fn undo_delta_chunk<D: Domain>(
     entities: &mut EntityMap<D::Entity>,
-    restored: &mut Vec<NsKey>,
     store: &D::State,
     deltas: &[D::EntityDelta],
 ) -> Result<(), StateError> {
@@ -572,10 +572,6 @@ pub fn undo_delta_chunk<D: Domain>(
 
         if entity.is_none() {
             *entity = D::Chain::restore_for_undo(store, &key)?;
-
-            if entity.is_some() && !restored.contains(&key) {
-                restored.push(key);
-            }
         }
 
         delta.undo(entity);
