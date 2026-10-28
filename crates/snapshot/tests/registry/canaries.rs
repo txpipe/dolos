@@ -29,7 +29,8 @@ use dolos_cardano::{
         FirstScriptChunk, FirstScriptSet, GovDistr, GovRoots, GovState, MetadataLabelState, Nonces,
         PParamValue, PParamsSet, PendingMirState, PendingRewardState, PolicyMintChunk,
         PoolDelegation, PoolEpochLog, PoolParams, PoolSnapshot, PoolState, PoolTally,
-        ProposalAction, ProposalState, RollingStats, ShardProgress, Stake, VoteEntry,
+        ProposalAction, ProposalState, PrunedAccountState, RollingStats, ShardProgress, Stake,
+        VoteEntry,
     },
     model::{
         AccountStats, AddressStats, AssetMintChunk, AssetMintSet, PaymentAddressChunk,
@@ -656,6 +657,13 @@ pub fn pending_mir_state() -> PendingMirState {
         credential: StakeCredential::ScriptHash(hash28(0xe0)),
         from_reserves: 7_000_000,
         from_treasury: 8_000_000,
+    }
+}
+
+pub fn pruned_account_state() -> PrunedAccountState {
+    PrunedAccountState {
+        lifetime_rewards: 4_981_449,
+        deregistered_at: Some(171_234_567),
     }
 }
 

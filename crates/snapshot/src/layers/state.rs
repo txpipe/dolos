@@ -314,7 +314,7 @@ mod tests {
         AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
         AddressStats, AssetKey, AssetMintChunk, AssetMintSet, AssetState, DRepState, EpochState,
         EraState, FirstMintSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressSet,
-        PaymentStats, PoolState, ProposalState,
+        PaymentStats, PoolState, ProposalState, PrunedAccountState,
     };
 
     use super::*;
@@ -372,6 +372,7 @@ mod tests {
         }
 
         keyed(AccountState::NS, &credential).unwrap();
+        keyed(PrunedAccountState::NS, &credential).unwrap();
         keyed(DRepState::NS, &[[0x22].as_slice(), &[7; 28]].concat()).unwrap();
 
         // an address: an account and a base address's header and payment
@@ -409,6 +410,7 @@ mod tests {
             (MetadataLabelState::NS, vec![1; 32]),
             (DRepState::NS, vec![0x22; 32]),
             (AccountState::NS, vec![1; 32]),
+            (PrunedAccountState::NS, vec![1; 32]),
             (AccountEpochLog::NS, vec![1; 32]),
             (AccountAddressSet::NS, staged(&[])),
             (AccountAddressSet::NS, staged(&[1; 57])),

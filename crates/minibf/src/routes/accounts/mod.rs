@@ -1,10 +1,10 @@
 use axum::http::StatusCode;
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, SlotOrder},
-    model::{AccountState, ProposalState},
+    indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt as _, SlotOrder},
+    model::{AccountState, ProposalState, PrunedAccountState},
     pallas_extras, AccountKey, ChainSummary,
 };
-use dolos_core::{ArchiveStore as _, Domain};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use futures_util::StreamExt;
 use pallas::{
     crypto::hash::{Hash, Hasher},
@@ -15,7 +15,7 @@ use pallas::{
     },
 };
 
-use crate::{error::Error, pagination::Pagination, Facade};
+use crate::{error::Error, mapping, pagination::Pagination, Facade};
 
 mod addresses;
 mod addresses_assets;
@@ -139,16 +139,83 @@ where
     Ok(false)
 }
 
+/// Whether the archive tags a block with the credential's stake address: an
+/// output paid to, or an input spending, an address it controls. ESTART
+/// prunes a never-registered account once it empties, and leaves no
+/// remainder, so this is what still knows it.
+fn stake_tag_seen<D: Domain>(domain: &Facade<D>, account: &AccountKey) -> Result<bool, StatusCode> {
+    let address = mapping::stake_cred_to_address(account.credential(), domain.get_network_id()?);
+
+    let seen = domain
+        .archive()
+        .slots_by_stake(&address.to_vec(), 0, BlockSlot::MAX)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .next()
+        .transpose()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_some();
+
+    Ok(seen)
+}
+
+/// Whether anything but the account rows knows a credential that has
+/// neither a live row nor a remainder: the `stake` tag, then a proposal
+/// naming it as its return account.
+fn known_without_rows<D>(domain: &Facade<D>, account: &AccountKey) -> Result<bool, StatusCode>
+where
+    Option<ProposalState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    Ok(stake_tag_seen(domain, account)? || account_appears_in_proposals(domain, account)?)
+}
+
+/// The account `/accounts/{stake}` serves for a credential: its live row, or
+/// a fresh one at `epoch` when state holds none, with the history ESTART
+/// pruned from the credential's earlier lives added back. `None` when no
+/// row, remainder or witness knows the credential.
+///
+/// The one read of a live credential's remainder: were ESTART to fold a
+/// remainder back into its recreated row, only this would change.
+fn served_account<D>(
+    domain: &Facade<D>,
+    account: &AccountKey,
+    epoch: Epoch,
+) -> Result<Option<AccountState>, StatusCode>
+where
+    Option<ProposalState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let live = domain.read_cardano_entity::<AccountState>(account)?;
+    let pruned = domain.read_cardano_entity::<PrunedAccountState>(account)?;
+
+    let mut served = match live {
+        Some(live) => live,
+        None if pruned.is_some() || known_without_rows(domain, account)? => {
+            AccountState::new(epoch, account.credential().clone())
+        }
+        None => return Ok(None),
+    };
+
+    if let Some(pruned) = pruned {
+        pruned.restore(&mut served);
+    }
+
+    Ok(Some(served))
+}
+
 fn account_exists<D>(domain: &Facade<D>, account: &AccountKey) -> Result<bool, StatusCode>
 where
     Option<AccountState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
-    if domain.cardano_entity_exists::<AccountState>(account)? {
+    if domain.cardano_entity_exists::<AccountState>(account)?
+        || domain.cardano_entity_exists::<PrunedAccountState>(account)?
+    {
         return Ok(true);
     }
-    account_appears_in_proposals(domain, account)
+
+    known_without_rows(domain, account)
 }
 
 struct AccountActivityModelBuilder<T> {
@@ -369,8 +436,10 @@ mod tests {
     use blockfrost_openapi::models::{
         account_addresses_total::AccountAddressesTotal, account_content::AccountContent,
     };
-    use dolos_core::{StateStore as _, StateWriter as _};
+    use dolos_cardano::{CardanoDelta, CardanoEntity};
+    use dolos_core::{EntityDelta as _, StateStore as _, StateWriter as _};
     use dolos_testing::synthetic::SyntheticBlockConfig;
+    use pallas::ledger::primitives::StakeCredential;
 
     fn encode_bech32(hrp: &str, payload: &[u8]) -> String {
         let hrp = bech32::Hrp::parse(hrp).expect("invalid hrp");
@@ -661,5 +730,219 @@ mod tests {
     #[tokio::test]
     async fn accounts_named_only_by_invalid_proposals_remain_unknown() {
         assert_proposal_account_endpoints(false, false, false).await;
+    }
+
+    /// `/accounts/{stake}` and every subroute under it, the gated ones and
+    /// `/utxos`.
+    const ACCOUNT_ROUTES: [&str; 12] = [
+        "",
+        "/registrations",
+        "/delegations",
+        "/withdrawals",
+        "/mirs",
+        "/rewards",
+        "/history",
+        "/addresses",
+        "/addresses/assets",
+        "/addresses/total",
+        "/transactions",
+        "/utxos",
+    ];
+
+    async fn answers(app: &TestApp, credential: &StakeCredential) -> Vec<(String, u16, String)> {
+        let network = app.facade().get_network_id().unwrap();
+        let address = mapping::stake_cred_to_address(credential, network)
+            .to_bech32()
+            .unwrap();
+
+        let mut out = vec![];
+
+        for route in ACCOUNT_ROUTES {
+            let path = format!("/accounts/{address}{route}");
+            let (status, body) = app.get_bytes(&path).await;
+            out.push((path, status.as_u16(), String::from_utf8(body).unwrap()));
+        }
+
+        out
+    }
+
+    /// Store `credential`'s live row and remainder, deleting the absent ones.
+    fn store(
+        app: &TestApp,
+        credential: &StakeCredential,
+        live: Option<&AccountState>,
+        pruned: Option<&PrunedAccountState>,
+    ) {
+        let facade = app.facade();
+        let key = AccountKey::from(credential);
+        let writer = facade.state().start_writer().unwrap();
+        writer.save_entity_typed(&key, live).unwrap();
+        writer.save_entity_typed(&key, pruned).unwrap();
+        writer.commit().unwrap();
+    }
+
+    /// Prune `row` as ESTART does, through its own write.
+    fn prune(app: &TestApp, credential: &StakeCredential, row: &AccountState) {
+        assert!(row.is_dead(), "{row:?}");
+
+        let facade = app.facade();
+        let writer = facade.state().start_writer().unwrap();
+        dolos_cardano::estart::prune::prune_account(
+            facade.state(),
+            &writer,
+            &AccountKey::from(credential),
+            row,
+        )
+        .unwrap();
+        writer.commit().unwrap();
+    }
+
+    fn read_remainders(app: &TestApp) -> Vec<(AccountKey, PrunedAccountState)> {
+        app.facade()
+            .state()
+            .iter_entities_typed::<PrunedAccountState>(None)
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect()
+    }
+
+    /// Apply one roll delta to `main`, the row `main` keeps, and to `fresh`,
+    /// the row the pruned credential starts again.
+    fn roll_both(
+        main: &mut Option<AccountState>,
+        fresh: &mut Option<AccountState>,
+        delta: CardanoDelta,
+    ) {
+        for row in [main, fresh] {
+            let mut entity: Option<CardanoEntity> = row.take().map(Into::into);
+            delta.clone().apply(&mut entity);
+            *row = entity.and_then(Into::into);
+        }
+    }
+
+    /// A credential that registers, earns rewards, withdraws them,
+    /// deregisters and empties answers every account route the same once
+    /// pruned. Funded and registered again, it answers as `main`'s row at
+    /// each step, and pruned a second time it keeps a single remainder and
+    /// answers the same again.
+    #[tokio::test]
+    async fn a_pruned_deregistered_account_answers_as_main_does() {
+        use dolos_cardano::model::{
+            AssignRewards, ControlledAmountDec, ControlledAmountInc, StakeDelegation,
+            StakeDeregistration, StakeRegistration, WithdrawalInc,
+        };
+
+        let app = TestApp::new();
+        let epoch = app.tip_epoch();
+        let slot = app.epoch_start(epoch);
+        let credential = StakeCredential::AddrKeyhash([0x6e; 28].into());
+        let key = AccountKey::from(&credential);
+
+        // its first life, as the roll leaves it in `main`
+        let mut main = None;
+        let mut none = None;
+        for step in [
+            StakeRegistration::new(credential.clone(), slot + 1, epoch, 2_000_000).into(),
+            ControlledAmountInc::new(credential.clone(), false, 9_000_000, epoch).into(),
+            StakeDelegation::new(credential.clone(), [0x71; 28].into(), epoch).into(),
+            AssignRewards::new(key.clone(), 450_000).into(),
+            WithdrawalInc::new(credential.clone(), 450_000).into(),
+            StakeDeregistration::new(credential.clone(), slot + 2, epoch).into(),
+            ControlledAmountDec::new(credential.clone(), false, 9_000_000).into(),
+        ] {
+            roll_both(&mut main, &mut none, step);
+        }
+
+        let first_life = main.clone().unwrap();
+        assert_eq!(first_life.stake.live().unwrap().rewards_sum, 450_000);
+
+        store(&app, &credential, Some(&first_life), None);
+        let expected = answers(&app, &credential).await;
+        assert_eq!(expected[0].1, 200, "{:?}", expected[0]);
+
+        store(&app, &credential, None, None);
+        prune(&app, &credential, &first_life);
+        assert_eq!(answers(&app, &credential).await, expected);
+
+        let pruned = read_remainders(&app);
+        assert_eq!(
+            pruned,
+            vec![(
+                key.clone(),
+                PrunedAccountState {
+                    lifetime_rewards: 450_000,
+                    deregistered_at: Some(slot + 2),
+                }
+            )]
+        );
+        let remainder = pruned[0].1.clone();
+
+        // funded and registered again: a fresh row beside the remainder
+        let mut fresh = None;
+        for step in [
+            ControlledAmountInc::new(credential.clone(), false, 4_000_000, epoch).into(),
+            StakeRegistration::new(credential.clone(), slot + 3, epoch, 2_000_000).into(),
+            AssignRewards::new(key.clone(), 120_000).into(),
+            WithdrawalInc::new(credential.clone(), 100_000).into(),
+            WithdrawalInc::new(credential.clone(), 20_000).into(),
+            StakeDeregistration::new(credential.clone(), slot + 4, epoch).into(),
+            ControlledAmountDec::new(credential.clone(), false, 4_000_000).into(),
+        ] {
+            roll_both(&mut main, &mut fresh, step);
+
+            store(&app, &credential, main.as_ref(), None);
+            let expected = answers(&app, &credential).await;
+
+            store(&app, &credential, fresh.as_ref(), Some(&remainder));
+            assert_eq!(answers(&app, &credential).await, expected);
+        }
+
+        // pruned a second time
+        store(&app, &credential, main.as_ref(), None);
+        let expected = answers(&app, &credential).await;
+
+        store(&app, &credential, None, Some(&remainder));
+        prune(&app, &credential, fresh.as_ref().unwrap());
+        assert_eq!(answers(&app, &credential).await, expected);
+
+        assert_eq!(
+            read_remainders(&app),
+            vec![(
+                key,
+                PrunedAccountState {
+                    lifetime_rewards: 570_000,
+                    deregistered_at: Some(slot + 4),
+                }
+            )]
+        );
+    }
+
+    /// A never-registered credential that empties leaves no remainder, and its
+    /// `stake` tag keeps it known: every account route answers as `main`'s
+    /// all-zero row did.
+    #[tokio::test]
+    async fn a_pruned_never_registered_account_answers_as_main_does() {
+        use dolos_cardano::model::{ControlledAmountDec, ControlledAmountInc};
+
+        let app = TestApp::new();
+        let epoch = app.tip_epoch();
+
+        // the synthetic chain's own account, which its outputs pay
+        let credential = crate::test_support::stake_address_accounts::primary();
+
+        let mut row = Some(AccountState::new(epoch, credential.clone()));
+        ControlledAmountInc::new(credential.clone(), false, 3_000_000, epoch).apply(&mut row);
+        ControlledAmountDec::new(credential.clone(), false, 3_000_000).apply(&mut row);
+        let row = row.unwrap();
+
+        store(&app, &credential, Some(&row), None);
+        let expected = answers(&app, &credential).await;
+        assert_eq!(expected[0].1, 200, "{:?}", expected[0]);
+
+        store(&app, &credential, None, None);
+        prune(&app, &credential, &row);
+
+        assert!(read_remainders(&app).is_empty());
+        assert_eq!(answers(&app, &credential).await, expected);
     }
 }
