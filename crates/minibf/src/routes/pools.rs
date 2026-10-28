@@ -60,14 +60,8 @@ use crate::{
     Facade,
 };
 
-/// How long `/pools/extended` waits for the metadata of the rows it misses,
-/// the wait for a fetch slot included. A cold page behind dead hosts would
-/// otherwise wait out one five-second fetch timeout per wave of
-/// [`MAX_CONCURRENT_POOL_FETCHES`]. A fetch the page started before the
-/// deadline keeps going in the background and fills the cache for the next
-/// request; a miss it had not started yet is dropped. Either way its row goes
-/// out without metadata, the way Blockfrost serves a pool whose metadata
-/// db-sync has not fetched yet.
+/// How long `/pools/extended` waits for the metadata of its misses, the wait
+/// for a fill permit included.
 const PAGE_METADATA_DEADLINE: Duration = Duration::from_secs(5);
 
 type ActivePools = HashSet<PoolHash>;
@@ -895,10 +889,8 @@ async fn page_pool_metadata<C: dolos_core::CacheStore>(
     .await
 }
 
-/// Cached rows answer at once. Misses start at most
-/// [`MAX_CONCURRENT_POOL_FETCHES`] at a time, one per fetch slot, so a page
-/// queues no fetch ahead of a single-pool request. A miss started before the
-/// deadline keeps its result for the next request.
+/// [`page_pool_metadata`] over `load`. Starts at most
+/// [`MAX_CONCURRENT_POOL_FETCHES`] misses at a time.
 async fn page_pool_metadata_with<'a, C, L>(
     cache: &C,
     onchain: &[Option<&'a pallas::ledger::primitives::PoolMetadata>],
@@ -3306,10 +3298,9 @@ mod tests {
         assert_eq!(listed.unwrap().ticker, "POOL");
     }
 
-    /// A cold page with more misses than fetch slots starts one fetch per
-    /// slot and queues none, so a single-pool request never waits behind the
-    /// page. What it started keeps its result, and the next request fetches
-    /// the rest.
+    /// A cold page starts at most one fill per permit and queues none. Its
+    /// started fills keep their bodies, and the next request fetches the
+    /// rest.
     #[tokio::test]
     async fn a_cold_page_starts_no_more_fetches_than_its_slots() {
         use crate::offchain::{load_pool_metadata, OnOverload};
