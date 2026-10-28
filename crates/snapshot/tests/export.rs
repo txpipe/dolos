@@ -75,7 +75,7 @@ use watcher::Watcher;
 
 /// The identity of an export over the skeleton store set.
 const GOLDEN_SKELETON: &str =
-    "sha256:75bf2bb5ed2f43c193e7542e2a905b4a156f7cc204706cd26eeedc49b7ce670c";
+    "sha256:1fd9411d1f84b9c8c0d24350bc1fcf4434d3105ec03b41d1612975a7dbe32c9e";
 
 /// Where the skeleton fixture stands: on the first block of epoch 2 under
 /// [`skeleton_summary`], after fifty empty slots, so the export covers three
@@ -1588,7 +1588,7 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:fa3101937f3491ae614180384787cfeb1d2ffb7e522c4c731b60208472573917","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:e59d8b7ec7144216a9caab188b2de8d09d98c7c419e228a41131722796b81711","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":46}"#,
     r#"],"parameters":{"#,
-    r#""entities":{"asset":32,"script":28},"#,
+    r#""entities":{"asset":32,"script":28,"stake":29},"#,
     r#""indexKeyHash":"xxh3-64","#,
     r#""schemas":{"account-address-chunks":1,"account-addresses":1,"account-epochs":1,"account-stakes":0,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"datums":1,"drep-epochs":1,"drep-sightings":1,"dreps":2,"epochs":4,"eras":2,"first-mint-chunks":2,"first-mints":2,"first-script-chunks":1,"first-scripts":1,"gov":4,"leader-rewards":0,"member-rewards":0,"metadata-labels":2,"payment-address-chunks":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-mint-chunks":1,"pool-deposit-refunds":0,"pool-epochs":2,"pools":3,"proposals":4,"pruned-accounts":1,"utxos":1},"#,
     r#""shards":{"account-addresses":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"datums":16,"drep-sightings":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"pruned-accounts":1,"utxos":16},"#,
@@ -2556,7 +2556,7 @@ fn entity_layers_exist_only_where_an_entity_was_first_seen() {
     // The parameters declare every kind the publisher writes, layers or not.
     assert_eq!(
         inscription.parameters["entities"],
-        serde_json::json!({"asset": 32, "script": 28})
+        serde_json::json!({"asset": 32, "script": 28, "stake": 29})
     );
 }
 
