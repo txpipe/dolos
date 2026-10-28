@@ -739,7 +739,7 @@ fn the_seal_indexes_each_stake_address_at_its_first_tag() {
 /// walked, and a tag in them is found.
 #[test]
 fn stake_seen_reads_the_index_then_the_staged_tags() {
-    let (domain, tip, _) = sealed_chain();
+    let (domain, tip, genesis) = sealed_chain();
 
     let seen = |stake: &[u8]| account_addresses::stake_seen(&domain, stake).unwrap();
 
@@ -753,6 +753,16 @@ fn stake_seen_reads_the_index_then_the_staged_tags() {
     let late = [0xe1; 29];
     tag_stake(&domain, &late, tip);
     assert!(seen(&late));
+
+    // the oldest staged epoch, before the tip's: the walk starts there
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let mutable = dolos_cardano::mutable_slots(&genesis);
+    let (tip_epoch, _) = chain.slot_epoch(tip);
+    assert!(!is_sealable(&chain, mutable, tip_epoch - 1, tip_epoch));
+
+    let previous = [0xe4; 29];
+    tag_stake(&domain, &previous, chain.epoch_start(tip_epoch - 1));
+    assert!(seen(&previous));
 
     assert!(!seen(&[0xe2; 29]));
 }
