@@ -6,12 +6,7 @@ use pallas::{
     crypto::hash::Hasher,
     ledger::primitives::{conway::Anchor, PoolMetadata},
 };
-use std::{
-    convert::Infallible,
-    future::Future,
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{convert::Infallible, future::Future, path::Path, time::Duration};
 
 use crate::mapping::{
     anchor_fetch_budget, anchor_metadata_from_body, anchor_offchain_body,
@@ -614,8 +609,6 @@ where
     C: CacheStore,
     Fut: Future<Output = Result<Vec<u8>, Option<DrepsInnerMetadataError>>>,
 {
-    let started = Instant::now();
-
     let fetched = fetch.await.and_then(|body| {
         if location.holds_hash(&body) {
             return Ok(body);
@@ -629,15 +622,10 @@ where
         )))
     });
 
-    // an entry costs the time its fetch took
-    let cost = u64::try_from(started.elapsed().as_millis())
-        .unwrap_or(u64::MAX)
-        .max(1);
-
     match fetched {
-        Ok(body) => Ok(CacheEntry::new(body, cost)),
+        Ok(body) => Ok(CacheEntry::new(body, 0)),
         Err(failure) => {
-            keep_failure(&cache, &location, namespaces, &failure, cost).await;
+            keep_failure(&cache, &location, namespaces, &failure).await;
             Err(FetchFailed {
                 url: location.url,
                 error: failure,
@@ -652,7 +640,6 @@ async fn keep_failure<C: CacheStore>(
     location: &MetadataLocation,
     namespaces: MetadataCache,
     failure: &Option<DrepsInnerMetadataError>,
-    cost: u64,
 ) {
     let Ok(value) = serde_json::to_vec(failure) else {
         return;
@@ -660,7 +647,7 @@ async fn keep_failure<C: CacheStore>(
 
     let kept = cache
         .fill_inline(namespaces.failures, &location.failure_key(), async move {
-            Ok::<_, Infallible>(CacheEntry::new(value, cost))
+            Ok::<_, Infallible>(CacheEntry::new(value, 0))
         })
         .await;
 
@@ -704,7 +691,6 @@ pub(crate) async fn cache_pool_failure<C: CacheStore>(
         &MetadataLocation::from(metadata),
         POOL_CACHE,
         &Some(error),
-        1,
     )
     .await;
 }
@@ -1057,18 +1043,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entries_cost_the_time_their_fetch_took() {
+    async fn entries_cost_zero() {
         let cache = memory_cache();
         let metadata = pool_metadata(POOL_BODY);
-        let fetch = async {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            Ok(POOL_BODY.to_vec())
-        };
+        let fetch = async { Ok(POOL_BODY.to_vec()) };
 
         let entry = fill_body(cache, MetadataLocation::from(&metadata), POOL_CACHE, fetch)
             .await
             .unwrap();
-        assert!(entry.cost >= 20, "{}", entry.cost);
+        assert_eq!(entry.cost, 0);
     }
 
     #[tokio::test]
