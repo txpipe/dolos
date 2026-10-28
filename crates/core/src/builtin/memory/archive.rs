@@ -657,6 +657,17 @@ impl ArchiveStore for MemoryArchiveStore {
         Ok(tip)
     }
 
+    fn get_oldest(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let oldest = tables
+            .blocks
+            .first_key_value()
+            .and_then(|(slot, bodies)| bodies.first().map(|body| (*slot, body.clone())));
+
+        Ok(oldest)
+    }
+
     fn prune_history(
         &self,
         max_slots: u64,
@@ -873,5 +884,37 @@ impl ArchiveStore for MemoryArchiveStore {
         }
 
         Ok(MemoryEntityRecordIter(records.into_iter()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point(slot: BlockSlot) -> ChainPoint {
+        ChainPoint::Specific(slot, pallas::crypto::hash::Hash::new([slot as u8; 32]))
+    }
+
+    /// The oldest block is the first body of the first slot, read without
+    /// walking the range; an empty store holds none.
+    #[test]
+    fn oldest_block_is_the_first_body_of_the_first_slot() {
+        let store = MemoryArchiveStore::new(StateSchema::default());
+        assert_eq!(store.get_oldest().unwrap(), None);
+
+        let writer = store.start_writer().unwrap();
+        writer
+            .apply(&point(20), &Arc::new(b"main 20".to_vec()))
+            .unwrap();
+        writer
+            .apply(&point(10), &Arc::new(b"ebb 10".to_vec()))
+            .unwrap();
+        writer
+            .apply(&point(10), &Arc::new(b"main 10".to_vec()))
+            .unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(store.get_oldest().unwrap(), Some((10, b"ebb 10".to_vec())));
+        assert_eq!(store.get_tip().unwrap(), Some((20, b"main 20".to_vec())));
     }
 }

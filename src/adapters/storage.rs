@@ -1633,6 +1633,16 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         }
     }
 
+    fn get_oldest(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::get_oldest(s),
+            Self::LogsOnly(inner) => CoreArchiveStore::get_oldest(inner.as_ref()),
+            Self::Fjall(s) => CoreArchiveStore::get_oldest(s),
+            Self::EntityReads(_) => CoreArchiveStore::get_oldest(&NoOpArchiveStore),
+            Self::NoOp(s) => CoreArchiveStore::get_oldest(s),
+        }
+    }
+
     fn prune_history(
         &self,
         max_slots: u64,

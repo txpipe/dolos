@@ -227,6 +227,15 @@ impl<Inner: ArchiveStore> ArchiveStore for MeasuredArchive<Inner> {
         Ok(tip)
     }
 
+    fn get_oldest(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+        let oldest = self.inner.get_oldest()?;
+        if let Some((_, body)) = &oldest {
+            self.counters.block_reads.fetch_add(1, Ordering::Relaxed);
+            self.counters.body(body);
+        }
+        Ok(oldest)
+    }
+
     fn prune_history(
         &self,
         max_slots: u64,

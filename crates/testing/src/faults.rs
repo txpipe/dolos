@@ -527,6 +527,13 @@ impl ArchiveStore for FaultyArchiveStore {
         self.inner.get_tip()
     }
 
+    fn get_oldest(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.get_oldest()
+    }
+
     fn prune_history(
         &self,
         max_slots: u64,

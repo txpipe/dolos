@@ -365,6 +365,13 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError>;
 
+    /// The oldest block the archive holds: the first slot and the first body
+    /// at it. Reads one block; a backend whose [`Self::get_range`] is not
+    /// lazy overrides it.
+    fn get_oldest(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+        Ok(self.get_range(None, None)?.next())
+    }
+
     /// Prune history outside the retained slot window.
     ///
     /// `max_slots` is the retained window, from the first block to the tip.

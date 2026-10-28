@@ -11,8 +11,8 @@ use std::{
 
 use dolos_cardano::indexes::AsyncCardanoQueryExt as _;
 use dolos_core::{
-    ArchiveStore as _, BlockSlot, Domain, StateStore as _, Tag, TagEntry, TagOrder, TagStart,
-    TxHash, TxoRef, UtxoValue, TAG_ORDER_LEN,
+    ArchiveStore as _, BlockRefMeta, BlockSlot, Domain, StateStore as _, Tag, TagEntry, TagOrder,
+    TagStart, TxHash, TxoRef, UtxoValue, TAG_ORDER_LEN,
 };
 
 use crate::{
@@ -318,9 +318,8 @@ where
         .blocking(|domain| {
             let Some((slot, body)) = domain
                 .archive()
-                .get_range(None, None)
+                .get_oldest()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .next()
             else {
                 return Ok(None);
             };
@@ -459,7 +458,9 @@ fn entry_slot(entry: &TagEntry) -> BlockSlot {
 /// starts at the first row inside it and stops at the first one past it. The
 /// offset costs tag entries, as a plain listing's does; the page's rows are
 /// read, and so are the rows of the edge slots, whose block decides whether
-/// they are in the range at all.
+/// they are in the range at all. The blocks read for that decision are the
+/// ones the models report, so a block pruned after the walk passed it cannot
+/// drop a row from the page.
 pub async fn load_tag_page_in_heights<D, T>(
     domain: &Facade<D>,
     tag: &Tag,
@@ -490,6 +491,7 @@ where
 
     let mut walk = Walk::tag(tag.clone(), order, start);
     let mut rows = Rows::new(pagination.count);
+    let mut metas = HashMap::new();
     let mut skip = pagination.skip();
     let mut ended = false;
 
@@ -508,7 +510,11 @@ where
 
         // The entries come in runs on and off the edge zones. Off them the
         // offset is counted in entries, their values unread; on them every
-        // row is read and held against its block's height first.
+        // row is read and held against its block's height first. A ref the
+        // walk has counted, re-created by a fork ahead of it, counts no more,
+        // and a row a fork moved out of the range since its tag read is no
+        // row of the page.
+        let entries = rows.uncounted(entries);
         let mut rest = entries.as_slice();
 
         while !rest.is_empty() && !rows.full() {
@@ -522,12 +528,12 @@ where
 
             if on_edge {
                 let loaded = rows.load(domain, run.to_vec(), false).await?;
-                let heights = block_heights(domain, &loaded).await?;
+                metas.extend(block_metas(domain, &loaded).await?);
 
                 for (txo_ref, value) in loaded {
-                    match heights.get(&txo_ref.0) {
+                    match metas.get(&txo_ref.0) {
                         // outside the range: not a row of this listing
-                        Some(height) if !bounds.heights.holds(*height) => continue,
+                        Some(meta) if !bounds.heights.holds(meta.height) => continue,
                         // its block is gone: it keeps its place in the offset
                         // and drops out of the page, as a spent row does
                         None if skip > 0 => skip -= 1,
@@ -545,10 +551,12 @@ where
 
                 if !page.is_empty() {
                     let loaded = rows.load(domain, page.to_vec(), false).await?;
-                    let heights = block_heights(domain, &loaded).await?;
-                    let located = loaded
-                        .into_iter()
-                        .filter(|(txo_ref, _)| heights.contains_key(&txo_ref.0));
+                    metas.extend(block_metas(domain, &loaded).await?);
+                    let located = loaded.into_iter().filter(|(txo_ref, _)| {
+                        metas
+                            .get(&txo_ref.0)
+                            .is_some_and(|meta| bounds.heights.holds(meta.height))
+                    });
                     rows.rows.extend(located);
                     rows.rows.truncate(rows.count);
                 }
@@ -556,17 +564,17 @@ where
         }
     }
 
-    into_located_models(domain, rows.rows).await
+    located_models(domain, rows.rows, &metas)
 }
 
-/// The height of the creating block of each row of `rows` whose block the
-/// archive holds, with the row's transaction at its position, by tx hash. A
-/// row whose block is gone has no entry: it is left out of a page so the page
-/// is topped up from the next rows, as a spent row is.
-async fn block_heights<D>(
+/// The creating block of each row of `rows` whose block the archive holds,
+/// with the row's transaction at its position, by tx hash. A row whose block
+/// is gone has no entry: it is left out of a page so the page is topped up
+/// from the next rows, as a spent row is.
+async fn block_metas<D>(
     domain: &Facade<D>,
     rows: &[(TxoRef, Arc<UtxoValue>)],
-) -> Result<HashMap<TxHash, u64>, StatusCode>
+) -> Result<HashMap<TxHash, BlockRefMeta>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -575,16 +583,11 @@ where
         .filter_map(|(txo_ref, value)| Some((txo_ref.0, value.position()?)))
         .collect::<Vec<_>>();
 
-    let held = domain
+    domain
         .query()
         .block_meta_by_positions(positions)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(held
-        .into_iter()
-        .map(|(tx_hash, meta)| (tx_hash, meta.height))
-        .collect())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// What a filtered listing walks, in creation order.
@@ -819,6 +822,39 @@ where
         .await
 }
 
+/// The models of `rows`, in the order given, over the blocks `metas` holds:
+/// a row `metas` lacks is left out, for the models that report the creating
+/// block. No consumer is looked up: a live UTxO has none.
+fn located_models<D, T>(
+    domain: &Facade<D>,
+    rows: Vec<(TxoRef, Arc<UtxoValue>)>,
+    metas: &HashMap<TxHash, BlockRefMeta>,
+) -> Result<Vec<T>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    T: serde::Serialize,
+    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
+{
+    let chain = domain.get_chain_summary()?;
+
+    rows.into_iter()
+        .filter_map(|(txo_ref, value)| {
+            let meta = metas.get(&txo_ref.0)?.clone();
+            Some((txo_ref, value, meta))
+        })
+        .map(|(TxoRef(tx_hash, txo_idx), value, meta)| {
+            let output = MultiEraOutput::try_from(value.as_ref())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let block_time = chain.slot_time(meta.slot);
+
+            UtxoOutputModelBuilder::from_output(tx_hash, txo_idx, output)
+                .with_block_data(meta)
+                .with_block_time(block_time)
+                .into_model()
+        })
+        .collect()
+}
+
 /// The models of a page's rows, in the rows' order. The block hash comes from
 /// the block at each row's creation position; a row without one (genesis,
 /// configured) or whose block was pruned gets none.
@@ -831,33 +867,6 @@ where
 async fn into_models<D, T>(
     domain: &Facade<D>,
     rows: Vec<(TxoRef, Arc<UtxoValue>)>,
-) -> Result<Vec<T>, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-    T: serde::Serialize,
-    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
-{
-    build_models(domain, rows, false).await
-}
-
-/// As [`into_models`], leaving out every row whose creating block the archive
-/// does not hold, for the models that report that block.
-async fn into_located_models<D, T>(
-    domain: &Facade<D>,
-    rows: Vec<(TxoRef, Arc<UtxoValue>)>,
-) -> Result<Vec<T>, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-    T: serde::Serialize,
-    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
-{
-    build_models(domain, rows, true).await
-}
-
-async fn build_models<D, T>(
-    domain: &Facade<D>,
-    rows: Vec<(TxoRef, Arc<UtxoValue>)>,
-    located_only: bool,
 ) -> Result<Vec<T>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
@@ -889,7 +898,6 @@ where
                 let block_time = chain.slot_time(x.slot);
                 builder.with_block_data(x).with_block_time(block_time)
             }
-            None if located_only => continue,
             None => builder,
         };
 

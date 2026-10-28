@@ -1447,6 +1447,22 @@ mod tests {
             .unwrap()
     }
 
+    /// The oldest block is the first slot's body, whatever order the blocks
+    /// were written in; an empty store holds none.
+    #[test]
+    fn oldest_block_is_the_first_slot_held() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        assert_eq!(store.get_oldest().unwrap(), None);
+
+        write(&store, &[(20, body(20, 1)), (10, body(10, 1))]);
+
+        assert_eq!(
+            store.get_oldest().unwrap(),
+            Some((10, body(10, 1).to_vec()))
+        );
+        assert_eq!(store.get_tip().unwrap(), Some((20, body(20, 1).to_vec())));
+    }
+
     #[test]
     fn index_chunks_share_budget_and_cursor_and_read_fresh_values() {
         let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
