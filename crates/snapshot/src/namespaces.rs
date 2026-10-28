@@ -21,7 +21,7 @@ use dolos_cardano::model::{
     DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolEpochLog, PoolState, ProposalState,
+    PoolEpochLog, PoolState, ProposalState, PrunedAccountState,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -40,7 +40,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against the schemas directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 30] = [
+pub const NAMESPACES: [Namespace; 31] = [
     AccountAddressChunk::NS,
     AccountAddressSet::NS,
     AccountEpochLog::NS,
@@ -70,6 +70,7 @@ pub const NAMESPACES: [Namespace; 30] = [
     PoolEpochLog::NS,
     PoolState::NS,
     ProposalState::NS,
+    PrunedAccountState::NS,
     UTXOS,
 ];
 
@@ -95,7 +96,7 @@ pub const NAMESPACES: [Namespace; 30] = [
 /// `estart_tally`, and the frozen tally on each `PoolSnapshot`. Kept beside
 /// [`NAMESPACES`], in the same order, and held to it by
 /// `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 30] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (AccountAddressChunk::NS, 1),
     (AccountAddressSet::NS, 1),
     (AccountEpochLog::NS, 1),
@@ -125,6 +126,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 30] = [
     (PoolEpochLog::NS, 2),
     (PoolState::NS, 3),
     (ProposalState::NS, 4),
+    (PrunedAccountState::NS, 1),
     (UTXOS, 1),
 ];
 
@@ -158,6 +160,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         PendingRewardState::NS => exact::<<PendingRewardState as StateEntity>::Key>(key),
         PoolState::NS => exact::<<PoolState as StateEntity>::Key>(key),
         ProposalState::NS => exact::<<ProposalState as StateEntity>::Key>(key),
+        PrunedAccountState::NS => exact::<<PrunedAccountState as StateEntity>::Key>(key),
         FirstMintSet::NS => exact::<<FirstMintSet as StateEntity>::Key>(key),
         FirstScriptSet::NS => exact::<<FirstScriptSet as StateEntity>::Key>(key),
         PaymentAddressSet::NS => exact::<<PaymentAddressSet as StateEntity>::Key>(key),

@@ -4,8 +4,8 @@ use itertools::Itertools;
 
 use crate::{
     keys::{EntityKey, KeyCodec, KeyError, KeyRange, RangeOf},
-    ChainError, ChainPoint, Domain, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap, UtxoPosition,
-    UtxoSet, UtxoSetDelta, UtxoValue, TAG_ORDER_LEN,
+    ChainError, ChainLogic, ChainPoint, Domain, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap,
+    UtxoPosition, UtxoSet, UtxoSetDelta, UtxoValue, TAG_ORDER_LEN,
 };
 
 pub type Namespace = &'static str;
@@ -551,6 +551,11 @@ pub fn apply_delta_chunk<D: Domain>(
 /// captures the state immediately before its own apply, so multiple deltas
 /// keyed to the same entity must be reversed last-first to correctly walk
 /// back through the apply chain.
+///
+/// A delta can find its entity absent: its own apply removed it, or boundary
+/// work deleted it after the delta applied, and the undo of a later delta may
+/// have removed the one that came after it. The chain may restore the entity
+/// for the undo ([`ChainLogic::restore_for_undo`]).
 pub fn undo_delta_chunk<D: Domain>(
     entities: &mut EntityMap<D::Entity>,
     store: &D::State,
@@ -559,9 +564,15 @@ pub fn undo_delta_chunk<D: Domain>(
     load_missing_entities::<D>(entities, store, deltas)?;
 
     for delta in deltas.iter().rev() {
+        let key = delta.key();
+
         let entity = entities
-            .get_mut(&delta.key())
+            .get_mut(&key)
             .expect("entity loaded by load_missing_entities");
+
+        if entity.is_none() {
+            *entity = D::Chain::restore_for_undo(store, &key)?;
+        }
 
         delta.undo(entity);
     }
