@@ -7,16 +7,19 @@
 //!
 //! State is organized into four keyspaces based on access patterns:
 //!
-//! 1. **`state-cursor`**: Chain position tracking (single key-value)
+//! 1. **`state-cursor`**: Chain position tracking, and the compatibility
+//!    identity the store recorded when it was created
 //!
 //! 2. **`state-utxos`**: UTxO set storage Key: `[tx_hash:32][index:4]` (36
-//!    bytes) Value: `[era:2][cbor:...]`
+//!    bytes) Value: CBOR `[era, body, slot, tx_index]` (`[era, body]` for a
+//!    UTxO no block produced)
 //!
 //! 3. **`state-entities`**: All entity types with namespace hash prefix Key:
 //!    `[ns_hash:8][entity_key:var]` Value: entity CBOR bytes
 //!
 //! 4. **`state-tags`**: Live-UTxO tags (mutable: insert on produce, delete on
-//!    consume) Key: `[dim_hash:8][lookup_key:var][txo_ref:36]` -> empty
+//!    consume) Key: `[dim_hash:8][lookup_key:var][tag_order:10][txo_ref:36]` ->
+//!    empty, so a lookup key's refs sort by creation position
 //!
 //! This design reduces the number of LSM-tree segment files compared to using
 //! separate keyspaces per entity type, avoiding "too many open files" errors
@@ -28,27 +31,22 @@
 //! entity and UTxO keyspaces'.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use dolos_core::{
-    config::FjallStateConfig, ChainPoint, EntityKey, EntityValue, KeyRange, Namespace, StateError,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TxoRef,
-    UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
+    ChainPoint, EntityKey, EntityValue, KeyRange, Namespace, StateError,
+    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TagEntry, TagOrder,
+    TagStart, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
 };
-use fjall::{
-    compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
-    Readable,
-};
+use fjall::{Database, Keyspace, OwnedWriteBatch, PersistMode, Readable};
 
 pub mod entities;
 pub mod entity_keys;
 pub mod tags;
 pub mod utxos;
 
+use crate::preset::{Preset, Tuning};
 use crate::Error;
-
-/// Default cache size in MB
-const DEFAULT_CACHE_SIZE_MB: usize = 500;
 
 /// Keyspace names for state store
 mod keyspace_names {
@@ -62,25 +60,23 @@ mod keyspace_names {
     pub const TAGS: &str = "state-tags";
 }
 
-/// Compaction settings of the tags keyspace: what the standalone index store
-/// applied to it before it moved here, kept so its behavior does not change.
-const TAGS_L0_THRESHOLD: u8 = 8;
-const TAGS_MEMTABLE_SIZE_MB: usize = 128;
-
 /// Key for the cursor entry
 const CURSOR_KEY: &[u8] = &[0u8];
+
+/// Key for the compatibility identity, beside the cursor
+const IDENTITY_KEY: &[u8] = b"identity";
 
 /// Fjall-based state store implementation with unified entities keyspace.
 ///
 /// Uses 4 keyspaces:
-/// - `cursor`: Chain position tracking
+/// - `cursor`: Chain position tracking and the compatibility identity
 /// - `utxos`: UTxO set storage
 /// - `entities`: All entity types with namespace hash prefixes
 /// - `tags`: Live-UTxO tags, a projection of `utxos`
 #[derive(Clone)]
 pub struct StateStore {
     db: Database,
-    /// Cursor keyspace (chain position)
+    /// Cursor keyspace (chain position and compatibility identity)
     cursor: Keyspace,
     /// UTxO set keyspace
     utxos: Keyspace,
@@ -88,87 +84,43 @@ pub struct StateStore {
     entities: Keyspace,
     /// Live-UTxO tags keyspace
     tags: Keyspace,
-    /// Configuration
-    flush_on_commit: bool,
+    preset: Preset,
 }
 
 impl StateStore {
-    /// Open or create a state store at the given path
-    ///
-    /// # Parameters
-    /// - `path`: Directory path for the database
-    /// - `config`: Fjall state configuration
-    pub fn open(path: impl AsRef<Path>, config: &FjallStateConfig) -> Result<Self, Error> {
-        let cache_size = config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB);
-        let cache_bytes = (cache_size * 1024 * 1024) as u64;
+    /// Open or create a state store at the given path, tuned by `preset`.
+    pub fn open(path: impl AsRef<Path>, preset: Preset) -> Result<Self, Error> {
+        let tuning = preset.state();
+        let db = tuning.database.builder(path.as_ref()).open()?;
 
-        let mut builder = Database::builder(path.as_ref()).cache_size(cache_bytes);
+        let store = Self {
+            cursor: db.keyspace(keyspace_names::CURSOR, || tuning.cursor.options())?,
+            utxos: db.keyspace(keyspace_names::UTXOS, || tuning.utxos.options())?,
+            entities: db.keyspace(keyspace_names::ENTITIES, || tuning.entities.options())?,
+            tags: db.keyspace(keyspace_names::TAGS, || tuning.tags.options())?,
+            db,
+            preset,
+        };
 
-        // Apply optional max journal size (otherwise use Fjall default of 512 MiB)
-        if let Some(journal_mb) = config.max_journal_size {
-            builder = builder.max_journaling_size((journal_mb as u64) * 1024 * 1024);
-        }
+        tracing::info!(tuning = %store.tuning(), "state store opened");
 
-        // Apply optional worker threads (otherwise use Fjall default of min(cores, 4))
-        if let Some(threads) = config.worker_threads {
-            builder = builder.worker_threads(threads);
-        }
-
-        let db = builder.open()?;
-
-        // Use Fjall default (false) if not specified
-        let flush = config.flush_on_commit.unwrap_or(false);
-
-        Self::from_database(db, flush, config.l0_threshold, config.memtable_size_mb)
+        Ok(store)
     }
 
-    /// Create a state store from an existing database
-    fn from_database(
-        db: Database,
-        flush_on_commit: bool,
-        l0_threshold: Option<u8>,
-        memtable_size_mb: Option<usize>,
-    ) -> Result<Self, Error> {
-        // Build keyspace options with compaction settings
-        let build_opts = || {
-            let mut opts = KeyspaceCreateOptions::default();
+    /// The tuning the store opened with.
+    pub fn tuning(&self) -> Tuning {
+        let tuning = self.preset.state();
 
-            // Apply L0 threshold for more aggressive compaction if specified
-            if let Some(threshold) = l0_threshold {
-                opts = opts
-                    .compaction_strategy(Arc::new(Leveled::default().with_l0_threshold(threshold)));
-            }
-
-            // Apply memtable size if specified
-            if let Some(size_mb) = memtable_size_mb {
-                opts = opts.max_memtable_size((size_mb as u64) * 1024 * 1024);
-            }
-
-            opts
-        };
-
-        // db.keyspace expects a closure that returns KeyspaceCreateOptions
-        let cursor = db.keyspace(keyspace_names::CURSOR, build_opts)?;
-        let utxos = db.keyspace(keyspace_names::UTXOS, build_opts)?;
-        let entities = db.keyspace(keyspace_names::ENTITIES, build_opts)?;
-
-        let tags_opts = || {
-            KeyspaceCreateOptions::default()
-                .compaction_strategy(Arc::new(
-                    Leveled::default().with_l0_threshold(TAGS_L0_THRESHOLD),
-                ))
-                .max_memtable_size((TAGS_MEMTABLE_SIZE_MB as u64) * 1024 * 1024)
-        };
-        let tags = db.keyspace(keyspace_names::TAGS, tags_opts)?;
-
-        Ok(Self {
-            db,
-            cursor,
-            utxos,
-            entities,
-            tags,
-            flush_on_commit,
-        })
+        Tuning::new(
+            self.preset,
+            &tuning.database,
+            vec![
+                (keyspace_names::CURSOR, tuning.cursor),
+                (keyspace_names::UTXOS, tuning.utxos),
+                (keyspace_names::ENTITIES, tuning.entities),
+                (keyspace_names::TAGS, tuning.tags),
+            ],
+        )
     }
 
     /// Get a reference to the underlying database
@@ -179,6 +131,36 @@ impl StateStore {
     /// Get a reference to the entities keyspace
     pub fn entities_keyspace(&self) -> &Keyspace {
         &self.entities
+    }
+
+    /// The compatibility identity the store recorded when it was created.
+    pub fn identity(&self) -> Result<Option<String>, Error> {
+        let value = self.cursor.get(IDENTITY_KEY)?;
+
+        Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
+    /// Record the compatibility identity, synced to disk before it returns.
+    pub fn record_identity(&self, identity: &str) -> Result<(), Error> {
+        self.cursor.insert(IDENTITY_KEY, identity.as_bytes())?;
+        self.db.persist(PersistMode::SyncAll)?;
+
+        Ok(())
+    }
+
+    /// Whether the store holds a cursor or any row.
+    pub fn holds_data(&self) -> Result<bool, Error> {
+        if self.cursor.contains_key(CURSOR_KEY)? {
+            return Ok(true);
+        }
+
+        for keyspace in [&self.utxos, &self.entities, &self.tags] {
+            if !keyspace.is_empty()? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Per-keyspace disk footprint: `(name, bytes, path)`.
@@ -307,7 +289,7 @@ impl CoreStateWriter for StateWriter {
         batch.commit().map_err(Error::Fjall)?;
 
         // Flush journal if configured to prevent accumulation
-        if self.store.flush_on_commit {
+        if self.store.preset.state().database.flush_on_commit {
             self.store
                 .db
                 .persist(PersistMode::Buffer)
@@ -395,9 +377,54 @@ impl CoreStateStore for StateStore {
         tags::get_by_key(&snapshot, &self.tags, dimension, key).map_err(StateError::from)
     }
 
+    fn utxos_by_tag_page(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        order: TagOrder,
+        start: TagStart,
+        count: usize,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        tags::get_page_by_key(&snapshot, &self.tags, dimension, key, order, start, count)
+            .map_err(StateError::from)
+    }
+
+    fn utxos_with_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        entries: Vec<TagEntry>,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        tags::filter_by_key(&snapshot, &self.tags, dimension, key, entries)
+            .map_err(StateError::from)
+    }
+
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
         Ok(utxos::UtxosIterator::new(&snapshot, &self.utxos))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preset::{assert_fjall_holds, assert_memtables_hold};
+
+    #[test]
+    fn a_reopened_store_holds_its_preset() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let store = StateStore::open(dir.path(), Preset::Standard).unwrap();
+        store.shutdown().unwrap();
+        drop(store);
+
+        let store = StateStore::open(dir.path(), Preset::Standard).unwrap();
+        assert_fjall_holds(store.database(), &store.tuning());
+        assert_memtables_hold(store.database(), &store.tuning());
     }
 }

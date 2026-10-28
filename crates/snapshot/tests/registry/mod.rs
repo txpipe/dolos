@@ -57,11 +57,11 @@ pub mod ground_rules;
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepSightingState, DRepState,
-    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepEpochLog, DRepSightingState,
+    DRepState, DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolEpochLog, PoolState, ProposalState, ScriptState,
+    PoolEpochLog, PoolState, ProposalState,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -116,8 +116,9 @@ macro_rules! entity_entry {
     }};
 }
 
-/// The `utxos` value is `[era, body]`, composed by the profile rather than
-/// carried from a store, so its canary goes through the profile's own codec.
+/// The `utxos` value is `[era, body, slot, tx_index]`, composed by the profile
+/// rather than carried from a store, so its canary goes through the profile's
+/// own codec.
 fn encode_utxos() -> (Namespace, Vec<u8>) {
     let value = state::encode_utxo_value(&canaries::utxo_value())
         .expect("the utxo canary encodes")
@@ -177,6 +178,15 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
+            enc_drep_epochs,
+            DRepEpochLog,
+            canaries::drep_epoch_log,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/drep-epochs.rev1.hex"),
+            }]
+        ),
+        entity_entry!(
             enc_drep_sightings,
             DRepSightingState,
             canaries::drep_sighting_state,
@@ -190,7 +200,9 @@ pub fn registry() -> Vec<Entry> {
             DRepState,
             canaries::drep_state,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
+            // the value is unchanged. `voting_power` and `anchor`, which
+            // minibf now derives, leave revision 2 in place and `expiry`
+            // stops being optional: the v2 freeze resets every revision to 1.
             &[
                 Pinned {
                     rev: 1,
@@ -215,7 +227,11 @@ pub fn registry() -> Vec<Entry> {
             // it asserts.
             // Revision 3 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged. Revision 4 appends the epoch's active
-            // stake and the ESTART shards' carried tally.
+            // stake and the ESTART shards' carried tally. Field 20, the EWRAP
+            // finalize mark, joins revision 4 in place: the v2 freeze resets
+            // every revision to 1. The rolling and end stats fields no reader
+            // used, and the `set` and `go` copies of `rolling` and `pparams`,
+            // leave revision 4 in place for the same reason.
             &[
                 Pinned {
                     rev: 1,
@@ -345,8 +361,10 @@ pub fn registry() -> Vec<Entry> {
             // Revision 2 moves the key, unpadded and exact (decision 0051);
             // the value is unchanged. Revision 3 appends the stake,
             // delegators and live pledge each snapshot freezes with. Field
-            // 17, the calidus key, joins revision 3 in place: the v2 freeze
-            // resets every revision to 1.
+            // 17, the calidus key, joins revision 3 in place, and
+            // `blocks_minted_total` and `register_slot`, which minibf now
+            // derives, leave it in place: the v2 freeze resets every revision
+            // to 1.
             &[
                 Pinned {
                     rev: 1,
@@ -508,20 +526,13 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_scripts,
-            ScriptState,
-            canaries::script_state,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/scripts.rev1.hex"),
-            }]
-        ),
-        entity_entry!(
             enc_pool_epochs,
             PoolEpochLog,
             canaries::pool_epoch_log,
             // Revision 2 moves the key, unpadded and exact (decision 0051);
-            // the value is unchanged.
+            // the value is unchanged. `declared_pledge` and `operator_share`
+            // leave revision 2 in place: the v2 freeze resets every revision
+            // to 1.
             &[
                 Pinned {
                     rev: 1,
@@ -535,6 +546,8 @@ pub fn registry() -> Vec<Entry> {
         ),
         Entry {
             ns: UTXOS,
+            // The creation position (slot, tx index) joins revision 1 in
+            // place: the v2 freeze resets every revision to 1.
             history: &[Pinned {
                 rev: 1,
                 hex: include_str!("goldens/utxos.rev1.hex"),

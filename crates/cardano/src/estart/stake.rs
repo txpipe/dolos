@@ -8,38 +8,105 @@
 //! filters of the reward calculation: a pool counts only if it exists in E-1
 //! and is not retired there. The values rotate to `set` and `go` with the
 //! snapshot, where minibf and RUPD read them.
+//!
+//! The same shards write the opening epoch's account-epoch rows with the stake
+//! leg alone, from the distribution of E-2 (`mark` before rotation), so the
+//! two latest epochs have rows before EWRAP writes them in full.
 
 use std::collections::{BTreeMap, HashMap};
 
-use dolos_core::{ChainError, Domain, StateStore};
+use dolos_core::{
+    ArchiveStore as _, BlockSlot, ChainError, ChainPoint, Domain, LogRangeOf, StateStore,
+};
 use pallas::ledger::primitives::{Epoch, StakeCredential};
+use tracing::warn;
 
 use crate::{
-    estart::WorkContext, pallas_extras, AccountState, EpochState, EraKey, PoolHash, PoolState,
-    PoolTally,
+    estart::{ShardInputs, WorkContext},
+    ewrap::stake::{admits_pool, stake_leg, stake_snapshot_of},
+    load_era_summary, pallas_extras, AccountEpochLog, AccountKey, AccountState, ChainSummary,
+    EpochState, EraKey, PoolHash, PoolState, PoolTally,
 };
 
 /// Owner credential → the pools it owns.
 pub type PoolOwners = HashMap<StakeCredential, Vec<PoolHash>>;
 
-/// Index the declared owners of every pool, from its snapshot of `epoch`.
-pub fn pool_owners<D: Domain>(state: &D::State, epoch: Epoch) -> Result<PoolOwners, ChainError> {
-    let mut owners = PoolOwners::new();
+/// Index what every shard of the boundary closing `ended` reads, in one scan
+/// of the pools: their declared owners, from the snapshot of `ended`, and the
+/// distribution of the opening epoch's stake legs with the pools admitted to
+/// it. The opening epoch's full rows are written by the EWRAP that closes the
+/// epoch after it, so the gate is that boundary's.
+pub fn shard_inputs<D: Domain>(
+    state: &D::State,
+    ended: Epoch,
+    chain: &ChainSummary,
+) -> Result<ShardInputs, ChainError> {
+    let stake_snapshot = stake_snapshot_of(ended + 2, chain);
+    let stake_epoch = stake_snapshot.map(|(epoch, _)| epoch);
+
+    let mut inputs = ShardInputs {
+        stake_snapshot,
+        ..Default::default()
+    };
 
     for record in state.iter_entities_typed::<PoolState>(None)? {
         let (_, pool) = record?;
 
-        let Some(snapshot) = pool.snapshot.snapshot_at(epoch) else {
+        if stake_epoch.is_some_and(|epoch| admits_pool(&pool, epoch)) {
+            inputs.stake_pools.insert(pool.operator);
+        }
+
+        let Some(snapshot) = pool.snapshot.snapshot_at(ended) else {
             continue;
         };
 
         for owner in &snapshot.params.pool_owners {
             let credential = pallas_extras::keyhash_to_stake_cred(*owner);
-            owners.entry(credential).or_default().push(pool.operator);
+            inputs
+                .owners
+                .entry(credential)
+                .or_default()
+                .push(pool.operator);
         }
     }
 
-    Ok(owners)
+    Ok(inputs)
+}
+
+/// Warn when a rollback to `to` is about to cut account-epoch rows ESTART
+/// wrote: they key at the opening epoch's start, the archive drops every row
+/// at or after `to`'s slot, and ESTART does not run again for a boundary
+/// already crossed. The epoch pages an empty or partial distribution until
+/// the EWRAP closing the epoch after it writes the full rows.
+pub fn warn_on_dropped_rows<D: Domain>(domain: &D, to: &ChainPoint) {
+    let first = || -> Result<Option<BlockSlot>, ChainError> {
+        let range = LogRangeOf::<AccountKey>::slots(to.slot()..BlockSlot::MAX);
+        let mut rows = domain
+            .archive()
+            .iter_logs_typed::<AccountEpochLog>(Some(range))?;
+
+        Ok(rows.next().transpose()?.map(|(slot, _, _)| slot))
+    };
+
+    match first() {
+        Ok(None) => (),
+        Ok(Some(slot)) => {
+            let epoch = load_era_summary::<D>(domain.state())
+                .map(|chain| chain.slot_epoch(slot).0)
+                .ok();
+
+            warn!(
+                rollback_to = %to,
+                slot,
+                ?epoch,
+                "rollback drops the stake rows ESTART logged for the epoch; its stakes page \
+                 stays incomplete until the EWRAP closing the next epoch writes the full rows"
+            );
+        }
+        Err(error) => {
+            warn!(rollback_to = %to, %error, "could not check the rollback for ESTART's stake rows")
+        }
+    }
 }
 
 /// The protocol the distribution of the closing epoch counts stake under:
@@ -56,6 +123,10 @@ pub fn tally_protocol(ended: &EpochState, active_protocol: EraKey) -> EraKey {
 
 impl WorkContext {
     /// Add an account, as it stands before rotation, to its pool's tally.
+    ///
+    /// A delegator counts only with stake above zero: db-sync leaves the
+    /// others out of `epoch_stake`, which is what Blockfrost's
+    /// `delegators_count` counts. The pool keeps its entry either way.
     pub(crate) fn tally_account(
         &self,
         tally: &mut BTreeMap<PoolHash, PoolTally>,
@@ -75,9 +146,13 @@ impl WorkContext {
 
         let entry = tally.entry(*pool).or_default();
         entry.stake += stake;
-        entry.delegators += 1;
+
+        if stake > 0 {
+            entry.delegators += 1;
+        }
 
         let owns = self
+            .inputs
             .owners
             .get(&account.credential)
             .is_some_and(|pools| pools.contains(pool));
@@ -85,6 +160,16 @@ impl WorkContext {
         if owns {
             entry.live_pledge += stake;
         }
+    }
+
+    /// The opening epoch's stake-only row of an account, as it stands before
+    /// rotation: the leg the EWRAP one boundary later writes into the full
+    /// row, from the same snapshot, which `mark` holds until this boundary
+    /// rotates it to `set`.
+    pub(crate) fn account_epoch_row(&self, account: &AccountState) -> Option<AccountEpochLog> {
+        let (stake_epoch, protocol) = self.inputs.stake_snapshot?;
+
+        stake_leg(account, stake_epoch, protocol, &self.inputs.stake_pools)
     }
 
     /// The tally a pool's snapshot of the closing epoch freezes with, `None`

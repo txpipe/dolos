@@ -172,8 +172,8 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
                 .ok()?
                 .into_iter()
                 .map(|(k, v)| {
-                    let era = v.0.try_into().expect("era out of range");
-                    (k.into(), (era, v.1.clone()))
+                    let era = v.era().try_into().expect("era out of range");
+                    (k.into(), (era, v.cbor().to_vec()))
                 })
                 .collect();
 

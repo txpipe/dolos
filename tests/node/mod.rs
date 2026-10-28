@@ -109,29 +109,48 @@ impl Node {
     /// Apply synthetic blocks through the real domain, then close every store
     /// so the publishing process can open them.
     pub fn sync(&self) {
+        // Inside epoch zero, so the ledger stays epoch-coherent and the
+        // `strict` assertions in `dolos-cardano` hold — see the note on the
+        // export crate's own harness fixture.
+        self.sync_chain(
+            Arc::new(dolos_cardano::include::preview::load()),
+            GenesisConfig::in_dir(self.root.path()),
+            SyntheticBlockConfig {
+                block_count: 3,
+                txs_per_block: 2,
+                slot: 100,
+                ..Default::default()
+            },
+        );
+    }
+
+    /// [`Self::sync`] over `genesis`, which the files `files` names hold, and
+    /// the synthetic blocks `blocks` configures.
+    pub fn sync_chain(
+        &self,
+        genesis: Arc<dolos_core::Genesis>,
+        files: GenesisConfig,
+        blocks: SyntheticBlockConfig,
+    ) {
         dolos::storage::ensure_storage_path(&self.config).unwrap();
 
         let stores =
             dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
-        let genesis = Arc::new(dolos_cardano::include::preview::load());
 
-        // Inside epoch zero, so the ledger stays epoch-coherent and the
-        // `strict` assertions in `dolos-cardano` hold — see the note on the
-        // export crate's own harness fixture.
-        let (blocks, _, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
-            block_count: 3,
-            txs_per_block: 2,
-            slot: 100,
-            ..Default::default()
-        });
+        let (blocks, _, chain_config) = build_synthetic_blocks(blocks);
 
         // The synthetic chain's initial UTxOs are seeded through the chain
         // config's `custom_utxos`, so they are part of this chain's genesis.
         // Persist them into `dolos.toml`: a separate process replaying from
         // origin (`doctor rebuild-state`) runs genesis from the file and must
         // seed the same set. Only a custom network carries them, so the file
-        // becomes preview's genesis under a custom chain.
-        self.write_chain(&self.custom_chain(2, chain_config.custom_utxos.clone()));
+        // becomes the genesis under a custom chain.
+        self.write_chain(&ChainConfig::custom(CardanoConfig {
+            magic: genesis.network_magic(),
+            is_testnet: true,
+            genesis: files,
+            custom_utxos: chain_config.custom_utxos.clone(),
+        }));
 
         let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
             chain_config,
@@ -170,6 +189,83 @@ impl Node {
 
         domain.shutdown().unwrap();
         drop(domain);
+    }
+
+    /// Put the synced stores on the first block of epoch 1, as a
+    /// `stop_epoch` sync leaves them, so a stele can be cut from them.
+    ///
+    /// Appends two empty blocks chained onto the archive's tip — the last block
+    /// of epoch 0 and the first of epoch 1 — and moves the state cursor onto
+    /// the second. The ledger is not run over them; they are what the
+    /// archive shows about where the state stands.
+    ///
+    /// Returns the first block's parent, the evidence a plan reports.
+    pub fn stand_at_boundary(&self) -> dolos_core::ChainPoint {
+        use dolos_cardano::pallas::ledger::traverse::MultiEraBlock;
+        use dolos_core::{ArchiveStore as _, ArchiveWriter as _, StateWriter as _};
+        use dolos_testing::blocks::make_conway_block_with_prev;
+
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
+
+        let summary = dolos_cardano::eras::load_chain_summary_from_state(&stores.state).unwrap();
+        let start = summary.epoch_start(1);
+
+        let (_, tip) = stores.archive.get_tip().unwrap().unwrap();
+        let tip = MultiEraBlock::decode(&tip).unwrap();
+
+        let (last, last_body) =
+            make_conway_block_with_prev(start - 1, Some(tip.hash()), tip.number() + 1);
+        let (first, first_body) = make_conway_block_with_prev(start, last.hash(), tip.number() + 2);
+
+        let archive = stores.archive.start_writer().unwrap();
+        archive.apply(&last, &last_body).unwrap();
+        archive.apply(&first, &first_body).unwrap();
+        archive.commit().unwrap();
+
+        let state = stores.state.start_writer().unwrap();
+        state.set_cursor(first).unwrap();
+        state.commit().unwrap();
+
+        drop(stores);
+
+        last
+    }
+
+    /// Move the stores one block past the boundary [`Self::stand_at_boundary`]
+    /// put them on: an empty block a few slots later in epoch 1, chained onto
+    /// the cursor's, with the cursor on it. Where a node that kept syncing
+    /// past `stop_epoch` stands.
+    pub fn step_past_boundary(&self) {
+        use dolos_cardano::pallas::ledger::traverse::MultiEraBlock;
+        use dolos_core::{
+            ArchiveStore as _, ArchiveWriter as _, StateStore as _, StateWriter as _,
+        };
+        use dolos_testing::blocks::make_conway_block_with_prev;
+
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&self.config).unwrap();
+
+        let cursor = stores.state.read_cursor().unwrap().unwrap();
+        let body = stores
+            .archive
+            .get_block_by_slot(&cursor.slot())
+            .unwrap()
+            .unwrap();
+        let number = MultiEraBlock::decode(&body).unwrap().number();
+
+        let (next, next_body) =
+            make_conway_block_with_prev(cursor.slot() + 5, cursor.hash(), number + 1);
+
+        let archive = stores.archive.start_writer().unwrap();
+        archive.apply(&next, &next_body).unwrap();
+        archive.commit().unwrap();
+
+        let state = stores.state.start_writer().unwrap();
+        state.set_cursor(next).unwrap();
+        state.commit().unwrap();
+
+        drop(stores);
     }
 
     /// Write a directory stele as a restore fixture through the retained

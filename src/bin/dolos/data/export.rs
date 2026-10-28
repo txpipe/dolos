@@ -224,7 +224,9 @@ pub fn run(
     let mut archive = Builder::new(encoder);
 
     match &mut stores.archive {
-        ArchiveStoreBackend::LogsOnly(_) if !args.skip_sanitization => {
+        ArchiveStoreBackend::LogsOnly(_) | ArchiveStoreBackend::EntityReads(_)
+            if !args.skip_sanitization =>
+        {
             bail!("archive sanitization needs exclusive access to the archive database")
         }
         // The memory archive holds its blocks in process, so there is no
@@ -241,6 +243,7 @@ pub fn run(
         }
         ArchiveStoreBackend::Memory(_)
         | ArchiveStoreBackend::LogsOnly(_)
+        | ArchiveStoreBackend::EntityReads(_)
         | ArchiveStoreBackend::Fjall(_) => {}
         ArchiveStoreBackend::NoOp(_) => {
             bail!("`history.mode = \"none\"` keeps no archive to export")

@@ -1,9 +1,9 @@
 use dolos_core::ChainError;
 
 use crate::{
-    estart::{AccountId, PoolId, WorkContext},
+    estart::{PoolId, WorkContext},
     pots::{apply_delta, PotDelta, Pots},
-    AccountState, AccountTransition, EpochTransitionV2, PoolState, PoolTransition,
+    EpochTransitionV2, PoolState, PoolTransition,
 };
 
 pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
@@ -28,8 +28,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         proposal_deposits: rolling.proposal_deposits,
         drep_refunds: rolling.drep_refunds,
         treasury_donations: rolling.treasury_donations,
-        // Use effective MIR amounts from EndStats (only MIRs applied to registered accounts)
-        // Rolling stats contain total from MIR certificates, which includes unregistered accounts
+        // EndStats keeps only the MIRs applied to registered accounts
         reserve_mirs: end.reserve_mirs,
         treasury_mirs: end.treasury_mirs,
         treasury_withdrawals: end.treasury_withdrawals,
@@ -68,10 +67,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
             .saturating_sub(delta.consumed_incentives()),
         effective_reserve_mirs = end.reserve_mirs,
         effective_treasury_mirs = end.treasury_mirs,
-        invalid_reserve_mirs = end.invalid_reserve_mirs,
-        invalid_treasury_mirs = end.invalid_treasury_mirs,
         treasury_withdrawals = end.treasury_withdrawals,
-        invalid_treasury_withdrawals = end.invalid_treasury_withdrawals,
         pool_invalid_refund_count = end.pool_invalid_refund_count,
         proposal_invalid_refunds = end.proposal_invalid_refunds,
         treasury_donations = rolling.treasury_donations,
@@ -109,32 +105,19 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
     pots
 }
 
-/// Per-entity transition visitor for the snapshot rotation that ESTART
-/// performs. Emits deltas straight onto `WorkContext.deltas` (no internal
-/// `Vec` accumulator) so the per-account branch can be driven from a
-/// shard-scoped iteration without holding millions of deltas in RAM.
+/// Per-entity transition visitor for the snapshot rotation that ESTART's
+/// finalize pass performs on pools. Emits deltas straight onto
+/// `WorkContext.deltas`. Accounts rotate in the shards, without deltas
+/// (`WorkContext::commit_shard`).
 ///
 /// The single `EpochTransition` delta — which advances the epoch number,
 /// recomputes pots, and (optionally) migrates pparams across an era
 /// boundary — is emitted by `WorkContext::compute_global_deltas` (the
-/// finalize-phase entry point), not by `flush`. Sharded callers therefore
-/// run the per-account branch alone and let the finalize unit handle the
-/// closing global delta.
+/// finalize-phase entry point), not by `flush`.
 #[derive(Default)]
 pub struct BoundaryVisitor;
 
 impl super::BoundaryVisitor for BoundaryVisitor {
-    fn visit_account(
-        &mut self,
-        ctx: &mut super::WorkContext,
-        id: &AccountId,
-        _: &AccountState,
-    ) -> Result<(), ChainError> {
-        ctx.add_delta(AccountTransition::new(id.clone(), ctx.starting_epoch_no()));
-
-        Ok(())
-    }
-
     fn visit_pool(
         &mut self,
         ctx: &mut super::WorkContext,

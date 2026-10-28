@@ -8,7 +8,8 @@ use std::{
 
 use dolos_core::{
     archive::Skippable, ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, EntityKey,
-    EntityValue, LogKey, Namespace, StateError, StateStore, TagDimension, TxoRef, UtxoMap, UtxoSet,
+    EntityValue, LogKey, Namespace, StateError, StateStore, TagDimension, TagEntry, TagOrder,
+    TagStart, TxoRef, UtxoMap, UtxoSet,
 };
 use serde::Serialize;
 
@@ -158,6 +159,7 @@ impl<Inner: ArchiveStore> ArchiveStore for MeasuredArchive<Inner> {
     type SlotIter = CountedIter<Inner::SlotIter>;
     type TagIter = Inner::TagIter;
     type ExactIter = Inner::ExactIter;
+    type EntityRecordIter = Inner::EntityRecordIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         self.inner.start_writer()
@@ -249,6 +251,14 @@ impl<Inner: ArchiveStore> ArchiveStore for MeasuredArchive<Inner> {
         self.inner.slot_by_tx_hash(hash)
     }
 
+    fn entity_slots(
+        &self,
+        kind: dolos_core::EntityKind,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<BlockSlot>>, ArchiveError> {
+        self.inner.entity_slots(kind, keys)
+    }
+
     fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, ArchiveError> {
         self.counters.exact_lookups.fetch_add(1, Ordering::Relaxed);
         self.inner.slot_by_block_number(number)
@@ -277,6 +287,14 @@ impl<Inner: ArchiveStore> ArchiveStore for MeasuredArchive<Inner> {
 
     fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, ArchiveError> {
         self.inner.iter_exact_records(slots)
+    }
+
+    fn iter_entity_records(
+        &self,
+        kinds: &[dolos_core::EntityKind],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::EntityRecordIter, ArchiveError> {
+        self.inner.iter_entity_records(kinds, slots)
     }
 }
 
@@ -346,6 +364,36 @@ impl<Inner: StateStore> StateStore for MeasuredState<Inner> {
             .utxo_refs
             .fetch_add(refs.len() as u64, Ordering::Relaxed);
         Ok(refs)
+    }
+
+    fn utxos_by_tag_page(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        order: TagOrder,
+        start: TagStart,
+        count: usize,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        let entries = self
+            .inner
+            .utxos_by_tag_page(dimension, key, order, start, count)?;
+        self.counters
+            .utxo_refs
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        Ok(entries)
+    }
+
+    /// Each probed entry is one tag key read, counted with the refs.
+    fn utxos_with_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        entries: Vec<TagEntry>,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        self.counters
+            .utxo_refs
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        self.inner.utxos_with_tag(dimension, key, entries)
     }
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {

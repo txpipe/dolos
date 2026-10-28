@@ -70,8 +70,15 @@ pub trait TransitionDefault: Sized {
     fn next_value(current: Option<&Self>) -> Option<Self>;
 }
 
+/// A value versioned by epoch: the scheduled `next`, the `live` one and the
+/// snapshots of the three epochs before it.
+///
+/// `DEEP = false` ([`ShallowEpochValue`]) keeps `next`, `live` and `mark`
+/// only, for values nothing reads further back: `set` and `go` stay empty, so
+/// they cost nothing in state or in the archive, and their accessors do not
+/// exist.
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EpochValue<T> {
+pub struct EpochValue<T, const DEEP: bool = true> {
     /// The epoch representing the live version of the value
     #[n(0)]
     epoch: EpochPosition,
@@ -97,7 +104,10 @@ pub struct EpochValue<T> {
     go: Option<T>,
 }
 
-impl<T> EpochValue<T>
+/// An [`EpochValue`] without the `set` and `go` snapshots.
+pub type ShallowEpochValue<T> = EpochValue<T, false>;
+
+impl<T, const DEEP: bool> EpochValue<T, DEEP>
 where
     T: Clone + std::fmt::Debug,
 {
@@ -137,7 +147,8 @@ where
     /// Test-only raw constructor used by proptest strategies to populate every
     /// slot independently. Must stay behind `cfg(test)` so production code
     /// keeps going through the regular
-    /// `new`/`with_live`/`schedule`/`transition` API.
+    /// `new`/`with_live`/`schedule`/`transition` API. A shallow value drops
+    /// `set` and `go`.
     #[cfg(test)]
     pub(crate) fn from_parts(
         epoch: Epoch,
@@ -152,8 +163,8 @@ where
             live,
             next,
             mark,
-            set,
-            go,
+            set: set.filter(|_| DEEP),
+            go: go.filter(|_| DEEP),
         }
     }
 
@@ -198,14 +209,6 @@ where
 
     pub fn unwrap_live_mut(&mut self) -> &mut T {
         self.live.as_mut().expect("live value not initialized")
-    }
-
-    pub fn go(&self) -> Option<&T> {
-        self.go.as_ref()
-    }
-
-    pub fn set(&self) -> Option<&T> {
-        self.set.as_ref()
     }
 
     pub fn mark(&self) -> Option<&T> {
@@ -272,12 +275,31 @@ where
         assert_eq!(self.epoch + 1, next_epoch);
         let _ = next_epoch;
 
-        self.go = self.set.clone();
-        self.set = self.mark.clone();
+        if DEEP {
+            self.go = self.set.clone();
+            self.set = self.mark.clone();
+        } else {
+            self.go = None;
+            self.set = None;
+        }
+
         self.mark = self.live.clone();
         self.live = self.next.take();
 
         self.epoch += 1;
+    }
+}
+
+impl<T> EpochValue<T>
+where
+    T: Clone + std::fmt::Debug,
+{
+    pub fn go(&self) -> Option<&T> {
+        self.go.as_ref()
+    }
+
+    pub fn set(&self) -> Option<&T> {
+        self.set.as_ref()
     }
 
     /// Returns the value for the snapshot taken at the end of the given epoch.
@@ -303,7 +325,7 @@ where
     }
 }
 
-impl<T> EpochValue<T>
+impl<T, const DEEP: bool> EpochValue<T, DEEP>
 where
     T: TransitionDefault + std::fmt::Debug + Clone,
 {
@@ -344,18 +366,17 @@ pub(crate) mod testing {
     /// `EpochValue`s — or an entity and a delta — independently violate that
     /// invariant almost surely; rebasing them onto one drawn epoch restores
     /// it without giving up randomized slot contents.
-    pub fn rebase<T>(value: EpochValue<T>, epoch: Epoch) -> EpochValue<T>
+    pub fn rebase<T, const DEEP: bool>(
+        value: EpochValue<T, DEEP>,
+        epoch: Epoch,
+    ) -> EpochValue<T, DEEP>
     where
         T: Clone + std::fmt::Debug,
     {
-        EpochValue::from_parts(
-            epoch,
-            value.live().cloned(),
-            value.next().cloned(),
-            value.mark().cloned(),
-            value.set().cloned(),
-            value.go().cloned(),
-        )
+        EpochValue {
+            epoch: EpochPosition::Epoch(epoch),
+            ..value
+        }
     }
 
     /// Generate an `EpochValue<T>` where `live` is always populated (most
@@ -421,6 +442,38 @@ pub(crate) mod testing {
                 EpochValue::from_parts(epoch, Some(live), None, mark, set, go)
             })
     }
+
+    /// The shallow copy of a generated value, `set` and `go` dropped.
+    fn shallow<T>(value: EpochValue<T>) -> ShallowEpochValue<T> {
+        EpochValue {
+            epoch: value.epoch,
+            next: value.next,
+            live: value.live,
+            mark: value.mark,
+            set: None,
+            go: None,
+        }
+    }
+
+    /// Shallow variant of `any_epoch_value`.
+    pub fn any_shallow_epoch_value<T>(
+        inner: BoxedStrategy<T>,
+    ) -> impl Strategy<Value = ShallowEpochValue<T>>
+    where
+        T: Clone + std::fmt::Debug + 'static,
+    {
+        any_epoch_value(inner).prop_map(shallow)
+    }
+
+    /// Shallow variant of `any_epoch_value_no_next`.
+    pub fn any_shallow_epoch_value_no_next<T>(
+        inner: BoxedStrategy<T>,
+    ) -> impl Strategy<Value = ShallowEpochValue<T>>
+    where
+        T: Clone + std::fmt::Debug + 'static,
+    {
+        any_epoch_value_no_next(inner).prop_map(shallow)
+    }
 }
 
 #[cfg(test)]
@@ -433,6 +486,23 @@ mod tests {
         assert!(value.is_at_epoch(1223));
         assert!(!value.is_at_epoch(1222));
         assert!(!value.is_at_epoch(1224));
+    }
+
+    #[test]
+    fn a_shallow_value_keeps_no_set_or_go() {
+        let mut shallow = ShallowEpochValue::with_live(0, 0u32);
+        let mut deep = EpochValue::with_live(0, 0u32);
+
+        for epoch in 1..=4 {
+            shallow.schedule(epoch - 1, Some(epoch as u32));
+            shallow.transition(epoch);
+            deep.schedule(epoch - 1, Some(epoch as u32));
+            deep.transition(epoch);
+        }
+
+        assert_eq!((shallow.live(), shallow.mark()), (Some(&4), Some(&3)));
+        assert_eq!((shallow.set, shallow.go), (None, None));
+        assert_eq!((deep.set(), deep.go()), (Some(&2), Some(&1)));
     }
 
     #[test]

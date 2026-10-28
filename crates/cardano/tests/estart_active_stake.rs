@@ -7,25 +7,34 @@
 //! values to an independent scan of the accounts, with the filters the reward
 //! calculation applies, across several boundaries, through RUPD's reads and
 //! the `PoolEpochLog` rows it writes, and across a crash at every commit of
-//! the boundary. The harness is `ToyDomain` on the devnet genesis, and every
-//! work unit runs through `execute_work_unit`, the executor the node runs.
+//! the boundary. The account rows the shards rotate are held to the bytes
+//! the per-account `AccountTransition` deltas stored, straight through and
+//! across the same crashes. The harness is `ToyDomain` on the devnet
+//! genesis, and every work unit runs through `execute_work_unit`, the
+//! executor the node runs.
 
 use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{
-    sync::execute_work_unit, ArchiveStore as _, BrokenInvariant, ChainError, Domain, DomainError,
-    Genesis, StateStore as _, StateWriter as _,
+    sync::execute_work_unit, ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _,
+    BrokenInvariant, ChainError, Domain, DomainError, Entity as _, EntityDelta as _, EntityKey,
+    FixedNamespace, Genesis, RangeOf, StateStore as _, StateWriter as _, Tag,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
     toy_domain::ToyDomain,
 };
-use pallas::ledger::primitives::{conway::RationalNumber, Epoch, StakeCredential};
+use pallas::ledger::primitives::{
+    conway::{DRep, RationalNumber},
+    Epoch, StakeCredential,
+};
 
 use dolos_cardano::{
-    estart::EstartWorkUnit, rupd::RupdWorkUnit, rupd::StakeSnapshot, AccountKey, AccountState,
-    CardanoWorkUnit, DRepDelegation, EpochState, EpochValue, EraKey, PoolDelegation, PoolEpochLog,
-    PoolHash, PoolKey, PoolParams, PoolSnapshot, PoolState, PoolTally, Stake,
+    estart::EstartWorkUnit, ewrap::EwrapWorkUnit, indexes::archive_dimensions, rupd::RupdWorkUnit,
+    rupd::StakeSnapshot, AccountEpochLog, AccountKey, AccountState, AccountTransition,
+    CardanoWorkUnit, DRepDelegation, EndStats, EpochState, EpochValue, EraBoundary, EraKey,
+    EraState, PendingRewardState, PoolDelegation, PoolEpochLog, PoolHash, PoolKey, PoolParams,
+    PoolSnapshot, PoolState, PoolTally, Stake,
 };
 
 fn key(byte: u8) -> StakeCredential {
@@ -85,8 +94,6 @@ fn pool(operator: u8, owners: &[u8], is_retired: bool, epoch: Epoch) -> PoolStat
     PoolState {
         operator: pool_hash(operator),
         snapshot: EpochValue::with_live(epoch, snapshot),
-        blocks_minted_total: 0,
-        register_slot: 0,
         retiring_epoch: None,
         deposit: 0,
         calidus: None,
@@ -237,8 +244,10 @@ fn protocol_of_snapshot(domain: &ToyDomain, stake_epoch: Epoch) -> EraKey {
 /// The test oracle: the distribution of `stake_epoch` from a scan of every
 /// account, with the rules of the reward calculation. A pool counts when it
 /// has a snapshot of the stake epoch and is not retired there; every pool
-/// with a snapshot gets a row, zeros included. The live pledge is the stake
-/// of the accounts that own, in that snapshot, the pool they delegate to.
+/// with a snapshot gets a row, zeros included. A delegator counts when its
+/// stake is above zero, as db-sync's `epoch_stake` does. The live pledge is
+/// the stake of the accounts that own, in that snapshot, the pool they
+/// delegate to.
 fn scanned(domain: &ToyDomain, stake_epoch: Epoch) -> BTreeMap<PoolHash, PoolTally> {
     let protocol = protocol_of_snapshot(domain, stake_epoch);
     let mut out = BTreeMap::new();
@@ -272,7 +281,10 @@ fn scanned(domain: &ToyDomain, stake_epoch: Epoch) -> BTreeMap<PoolHash, PoolTal
 
         let tally = out.get_mut(pool).unwrap();
         tally.stake += stake;
-        tally.delegators += 1;
+
+        if stake > 0 {
+            tally.delegators += 1;
+        }
 
         let owns = match &account.credential {
             StakeCredential::AddrKeyhash(hash) => snapshot.params.pool_owners.contains(hash),
@@ -576,6 +588,53 @@ fn scheduled_pool_changes_wait_for_the_next_distribution() {
     assert_eq!(frozen_tally(&domain, epoch + 1, OWNED).live_pledge, 35);
 }
 
+/// A delegator with no stake adds no stake and no delegator: db-sync leaves
+/// it out of `epoch_stake`, which is what Blockfrost's `delegators_count`
+/// counts. A pool whose only delegator has no stake freezes zeros.
+#[test]
+fn zero_stake_delegators_are_not_counted() {
+    const STAKED: u8 = 0xa6;
+    const UNSTAKED: u8 = 0xa7;
+
+    let domain = seeded(devnet());
+
+    write(&domain, |writer| {
+        for operator in [STAKED, UNSTAKED] {
+            let pool = pool(operator, &[], false, 0);
+            writer
+                .write_entity_typed(&PoolKey(pool.operator), &pool)
+                .unwrap();
+        }
+
+        for (credential, pool, utxo_sum) in [
+            (key(0x50), STAKED, 300),
+            (key(0x51), STAKED, 400),
+            (key(0x52), STAKED, 0),
+            (key(0x53), UNSTAKED, 0),
+        ] {
+            let mut state = account(credential.clone(), Some(pool), utxo_sum, 0, 0);
+            state.stake.unwrap_live_mut().rewards_sum = 0;
+
+            writer
+                .write_entity_typed(&AccountKey::from(&credential), &state)
+                .unwrap();
+        }
+    });
+
+    open_next_epoch(&domain).unwrap();
+    assert_frozen_matches_the_scan(&domain, 0);
+
+    assert_eq!(
+        frozen_tally(&domain, 0, STAKED),
+        PoolTally {
+            stake: 700,
+            delegators: 2,
+            live_pledge: 0,
+        }
+    );
+    assert_eq!(frozen_tally(&domain, 0, UNSTAKED), PoolTally::default());
+}
+
 /// RUPD refuses a stake epoch whose pool snapshot ESTART never froze, rather
 /// than reading its stake as zero.
 #[test]
@@ -613,6 +672,417 @@ fn rupd_refuses_an_unfrozen_stake_snapshot() {
         "{:?}",
         result.err()
     );
+}
+
+/// A pool and its delegator from the genesis staking section, which
+/// `genesis/staking.rs` loads with no frozen tally.
+const GENESIS_POOL: u8 = 0xb1;
+const GENESIS_DELEGATOR: u8 = 0xb2;
+const GENESIS_FUNDS: u64 = 2_000;
+
+fn devnet_with_genesis_pool() -> Arc<Genesis> {
+    let mut genesis = dolos_cardano::include::devnet::load();
+
+    let pool = hex::encode([GENESIS_POOL; 28]);
+    let delegator = hex::encode([GENESIS_DELEGATOR; 28]);
+
+    let vrf = hex::encode([GENESIS_POOL; 32]);
+
+    let staking = format!(
+        r#"{{
+            "pools": {{
+                "{pool}": {{
+                    "cost": 0,
+                    "margin": 0.0,
+                    "pledge": 0,
+                    "publicKey": "{pool}",
+                    "relays": [],
+                    "rewardAccount": {{
+                        "credential": {{ "keyHash": "{delegator}" }},
+                        "network": "Testnet"
+                    }},
+                    "vrf": "{vrf}"
+                }}
+            }},
+            "stake": {{ "{delegator}": "{pool}" }}
+        }}"#
+    );
+
+    genesis.shelley.staking = Some(serde_json::from_str(&staking).unwrap());
+
+    // a testnet base address whose stake part is the delegator
+    let address = format!("00{}{delegator}", hex::encode([0x01; 28]));
+    genesis
+        .shelley
+        .initial_funds
+        .get_or_insert_with(Default::default)
+        .insert(address, GENESIS_FUNDS);
+
+    Arc::new(genesis)
+}
+
+/// Run EWRAP over the boundary that closes the current epoch.
+fn wrap_the_epoch(domain: &ToyDomain) {
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let slot = summary.epoch_start(epoch_state(domain).number + 1);
+
+    let mut work = CardanoWorkUnit::Ewrap(Box::new(EwrapWorkUnit::new(slot, domain.genesis())));
+
+    execute_work_unit(domain, &mut work).unwrap();
+}
+
+fn pool_epoch_logs(domain: &ToyDomain, epoch: Epoch) -> BTreeMap<PoolHash, PoolEpochLog> {
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let slot = summary.epoch_start(epoch);
+
+    pools(domain)
+        .into_keys()
+        .filter_map(|pool| {
+            let log = domain
+                .archive()
+                .read_log_typed::<PoolEpochLog>(slot, &PoolKey(pool))
+                .unwrap()?;
+            Some((pool, log))
+        })
+        .collect()
+}
+
+fn account_epoch_logs(
+    domain: &ToyDomain,
+    epoch: Epoch,
+) -> BTreeMap<StakeCredential, AccountEpochLog> {
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let slot = summary.epoch_start(epoch);
+
+    all_accounts(domain)
+        .into_iter()
+        .filter_map(|account| {
+            let log = domain
+                .archive()
+                .read_log_typed::<AccountEpochLog>(slot, &AccountKey::from(&account.credential))
+                .unwrap()?;
+            Some((account.credential, log))
+        })
+        .collect()
+}
+
+/// Overwrite `epoch`'s account rows, which ESTART wrote, with a row neither
+/// writer produces. EWRAP skips an account it has nothing for rather than
+/// delete its row, so an EWRAP run after this leaves the row in place only
+/// where it wrote nothing, and every other row read afterwards is its own.
+fn overwrite_estarts_rows(domain: &ToyDomain, epoch: Epoch) {
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let slot = summary.epoch_start(epoch);
+    let rows = account_epoch_logs(domain, epoch);
+    assert!(!rows.is_empty(), "ESTART wrote no rows for epoch {epoch}");
+
+    let writer = domain.archive().start_writer().unwrap();
+
+    for credential in rows.keys() {
+        writer
+            .write_log_typed(slot, &AccountKey::from(credential), &overwritten())
+            .unwrap();
+    }
+
+    writer.commit().unwrap();
+}
+
+fn overwritten() -> AccountEpochLog {
+    AccountEpochLog {
+        active_stake: Some(u64::MAX),
+        ..Default::default()
+    }
+}
+
+/// The first stake epoch (`first_shelley + 2`) logs the distribution of the
+/// first Shelley epoch, genesis pools included, as every later epoch logs
+/// its own: a `PoolEpochLog` per pool with rewards 0, and the stake leg of
+/// each delegator's `AccountEpochLog`. No reward is computed for it. RUPD
+/// runs in every epoch and ESTART at every boundary; EWRAP runs at the one
+/// that closes the RUPD epoch of the first stake epoch, since the store's
+/// pots do not fund its accounts and pools, over ESTART's rows overwritten so
+/// that the rows checked are EWRAP's.
+#[test]
+fn the_first_stake_epoch_logs_its_distribution() {
+    let domain = seeded(devnet_with_genesis_pool());
+
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let first_shelley = summary.first_shelley_epoch();
+    let first_stake = first_shelley + 2;
+
+    let genesis_pool = pools(&domain).remove(&pool_hash(GENESIS_POOL)).unwrap();
+    assert_eq!(genesis_pool.snapshot.unwrap_live().tally(), None);
+
+    let mut first_stake_distribution = None;
+
+    loop {
+        let epoch = epoch_state(&domain).number;
+
+        if epoch == first_shelley + 1 {
+            first_stake_distribution = Some(scanned(&domain, first_shelley));
+        }
+
+        run_rupd(&domain);
+
+        if epoch == first_shelley + 3 {
+            break;
+        }
+
+        assert!(
+            pool_epoch_logs(&domain, epoch.saturating_sub(1)).is_empty(),
+            "RUPD of epoch {epoch} logged a distribution"
+        );
+
+        open_next_epoch(&domain).unwrap();
+    }
+
+    let pending = domain
+        .state()
+        .iter_entities_typed::<PendingRewardState>(None)
+        .unwrap()
+        .count();
+    assert_eq!(pending, 0, "rewards computed against the genesis snapshot");
+
+    overwrite_estarts_rows(&domain, first_stake);
+    wrap_the_epoch(&domain);
+
+    // `RETIRED` is retired in every snapshot by now, so it has left state for
+    // the final-row log, and RUPD logs no empty row for it.
+    let mut expected = first_stake_distribution.unwrap();
+    assert_eq!(
+        expected.remove(&pool_hash(RETIRED)),
+        Some(PoolTally::default())
+    );
+    assert!(!pools(&domain).contains_key(&pool_hash(RETIRED)));
+
+    let genesis_tally = expected.get(&pool_hash(GENESIS_POOL)).unwrap();
+    assert_eq!(genesis_tally.stake, GENESIS_FUNDS);
+    assert_eq!(genesis_tally.delegators, 1);
+
+    let pool_logs = pool_epoch_logs(&domain, first_stake);
+    assert_eq!(
+        pool_logs.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>()
+    );
+
+    for (pool, tally) in &expected {
+        let log = &pool_logs[pool];
+
+        assert_eq!(log.total_stake, tally.stake, "pool {pool}");
+        assert_eq!(log.delegators_count, tally.delegators, "pool {pool}");
+        assert_eq!(log.live_pledge, tally.live_pledge, "pool {pool}");
+        assert_eq!(log.total_rewards, 0, "pool {pool}");
+    }
+
+    let account_logs = account_epoch_logs(&domain, first_stake);
+
+    let genesis_row = &account_logs[&key(GENESIS_DELEGATOR)];
+    assert_eq!(genesis_row.active_stake, Some(GENESIS_FUNDS));
+    assert_eq!(genesis_row.pool_id, Some(pool_hash(GENESIS_POOL)));
+    assert_eq!(genesis_row.member_reward, None);
+    assert!(genesis_row.leader_rewards.is_empty());
+
+    let staked: u64 = account_logs
+        .values()
+        .filter_map(|row| row.active_stake)
+        .sum();
+    assert_eq!(staked, total(&expected));
+}
+
+/// ESTART opening the first stake epoch writes its rows with the stake leg
+/// alone, from the first Shelley epoch's snapshot, and the EWRAP closing the
+/// epoch after it writes the same rows under the same keys: the first stake
+/// epoch carries no reward, so its full rows are the stake-only ones, account
+/// for account, genesis delegator included. EWRAP runs over ESTART's rows
+/// overwritten, so the two sides are compared and not one with itself.
+#[test]
+fn estart_writes_the_first_stake_epochs_rows_as_ewrap_does() {
+    let domain = seeded(devnet_with_genesis_pool());
+
+    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let first_shelley = summary.first_shelley_epoch();
+    let first_stake = first_shelley + 2;
+
+    let mut estart_rows = None;
+
+    loop {
+        let epoch = epoch_state(&domain).number;
+
+        run_rupd(&domain);
+
+        if epoch == first_shelley + 3 {
+            break;
+        }
+
+        open_next_epoch(&domain).unwrap();
+
+        if epoch_state(&domain).number == first_stake {
+            estart_rows = Some(account_epoch_logs(&domain, first_stake));
+        }
+    }
+
+    let estart_rows = estart_rows.unwrap();
+
+    let genesis_row = &estart_rows[&key(GENESIS_DELEGATOR)];
+    assert_eq!(genesis_row.active_stake, Some(GENESIS_FUNDS));
+    assert_eq!(genesis_row.pool_id, Some(pool_hash(GENESIS_POOL)));
+    assert!(estart_rows
+        .values()
+        .all(|row| row.member_reward.is_none() && row.leader_rewards.is_empty()));
+
+    overwrite_estarts_rows(&domain, first_stake);
+    wrap_the_epoch(&domain);
+
+    assert_eq!(account_epoch_logs(&domain, first_stake), estart_rows);
+}
+
+/// Credit `blocks` blocks of the current epoch to `operator`, or to no pool,
+/// as the roll does: in the epoch's and the pool's live counts, and in the
+/// archive's `pool_blocks` tags. Without an operator they are blocks no
+/// registered pool minted, which the reward calculation pays no one for.
+fn mint(domain: &ToyDomain, operator: Option<u8>, blocks: u32) {
+    let mut epoch = epoch_state(domain);
+    let rolling = epoch.rolling.unwrap_live_mut();
+    let earlier = rolling.blocks_minted;
+    rolling.blocks_minted += blocks;
+    rolling.non_overlay_blocks_minted += blocks;
+
+    if let Some(operator) = operator {
+        let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+        // past the slot RUPD runs at
+        let first = chain.epoch_start(epoch.number) + 2 + u64::from(earlier);
+
+        let deltas: Vec<_> = (first..first + u64::from(blocks))
+            .map(|slot| ArchiveIndexDelta {
+                slot,
+                block_hash: [&slot.to_be_bytes()[..], &[0; 24]].concat(),
+                block_number: Some(slot),
+                tx_hashes: vec![],
+                tags: vec![Tag::new(
+                    archive_dimensions::POOL_BLOCKS,
+                    pool_hash(operator).to_vec(),
+                )],
+            })
+            .collect();
+
+        let writer = domain.archive().start_writer().unwrap();
+        writer.apply_index(&deltas).unwrap();
+        writer.commit().unwrap();
+    }
+
+    let pool = operator.map(|operator| {
+        let mut pool = pools(domain).remove(&pool_hash(operator)).unwrap();
+        pool.snapshot.unwrap_live_mut().blocks_minted += blocks;
+        pool
+    });
+
+    write(domain, |writer| {
+        writer.write_entity_typed(&(), &epoch).unwrap();
+
+        if let Some(pool) = &pool {
+            writer
+                .write_entity_typed(&PoolKey(pool.operator), pool)
+                .unwrap();
+        }
+    });
+}
+
+fn pending_rewards(domain: &ToyDomain) -> u64 {
+    domain
+        .state()
+        .iter_entities_typed::<PendingRewardState>(None)
+        .unwrap()
+        .map(|x| x.unwrap().1.total_value())
+        .sum()
+}
+
+/// Drive a devnet store to the RUPD of `rupd_epoch`, with `blocks` minted in
+/// the epoch before it, by `operator` or by no registered pool. Every
+/// boundary on the way runs ESTART alone. A whale delegates to `OWNED`, so
+/// its share of the supply earns more than a lovelace.
+fn run_rupd_after_blocks(rupd_epoch: Epoch, operator: Option<u8>, blocks: u32) -> ToyDomain {
+    let domain = seeded(devnet());
+
+    let whale = account(key(0x30), Some(OWNED), 1_000_000_000_000_000, 0, 0);
+    write(&domain, |writer| {
+        writer
+            .write_entity_typed(&AccountKey::from(&whale.credential), &whale)
+            .unwrap();
+    });
+
+    loop {
+        let epoch = epoch_state(&domain).number;
+
+        run_rupd(&domain);
+
+        if epoch == rupd_epoch {
+            return domain;
+        }
+
+        if epoch + 1 == rupd_epoch {
+            mint(&domain, operator, blocks);
+        }
+
+        open_next_epoch(&domain).unwrap();
+    }
+}
+
+/// Dolos pays no rewards for the first stake epoch, even where the ledger
+/// would pay the delegators (a post-Babbage store whose pool has credited
+/// non-overlay blocks, as driven here): its RUPD reads the first Shelley
+/// snapshot for the logs and computes nothing against it. The boundary closing
+/// it leaves the pots as on a chain where no pool earned anything, while one
+/// epoch later the same blocks are paid.
+#[test]
+fn the_first_stake_epoch_pays_no_rewards() {
+    const BLOCKS: u32 = 10;
+
+    let first_shelley = {
+        let domain = seeded(devnet());
+        dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+            .unwrap()
+            .first_shelley_epoch()
+    };
+    let first_stake = first_shelley + 2;
+
+    // the RUPD of the first stake epoch, after `OWNED` minted, and the path
+    // with the same epoch counts and no pool to pay
+    let earned = run_rupd_after_blocks(first_stake + 1, Some(OWNED), BLOCKS);
+    let unearned = run_rupd_after_blocks(first_stake + 1, None, BLOCKS);
+
+    let incentives = epoch_state(&earned).incentives.expect("incentives");
+    assert!(incentives.available_rewards > 0, "{incentives:?}");
+    assert_eq!(epoch_state(&unearned).incentives, Some(incentives));
+
+    assert_eq!(
+        pending_rewards(&earned),
+        0,
+        "rewards for the first stake epoch"
+    );
+
+    let logs = pool_epoch_logs(&earned, first_stake);
+    assert!(logs[&pool_hash(OWNED)].total_stake > 0);
+    assert!(logs.values().all(|x| x.total_rewards == 0), "{logs:?}");
+
+    // ESTART resets the end stats, so they are read between the two
+    let [earned_end, unearned_end] = [&earned, &unearned].map(|domain| {
+        wrap_the_epoch(domain);
+        let end = epoch_state(domain).end.expect("end stats");
+        open_next_epoch(domain).unwrap();
+        format!("{end:?}")
+    });
+
+    assert_ne!(earned_end, format!("{:?}", EndStats::default()));
+    assert_eq!(earned_end, unearned_end, "end stats");
+
+    let (earned, unearned) = (epoch_state(&earned), epoch_state(&unearned));
+    assert_eq!(earned.number, first_stake + 2);
+    assert_eq!(earned.initial_pots, unearned.initial_pots);
+
+    // the control: the same blocks, one epoch later, are paid
+    let paid = run_rupd_after_blocks(first_stake + 2, Some(OWNED), BLOCKS);
+    assert!(pending_rewards(&paid) > 0, "no rewards one epoch later");
+    assert!(pool_epoch_logs(&paid, first_stake + 1)[&pool_hash(OWNED)].total_rewards > 0);
 }
 
 fn snapshot_of(
@@ -666,5 +1136,324 @@ fn a_crash_at_any_commit_freezes_the_same_distribution() {
     assert!(
         crash_after > 1,
         "the boundary committed too little to crash between shards"
+    );
+}
+
+/// A pool's lifetime blocks as minibf derives them, uncached and through the
+/// cache, after the cached entry has been filled at the same tip.
+fn lifetime_blocks(domain: &ToyDomain, operator: u8) -> (u64, u64) {
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let pool = pools(domain).remove(&pool_hash(operator)).unwrap();
+
+    let uncached = dolos_cardano::pool_history::unsealed_blocks(domain, &chain, &pool, 0).unwrap();
+
+    let cached = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(dolos_cardano::pool_history::blocks_minted(
+            domain,
+            &chain,
+            vec![pool],
+        ))
+        .unwrap();
+
+    (uncached, cached[0])
+}
+
+/// A pool's lifetime blocks count every block it minted, read at both sides
+/// of every RUPD. RUPD writes the closed epoch's `pool-epochs` row a while
+/// into the next epoch, and ESTART has already moved that epoch's count from
+/// `live` to `mark`, so from ESTART until RUPD the count is in `mark` alone.
+#[test]
+fn lifetime_blocks_count_every_minted_block_around_rupd() {
+    let first_shelley =
+        dolos_cardano::eras::load_era_summary::<ToyDomain>(seeded(devnet()).state())
+            .unwrap()
+            .first_shelley_epoch();
+
+    assert_lifetime_blocks_around_rupd(seeded(devnet()), first_shelley + 2);
+}
+
+/// The blocks of the first Shelley epochs count too, though RUPD logs no
+/// `pool-epochs` row for an epoch before the first stake snapshot, on a
+/// chain that opens in Shelley and on one with Byron epochs before it.
+#[test]
+fn lifetime_blocks_count_the_blocks_of_the_first_shelley_epochs() {
+    for byron_epochs in [0, 4] {
+        let domain = seeded(devnet());
+        prefix_byron_epochs(&domain, byron_epochs);
+
+        let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+        let unlogged = dolos_cardano::pool_history::unlogged_epochs(&chain);
+
+        assert_eq!(unlogged.start, byron_epochs, "the first Shelley epoch");
+        assert!(!unlogged.is_empty(), "some epoch has no row");
+        assert_lifetime_blocks_around_rupd(domain, unlogged.start);
+    }
+}
+
+/// Rewrite the store's eras so that `epochs` Byron epochs open the chain,
+/// as on preprod: Byron, with half the devnet's epoch length and twice its
+/// slot length, then one Shelley epoch, then the devnet's protocol, at the
+/// devnet's lengths. Unequal lengths make an era-unaware slot bound miss the
+/// first Shelley epochs. Preprod's twentieth would put the first boundaries
+/// inside the devnet protocol's nonce stability window, which `strict`
+/// refuses.
+fn prefix_byron_epochs(domain: &ToyDomain, epochs: Epoch) {
+    if epochs == 0 {
+        return;
+    }
+
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let edge = chain.edge().clone();
+
+    let mut byron = EraState {
+        start: EraBoundary {
+            epoch: 0,
+            slot: 0,
+            timestamp: edge.start.timestamp,
+        },
+        end: None,
+        epoch_length: edge.epoch_length / 2,
+        slot_length: edge.slot_length * 2,
+        protocol: 1,
+    };
+    byron.define_end(epochs);
+
+    let mut shelley = EraState {
+        start: byron.end.clone().unwrap(),
+        end: None,
+        protocol: 2,
+        ..edge.clone()
+    };
+    shelley.define_end(epochs + 1);
+
+    let current = EraState {
+        start: shelley.end.clone().unwrap(),
+        end: None,
+        ..edge.clone()
+    };
+
+    write(domain, |writer| {
+        for (protocol, era) in [(1, &byron), (2, &shelley), (edge.protocol, &current)] {
+            writer
+                .write_entity_typed(&EraKey::from(protocol), era)
+                .unwrap();
+        }
+    });
+}
+
+/// Mints blocks to `OWNED` in every epoch from `first_minted` on, reading
+/// its lifetime blocks after each ESTART and each RUPD.
+fn assert_lifetime_blocks_around_rupd(domain: ToyDomain, first_minted: Epoch) {
+    dolos_cardano::pool_history::register_pool_caches(&domain).unwrap();
+
+    let whale = account(key(0x30), Some(OWNED), 1_000_000_000_000_000, 0, 0);
+    write(&domain, |writer| {
+        writer
+            .write_entity_typed(&AccountKey::from(&whale.credential), &whale)
+            .unwrap();
+    });
+
+    let first_shelley = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+        .unwrap()
+        .first_shelley_epoch();
+    let first_stake = first_shelley + 2;
+
+    let mut minted = 0;
+    let mut read_in_mark = 0;
+
+    loop {
+        let epoch = epoch_state(&domain).number;
+        let unlogged = pools(&domain)[&pool_hash(OWNED)]
+            .snapshot
+            .mark()
+            .is_some_and(|mark| mark.blocks_minted > 0);
+
+        assert_eq!(
+            lifetime_blocks(&domain, OWNED),
+            (minted, minted),
+            "after ESTART into {epoch}"
+        );
+
+        if unlogged {
+            read_in_mark += 1;
+        }
+
+        run_rupd(&domain);
+
+        assert_eq!(
+            lifetime_blocks(&domain, OWNED),
+            (minted, minted),
+            "after RUPD of {epoch}"
+        );
+
+        if epoch == first_stake + 4 {
+            break;
+        }
+
+        if epoch >= first_minted {
+            let blocks = 3 + 2 * (epoch - first_minted) as u32;
+            mint(&domain, Some(OWNED), blocks);
+            minted += u64::from(blocks);
+        }
+
+        open_next_epoch(&domain).unwrap();
+    }
+
+    assert!(read_in_mark > 0, "no read between ESTART and RUPD");
+}
+
+/// Every stored account row, key and value bytes, in key order.
+fn account_rows(domain: &ToyDomain) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let range = RangeOf::<AccountKey>::all().into_raw();
+
+    domain
+        .state()
+        .iter_entities(<AccountState as FixedNamespace>::NS, range)
+        .unwrap()
+        .map(|x| {
+            let (key, value) = x.unwrap();
+            (key.as_ref().to_vec(), value)
+        })
+        .collect()
+}
+
+/// The rows the per-account `AccountTransition` deltas stored: each row
+/// rotated into `next_epoch` by the delta's `apply`, then encoded.
+fn rotated_by_deltas(domain: &ToyDomain, next_epoch: Epoch) -> Vec<(Vec<u8>, Vec<u8>)> {
+    domain
+        .state()
+        .iter_entities_typed::<AccountState>(None)
+        .unwrap()
+        .map(|x| {
+            let (key, account) = x.unwrap();
+
+            let mut entity = Some(account);
+            AccountTransition::new(key.clone(), next_epoch).apply(&mut entity);
+
+            let (_, value) = AccountState::encode_entity(&entity.unwrap());
+            (EntityKey::of(&key).as_ref().to_vec(), value)
+        })
+        .collect()
+}
+
+/// Schedule a change for the next epoch on some accounts, so their rotation
+/// takes a scheduled value instead of carrying the live one.
+fn schedule_changes(domain: &ToyDomain) {
+    let epoch = epoch_state(domain).number;
+
+    let mut scheduled = Vec::new();
+
+    for mut account in all_accounts(domain) {
+        if account.credential == key(0x80) {
+            account
+                .pool
+                .schedule(epoch, Some(PoolDelegation::Pool(pool_hash(EMPTY))));
+        }
+
+        if account.credential == script(0x90) {
+            account
+                .drep
+                .schedule(epoch, Some(DRepDelegation::Delegated(DRep::Abstain)));
+        }
+
+        scheduled.push(account);
+    }
+
+    write(domain, |writer| {
+        for account in &scheduled {
+            writer
+                .write_entity_typed(&AccountKey::from(&account.credential), account)
+                .unwrap();
+        }
+    });
+}
+
+/// The shards' one streamed pass stores, at every boundary, the bytes the
+/// per-account `AccountTransition` deltas stored.
+#[test]
+fn the_shard_pass_stores_the_rows_the_transition_deltas_stored() {
+    let domain = seeded(devnet());
+
+    for round in 0..4u64 {
+        churn(&domain, round);
+
+        if round % 2 == 1 {
+            schedule_changes(&domain);
+        }
+
+        let expected = rotated_by_deltas(&domain, epoch_state(&domain).number + 1);
+        assert_eq!(expected.len(), accounts().len());
+
+        open_next_epoch(&domain).unwrap();
+
+        assert_eq!(
+            account_rows(&domain),
+            expected,
+            "account rows after the boundary opening epoch {}",
+            round + 1
+        );
+    }
+}
+
+/// A boundary interrupted after any number of commits, and resumed, stores
+/// the same account bytes as one that ran straight through. The committed
+/// shards are not rotated again, and the others rotate once from rows the
+/// interrupted run left untouched.
+#[test]
+fn a_resumed_boundary_stores_the_same_account_bytes() {
+    let prepare = || {
+        let domain = seeded(devnet());
+        open_next_epoch(&domain).unwrap();
+        churn(&domain, 0);
+        schedule_changes(&domain);
+        domain
+    };
+
+    let clean = prepare();
+    open_next_epoch(&clean).unwrap();
+
+    let expected = account_rows(&clean);
+    let opened = epoch_state(&clean).number;
+
+    let mut interrupted_between_shards = 0;
+    let mut crash_after = 0;
+
+    loop {
+        let domain = prepare();
+
+        let crashing =
+            FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(crash_after));
+
+        if open_next_epoch(&crashing).is_ok() {
+            // past the last commit, so every crash point has been covered
+            break;
+        }
+
+        let rotated = all_accounts(&domain)
+            .iter()
+            .filter(|x| x.stake.epoch() == Some(opened))
+            .count();
+
+        if rotated > 0 && rotated < accounts().len() {
+            interrupted_between_shards += 1;
+        }
+
+        open_next_epoch(&domain).expect("resume");
+
+        assert_eq!(
+            account_rows(&domain),
+            expected,
+            "account rows after a crash following commit {crash_after}"
+        );
+
+        crash_after += 1;
+    }
+
+    assert!(
+        interrupted_between_shards > 1,
+        "no crash left the accounts partly rotated"
     );
 }

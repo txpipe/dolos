@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use dolos_core::{cbor, BlockSlot, Genesis, NsKey};
 use pallas::{
@@ -15,7 +12,7 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    epoch_value::{EpochValue, TransitionDefault},
+    epoch_value::{ShallowEpochValue, TransitionDefault},
     eras::EraTransition,
     pools::{PoolHash, PoolTally},
     pparams::PParamsSet,
@@ -113,20 +110,6 @@ pub struct RollingStats {
     #[n(7)]
     pub withdrawals: Lovelace,
 
-    /// Pools registered during the epoch.
-    ///
-    /// **Ordered**, and that is load-bearing rather than incidental: this
-    /// value's minicbor encoding is copied verbatim into a stele's
-    /// `state-epochs` and `log-epochs` layers, so an iteration order that
-    /// varies per instance — as a hash container's does — would make two
-    /// honest publishers of the same ledger disagree about the bytes of
-    /// identical state (ADR-004, "Determinism depends on deterministic entity
-    /// encoding"). Any container reachable from an entity value has to order
-    /// by content; `crates/snapshot/tests/field_registry.rs` is what holds
-    /// this one to it.
-    #[n(8)]
-    pub registered_pools: BTreeSet<PoolHash>,
-
     #[n(13)]
     pub blocks_minted: u32,
 
@@ -139,27 +122,14 @@ pub struct RollingStats {
     #[n(16)]
     pub drep_refunds: Lovelace,
 
-    // TODO: deprecate
-    #[n(17)]
-    pub __proposal_refunds: Lovelace,
-
     #[n(18)]
     #[cbor(default)]
     pub treasury_donations: Lovelace,
-
-    #[n(19)]
-    #[cbor(default)]
-    pub reserve_mirs: Lovelace,
 
     /// Blocks minted in non-overlay slots (includes pools + genesis delegates).
     #[n(20)]
     #[cbor(default)]
     pub non_overlay_blocks_minted: u32,
-
-    /// MIR sourced from treasury.
-    #[n(21)]
-    #[cbor(default)]
-    pub treasury_mirs: Lovelace,
 
     /// Number of transactions across all blocks minted this epoch.
     #[n(22)]
@@ -230,42 +200,17 @@ pub struct EndStats {
     #[cbor(default)]
     pub reserve_mirs: Lovelace,
 
-    /// MIRs to unregistered accounts (stays in treasury, not transferred).
-    #[n(13)]
-    #[cbor(default)]
-    pub invalid_treasury_mirs: Lovelace,
-
-    /// MIRs to unregistered accounts (stays in reserves, not transferred).
-    #[n(14)]
-    #[cbor(default)]
-    pub invalid_reserve_mirs: Lovelace,
-
     /// Treasury withdrawals enacted by governance at the boundary and
     /// delivered to registered accounts (moved treasury → rewards).
     #[n(15)]
     #[cbor(default)]
     pub treasury_withdrawals: Lovelace,
 
-    /// Enacted treasury withdrawals whose target account cannot receive
-    /// them (unregistered at the boundary) — discarded, the value stays
-    /// in treasury.
-    #[n(16)]
-    #[cbor(default)]
-    pub invalid_treasury_withdrawals: Lovelace,
-
     #[n(6)]
     pub proposal_invalid_refunds: Lovelace,
 
     #[n(7)]
     pub proposal_refunds: Lovelace,
-
-    // TODO: deprecate
-    #[n(8)]
-    pub __drep_deposits: Lovelace,
-
-    // TODO: deprecate
-    #[n(9)]
-    pub __drep_refunds: Lovelace,
 }
 
 /// Snapshot of a sharded phase's progress + total within a single epoch
@@ -295,11 +240,12 @@ pub struct EpochState {
     #[n(1)]
     pub initial_pots: Pots,
 
+    /// Read at `next`, `live` and `mark` only, so shallow, like `pparams`.
     #[n(2)]
-    pub rolling: EpochValue<RollingStats>,
+    pub rolling: ShallowEpochValue<RollingStats>,
 
     #[n(9)]
-    pub pparams: EpochValue<PParamsSet>,
+    pub pparams: ShallowEpochValue<PParamsSet>,
 
     #[n(10)]
     pub largest_stable_slot: BlockSlot,
@@ -324,10 +270,10 @@ pub struct EpochState {
     /// state, set by `EpochTransition` during ESTART). `Some(p)` means
     /// shards `0..p.committed` have committed; `p.total` is the boundary's
     /// shard count, captured at the first shard's commit. Each
-    /// `EWrapProgress` (Ewrap) advances `committed`; `EpochWrapUp`
-    /// (Ewrap) clears the field back to `None`. The persisted `total`
-    /// guards against a config change mid-boundary breaking the in-flight
-    /// pipeline.
+    /// `EWrapProgress` (Ewrap) advances `committed`; `EpochTransitionV2`
+    /// (ESTART finalize) clears the field back to `None`. The persisted
+    /// `total` guards against a config change mid-boundary breaking the
+    /// in-flight pipeline.
     #[n(15)]
     #[cbor(default)]
     pub ewrap_progress: Option<ShardProgress>,
@@ -366,6 +312,15 @@ pub struct EpochState {
     #[n(19)]
     #[cbor(default)]
     pub estart_tally: Option<BTreeMap<PoolHash, PoolTally>>,
+
+    /// Whether Ewrap's finalize pass has committed in this boundary.
+    /// `EpochWrapUpV3` sets it in finalize's own state commit and
+    /// `EpochTransitionV2` clears it. `ewrap_progress` at `committed ==
+    /// total` only says the shards are done: until this is set, finalize is
+    /// still owed.
+    #[n(20)]
+    #[cbor(default)]
+    pub ewrap_finalized: bool,
 }
 
 impl Default for EpochState {
@@ -373,8 +328,8 @@ impl Default for EpochState {
         Self {
             number: 0,
             initial_pots: Pots::default(),
-            rolling: EpochValue::new(0),
-            pparams: EpochValue::new(0),
+            rolling: ShallowEpochValue::new(0),
+            pparams: ShallowEpochValue::new(0),
             largest_stable_slot: 0,
             previous_nonce_tail: None,
             nonces: None,
@@ -385,6 +340,7 @@ impl Default for EpochState {
             rupd_progress: None,
             active_stake: None,
             estart_tally: None,
+            ewrap_finalized: false,
         }
     }
 }
@@ -396,7 +352,7 @@ impl SingletonEntity for EpochState {}
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-    use crate::model::epoch_value::testing::any_epoch_value;
+    use crate::model::epoch_value::testing::any_shallow_epoch_value;
     use crate::model::pparams::testing::any_pparams_set;
     use crate::model::testing as root;
     use crate::pots::testing::{any_epoch_incentives, any_pots};
@@ -456,14 +412,9 @@ pub(crate) mod testing {
                 unspendable_to_reserves: 0,
                 treasury_mirs: 0,
                 reserve_mirs: 0,
-                invalid_treasury_mirs: 0,
-                invalid_reserve_mirs: 0,
                 treasury_withdrawals: 0,
-                invalid_treasury_withdrawals: 0,
                 proposal_invalid_refunds: 0,
                 proposal_refunds: 0,
-                __drep_deposits: 0,
-                __drep_refunds: 0,
             }
         }
     }
@@ -472,8 +423,8 @@ pub(crate) mod testing {
         pub fn any_epoch_state()(
             number in root::any_epoch(),
             initial_pots in any_pots(),
-            rolling in any_epoch_value(any_rolling_stats().boxed()),
-            pparams in any_epoch_value(any_pparams_set().boxed()),
+            rolling in any_shallow_epoch_value(any_rolling_stats().boxed()),
+            pparams in any_shallow_epoch_value(any_pparams_set().boxed()),
             largest_stable_slot in root::any_slot(),
             previous_nonce_tail in prop::option::of(root::any_hash_32()),
             nonces in prop::option::of(any_nonces()),
@@ -488,9 +439,10 @@ pub(crate) mod testing {
             rupd_progress in prop::option::of(
                 (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
             ),
-            (active_stake, estart_tally) in (
+            (active_stake, estart_tally, ewrap_finalized) in (
                 prop::option::of(root::any_lovelace()),
                 prop::option::of(any_estart_tally()),
+                any::<bool>(),
             ),
         ) -> EpochState {
             // ESTART rotates rolling/pparams in lockstep with the epoch
@@ -511,6 +463,7 @@ pub(crate) mod testing {
                 rupd_progress,
                 active_stake,
                 estart_tally,
+                ewrap_finalized,
             }
         }
     }
@@ -534,22 +487,17 @@ pub struct EpochStatsUpdate {
     pub(crate) new_accounts: u64,
     pub(crate) removed_accounts: u64,
     pub(crate) withdrawals: u64,
-    pub(crate) registered_pools: BTreeSet<PoolHash>,
     pub(crate) drep_deposits: Lovelace,
     pub(crate) proposal_deposits: Lovelace,
     pub(crate) drep_refunds: Lovelace,
     pub(crate) treasury_donations: Lovelace,
-    pub(crate) reserve_mirs: Lovelace,
-    pub(crate) treasury_mirs: Lovelace,
     pub(crate) non_overlay_blocks_minted: u32,
     pub(crate) tx_count: u64,
     pub(crate) output: cbor::U128,
     pub(crate) block_slot: u64,
 
-    // undo: did apply create rolling.live from default? Plus the pre-union pool set, which
-    // can't be recovered by set subtraction (a pool in both prev and self would be removed).
+    // undo: did apply create rolling.live from default?
     pub(crate) was_new: bool,
-    pub(crate) prev_registered_pools: BTreeSet<PoolHash>,
 
     // Undo data for the first and last block slots. A min or max operation is
     // not reversible by arithmetic. So `apply` keeps the earlier values here,
@@ -572,8 +520,6 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         self.was_new = live_slot.is_none();
         let stats = live_slot.get_or_insert_default();
 
-        self.prev_registered_pools = stats.registered_pools.clone();
-
         stats.blocks_minted += 1;
 
         if self.utxo_delta > 0 {
@@ -590,8 +536,6 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.drep_deposits += self.drep_deposits;
         stats.drep_refunds += self.drep_refunds;
         stats.treasury_donations += self.treasury_donations;
-        stats.reserve_mirs += self.reserve_mirs;
-        stats.treasury_mirs += self.treasury_mirs;
         stats.non_overlay_blocks_minted += self.non_overlay_blocks_minted;
         stats.tx_count += self.tx_count;
         stats.output += self.output;
@@ -605,16 +549,10 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         // the epoch. `last_block_slot` moves forward to the most recent block.
         // Blocks roll in slot order, so these values are the correct min and
         // max.
-        if stats.first_block_slot == 0 {
+        if stats.blocks_minted == 1 {
             stats.first_block_slot = self.block_slot;
         }
         stats.last_block_slot = self.block_slot;
-
-        stats.registered_pools = stats
-            .registered_pools
-            .union(&self.registered_pools)
-            .cloned()
-            .collect();
     }
 
     fn undo(&self, entity: &mut Option<EpochState>) {
@@ -644,16 +582,12 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.drep_deposits -= self.drep_deposits;
         stats.drep_refunds -= self.drep_refunds;
         stats.treasury_donations -= self.treasury_donations;
-        stats.reserve_mirs -= self.reserve_mirs;
-        stats.treasury_mirs -= self.treasury_mirs;
         stats.non_overlay_blocks_minted -= self.non_overlay_blocks_minted;
         stats.tx_count -= self.tx_count;
         stats.output -= self.output;
 
         stats.first_block_slot = self.prev_first_block_slot;
         stats.last_block_slot = self.prev_last_block_slot;
-
-        stats.registered_pools = self.prev_registered_pools.clone();
     }
 }
 
@@ -711,7 +645,7 @@ pub struct PParamsUpdate {
     pub(crate) to_update: PParamsSet,
 
     // undo
-    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_pparams: Option<ShallowEpochValue<PParamsSet>>,
 }
 
 impl PParamsUpdate {
@@ -764,8 +698,8 @@ pub struct EpochWrapUp {
     pub(crate) stats: EndStats,
 
     // undo
-    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
-    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_rolling: Option<ShallowEpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<ShallowEpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
 }
 
@@ -834,8 +768,8 @@ pub struct EpochWrapUpV2 {
     pub(crate) stats: EndStats,
 
     // undo
-    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
-    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_rolling: Option<ShallowEpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<ShallowEpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
     pub(crate) prev_ewrap_progress: Option<ShardProgress>,
 }
@@ -887,22 +821,24 @@ impl dolos_core::EntityDelta for EpochWrapUpV2 {
 /// V3 of `EpochWrapUp` — drops the `prev_ewrap_progress` undo field
 /// because `apply` no longer mutates `EpochState.ewrap_progress`. After
 /// V3 commits, `ewrap_progress` is left at `Some(total, total)` from the
-/// last `EWrapProgress` shard delta and serves as the unambiguous
-/// "EWRAP done, ESTART pending finalize" marker. `EpochTransitionV2`
-/// (run at ESTART finalize) is the only remaining writer that clears
-/// the field; that single-writer invariant is what lets a crash
+/// last `EWrapProgress` shard delta, and `ewrap_finalized` is set: the
+/// two together are the "EWRAP done, ESTART pending finalize" marker.
+/// `EpochTransitionV2` (run at ESTART finalize) is the only writer that
+/// clears them; that single-writer invariant is what lets a crash
 /// between EWRAP finalize and ESTART finalize be recovered cleanly:
-/// the next boundary trigger sees `committed == total` and short-
-/// circuits the EwrapWorkUnit instead of replaying it over partially-
-/// rotated state.
+/// the next boundary trigger sees both and short-circuits the
+/// EwrapWorkUnit instead of replaying it over partially-rotated state.
+/// A crash before V3 commits leaves `ewrap_finalized` unset, so the
+/// trigger runs finalize again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochWrapUpV3 {
     pub(crate) stats: EndStats,
 
     // undo
-    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
-    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_rolling: Option<ShallowEpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<ShallowEpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
+    pub(crate) prev_ewrap_finalized: bool,
     // No prev_ewrap_progress — apply does not mutate ewrap_progress.
 }
 
@@ -913,6 +849,7 @@ impl EpochWrapUpV3 {
             prev_rolling: None,
             prev_pparams: None,
             prev_end: None,
+            prev_ewrap_finalized: false,
         }
     }
 }
@@ -930,10 +867,12 @@ impl dolos_core::EntityDelta for EpochWrapUpV3 {
         self.prev_rolling = Some(entity.rolling.clone());
         self.prev_pparams = Some(entity.pparams.clone());
         self.prev_end = entity.end.clone();
+        self.prev_ewrap_finalized = entity.ewrap_finalized;
 
         entity.rolling.scheduled_or_default();
         entity.pparams.scheduled_or_default();
         entity.end = Some(self.stats.clone());
+        entity.ewrap_finalized = true;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -941,6 +880,7 @@ impl dolos_core::EntityDelta for EpochWrapUpV3 {
         entity.rolling = self.prev_rolling.clone().expect("apply captured rolling");
         entity.pparams = self.prev_pparams.clone().expect("apply captured pparams");
         entity.end = self.prev_end.clone();
+        entity.ewrap_finalized = self.prev_ewrap_finalized;
     }
 }
 
@@ -1098,8 +1038,8 @@ impl dolos_core::EntityDelta for EWrapProgress {
 /// in-flight pipeline robust against a config change between shards (e.g.
 /// across a crash and restart).
 ///
-/// The shard's per-account work lands directly on each `AccountState` via
-/// `AccountTransition` deltas. Its one accumulator is `tally`, the shard's
+/// The shard's per-account work lands directly on each `AccountState`, in
+/// the pass that reads it. Its one accumulator is `tally`, the shard's
 /// part of the stake distribution being frozen, which `apply` adds to
 /// `EpochState.estart_tally` in the same commit as the shard's rotations.
 ///
@@ -1394,8 +1334,8 @@ pub struct EpochTransition {
     // undo
     pub(crate) prev_number: Epoch,
     pub(crate) prev_initial_pots: Option<Pots>,
-    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
-    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_rolling: Option<ShallowEpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<ShallowEpochValue<PParamsSet>>,
 }
 
 #[allow(deprecated)]
@@ -1499,14 +1439,15 @@ pub struct EpochTransitionV2 {
     // undo
     pub(crate) prev_number: Epoch,
     pub(crate) prev_initial_pots: Option<Pots>,
-    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
-    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_rolling: Option<ShallowEpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<ShallowEpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
     pub(crate) prev_ewrap_progress: Option<ShardProgress>,
     pub(crate) prev_estart_progress: Option<ShardProgress>,
     pub(crate) prev_rupd_progress: Option<ShardProgress>,
     pub(crate) prev_active_stake: Option<u64>,
     pub(crate) prev_estart_tally: Option<BTreeMap<PoolHash, PoolTally>>,
+    pub(crate) prev_ewrap_finalized: bool,
 }
 
 impl EpochTransitionV2 {
@@ -1533,6 +1474,7 @@ impl EpochTransitionV2 {
             prev_rupd_progress: None,
             prev_active_stake: None,
             prev_estart_tally: None,
+            prev_ewrap_finalized: false,
         }
     }
 }
@@ -1570,6 +1512,7 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
         self.prev_rupd_progress = entity.rupd_progress.clone();
         self.prev_active_stake = entity.active_stake;
         self.prev_estart_tally = entity.estart_tally.clone();
+        self.prev_ewrap_finalized = entity.ewrap_finalized;
 
         entity.number = self.new_epoch;
         entity.initial_pots = self.new_pots.clone();
@@ -1598,6 +1541,7 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
         entity.rupd_progress = None;
         entity.active_stake = self.active_stake;
         entity.estart_tally = None;
+        entity.ewrap_finalized = false;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -1616,6 +1560,7 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
         entity.rupd_progress = self.prev_rupd_progress.clone();
         entity.active_stake = self.prev_active_stake;
         entity.estart_tally = self.prev_estart_tally.clone();
+        entity.ewrap_finalized = self.prev_ewrap_finalized;
     }
 }
 
@@ -1656,12 +1601,109 @@ impl dolos_core::EntityDelta for SetEpochIncentives {
 }
 
 #[cfg(test)]
+mod tests {
+    use dolos_core::EntityDelta;
+
+    use super::*;
+
+    #[test]
+    fn epoch_stats_preserve_first_slot_across_apply_undo_and_reapply() {
+        for rolling in [
+            ShallowEpochValue::new(0),
+            ShallowEpochValue::with_live(0, RollingStats::default()),
+        ] {
+            for slots in [[0, 0, 2, 4], [0, 20, 40, 60], [2, 4, 6, 8]] {
+                let mut entity = Some(EpochState {
+                    rolling: rolling.clone(),
+                    ..Default::default()
+                });
+                let mut states = vec![entity.clone()];
+                let mut deltas = slots.map(|block_slot| EpochStatsUpdate {
+                    block_slot,
+                    ..Default::default()
+                });
+
+                for (index, delta) in deltas.iter_mut().enumerate() {
+                    delta.apply(&mut entity);
+                    assert_eq!(
+                        entity.as_ref().unwrap().rolling.unwrap_live(),
+                        &RollingStats {
+                            blocks_minted: (index + 1) as u32,
+                            first_block_slot: slots[0],
+                            last_block_slot: slots[index],
+                            ..Default::default()
+                        }
+                    );
+                    states.push(entity.clone());
+                }
+
+                for (delta, expected) in deltas.iter().zip(&states).rev() {
+                    delta.undo(&mut entity);
+                    assert_eq!(&entity, expected);
+                }
+
+                for (delta, expected) in deltas.iter_mut().zip(states.iter().skip(1)) {
+                    delta.apply(&mut entity);
+                    assert_eq!(&entity, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn epoch_stats_reset_first_slot_on_transition() {
+        let mut entity = Some(EpochState {
+            pparams: ShallowEpochValue::with_live(0, PParamsSet::default()),
+            ..Default::default()
+        });
+        let mut first_block = EpochStatsUpdate::default();
+        first_block.apply(&mut entity);
+        let completed_epoch = entity.clone();
+
+        let mut wrap = EpochWrapUpV3::new(EndStats::default());
+        wrap.apply(&mut entity);
+        let mut transition = EpochTransitionV2::new(1, Pots::default(), None, None, None);
+        transition.apply(&mut entity);
+
+        let rolling = &entity.as_ref().unwrap().rolling;
+        assert_eq!(
+            rolling.mark(),
+            completed_epoch.as_ref().unwrap().rolling.live()
+        );
+        assert_eq!(rolling.unwrap_live(), &RollingStats::default());
+
+        let mut next_block = EpochStatsUpdate {
+            epoch: 1,
+            block_slot: 100,
+            ..Default::default()
+        };
+        next_block.apply(&mut entity);
+        assert_eq!(
+            entity.as_ref().unwrap().rolling.unwrap_live(),
+            &RollingStats {
+                blocks_minted: 1,
+                first_block_slot: 100,
+                last_block_slot: 100,
+                ..Default::default()
+            }
+        );
+
+        next_block.undo(&mut entity);
+        transition.undo(&mut entity);
+        wrap.undo(&mut entity);
+        assert_eq!(entity, completed_epoch);
+    }
+}
+
+#[cfg(test)]
 #[allow(deprecated)] // prop_compose! macro expansions reference legacy
                      // EpochWrapUp/EpochTransition for back-compat tests
 mod prop_tests {
     use super::testing::{any_end_stats, any_epoch_state, any_nonces};
     use super::*;
-    use crate::model::epoch_value::testing::{any_epoch_value, any_epoch_value_no_next};
+    use crate::model::epoch_value::testing::{
+        any_shallow_epoch_value, any_shallow_epoch_value_no_next,
+    };
     use crate::model::pparams::testing::any_pparams_set;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
     use crate::pots::testing::{any_epoch_incentives, any_pots};
@@ -1674,8 +1716,8 @@ mod prop_tests {
         fn any_epoch_state_no_rolling_next()(
             number in root::any_epoch(),
             initial_pots in any_pots(),
-            rolling in any_epoch_value_no_next(super::testing::any_rolling_stats().boxed()),
-            pparams in any_epoch_value(any_pparams_set().boxed()),
+            rolling in any_shallow_epoch_value_no_next(super::testing::any_rolling_stats().boxed()),
+            pparams in any_shallow_epoch_value(any_pparams_set().boxed()),
             largest_stable_slot in root::any_slot(),
             previous_nonce_tail in prop::option::of(root::any_hash_32()),
             nonces in prop::option::of(any_nonces()),
@@ -1699,6 +1741,7 @@ mod prop_tests {
                 rupd_progress: None,
                 active_stake: None,
                 estart_tally: None,
+                ewrap_finalized: false,
             }
         }
     }
@@ -2100,5 +2143,34 @@ mod prop_tests {
         let epoch = entity.unwrap();
         assert_eq!(epoch.active_stake, Some(42));
         assert_eq!(epoch.estart_tally, None);
+    }
+
+    /// EWRAP finalize marks itself done and `EpochTransition` clears the mark
+    /// for the next boundary; each undo puts back what it found.
+    #[test]
+    fn ewrap_finalize_marks_itself_done_until_the_transition() {
+        use dolos_core::EntityDelta as _;
+
+        let mut epoch = EpochState::default();
+        epoch.rolling.reset(Some(RollingStats::default()));
+        epoch.pparams.reset(Some(PParamsSet::default()));
+
+        let mut entity = Some(epoch);
+        let finalized = |entity: &Option<EpochState>| entity.as_ref().unwrap().ewrap_finalized;
+
+        let mut wrapup = EpochWrapUpV3::new(EndStats::default());
+        wrapup.apply(&mut entity);
+        assert!(finalized(&entity));
+
+        let new_pots = entity.as_ref().unwrap().initial_pots.clone();
+        let mut transition = EpochTransitionV2::new(1, new_pots, None, None, None);
+        transition.apply(&mut entity);
+        assert!(!finalized(&entity));
+
+        transition.undo(&mut entity);
+        assert!(finalized(&entity));
+
+        wrapup.undo(&mut entity);
+        assert!(!finalized(&entity));
     }
 }

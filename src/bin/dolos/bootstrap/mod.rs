@@ -83,12 +83,13 @@ pub struct Args {
     #[arg(long, global = true)]
     force: bool,
 
-    /// Skip bootstrap if data already exists (exit 0)
+    /// Skip bootstrap if data already exists (exit 0); a store this release
+    /// refuses is an error instead
     #[arg(long, alias = "skip-if-not-empty", global = true)]
     skip_if_data: bool,
 
     /// Continue bootstrap even if data exists, trusting the subcommand to
-    /// handle resumption
+    /// handle resumption; a store this release refuses is an error instead
     #[arg(long, alias = "resume", global = true)]
     r#continue: bool,
 

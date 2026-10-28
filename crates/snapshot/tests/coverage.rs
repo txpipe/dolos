@@ -19,13 +19,14 @@ mod common;
 use std::collections::BTreeSet;
 
 use dolos_cardano::{
-    indexes::archive_dimensions,
+    indexes::{archive_dimensions, entities},
     model::{build_log_schema, build_schema},
 };
-use dolos_core::{ExactKind, IndexRecord, Namespace};
+use dolos_core::{EntityKind, ExactKind, IndexRecord, Namespace};
 use dolos_snapshot::{
-    layers::indexes, log_kind_for, log_ns_for, namespaces, shards_for, state_kind_for,
-    state_ns_for, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
+    entity_kind_for, entity_layer_for, layers::indexes, log_kind_for, log_ns_for, namespaces,
+    shards_for, state_kind_for, state_ns_for, ENTITY_INDEX_KINDS, ENTITY_KINDS, EPOCH_KINDS,
+    LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 
 /// The namespaces this profile carries are exactly the two schemas', plus the
@@ -305,6 +306,72 @@ fn the_golden_stele_covers_every_log_kind() {
     }
 }
 
+/// The ENTITY_KINDS table, held to the rule that spelled it: `entity-` and the
+/// kind's name, one layer kind per kind the chain declares, in byte order.
+#[test]
+fn entity_kinds_derive_from_their_names() {
+    let mut layers = Vec::new();
+
+    for (layer, kind) in ENTITY_KINDS {
+        assert_eq!(layer, format!("entity-{}", kind.name()), "{kind}");
+
+        // A media type's kind token admits hyphens and not underscores.
+        assert!(
+            kind.name()
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+            "{kind}: not a kind token"
+        );
+
+        assert_eq!(entity_layer_for(kind), Some(layer), "{kind}");
+        assert_eq!(entity_kind_for(layer), Some(kind), "{layer}");
+
+        layers.push(layer);
+    }
+
+    // Every kind the chain declares, and nothing else.
+    assert_eq!(ENTITY_INDEX_KINDS, entities::ALL);
+
+    let mut sorted = layers.clone();
+    sorted.sort_unstable();
+    assert_eq!(layers, sorted, "ENTITY_KINDS must be in byte order");
+
+    // Epoch-scoped, so a window's entity layer inherits per `(kind, scope)`.
+    for layer in &layers {
+        assert!(EPOCH_KINDS.contains(layer), "{layer}");
+    }
+
+    for absent in ["entity-", "entity-datum", "entities", "indexes", ""] {
+        assert!(entity_kind_for(absent).is_none(), "{absent:?}");
+    }
+
+    assert!(entity_layer_for(EntityKind::new("datum", 32)).is_none());
+}
+
+/// Every entity kind appears in the golden stele, so every entity kind string
+/// and id width is frozen by a published digest.
+#[test]
+fn the_golden_stele_covers_every_entity_kind() {
+    let present: BTreeSet<&str> = common::all_layers()
+        .iter()
+        .filter_map(|(kind, _, _)| entity_kind_for(kind).map(|_| *kind))
+        .collect();
+
+    let expected: BTreeSet<&str> = ENTITY_KINDS.into_iter().map(|(kind, _)| kind).collect();
+
+    assert_eq!(
+        present, expected,
+        "the golden stele no longer freezes every entity kind"
+    );
+
+    for (_, kind) in ENTITY_KINDS {
+        assert!(
+            !common::entities(kind).is_empty(),
+            "{kind}: no golden record"
+        );
+    }
+}
+
 /// Done criterion 3's table half: the STATE_KINDS table, held to its own rule.
 ///
 /// The same discipline `log_kinds_derive_from_their_namespaces` applies, plus
@@ -375,7 +442,7 @@ fn state_kinds_derive_from_their_namespaces() {
     // out here rather than derived from the table it is checking.
     for (_, ns, shards) in STATE_KINDS {
         let expected = match ns {
-            "utxos" | "accounts" | "assets" | "datums" | "scripts" => 16,
+            "utxos" | "accounts" | "assets" | "datums" => 16,
             _ => 1,
         };
 

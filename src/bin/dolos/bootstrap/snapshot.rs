@@ -289,12 +289,19 @@ fn fetch_snapshot_streaming(
     Ok(())
 }
 
+/// Unpacking writes the stores without opening them, so their identity check
+/// runs once they are in place: a snapshot exported before stores recorded an
+/// identity is refused like any store this release did not write.
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     if let Some(path) = &args.file {
         import_local_snapshot(config, path)?;
     } else {
         fetch_snapshot(config, args, feedback)?;
     }
+
+    dolos::storage::check_store_identities(config)
+        .into_diagnostic()
+        .context("checking the unpacked snapshot")?;
 
     Ok(())
 }

@@ -1499,6 +1499,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -7140,6 +7141,7 @@ dependencies = [
  "dolos",
  "dolos-cardano",
  "dolos-core",
+ "dolos-fjall",
  "dolos-flatfiles",
  "dolos-minibf",
  "dolos-testing",

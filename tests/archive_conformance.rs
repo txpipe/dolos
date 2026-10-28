@@ -8,7 +8,8 @@
 //! segment truncation, prune and truncate boundaries, the log namespaces'
 //! write/read/range behavior, and the index entries a block projects (the
 //! exact lookups and the archive tags, written in the block's own commit
-//! and pruned with it).
+//! and pruned with it), and the entity index (written by a seal, read in
+//! batches, swept by a prune and never undone).
 //! The index half's export/restore contract has its own suite,
 //! `archive_index_roundtrip`.
 //!
@@ -20,9 +21,9 @@ use std::sync::Arc;
 
 use dolos_cardano::indexes::archive_dimensions;
 use dolos_core::{
-    builtin::MemoryArchiveStore, ArchiveIndexDelta, ArchiveStore as CoreArchiveStore,
-    ArchiveWriter as _, BlockSlot, ChainPoint, KeyRange, LogKey, LogRangeOf, NamespaceType,
-    RawBlock, StateSchema, Tag,
+    builtin::MemoryArchiveStore, ArchiveError, ArchiveIndexDelta, ArchiveStore as CoreArchiveStore,
+    ArchiveWriter as _, BlockSlot, ChainPoint, EntityKind, EntityRecord, KeyRange, LogKey,
+    LogRangeOf, NamespaceType, RawBlock, StateSchema, Tag,
 };
 
 use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
@@ -72,17 +73,13 @@ impl Backend for Fjall {
     fn open() -> (Self::Store, Self::Guard) {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
 
-        // Only the fields this suite cares about; the rest are the backend's
-        // own defaults rather than a re-listing of them that can go stale.
-        let config = dolos_core::config::FjallArchiveConfig {
-            cache: Some(16),
-            flush_on_commit: Some(false),
-            worker_threads: Some(1),
-            ..Default::default()
-        };
-
-        let store = dolos_fjall::archive::ArchiveStore::open(schema(), dir.path(), &config)
-            .expect("failed to open fjall archive store");
+        let store = dolos_fjall::archive::ArchiveStore::open(
+            schema(),
+            dir.path(),
+            None,
+            dolos_fjall::Preset::Standard,
+        )
+        .expect("failed to open fjall archive store");
 
         (store, dir)
     }
@@ -1408,6 +1405,204 @@ fn slots_by_tag_after_prune_answers_only_retained_slots<B: Backend>() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The entity index: written by a seal, never undone, swept by a prune
+// ---------------------------------------------------------------------------
+
+/// Toy kinds: core names no chain kind, and the suite does not either. Their
+/// widths differ, so isolation and the width rule are both pinned.
+const TOY: EntityKind = EntityKind::new("toy", 4);
+const WIDE: EntityKind = EntityKind::new("wide", 28);
+
+fn toy_id(seed: u8) -> [u8; 4] {
+    [0, 0, 0, seed]
+}
+
+fn write_entities<S: CoreArchiveStore>(store: &S, entries: &[(EntityKind, Vec<u8>, BlockSlot)]) {
+    let writer = store.start_writer().unwrap();
+    for (kind, id, slot) in entries {
+        writer.write_entity(*kind, id, *slot).unwrap();
+    }
+    writer.commit().unwrap();
+}
+
+fn entity_records<S: CoreArchiveStore>(
+    store: &S,
+    kinds: &[EntityKind],
+    slots: std::ops::Range<BlockSlot>,
+) -> Vec<EntityRecord> {
+    store
+        .iter_entity_records(kinds, slots)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// What the seal writes reads back by batch, in the order asked, and the
+/// record traversal yields it sorted by kind name then id, whatever order the
+/// kinds are listed in. An id is stored per kind: the same bytes under two
+/// kinds are two entries.
+fn entity_index_writes_read_back<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let writer = store.start_writer().unwrap();
+    writer.write_entity(TOY, &toy_id(2), 200).unwrap();
+    writer.write_entity(TOY, &toy_id(1), 300).unwrap();
+
+    // Nothing is visible before the commit lands.
+    assert_eq!(
+        store.entity_slots(TOY, &[&toy_id(1)]).unwrap(),
+        [None],
+        "an uncommitted entry was visible"
+    );
+
+    writer.write_entity(WIDE, &[2; 28], 100).unwrap();
+    writer.commit().unwrap();
+
+    assert_eq!(
+        store
+            .entity_slots(TOY, &[&toy_id(1), &toy_id(9), &toy_id(2)])
+            .unwrap(),
+        [Some(300), None, Some(200)]
+    );
+    assert_eq!(store.entity_slots(WIDE, &[&[2; 28]]).unwrap(), [Some(100)]);
+    assert_eq!(store.entity_slots(TOY, &[]).unwrap(), []);
+
+    // A seal re-run writes the same entry again: still one entry.
+    write_entities(&store, &[(TOY, toy_id(1).to_vec(), 300)]);
+
+    let expected = [
+        EntityRecord::new(TOY, &toy_id(1), 300).unwrap(),
+        EntityRecord::new(TOY, &toy_id(2), 200).unwrap(),
+        EntityRecord::new(WIDE, &[2; 28], 100).unwrap(),
+    ];
+
+    assert_eq!(
+        entity_records(&store, &[WIDE, TOY, WIDE], 0..u64::MAX),
+        expected
+    );
+
+    // Half-open slots, and only the kinds asked for.
+    assert_eq!(entity_records(&store, &[TOY], 200..300), expected[1..2]);
+    assert_eq!(
+        entity_records(&store, &[TOY, WIDE], 100..201),
+        [expected[1], expected[2]]
+    );
+    assert!(entity_records(&store, &[TOY], 301..u64::MAX).is_empty());
+}
+
+/// An id that is not its kind's width is refused on both sides, and a
+/// refused batch read answers nothing rather than a partial vector.
+fn entity_index_refuses_a_wrong_width_id<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let writer = store.start_writer().unwrap();
+
+    for id in [&[0u8; 3][..], &[0; 5], &[], &[0; 28]] {
+        assert!(
+            matches!(
+                writer.write_entity(TOY, id, 1),
+                Err(ArchiveError::EntityKeyWidth {
+                    kind: "toy",
+                    expected: 4,
+                    ..
+                })
+            ),
+            "a {}-byte toy id was written",
+            id.len()
+        );
+    }
+
+    writer.write_entity(TOY, &toy_id(1), 1).unwrap();
+    writer.commit().unwrap();
+
+    assert!(matches!(
+        store.entity_slots(TOY, &[&toy_id(1), &[0; 28]]),
+        Err(ArchiveError::EntityKeyWidth {
+            kind: "toy",
+            len: 28,
+            expected: 4
+        })
+    ));
+    assert_eq!(store.entity_slots(TOY, &[&toy_id(1)]).unwrap(), [Some(1)]);
+}
+
+/// A prune sweeps the entity index by slot, cutoff exclusive, as it sweeps
+/// the exact lookups: a pruned node keeps the entries of its window.
+fn prune_sweeps_entity_entries_below_the_cutoff<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let slots: Vec<u64> = (0..=1_000).step_by(100).collect();
+    write_indexed_blocks(&store, &slots);
+    write_entities(
+        &store,
+        &[
+            (TOY, toy_id(1).to_vec(), 0),
+            (TOY, toy_id(2).to_vec(), 499),
+            (TOY, toy_id(3).to_vec(), 500),
+            (WIDE, vec![4; 28], 300),
+            (WIDE, vec![5; 28], 1_000),
+        ],
+    );
+
+    // Start 0, tip 1000, window 500: prune before slot 500.
+    assert!(store.prune_history(500, None, None).unwrap());
+
+    assert_eq!(
+        store
+            .entity_slots(TOY, &[&toy_id(1), &toy_id(2), &toy_id(3)])
+            .unwrap(),
+        [None, None, Some(500)]
+    );
+    assert_eq!(
+        store.entity_slots(WIDE, &[&[4; 28], &[5; 28]]).unwrap(),
+        [None, Some(1_000)]
+    );
+    assert_eq!(
+        entity_records(&store, &[TOY, WIDE], 0..u64::MAX)
+            .iter()
+            .map(|record| record.slot)
+            .collect::<Vec<_>>(),
+        [500, 1_000]
+    );
+}
+
+/// Nothing a rollback runs reaches the entity index: a seal writes it for an
+/// immutable epoch, which no rollback can reach. An entry written in a
+/// block's own commit survives that block's index undo, its block undo and a
+/// truncation past it.
+fn no_undo_path_touches_the_entity_index<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let writer = store.start_writer().unwrap();
+    for slot in [100, 200, 300] {
+        writer
+            .apply(&point(slot), &Arc::new(fake_block(slot)))
+            .unwrap();
+        writer.apply_index(&[slot_delta(slot)]).unwrap();
+    }
+    writer.write_entity(TOY, &toy_id(1), 200).unwrap();
+    writer.write_entity(TOY, &toy_id(2), 300).unwrap();
+    writer.commit().unwrap();
+
+    let writer = store.start_writer().unwrap();
+    writer
+        .undo_index(&[slot_delta(200), slot_delta(300)])
+        .unwrap();
+    writer.undo(&point(300)).unwrap();
+    writer.undo(&point(200)).unwrap();
+    writer.commit().unwrap();
+
+    store.truncate_front(&point(100)).unwrap();
+
+    assert_eq!(stored_slots(&store), [100]);
+    assert!(!exact_entries_present(&store, 300));
+    assert_eq!(
+        store.entity_slots(TOY, &[&toy_id(1), &toy_id(2)]).unwrap(),
+        [Some(200), Some(300)]
+    );
+}
+
 /// Under an index row budget, the fjall backend sweeps its index keyspaces
 /// only when the cutoff has advanced by a sixteenth of the window since the
 /// last sweep, so between sweeps a pruned block's entries linger; the memory
@@ -1461,6 +1656,42 @@ fn fjall_index_sweep_is_amortized_across_prune_rounds() {
     assert!(!exact_entries_present(&store, 150));
     assert!(exact_entries_present(&store, 160));
     assert_eq!(tagged_slots(&store, &SHARED_TAG_KEY, 0, 170), [160, 170]);
+}
+
+/// A budgeted sweep walks the tag, exact and entity keyspaces in turn across
+/// calls, and reports done only once the entity index is swept too.
+#[test]
+fn fjall_budgeted_sweep_reaches_the_entity_index() {
+    let (store, _guard) = Fjall::open();
+
+    let slots: Vec<u64> = (0..=1_000).step_by(100).collect();
+    write_indexed_blocks(&store, &slots);
+    write_entities(
+        &store,
+        &slots
+            .iter()
+            .map(|slot| (TOY, (*slot as u32).to_be_bytes().to_vec(), *slot))
+            .collect::<Vec<_>>(),
+    );
+
+    let mut calls = 0;
+
+    while !store.prune_history(500, None, Some(3)).unwrap() {
+        calls += 1;
+        assert!(calls < 100, "the budgeted sweep does not converge");
+    }
+
+    assert!(
+        calls > 1,
+        "a three-row budget swept every keyspace in one call"
+    );
+    assert_eq!(
+        entity_records(&store, &[TOY], 0..u64::MAX)
+            .iter()
+            .map(|record| record.slot)
+            .collect::<Vec<_>>(),
+        [500, 600, 700, 800, 900, 1_000]
+    );
 }
 
 #[test]
@@ -1609,6 +1840,10 @@ macro_rules! full_suite {
                 prune_history_drops_tags_and_exact_below_the_cutoff,
                 prune_keeps_index_entries_at_the_cutoff_slot,
                 slots_by_tag_after_prune_answers_only_retained_slots,
+                entity_index_writes_read_back,
+                entity_index_refuses_a_wrong_width_id,
+                prune_sweeps_entity_entries_below_the_cutoff,
+                no_undo_path_touches_the_entity_index,
             ]
         );
     };

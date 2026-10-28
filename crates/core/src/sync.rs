@@ -158,6 +158,8 @@ impl<D: Domain> SyncExt for D {
         writer.commit()?;
         archive_writer.commit()?;
 
+        D::Chain::rolling_back(self, to);
+
         self.archive().truncate_front(to)?;
 
         self.wal().truncate_front(to)?;

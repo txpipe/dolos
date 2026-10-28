@@ -61,25 +61,15 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
 
     let incentives = ctx.rewards.incentives();
 
-    // Use effective MIR amounts (only applied to registered accounts)
-    // instead of total from rolling stats (which includes MIRs to unregistered
-    // accounts)
-    let treasury_mirs = ctx.effective_treasury_mirs;
-    let reserve_mirs = ctx.effective_reserve_mirs;
-    let invalid_treasury_mirs = ctx.invalid_treasury_mirs;
-    let invalid_reserve_mirs = ctx.invalid_reserve_mirs;
-
-    // Log comparison with rolling stats for debugging
-    let rolling_treasury_mirs = ctx.ending_state().rolling.unwrap_live().treasury_mirs;
-    if treasury_mirs != rolling_treasury_mirs {
-        tracing::info!(
-            epoch = ctx.ending_state().number,
-            %treasury_mirs,
-            %rolling_treasury_mirs,
-            %invalid_treasury_mirs,
-            "treasury MIRs: effective != rolling (MIRs to unregistered accounts)"
-        );
-    }
+    // Only the effective MIRs and withdrawals (to registered accounts) move a
+    // pot; the invalid ones stay where they were and are only logged.
+    tracing::debug!(
+        epoch = ctx.ending_state().number,
+        invalid_treasury_mirs = ctx.invalid_treasury_mirs,
+        invalid_reserve_mirs = ctx.invalid_reserve_mirs,
+        invalid_treasury_withdrawals = ctx.invalid_treasury_withdrawals,
+        "EWRAP: MIRs and withdrawals left in their source pot"
+    );
 
     // Reward accumulators are populated by Ewraps (which ran before
     // this Ewrap phase). Read them back from `EpochState.end` and combine
@@ -106,17 +96,11 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         effective_rewards: acc.effective_rewards,
         unspendable_to_treasury: acc.unspendable_to_treasury,
         unspendable_to_reserves: acc.unspendable_to_reserves,
-        treasury_mirs,
-        reserve_mirs,
-        invalid_treasury_mirs,
-        invalid_reserve_mirs,
+        treasury_mirs: ctx.effective_treasury_mirs,
+        reserve_mirs: ctx.effective_reserve_mirs,
         treasury_withdrawals: ctx.effective_treasury_withdrawals,
-        invalid_treasury_withdrawals: ctx.invalid_treasury_withdrawals,
         proposal_refunds: proposal_valid_refunds,
         proposal_invalid_refunds,
-        // TODO: deprecate
-        __drep_deposits: 0,
-        __drep_refunds: 0,
     }
 }
 
@@ -141,13 +125,13 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         // Assemble the final `EndStats` from the prepare-time fields plus the
         // shard-populated accumulators (already in `ending_state.end`), and
         // emit `EpochWrapUp` to close the epoch boundary. Apply will
-        // overwrite `entity.end` with these stats and rotate the
-        // rolling/pparams snapshots forward. `ewrap_progress` is left
-        // at `Some(total, total)` from the last `EWrapProgress` shard
-        // so the EwrapWorkUnit can short-circuit a replay if a crash
-        // lands between EWRAP finalize and ESTART finalize;
-        // `EpochTransitionV2` (run at ESTART finalize) is the single
-        // writer that clears the field.
+        // overwrite `entity.end` with these stats, rotate the
+        // rolling/pparams snapshots forward and set `ewrap_finalized`.
+        // `ewrap_progress` is left at `Some(total, total)` from the last
+        // `EWrapProgress` shard, so with `ewrap_finalized` the
+        // EwrapWorkUnit can short-circuit a replay if a crash lands
+        // between EWRAP finalize and ESTART finalize; `EpochTransitionV2`
+        // (run at ESTART finalize) is the single writer that clears both.
         let final_stats = define_end_stats(ctx);
 
         // Stash the final stats on `ending_state.end` so the post-commit

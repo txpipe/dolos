@@ -1,7 +1,7 @@
 use std::{
     sync::{
         atomic::{AtomicU32, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -10,7 +10,7 @@ use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryStateStore},
     ArchiveError, ArchiveIndexDelta, ArchiveStore, ArchiveWriter, BlockBody, BlockSlot, ChainPoint,
     Domain, DomainError, IndexRecord, LogEntry, LogKey, LogValue, Namespace, RawBlock, StateError,
-    StateStore, StateWriter, TagDimension, TipEvent, UtxoIndexDelta, WalError, WalStore,
+    StateStore, StateWriter, TagDimension, TagEntry, TipEvent, UtxoIndexDelta, WalError, WalStore,
 };
 
 use crate::toy_domain::{Mempool, TipSubscription, ToyDomain};
@@ -37,7 +37,8 @@ pub enum TestFault {
     /// stop a work unit between the two commits of a phase, whichever store
     /// that phase commits first.
     CrashAfterCommits(u32),
-    /// [`StateStore::utxos_by_tag`] and [`StateStore::get_utxos`] sleep this
+    /// [`StateStore::utxos_by_tag`], [`StateStore::utxos_by_tag_page`],
+    /// [`StateStore::utxos_with_tag`] and [`StateStore::get_utxos`] sleep this
     /// long before answering, as a heavy lookup on a large store would.
     SlowUtxoReads(Duration),
     /// [`StateStore::iter_entities`] sleeps this long before answering, as a
@@ -90,7 +91,33 @@ impl FaultyToyDomain {
     pub fn entity_scans(&self) -> usize {
         self.state.scans.load(Ordering::SeqCst)
     }
+
+    /// Runs `hook` after every [`StateStore::utxos_by_tag_page`] read, with the
+    /// entries read and the store under the adapter, before the caller gets
+    /// them: a write that lands between a listing's tag read and its value
+    /// read.
+    pub fn after_tag_page(
+        &self,
+        hook: impl FnMut(&[TagEntry], &MemoryStateStore) + Send + 'static,
+    ) {
+        *self.state.tag_page_hook.lock().expect("tag page hook") = Some(Box::new(hook));
+    }
+
+    /// Runs `hook` once, after the next [`ArchiveStore::entity_slots`] read
+    /// answers and before the caller gets the slots: a write that lands
+    /// between a lookup's index read and its next read.
+    pub fn after_entity_slots(&self, hook: impl FnOnce() + Send + 'static) {
+        *self
+            .archive
+            .entity_slots_hook
+            .lock()
+            .expect("entity slots hook") = Some(Box::new(hook));
+    }
 }
+
+type TagPageHook = Box<dyn FnMut(&[TagEntry], &MemoryStateStore) + Send>;
+
+type EntitySlotsHook = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone)]
 pub struct FaultyStateStore {
@@ -98,6 +125,7 @@ pub struct FaultyStateStore {
     fault: TestFault,
     commits: Arc<AtomicU32>,
     scans: Arc<AtomicUsize>,
+    tag_page_hook: Arc<Mutex<Option<TagPageHook>>>,
 }
 
 impl FaultyStateStore {
@@ -111,6 +139,7 @@ impl FaultyStateStore {
             fault,
             commits,
             scans: Default::default(),
+            tag_page_hook: Default::default(),
         }
     }
 
@@ -218,6 +247,42 @@ impl StateStore for FaultyStateStore {
         self.inner.utxos_by_tag(dimension, key)
     }
 
+    fn utxos_by_tag_page(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        order: dolos_core::TagOrder,
+        start: dolos_core::TagStart,
+        count: usize,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.slow_utxo_read();
+        let entries = self
+            .inner
+            .utxos_by_tag_page(dimension, key, order, start, count)?;
+
+        if let Some(hook) = self.tag_page_hook.lock().expect("tag page hook").as_mut() {
+            hook(&entries, &self.inner);
+        }
+
+        Ok(entries)
+    }
+
+    fn utxos_with_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        entries: Vec<TagEntry>,
+    ) -> Result<Vec<TagEntry>, StateError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.slow_utxo_read();
+        self.inner.utxos_with_tag(dimension, key, entries)
+    }
+
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         if self.should_fault() {
             return Err(self.fault_err());
@@ -282,6 +347,7 @@ pub struct FaultyArchiveStore {
     inner: MemoryArchiveStore,
     fault: TestFault,
     commits: Arc<AtomicU32>,
+    entity_slots_hook: Arc<Mutex<Option<EntitySlotsHook>>>,
 }
 
 impl FaultyArchiveStore {
@@ -294,6 +360,7 @@ impl FaultyArchiveStore {
             inner,
             fault,
             commits,
+            entity_slots_hook: Default::default(),
         }
     }
 
@@ -314,6 +381,7 @@ impl ArchiveStore for FaultyArchiveStore {
     type SlotIter = <MemoryArchiveStore as ArchiveStore>::SlotIter;
     type TagIter = <MemoryArchiveStore as ArchiveStore>::TagIter;
     type ExactIter = <MemoryArchiveStore as ArchiveStore>::ExactIter;
+    type EntityRecordIter = <MemoryArchiveStore as ArchiveStore>::EntityRecordIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         if self.should_fault() {
@@ -428,6 +496,29 @@ impl ArchiveStore for FaultyArchiveStore {
         self.inner.slot_by_tx_hash(hash)
     }
 
+    fn entity_slots(
+        &self,
+        kind: dolos_core::EntityKind,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<BlockSlot>>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        let slots = self.inner.entity_slots(kind, keys)?;
+
+        let hook = self
+            .entity_slots_hook
+            .lock()
+            .expect("entity slots hook")
+            .take();
+
+        if let Some(hook) = hook {
+            hook();
+        }
+
+        Ok(slots)
+    }
+
     fn slots_by_tag(
         &self,
         dimension: TagDimension,
@@ -460,6 +551,17 @@ impl ArchiveStore for FaultyArchiveStore {
             return Err(self.fault_err());
         }
         self.inner.iter_exact_records(slots)
+    }
+
+    fn iter_entity_records(
+        &self,
+        kinds: &[dolos_core::EntityKind],
+        slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::EntityRecordIter, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.iter_entity_records(kinds, slots)
     }
 }
 
@@ -500,6 +602,15 @@ impl ArchiveWriter for FaultyArchiveWriter {
 
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
         self.inner.undo(point)
+    }
+
+    fn write_entity(
+        &self,
+        kind: dolos_core::EntityKind,
+        key: &[u8],
+        slot: BlockSlot,
+    ) -> Result<(), ArchiveError> {
+        self.inner.write_entity(kind, key, slot)
     }
 
     fn commit(self) -> Result<(), ArchiveError> {

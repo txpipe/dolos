@@ -53,7 +53,7 @@ where
 
     let pagination = Pagination::try_from(params)?;
 
-    let (subject, state) = super::resolve_asset_state(&domain, &subject)?;
+    let (subject, state) = crate::mapping::assets::resolve_asset_state(&domain, &subject)?;
 
     let Some(initial_slot) = state.initial_slot else {
         return Ok(Json(vec![]));
@@ -91,11 +91,18 @@ where
 mod tests {
     use super::*;
     use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::{
+        asset::Asset, asset_policy_inner::AssetPolicyInner, assets_inner::AssetsInner,
+    };
     use dolos_cardano::model::{AssetMintChunk, AssetMintSet};
     use dolos_core::{import::ImportExt as _, ArchiveStore as _, RangeOf, StateStore as _};
     use dolos_testing::synthetic::{SyntheticBlockConfig, SyntheticVectors, TxMints};
     use itertools::Itertools;
     use pallas::ledger::primitives::{alonzo, TransactionInput};
+
+    use axum::http::StatusCode;
+
+    use dolos_core::Domain;
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
         let (status, bytes) = app.get_bytes(path).await;
@@ -435,8 +442,45 @@ mod tests {
         assert!(rows.iter().all(|x| x.amount != "0"));
 
         // the zero mint is the chain's last tx, and the only mint of `ZERO`
-        let rows = history_of(&app, &unit(POLICY, "ZERO"), "").await;
-        assert!(rows.is_empty());
+        let path = format!("/assets/{}/history", unit(POLICY, "ZERO"));
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    async fn get_json<T: serde::de::DeserializeOwned>(app: &TestApp, path: &str) -> T {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} for {path} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes).expect("failed to parse response")
+    }
+
+    /// A zero-quantity entry creates no asset, and leaves a minted one as the
+    /// chain without it left it.
+    #[tokio::test]
+    async fn zero_mint_adds_no_asset_state() {
+        let app = history_app();
+        let zero = unit(POLICY, "ZERO");
+
+        assert_status(&app, &format!("/assets/{zero}"), StatusCode::NOT_FOUND).await;
+
+        let baseline = TestApp::new_with_cfg(history_chain());
+        let path = format!("/assets/{}", unit(POLICY, "H"));
+        let want: Asset = get_json(&baseline, &path).await;
+        let got: Asset = get_json(&app, &path).await;
+        assert_eq!(got.mint_or_burn_count, want.mint_or_burn_count);
+        assert_eq!(got.initial_mint_tx_hash, want.initial_mint_tx_hash);
+
+        let all: Vec<AssetsInner> = get_json(&app, "/assets").await;
+        assert!(all.iter().any(|x| x.asset == unit(POLICY, "H")));
+        assert!(all.iter().all(|x| x.asset != zero));
+
+        let path = format!("/assets/policy/{}", hex::encode(POLICY));
+        let by_policy: Vec<AssetPolicyInner> = get_json(&app, &path).await;
+        assert!(by_policy.iter().any(|x| x.asset == unit(POLICY, "H")));
+        assert!(by_policy.iter().all(|x| x.asset != zero));
     }
 
     #[tokio::test]

@@ -226,7 +226,7 @@ impl ConfigEditor {
     fn apply_serve_grpc(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.grpc = GrpcConfig::new("[::]:50051".into(), None).into();
+                self.0.serve.grpc = GrpcConfig::new("[::]:50051".into()).into();
             } else {
                 self.0.serve.grpc = None;
             }

@@ -161,7 +161,7 @@ fn state_round_trips_through_a_layer_per_kind_and_shard() {
             let (txo, value) = state::as_utxo(&decoded[0]).unwrap();
 
             assert_eq!(txo.1, 3);
-            assert_eq!(value.0, 6);
+            assert_eq!(value.era(), 6);
         }
     }
 }

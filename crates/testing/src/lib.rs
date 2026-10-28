@@ -239,16 +239,15 @@ pub fn fake_genesis_utxo(
     address: impl Into<TestAddress>,
     ordinal: usize,
     amount: u64,
-) -> (TxoRef, EraCbor) {
+) -> (TxoRef, UtxoValue) {
     let tx_hash = genesis_tx_hash();
     let txoref = TxoRef(tx_hash, ordinal as u32);
-    (txoref, utxo_with_value(address, Value::Coin(amount)))
+    let output = utxo_with_value(address, Value::Coin(amount));
+    (txoref, UtxoValue::new(output, None))
 }
 
-pub fn replace_utxo_address(utxo: Arc<EraCbor>, new_address: TestAddress) -> Arc<EraCbor> {
-    let EraCbor(_, cbor) = utxo.as_ref();
-
-    let output = MultiEraOutput::decode(Era::Conway, cbor).unwrap();
+pub fn replace_utxo_address(utxo: Arc<UtxoValue>, new_address: TestAddress) -> Arc<UtxoValue> {
+    let output = MultiEraOutput::decode(Era::Conway, utxo.cbor()).unwrap();
 
     let Some(GenTransactionOutput::PostAlonzo(mut output)) = output.as_conway().cloned() else {
         unreachable!()
@@ -256,10 +255,9 @@ pub fn replace_utxo_address(utxo: Arc<EraCbor>, new_address: TestAddress) -> Arc
 
     output.address = new_address.to_bytes().into();
 
-    Arc::new(EraCbor(
-        Era::Conway.into(),
-        minicbor::to_vec(&output).unwrap(),
-    ))
+    let output = EraCbor(Era::Conway.into(), minicbor::to_vec(&output).unwrap());
+
+    Arc::new(UtxoValue::new(output, utxo.position()))
 }
 
 pub fn replace_utxo_map_address(utxos: UtxoMap, new_address: TestAddress) -> UtxoMap {
@@ -269,19 +267,23 @@ pub fn replace_utxo_map_address(utxos: UtxoMap, new_address: TestAddress) -> Utx
         .collect()
 }
 
+/// Moves `utxos` to the tx `tx_sequence`, which a block at slot `tx_sequence`
+/// holds first.
 pub fn replace_utxo_map_txhash(utxos: UtxoMap, tx_sequence: u64) -> UtxoMap {
     let new_txhash = tx_sequence_to_hash(tx_sequence);
+    let position = UtxoPosition::of_tx(tx_sequence, 0);
 
     utxos
         .into_iter()
-        .map(|(k, v)| (TxoRef(new_txhash, k.1), v))
+        .map(|(k, v)| {
+            let v = UtxoValue::new(v.output.clone(), Some(position));
+            (TxoRef(new_txhash, k.1), Arc::new(v))
+        })
         .collect()
 }
 
-pub fn get_utxo_address_and_value(utxo: &EraCbor) -> (Vec<u8>, u64) {
-    let EraCbor(_, cbor) = utxo;
-
-    let output = MultiEraOutput::decode(Era::Conway, cbor).unwrap();
+pub fn get_utxo_address_and_value(utxo: &UtxoValue) -> (Vec<u8>, u64) {
+    let output = MultiEraOutput::decode(Era::Conway, utxo.cbor()).unwrap();
 
     let Some(GenTransactionOutput::PostAlonzo(output)) = output.as_conway() else {
         unreachable!()
@@ -296,7 +298,7 @@ pub fn get_utxo_address_and_value(utxo: &EraCbor) -> (Vec<u8>, u64) {
     )
 }
 
-pub fn assert_utxo_address_and_value(utxo: &EraCbor, address: impl Into<Vec<u8>>, value: u64) {
+pub fn assert_utxo_address_and_value(utxo: &UtxoValue, address: impl Into<Vec<u8>>, value: u64) {
     let (output_address, output_value) = get_utxo_address_and_value(utxo);
 
     assert_eq!(output_address, address.into());
@@ -312,7 +314,7 @@ where
     }
 }
 
-pub fn print_utxo(txoref: &TxoRef, utxo: &EraCbor) {
+pub fn print_utxo(txoref: &TxoRef, utxo: &UtxoValue) {
     let (output_address, output_value) = get_utxo_address_and_value(utxo);
 
     let bech32 = Address::from_bytes(&output_address).unwrap().to_string();
@@ -372,15 +374,16 @@ where
 
     for (tx, address) in addresses.iter().enumerate() {
         let utxo_count = rand::rng().random_range(utxos_per_address.clone());
+        let position = UtxoPosition::of_tx(tx as u64, 0);
 
         for ordinal in 0..utxo_count {
             let tx = tx_sequence_to_hash(tx as u64);
 
             let key = TxoRef(tx, ordinal as u32);
-            let cbor = utxo_generator.generate(address);
-            let cbor = Arc::new(cbor);
+            let output = utxo_generator.generate(address);
+            let value = Arc::new(UtxoValue::new(output, Some(position)));
 
-            utxos.insert(key, cbor);
+            utxos.insert(key, value);
         }
     }
 

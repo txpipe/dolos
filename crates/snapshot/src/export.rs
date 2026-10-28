@@ -17,7 +17,9 @@
 //! rather than to the epoch boundary. That last window is a deliberate sliver,
 //! not an accident: a `stop_epoch = E` sync halts after applying the *first
 //! block of epoch E*, so the window carries that one block together with epoch
-//! E's opening (estart) logs, which key at `epoch_start(E)`.
+//! E's opening (estart) logs, which key at `epoch_start(E)`. [`export`] refuses
+//! stores standing anywhere else before it writes a layer — see
+//! [`crate::boundary`].
 //!
 //! **The network name.** It rides inside the canonical JSON, so it is inside
 //! the stele's identity. [`crate::Network::for_magic`] is the only way to build
@@ -56,7 +58,7 @@
 //! check, which is publisher plumbing. No restore, no signatures.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
     ops::Range,
     sync::{atomic::AtomicBool, Mutex},
@@ -66,7 +68,8 @@ use dolos_cardano::{
     eras::ChainSummary, indexes::archive_dimensions, pallas::ledger::traverse::MultiEraBlock,
 };
 use dolos_core::{
-    ArchiveError, ArchiveStore, BlockSlot, ChainPoint, IndexRecord, KeyRange, Namespace, StateStore,
+    ArchiveError, ArchiveStore, BlockSlot, ChainPoint, EntityKind, IndexRecord, KeyRange,
+    Namespace, StateStore,
 };
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
@@ -75,12 +78,12 @@ use stelae::{
 };
 
 use crate::{
-    layers::{blocks, digests, indexes, logs, state},
+    layers::{blocks, digests, entities, indexes, logs, state},
     namespaces::NAMESPACES,
     reporting::{Cursor, Records},
     state_layer_count, DigestsScope, DolosProfile, EpochScope, Error, Network, RetainedEpochs,
-    Scope, StateScope, BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, INDEXES, LOG_KINDS,
-    LOG_NAMESPACES, STATE_KINDS, UTXOS,
+    Scope, StateScope, BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, ENTITY_INDEX_KINDS,
+    ENTITY_KINDS, EPOCH_KINDS, INDEXES, LOG_KINDS, LOG_NAMESPACES, STATE_KINDS, UTXOS,
 };
 
 /// The slot window one epoch layer covers.
@@ -648,6 +651,74 @@ fn retained_dumps(
         .collect()
 }
 
+/// A predecessor held to its manifest for `log-account-epochs`.
+///
+/// A registry's chained publish carries a layer forward out of the manifest it
+/// follows or, failing that, out of an interrupted publish's resumption record.
+/// The record names the layers that publish uploaded, not the sequence that
+/// built them, and a window of this kind settles one boundary after it closes
+/// ([`crate::is_settled`]): a record can hold a window's stake-only rows that
+/// the manifest lacks, say because that publish was restricted to fewer
+/// epochs. This answers for such a window only where the manifest holds it,
+/// and leaves every other kind to `inner`.
+pub struct Settling<P> {
+    inner: P,
+    published: BTreeSet<(String, String)>,
+}
+
+impl<P: Predecessor> Settling<P> {
+    /// `inner`, carrying the account windows `manifest` holds and no others.
+    /// `None` is a repository with no stele yet.
+    pub fn new(inner: P, manifest: Option<&Inscription>) -> Result<Self, Error> {
+        let published = manifest
+            .into_iter()
+            .flat_map(|manifest| &manifest.layers)
+            .filter(|layer| crate::settles_late(&layer.kind))
+            .map(|layer| crate::scope_key(&layer.kind, &layer.scope))
+            .collect::<Result<_, _>>()?;
+
+        Ok(Self { inner, published })
+    }
+
+    pub fn inner(&self) -> &P {
+        &self.inner
+    }
+
+    fn admits(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, stelae_driver::Error> {
+        Ok(!crate::settles_late(kind) || self.published.contains(&crate::scope_key(kind, scope)?))
+    }
+}
+
+impl<P: Predecessor> Predecessor for Settling<P> {
+    fn history(&self) -> &[HistoryEntry] {
+        self.inner.history()
+    }
+
+    fn adopt(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<Option<LayerDescriptor>, stelae_driver::Error> {
+        if !self.admits(kind, scope)? {
+            return Ok(None);
+        }
+
+        self.inner.adopt(kind, scope)
+    }
+
+    fn carried_forward(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<bool, stelae_driver::Error> {
+        Ok(self.admits(kind, scope)? && self.inner.carried_forward(kind, scope)?)
+    }
+
+    fn landed(&self, descriptor: &LayerDescriptor) -> Result<(), stelae_driver::Error> {
+        self.inner.landed(descriptor)
+    }
+}
+
 /// The history rule, which is [`stelae::inscription::history_for`]: it reads a
 /// predecessor's sequence and digest and composes nothing this profile owns.
 pub use stelae::inscription::history_for;
@@ -714,6 +785,10 @@ where
     A: ArchiveStore,
     S: StateStore,
 {
+    // Ahead of everything else, so a store set this profile does not publish
+    // from has no layer written for it, whatever transport is in hand.
+    crate::boundary::check(plan, archive, state)?;
+
     stele.observe(observer.clone());
 
     // Ahead of the count as well as of the build: see `refuse_uncovered_logs`.
@@ -721,11 +796,18 @@ where
         refuse_uncovered_logs(archive, window)?;
     }
 
+    // One scan of the entity index, read by the count below and by the jobs
+    // that build the entity layers, so the two cannot disagree.
+    let presence = entity_presence(plan, archive)?;
+    let presence = &presence;
+
     // The same arithmetic `crate::registry::preview` reports a dry run with, so
-    // "layer 12 of 52" and "build: 52 layers" cannot disagree — `log_layers` on
-    // both sides, since an empty log kind produces no layer to multiply.
+    // "layer 12 of 52" and "build: 52 layers" cannot disagree — `log_layers`
+    // and `entity_layers` on both sides, since an empty log or entity kind
+    // produces no layer to multiply.
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + log_layers(plan, archive, previous)?
+        + entity_layers(plan, presence, previous)?
         + state_layers(plan, previous)?
         + usize::from(digest_records.is_some());
 
@@ -772,6 +854,19 @@ where
                     }
                     None => Ok(Vec::new()),
                 }
+            }));
+        }
+    }
+
+    // Kind-major again, after the logs. An entity layer is a scan of its kind's
+    // whole index, as an index layer is a scan of the whole store, so these are
+    // banded and run on the band lane. See [`write_entities`].
+    for (kind, entity) in ENTITY_KINDS {
+        for band in plan.epochs.chunks(plan.band.epochs()) {
+            jobs.push(Job::band(move || {
+                write_entities(
+                    stele, plan, archive, band, kind, entity, presence, previous, cursor,
+                )
             }));
         }
     }
@@ -1397,7 +1492,12 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
 ) -> Result<Option<LayerDescriptor>, Error> {
     let scope = window.scope(plan.network.magic());
 
-    let (spec, adopted) = inherit(&scope, kind, previous)?;
+    // Asked before `adopt`, which already arranges the blob it answers with.
+    let (spec, adopted) = if crate::is_settled(kind, window.epoch, previous.history()) {
+        inherit(&scope, kind, previous)?
+    } else {
+        (scope.layer_spec(kind)?, None)
+    };
 
     if let Some(descriptor) = adopted {
         let at = cursor.open(kind, &spec.scope);
@@ -1461,7 +1561,7 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
 /// method documents — a recorded blob the repository has since dropped — and
 /// here that turns a forecast layer into no layer at all rather than into a
 /// rebuild, because a past epoch's state is not in this publish's stores.
-pub(crate) fn carried_dumps(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
+fn carried_dumps(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
     let mut total = 0;
 
     for epoch in plan.adoptable_dumps() {
@@ -1485,13 +1585,79 @@ pub(crate) fn carried_dumps(plan: &Plan, previous: &dyn Predecessor) -> Result<u
 /// The tip's count is structural — every shard of every kind, empty ones
 /// included — and so is the cut dump's, since it is the same layers under a
 /// second scope. Only the adopted past is a lookup.
-pub(crate) fn state_layers(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
+fn state_layers(plan: &Plan, previous: &dyn Predecessor) -> Result<usize, Error> {
     let cut = usize::from(plan.cuts_a_dump());
 
     Ok(state_layer_count() * (1 + cut) + carried_dumps(plan, previous)?)
 }
 
-pub(crate) fn log_layers<A: ArchiveStore>(
+/// What a publish of `plan` chained onto `previous` would write, counted
+/// without writing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Forecast {
+    pub layers_built: usize,
+    pub layers_reused: usize,
+}
+
+/// The layers a publish of `plan` chained onto `previous` would build and carry
+/// forward — the forecast, not the outcome: see
+/// [`Predecessor::carried_forward`] for the one direction it may be wrong in.
+///
+/// What [`crate::registry::preview`] reports. It asks [`export`]'s questions
+/// through the same `layer_spec` and [`crate::is_settled`], so a dry run and
+/// the publish that follows it cannot disagree about which layers are
+/// inherited.
+pub fn forecast<A: ArchiveStore>(
+    plan: &Plan,
+    archive: &A,
+    previous: &dyn Predecessor,
+    digest_records: Option<&[digests::ImmutableDigests]>,
+) -> Result<Forecast, Error> {
+    // Every epoch selected contributes one `blocks` and one `indexes` layer and
+    // as many log layers as it has namespaces with logs, the state tip
+    // contributes every shard of every kind however the epochs were restricted,
+    // the retained dumps contribute what `state_layers` counts, and the digests
+    // layer is there exactly when its records are.
+    let presence = entity_presence(plan, archive)?;
+
+    let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
+        + log_layers(plan, archive, previous)?
+        + entity_layers(plan, &presence, previous)?
+        + state_layers(plan, previous)?
+        + usize::from(digest_records.is_some());
+
+    // A failure here is the scope refusing a kind it does not describe, and it
+    // propagates rather than counting as a miss: a dry run that quietly
+    // reported "build it" for a layer nobody could build would be the one
+    // number a publisher trusts, wrong. A dump this publish adopts is a layer
+    // nothing walks a store for; the one it cuts out of its own tip is not,
+    // because the tip is walked either way.
+    let mut layers_reused = carried_dumps(plan, previous)?;
+
+    for window in &plan.epochs {
+        let scope = window.scope(plan.network.magic());
+
+        for kind in EPOCH_KINDS {
+            let spec = scope.layer_spec(kind)?;
+
+            if crate::is_settled(kind, window.epoch, previous.history())
+                && previous.carried_forward(kind, &spec.scope)?
+            {
+                layers_reused += 1;
+            }
+        }
+    }
+
+    // A layer carried forward is a layer that exists, so `total` counted it
+    // too — see `log_layers` and `entity_layers`, which ask the predecessor
+    // first.
+    Ok(Forecast {
+        layers_built: total - layers_reused,
+        layers_reused,
+    })
+}
+
+fn log_layers<A: ArchiveStore>(
     plan: &Plan,
     archive: &A,
     previous: &dyn Predecessor,
@@ -1505,7 +1671,10 @@ pub(crate) fn log_layers<A: ArchiveStore>(
         for (kind, ns) in LOG_KINDS {
             let spec = scope.layer_spec(kind)?;
 
-            let present = previous.carried_forward(kind, &spec.scope)?
+            let carried = crate::is_settled(kind, window.epoch, previous.history())
+                && previous.carried_forward(kind, &spec.scope)?;
+
+            let present = carried
                 || archive
                     .iter_logs(ns, range.clone())?
                     .next()
@@ -1517,6 +1686,185 @@ pub(crate) fn log_layers<A: ArchiveStore>(
     }
 
     Ok(total)
+}
+
+/// The windows of a plan each entity kind holds an entry in.
+#[derive(Debug, Default)]
+struct EntityPresence(BTreeMap<EntityKind, BTreeSet<u64>>);
+
+impl EntityPresence {
+    fn holds(&self, kind: EntityKind, epoch: u64) -> bool {
+        self.0
+            .get(&kind)
+            .is_some_and(|epochs| epochs.contains(&epoch))
+    }
+}
+
+/// Which of `plan`'s windows hold an entity index entry, per kind: one scan
+/// of the index over the plan's span.
+///
+/// An entry's slot is its value, so no traversal can seek to a window, and
+/// asking per window would scan the index once per epoch. One scan answers
+/// for every window and kind at once; a mainnet index of 11.5 M entries
+/// scanned in 2.6 s in the research.
+fn entity_presence<A: ArchiveStore>(plan: &Plan, archive: &A) -> Result<EntityPresence, Error> {
+    let mut presence = EntityPresence::default();
+
+    let (Some(first), Some(last)) = (plan.epochs.first(), plan.epochs.last()) else {
+        return Ok(presence);
+    };
+
+    let span = first.start_slot..last.slots().end;
+
+    for record in archive.iter_entity_records(&ENTITY_INDEX_KINDS, span)? {
+        let record = record?;
+
+        if let Some(window) = window_of(&plan.epochs, record.slot) {
+            presence
+                .0
+                .entry(record.kind)
+                .or_default()
+                .insert(window.epoch);
+        }
+    }
+
+    Ok(presence)
+}
+
+/// The window among `windows` (ascending and disjoint) whose slots hold
+/// `slot`, if any: a restricted plan can leave gaps.
+fn window_of(windows: &[EpochWindow], slot: BlockSlot) -> Option<&EpochWindow> {
+    let above = windows.partition_point(|window| window.start_slot <= slot);
+
+    above
+        .checked_sub(1)
+        .map(|at| &windows[at])
+        .filter(|window| window.slots().contains(&slot))
+}
+
+/// How many entity layers a publish of `plan` will produce: one per (window,
+/// kind) pair the predecessor carries forward or the index holds an entry
+/// in, the two questions [`write_entities`] asks.
+fn entity_layers(
+    plan: &Plan,
+    presence: &EntityPresence,
+    previous: &dyn Predecessor,
+) -> Result<usize, Error> {
+    let mut total = 0;
+
+    for window in &plan.epochs {
+        let scope = window.scope(plan.network.magic());
+
+        for (kind, entity) in ENTITY_KINDS {
+            let spec = scope.layer_spec(kind)?;
+
+            let carried = crate::is_settled(kind, window.epoch, previous.history())
+                && previous.carried_forward(kind, &spec.scope)?;
+
+            total += usize::from(carried || presence.holds(entity, window.epoch));
+        }
+    }
+
+    Ok(total)
+}
+
+/// One band of epochs' entity layers for one kind, ascending id within each,
+/// from one scan of the kind's index.
+///
+/// Banded for the reason [`write_indexes`] is: the slot is an entry's value,
+/// so filling one window costs a scan of the whole kind, and one scan per
+/// window would make a first publish quadratic. A routine publish builds one
+/// window per kind, the one whose epoch the boundary just sealed (`E - 2`),
+/// and inherits the rest.
+///
+/// A window gets a layer only where its kind has an entry first seen in it
+/// ([`entity_presence`]): an entity layer, like a log layer, exists if and
+/// only if it holds a record. The scan yields a kind's records in id order,
+/// and routing one ascending run into windows by slot keeps that order in
+/// each, so a window's layer is the one a scan of its epoch alone would
+/// write.
+///
+/// Each layer is recorded through [`Predecessor::landed`] as it exists, as
+/// [`write_indexes`] records its own.
+#[allow(clippy::too_many_arguments)]
+fn write_entities<W: SteleWriter, A: ArchiveStore>(
+    stele: &W,
+    plan: &Plan,
+    archive: &A,
+    band: &[EpochWindow],
+    kind: &'static str,
+    entity: EntityKind,
+    presence: &EntityPresence,
+    previous: &dyn Predecessor,
+    cursor: &Cursor<'_>,
+) -> Result<Vec<LayerDescriptor>, Error> {
+    let mut descriptors: Vec<Option<LayerDescriptor>> = Vec::with_capacity(band.len());
+    let mut building = Vec::new();
+
+    for window in band {
+        let scope = window.scope(plan.network.magic());
+
+        let (spec, adopted) = if crate::is_settled(kind, window.epoch, previous.history()) {
+            inherit(&scope, kind, previous)?
+        } else {
+            (scope.layer_spec(kind)?, None)
+        };
+
+        if let Some(descriptor) = adopted {
+            let at = cursor.open(kind, &spec.scope);
+            cursor.close(at, kind, Outcome::Inherited);
+
+            previous.landed(&descriptor)?;
+            descriptors.push(Some(descriptor));
+
+            continue;
+        }
+
+        if !presence.holds(entity, window.epoch) {
+            continue;
+        }
+
+        let at = cursor.open(kind, &spec.scope);
+
+        building.push(Building {
+            slots: window.slots(),
+            at,
+            position: descriptors.len(),
+            sink: sink(stele, &spec)?,
+            order: entities::OrderCheck::default(),
+        });
+
+        descriptors.push(None);
+    }
+
+    if let (Some(first), Some(last)) = (building.first(), building.last()) {
+        let slots = first.slots.start..last.slots.end;
+        let mut records = cursor.records();
+
+        for record in archive.iter_entity_records(&[entity], slots)? {
+            let record = record?;
+
+            let Some(layer) = layer_for(&mut building, record.slot) else {
+                continue;
+            };
+
+            layer.order.check(&record)?;
+            layer.sink.write_record(&entities::encode(&record)?)?;
+            records.tick();
+        }
+
+        records.flush();
+    }
+
+    for layer in building {
+        let descriptor = layer.sink.finish()?.descriptor;
+        cursor.close(layer.at, kind, Outcome::Transferred);
+
+        previous.landed(&descriptor)?;
+        descriptors[layer.position] = Some(descriptor);
+    }
+
+    Ok(descriptors.into_iter().flatten().collect())
 }
 
 /// Refuse a window holding logs under a namespace no `log-{ns}` kind carries.
@@ -1691,8 +2039,9 @@ fn write_indexes<W: SteleWriter, A: ArchiveStore>(
     Ok(descriptors.into_iter().flatten().collect())
 }
 
-/// One `indexes` layer being filled by a band's traversal.
-struct Building<K> {
+/// One layer being filled by a band's traversal: an `indexes` layer, or an
+/// entity layer with the entity codec's order check.
+struct Building<K, O = indexes::OrderCheck> {
     /// The half-open slot range this layer's epoch covers — what a record is
     /// routed by.
     slots: Range<BlockSlot>,
@@ -1703,13 +2052,27 @@ struct Building<K> {
     /// built the band held.
     position: usize,
     sink: K,
-    order: indexes::OrderCheck,
+    order: O,
 }
 
-/// Send one index record to the layer whose epoch its slot falls in.
+/// The layer in a band whose epoch `slot` falls in, if any.
 ///
 /// A binary search rather than a walk of the band: this runs once per record,
 /// and a mainnet archive store holds hundreds of millions of them.
+fn layer_for<K, O>(
+    building: &mut [Building<K, O>],
+    slot: BlockSlot,
+) -> Option<&mut Building<K, O>> {
+    let above = building.partition_point(|layer| layer.slots.start <= slot);
+
+    above
+        .checked_sub(1)
+        .map(|at| &mut building[at])
+        .filter(|layer| layer.slots.contains(&slot))
+}
+
+/// Send one index record to the layer whose epoch its slot falls in
+/// ([`layer_for`]).
 ///
 /// A record that lands in no layer is **dropped on purpose** — see
 /// [`write_indexes`] for the two ways the band's span can cover a slot no layer
@@ -1721,17 +2084,9 @@ fn route_index<K: RecordSink>(
     record: IndexRecord,
     records: &mut Records<'_>,
 ) -> Result<(), Error> {
-    let slot = indexes::slot_of(&record);
-
-    let above = building.partition_point(|layer| layer.slots.start <= slot);
-
-    let Some(layer) = above.checked_sub(1).map(|at| &mut building[at]) else {
+    let Some(layer) = layer_for(building, indexes::slot_of(&record)) else {
         return Ok(());
     };
-
-    if !layer.slots.contains(&slot) {
-        return Ok(());
-    }
 
     layer.order.check(&record)?;
     layer.sink.write_record(&indexes::encode(&record)?)?;
@@ -2127,8 +2482,10 @@ mod tests {
         );
     }
 
-    /// A stele cut mid-epoch clamps its last window to the cursor, so two
-    /// publishers standing at the same point publish the same windows.
+    /// A plan standing mid-epoch clamps its last window to the cursor. The
+    /// geometry is the plan's to compute whatever the cursor; whether the
+    /// stores may be published from is [`crate::boundary`]'s question, and
+    /// the export refuses this one.
     #[test]
     fn the_last_window_is_clamped_to_the_cursor() {
         let plan = Plan::new(&summary(), Network::for_magic(2), point(250), retained()).unwrap();

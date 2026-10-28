@@ -4,8 +4,8 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::proposal_parameters::ProposalParameters;
-use dolos_cardano::model::{ProposalAction, ProposalKey, ProposalState};
-use dolos_core::{Domain, StateStore as _};
+use dolos_cardano::model::{ProposalAction, ProposalKey};
+use dolos_core::Domain;
 use pallas::crypto::hash::Hash;
 
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
     Facade,
 };
 
-use super::is_gov_action;
+use super::{is_gov_action, read_proposal_row};
 
 /// The parameter change proposed by `tx` at action index `idx`.
 ///
@@ -31,11 +31,9 @@ fn read_parameters<D: Domain>(
 ) -> Result<ProposalParameters, Error> {
     let key = ProposalKey::new(tx, idx);
 
-    let state = domain
-        .state()
-        .read_entity_typed::<ProposalState>(&key)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let state = read_proposal_row(&domain.inner, &key)?
+        .ok_or(StatusCode::NOT_FOUND)?
+        .into_state();
 
     // A pre-Conway update proposal is a parameter change too, but db-sync
     // keeps those out of the governance table this endpoint reads.
@@ -156,41 +154,6 @@ mod tests {
             drep_deposit: Some(99_999_000_000),
             drep_inactivity_period: Some(13),
             minfee_refscript_cost_per_byte: Some(ratio(999, 1)),
-        }
-    }
-
-    fn empty_update() -> ProtocolParamUpdate {
-        ProtocolParamUpdate {
-            minfee_a: None,
-            minfee_b: None,
-            max_block_body_size: None,
-            max_transaction_size: None,
-            max_block_header_size: None,
-            key_deposit: None,
-            pool_deposit: None,
-            maximum_epoch: None,
-            desired_number_of_stake_pools: None,
-            pool_pledge_influence: None,
-            expansion_rate: None,
-            treasury_growth_rate: None,
-            min_pool_cost: None,
-            ada_per_utxo_byte: None,
-            cost_models_for_script_languages: None,
-            execution_costs: None,
-            max_tx_ex_units: None,
-            max_block_ex_units: None,
-            max_value_size: None,
-            collateral_percentage: None,
-            max_collateral_inputs: None,
-            pool_voting_thresholds: None,
-            drep_voting_thresholds: None,
-            min_committee_size: None,
-            committee_term_limit: None,
-            governance_action_validity_period: None,
-            governance_action_deposit: None,
-            drep_deposit: None,
-            drep_inactivity_period: None,
-            minfee_refscript_cost_per_byte: None,
         }
     }
 

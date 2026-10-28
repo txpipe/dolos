@@ -1,4 +1,6 @@
 use crate::mapping::{bech32, bech32_drep, stake_cred_to_address, IntoModel, DREP_HRP};
+use std::collections::BTreeMap;
+
 use axum::http::StatusCode;
 use blockfrost_openapi::models::{drep_delegators_inner::DrepDelegatorsInner, Drep, DrepsInner};
 use dolos_cardano::{
@@ -145,12 +147,31 @@ pub fn drep_is_expired(
         .unwrap_or(false)
 }
 
+/// Blockfrost's `amount`: the DRep's entry in the last completed
+/// distribution, `GovState.prev_distr`, which the newest `drep-epochs` rows
+/// hold too. `distr` is partial while a boundary's shards run. A DRep
+/// registered after that boundary has no entry, so it serves 0, as does one
+/// that unregistered. The special DReps serve their entries.
+pub fn drep_amount(
+    identifier: &DRep,
+    state: Option<&DRepState>,
+    distribution: &BTreeMap<DRep, u64>,
+) -> u64 {
+    if state.is_some_and(drep_is_retired) {
+        return 0;
+    }
+
+    distribution.get(identifier).copied().unwrap_or_default()
+}
+
 pub struct DrepModelBuilder<'a> {
     pub drep_id: String,
     pub drep_id_encoded: Vec<u8>,
     pub is_legacy: bool,
     pub is_special: bool,
     pub state: Option<DRepState>,
+    /// See [`drep_amount`].
+    pub amount: u64,
     pub pparams: &'a PParamsSet,
     pub chain: &'a ChainSummary,
     pub tip: BlockSlot,
@@ -215,17 +236,6 @@ impl<'a> DrepModelBuilder<'a> {
             hex::encode(&self.drep_id_encoded)
         }
     }
-
-    /// The boundary pass stores the ledger-exact `drep_distr` snapshot in
-    /// `DRepState.voting_power`; serving it keeps the API on the corrected
-    /// value instead of a live re-aggregation.
-    fn amount(&self) -> String {
-        self.state
-            .as_ref()
-            .map(|x| x.voting_power)
-            .unwrap_or_default()
-            .to_string()
-    }
 }
 
 impl<'a> IntoModel<Drep> for DrepModelBuilder<'a> {
@@ -235,7 +245,7 @@ impl<'a> IntoModel<Drep> for DrepModelBuilder<'a> {
         let out = Drep {
             drep_id: self.drep_id.clone(),
             hex: self.hex_value(),
-            amount: self.amount(),
+            amount: self.amount.to_string(),
             active: self.is_drep_active(),
             active_epoch: self.first_active_epoch().map(|x| x as i32),
             has_script: pallas_extras::drep_id_is_script(&self.drep_id_encoded),
@@ -255,7 +265,7 @@ impl<'a> IntoModel<DrepsInner> for DrepModelBuilder<'a> {
         let out = DrepsInner {
             drep_id: self.drep_id.clone(),
             hex: self.hex_value(),
-            amount: self.amount(),
+            amount: self.amount.to_string(),
             has_script: pallas_extras::drep_id_is_script(&self.drep_id_encoded),
             retired: self.is_drep_retired(),
             expired: self.is_drep_expired(),
@@ -269,11 +279,11 @@ impl<'a> IntoModel<DrepsInner> for DrepModelBuilder<'a> {
 }
 
 /// A listed DRep. `state` is its ledger row, which a DRep only a vote
-/// delegation named does not have: it lists with no amount, neither retired
-/// nor expired.
+/// delegation named does not have: it lists neither retired nor expired.
 pub fn drep_list_item(
     identifier: DRep,
     state: Option<DRepState>,
+    amount: u64,
     pparams: &PParamsSet,
     chain: &ChainSummary,
     tip: BlockSlot,
@@ -288,6 +298,7 @@ pub fn drep_list_item(
         is_legacy: false,
         is_special,
         state,
+        amount,
         pparams,
         chain,
         tip,
@@ -329,19 +340,21 @@ mod tests {
 
     #[test]
     fn drep_is_retired_follows_same_tx_certificate_order() {
-        use dolos_cardano::{DRepRegistration, DRepUnRegistration};
+        use dolos_cardano::{DRepExpiry, DRepRegistration, DRepUnRegistration};
         use dolos_core::EntityDelta as _;
 
         let drep = DRep::Key([7u8; 28].into());
 
         let replay = |certs: &[bool]| {
             let mut entity = None;
-            DRepRegistration::new(drep.clone(), 10, 0, 500, None).apply(&mut entity);
+            DRepRegistration::new(drep.clone(), 10, 0, 500, DRepExpiry::new(30, 1))
+                .apply(&mut entity);
 
             // one tx, its certificates in order: `true` registers
             for registers in certs {
                 if *registers {
-                    DRepRegistration::new(drep.clone(), 20, 1, 500, None).apply(&mut entity);
+                    DRepRegistration::new(drep.clone(), 20, 1, 500, DRepExpiry::new(30, 1))
+                        .apply(&mut entity);
                 } else {
                     DRepUnRegistration::new(drep.clone(), 20, 1).apply(&mut entity);
                 }
@@ -354,6 +367,50 @@ mod tests {
         assert!(!drep_is_retired(&replay(&[true])));
         assert!(drep_is_retired(&replay(&[true, false])));
         assert!(!drep_is_retired(&replay(&[false, true])));
+    }
+
+    /// Blockfrost's `COALESCE(drep_distr.amount, 0)` over the distribution of
+    /// the current epoch, the last one completed.
+    #[test]
+    fn drep_amount_is_the_completed_distribution_entry() {
+        use dolos_cardano::DRepExpiry;
+
+        let registered = DRep::Key([1u8; 28].into());
+        let absent = DRep::Key([2u8; 28].into());
+        let unregistered = DRep::Key([3u8; 28].into());
+
+        let distribution = BTreeMap::from([
+            (registered.clone(), 300),
+            (unregistered.clone(), 200),
+            (DRep::Abstain, 40),
+            (DRep::NoConfidence, 50),
+        ]);
+
+        let row = |drep: &DRep, unregistered_at| {
+            let mut state = DRepState::new(drep.clone(), DRepExpiry::new(30, 1));
+            state.registered_at = Some((10, 0));
+            state.unregistered_at = unregistered_at;
+            state.deposit = 500;
+            state
+        };
+
+        let amount = |drep: &DRep, state: Option<DRepState>| {
+            drep_amount(drep, state.as_ref(), &distribution)
+        };
+
+        assert_eq!(amount(&registered, Some(row(&registered, None))), 300);
+
+        // registered after the distribution's boundary: none of its deposit
+        assert_eq!(amount(&absent, Some(row(&absent, None))), 0);
+
+        // unregistered since the boundary that still counted it
+        assert_eq!(
+            amount(&unregistered, Some(row(&unregistered, Some((20, 0))))),
+            0
+        );
+
+        assert_eq!(amount(&DRep::Abstain, None), 40);
+        assert_eq!(amount(&DRep::NoConfidence, None), 50);
     }
 
     #[test]

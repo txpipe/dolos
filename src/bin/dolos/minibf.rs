@@ -29,6 +29,12 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         format!("/{}", args.path.trim())
     };
 
+    // paths are relative to the API root, wherever the routes are served
+    let path = match minibf.route_prefix() {
+        Some(prefix) => format!("{}{path}", prefix.as_str()),
+        None => path,
+    };
+
     let uri: Uri = path
         .parse()
         .into_diagnostic()

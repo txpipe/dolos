@@ -511,8 +511,6 @@ mod tests {
         let pool = PoolState {
             operator,
             snapshot: dolos_cardano::model::EpochValue::with_live(epoch.number, snapshot(false)),
-            blocks_minted_total: 0,
-            register_slot: 0,
             retiring_epoch: None,
             deposit: 500_000_000,
             calidus: None,
@@ -668,7 +666,10 @@ mod tests {
         identifier: DRep,
         unregistered_at: Option<(u64, usize)>,
     ) {
-        let mut drep = dolos_cardano::model::DRepState::new(identifier);
+        let mut drep = dolos_cardano::model::DRepState::new(
+            identifier,
+            dolos_cardano::model::DRepExpiry::new(0, 0),
+        );
         drep.registered_at = Some((1, 0));
         drep.unregistered_at = unregistered_at;
 

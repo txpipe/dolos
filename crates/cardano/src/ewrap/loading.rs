@@ -9,7 +9,7 @@
 //! incentives) is built by `new_empty`.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 
@@ -20,43 +20,15 @@ use pallas::ledger::primitives::{
 };
 
 use crate::{
-    ewrap::{AccountId, BoundaryVisitor as _, BoundaryWork, DRepId, ProposalId},
+    ewrap::stake::{admits_pool, stake_snapshot_of},
+    ewrap::{AccountId, BoundaryVisitor as _, BoundaryWork, ProposalId},
     load_era_summary, load_gov, pallas_extras,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
-    AccountKey, AccountState, ChainSummary, DRepKey, DRepSnapshotEntry, DRepState, EraKey,
+    AccountKey, AccountState, DRepEpochLog, DRepKey, DRepSnapshotEntry, DRepState, EraKey,
     PendingMirState, PendingRewardState, PoolHash, PoolKey, PoolState, ProposalAction,
     ProposalOutcome, ProposalState,
 };
-
-/// `RupdWork::relevant_epochs`, read from the closing boundary's side: the
-/// stake snapshot the epoch's rewards were computed against, and the protocol
-/// its stake totals are read under.
-///
-/// Both clauses of RUPD's guard are reproduced, the second one included: the
-/// node computes no rewards while the snapshot epoch is still at or before the
-/// first Shelley epoch, because the genesis-initialized snapshot at that epoch
-/// is not a reward input. A merged row written where RUPD wrote none would be
-/// a population this log invented.
-///
-/// The protocol is the era of `snapshot_epoch + 1`, not of the snapshot epoch:
-/// the Haskell ledger computes the mark snapshot under the *entering* epoch's
-/// rules, which is what decides whether pointer-address stake counts.
-fn stake_snapshot_of(ending_epoch: Epoch, chain: &ChainSummary) -> Option<(Epoch, EraKey)> {
-    if ending_epoch < 4 {
-        return None;
-    }
-
-    let snapshot_epoch = ending_epoch - 3;
-
-    if snapshot_epoch <= chain.first_shelley_epoch() {
-        return None;
-    }
-
-    let protocol = EraKey::from(chain.era_for_epoch(snapshot_epoch + 1).protocol);
-
-    Some((snapshot_epoch, protocol))
-}
 
 /// DRep votes standing at `cutoff` that the ledger still held when the
 /// snapshot was taken: only DReps in the snapshot, and only votes cast
@@ -131,6 +103,7 @@ impl BoundaryWork {
             dropping_proposals: Default::default(),
             deltas: WorkDeltas::default(),
             logs: Default::default(),
+            drep_logs: Default::default(),
             applied_reward_credentials: Default::default(),
             applied_rewards: Default::default(),
             deliverable_withdrawal_targets: Default::default(),
@@ -678,15 +651,8 @@ impl BoundaryWork {
 
             // Pool counts are in the thousands, so holding the set is memory
             // rather than scan time.
-            if let Some(stake_epoch) = stake_epoch {
-                let admitted = pool
-                    .snapshot
-                    .snapshot_at(stake_epoch)
-                    .is_some_and(|snapshot| !snapshot.is_retired);
-
-                if admitted {
-                    self.stake_pools.insert(pool.operator);
-                }
+            if stake_epoch.is_some_and(|epoch| admits_pool(&pool, epoch)) {
+                self.stake_pools.insert(pool.operator);
             }
 
             if self.should_retire_pool(&pool) {
@@ -750,39 +716,18 @@ impl BoundaryWork {
         (self.starting_epoch_no() == unregistered_epoch + 1).then_some(unregistered_at)
     }
 
-    fn should_expire_drep(&self, drep: &DRepState) -> Result<bool, ChainError> {
-        if drep.expired {
-            return Ok(false);
-        }
-
-        if drep.is_unregistered() {
-            return Ok(false);
+    fn should_expire_drep(&self, drep: &DRepState) -> bool {
+        if drep.expired || drep.is_unregistered() {
+            return false;
         }
 
         // Epoch-based expiry, Haskell-style: the stored value carries no
         // dormancy credit, so add the counter back. A DRep is active while
         // `epoch <= expiry + dormant`, i.e. it expires entering the first
         // epoch strictly greater.
-        if let Some(expiry) = &drep.expiry {
-            let actual = expiry.current + self.num_dormant_epochs;
+        let actual = drep.expiry.current + self.num_dormant_epochs;
 
-            return Ok(actual < self.starting_epoch_no());
-        }
-
-        // Legacy fallback for rows written before the epoch-based expiry
-        // field existed: the old slot-arithmetic heuristic. Self-heals as
-        // activity repopulates the field.
-        let last_activity_slot = drep
-            .last_active_slot
-            .unwrap_or(drep.registered_at.map(|x| x.0).unwrap_or_default());
-
-        let (last_activity_epoch, _) = self.chain_summary.slot_epoch(last_activity_slot);
-
-        let pparams = self.ending_state().pparams.unwrap_live();
-
-        let expiring_epoch = last_activity_epoch + pparams.ensure_drep_inactivity_period()?;
-
-        Ok(expiring_epoch <= self.starting_epoch_no())
+        actual < self.starting_epoch_no()
     }
 
     /// Current boundary registration, including certificate order within a
@@ -821,10 +766,7 @@ impl BoundaryWork {
                     self.boundary_dreps.insert(
                         credential,
                         crate::DRepSnapshotEntry {
-                            expiry: drep
-                                .expiry
-                                .as_ref()
-                                .and_then(|expiry| expiry.as_of(self.ending_state.number)),
+                            expiry: drep.expiry.as_of(self.ending_state.number),
                             unregistered_at: drep.unregistered_at,
                         },
                     );
@@ -833,7 +775,7 @@ impl BoundaryWork {
 
             if let Some(unregistered_at) = self.is_retiring_drep(&drep) {
                 self.retiring_dreps.push((drep.identifier, unregistered_at));
-            } else if self.should_expire_drep(&drep)? {
+            } else if self.should_expire_drep(&drep) {
                 self.expiring_dreps.push(drep.identifier);
             }
         }
@@ -1104,27 +1046,6 @@ impl BoundaryWork {
                 );
                 None
             }
-        }
-    }
-
-    /// Emit the boundary `DRepPowerUpdate` for one DRep: registered DReps
-    /// get the stake the accumulation attributed to them (zero when absent
-    /// from the distribution — including DReps registered after the
-    /// boundary, which postdate the snapshot). No-op writes are elided.
-    fn emit_drep_power_update(
-        &mut self,
-        distr: &BTreeMap<DRep, u64>,
-        id: &DRepId,
-        drep: &DRepState,
-    ) {
-        if drep.registered_at.is_none() || drep.is_unregistered() {
-            return;
-        }
-
-        let power = distr.get(&drep.identifier).copied().unwrap_or_default();
-
-        if power != drep.voting_power {
-            self.add_delta(crate::DRepPowerUpdate::new(id.clone(), power));
         }
     }
 
@@ -1634,11 +1555,11 @@ impl BoundaryWork {
             visitor_wrapup.visit_retiring_pool(self, pool_hash, &pool, account.as_ref())?;
         }
 
-        // DReps — drops.visit_drep emits DRepExpiration for expiring dreps;
-        // registered dreps additionally get their boundary voting power
-        // written from the completed distribution accumulator, with the
-        // boundary-paid credits folded in — the same amounts
-        // `GovDistrBoundaryCredit` persists into the accumulator itself.
+        // DReps — drops.visit_drep emits DRepExpiration for expiring dreps.
+        // The `drep-epochs` rows below take the completed distribution
+        // accumulator with the boundary-paid credits folded in — the same
+        // amounts `GovDistrBoundaryCredit` persists into the accumulator
+        // itself.
         let drep_power = self.completed_drep_distr().map(|mut distr| {
             for (drep, credit) in &self.boundary_drep_credits {
                 *distr.entry(drep.clone()).or_default() += credit;
@@ -1646,6 +1567,9 @@ impl BoundaryWork {
 
             distr
         });
+
+        let boundary_slot = self.chain_summary.epoch_start(self.ending_state.number + 1);
+        let mut registered_dreps = BTreeSet::new();
 
         let dreps = state.iter_entities_typed::<DRepState>(None)?;
         for record in dreps {
@@ -1655,9 +1579,30 @@ impl BoundaryWork {
             visitor_refunds.visit_drep(self, &drep_id, &drep)?;
             visitor_wrapup.visit_drep(self, &drep_id, &drep)?;
 
-            if let Some(distr) = drep_power.as_ref() {
-                self.emit_drep_power_update(distr, &drep_id, &drep);
+            if Self::is_drep_registered_at_boundary(&drep, boundary_slot) {
+                registered_dreps.insert(drep.identifier);
             }
+        }
+
+        // One `drep-epochs` row per distribution entry, at its full value.
+        if let Some(distr) = drep_power {
+            self.drep_logs = distr
+                .into_iter()
+                .map(|(drep, voting_power)| {
+                    let registered = match &drep {
+                        DRep::Abstain | DRep::NoConfidence => true,
+                        _ => registered_dreps.contains(&drep),
+                    };
+
+                    (
+                        DRepKey::from(drep),
+                        DRepEpochLog {
+                            voting_power,
+                            registered,
+                        },
+                    )
+                })
+                .collect();
         }
 
         // Active proposals + enacting + dropping.
@@ -1716,15 +1661,18 @@ impl BoundaryWork {
 mod tests {
     use std::collections::BTreeMap;
 
-    use dolos_core::{Domain as _, EntityDelta as _, StateStore as _, StateWriter as _};
+    use dolos_core::{
+        ArchiveStore as _, Domain as _, EntityDelta as _, StateStore as _, StateWriter as _,
+    };
     use dolos_testing::toy_domain::ToyDomain;
     use pallas::ledger::primitives::StakeCredential;
 
     use super::*;
     use crate::hacks::pv9_drep_delegs::{Action as Pv9Action, Entry as Pv9Entry};
     use crate::{
-        ewrap::AppliedReward, AccountTransition, AssignRewards, ControlledAmountInc,
-        DRepDelegation, DRepRegistration, DRepUnRegistration, EpochValue, PoolDelegation, Stake,
+        ewrap::AppliedReward, rupd::loading::stake_snapshot_epoch, AccountTransition,
+        AssignRewards, ChainSummary, ControlledAmountInc, DRepDelegation, DRepRegistration,
+        DRepUnRegistration, EpochValue, PoolDelegation, Stake,
     };
 
     /// Pins the rotation-timing assumption behind the distribution snapshot
@@ -1875,18 +1823,16 @@ mod tests {
         identifier: DRep,
         registered_at: Option<u64>,
         unregistered_at: Option<u64>,
-        voting_power: u64,
+        deposit: u64,
     ) -> crate::DRepState {
         crate::DRepState {
             registered_at: registered_at.map(|slot| (slot, 0)),
-            voting_power,
             last_active_slot: None,
             unregistered_at: unregistered_at.map(|slot| (slot, 0)),
             expired: false,
-            deposit: voting_power,
+            deposit,
             identifier,
-            anchor: None,
-            expiry: None,
+            expiry: crate::DRepExpiry::new(CLOSING_EPOCH + 100, CLOSING_EPOCH),
         }
     }
 
@@ -2032,13 +1978,17 @@ mod tests {
             .expect("accumulator present")
     }
 
+    /// A DRep's entry in the last completed distribution, the one minibf
+    /// serves.
     fn read_drep_power(domain: &ToyDomain, drep: &DRep) -> u64 {
-        domain
-            .state()
-            .read_entity_typed::<crate::DRepState>(&DRepKey::from(drep))
+        crate::load_gov::<ToyDomain>(domain.state())
             .unwrap()
-            .expect("drep row present")
-            .voting_power
+            .prev_distr
+            .expect("completed distribution")
+            .drep_distr
+            .get(drep)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// End-to-end shard pass over a seeded store: the accumulated
@@ -2046,8 +1996,8 @@ mod tests {
     /// the delegated weight (done criterion 3), track the abstain
     /// pseudo-DRep separately, skip delegations to DReps outside the
     /// snapshot's registered set, survive shard replays unchanged (done
-    /// criterion 1 through the real commit path), and land on
-    /// `DRepState.voting_power` at finalize.
+    /// criterion 1 through the real commit path), and rotate into
+    /// `prev_distr` at finalize.
     #[test]
     fn shard_accumulation_builds_boundary_distributions() {
         let domain = seed_domain();
@@ -2078,10 +2028,9 @@ mod tests {
         }
         assert_eq!(read_distr(&domain), distr);
 
-        // finalize writes the accumulated powers: the registered drep gets
-        // its delegated stake (replacing the deposit seed), the drep
-        // registered after the boundary is zeroed (absent from the
-        // snapshot), the unregistered one is left alone
+        // finalize completes the distribution: the registered drep gets its
+        // delegated stake, the drep registered after the boundary and the
+        // unregistered one have no entry
         let mut boundary =
             BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
         boundary
@@ -2091,6 +2040,157 @@ mod tests {
         assert_eq!(read_drep_power(&domain, &reg_drep()), 147);
         assert_eq!(read_drep_power(&domain, &fresh_drep()), 0);
         assert_eq!(read_drep_power(&domain, &unreg_drep()), 0);
+    }
+
+    fn script_drep() -> DRep {
+        DRep::Script([4u8; 28].into())
+    }
+
+    fn drep_epochs(domain: &ToyDomain) -> Vec<(BlockSlot, DRepKey, DRepEpochLog)> {
+        domain
+            .archive()
+            .iter_logs_typed::<DRepEpochLog>(None)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// Finalize archives one `drep-epochs` row per entry of the completed
+    /// distribution, at its full value and under the start of the closing
+    /// epoch: the registered DReps and the unregistered one in it, and both
+    /// pseudo-DReps, which count as registered. The DRep registered after the
+    /// boundary is outside the distribution and has no row.
+    #[test]
+    fn finalize_archives_one_drep_epoch_row_per_distribution_entry() {
+        let domain = seed_domain();
+        let state = domain.state();
+        let chain = load_era_summary::<ToyDomain>(state).unwrap();
+        let boundary_slot = chain.epoch_start(CLOSING_EPOCH + 1);
+
+        let second = drep_row(script_drep(), Some(boundary_slot - 10), None, 30);
+        let writer = state.start_writer().unwrap();
+        writer
+            .write_entity_typed(&DRepKey::from(&second.identifier), &second)
+            .unwrap();
+        writer.commit().unwrap();
+
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+
+        // entries the seeded delegations don't produce: the second registered
+        // DRep, the one unregistered before the boundary, and NoConfidence
+        let mut gov = crate::load_gov::<ToyDomain>(state).unwrap();
+        let distr = gov.distr.as_mut().expect("accumulator present");
+        distr.drep_distr.insert(script_drep(), 30);
+        distr.drep_distr.insert(unreg_drep(), 20);
+        distr.drep_distr.insert(DRep::NoConfidence, 9);
+
+        let writer = state.start_writer().unwrap();
+        writer.write_entity_typed(&(), &gov).unwrap();
+        writer.commit().unwrap();
+
+        let mut boundary =
+            BoundaryWork::load_finalize::<ToyDomain>(state, domain.genesis()).unwrap();
+
+        let row = |voting_power, registered| DRepEpochLog {
+            voting_power,
+            registered,
+        };
+
+        let expected = BTreeMap::from([
+            (reg_drep(), row(147, true)),
+            (script_drep(), row(30, true)),
+            (unreg_drep(), row(20, false)),
+            (DRep::Abstain, row(61, true)),
+            (DRep::NoConfidence, row(9, true)),
+        ]);
+
+        let rows: BTreeMap<_, _> = boundary
+            .drep_logs
+            .iter()
+            .map(|(key, log)| (key.0.clone(), log.clone()))
+            .collect();
+        assert_eq!(rows, expected);
+
+        boundary
+            .commit_finalize::<ToyDomain>(state, domain.archive())
+            .unwrap();
+
+        let row_slot = chain.epoch_start(CLOSING_EPOCH);
+        let archived = drep_epochs(&domain);
+        assert!(archived.iter().all(|(slot, ..)| *slot == row_slot));
+
+        let archived: BTreeMap<_, _> = archived
+            .into_iter()
+            .map(|(_, key, log)| (key.0, log))
+            .collect();
+        assert_eq!(archived, expected);
+    }
+
+    /// An incomplete distribution has nothing sound to archive, even with
+    /// DReps in it: every shard runs, then the accumulator is set back one
+    /// shard, which is what a shard that never merged leaves.
+    #[test]
+    fn an_incomplete_distribution_archives_no_drep_epoch_rows() {
+        let domain = seed_domain();
+        let state = domain.state();
+
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+
+        let mut gov = crate::load_gov::<ToyDomain>(state).unwrap();
+        let distr = gov.distr.as_mut().expect("accumulator present");
+        distr.committed_shards -= 1;
+
+        let writer = state.start_writer().unwrap();
+        writer.write_entity_typed(&(), &gov).unwrap();
+        writer.commit().unwrap();
+
+        let distr = read_distr(&domain);
+        assert!(!distr.drep_distr.is_empty());
+        assert!(!distr.is_complete_for(CLOSING_EPOCH));
+
+        let mut boundary =
+            BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+        assert!(boundary.drep_logs.is_empty());
+
+        boundary
+            .commit_finalize::<ToyDomain>(domain.state(), domain.archive())
+            .unwrap();
+        assert!(drep_epochs(&domain).is_empty());
+    }
+
+    /// A rollback to the boundary itself, the start of the epoch it opens,
+    /// keeps the rows. The archive drops log rows at the rollback slot and
+    /// after it, and EWRAP does not run again for a boundary already crossed.
+    #[test]
+    fn a_rollback_to_the_boundary_keeps_the_drep_epoch_rows() {
+        let domain = seed_domain();
+
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+
+        let mut boundary =
+            BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+        boundary
+            .commit_finalize::<ToyDomain>(domain.state(), domain.archive())
+            .unwrap();
+
+        let rows = drep_epochs(&domain);
+        assert!(!rows.is_empty());
+
+        let boundary_slot = load_era_summary::<ToyDomain>(domain.state())
+            .unwrap()
+            .epoch_start(CLOSING_EPOCH + 1);
+        domain
+            .archive()
+            .truncate_front(&dolos_core::ChainPoint::Slot(boundary_slot))
+            .unwrap();
+
+        assert_eq!(drep_epochs(&domain), rows);
     }
 
     /// Deposit weight follows the ledger's live forest, not the drop-pass
@@ -2215,8 +2315,6 @@ mod tests {
                 None,
                 None,
             ),
-            blocks_minted_total: 0,
-            register_slot: 0,
             retiring_epoch: Some(CLOSING_EPOCH + 1),
             deposit: 0,
             calidus: None,
@@ -2265,6 +2363,19 @@ mod tests {
         assert_eq!(distr.pool_total, accumulated.pool_total);
 
         assert_eq!(read_drep_power(&domain, &reg_drep()), 147 + pool_deposit);
+
+        // the archived row carries the credited power too
+        let row = drep_epochs(&domain)
+            .into_iter()
+            .find(|(_, key, _)| key.0 == reg_drep())
+            .map(|(_, _, log)| log);
+        assert_eq!(
+            row,
+            Some(DRepEpochLog {
+                voting_power: 147 + pool_deposit,
+                registered: true,
+            })
+        );
     }
 
     /// A DRep certificate, as the tests below replay it: the position it
@@ -2283,10 +2394,14 @@ mod tests {
 
         for cert in certs {
             match cert {
-                Cert::Reg(slot, order) => {
-                    DRepRegistration::new(identifier.clone(), *slot, *order, 500, None)
-                        .apply(&mut entity)
-                }
+                Cert::Reg(slot, order) => DRepRegistration::new(
+                    identifier.clone(),
+                    *slot,
+                    *order,
+                    500,
+                    crate::DRepExpiry::new(CLOSING_EPOCH + 100, CLOSING_EPOCH),
+                )
+                .apply(&mut entity),
                 Cert::UnReg(slot, order) => {
                     DRepUnRegistration::new(identifier.clone(), *slot, *order).apply(&mut entity)
                 }
@@ -2754,6 +2869,46 @@ mod tests {
         );
     }
 
+    /// A delegation in the certificate's own transaction compares equal to
+    /// it, since positions record no certificate index. On mainnet the
+    /// account moved from X to Y in the transaction that deregisters X, and
+    /// the ledger cleared it, so a `Clear` entry drops it and it counts toward
+    /// no DRep. An unlisted delegation to X in that transaction falls to the
+    /// strict positional rule and is kept.
+    #[test]
+    fn a_listed_same_transaction_delegation_is_cleared() {
+        let domain = ToyDomain::new(None, None);
+        let at = |offset| closing_epoch_slot(&domain, offset);
+
+        let x = DRep::Key([0x21; 28].into());
+        let y = DRep::Key([0x22; 28].into());
+
+        let dreps = [
+            replay_drep_certs(x.clone(), &[Cert::Reg(at(10), 0), Cert::UnReg(at(100), 0)]),
+            replay_drep_certs(y.clone(), &[Cert::Reg(at(10), 0)]),
+        ];
+
+        let same_tx = weighted_delegator(0xa3, 1, y.clone(), (at(100), 0));
+        let unlisted = weighted_delegator(0xb3, 4, x.clone(), (at(100), 0));
+
+        let table = pv9_table(&x, (at(100), 0), &[(&same_tx, Pv9Action::Clear)]);
+
+        let accounts = [same_tx, unlisted];
+        let domain = seed_delegation_domain(&dreps, &accounts);
+        let [same_tx, unlisted] = &accounts;
+
+        assert_eq!(snapshot_drep(&domain, table, same_tx), None);
+
+        run_shards_with(&domain, table);
+
+        assert!(delegation_dropped(&domain, same_tx));
+        assert!(!delegation_dropped(&domain, unlisted));
+
+        let distr = read_distr(&domain);
+        assert!(distr.is_complete_for(CLOSING_EPOCH));
+        assert!(!distr.drep_distr.contains_key(&y));
+    }
+
     /// Without its entry the same stale delegation keeps today's positional
     /// attribution: Y's delegation postdates nothing that retires.
     #[test]
@@ -3015,7 +3170,7 @@ mod tests {
         assert_eq!(row.pool_id, None);
     }
 
-    /// A boundary whose `relevant_epochs` gate is closed writes no stake leg
+    /// A boundary whose stake gate is closed writes no stake leg
     /// at all, however the account looks.
     #[test]
     fn no_stake_snapshot_means_no_stake_leg() {
@@ -3108,9 +3263,9 @@ mod tests {
         );
     }
 
-    /// `RupdWork::relevant_epochs`, both clauses. The first-Shelley one is the
-    /// clause the consolidation evaluation's instrumentation omitted, and the
-    /// one reported epoch difference it produced.
+    /// `RupdWork::stake_epochs`, not its reward gate: the boundary whose
+    /// snapshot is the first Shelley epoch's is open, the one before it is
+    /// closed.
     #[test]
     fn the_stake_snapshot_gate_matches_rupds() {
         let domain = ToyDomain::new(None, None);
@@ -3119,20 +3274,165 @@ mod tests {
         let chain = &boundary.chain_summary;
         let first_shelley = chain.first_shelley_epoch();
 
-        for ending in 0..4 {
+        for ending in 0..first_shelley + 3 {
             assert_eq!(stake_snapshot_of(ending, chain), None, "epoch {ending}");
         }
 
-        // `snapshot_epoch <= first_shelley` is closed; the epoch right after it
-        // is open.
-        let closed = first_shelley + 3;
-        assert_eq!(stake_snapshot_of(closed, chain), None);
+        for open in [first_shelley + 3, first_shelley + 4] {
+            assert_eq!(
+                stake_snapshot_of(open, chain).map(|(epoch, _)| epoch),
+                Some(open - 3),
+                "epoch {open}"
+            );
+        }
+    }
 
-        let open = closed + 1;
-        assert_eq!(
-            stake_snapshot_of(open, chain).map(|(epoch, _)| epoch),
-            Some(open - 3)
+    /// The two gates differ at one epoch only, the first stake epoch's
+    /// boundary (`first_shelley + 3`): a snapshot, and no rewards. Preview's
+    /// `first_shelley == 0` opens it at epoch 3, below the old `< 4` clause.
+    #[test]
+    fn the_stake_gate_opens_one_epoch_before_the_reward_gate() {
+        use crate::rupd::loading::reward_snapshot_epoch;
+
+        for first_shelley in [0, 208] {
+            for epoch in 0..first_shelley + 3 {
+                assert_eq!(stake_snapshot_epoch(epoch, first_shelley), None);
+                assert_eq!(reward_snapshot_epoch(epoch, first_shelley), None);
+            }
+
+            let first_stake = first_shelley + 3;
+            assert_eq!(
+                stake_snapshot_epoch(first_stake, first_shelley),
+                Some(first_shelley)
+            );
+            assert_eq!(reward_snapshot_epoch(first_stake, first_shelley), None);
+
+            for epoch in first_stake + 1..first_stake + 4 {
+                assert_eq!(stake_snapshot_epoch(epoch, first_shelley), Some(epoch - 3));
+                assert_eq!(reward_snapshot_epoch(epoch, first_shelley), Some(epoch - 3));
+            }
+        }
+    }
+
+    /// A chain shaped as mainnet's or preprod's: Byron history, then Shelley
+    /// from `first_shelley`. With `shelley_epochs`, Shelley closes after that
+    /// many epochs and Allegra is the edge; without, Shelley is the edge, as
+    /// on mainnet through its gate epochs.
+    fn byron_then_shelley(first_shelley: u64, shelley_epochs: Option<u64>) -> ChainSummary {
+        let byron_length = 21_600;
+        let shelley_length = 432_000;
+
+        let shelley_start = crate::model::EraBoundary {
+            epoch: first_shelley,
+            slot: first_shelley * byron_length,
+            timestamp: first_shelley * byron_length * 20,
+        };
+
+        let allegra_start = shelley_epochs.map(|epochs| crate::model::EraBoundary {
+            epoch: first_shelley + epochs,
+            slot: shelley_start.slot + epochs * shelley_length,
+            timestamp: shelley_start.timestamp + epochs * shelley_length,
+        });
+
+        let mut chain = ChainSummary::default();
+
+        chain.append_era(
+            1,
+            crate::model::EraState {
+                start: crate::model::EraBoundary {
+                    epoch: 0,
+                    slot: 0,
+                    timestamp: 0,
+                },
+                end: Some(shelley_start.clone()),
+                epoch_length: byron_length,
+                slot_length: 20,
+                protocol: 1,
+            },
         );
+
+        chain.append_era(
+            2,
+            crate::model::EraState {
+                start: shelley_start,
+                end: allegra_start.clone(),
+                epoch_length: shelley_length,
+                slot_length: 1,
+                protocol: 2,
+            },
+        );
+
+        if let Some(allegra_start) = allegra_start {
+            chain.append_era(
+                3,
+                crate::model::EraState {
+                    start: allegra_start,
+                    end: None,
+                    epoch_length: shelley_length,
+                    slot_length: 1,
+                    protocol: 3,
+                },
+            );
+        }
+
+        chain
+    }
+
+    /// RUPD's and EWRAP's gates read the chain's first Shelley epoch, not
+    /// the chain's first epoch: on mainnet the stake gate opens at 211 and
+    /// the reward gate at 212, and on preprod at 7 and 8. Mainnet reaches
+    /// those epochs with Shelley still at the edge, so both the edge and the
+    /// past-era shapes are covered.
+    #[test]
+    fn the_gates_follow_the_chains_first_shelley_epoch() {
+        for (first_shelley, shelley_epochs) in [(208, None), (208, Some(28)), (4, Some(1))] {
+            let chain = byron_then_shelley(first_shelley, shelley_epochs);
+            assert_eq!(chain.first_shelley_epoch(), first_shelley);
+
+            let rupd = |current_epoch| crate::rupd::RupdWork {
+                current_epoch,
+                snapshot: Default::default(),
+                pots: Default::default(),
+                incentives: Default::default(),
+                blocks_made_total: 0,
+                max_supply: 0,
+                chain: chain.clone(),
+                pparams: None,
+                shard_ranges: None,
+            };
+
+            let first_stake = first_shelley + 2;
+
+            let expected = [
+                (first_stake, None, None),
+                (first_stake + 1, Some(first_shelley), None),
+                (
+                    first_stake + 2,
+                    Some(first_shelley + 1),
+                    Some(first_shelley + 1),
+                ),
+            ];
+
+            for (epoch, stake, reward) in expected {
+                let work = rupd(epoch);
+
+                assert_eq!(
+                    work.stake_epochs(),
+                    stake.map(|x| (x, epoch - 1)),
+                    "stake epochs of {epoch}"
+                );
+                assert_eq!(
+                    work.reward_epochs(),
+                    reward.map(|x| (x, epoch - 1)),
+                    "reward epochs of {epoch}"
+                );
+                assert_eq!(
+                    stake_snapshot_of(epoch, &chain).map(|(epoch, _)| epoch),
+                    stake,
+                    "stake snapshot of {epoch}"
+                );
+            }
+        }
     }
 }
 
@@ -3400,14 +3700,12 @@ mod ratification_tests {
 
         let drep_row = crate::DRepState {
             registered_at: Some((0, 0)),
-            voting_power: 1_000,
             last_active_slot: None,
             unregistered_at: None,
             expired: false,
             deposit: 0,
             identifier: drep(),
-            anchor: None,
-            expiry: None,
+            expiry: crate::DRepExpiry::new(CLOSING + 100, CLOSING),
         };
 
         writer
@@ -3457,11 +3755,9 @@ mod ratification_tests {
                 unregistered_at: Some((slot, 0)),
                 deposit: 0,
                 identifier: drep(),
-                voting_power: 1000,
                 last_active_slot: None,
                 expired: false,
-                anchor: None,
-                expiry: Some(crate::DRepExpiry::new(CLOSING + 100, CLOSING)),
+                expiry: crate::DRepExpiry::new(CLOSING + 100, CLOSING),
             };
             if reregister {
                 row.registered_at = Some((slot + 1, 0));
@@ -3600,7 +3896,7 @@ mod ratification_tests {
             .unwrap();
         assert_eq!(snapshot.closing_epoch, CLOSING);
         assert_eq!(snapshot.dreps, boundary.boundary_dreps);
-        assert_eq!(snapshot.dreps[&drep_cred()].expiry, None);
+        assert_eq!(snapshot.dreps[&drep_cred()].expiry, Some(CLOSING + 100));
         assert_eq!(snapshot.dreps[&drep_cred()].unregistered_at, None);
     }
 
@@ -3695,7 +3991,7 @@ mod ratification_tests {
         );
 
         let mut live = replay_drep_certs(drep(), &certs(CLOSING + 1));
-        live.expiry = Some(crate::DRepExpiry::new(CLOSING + 100, CLOSING));
+        live.expiry = crate::DRepExpiry::new(CLOSING + 100, CLOSING);
 
         let mut gov = crate::load_gov::<ToyDomain>(state).unwrap();
         gov.drep_snapshot
@@ -3897,16 +4193,16 @@ mod ratification_tests {
         ) {
             let domain = seed(&[]);
             let mut row = domain.state().read_entity_typed::<crate::DRepState>(&DRepKey::from(&drep())).unwrap().unwrap();
-            row.expiry = Some(crate::DRepExpiry::new(expiry, updated_in));
-            let expected = row.expiry.as_ref().unwrap().as_of(CLOSING);
+            row.expiry = crate::DRepExpiry::new(expiry, updated_in);
+            let expected = row.expiry.as_of(CLOSING);
             let writer = domain.state().start_writer().unwrap();
             writer.write_entity_typed(&DRepKey::from(&drep()), &row).unwrap();
             writer.commit().unwrap();
             let boundary = BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
-            row.expiry.as_mut().unwrap().set(next_expiry, CLOSING + 1);
+            row.expiry.set(next_expiry, CLOSING + 1);
             proptest::prop_assert_eq!(boundary.boundary_dreps[&drep_cred()].expiry, expected);
             proptest::prop_assert_eq!(boundary.boundary_dreps[&drep_cred()].expiry,
-                row.expiry.as_ref().unwrap().as_of(CLOSING));
+                row.expiry.as_of(CLOSING));
         }
     }
 
@@ -3984,7 +4280,6 @@ mod ratification_tests {
         let wrapped = crate::load_epoch::<ToyDomain>(domain.state()).unwrap();
         let end = wrapped.end.as_ref().expect("EWRAP stamped end stats");
         assert_eq!(end.treasury_withdrawals, WITHDRAWAL);
-        assert_eq!(end.invalid_treasury_withdrawals, 0);
 
         // the beneficiary's live stake got the withdrawal credit (the
         // deposit refund is scheduled for the opening epoch instead)
@@ -4003,13 +4298,10 @@ mod ratification_tests {
             domain.genesis(),
             Default::default(),
             Default::default(),
-            0,
-            1,
-            ranges.clone(),
         )
         .unwrap();
         shard
-            .commit_shard::<ToyDomain>(domain.state(), ranges)
+            .commit_shard::<ToyDomain>(domain.state(), domain.archive(), 0, 1, ranges)
             .unwrap();
 
         let mut estart = crate::estart::WorkContext::load_finalize::<ToyDomain>(
@@ -4019,7 +4311,7 @@ mod ratification_tests {
         .unwrap();
         let slot = estart.chain_summary.epoch_start(estart.starting_epoch_no());
         estart
-            .commit_finalize::<ToyDomain>(domain.state(), slot)
+            .commit_finalize::<ToyDomain>(domain.state(), domain.archive(), slot)
             .unwrap();
 
         let after = crate::load_epoch::<ToyDomain>(domain.state()).unwrap();
@@ -4046,8 +4338,8 @@ mod ratification_tests {
     /// shard accumulation ran on pre-enactment positions — on mainnet the
     /// 644→645 boundary's six items left the `Abstain` bucket short by
     /// exactly their deliverable total. The finalize pass folds the credit
-    /// into the accumulator, the rotated copy the next boundary ratifies
-    /// with, and the published `DRepState.voting_power`.
+    /// into the accumulator and the rotated copy the next boundary ratifies
+    /// with, which minibf serves.
     #[test]
     fn enacted_withdrawal_credits_the_boundary_drep_distr() {
         let accepted = withdrawal(0x01, Some(Vote::Yes), CLOSING + 10);
@@ -4116,13 +4408,6 @@ mod ratification_tests {
             rotated.drep_distr.get(&drep()),
             Some(&(DEPOSIT + WITHDRAWAL))
         );
-
-        let drep_row = domain
-            .state()
-            .read_entity_typed::<crate::DRepState>(&DRepKey::from(&drep()))
-            .unwrap()
-            .expect("drep row present");
-        assert_eq!(drep_row.voting_power, DEPOSIT + WITHDRAWAL);
     }
 
     /// A proposal's deposit counts on the pool leg only while the proposal

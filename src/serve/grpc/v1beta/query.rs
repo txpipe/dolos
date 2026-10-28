@@ -877,7 +877,7 @@ where
         for (k, v) in utxos.iter() {
             let block_ref = block_refs.get(&k.0).map(to_chain_point);
             items.push(
-                into_u5c_utxo(k, v, &self.mapper, &self.domain, block_ref)
+                into_u5c_utxo(k, &v.output, &self.mapper, &self.domain, block_ref)
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?,
             );
@@ -931,7 +931,7 @@ where
         for (k, v) in utxos.iter() {
             let block_ref = block_refs.get(&k.0).map(to_chain_point);
             items.push(
-                into_u5c_utxo(k, v, &self.mapper, &self.domain, block_ref)
+                into_u5c_utxo(k, &v.output, &self.mapper, &self.domain, block_ref)
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?,
             );

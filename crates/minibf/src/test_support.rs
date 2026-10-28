@@ -10,7 +10,7 @@ use axum::{
 };
 use dolos_cardano::periods::stats::TOTALS;
 use dolos_core::{
-    config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig},
+    config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig, RoutePrefix},
     import::ImportExt as _,
     CacheStore as _, Domain, StateStore,
 };
@@ -19,7 +19,7 @@ use dolos_testing::{
         build_synthetic_blocks, seed_account_stake_logs, seed_epoch_logs, seed_reward_logs,
         SyntheticBlockConfig, SyntheticVectors,
     },
-    toy_domain::ToyDomain,
+    toy_domain::{MemoryStores, ToyDomain, ToyStores},
 };
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
@@ -400,8 +400,8 @@ pub fn stake_address_chain() -> SyntheticBlockConfig {
     }
 }
 
-pub struct TestDomainBuilder {
-    domain: ToyDomain,
+pub struct TestDomainBuilder<B: ToyStores = MemoryStores> {
+    domain: ToyDomain<B>,
     vectors: SyntheticVectors,
 }
 
@@ -411,13 +411,34 @@ impl TestDomainBuilder {
     }
 
     pub fn new_with_synthetic_and_protocol(
-        mut cfg: SyntheticBlockConfig,
+        cfg: SyntheticBlockConfig,
         force_protocol: Option<usize>,
     ) -> Self {
+        Self::new_with_synthetic_and_genesis(cfg, |genesis| {
+            if let Some(protocol) = force_protocol {
+                genesis.force_protocol = Some(protocol);
+            }
+        })
+    }
+
+    /// The synthetic chain over the preview genesis as `adjust` leaves it.
+    pub fn new_with_synthetic_and_genesis(
+        cfg: SyntheticBlockConfig,
+        adjust: impl FnOnce(&mut dolos_core::Genesis),
+    ) -> Self {
+        Self::new_with_synthetic_in(cfg, adjust)
+    }
+}
+
+impl<B: ToyStores> TestDomainBuilder<B> {
+    /// [`TestDomainBuilder::new_with_synthetic_and_genesis`] over a fresh
+    /// set of `B` stores.
+    pub fn new_with_synthetic_in(
+        mut cfg: SyntheticBlockConfig,
+        adjust: impl FnOnce(&mut dolos_core::Genesis),
+    ) -> Self {
         let mut genesis = dolos_cardano::include::preview::load();
-        if let Some(protocol) = force_protocol {
-            genesis.force_protocol = Some(protocol);
-        }
+        adjust(&mut genesis);
         let genesis = Arc::new(genesis);
         let min_slot = {
             let temp = ToyDomain::new_with_genesis_and_config(
@@ -435,11 +456,11 @@ impl TestDomainBuilder {
         }
         let (blocks, vectors, chain_config) = build_synthetic_blocks(cfg);
 
-        let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+        let domain = ToyDomain::<B>::with_backend(genesis, chain_config, None, None);
         domain
             .import_blocks(blocks.clone())
             .expect("failed to import synthetic blocks");
-        let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+        let summary = dolos_cardano::eras::load_era_summary::<ToyDomain<B>>(domain.state())
             .expect("era summary");
         let tip_slot = domain
             .state()
@@ -475,7 +496,7 @@ impl TestDomainBuilder {
         Self { domain, vectors }
     }
 
-    pub fn finish(self) -> (ToyDomain, SyntheticVectors) {
+    pub fn finish(self) -> (ToyDomain<B>, SyntheticVectors) {
         (self.domain, self.vectors)
     }
 }
@@ -514,12 +535,35 @@ impl TestApp {
                 ..Default::default()
             },
             force_protocol: None,
+            genesis_pools: Vec::new(),
         }
     }
 
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        Self::build(cfg, fault, minibf)
+    }
+
+    /// App that serves each route under `route_prefix`, parsed as a
+    /// configuration file would be.
+    pub fn new_with_route_prefix(route_prefix: &str) -> Self {
+        let route_prefix = RoutePrefix::parse(route_prefix).expect("invalid route prefix");
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
+            .with_route_prefix(route_prefix);
+        Self::build(
+            SyntheticBlockConfig {
+                block_count: 5,
+                txs_per_block: 3,
+                ..Default::default()
+            },
+            None,
+            minibf,
+        )
+    }
+
+    fn build(cfg: SyntheticBlockConfig, fault: Option<TestFault>, minibf: MinibfConfig) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(domain, vectors, fault, None)
+        Self::from_domain(domain, vectors, fault, minibf)
     }
 
     pub fn new_with_cfg_and_setup(
@@ -528,7 +572,8 @@ impl TestApp {
     ) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         setup(&domain, &vectors);
-        Self::from_domain(domain, vectors, None, None)
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        Self::from_domain(domain, vectors, None, minibf)
     }
 
     /// App over `cfg`'s chain on the domain `adjust` returns, for a domain
@@ -538,36 +583,33 @@ impl TestApp {
         adjust: impl FnOnce(ToyDomain) -> ToyDomain,
     ) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(adjust(domain), vectors, None, None)
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        Self::from_domain(adjust(domain), vectors, None, minibf)
     }
 
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
     /// can be exercised without building a chain of thousands of blocks.
     pub fn new_with_scan_limit(cfg: SyntheticBlockConfig, max_scan_items: u64) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(domain, vectors, None, Some(max_scan_items))
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
+            .with_max_scan_items(max_scan_items);
+        Self::from_domain(domain, vectors, None, minibf)
     }
 
     fn from_domain(
         domain: ToyDomain,
         vectors: SyntheticVectors,
         fault: Option<TestFault>,
-        max_scan_items: Option<u64>,
+        minibf: MinibfConfig,
     ) -> Self {
         let domain = match fault {
             Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
             None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
         };
 
-        let cfg = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        let cfg = match max_scan_items {
-            Some(max) => cfg.with_max_scan_items(max),
-            None => cfg,
-        };
-
         let facade = Facade {
             inner: domain,
-            config: cfg,
+            config: minibf,
         };
 
         let router = build_router_with_facade(facade.clone());
@@ -780,7 +822,8 @@ pub fn replicated_app_with_fault(fault: Option<TestFault>) -> TestApp {
     let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
     replicate_accounts_and_pools(&domain, 4);
 
-    TestApp::from_domain(domain, vectors, fault, None)
+    let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+    TestApp::from_domain(domain, vectors, fault, minibf)
 }
 
 /// The body of a totals route with the totals cache off, then on and keeping
@@ -833,9 +876,39 @@ async fn ok_body(app: &TestApp, path: &str) -> Vec<u8> {
     bytes
 }
 
+/// A Shelley genesis `staking` section that stakes `pools`, with no
+/// delegation.
+fn genesis_staking(pools: &[[u8; 28]]) -> pallas::interop::hardano::configs::shelley::Staking {
+    let pools: serde_json::Map<String, serde_json::Value> = pools
+        .iter()
+        .map(|operator| {
+            let operator = hex::encode(operator);
+
+            let pool = serde_json::json!({
+                "cost": 0,
+                "margin": 0.0,
+                "pledge": 0,
+                "publicKey": operator,
+                "relays": [],
+                "rewardAccount": {
+                    "credential": { "keyHash": operator },
+                    "network": "Testnet"
+                },
+                "vrf": hex::encode([0x01; 32]),
+            });
+
+            (operator, pool)
+        })
+        .collect();
+
+    serde_json::from_value(serde_json::json!({ "pools": pools, "stake": {} }))
+        .expect("a valid staking section")
+}
+
 pub struct TestAppBuilder {
     cfg: SyntheticBlockConfig,
     force_protocol: Option<usize>,
+    genesis_pools: Vec<[u8; 28]>,
 }
 
 impl TestAppBuilder {
@@ -849,11 +922,30 @@ impl TestAppBuilder {
         self
     }
 
-    pub fn build(self) -> TestApp {
-        let (domain, vectors) =
-            TestDomainBuilder::new_with_synthetic_and_protocol(self.cfg, self.force_protocol)
-                .finish();
+    /// Stakes `operator` in the Shelley genesis, which registers no pool by
+    /// certificate.
+    pub fn with_genesis_pool(mut self, operator: [u8; 28]) -> Self {
+        self.genesis_pools.push(operator);
+        self
+    }
 
-        TestApp::from_domain(domain, vectors, None, None)
+    pub fn build(self) -> TestApp {
+        let force_protocol = self.force_protocol;
+        let genesis_pools = self.genesis_pools;
+
+        let (domain, vectors) =
+            TestDomainBuilder::new_with_synthetic_and_genesis(self.cfg, |genesis| {
+                if let Some(protocol) = force_protocol {
+                    genesis.force_protocol = Some(protocol);
+                }
+
+                if !genesis_pools.is_empty() {
+                    genesis.shelley.staking = Some(genesis_staking(&genesis_pools));
+                }
+            })
+            .finish();
+
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        TestApp::from_domain(domain, vectors, None, minibf)
     }
 }

@@ -3,7 +3,10 @@ use std::{marker::PhantomData, ops::Range};
 use thiserror::Error;
 
 use crate::{
-    indexes::{ArchiveIndexDelta, ExactRecord, IndexRecord, TagDimension, TagRecord},
+    indexes::{
+        ArchiveIndexDelta, EntityKind, EntityRecord, ExactRecord, IndexRecord, TagDimension,
+        TagRecord,
+    },
     keys::{KeyCodec, KeyError, KeyRange, LogKey, LogRangeOf},
     BlockBody, BlockSlot, BrokenInvariant, ChainPoint, Entity, EntityValue, FixedNamespace,
     Namespace, RawBlock,
@@ -88,6 +91,36 @@ pub enum ArchiveError {
     /// records fails instead of reporting success.
     #[error("{0} is not supported on this storage backend")]
     Unsupported(&'static str),
+
+    #[error(transparent)]
+    IncompatibleStore(#[from] crate::compat::IncompatibleStore),
+
+    /// An entity index id that is not its kind's width, refused by every
+    /// write and read of the index. See [`check_entity_key`].
+    #[error("an id of entity kind {kind} is {len} bytes, expected {expected}")]
+    EntityKeyWidth {
+        kind: &'static str,
+        len: usize,
+        expected: usize,
+    },
+}
+
+/// Refuse an entity index id that is not exactly its kind's width.
+///
+/// The one width check every backend runs on [`ArchiveWriter::write_entity`]
+/// and [`ArchiveStore::entity_slots`]. A wrong-width id is a caller passing
+/// the wrong thing (a 32-byte hash for a 28-byte kind), and reading it as a
+/// miss would make a seen entity look new.
+pub fn check_entity_key(kind: EntityKind, key: &[u8]) -> Result<(), ArchiveError> {
+    if key.len() != kind.key_len() {
+        return Err(ArchiveError::EntityKeyWidth {
+            kind: kind.name(),
+            len: key.len(),
+            expected: kind.key_len(),
+        });
+    }
+
+    Ok(())
 }
 
 /// Iterator used by backends that do not implement
@@ -103,6 +136,13 @@ pub type EmptyTagIter = std::iter::Empty<Result<TagRecord, ArchiveError>>;
 /// Never constructed — those backends return [`ArchiveError::Unsupported`],
 /// so the alias only exists to satisfy the associated type.
 pub type EmptyExactIter = std::iter::Empty<Result<ExactRecord, ArchiveError>>;
+
+/// Iterator used by backends that do not implement
+/// [`ArchiveStore::iter_entity_records`].
+///
+/// Never constructed — those backends return [`ArchiveError::Unsupported`],
+/// so the alias only exists to satisfy the associated type.
+pub type EmptyEntityRecordIter = std::iter::Empty<Result<EntityRecord, ArchiveError>>;
 
 pub trait ArchiveWriter: Send + Sync + 'static {
     fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError>;
@@ -171,6 +211,24 @@ pub trait ArchiveWriter: Send + Sync + 'static {
 
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError>;
 
+    /// Record in the entity index the slot an entity was first seen at.
+    ///
+    /// The seal of an immutable epoch calls this, in the same commit as the
+    /// epoch's sealed logs, and a restore writes a stele's entity layers
+    /// through it. Nothing undoes an entry: a rollback cannot reach a sealed
+    /// epoch, so neither [`ArchiveWriter::undo`] nor
+    /// [`ArchiveWriter::undo_index`] touches the index. Writing an entry again
+    /// replaces it, which with the same slot is a no-op and makes a re-run
+    /// seal safe.
+    ///
+    /// An id that is not `kind`'s width is refused ([`check_entity_key`]).
+    fn write_entity(
+        &self,
+        kind: EntityKind,
+        key: &[u8],
+        slot: BlockSlot,
+    ) -> Result<(), ArchiveError>;
+
     fn commit(self) -> Result<(), ArchiveError>;
 }
 
@@ -203,6 +261,9 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
 
     /// Iterator type for exact-match record traversal.
     type ExactIter: Iterator<Item = Result<ExactRecord, ArchiveError>>;
+
+    /// Iterator type for entity index record traversal.
+    type EntityRecordIter: Iterator<Item = Result<EntityRecord, ArchiveError>>;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError>;
 
@@ -320,6 +381,20 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     /// Get the slot containing a transaction by its hash (exact lookup).
     fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
 
+    /// The first-seen slot of each id in `keys`, from the entity index, in
+    /// the order given: `None` where the index holds no entry.
+    ///
+    /// Batched because the roll asks for every entity of a batch at once. A
+    /// prune sweeps the index by slot, so a pruned node answers only for the
+    /// entities first seen inside its window.
+    ///
+    /// An id that is not `kind`'s width is refused ([`check_entity_key`]).
+    fn entity_slots(
+        &self,
+        kind: EntityKind,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<BlockSlot>>, ArchiveError>;
+
     /// Query slots by tag dimension and key within a slot range.
     ///
     /// This method returns a lazy iterator over the slots that contain data
@@ -392,4 +467,31 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     /// Backends that do not implement this return
     /// [`ArchiveError::Unsupported`].
     fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, ArchiveError>;
+
+    /// Iterate every entity index record of `kinds` whose slot falls in
+    /// `slots`.
+    ///
+    /// `slots` is **half-open**, as for the other record traversals.
+    ///
+    /// `kinds` is the closed list to traverse, supplied by the caller for the
+    /// reason [`ArchiveStore::iter_archive_tags`] takes its dimensions: stores
+    /// keep a hash of the kind name, not the name. Duplicates are ignored.
+    ///
+    /// **Order is part of the contract**: records come out sorted by
+    /// `(kind name, id)`, whatever order `kinds` was given in.
+    ///
+    /// **Errors are terminal** — same policy as
+    /// [`ArchiveStore::iter_archive_tags`]. A stored id that is not its kind's
+    /// width is a malformed entry and is yielded as `Err`.
+    ///
+    /// The slot is an entry's value, so this is a scan of every entry of the
+    /// kinds rather than a seek, lazy in memory.
+    ///
+    /// Backends that do not implement this return
+    /// [`ArchiveError::Unsupported`].
+    fn iter_entity_records(
+        &self,
+        kinds: &[EntityKind],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::EntityRecordIter, ArchiveError>;
 }

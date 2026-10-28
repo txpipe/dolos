@@ -1,15 +1,8 @@
 use axum::http::StatusCode;
-use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraOutput;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
-use dolos_core::async_query::{BlockMetaResolver, BlockRefMeta, LOCATE_CHUNK};
-use dolos_core::{
-    ArchiveStore as _, BlockSlot, Domain, EraCbor, StateStore as _, TxHash, TxoIdx, TxoRef,
-};
+use dolos_core::{Domain, StateStore as _, Tag, TagEntry, TagOrder, TagStart, TxoRef, UtxoValue};
 
 use crate::{
     mapping::{IntoModel, UtxoOutputModelBuilder},
@@ -17,132 +10,510 @@ use crate::{
     Facade,
 };
 
-/// The outputs that a UTxO listing returns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UtxoFilter {
-    /// Every output.
-    All,
-    /// Only outputs without native assets, the rows that Blockfrost lists for
-    /// the `lovelace` asset.
-    AdaOnly,
+/// The first window a filtered walk reads. Each next one doubles, up to
+/// [`MAX_WINDOW`]. Tests take two, so a fixture of a few rows crosses windows.
+const FIRST_WINDOW: usize = if cfg!(test) { 2 } else { 256 };
+
+/// The most tag entries, probes or UTxO values one blocking task returns, so a
+/// walk holds a query permit for a few milliseconds at a time, as the scans
+/// do. A tag read can still step over more keys than it returns, in its task:
+///
+/// - a plain listing's first read also steps over the page's offset, a tag key
+///   per skipped row;
+/// - a read under a lookup key that prefixes longer ones steps over theirs, as
+///   [`StateStore::utxos_by_tag_page`](dolos_core::StateStore::utxos_by_tag_page)
+///   says: an asset with an empty name over its policy's named assets, or
+///   `SpaceBud1` over `SpaceBud10`.
+///
+/// Tests take four, so a fixture walk reaches it.
+const MAX_WINDOW: usize = if cfg!(test) { 4 } else { 1024 };
+
+/// The tag order a page order walks.
+fn tag_order(order: &Order) -> TagOrder {
+    match order {
+        Order::Asc => TagOrder::Asc,
+        Order::Desc => TagOrder::Desc,
+    }
 }
 
-impl UtxoFilter {
-    /// Returns `true` when the listing returns `output`.
-    pub fn keeps(self, output: &MultiEraOutput<'_>) -> bool {
-        match self {
-            UtxoFilter::All => true,
-            UtxoFilter::AdaOnly => output
-                .value()
-                .assets()
-                .iter()
-                .all(|policy| policy.assets().is_empty()),
+/// Reads up to `count` entries of `tag`, in creation order, from `start`.
+async fn tag_page<D>(
+    domain: &Facade<D>,
+    tag: &Tag,
+    order: TagOrder,
+    start: TagStart,
+    count: usize,
+) -> Result<Vec<TagEntry>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    debug_assert!(count <= MAX_WINDOW);
+
+    let tag = tag.clone();
+
+    domain
+        .blocking(move |domain| {
+            domain
+                .state()
+                .utxos_by_tag_page(tag.dimension, &tag.key, order, start, count)
+                .map_err(|err| {
+                    tracing::error!(?err);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })
+        })
+        .await
+}
+
+/// Returns `true` when no live UTxO carries `tag`.
+pub async fn tag_is_empty<D>(domain: &Facade<D>, tag: &Tag) -> Result<bool, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    Ok(tag_page(domain, tag, TagOrder::Asc, TagStart::Skip(0), 1)
+        .await?
+        .is_empty())
+}
+
+/// The entries of a listing, in creation order, read a window at a time.
+///
+/// Each read of a tag resumes just past the last entry the walk read, not at
+/// a count of entries, so a UTxO spent or rolled back between two reads shifts
+/// none of the entries still ahead.
+///
+/// Reads are not one snapshot, so a fork during the walk can hide a live row
+/// from one response. When a rollback and a fork block re-include a
+/// transaction at a position the walk has already passed, its UTxOs' entries
+/// land behind the walk and no later read reaches them. The next request lists
+/// them. A response never lists a UTxO that was spent when its value was read.
+struct Walk {
+    source: Source,
+    order: TagOrder,
+}
+
+enum Source {
+    Tag {
+        tag: Tag,
+        start: TagStart,
+        done: bool,
+    },
+    Entries(std::vec::IntoIter<TagEntry>),
+}
+
+impl Walk {
+    /// A walk of `tag` that starts at `start`.
+    fn tag(tag: Tag, order: TagOrder, start: TagStart) -> Self {
+        let source = Source::Tag {
+            tag,
+            start,
+            done: false,
+        };
+
+        Self { source, order }
+    }
+
+    /// A walk of entries already read in the listing's order.
+    fn entries(entries: Vec<TagEntry>, order: TagOrder) -> Self {
+        let source = Source::Entries(entries.into_iter());
+
+        Self { source, order }
+    }
+
+    /// The next `count` entries, fewer when the walk ends: none once it has.
+    async fn next<D>(
+        &mut self,
+        domain: &Facade<D>,
+        count: usize,
+    ) -> Result<Vec<TagEntry>, StatusCode>
+    where
+        D: Domain + Clone + Send + Sync + 'static,
+    {
+        match &mut self.source {
+            Source::Tag { done: true, .. } => Ok(Vec::new()),
+            Source::Tag { tag, start, done } => {
+                let entries = tag_page(domain, tag, self.order, start.clone(), count).await?;
+
+                *done = entries.len() < count;
+
+                if let Some(last) = entries.last() {
+                    *start = TagStart::After(last.clone());
+                }
+
+                Ok(entries)
+            }
+            Source::Entries(entries) => Ok(entries.by_ref().take(count).collect()),
         }
     }
 }
 
-/// UTxO refs read, decoded and filtered per blocking task. One chunk holds
-/// its permit for a few milliseconds.
-const UTXO_CHUNK: usize = 1024;
+/// A page's rows, gathered in walk order.
+///
+/// A ref counts once: a fork that re-creates a UTxO at a later position
+/// between two reads puts its entry ahead of the walk a second time. It counts
+/// once its value loads, so an entry whose UTxO a rollback removed before the
+/// value read leaves the ref to the entry the fork block writes.
+struct Rows {
+    rows: Vec<(TxoRef, Arc<UtxoValue>)>,
+    counted: HashSet<TxoRef>,
+    count: usize,
+}
 
-/// Loads one page of the UTxOs in `refs` that `filter` keeps. Only the last
-/// page can have fewer than `count` rows.
-pub async fn load_utxo_models<D, T>(
+impl Rows {
+    fn new(count: usize) -> Self {
+        Self {
+            rows: Vec::with_capacity(count),
+            counted: HashSet::new(),
+            count,
+        }
+    }
+
+    fn full(&self) -> bool {
+        self.rows.len() >= self.count
+    }
+
+    fn missing(&self) -> usize {
+        self.count.saturating_sub(self.rows.len())
+    }
+
+    /// The entries whose ref the walk has not counted, each ref once.
+    fn uncounted(&self, entries: Vec<TagEntry>) -> Vec<TagEntry> {
+        let mut refs = HashSet::new();
+
+        entries
+            .into_iter()
+            .filter(|entry| !self.counted.contains(&entry.txo) && refs.insert(entry.txo.clone()))
+            .collect()
+    }
+
+    /// Counts the refs of `entries`.
+    fn count_entries(&mut self, entries: &[TagEntry]) {
+        self.counted
+            .extend(entries.iter().map(|entry| entry.txo.clone()));
+    }
+
+    /// Loads the UTxOs behind the uncounted entries of `entries`, as
+    /// [`load_values`] does, and counts the ones that load.
+    async fn load<D>(
+        &mut self,
+        domain: &Facade<D>,
+        entries: Vec<TagEntry>,
+        ada_only: bool,
+    ) -> Result<Vec<(TxoRef, Arc<UtxoValue>)>, StatusCode>
+    where
+        D: Domain + Clone + Send + Sync + 'static,
+    {
+        let loaded = load_values(domain, self.uncounted(entries), ada_only).await?;
+
+        self.counted
+            .extend(loaded.iter().map(|(txo, _)| txo.clone()));
+
+        Ok(loaded)
+    }
+}
+
+/// Loads one page of the UTxOs that carry `tag`, in creation order: slot, tx
+/// index, output index, ascending or descending.
+///
+/// The tag is read from the page's offset, and only the page's UTxOs and their
+/// blocks after that. The first read steps over the offset itself, a tag key
+/// per skipped row. A UTxO spent between the tag read and its value read
+/// leaves a gap that the next entries fill, so only the last page is short.
+pub async fn load_tag_page<D, T>(
     domain: &Facade<D>,
-    refs: HashSet<TxoRef>,
-    pagination: Pagination,
-    filter: UtxoFilter,
+    tag: &Tag,
+    pagination: &Pagination,
 ) -> Result<Vec<T>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
     T: serde::Serialize,
     for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
 {
-    // A filter needs every output decoded, and the window loads only the
-    // page's outputs. Keep the refs that pass before the window is cut.
-    let refs = match filter {
-        UtxoFilter::All => refs,
-        _ => select_utxos(domain, refs, filter, UTXO_CHUNK)
-            .await?
-            .into_iter()
-            .map(|(txo_ref, _)| txo_ref)
-            .collect(),
+    let order = tag_order(&pagination.order);
+    let mut walk = Walk::tag(tag.clone(), order, TagStart::Skip(pagination.skip()));
+    let mut rows = Rows::new(pagination.count);
+
+    while !rows.full() {
+        let entries = walk.next(domain, rows.missing().min(MAX_WINDOW)).await?;
+
+        if entries.is_empty() {
+            break;
+        }
+
+        let loaded = rows.load(domain, entries, false).await?;
+        rows.rows.extend(loaded);
+    }
+
+    into_models(domain, rows.rows).await
+}
+
+/// What a filtered listing walks, in creation order.
+pub enum UtxoWalk {
+    /// The UTxOs of a tag whose outputs hold no native asset, the rows that
+    /// Blockfrost lists for the `lovelace` asset. Each row's value decides, so
+    /// every walked row is read.
+    AdaOnly(Tag),
+    /// The UTxOs of `entries`, one tag read whole, that the tag `other` also
+    /// holds. Each entry is probed in `other` by its full key, so a row that
+    /// does not match costs a key read, not a value read.
+    ///
+    /// The probe looks for the position `entries` was read at. When a rollback
+    /// and a fork block re-include a row's transaction at another position in
+    /// between, the probe misses it and one response leaves the live row out,
+    /// as a walk does for a row the fork moves behind it.
+    Intersection { entries: Vec<TagEntry>, other: Tag },
+}
+
+/// Loads one page of the UTxOs `walk` keeps, in creation order, and whether
+/// any of the walk's UTxOs passed its filter at all.
+///
+/// Rows are walked in windows until the page is past its offset and full, or
+/// the walk ends, so the cost follows the rows walked, not the size of the
+/// tag. Only the page's blocks are read.
+pub async fn load_filtered_page<D, T>(
+    domain: &Facade<D>,
+    walk: UtxoWalk,
+    pagination: &Pagination,
+) -> Result<(Vec<T>, bool), StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    T: serde::Serialize,
+    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
+{
+    let order = tag_order(&pagination.order);
+
+    let (mut source, other) = match walk {
+        UtxoWalk::AdaOnly(tag) => (Walk::tag(tag, order, TagStart::Skip(0)), None),
+        UtxoWalk::Intersection { entries, other } => (Walk::entries(entries, order), Some(other)),
     };
 
-    let mut rows = page_rows(domain, refs, &pagination).await?;
+    let mut rows = Rows::new(pagination.count);
+    let mut skip = pagination.skip();
+    let mut matched = false;
+    let mut window = FIRST_WINDOW;
 
-    let mut window = select_window(&rows, &pagination);
-    if window.rows.is_empty() {
-        return Ok(Vec::new());
+    while !rows.full() {
+        let entries = source.next(domain, window).await?;
+
+        if entries.is_empty() {
+            break;
+        }
+
+        window = window.saturating_mul(2).min(MAX_WINDOW);
+
+        let Some(other) = &other else {
+            for row in rows.load(domain, entries, true).await? {
+                matched = true;
+
+                if skip > 0 {
+                    skip -= 1;
+                } else {
+                    rows.rows.push(row);
+
+                    if rows.full() {
+                        break;
+                    }
+                }
+            }
+
+            continue;
+        };
+
+        let held = probe(domain, other, entries).await?;
+        matched |= !held.is_empty();
+
+        // a row before the page counts on the probe's word, its value unread
+        let mut held = rows.uncounted(held);
+        let skipped = skip.min(held.len());
+        skip -= skipped;
+
+        let page = held.split_off(skipped);
+        rows.count_entries(&held);
+
+        // the page's values only, a UTxO spent since the probe giving its
+        // place to the next entry
+        let mut page = page.into_iter();
+
+        while !rows.full() {
+            let window: Vec<_> = page.by_ref().take(rows.missing()).collect();
+
+            if window.is_empty() {
+                break;
+            }
+
+            let loaded = rows.load(domain, window, false).await?;
+            rows.rows.extend(loaded);
+        }
     }
 
-    let mut utxos = select_utxos(
-        domain,
-        window.refs().into_iter().collect(),
-        UtxoFilter::All,
-        UTXO_CHUNK,
-    )
-    .await?;
+    Ok((into_models(domain, rows.rows).await?, matched))
+}
 
-    // Refresh once if a block spent listed refs after the tag read.
-    if utxos.len() != window.rows.len() {
-        let refs = rows.iter().map(|(_, txo_ref)| txo_ref.clone()).collect();
-        utxos = select_utxos(domain, refs, UtxoFilter::All, UTXO_CHUNK).await?;
-        let live: HashSet<_> = utxos.iter().map(|(txo_ref, _)| txo_ref.clone()).collect();
-        rows.retain(|(_, txo_ref)| live.contains(txo_ref));
-        window = select_window(&rows, &pagination);
-        let refs: HashSet<_> = window.refs().into_iter().collect();
-        utxos.retain(|(txo_ref, _)| refs.contains(txo_ref));
+/// The entries of `entries` that `tag` also holds, in order.
+async fn probe<D>(
+    domain: &Facade<D>,
+    tag: &Tag,
+    entries: Vec<TagEntry>,
+) -> Result<Vec<TagEntry>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    debug_assert!(entries.len() <= MAX_WINDOW);
+
+    let tag = tag.clone();
+
+    domain
+        .blocking(move |domain| {
+            domain
+                .state()
+                .utxos_with_tag(tag.dimension, &tag.key, entries)
+                .map_err(|err| {
+                    tracing::error!(?err);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })
+        })
+        .await
+}
+
+/// Reads two tags in `order`, a window at a time, until one of them ends
+/// before its window does. Returns that one's entries, read whole, then that
+/// tag and the other.
+///
+/// Neither tag is read much past the smaller one's end, and every read takes
+/// at most [`MAX_WINDOW`] entries. The entries are read before any probe, so a
+/// fork in between can hide a row, as [`UtxoWalk::Intersection`] says.
+pub async fn smaller_tag<D>(
+    domain: &Facade<D>,
+    first: Tag,
+    second: Tag,
+    order: &Order,
+) -> Result<(Vec<TagEntry>, Tag, Tag), StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let order = tag_order(order);
+    let mut walks = [
+        (
+            Walk::tag(first.clone(), order, TagStart::Skip(0)),
+            Vec::new(),
+        ),
+        (
+            Walk::tag(second.clone(), order, TagStart::Skip(0)),
+            Vec::new(),
+        ),
+    ];
+    let mut window = FIRST_WINDOW;
+
+    loop {
+        for (i, (walk, entries)) in walks.iter_mut().enumerate() {
+            let read = walk.next(domain, window).await?;
+            let ended = read.len() < window;
+            entries.extend(read);
+
+            if ended {
+                let entries = std::mem::take(entries);
+
+                return Ok(match i {
+                    0 => (entries, first, second),
+                    _ => (entries, second, first),
+                });
+            }
+        }
+
+        window = window.saturating_mul(2).min(MAX_WINDOW);
     }
+}
 
-    let PageWindow { rows, skip } = window;
-    let window_slots: HashMap<_, _> = rows
-        .into_iter()
-        .map(|(slot, txo_ref)| (txo_ref, slot))
-        .collect();
+/// The output holds no native asset.
+fn holds_no_asset(output: &MultiEraOutput<'_>) -> bool {
+    output
+        .value()
+        .assets()
+        .iter()
+        .all(|policy| policy.assets().is_empty())
+}
 
-    let mut block_meta = BlockMetaResolver::new(domain.query());
-    let block_deps = block_meta
-        .resolve_batch(utxos.iter().map(|(txo_ref, _)| txo_ref.0))
+/// Reads the UTxOs behind `entries` on the blocking pool, in the order of
+/// `entries`, keeping only those whose output holds no native asset when
+/// `ada_only` is set. A UTxO spent since its entry was read is skipped; every
+/// output the filter reads must decode.
+async fn load_values<D>(
+    domain: &Facade<D>,
+    entries: Vec<TagEntry>,
+    ada_only: bool,
+) -> Result<Vec<(TxoRef, Arc<UtxoValue>)>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    debug_assert!(entries.len() <= MAX_WINDOW);
+
+    domain
+        .blocking(move |domain| {
+            let refs: Vec<TxoRef> = entries.into_iter().map(|entry| entry.txo).collect();
+
+            let mut utxos = domain
+                .state()
+                .get_utxos(refs.clone())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            let mut kept = Vec::with_capacity(refs.len());
+            for txo_ref in refs {
+                let Some(value) = utxos.remove(&txo_ref) else {
+                    continue;
+                };
+
+                if ada_only {
+                    let output = MultiEraOutput::try_from(value.as_ref())
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                    if !holds_no_asset(&output) {
+                        continue;
+                    }
+                }
+
+                kept.push((txo_ref, value));
+            }
+
+            Ok(kept)
+        })
+        .await
+}
+
+/// The models of a page's rows, in the rows' order. The block hash comes from
+/// the block at each row's creation position; a row without one (genesis,
+/// configured) or whose block was pruned gets none.
+///
+/// The lookup and the value read are not one snapshot. When a rollback removes
+/// a row's block after its value was read, the row lists without a block hash
+/// for one response, unless a fork block at that slot already carries its
+/// transaction at the same index. A request after the fork reads the row's new
+/// position and its block.
+async fn into_models<D, T>(
+    domain: &Facade<D>,
+    rows: Vec<(TxoRef, Arc<UtxoValue>)>,
+) -> Result<Vec<T>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    T: serde::Serialize,
+    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
+{
+    let located = rows
+        .iter()
+        .filter_map(|(txo_ref, value)| Some((txo_ref.0, value.position()?)))
+        .collect::<Vec<_>>();
+
+    let block_deps = domain
+        .query()
+        .block_meta_by_positions(located)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut rows: Vec<_> = utxos
-        .into_iter()
-        // The window cut the page by its slot, so sort by that slot first. A
-        // block that rolling history pruned keeps its index slot until the
-        // sweep but has no block data, and `page_sort_key` alone would move its
-        // rows out of their slot and cut the page in a different place.
-        .map(|(txo_ref, cbor)| {
-            let block_data = block_deps.get(&txo_ref.0).cloned();
-            let slot = window_slots.get(&txo_ref).copied().flatten();
-            (
-                (slot, page_sort_key(&txo_ref, block_data.as_ref())),
-                txo_ref,
-                cbor,
-                block_data,
-            )
-        })
-        .collect();
-
-    match pagination.order {
-        Order::Asc => {
-            rows.sort_by_key(|(sort_key, ..)| *sort_key);
-        }
-        Order::Desc => {
-            rows.sort_by_key(|(sort_key, ..)| *sort_key);
-            rows.reverse();
-        }
-    }
-
-    let mut out = Vec::new();
-    for (_, txo_ref, cbor, block_data) in rows.into_iter().skip(skip).take(pagination.count) {
-        let output = MultiEraOutput::try_from(cbor.as_ref())
+    let mut out = Vec::with_capacity(rows.len());
+    for (txo_ref, value) in rows {
+        let output = MultiEraOutput::try_from(value.as_ref())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let TxoRef(tx_hash, txo_idx) = txo_ref;
         let builder = UtxoOutputModelBuilder::from_output(tx_hash, txo_idx, output);
 
-        let builder = if let Some(x) = block_data {
+        let builder = if let Some(x) = block_deps.get(&tx_hash).cloned() {
             builder.with_block_data(x)
         } else {
             builder
@@ -156,268 +527,640 @@ where
     Ok(out)
 }
 
-/// The rows that can land on the requested page, in page order, and the
-/// offset of the page's first row among them.
-struct PageWindow {
-    rows: Vec<(Option<BlockSlot>, TxoRef)>,
-    skip: usize,
-}
-
-impl PageWindow {
-    fn refs(&self) -> Vec<TxoRef> {
-        self.rows
-            .iter()
-            .map(|(_, txo_ref)| txo_ref.clone())
-            .collect()
-    }
-}
-
-/// Every row of the listing as `(slot, ref)`, in page order.
-///
-/// The page order (`page_sort_key`) needs each row's transaction index, and
-/// only decoding the row's block yields it. The slot does not: the archive's
-/// exact index answers it with one point read per transaction. Ordering by
-/// slot first already puts every block's rows next to each other and in their
-/// final place relative to other blocks, so the page comes out exact once the
-/// blocks cut by its two edges are taken whole and re-ordered by the full key.
-async fn page_rows<D>(
-    domain: &Facade<D>,
-    refs: HashSet<TxoRef>,
-    pagination: &Pagination,
-) -> Result<Vec<(Option<BlockSlot>, TxoRef)>, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let tx_hashes: Vec<TxHash> = refs.iter().map(|txo_ref| txo_ref.0).unique().collect();
-
-    let mut slots = HashMap::with_capacity(tx_hashes.len());
-    for hashes in tx_hashes.chunks(LOCATE_CHUNK) {
-        let hashes = hashes.to_vec();
-        let located = domain
-            .query()
-            .run_blocking(move |domain| {
-                let mut slots = HashMap::with_capacity(hashes.len());
-                for hash in hashes {
-                    if let Some(slot) = domain.archive().slot_by_tx_hash(hash.as_slice())? {
-                        slots.insert(hash, slot);
-                    }
-                }
-                Ok(slots)
-            })
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        slots.extend(located);
-    }
-
-    let mut rows: Vec<_> = refs
-        .into_iter()
-        .map(|txo_ref| (slots.get(&txo_ref.0).copied(), txo_ref))
-        .collect();
-
-    sort_rows(&mut rows, pagination.order);
-
-    Ok(rows)
-}
-
-/// Sort `(slot, ref)` rows into page order: slot, then `TxoRef`, rows without
-/// a slot first, and the whole order reversed for `order=desc`.
-fn sort_rows(rows: &mut [(Option<BlockSlot>, TxoRef)], order: Order) {
-    rows.sort();
-    if let Order::Desc = order {
-        rows.reverse();
-    }
-}
-
-/// Pick the page out of `(slot, ref)` rows in page order, widened at both
-/// edges to whole slots.
-///
-/// Rows without a slot sort first, by `TxoRef`, which is already their final
-/// order, so the window never widens into them.
-fn select_window(rows: &[(Option<BlockSlot>, TxoRef)], pagination: &Pagination) -> PageWindow {
-    let from = pagination.from();
-    let to = pagination.to().min(rows.len());
-    if from >= to {
-        return PageWindow {
-            rows: Vec::new(),
-            skip: 0,
-        };
-    }
-
-    let same_slot = |i: usize, slot: Option<BlockSlot>| slot.is_some() && rows[i].0 == slot;
-
-    let mut start = from;
-    while start > 0 && same_slot(start - 1, rows[from].0) {
-        start -= 1;
-    }
-
-    let mut end = to;
-    while end < rows.len() && same_slot(end, rows[to - 1].0) {
-        end += 1;
-    }
-
-    PageWindow {
-        rows: rows[start..end].to_vec(),
-        skip: from - start,
-    }
-}
-
-/// Read and decode the outputs behind `refs`, `chunk` refs per blocking
-/// task, and keep those that `filter` keeps. Every output must decode.
-async fn select_utxos<D>(
-    domain: &Facade<D>,
-    refs: HashSet<TxoRef>,
-    filter: UtxoFilter,
-    chunk: usize,
-) -> Result<Vec<(TxoRef, Arc<EraCbor>)>, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let mut refs: Vec<_> = refs.into_iter().collect();
-    refs.sort();
-
-    let mut selected = Vec::new();
-
-    for refs in refs.chunks(chunk.max(1)) {
-        let refs = refs.to_vec();
-
-        let kept = domain
-            .blocking(move |domain| {
-                let utxos = domain
-                    .state()
-                    .get_utxos(refs)
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                let mut kept = Vec::with_capacity(utxos.len());
-                for (txo_ref, cbor) in utxos {
-                    let output = MultiEraOutput::try_from(cbor.as_ref())
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                    if filter.keeps(&output) {
-                        kept.push((txo_ref, cbor));
-                    }
-                }
-
-                Ok(kept)
-            })
-            .await?;
-
-        selected.extend(kept);
-    }
-
-    Ok(selected)
-}
-
-/// The page order for UTxO models in the same window slot: chain position
-/// first, `TxoRef` second.
-///
-/// Chain position is `None` for an output whose creation block was pruned by
-/// rolling history — the block that carries its slot no longer exists, so
-/// true chain order is unrecoverable for it. The `TxoRef` tie-breaker keeps
-/// those rows in a deterministic order across requests; without it their
-/// order came from `HashMap` iteration, and two page requests could slice two
-/// different shufflings, duplicating or dropping rows.
-///
-/// `None` sorts before every known position, which approximates chain order:
-/// a pruned creation block is older than every retained one.
-fn page_sort_key(
-    txo_ref: &TxoRef,
-    block_data: Option<&BlockRefMeta>,
-) -> (Option<(u64, usize, u32)>, TxHash, TxoIdx) {
-    let TxoRef(tx_hash, txo_idx) = *txo_ref;
-
-    (
-        block_data.map(|data| (data.slot, data.tx_index, txo_idx)),
-        tx_hash,
-        txo_idx,
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_support::{TestApp, TestDomainBuilder};
-    use axum::body::Body;
-    use axum::http::Request;
+    use std::collections::BTreeMap;
+
+    use axum::{body::Body, http::Request};
+
     use blockfrost_openapi::models::address_utxo_content_inner::AddressUtxoContentInner;
-    use dolos_cardano::indexes::CardanoStateIndexExt as _;
-    use dolos_core::config::MinibfConfig;
-    use dolos_core::import::ImportExt as _;
-    use dolos_core::{ArchiveWriter as _, ChainPoint, StateWriter as _, UtxoSetDelta};
-    use dolos_testing::measured::MeasuredStores;
-    use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
-    use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores as _};
+    use dolos_cardano::indexes::{
+        utxo_dimensions, utxo_index_delta_from_utxo_delta, utxo_tags, CardanoStateIndexExt as _,
+    };
+    use dolos_core::{
+        async_query::BlockMetaResolver, config::MinibfConfig, import::ImportExt as _,
+        ArchiveStore as _, ArchiveWriter as _, ChainPoint, EraCbor, MempoolStore as _, MempoolTx,
+        StateStore, StateWriter as _, UtxoIndexDelta, UtxoPosition, UtxoSetDelta,
+    };
+    use dolos_testing::{
+        measured::MeasuredStores,
+        synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+        toy_domain::{MemoryStores, ToyDomain, ToyStores as _},
+        TestAddress, MIN_UTXO_AMOUNT,
+    };
     use http_body_util::BodyExt as _;
-    use pallas::crypto::hash::Hash;
-    use pallas::ledger::addresses::Address;
+    use pallas::{
+        crypto::hash::Hash,
+        ledger::{
+            addresses::Address,
+            primitives::conway::{PositiveCoin, Value},
+            traverse::{Era, MultiEraTx},
+        },
+    };
     use tower::util::ServiceExt as _;
 
-    /// Pins the pruned-row ordering contract: no chain position means the
-    /// `TxoRef` decides, deterministically, and the whole unknowable group
-    /// sorts before any row with a known position.
-    #[test]
-    fn page_sort_key_orders_pruned_rows_by_txo_ref() {
-        let low = TxoRef(Hash::from([0xaa; 32]), 1);
-        let high = TxoRef(Hash::from([0xbb; 32]), 0);
-        let low_later = TxoRef(Hash::from([0xaa; 32]), 2);
-        let key = |txo_ref: &TxoRef| page_sort_key(txo_ref, None);
+    use crate::test_support::TestApp;
 
-        // no block data: the TxoRef alone decides, tx hash before output index
-        assert!(key(&low) < key(&high));
-        assert!(key(&low) < key(&low_later));
-        assert!(key(&low_later) < key(&high));
+    use super::*;
 
-        // a known chain position sorts after the whole unknowable group,
-        // regardless of its TxoRef
-        let block = BlockRefMeta {
-            slot: 1,
-            hash: Hash::from([0x11; 32]),
-            height: 1,
-            tx_hash: Hash::from([0x00; 32]),
-            tx_index: 0,
-        };
-        let positioned = page_sort_key(&TxoRef(Hash::from([0x00; 32]), 0), Some(&block));
-
-        assert!(key(&high) < positioned);
+    /// A listed row: the ref, the block that created it, the units it holds.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Row {
+        txo: String,
+        block: String,
+        units: Vec<String>,
     }
 
-    async fn selected(app: &TestApp, filter: UtxoFilter, chunk: usize) -> Vec<TxoRef> {
+    async fn page_rows(app: &TestApp, path: &str) -> Vec<Row> {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{path}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let page: Vec<AddressUtxoContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse address utxos");
+
+        page.into_iter()
+            .map(|x| Row {
+                txo: format!("{}#{}", x.tx_hash, x.output_index),
+                block: x.block,
+                units: x.amount.into_iter().map(|amount| amount.unit).collect(),
+            })
+            .collect()
+    }
+
+    /// Every row of `path` in `order`, `count` at a time: the walk ends at the
+    /// first short page.
+    async fn walk(app: &TestApp, path: &str, order: &str, count: usize) -> Vec<Row> {
+        let mut rows = Vec::new();
+
+        for page in 1.. {
+            let found = page_rows(
+                app,
+                &format!("{path}?order={order}&count={count}&page={page}"),
+            )
+            .await;
+            let short = found.len() < count;
+            rows.extend(found);
+
+            if short {
+                return rows;
+            }
+        }
+
+        unreachable!()
+    }
+
+    /// The rows the listing served before UTxOs stored their position: the
+    /// whole tag, every tx's block found through the exact index, sorted by
+    /// slot, tx index and output index, with the rows no block holds first by
+    /// ref.
+    async fn whole_set_rows(app: &TestApp, address: &str, order: &str) -> Vec<Row> {
         let facade = app.facade();
-        let address = pallas::ledger::addresses::Address::from_bech32(&app.vectors().address)
-            .expect("vector address");
+        let address = Address::from_bech32(address).expect("bech32 address");
         let refs = facade
             .state()
             .utxos_by_address(&address.to_vec())
             .expect("address refs");
 
-        let mut refs: Vec<_> = select_utxos(&facade, refs, filter, chunk)
+        let blocks = BlockMetaResolver::new(facade.query())
+            .resolve_batch(refs.iter().map(|txo| txo.0))
             .await
-            .expect("selected utxos")
+            .expect("block metadata");
+
+        let mut rows: Vec<_> = refs
             .into_iter()
-            .map(|(txo_ref, _)| txo_ref)
+            .map(|TxoRef(hash, idx)| {
+                let meta = blocks.get(&hash);
+                let key = (meta.map(|meta| (meta.slot, meta.tx_index, idx)), hash, idx);
+                let block = meta.map(|meta| meta.hash.to_string()).unwrap_or_default();
+
+                (key, format!("{hash}#{idx}"), block)
+            })
             .collect();
-        refs.sort();
-        refs
-    }
 
-    #[tokio::test]
-    async fn chunked_utxo_selection_matches_unchunked() {
-        let app = TestApp::new();
-
-        for filter in [UtxoFilter::All, UtxoFilter::AdaOnly] {
-            let whole = selected(&app, filter, usize::MAX).await;
-            let chunked = selected(&app, filter, 2).await;
-
-            assert_eq!(chunked, whole);
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        if order == "desc" {
+            rows.reverse();
         }
 
-        assert!(
-            selected(&app, UtxoFilter::All, usize::MAX).await.len() > 2,
-            "too few utxos to split into chunks"
-        );
+        rows.into_iter()
+            .map(|(_, txo, block)| (txo, block))
+            .map(|(txo, block)| Row {
+                txo,
+                block,
+                units: Vec::new(),
+            })
+            .collect()
     }
 
-    fn txo(byte: u8, idx: TxoIdx) -> TxoRef {
-        TxoRef(Hash::from([byte; 32]), idx)
+    fn without_units(rows: Vec<Row>) -> Vec<Row> {
+        rows.into_iter()
+            .map(|row| Row {
+                units: Vec::new(),
+                ..row
+            })
+            .collect()
+    }
+
+    /// Writes `utxos` with their tags, as a block that produces them does.
+    fn produce(state: &impl StateStore, utxos: Vec<(TxoRef, UtxoValue)>) {
+        let delta = UtxoSetDelta {
+            produced_utxo: utxos
+                .into_iter()
+                .map(|(txo, value)| (txo, Arc::new(value)))
+                .collect(),
+            ..Default::default()
+        };
+
+        let writer = state.start_writer().expect("state writer");
+        writer.apply_utxoset(&delta).expect("apply utxos");
+        writer
+            .apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&delta))
+            .expect("apply tags");
+        writer.commit().expect("commit");
+    }
+
+    /// Writes `outputs` as UTxOs no block produced, with their tags.
+    fn configure(domain: &dolos_testing::toy_domain::ToyDomain, outputs: Vec<(TxoRef, EraCbor)>) {
+        let utxos = outputs
+            .into_iter()
+            .map(|(txo, output)| (txo, UtxoValue::new(output, None)))
+            .collect();
+
+        produce(domain.state(), utxos);
+    }
+
+    fn asset_output(address: TestAddress, policy: &str, name: &str) -> EraCbor {
+        let policy: [u8; 28] = hex::decode(policy)
+            .expect("hex policy")
+            .try_into()
+            .expect("28-byte policy");
+
+        let assets = BTreeMap::from([(
+            Hash::from(policy),
+            BTreeMap::from([(
+                pallas::codec::utils::Bytes::from(name.as_bytes().to_vec()),
+                PositiveCoin::try_from(5).expect("positive"),
+            )]),
+        )]);
+
+        dolos_testing::utxo_with_value(address, Value::Multiasset(MIN_UTXO_AMOUNT, assets))
+    }
+
+    /// Every tx of every block also pays the listed address twice, so rows
+    /// share a block at several tx indexes and a tx at several output
+    /// indexes. Two configured UTxOs on the address, one hashing below and one
+    /// above every tx, give the no-position rows a ref order to keep.
+    fn chain_with_configured_rows() -> TestApp {
+        chain_with_configured_rows_over(4)
+    }
+
+    /// [`chain_with_configured_rows`] over `block_count` blocks. Each block
+    /// adds one row that holds the vectors' asset.
+    fn chain_with_configured_rows_over(block_count: usize) -> TestApp {
+        let base = SyntheticBlockConfig::default();
+        let address = Address::from_bech32(&base.address)
+            .expect("bech32 address")
+            .to_vec();
+        let cfg = SyntheticBlockConfig {
+            block_count,
+            txs_per_block: 3,
+            extra_outputs_by_block: vec![vec![vec![address.clone(), address]; 3]; block_count],
+            ..base
+        };
+
+        TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let address = TestAddress::Custom(vectors.address.clone());
+
+            configure(
+                domain,
+                vec![
+                    (
+                        TxoRef(Hash::from([0xff; 32]), 0),
+                        dolos_testing::utxo_with_value(address.clone(), Value::Coin(3_000_000)),
+                    ),
+                    (
+                        TxoRef(Hash::from([0x00; 32]), 1),
+                        dolos_testing::utxo_with_value(address, Value::Coin(4_000_000)),
+                    ),
+                ],
+            );
+        })
+    }
+
+    /// Paged from the ordered tag read, a listing serves the rows and the
+    /// block hashes the whole-set listing served, in the same order, for
+    /// every page size and both orders.
+    #[tokio::test]
+    async fn pages_follow_the_whole_set_order() {
+        let app = chain_with_configured_rows();
+        let address = app.vectors().address.clone();
+        let path = format!("/addresses/{address}/utxos");
+
+        for order in ["asc", "desc"] {
+            let expected = whole_set_rows(&app, &address, order).await;
+
+            assert!(expected.len() > 24, "the fixture lists too few rows");
+            assert!(expected.iter().any(|row| row.block.is_empty()));
+            assert!(expected.iter().any(|row| !row.block.is_empty()));
+
+            for count in [1, 2, 3, 5, 100] {
+                let walked = without_units(walk(&app, &path, order, count).await);
+                assert_eq!(walked, expected, "order={order} count={count}");
+            }
+        }
+    }
+
+    /// An asset listing is the address listing narrowed to the rows that hold
+    /// the asset, whichever of the two tags is the smaller one to walk.
+    #[tokio::test]
+    async fn asset_listings_narrow_the_address_listing() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 6,
+            txs_per_block: 1,
+            asset_names_by_block: ["A", "B", "A", "B", "A", "B"].map(String::from).to_vec(),
+            ..Default::default()
+        };
+
+        // Alice holds one UTxO of asset A, which three of the chain's outputs
+        // hold too: her tag is the smaller one there, the asset's is on the
+        // chain's address
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            configure(
+                domain,
+                vec![
+                    (
+                        TxoRef(Hash::from([0xa1; 32]), 0),
+                        asset_output(TestAddress::Alice, &vectors.policy_id, "A"),
+                    ),
+                    (
+                        TxoRef(Hash::from([0xa1; 32]), 1),
+                        dolos_testing::utxo_with_value(TestAddress::Alice, Value::Coin(2_000_000)),
+                    ),
+                ],
+            );
+        });
+
+        let unit = format!("{}{}", app.vectors().policy_id, hex::encode("A"));
+        let alice = Address::from_bytes(&TestAddress::Alice.to_bytes())
+            .expect("alice address")
+            .to_string();
+
+        for address in [app.vectors().address.clone(), alice] {
+            for order in ["asc", "desc"] {
+                let listed: Vec<Row> =
+                    walk(&app, &format!("/addresses/{address}/utxos"), order, 100)
+                        .await
+                        .into_iter()
+                        .filter(|row| row.units.contains(&unit))
+                        .collect();
+
+                assert!(!listed.is_empty(), "{address} holds none of the asset");
+
+                for count in [1, 2, 100] {
+                    let path = format!("/addresses/{address}/utxos/{unit}");
+                    assert_eq!(
+                        walk(&app, &path, order, count).await,
+                        listed,
+                        "{address} order={order} count={count}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn address_tag(app: &TestApp) -> Tag {
+        let address = Address::from_bech32(&app.vectors().address).expect("bech32 address");
+        Tag::new(utxo_dimensions::ADDRESS, address.to_vec())
+    }
+
+    /// Spends `txo` the way a block does: out of the set and out of its tags.
+    fn spend(state: &impl StateStore, txo: &TxoRef) {
+        let consumed_utxo = state.get_utxos(vec![txo.clone()]).expect("utxo read");
+        assert_eq!(consumed_utxo.len(), 1, "{txo} is live");
+
+        let delta = UtxoSetDelta {
+            consumed_utxo,
+            ..Default::default()
+        };
+
+        let writer = state.start_writer().expect("state writer");
+        writer.apply_utxoset(&delta).expect("apply utxos");
+        writer
+            .apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&delta))
+            .expect("apply tags");
+        writer.commit().expect("commit");
+    }
+
+    /// Tags `output` under `txo` at `position` and leaves the set alone: what
+    /// a listing finds when the UTxO is spent between its tag read and its
+    /// value read.
+    fn tag_only<D: Domain>(
+        domain: &D,
+        txo: TxoRef,
+        position: Option<UtxoPosition>,
+        output: &UtxoValue,
+    ) {
+        let output = MultiEraOutput::try_from(output).expect("output");
+        let delta = UtxoIndexDelta {
+            produced: vec![(txo, position, utxo_tags(&output))],
+            consumed: vec![],
+        };
+
+        let writer = domain.state().start_writer().expect("state writer");
+        writer.apply_utxo_tags(&delta).expect("apply tags");
+        writer.commit().expect("commit");
+    }
+
+    /// The value of the listed row `txo`.
+    fn value_of(app: &TestApp, txo: &str) -> UtxoValue {
+        let txo: TxoRef = txo.parse().expect("txo ref");
+        let utxos = app
+            .facade()
+            .state()
+            .get_utxos(vec![txo.clone()])
+            .expect("utxo read");
+
+        (*utxos[&txo]).clone()
+    }
+
+    /// A walk resumes just past the last entry it read. A row spent behind it
+    /// moves nothing ahead: a read at a count of entries would pass over the
+    /// row the spend shifted into its place.
+    #[tokio::test]
+    async fn walks_resume_past_the_last_entry_read() {
+        for order in [TagOrder::Asc, TagOrder::Desc] {
+            let app = chain_with_configured_rows();
+            let facade = app.facade();
+            let tag = address_tag(&app);
+
+            let all = facade
+                .state()
+                .utxos_by_tag_page(
+                    tag.dimension,
+                    &tag.key,
+                    order,
+                    TagStart::Skip(0),
+                    usize::MAX,
+                )
+                .expect("whole tag");
+            assert!(all.len() > 6, "the fixture lists too few rows");
+
+            let mut walk = Walk::tag(tag, order, TagStart::Skip(0));
+
+            let first = walk.next(&facade, 3).await.expect("first read");
+            assert_eq!(first, all[..3], "{order:?}");
+
+            spend(facade.inner.state(), &first[0].txo);
+
+            let next = walk.next(&facade, 3).await.expect("second read");
+            assert_eq!(next, all[3..6], "{order:?}: the walk skipped a row");
+        }
+    }
+
+    /// A row whose UTxO is gone by the time its value is read gives its place
+    /// to the next one, at either end of the tag, so a page that is not the
+    /// last is full, on the plain listing and on an asset's.
+    #[tokio::test]
+    async fn pages_fill_past_rows_spent_since_the_tag_read() {
+        let app = chain_with_configured_rows();
+        let address = app.vectors().address.clone();
+        let unit = app.vectors().asset_unit.clone();
+
+        let asc = whole_set_rows(&app, &address, "asc").await;
+        let desc = whole_set_rows(&app, &address, "desc").await;
+        let with_asset = walk(&app, &format!("/addresses/{address}/utxos"), "asc", 100)
+            .await
+            .into_iter()
+            .filter(|row| row.units.contains(&unit))
+            .collect::<Vec<_>>();
+        assert!(with_asset.len() > 3, "the fixture holds too few asset rows");
+
+        // gone rows at the head of the tag in each order, holding the asset
+        let output = value_of(&app, &with_asset[0].txo);
+        let domain = app.facade().inner;
+        tag_only(&domain, TxoRef(Hash::from([0x01; 32]), 9), None, &output);
+        tag_only(
+            &domain,
+            TxoRef(Hash::from([0x02; 32]), 0),
+            Some(UtxoPosition::new(u64::MAX, 0)),
+            &output,
+        );
+
+        for count in [1, 3, 4] {
+            let path = format!("/addresses/{address}/utxos?count={count}");
+
+            let rows = without_units(page_rows(&app, &format!("{path}&order=asc")).await);
+            assert_eq!(rows, asc[..count], "asc count={count}");
+
+            let rows = without_units(page_rows(&app, &format!("{path}&order=desc")).await);
+            assert_eq!(rows, desc[..count], "desc count={count}");
+
+            let path = format!("/addresses/{address}/utxos/{unit}?count={count}&order=asc");
+            assert_eq!(page_rows(&app, &path).await, with_asset[..count]);
+        }
+    }
+
+    /// A ref the tag holds at two positions, as a fork that re-creates a UTxO
+    /// later in the chain leaves it between two reads, is listed once.
+    #[tokio::test]
+    async fn a_ref_reached_twice_is_one_row() {
+        let app = chain_with_configured_rows();
+        let address = app.vectors().address.clone();
+
+        let asc = whole_set_rows(&app, &address, "asc").await;
+        let lovelace_path = format!("/addresses/{address}/utxos/lovelace?order=asc&count=100");
+        let lovelace = page_rows(&app, &lovelace_path).await;
+        assert!(
+            lovelace.len() > 2,
+            "the fixture lists too few lovelace rows"
+        );
+
+        let listed = &lovelace[1].txo;
+        let domain = app.facade().inner;
+        tag_only(
+            &domain,
+            listed.parse().expect("txo ref"),
+            Some(UtxoPosition::new(u64::MAX, 0)),
+            &value_of(&app, listed),
+        );
+
+        let path = format!("/addresses/{address}/utxos?order=asc&count=100");
+        assert_eq!(without_units(page_rows(&app, &path).await), asc);
+        assert_eq!(page_rows(&app, &lovelace_path).await, lovelace);
+    }
+
+    /// A ref counts once its value loads. A rollback that removes a UTxO
+    /// between its tag read and its value read leaves the ref uncounted, so
+    /// the entry the fork block writes for it further on is a row.
+    #[tokio::test]
+    async fn a_ref_counts_once_its_value_loads() {
+        let app = chain_with_configured_rows();
+        let facade = app.facade();
+
+        let mut walk = Walk::tag(address_tag(&app), TagOrder::Asc, TagStart::Skip(0));
+        let mut rows = Rows::new(100);
+
+        let first = walk.next(&facade, MAX_WINDOW).await.expect("first read");
+        let gone = first
+            .iter()
+            .find(|entry| entry.order != UtxoPosition::tag_order(None))
+            .expect("a block row in the first read")
+            .txo
+            .clone();
+        let value = value_of(&app, &gone.to_string());
+
+        spend(facade.inner.state(), &gone);
+
+        let loaded = rows
+            .load(&facade, first, false)
+            .await
+            .expect("first values");
+        assert!(loaded.iter().all(|(txo, _)| *txo != gone));
+
+        let position = Some(UtxoPosition::new(u64::MAX, 0));
+        produce(
+            facade.inner.state(),
+            vec![(gone.clone(), UtxoValue::new(value.output, position))],
+        );
+
+        let mut listed = false;
+
+        loop {
+            let next = walk.next(&facade, MAX_WINDOW).await.expect("next read");
+
+            if next.is_empty() {
+                break;
+            }
+
+            let loaded = rows.load(&facade, next, false).await.expect("next values");
+            listed |= loaded.iter().any(|(txo, _)| *txo == gone);
+        }
+
+        assert!(listed, "the re-created UTxO is no row");
+    }
+
+    /// Through the routes, a rollback between the tag read and the value read
+    /// of the window that holds a row, then a fork block that re-creates the
+    /// row past the walk, moves the row to the end of the plain listing and of
+    /// the `lovelace` walk: each counts a ref only once its value loads.
+    #[tokio::test]
+    async fn listings_count_a_ref_once_its_value_loads() {
+        for listing in ["", "/lovelace"] {
+            let app = chain_with_configured_rows();
+            let address = app.vectors().address.clone();
+            let path = format!("/addresses/{address}/utxos{listing}?order=asc&count=100");
+
+            let before: Vec<String> = page_rows(&app, &path)
+                .await
+                .into_iter()
+                .map(|row| row.txo)
+                .collect();
+            let moved = before
+                .iter()
+                .find(|txo| value_of(&app, txo).position().is_some())
+                .expect("a block row")
+                .clone();
+
+            let txo: TxoRef = moved.parse().expect("txo ref");
+            let position = Some(UtxoPosition::new(u64::MAX, 0));
+            let mut fork = Some(UtxoValue::new(value_of(&app, &moved).output, position));
+            let mut rolled_back = false;
+
+            app.facade().inner.after_tag_page(move |entries, state| {
+                if !rolled_back {
+                    if entries.iter().any(|entry| entry.txo == txo) {
+                        spend(state, &txo);
+                        rolled_back = true;
+                    }
+                } else if let Some(value) = fork.take() {
+                    produce(state, vec![(txo.clone(), value)]);
+                }
+            });
+
+            let after: Vec<String> = page_rows(&app, &path)
+                .await
+                .into_iter()
+                .map(|row| row.txo)
+                .collect();
+
+            let mut expected: Vec<String> =
+                before.into_iter().filter(|txo| *txo != moved).collect();
+            expected.push(moved);
+
+            assert_eq!(after, expected, "listing {listing:?}");
+        }
+    }
+
+    /// Both of an asset listing's tags are read a window at a time, each read
+    /// within [`MAX_WINDOW`], which `tag_page` asserts: these tags outlast the
+    /// windows a schedule that doubled past it would read.
+    #[tokio::test]
+    async fn asset_listings_read_both_tags_within_the_window() {
+        let app = chain_with_configured_rows_over(2 * (FIRST_WINDOW + MAX_WINDOW));
+        let address = app.vectors().address.clone();
+        let unit = app.vectors().asset_unit.clone();
+
+        let rows = walk(&app, &format!("/addresses/{address}/utxos"), "asc", 100).await;
+        let with_asset: Vec<Row> = rows
+            .iter()
+            .filter(|row| row.units.contains(&unit))
+            .cloned()
+            .collect();
+
+        let past_the_cap = FIRST_WINDOW + MAX_WINDOW;
+        assert!(
+            with_asset.len() > past_the_cap,
+            "the asset tag is too small"
+        );
+        assert!(rows.len() > past_the_cap, "the address tag is too small");
+
+        for count in [1, 100] {
+            let path = format!("/addresses/{address}/utxos/{unit}");
+            assert_eq!(walk(&app, &path, "asc", count).await, with_asset);
+        }
+    }
+
+    /// Listings read the confirmed set, as Blockfrost's do: a pending tx that
+    /// spends a listed UTxO and pays the same address changes no row.
+    #[tokio::test]
+    async fn pending_txs_leave_the_listing_alone() {
+        let app = TestApp::new();
+        let cbor = app.vectors().tx_cbor.clone();
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &cbor).expect("submit tx");
+
+        let spent = TxoRef::from(&tx.consumes()[0]);
+        let pays = tx.produces()[0].1.address().expect("output address");
+        let path = format!("/addresses/{pays}/utxos");
+
+        let before = walk(&app, &path, "asc", 100).await;
+        assert!(
+            before.iter().any(|row| row.txo == spent.to_string()),
+            "the pending tx spends a listed UTxO"
+        );
+
+        app.facade()
+            .mempool()
+            .receive(MempoolTx::new(
+                tx.hash(),
+                EraCbor(Era::Conway.into(), cbor.clone()),
+                vec![],
+            ))
+            .expect("mempool accepts the tx");
+        assert!(app.facade().mempool().has_pending());
+
+        for order in ["asc", "desc"] {
+            let mut expected = before.clone();
+            if order == "desc" {
+                expected.reverse();
+            }
+
+            assert_eq!(walk(&app, &path, order, 1).await, expected, "order={order}");
+        }
     }
 
     fn pagination(order: Order, count: usize, page: u64) -> Pagination {
@@ -427,68 +1170,6 @@ mod tests {
             order,
             ..Default::default()
         }
-    }
-
-    fn select(rows: &[(Option<BlockSlot>, TxoRef)], pagination: Pagination) -> PageWindow {
-        let mut rows = rows.to_vec();
-        sort_rows(&mut rows, pagination.order);
-        select_window(&rows, &pagination)
-    }
-
-    /// A page edge inside a slot widens the window to the whole slot, so the
-    /// block decode can still order that slot's rows by transaction index; an
-    /// edge inside the slot-less group does not widen.
-    #[test]
-    fn select_window_widens_page_edges_to_whole_slots() {
-        let rows = vec![
-            (None, txo(0x02, 0)),
-            (None, txo(0x01, 0)),
-            (Some(10), txo(0x13, 0)),
-            (Some(10), txo(0x11, 0)),
-            (Some(10), txo(0x12, 0)),
-            (Some(20), txo(0x21, 0)),
-            (Some(20), txo(0x21, 1)),
-        ];
-
-        // page 2 of count 2 covers sorted positions 2..4, cutting slot 10
-        let window = select(&rows, pagination(Order::Asc, 2, 2));
-        assert_eq!(
-            window.refs(),
-            vec![txo(0x11, 0), txo(0x12, 0), txo(0x13, 0)]
-        );
-        assert_eq!(window.skip, 0);
-
-        // page 3 of count 2 covers 4..6: the tail of slot 10 and half of 20
-        let window = select(&rows, pagination(Order::Asc, 2, 3));
-        assert_eq!(
-            window.refs(),
-            vec![
-                txo(0x11, 0),
-                txo(0x12, 0),
-                txo(0x13, 0),
-                txo(0x21, 0),
-                txo(0x21, 1)
-            ]
-        );
-        assert_eq!(window.skip, 2);
-
-        // the slot-less group is final order already and never widens
-        let window = select(&rows, pagination(Order::Asc, 1, 1));
-        assert_eq!(window.refs(), vec![txo(0x01, 0)]);
-        assert_eq!(window.skip, 0);
-
-        // descending mirrors the whole order, slot-less rows last
-        let window = select(&rows, pagination(Order::Desc, 1, 2));
-        assert_eq!(window.refs(), vec![txo(0x21, 1), txo(0x21, 0)]);
-        assert_eq!(window.skip, 1);
-
-        let window = select(&rows, pagination(Order::Desc, 2, 4));
-        assert_eq!(window.refs(), vec![txo(0x01, 0)]);
-        assert_eq!(window.skip, 0);
-
-        // a page past the end is empty
-        let window = select(&rows, pagination(Order::Asc, 100, 2));
-        assert!(window.rows.is_empty());
     }
 
     async fn utxo_page(app: &TestApp, stake_address: &str, query: &str) -> Vec<String> {
@@ -585,49 +1266,9 @@ mod tests {
         }
     }
 
-    /// A block can spend a listed UTxO between the caller's tag read and the
-    /// load. No page may come back shorter than the rows left from its offset,
-    /// since clients stop paging at the first short page.
     #[tokio::test]
-    async fn a_ref_missing_from_the_set_does_not_shorten_a_page() {
-        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(SyntheticBlockConfig {
-            block_count: 6,
-            txs_per_block: 1,
-            ..Default::default()
-        })
-        .finish();
-        let address = Address::from_bech32(&vectors.address).unwrap().to_vec();
-        let live = domain.state().utxos_by_address(&address).unwrap();
-        let facade = Facade {
-            inner: domain,
-            config: MinibfConfig::new("[::]:0".parse().unwrap()),
-        };
-
-        let count = 2;
-        for spent in live.iter().map(|txo_ref| TxoRef(txo_ref.0, 7)) {
-            let mut refs = live.clone();
-            refs.insert(spent);
-
-            for page in 1..=live.len().div_ceil(count) as u64 {
-                let pagination = pagination(Order::Asc, count, page);
-                let left = live.len() - pagination.from();
-                let rows: Vec<AddressUtxoContentInner> =
-                    load_utxo_models(&facade, refs.clone(), pagination, UtxoFilter::All)
-                        .await
-                        .unwrap();
-
-                assert!(
-                    rows.len() >= count.min(left),
-                    "page {page} has {} rows",
-                    rows.len()
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn many_spent_refs_need_only_one_refresh() {
-        let block_count = UTXO_CHUNK + 100;
+    async fn many_spent_refs_are_walked_once() {
+        let block_count = 4 * MAX_WINDOW + 100;
         let (blocks, vectors, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
             block_count,
             txs_per_block: 1,
@@ -643,49 +1284,77 @@ mod tests {
         );
         domain.import_blocks(blocks).unwrap();
         let address = Address::from_bech32(&vectors.address).unwrap().to_vec();
-        let refs = domain.state().utxos_by_address(&address).unwrap();
-        assert_eq!(refs.len(), block_count);
+        let tag = Tag::new(utxo_dimensions::ADDRESS, address);
         let facade = Facade {
             inner: domain,
             config: MinibfConfig::new("[::]:0".parse().unwrap()),
         };
-        let rows = page_rows(&facade, refs.clone(), &pagination(Order::Asc, 100, 1))
-            .await
+        let entries = facade
+            .state()
+            .utxos_by_tag_page(
+                tag.dimension,
+                &tag.key,
+                TagOrder::Asc,
+                TagStart::Skip(0),
+                usize::MAX,
+            )
             .unwrap();
-        let spent: Vec<_> = rows[99..block_count - 1]
+        assert_eq!(entries.len(), block_count);
+
+        let spent: Vec<_> = entries[99..block_count - 1]
             .iter()
-            .map(|(_, txo_ref)| txo_ref.clone())
+            .map(|entry| entry.txo.clone())
             .collect();
         let writer = facade.state().start_writer().unwrap();
         writer
             .apply_utxoset(&UtxoSetDelta {
-                consumed_utxo: facade.state().get_utxos(spent.clone()).unwrap(),
+                consumed_utxo: facade.state().get_utxos(spent).unwrap(),
                 ..Default::default()
             })
             .unwrap();
         writer.commit().unwrap();
-        let mut live = refs.clone();
-        for txo_ref in spent {
-            live.remove(&txo_ref);
-        }
 
         for order in [Order::Asc, Order::Desc] {
-            for (count, page) in [(100, 1), (99, 2)] {
-                let pagination = pagination(order, count, page);
-                let expected: Vec<AddressUtxoContentInner> =
-                    load_utxo_models(&facade, live.clone(), pagination.clone(), UtxoFilter::All)
-                        .await
-                        .unwrap();
+            let mut live: Vec<_> = entries[..99]
+                .iter()
+                .chain(&entries[block_count - 1..])
+                .map(|entry| entry.txo.to_string())
+                .collect();
+            if let Order::Desc = order {
+                live.reverse();
+            }
+
+            for count in [99, 100] {
+                let pagination = pagination(order, count, 1);
+                let expected: Vec<_> = live
+                    .iter()
+                    .skip(pagination.skip())
+                    .take(count)
+                    .cloned()
+                    .collect();
                 facade.state().counters.reset();
                 let actual: Vec<AddressUtxoContentInner> =
-                    load_utxo_models(&facade, refs.clone(), pagination, UtxoFilter::All)
-                        .await
-                        .unwrap();
+                    load_tag_page(&facade, &tag, &pagination).await.unwrap();
+                let actual: Vec<_> = actual
+                    .into_iter()
+                    .map(|row| format!("{}#{}", row.tx_hash, row.output_index))
+                    .collect();
                 assert_eq!(actual, expected);
-                assert_eq!(actual.len(), if page == 1 { 100 } else { 1 });
+                assert_eq!(actual.len(), count);
                 let work = facade.state().counters.snapshot();
-                assert_eq!(work.utxo_reads, (refs.len() + count) as u64);
+                assert_eq!(
+                    work.utxo_reads,
+                    (count
+                        + if count == 100 || matches!(order, Order::Desc) {
+                            block_count - 100
+                        } else {
+                            0
+                        }) as u64
+                );
+                assert_eq!(work.utxo_refs, work.utxo_reads);
                 assert_eq!(work.block_reads, actual.len() as u64);
+                assert_eq!(work.exact_lookups, 0);
+                assert_eq!(work.tip_reads, 0);
             }
         }
     }

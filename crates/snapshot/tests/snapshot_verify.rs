@@ -1,9 +1,9 @@
 //! Verifying and inspecting a published stele, end to end.
 //!
-//! Everything here needs a **registry**, and spawns one: `docker run` of an
-//! OCI Distribution server, torn down on the way out. So everything here is
-//! `#[ignore]`d, and an `#[ignore]`d test that was never executed proves
-//! nothing — run it with:
+//! Nearly everything here needs a **registry**, and spawns one: `docker run`
+//! of an OCI Distribution server, torn down on the way out. So all of it but
+//! what runs against a listener that answers nothing is `#[ignore]`d, and an
+//! `#[ignore]`d test that was never executed proves nothing — run it with:
 //!
 //! ```text
 //! cargo test -p dolos-snapshot --test snapshot_verify -- --ignored --nocapture
@@ -24,6 +24,8 @@
 //!    rebuilt.
 //! 4. **An inspection reports what the manifest carries**, and its canonical
 //!    JSON is exactly what `digest --chain-from` takes.
+//! 5. **A resumed publish reproduces**: a resumption record never supplies an
+//!    account window its predecessor's manifest lacks.
 //!
 //! ## The registry is content-addressed, so tampering means manifests
 //!
@@ -35,22 +37,25 @@
 mod node;
 mod registry_fixture;
 
-use dolos_core::Domain as _;
+use dolos_core::{Domain as _, StateStore as _};
 use dolos_snapshot::{
+    boundary::Ineligible,
     export::{self, Following, Predecessor as _},
-    registry::{self, Point},
-    Error,
+    registry::{self, Point, PublishRecord, Publishing},
+    DolosProfile, Error, RetainedEpochs,
 };
+use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
 use serde_json::json;
-use stelae::Digest;
+use stelae::{Digest, SteleReader as _};
 
-use node::Node;
-use registry_fixture::Fixture;
+use node::{account_layer, plan_at_boundary, settled, stake_only, write_account_row, Node};
+use registry_fixture::{Fixture, Unanswered};
 
-/// Layers epoch 0 contributes, and therefore what sequence 1 inherits:
-/// `blocks`, `indexes`, and the two log layers the harness seeds. The other
-/// log kinds have no records in the window, so they have no layer.
-const EPOCH_0: usize = 4;
+/// Layers of epoch 0 that sequence 2 inherits: `blocks`, `indexes` and
+/// `log-epochs`. The harness also seeds `log-account-epochs`, which a publish
+/// builds again until its window has settled (`dolos_snapshot::is_settled`).
+/// The other log kinds have no records in the window, so they have no layer.
+const EPOCH_0: usize = 3;
 
 // ---------------------------------------------------------------------------
 // Done criterion 3: verify --repo
@@ -89,12 +94,12 @@ fn a_freshly_published_stele_verifies_clean() {
     assert!(verified.compressed_bytes > 0);
 
     // The immutable tag reads the predecessor back just as clean.
-    let predecessor = reader.verify(Point::Epoch(0)).unwrap();
+    let predecessor = reader.verify(Point::Epoch(1)).unwrap();
 
     assert_eq!(predecessor.identity, first.identity);
 
     eprintln!(
-        "verified latest = {} ({} layers, {} compressed bytes) and epoch-0 = {}",
+        "verified latest = {} ({} layers, {} compressed bytes) and epoch-1 = {}",
         verified.identity,
         verified.inscription.layers.len(),
         verified.compressed_bytes,
@@ -203,13 +208,13 @@ fn a_history_that_skips_a_sequence_is_refused() {
     let first = node.publish(&repository, &node.first, false);
     let second = node.publish(&repository, &node.second, false);
 
-    // Sequence 3 claiming a history of 0 and 2: the entries themselves ascend,
-    // and the chain still skips sequence 1.
+    // Sequence 4 claiming a history of 1 and 3: the entries themselves ascend,
+    // and the chain still skips sequence 2.
     let mut gapped = serde_json::to_value(&second.inscription).unwrap();
-    gapped["sequence"] = json!(3);
+    gapped["sequence"] = json!(4);
     gapped["history"] = json!([
-        {"sequence": 0, "inscriptionDigest": first.identity.to_string()},
-        {"sequence": 2, "inscriptionDigest": second.identity.to_string()},
+        {"sequence": 1, "inscriptionDigest": first.identity.to_string()},
+        {"sequence": 3, "inscriptionDigest": second.identity.to_string()},
     ]);
 
     let config = stelae::inscription::canonical_json(&gapped).unwrap();
@@ -224,7 +229,7 @@ fn a_history_that_skips_a_sequence_is_refused() {
     let message = err.to_string();
 
     assert!(message.contains("gap"), "{message}");
-    assert!(message.contains('0') && message.contains('2'), "{message}");
+    assert!(message.contains('1') && message.contains('3'), "{message}");
 
     eprintln!("skipped sequence: {message}");
 }
@@ -273,8 +278,8 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
     let err = export::verify_reproduction(
         &verified.inscription,
         &node.first,
-        node.domain.archive(),
-        node.domain.state(),
+        node.earlier.archive(),
+        node.earlier.state(),
         None,
     )
     .unwrap_err();
@@ -283,7 +288,7 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
 
     assert!(matches!(err, Error::ReproductionMismatch { .. }), "{err:?}");
     assert!(
-        message.contains("sequence 1") && message.contains("sequence 0"),
+        message.contains("sequence 2") && message.contains("sequence 1"),
         "{message}"
     );
 
@@ -292,6 +297,287 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
         reproduced.digest().unwrap(),
         verified.identity,
     );
+}
+
+/// A registry publish and its dry run refuse stores past their boundary, and
+/// the refusal comes before the repository is touched: nothing is published,
+/// and a stele at the boundary still publishes into it afterwards.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_registry_publish_and_its_dry_run_refuse_a_cursor_past_the_boundary() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let repository = fixture.repository("dolos/boundary");
+
+    let past = node::harness::<dolos_testing::toy_domain::MemoryStores>();
+    let first = past.state().read_cursor().unwrap().unwrap();
+    node::step_past_boundary(&past);
+    let plan = node::plan_for(&past);
+
+    let refused = |err: Error| match err {
+        Error::NotABoundary { reason, .. } => reason,
+        other => panic!("{other:?}"),
+    };
+
+    let expected = Ineligible::LaterBlock { parent: first };
+
+    let preview = registry::preview(
+        Publishing::new(&repository),
+        &plan,
+        past.archive(),
+        past.state(),
+        None,
+    );
+    assert_eq!(refused(preview.unwrap_err()), expected);
+
+    let publish = registry::publish(
+        Publishing::new(&repository),
+        &plan,
+        past.archive(),
+        past.state(),
+        None,
+        &stelae::progress::Observer::silent(),
+    );
+    assert_eq!(refused(publish.unwrap_err()), expected);
+
+    assert!(
+        repository.latest(&DolosProfile).unwrap().is_none(),
+        "a refused publish left a stele behind"
+    );
+
+    let published = node.publish(&repository, &node.first, false);
+    assert_eq!(published.inscription.sequence, 1);
+}
+
+/// The same refusals ask the registry nothing: neither opens a connection to
+/// it. The repository answers no request, so a refusal that came after a
+/// read would surface as a transport error instead.
+#[test]
+fn a_registry_refusal_comes_before_any_request() {
+    let unanswered = Unanswered::start();
+    let repository = unanswered.repository("dolos/boundary");
+
+    let past = node::harness::<dolos_testing::toy_domain::MemoryStores>();
+    let first = past.state().read_cursor().unwrap().unwrap();
+    node::step_past_boundary(&past);
+    let plan = node::plan_for(&past);
+
+    let expected = Ineligible::LaterBlock { parent: first };
+
+    let refused = |err: Error| match err {
+        Error::NotABoundary { reason, .. } => reason,
+        other => panic!("{other:?}"),
+    };
+
+    let opened = unanswered.connections();
+
+    let preview = registry::preview(
+        Publishing::new(&repository),
+        &plan,
+        past.archive(),
+        past.state(),
+        None,
+    );
+    assert_eq!(refused(preview.unwrap_err()), expected);
+
+    let publish = registry::publish(
+        Publishing::new(&repository),
+        &plan,
+        past.archive(),
+        past.state(),
+        None,
+        &stelae::progress::Observer::silent(),
+    );
+    assert_eq!(refused(publish.unwrap_err()), expected);
+
+    assert_eq!(
+        unanswered.connections(),
+        opened,
+        "a refused publish reached the registry"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A resumed publish
+// ---------------------------------------------------------------------------
+
+/// Finding G of the fourth QA review of dolos#1499, through the registry: a
+/// resumption record holds a settled account window the predecessor's manifest
+/// lacks, and the publish that resumes from it rebuilds that window.
+///
+/// Host A's first publish at 2 dies at the seal, after window 1's stake-only
+/// account rows were uploaded and recorded. Host B publishes 2 and 3 from
+/// stores with no row in window 1, so the manifest at 3 has no such layer. The
+/// EWRAP closing 2 settles A's row, and A resumes at 4: the window is settled
+/// and the manifest silent, so only the record could lend it. The stele
+/// reproduces from A's stores, and the dry run counted what the publish built
+/// and reused.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_resumed_registry_publish_rebuilds_an_account_window_the_manifest_lacks() {
+    let fixture = Fixture::spawn();
+    // One handle per process, as the hosts would hold them.
+    let process = || fixture.repository("dolos/resume-account-window");
+    let record = tempfile::tempdir().unwrap();
+    let record_path = registry::record_path_in(record.path());
+
+    let host_a: ToyDomain<MemoryStores> = node::harness();
+    write_account_row(&host_a, 1, stake_only());
+
+    let cut_at_2 = plan_at_boundary(&host_a, 2, RetainedEpochs::default());
+    let dying = process();
+    let interrupted = registry::publish_into(
+        &SealFails(&dying),
+        Publishing::new(&dying).recording_in(&record_path),
+        &cut_at_2,
+        host_a.archive(),
+        host_a.state(),
+        None,
+        &stelae::progress::Observer::silent(),
+    );
+    assert!(interrupted.is_err(), "the seal was meant to fail");
+
+    let stale = export::reproduce(
+        &cut_at_2,
+        host_a.archive(),
+        host_a.state(),
+        None,
+        &export::First,
+    )
+    .unwrap();
+    let stale = account_layer(&stale, 1);
+
+    // The record was written through the wrapper the registry publishes with.
+    let recorded = PublishRecord::load(&record_path).unwrap().unwrap();
+    assert!(
+        recorded
+            .layers
+            .iter()
+            .any(|layer| layer.descriptor == stale),
+        "the interrupted publish recorded no stake-only window 1"
+    );
+
+    // The failed seal never joined the uploads, and a resume adopts a recorded
+    // layer only once its blob is up, so wait for it.
+    let recorded = recorded
+        .layers
+        .into_iter()
+        .find(|layer| layer.descriptor == stale)
+        .unwrap();
+    let probe = process();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !probe.adopt_carried(recorded.clone()).unwrap() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the stake-only window 1 never finished uploading"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let host_b: ToyDomain<MemoryStores> = node::harness();
+    for sequence in [2, 3] {
+        let plan = plan_at_boundary(&host_b, sequence, RetainedEpochs::default());
+        registry::publish(
+            Publishing::new(&process()),
+            &plan,
+            host_b.archive(),
+            host_b.state(),
+            None,
+            &stelae::progress::Observer::silent(),
+        )
+        .unwrap();
+    }
+
+    let manifest = process()
+        .latest(&DolosProfile)
+        .unwrap()
+        .unwrap()
+        .read_inscription()
+        .unwrap();
+    assert!(
+        !manifest.layers.iter().any(|layer| {
+            layer.kind == "log-account-epochs"
+                && layer.scope.get("epoch").and_then(serde_json::Value::as_u64) == Some(1)
+        }),
+        "the manifest at 3 was meant to lack window 1"
+    );
+
+    // Through 3 as B went, so the two hosts hold the same chain.
+    node::stand_at_boundary(&host_a, 3);
+    write_account_row(&host_a, 1, settled());
+    let cut_at_4 = plan_at_boundary(&host_a, 4, RetainedEpochs::default());
+
+    let resumed = process();
+    let resuming = || Publishing::new(&resumed).recording_in(&record_path);
+    let preview = registry::preview(
+        resuming(),
+        &cut_at_4,
+        host_a.archive(),
+        host_a.state(),
+        None,
+    )
+    .unwrap();
+    let published = registry::publish(
+        resuming(),
+        &cut_at_4,
+        host_a.archive(),
+        host_a.state(),
+        None,
+        &stelae::progress::Observer::silent(),
+    )
+    .unwrap();
+
+    assert_ne!(account_layer(&published.inscription, 1), stale);
+    assert!(published.layers_reused > 0, "nothing was inherited");
+    assert_eq!(
+        (preview.layers_built, preview.layers_reused),
+        (published.layers_built, published.layers_reused)
+    );
+
+    let reproduced = export::verify_reproduction(
+        &published.inscription,
+        &cut_at_4,
+        host_a.archive(),
+        host_a.state(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(reproduced.digest().unwrap(), published.identity);
+}
+
+/// The registry, except that the seal fails: every layer is up and recorded,
+/// and the stele never becomes readable.
+struct SealFails<'a>(&'a stelae::oci::Registry);
+
+impl stelae::SteleWriter for SealFails<'_> {
+    type Sink = <stelae::oci::Registry as stelae::SteleWriter>::Sink;
+
+    fn layer_sink(
+        &self,
+        profile: &dyn stelae::Profile,
+        spec: &stelae::LayerSpec,
+        level: i32,
+    ) -> Result<Self::Sink, stelae::Error> {
+        self.0.layer_sink(profile, spec, level)
+    }
+
+    fn seal(
+        &self,
+        _profile: &dyn stelae::Profile,
+        _inscription: &stelae::Inscription,
+    ) -> Result<Digest, stelae::Error> {
+        Err(stelae::Error::Io(std::io::Error::other(
+            "the machine went away",
+        )))
+    }
+
+    fn carry_again(
+        &self,
+        written: &stelae::transport::WrittenLayer,
+        scope: serde_json::Value,
+    ) -> Result<stelae::transport::WrittenLayer, stelae::Error> {
+        self.0.carry_again(written, scope)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +625,7 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
     assert_eq!(total, inspected.total_compressed);
 
     // The `--json` output is the canonical document, verbatim.
-    let predecessor = reader.inspect(Point::Epoch(0)).unwrap();
+    let predecessor = reader.inspect(Point::Epoch(1)).unwrap();
 
     assert_eq!(predecessor.identity, first.identity);
 
@@ -364,7 +650,7 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
     );
 
     eprintln!(
-        "inspected {} layers, {} compressed bytes; epoch-0's document chained to {}",
+        "inspected {} layers, {} compressed bytes; epoch-1's document chained to {}",
         inspected.inscription.layers.len(),
         inspected.total_compressed,
         reproduced.digest().unwrap(),

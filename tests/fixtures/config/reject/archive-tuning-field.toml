@@ -1,0 +1,8 @@
+compatibility = "v2-alpha.1"
+
+[chain]
+protocol = "cardano"
+network = "preview"
+
+[storage.archive]
+worker_threads = 2

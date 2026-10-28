@@ -2,8 +2,10 @@
 //! (decision 0057).
 //!
 //! A sealed epoch holds one list, in first-seen order, at
-//! `epoch_start(e) ‖ chunk`. The `scripts` witness decides at roll time which
-//! sighting is a script's first, so every staged row is listed.
+//! `epoch_start(e) ‖ chunk`. The roll's witness decides which sighting is a
+//! script's first, so every staged row is listed, and the seal records each
+//! one in the archive's entity index, where the witness finds it once the
+//! staged row is gone.
 
 use std::{collections::BTreeMap, ops::RangeInclusive};
 
@@ -11,7 +13,10 @@ use dolos_core::{ArchiveWriter as _, BlockSlot, ChainError, Domain, StateStore};
 use pallas::{crypto::hash::Hash, ledger::primitives::Epoch};
 
 use super::{Period, Segment};
-use crate::{indexes::SlotOrder, ChainSummary, FirstScriptChunk, FirstScriptSet};
+use crate::{
+    indexes::{entities, SlotOrder},
+    ChainSummary, FirstScriptChunk, FirstScriptSet,
+};
 
 /// Seal the staged first scripts of every epoch `sealable` accepts.
 ///
@@ -20,6 +25,10 @@ use crate::{indexes::SlotOrder, ChainSummary, FirstScriptChunk, FirstScriptSet};
 /// early: the seal is one archive commit, then one state commit. An epoch's
 /// list depends on every staged row of it, so that is the split it needs, and
 /// a re-run after a crash between the two writes the same chunks again.
+///
+/// The archive commit also writes each sealed script's entity index entry,
+/// before the state commit deletes its staged row, so the roll's witness
+/// finds every sealed script in one of the two.
 pub(crate) fn seal<D: Domain>(
     state: &D::State,
     archive: &D::Archive,
@@ -49,6 +58,8 @@ pub(crate) fn seal<D: Domain>(
             let mut epochs: BTreeMap<Epoch, Vec<(FirstScriptSet, Hash<28>)>> = BTreeMap::new();
 
             for (key, row) in chunk {
+                writer.write_entity(entities::SCRIPT, key.member.0.as_slice(), row.slot)?;
+
                 epochs
                     .entry(key.epoch)
                     .or_default()
@@ -370,5 +381,58 @@ mod tests {
 
         // the archive commit, then the state delete
         assert_eq!(crash_after, 2);
+    }
+
+    /// The entity index entries of every listed script, as `(hash, slot)`.
+    fn indexed(domain: &ToyDomain) -> Vec<(Hash<28>, Option<BlockSlot>)> {
+        let hashes: Vec<Hash<28>> = listing(domain).into_iter().map(|(_, h, _)| h).collect();
+        let keys: Vec<&[u8]> = hashes.iter().map(|h| h.as_slice()).collect();
+        let slots = domain
+            .archive()
+            .entity_slots(entities::SCRIPT, &keys)
+            .unwrap();
+
+        hashes.into_iter().zip(slots).collect()
+    }
+
+    /// The seal records every sealed script's first-seen slot in the entity
+    /// index, in the archive commit that seals its epoch, and a crash at
+    /// either commit leaves the same entries after the re-run. Between the
+    /// commits a script is in the index and staged, never in neither.
+    #[test]
+    fn the_seal_indexes_each_sealed_script_once_whatever_commit_it_dies_at() {
+        let clean = seeded();
+        seal_as(&clean, &clean).unwrap();
+
+        let expected: Vec<_> = listing(&clean)
+            .into_iter()
+            .map(|(epoch, hash, row)| (hash, (epoch < 7).then_some(row.slot)))
+            .collect();
+
+        assert_eq!(indexed(&clean), expected);
+
+        for crash_after in 0..2 {
+            let domain = seeded();
+            let crashing =
+                FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(crash_after));
+
+            assert!(seal_as(&crashing, &domain).is_err());
+
+            let staged: std::collections::HashSet<_> = staged(&domain)
+                .into_iter()
+                .map(|(k, _)| k.member.0)
+                .collect();
+
+            for (hash, slot) in indexed(&domain) {
+                assert!(slot.is_some() || staged.contains(&hash), "lost {hash}");
+            }
+
+            seal_as(&domain, &domain).expect("re-run");
+            assert_eq!(
+                indexed(&domain),
+                expected,
+                "crash after commit {crash_after}"
+            );
+        }
     }
 }

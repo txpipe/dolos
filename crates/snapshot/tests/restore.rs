@@ -47,20 +47,21 @@ use dolos_cardano::{
     AccountKey, AccountStats, AddressKey, AddressStats,
 };
 use dolos_core::{
-    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, StateStore,
-    StateWriter as _, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    ArchiveStore, ArchiveWriter as _, ChainPoint, Domain as _, EntityKey, EntityRecord,
+    ExactRecord, LogKey, StateStore, StateWriter as _, TagOrder, TagRecord, TagStart, TxoRef,
+    UtxoSet, UtxoSetDelta, UtxoValue,
 };
 use dolos_snapshot::{
     is_state_kind,
     restore::{self, default_budget, progress_path_in, Budget, Checkpoint},
-    state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL, KINDS,
-    LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
+    state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL,
+    ENTITY_INDEX_KINDS, ENTITY_KINDS, KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::{
     faults::{FaultyStateStore, TestFault},
     toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
 };
-use node::{export_plan, export_to, harness, plan_at_boundary, Blank};
+use node::{export_plan, export_to, harness, plan_at_boundary, stand_at_boundary, Blank};
 use serde_json::json;
 use stelae::{
     dir::{LayerSpec, SteleDir},
@@ -541,7 +542,7 @@ impl<S: StateStore> Progress for UtxoBatchObserver<S> {
                 .collect(),
             ..Default::default()
         };
-        for (txo, tags) in utxo_index_delta_from_utxo_delta(&delta).produced {
+        for (txo, _, tags) in utxo_index_delta_from_utxo_delta(&delta).produced {
             for tag in tags {
                 assert!(
                     self.state
@@ -620,7 +621,7 @@ fn resume_repairs_utxos_written_without_tags_by_an_older_restore() {
 
     let tags = utxo_index_delta_from_utxo_delta(&delta);
     assert!(!tags.produced.is_empty());
-    for (_, tags) in &tags.produced {
+    for (_, _, tags) in &tags.produced {
         for tag in tags {
             assert!(blank
                 .state()
@@ -739,6 +740,175 @@ fn a_restored_node_is_the_node_it_came_from_on_memory() {
 #[test]
 fn a_restored_node_is_the_node_it_came_from_on_fjall() {
     roundtrip::<FjallStores>();
+}
+
+// --------------------------------------------------------------------------
+// The entity index
+// --------------------------------------------------------------------------
+
+/// Entries as a seal writes them, straight into `domain`'s archive: both kinds,
+/// across the stele's complete window and its boundary sliver, in an id order
+/// that is not their slot order. Returns them as the index yields them.
+fn seed_entity_index<B: ToyStores>(domain: &ToyDomain<B>) -> Vec<EntityRecord> {
+    let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
+    let sliver = summary.epoch_start(1);
+
+    let (_, asset) = ENTITY_KINDS[0];
+    let (_, script) = ENTITY_KINDS[1];
+
+    let mut entries: Vec<EntityRecord> = [
+        (asset, 0x02, 100),
+        (asset, 0x01, 300),
+        (script, 0x08, 200),
+        (script, 0x07, sliver),
+    ]
+    .into_iter()
+    .map(|(kind, byte, slot)| EntityRecord::new(kind, &vec![byte; kind.key_len()], slot).unwrap())
+    .collect();
+
+    let writer = domain.archive().start_writer().unwrap();
+
+    for entry in &entries {
+        writer
+            .write_entity(entry.kind, entry.key(), entry.slot)
+            .unwrap();
+    }
+
+    writer.commit().unwrap();
+
+    entries.sort();
+    entries
+}
+
+fn entity_index_of<A: ArchiveStore>(store: &A) -> Vec<EntityRecord> {
+    store
+        .iter_entity_records(&ENTITY_INDEX_KINDS, 0..u64::MAX)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// The entity index survives the trip: one layer per kind and window that
+/// first saw an entity, written back through `write_entity`, and the restored
+/// node publishes the same stele.
+fn entity_index_round_trip<B: ToyStores>() {
+    let domain: ToyDomain<B> = harness();
+    let seeded = seed_entity_index(&domain);
+
+    let temp = tempfile::tempdir().unwrap();
+    let original = export_to(temp.path(), &domain);
+
+    let layers: Vec<(&str, u64)> = original
+        .layers
+        .iter()
+        .filter(|layer| layer.kind.starts_with("entity-"))
+        .map(|layer| (layer.kind.as_str(), layer.scope["epoch"].as_u64().unwrap()))
+        .collect();
+
+    assert_eq!(
+        layers,
+        [
+            ("entity-asset", 0),
+            ("entity-script", 0),
+            ("entity-script", 1)
+        ]
+    );
+
+    let blank = Blank::<B>::open();
+    let summary = restore_into(temp.path(), magic_of(&domain), &blank, shredded()).unwrap();
+
+    assert_eq!(summary.entity_index, seeded.len() as u64);
+    assert_eq!(entity_index_of(domain.archive()), seeded);
+    assert_eq!(entity_index_of(&blank.archive), seeded);
+
+    let again = tempfile::tempdir().unwrap();
+    let republished = {
+        let stele = SteleDir::create(again.path()).unwrap();
+        let plan =
+            dolos_snapshot::export::plan(blank.state(), magic_of(&domain), Default::default())
+                .unwrap();
+
+        dolos_snapshot::export::export(
+            &stele,
+            &plan,
+            &blank.archive,
+            blank.state(),
+            None,
+            &dolos_snapshot::export::First,
+            &Observer::silent(),
+        )
+        .unwrap()
+    };
+
+    assert_eq!(original.digest().unwrap(), republished.digest().unwrap());
+}
+
+#[test]
+fn the_entity_index_round_trips_on_memory() {
+    entity_index_round_trip::<MemoryStores>();
+}
+
+#[test]
+fn the_entity_index_round_trips_on_fjall() {
+    entity_index_round_trip::<FjallStores>();
+}
+
+/// Restore the harness's stele with `edit` applied to its inscription, which
+/// has to be refused before anything is written, and return the refusal.
+fn refuse_edited_stele(edit: impl FnOnce(&mut Inscription)) -> Error {
+    let domain: ToyDomain = harness();
+    let magic = magic_of(&domain);
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut inscription = export_to(temp.path(), &domain);
+
+    edit(&mut inscription);
+    SteleDir::open(temp.path())
+        .unwrap()
+        .seal(&DolosProfile, &inscription)
+        .unwrap();
+
+    let blank = Blank::<MemoryStores>::open();
+    let err = restore_into(temp.path(), magic, &blank, default_budget()).unwrap_err();
+
+    assert_untouched(&blank);
+
+    err
+}
+
+/// A stele that does not declare an entity kind this build indexes, or
+/// declares one at another id width, is refused before anything is written:
+/// the restored node would otherwise take every repeat for a first sighting.
+#[test]
+fn a_stele_without_the_entity_kinds_is_refused_before_anything_is_written() {
+    let undeclared = refuse_edited_stele(|inscription| {
+        inscription
+            .parameters
+            .as_object_mut()
+            .unwrap()
+            .remove("entities");
+    });
+
+    assert!(
+        matches!(undeclared, Error::UndeclaredEntityKind { kind: "asset" }),
+        "{undeclared:?}"
+    );
+
+    let narrower = refuse_edited_stele(|inscription| {
+        inscription.parameters["entities"]["script"] = json!(32);
+    });
+
+    assert!(
+        matches!(
+            narrower,
+            Error::EntityWidthMismatch {
+                kind: "script",
+                declared: 32,
+                registered: 28,
+            }
+        ),
+        "{narrower:?}"
+    );
 }
 
 /// The address and account totals of every key the harness's stats name.
@@ -1020,6 +1190,7 @@ fn large_snapshot_block_chunks_use_automatic_parallel_encoding() {
         None,
     );
     domain.import_blocks(blocks).unwrap();
+    stand_at_boundary(&domain, 1);
     let temp = tempfile::tempdir().unwrap();
     export_to(temp.path(), &domain);
     let blank = Blank::<FjallStores>::open();
@@ -1105,6 +1276,11 @@ fn assert_state_matches<S: StateStore>(restored: &S, original: &S) {
 
     let utxos = utxos_of(original);
     assert!(!utxos.is_empty(), "the fixture has no utxos");
+    assert!(
+        utxos.values().any(|value| value.position().is_some()),
+        "no fixture utxo has a creation position, so its trip proves nothing"
+    );
+    // the values compare whole: the creation position rides the record
     assert_eq!(utxos_of(restored), utxos, "the utxo set");
 }
 
@@ -1142,7 +1318,8 @@ fn assert_indexes_match<A: ArchiveStore>(restored: &A, original: &A) {
 ///
 /// This is the point. `utxo::*` tags are never shipped — ADR-004's Amendment
 /// 2 — so they exist in a restored node only because the restore rebuilt
-/// them, and only a query proves it did.
+/// them, and only a query proves it did. The ordered reads compare too: the
+/// rebuilt keys carry the creation positions the sync wrote.
 fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
     // Every dimension the ledger tagged the restored UTxO set under, asked of
     // both stores.
@@ -1157,7 +1334,7 @@ fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
     let rebuilt = utxo_index_delta_from_utxo_delta(&delta);
     let mut asked = 0usize;
 
-    for (txo, tags) in &rebuilt.produced {
+    for (txo, _, tags) in &rebuilt.produced {
         for tag in tags {
             let left: UtxoSet = restored.utxos_by_tag(tag.dimension, &tag.key).unwrap();
             let right: UtxoSet = original.utxos_by_tag(tag.dimension, &tag.key).unwrap();
@@ -1168,6 +1345,27 @@ fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
                 tag.dimension
             );
             assert_eq!(left, right, "utxos under {}", tag.dimension);
+
+            for order in [TagOrder::Asc, TagOrder::Desc] {
+                let page = |store: &S| {
+                    store
+                        .utxos_by_tag_page(
+                            tag.dimension,
+                            &tag.key,
+                            order,
+                            TagStart::Skip(0),
+                            usize::MAX,
+                        )
+                        .unwrap()
+                };
+
+                assert_eq!(
+                    page(restored),
+                    page(original),
+                    "{order:?} order under {}",
+                    tag.dimension
+                );
+            }
 
             asked += 1;
         }
@@ -1187,7 +1385,7 @@ fn entities_of<S: StateStore>(store: &S, ns: &'static str) -> Vec<(EntityKey, Ve
         .collect()
 }
 
-fn utxos_of<S: StateStore>(store: &S) -> std::collections::BTreeMap<TxoRef, EraCbor> {
+fn utxos_of<S: StateStore>(store: &S) -> std::collections::BTreeMap<TxoRef, UtxoValue> {
     store.iter_utxos().unwrap().map(Result::unwrap).collect()
 }
 
@@ -1655,35 +1853,34 @@ fn a_killed_restore_resumes_into_the_same_node_on_fjall() {
 /// and the state tip is redone, because the tip is what a new stele changes.
 ///
 /// The harness ledger is one epoch, so "a newer inscription" is built the way
-/// `tests/publish.rs` builds its second publish: the same stores, standing at
-/// two synthetic chain points a slot apart. The first closes epoch 0; the
-/// second stands in epoch 1.
+/// `node::Node` builds its second publish: the same stores, published on the
+/// epoch-1 boundary and again once they stand on the epoch-2 one.
 ///
 /// That geometry is what makes the assertions mean anything. Epoch 0's layers
 /// are byte-identical across the two steles, because its window closed and a
-/// closed window cannot be published differently. The state shards are **not**,
-/// because a shard's header record names the epoch it is the tip of. So the
-/// resume has genuinely different bytes on both sides of the rule: layers it
-/// may skip, and layers it must not.
+/// closed window cannot be published differently. Epoch 1's are not — the
+/// first stele carries its boundary sliver, the second the whole epoch — and
+/// neither are the state shards, because a shard's header record names the
+/// epoch it is the tip of. So the resume has genuinely different bytes on both
+/// sides of the rule: layers it may skip, and layers it must not.
 #[test]
 fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     let domain: ToyDomain = harness();
     let magic = magic_of(&domain);
 
-    let boundary = epoch_one_starts_at(&domain);
-
     let older = tempfile::tempdir().unwrap();
     let newer = tempfile::tempdir().unwrap();
 
-    let first = export_standing_at(older.path(), &domain, boundary - 1);
-    let second = export_standing_at(newer.path(), &domain, boundary);
+    let first = export_to(older.path(), &domain);
+    stand_at_boundary(&domain, 2);
+    let second = export_to(newer.path(), &domain);
 
     // Two steles, not one. The whole test is about a `diffId` recorded under
     // the first staying true under the second, and that says nothing unless
     // the second is a different document.
     assert_ne!(first.digest().unwrap(), second.digest().unwrap());
-    assert_eq!(first.sequence, 0, "the cursor stands in epoch 0");
-    assert_eq!(second.sequence, 1, "and one slot later, in epoch 1");
+    assert_eq!(first.sequence, 1, "the cursor stands in epoch 1");
+    assert_eq!(second.sequence, 2, "and then in epoch 2");
 
     // And the two sides of the rule, as bytes. Epoch 0's layers carry forward;
     // every state layer is new.
@@ -1750,16 +1947,18 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     let resumed =
         restore_checkpointed(newer.path(), storage.path(), magic, &blank, true, None).unwrap();
 
+    let kept = epoch_zero(&first).len();
+
     assert_eq!(
-        resumed.layers_skipped, seeded,
-        "every epoch layer the older stele had completed was kept"
+        resumed.layers_skipped, kept,
+        "every layer of the closed epoch the older stele had completed was kept"
     );
 
     assert_eq!(
         resumed.layers_fetched,
-        second.layers.len() - seeded,
-        "and everything the newer stele adds was fetched: epoch 1's layers, \
-         and every state layer because a state layer is never inherited"
+        second.layers.len() - kept,
+        "and everything else the newer stele carries was fetched: epoch 1 whole, \
+         epoch 2's sliver, and every state layer because a state layer is never inherited"
     );
 
     assert!(
@@ -1767,10 +1966,8 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
         "the newer stele has to add an epoch, or the tip is all this proves"
     );
 
-    // Against an uninterrupted restore of the *same* stele, not against the
-    // domain: the two steles stand at synthetic chain points the harness ledger
-    // never reached, so their cursor is theirs and not the domain's. What has
-    // to match is everything a restore of `second` produces.
+    // Against an uninterrupted restore of the *same* stele, which is
+    // everything a restore of `second` produces.
     let reference = Blank::<MemoryStores>::open();
     let reference_storage = tempfile::tempdir().unwrap();
 
@@ -1788,53 +1985,6 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     assert_archive_matches(&blank.archive, &reference.archive);
     assert_indexes_match(&blank.archive, &reference.archive);
     assert_utxo_tags_match(blank.state(), reference.state());
-}
-
-/// The slot epoch 1 begins at, for a test that needs to stand on the boundary.
-fn epoch_one_starts_at<B: ToyStores>(domain: &ToyDomain<B>) -> u64 {
-    dolos_cardano::eras::load_chain_summary_from_state(domain.state())
-        .unwrap()
-        .epoch_start(1)
-}
-
-/// Export `domain` as if its cursor stood at `slot`.
-///
-/// [`export_to`] derives everything from the store's own cursor, so two calls
-/// produce one stele twice. A test about what changes *between* steles needs
-/// two, and standing at a synthetic chain point is how `tests/publish.rs`
-/// builds its second publish — for the same reason, and with the same caveat:
-/// the resulting cursor is not one the harness ledger ever reached, so a
-/// restore of it must be compared against another restore rather than against
-/// the domain.
-fn export_standing_at<B: ToyStores>(
-    root: &std::path::Path,
-    domain: &ToyDomain<B>,
-    slot: u64,
-) -> Inscription {
-    let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
-
-    // Any hash will do: `position` needs one to exist, and nothing in an export
-    // reads it back out of the store.
-    let plan = dolos_snapshot::export::Plan::new(
-        &summary,
-        dolos_snapshot::Network::for_magic(magic_of(domain)),
-        ChainPoint::Specific(slot, dolos_core::BlockHash::new([0xab; 32])),
-        Default::default(),
-    )
-    .unwrap();
-
-    let stele = SteleDir::create(root).unwrap();
-
-    dolos_snapshot::export::export(
-        &stele,
-        &plan,
-        domain.archive(),
-        domain.state(),
-        None,
-        &dolos_snapshot::export::First,
-        &Observer::silent(),
-    )
-    .unwrap()
 }
 
 /// The resume is `--continue`'s and nobody else's.
@@ -1999,7 +2149,9 @@ fn max_history_selects_epochs_and_never_the_tip() {
 
     let stele = SteleDir::open(temp.path()).unwrap();
 
-    for max_history in [None, Some(0), Some(u64::MAX)] {
+    // Epochs dropped and kept, per window: the fixture covers epoch 0 whole and
+    // epoch 1's boundary sliver.
+    for (max_history, dropped, kept) in [(None, 0, 2), (Some(0), 1, 1), (Some(u64::MAX), 0, 2)] {
         let plan = restore::plan(&stele, magic_of(&domain), max_history).unwrap();
 
         // Keyed by namespace now, so the tip is one entry per state kind and
@@ -2011,11 +2163,10 @@ fn max_history_selects_epochs_and_never_the_tip() {
             "{max_history:?}"
         );
 
-        // The fixture stands inside epoch zero, so every window reaches the tip
-        // and nothing is ever dropped — which is the assertion, not a shortcut:
-        // the epoch the cursor stands in must survive any window.
-        assert_eq!(plan.skipped_epochs, 0, "{max_history:?}");
-        assert_eq!(plan.epochs.len(), 1, "{max_history:?}");
+        // A zero window drops epoch 0 and keeps the sliver: the epoch the
+        // cursor stands in must survive any window.
+        assert_eq!(plan.skipped_epochs, dropped, "{max_history:?}");
+        assert_eq!(plan.epochs.len(), kept, "{max_history:?}");
     }
 }
 

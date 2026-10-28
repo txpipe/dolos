@@ -1,10 +1,12 @@
 //! `dolos doctor rebuild-state` — regenerate the state store from the local
 //! archive.
 //!
-//! The archive holds the full raw chain, and state computation never reads
-//! the archive, so a synced instance can rebuild its state store offline by
-//! replaying its own archive through the import lifecycle: no network, no
-//! snapshot re-import, no re-writing of the archive. This is the
+//! The archive holds the full raw chain, and state computation reads nothing
+//! of it but the entity index below each batch, which a replay without
+//! `--rewrite-logs` leaves as it was, so a synced instance can rebuild its
+//! state store offline by replaying its own archive through the import
+//! lifecycle: no network, no snapshot re-import, and without
+//! `--rewrite-logs` no re-writing of the archive. This is the
 //! debugging loop for state-math fixes — a full replay re-writes every store
 //! to test a change that only touches state.
 //!
@@ -26,12 +28,19 @@
 //! cursor only after the replay completes. A crash mid-rebuild therefore
 //! leaves WAL(origin) behind a partial state cursor, which the next startup
 //! refuses loudly (`InconsistentState`); re-running this command recovers.
+//!
+//! An archive whose seals wrote no script entries — one written before the
+//! entity index existed, or by an earlier build that kept the index but
+//! indexed no scripts — holds none, so a rebuild without `--rewrite-logs`
+//! over it, in place, `--target` or `--ephemeral`, would take every script a
+//! sealed epoch saw for a new one. Rebuild such an archive in place with
+//! `--rewrite-logs` first: its seals write the index as the replay goes.
 
 use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dolos_core::config::RootConfig;
+use dolos_core::config::{RootConfig, StoreType};
 use dolos_core::ImportExt as _;
 use indicatif::ProgressBar;
 use miette::{bail, Context as _, IntoDiagnostic as _};
@@ -218,10 +227,11 @@ fn preflight(archive: &ArchiveStoreBackend) -> miette::Result<ChainPoint> {
 
 /// Assemble the rebuild domain: the fresh state store, an empty in-memory WAL
 /// (the import lifecycle skips `commit_wal`, so it stays empty), the given
-/// archive backend (no-op, or the write-gated view under `--rewrite-logs`)
-/// and an ephemeral mempool. Genesis fires automatically on the first
-/// imported block; the archive entries it projects are discarded by the no-op
-/// archive, which is correct — the live archive already carries them.
+/// archive backend (the entity-read view, or the write-gated view under
+/// `--rewrite-logs`) and an ephemeral mempool. Genesis fires automatically on
+/// the first imported block; the archive entries it projects are discarded by
+/// the entity-read view, which is correct — the live archive already carries
+/// them.
 fn build_domain(
     config: &RootConfig,
     state: StateStoreBackend,
@@ -400,12 +410,16 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let tip = preflight(&archive)?;
 
+    // the roll reads the source archive's entity index as its witness of
+    // first sightings, whatever the replay writes
     let domain_archive = if args.rewrite_logs {
         archive
             .logs_only()
             .ok_or_else(|| miette::miette!("--rewrite-logs needs a persistent archive"))?
     } else {
-        ArchiveStoreBackend::noop()
+        archive
+            .entity_reads()
+            .ok_or_else(|| miette::miette!("rebuilding state needs an archive"))?
     };
 
     let (state, wal) = match &mode {
@@ -447,12 +461,14 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 );
             }
 
-            let state = StateStoreBackend::open_fjall(
-                path,
-                &dolos_core::config::FjallStateConfig::default(),
-            )
-            .into_diagnostic()
-            .with_context(|| format!("opening the target state store at {}", path.display()))?;
+            let preset = match config.storage.state.kind {
+                StoreType::Fjall { preset } => preset.into(),
+                StoreType::Ephemeral => dolos_fjall::Preset::default(),
+            };
+
+            let state = StateStoreBackend::open_fjall(path, preset)
+                .into_diagnostic()
+                .with_context(|| format!("opening the target state store at {}", path.display()))?;
 
             (state, None)
         }

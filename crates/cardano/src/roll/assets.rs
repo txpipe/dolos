@@ -11,7 +11,7 @@ use pallas::{
 use tracing::trace;
 
 use super::WorkDeltas;
-use crate::cip25::{cip25_metadata_for_tx, cip25_metadata_has_asset};
+use crate::cip25::{cip25_metadata_for_tx, cip25_mint_names_asset};
 use crate::cip68::{has_cip25_metadata, parse_cip67_label_from_asset_name};
 use crate::roll::BlockVisitor;
 use crate::{
@@ -63,7 +63,15 @@ impl BlockVisitor for AssetStateVisitor {
             trace!(%policy, asset = %hex::encode(asset.name()), "detected mint");
 
             let amount = asset.mint_coin().unwrap_or_default();
+
+            // a zero-quantity entry mints nothing: no count, first mint or asset state
+            if amount == 0 {
+                continue;
+            }
+
             let quantity: i128 = amount.into();
+            let names_asset =
+                cip25_mint_names_asset(cip25_metadata.as_ref(), policy, asset.name(), amount);
 
             deltas.add_for_entity(MintStatsUpdate::new(
                 *policy,
@@ -73,16 +81,14 @@ impl BlockVisitor for AssetStateVisitor {
                 block.slot(),
             ));
 
-            // db-sync stores no zero-quantity entry, so the history lists none
-            if amount != 0 {
-                deltas.add_for_entity(StageAssetMint::mint(
-                    AssetKey::of_parts(policy.as_slice(), asset.name()),
-                    self.epoch,
-                    (block.slot(), *order as u32),
-                    tx.hash(),
-                    amount,
-                ));
-            }
+            deltas.add_for_entity(StageAssetMint::mint(
+                AssetKey::of_parts(policy.as_slice(), asset.name()),
+                self.epoch,
+                (block.slot(), *order as u32),
+                tx.hash(),
+                amount,
+                names_asset,
+            ));
 
             if self.staged.insert((*policy, asset.name().to_vec())) {
                 deltas.add_for_entity(StageFirstMint::new(FirstMintSet {
@@ -94,16 +100,12 @@ impl BlockVisitor for AssetStateVisitor {
                 }));
             }
 
-            if quantity > 0 {
-                if let Some(metadata) = cip25_metadata.as_ref() {
-                    if cip25_metadata_has_asset(metadata, policy, asset.name()) {
-                        deltas.add_for_entity(MetadataTxUpdate::new(
-                            *policy,
-                            asset.name().to_vec(),
-                            tx.hash(),
-                        ));
-                    }
-                }
+            if names_asset {
+                deltas.add_for_entity(MetadataTxUpdate::new(
+                    *policy,
+                    asset.name().to_vec(),
+                    tx.hash(),
+                ));
             }
         }
 

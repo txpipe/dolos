@@ -1,28 +1,35 @@
 //! Period logs through the real pipeline: staging rolls back with its block,
 //! and ESTART seals short epochs.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use dolos_cardano::{
+    indexes::{archive_dimensions::SCRIPT, entities, AsyncCardanoQueryExt as _},
     model::{
-        AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, FirstMintChunk,
-        FirstMintSet, FirstScriptSet, ScriptState,
+        AccountAddressChunk, AccountAddressSet, AssetMintChunk, AssetMintSet, AssetState,
+        FirstMintChunk, FirstMintSet, FirstScriptChunk, FirstScriptSet,
     },
     periods::is_sealable,
-    AccountKey, CardanoDelta,
+    AccountKey, AssetKey, CardanoDelta,
 };
 use dolos_core::{
-    import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ChainPoint, Domain as _,
-    Genesis, StateStore as _, WalStore as _,
+    import::ImportExt as _, sync::SyncExt as _, ArchiveStore as _, ArchiveWriter as _,
+    AsyncQueryFacade, ChainPoint, Domain as _, Genesis, RangeOf, StateStore as _, StateWriter as _,
+    WalStore as _,
 };
 use dolos_testing::{
-    synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+    faults::{FaultyToyDomain, TestFault},
+    synthetic::{build_synthetic_blocks, sample_alonzo_block, SyntheticBlockConfig},
     toy_domain::ToyDomain,
     MIN_UTXO_AMOUNT,
 };
+use pallas::crypto::hash::Hash;
 use pallas::ledger::{
     addresses::{Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart},
-    primitives::StakeCredential,
+    primitives::{alonzo, StakeCredential, TransactionInput},
     traverse::MultiEraBlock,
 };
 
@@ -266,35 +273,80 @@ fn rollback_unstages_exactly_the_mints_its_block_created() {
     assert_eq!(staged_mints(&domain), after[0]);
 }
 
-/// The script hashes the witness holds, and the `(epoch, script hash)` keys
-/// staged as first seen.
-type ScriptRows = (BTreeSet<[u8; 28]>, BTreeSet<(u64, [u8; 28])>);
+/// A zero-quantity entry stages no first mint and no mint stats, beside a real
+/// mint in the same tx that does.
+#[test]
+fn zero_mint_stages_no_first_mint() {
+    let (blocks, vectors, chain_config) = build_synthetic_blocks(plain(SyntheticBlockConfig {
+        block_count: 1,
+        txs_per_block: 1,
+        ..Default::default()
+    }));
+    let last = vectors.blocks.last().unwrap();
 
-fn scripts(domain: &ToyDomain) -> ScriptRows {
-    let witness = domain
-        .state()
-        .iter_entities_typed::<ScriptState>(None)
-        .unwrap()
-        .map(|row| *row.unwrap().0 .0)
+    let mut assets = std::collections::BTreeMap::new();
+    assets.insert(b"A".to_vec().into(), 1);
+    assets.insert(b"ZERO".to_vec().into(), 0);
+
+    let mut mint: alonzo::Mint = std::collections::BTreeMap::new();
+    mint.insert([0x44u8; 28].into(), assets);
+
+    let input = TransactionInput {
+        transaction_id: last.tx_hashes[0].parse().unwrap(),
+        index: 0,
+    };
+
+    let (block, _, _) = sample_alonzo_block(
+        last.block_number + 1,
+        last.slot + 1,
+        Some(last.block_hash.parse().unwrap()),
+        input,
+        vec![],
+        Some(mint),
+    );
+
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+    domain.roll_forward(blocks[0].clone()).unwrap();
+    domain.roll_forward(block.clone()).unwrap();
+
+    let decoded = MultiEraBlock::decode(&block).unwrap();
+
+    let subjects: Vec<Vec<u8>> = staged(&domain)
+        .into_iter()
+        .filter(|(_, _, slot)| *slot == decoded.slot())
+        .map(|(_, subject, _)| subject[28..].to_vec())
         .collect();
+    assert_eq!(subjects, [b"A".to_vec()]);
 
-    let staged = domain
+    let point = ChainPoint::Specific(decoded.slot(), decoded.hash());
+    let entry = domain.wal().read_entry(&point).unwrap().unwrap();
+    let count = |f: fn(&CardanoDelta) -> bool| entry.delta.iter().filter(|x| f(x)).count();
+
+    assert_eq!(count(|x| matches!(x, CardanoDelta::StageFirstMint(_))), 1);
+    assert_eq!(count(|x| matches!(x, CardanoDelta::MintStatsUpdate(_))), 1);
+}
+
+/// The `(epoch, script hash, slot)` of each script staged as first seen.
+fn scripts(domain: &ToyDomain) -> BTreeSet<(u64, [u8; 28], u64)> {
+    domain
         .state()
         .iter_entities_typed::<FirstScriptSet>(None)
         .unwrap()
         .map(|row| {
-            let (key, _) = row.unwrap();
-            (key.epoch, *key.member.0)
+            let (key, row) = row.unwrap();
+            (key.epoch, *key.member.0, row.slot)
         })
-        .collect();
-
-    (witness, staged)
+        .collect()
 }
 
 /// Rollback for first scripts: undoing the block that first carried a script
-/// removes its witness and set rows, and a block that only repeats scripts
-/// leaves them alone. The first block's tx failed phase-2 validation, so the
-/// scripts it carries count from the second block.
+/// removes its set rows, and a block that only repeats scripts leaves them
+/// alone. The first block's tx failed phase-2 validation, so its witnesses
+/// do not count, get no `script` tag, and the scripts are staged once, at the
+/// second block, the first valid carrier. Each undone block's `script` tags go
+/// with it.
 #[test]
 fn rollback_removes_the_script_rows_of_the_block_that_first_carried_them() {
     let cfg = SyntheticBlockConfig {
@@ -319,17 +371,240 @@ fn rollback_removes_the_script_rows_of_the_block_that_first_carried_them() {
         after.push(scripts(&domain));
     }
 
-    let none = (BTreeSet::new(), BTreeSet::new());
+    let none = BTreeSet::new();
     assert_eq!(after[0], none, "an invalid tx's witnesses were recorded");
-    assert_eq!(after[1].0.len(), 3);
-    assert_eq!(after[1].1.len(), 3);
+    assert_eq!(after[1].len(), 3);
+    assert!(after[1]
+        .iter()
+        .all(|(_, _, slot)| *slot == points[1].slot()));
     assert_eq!(after[2], after[1]);
+
+    let tagged = |domain: &ToyDomain| -> BTreeSet<u64> {
+        after[1]
+            .iter()
+            .flat_map(|(_, hash, _)| {
+                domain
+                    .archive()
+                    .slots_by_tag(SCRIPT, hash, 0, u64::MAX)
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+
+    assert_eq!(
+        tagged(&domain),
+        BTreeSet::from([points[1].slot(), points[2].slot()])
+    );
 
     domain.rollback(&points[1]).unwrap();
     assert_eq!(scripts(&domain), after[1]);
+    assert_eq!(tagged(&domain), BTreeSet::from([points[1].slot()]));
 
     domain.rollback(&points[0]).unwrap();
     assert_eq!(scripts(&domain), none);
+    assert!(tagged(&domain).is_empty());
+}
+
+/// `script_by_hash` finds a script at its staged row's block, which is also
+/// its first tagged one, the block that counts it: the invalid tx that
+/// carried it earlier left no tag.
+#[tokio::test]
+async fn script_by_hash_finds_a_script_at_its_counting_block() {
+    let cfg = SyntheticBlockConfig {
+        block_count: 3,
+        txs_per_block: 1,
+        invalid_txs_by_block: vec![vec![0], vec![], vec![]],
+        ..Default::default()
+    };
+
+    let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+    let mut slots = Vec::new();
+
+    for block in &blocks {
+        domain.roll_forward(block.clone()).unwrap();
+        slots.push(MultiEraBlock::decode(block).unwrap().slot());
+    }
+
+    let staged = scripts(&domain);
+    assert_eq!(staged.len(), 3);
+
+    let query = AsyncQueryFacade::new(domain.clone());
+
+    for (_, hash, slot) in staged {
+        let first = domain
+            .archive()
+            .slots_by_tag(SCRIPT, &hash, 0, slots[2])
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first, slots[1], "first tag is not the counting block");
+        assert_eq!(slot, slots[1]);
+
+        let found = query.script_by_hash(&Hash::from(hash)).await.unwrap();
+        assert!(found.is_some_and(|x| !x.script.is_empty()));
+    }
+}
+
+/// The roll's witness across sealed epochs: every block carries the same
+/// scripts, the seal moves their first carrier's epoch into the entity index,
+/// and no later epoch stages them again. `script_by_hash` then finds each
+/// through the index.
+#[tokio::test]
+async fn scripts_are_staged_once_across_sealed_epochs() {
+    let (blocks, step) = (16, 350);
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: blocks,
+        txs_per_block: 1,
+        slot: step,
+        slot_step: step,
+        asset_names_by_block: (0..blocks).map(|i| format!("M{i:03}")).collect(),
+        ..Default::default()
+    });
+
+    let genesis = genesis_with(700, 10, 6);
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis.clone(), chain_config, None, None);
+    let tip = domain.import_blocks(raw).unwrap();
+
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let mutable = dolos_cardano::mutable_slots(&genesis);
+    let (tip_epoch, _) = chain.slot_epoch(tip);
+    let (first_epoch, _) = chain.slot_epoch(step);
+
+    assert!(is_sealable(&chain, mutable, first_epoch, tip_epoch));
+    assert!(
+        scripts(&domain).is_empty(),
+        "staged again: {:?}",
+        scripts(&domain)
+    );
+
+    let indexed: Vec<_> = domain
+        .archive()
+        .iter_entity_records(&[entities::SCRIPT], 0..u64::MAX)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    assert_eq!(indexed.len(), 3);
+    assert!(indexed.iter().all(|record| record.slot == step));
+
+    let listed = domain
+        .archive()
+        .read_log_typed::<FirstScriptChunk>(chain.epoch_start(first_epoch), &0)
+        .unwrap()
+        .expect("the first carrier's epoch is not sealed");
+    assert_eq!(listed.count, 3);
+
+    let query = AsyncQueryFacade::new(domain.clone());
+
+    for record in indexed {
+        let hash = Hash::<28>::from(record.key());
+        let found = query.script_by_hash(&hash).await.unwrap();
+        assert!(found.is_some_and(|x| !x.script.is_empty()));
+    }
+}
+
+/// `script_by_hash` reads the staged rows of every unsealed epoch, not only
+/// the tip's: the tip has crossed into epoch 1 while the scripts' first
+/// carrier's epoch 0 is still staged, and each script is found there.
+#[tokio::test]
+async fn script_by_hash_finds_a_script_staged_in_an_earlier_unsealed_epoch() {
+    let step = 350;
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: 3,
+        txs_per_block: 1,
+        slot: step,
+        slot_step: step,
+        asset_names_by_block: (0..3).map(|i| format!("M{i:03}")).collect(),
+        ..Default::default()
+    });
+
+    let genesis = genesis_with(700, 10, 6);
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    let tip = domain.import_blocks(raw).unwrap();
+
+    let chain = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap();
+    let (tip_epoch, _) = chain.slot_epoch(tip);
+    let (first_epoch, _) = chain.slot_epoch(step);
+
+    assert!(tip_epoch > first_epoch);
+
+    let staged = scripts(&domain);
+    assert_eq!(staged.len(), 3);
+    assert!(staged.iter().all(|(epoch, _, _)| *epoch == first_epoch));
+
+    let query = AsyncQueryFacade::new(domain.clone());
+
+    for (_, hash, _) in staged {
+        let found = query.script_by_hash(&Hash::from(hash)).await.unwrap();
+        assert!(found.is_some_and(|x| !x.script.is_empty()));
+    }
+}
+
+/// A seal that lands between `script_by_hash`'s first index read and its
+/// staged-row read moves the script out of the staged rows and into the
+/// index; the second index read finds it there.
+#[tokio::test]
+async fn script_by_hash_finds_a_script_sealed_during_the_lookup() {
+    let cfg = SyntheticBlockConfig {
+        block_count: 2,
+        txs_per_block: 1,
+        ..Default::default()
+    };
+
+    let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+    for block in blocks {
+        domain.roll_forward(block).unwrap();
+    }
+
+    let (key, row) = domain
+        .state()
+        .iter_entities_typed::<FirstScriptSet>(None)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+
+    let hash = key.member.0;
+    let faulty = FaultyToyDomain::new(domain.clone(), TestFault::None);
+
+    let sealer = domain.clone();
+    faulty.after_entity_slots(move || {
+        let writer = sealer.archive().start_writer().unwrap();
+        writer
+            .write_entity(entities::SCRIPT, hash.as_slice(), row.slot)
+            .unwrap();
+        writer.commit().unwrap();
+
+        let writer = sealer.state().start_writer().unwrap();
+        writer
+            .save_entity_typed::<FirstScriptSet>(&key, None)
+            .unwrap();
+        writer.commit().unwrap();
+    });
+
+    let found = AsyncQueryFacade::new(faulty)
+        .script_by_hash(&hash)
+        .await
+        .unwrap();
+
+    assert!(found.is_some_and(|x| !x.script.is_empty()));
+    assert!(scripts(&domain)
+        .iter()
+        .all(|(_, staged, _)| *staged != *hash));
 }
 
 /// A copy of the devnet genesis with `epoch_length`-slot epochs, security
@@ -442,4 +717,210 @@ fn epochs_too_short_for_rupd_seal() {
 #[test]
 fn short_devnet_epochs_seal() {
     assert_epochs_seal(genesis_with(500, 5, 9), 14, 250);
+}
+
+/// A policy whose CIP-25 entry uses v1 text keys: the policy id in hex and
+/// the asset name as UTF-8.
+const TEXT_KEYS: [u8; 28] = [0x51; 28];
+
+/// A policy whose CIP-25 entry uses v2 byte-string keys.
+const BYTE_KEYS: [u8; 28] = [0x52; 28];
+
+/// Label 721 naming `A` under [`TEXT_KEYS`] and `C` under [`BYTE_KEYS`], and
+/// no other asset.
+fn label_721() -> (u64, alonzo::Metadatum) {
+    use alonzo::Metadatum;
+    use pallas::codec::utils::KeyValuePairs;
+
+    let nft = || {
+        Metadatum::Map(KeyValuePairs::from(vec![
+            (Metadatum::Text("name".into()), Metadatum::Text("x".into())),
+            (
+                Metadatum::Text("image".into()),
+                Metadatum::Text("ipfs://x".into()),
+            ),
+        ]))
+    };
+
+    let assets = |key: Metadatum| Metadatum::Map(KeyValuePairs::from(vec![(key, nft())]));
+
+    let policies = KeyValuePairs::from(vec![
+        (
+            Metadatum::Text(hex::encode(TEXT_KEYS)),
+            assets(Metadatum::Text("A".into())),
+        ),
+        (
+            Metadatum::Bytes(BYTE_KEYS.to_vec().into()),
+            assets(Metadatum::Bytes(b"C".to_vec().into())),
+        ),
+    ]);
+
+    (721, Metadatum::Map(policies))
+}
+
+fn asset(policy: [u8; 28], name: &str) -> AssetKey {
+    AssetKey::of_parts(&policy, name.as_bytes())
+}
+
+/// The staged `(amount, names_asset)` of each asset, in chain order.
+fn staged_flags(domain: &ToyDomain) -> HashMap<AssetKey, Vec<(i64, bool)>> {
+    let mut out: HashMap<_, Vec<_>> = HashMap::new();
+
+    for row in domain
+        .state()
+        .iter_entities_typed::<AssetMintSet>(None)
+        .unwrap()
+    {
+        let (key, row) = row.unwrap();
+        out.entry(key.group)
+            .or_default()
+            .push((row.amount, row.names_asset));
+    }
+
+    out
+}
+
+/// A mint is flagged exactly when it sets `metadata_tx`: its tx's label 721
+/// names the asset, by text or byte-string keys, and it is not a burn.
+#[test]
+fn mint_flags_follow_the_cip25_predicate() {
+    let mint = |policy, name: &str, amount| (policy, name.to_string(), amount);
+
+    let mints_by_block = vec![
+        vec![
+            vec![
+                mint(TEXT_KEYS, "A", 1),
+                // the same policy's entry, which names A alone
+                mint(TEXT_KEYS, "B", 1),
+                mint(BYTE_KEYS, "C", 1),
+            ],
+            // a burn of a named asset
+            vec![mint(TEXT_KEYS, "A", -1)],
+        ],
+        vec![vec![mint(TEXT_KEYS, "A", 2)], vec![]],
+        // a burn by a tx whose label 721 names the asset
+        vec![vec![mint(TEXT_KEYS, "A", -1)], vec![]],
+    ];
+
+    let build = |metadata_entries| {
+        let cfg = plain(SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 2,
+            mints_by_block: mints_by_block.clone(),
+            metadata_entries,
+            ..Default::default()
+        });
+
+        let (blocks, _, chain_config) = build_synthetic_blocks(cfg);
+        let genesis = Arc::new(dolos_cardano::include::preview::load());
+        let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+
+        for block in blocks {
+            domain.roll_forward(block).unwrap();
+        }
+
+        staged_flags(&domain)
+    };
+
+    let named = build(vec![label_721()]);
+
+    assert_eq!(
+        named[&asset(TEXT_KEYS, "A")],
+        [(1, true), (-1, false), (2, true), (-1, false)]
+    );
+    assert_eq!(named[&asset(TEXT_KEYS, "B")], [(1, false)]);
+    assert_eq!(named[&asset(BYTE_KEYS, "C")], [(1, true)]);
+
+    // the default chain's txs carry label 1990 and no 721
+    let unnamed = build(vec![]);
+
+    assert_eq!(
+        unnamed[&asset(TEXT_KEYS, "A")],
+        [(1, false), (-1, false), (2, false), (-1, false)]
+    );
+    assert_eq!(unnamed[&asset(BYTE_KEYS, "C")], [(1, false)]);
+}
+
+/// Across sealed chunks and staged rows, an asset's newest flagged mint is
+/// the `metadata_tx` its state holds, and an asset never flagged holds none.
+#[test]
+fn the_newest_flagged_mint_is_the_metadata_tx() {
+    let genesis = genesis_with(500, 5, 9);
+    let mint = |policy, name: &str, amount| (policy, name.to_string(), amount);
+
+    let blocks = 14;
+    let mints_by_block = (0..blocks)
+        .map(|i| {
+            // A ends on a burn, which never moves its metadata tx
+            let a = if i % 3 == 1 { -1 } else { 1 };
+            let mut mints = vec![mint(TEXT_KEYS, "A", a), mint(TEXT_KEYS, "B", 1)];
+
+            if i % 2 == 0 {
+                mints.push(mint(BYTE_KEYS, "C", 1));
+            }
+
+            vec![mints]
+        })
+        .collect();
+
+    let cfg = plain(SyntheticBlockConfig {
+        block_count: blocks,
+        txs_per_block: 1,
+        slot: 250,
+        slot_step: 250,
+        mints_by_block,
+        metadata_entries: vec![label_721()],
+        ..Default::default()
+    });
+
+    let (raw, _, chain_config) = build_synthetic_blocks(cfg);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
+    domain.import_blocks(raw).unwrap();
+
+    let sealed: Vec<(AssetKey, AssetMintSet)> = domain
+        .archive()
+        .iter_logs_typed::<AssetMintChunk>(None)
+        .unwrap()
+        .flat_map(|row| {
+            let (_, (key, _), chunk) = row.unwrap();
+            chunk.mints.into_iter().map(move |x| (key, x))
+        })
+        .collect();
+
+    assert!(!sealed.is_empty(), "nothing sealed");
+
+    for (key, flagged) in [
+        (asset(TEXT_KEYS, "A"), true),
+        (asset(TEXT_KEYS, "B"), false),
+        (asset(BYTE_KEYS, "C"), true),
+    ] {
+        let staged = domain
+            .state()
+            .iter_entities_typed::<AssetMintSet>(Some(RangeOf::prefix(&key)))
+            .unwrap()
+            .map(|row| row.unwrap().1);
+
+        let mints: Vec<AssetMintSet> = sealed
+            .iter()
+            .filter(|(x, _)| *x == key)
+            .map(|(_, row)| row.clone())
+            .chain(staged)
+            .collect();
+
+        let newest = mints
+            .iter()
+            .rev()
+            .find(|x| x.names_asset)
+            .map(|x| x.tx_hash);
+
+        let state = domain
+            .state()
+            .read_entity_typed::<AssetState>(&key)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(newest.is_some(), flagged);
+        assert_eq!(newest, state.metadata_tx);
+        assert!(mints.last().is_some_and(|x| x.amount < 0) || key != asset(TEXT_KEYS, "A"));
+    }
 }
