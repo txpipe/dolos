@@ -17,11 +17,11 @@
 
 use dolos_cardano::model::{
     AccountAddressChunk, AccountAddressSet, AccountEpochLog, AccountState, AccountStats,
-    AddressStats, AssetMintChunk, AssetMintSet, AssetState, DRepEpochLog, DRepSightingState,
-    DRepState, DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
+    AddressStats, AssetMintChunk, AssetMintSet, DRepEpochLog, DRepSightingState, DRepState,
+    DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolEpochLog, PoolState, ProposalState,
+    PoolEpochLog, PoolState, ProposalState, PrunedAccountState,
 };
 use dolos_core::{KeyCodec, KeyError, LogEntity, Namespace, StateEntity};
 
@@ -49,7 +49,6 @@ pub const NAMESPACES: [Namespace; 31] = [
     AddressStats::NS,
     AssetMintChunk::NS,
     AssetMintSet::NS,
-    AssetState::NS,
     DatumState::NS,
     DRepEpochLog::NS,
     DRepSightingState::NS,
@@ -71,6 +70,7 @@ pub const NAMESPACES: [Namespace; 31] = [
     PoolEpochLog::NS,
     PoolState::NS,
     ProposalState::NS,
+    PrunedAccountState::NS,
     UTXOS,
 ];
 
@@ -105,7 +105,6 @@ pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (AddressStats::NS, 1),
     (AssetMintChunk::NS, 1),
     (AssetMintSet::NS, 1),
-    (AssetState::NS, 1),
     (DatumState::NS, 1),
     (DRepEpochLog::NS, 1),
     (DRepSightingState::NS, 1),
@@ -127,6 +126,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (PoolEpochLog::NS, 2),
     (PoolState::NS, 3),
     (ProposalState::NS, 4),
+    (PrunedAccountState::NS, 1),
     (UTXOS, 1),
 ];
 
@@ -149,7 +149,6 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         AccountStats::NS => exact::<<AccountStats as StateEntity>::Key>(key),
         AddressStats::NS => exact::<<AddressStats as StateEntity>::Key>(key),
         AssetMintSet::NS => exact::<<AssetMintSet as StateEntity>::Key>(key),
-        AssetState::NS => exact::<<AssetState as StateEntity>::Key>(key),
         DatumState::NS => exact::<<DatumState as StateEntity>::Key>(key),
         DRepSightingState::NS => exact::<<DRepSightingState as StateEntity>::Key>(key),
         DRepState::NS => exact::<<DRepState as StateEntity>::Key>(key),
@@ -161,6 +160,7 @@ pub fn check_state_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         PendingRewardState::NS => exact::<<PendingRewardState as StateEntity>::Key>(key),
         PoolState::NS => exact::<<PoolState as StateEntity>::Key>(key),
         ProposalState::NS => exact::<<ProposalState as StateEntity>::Key>(key),
+        PrunedAccountState::NS => exact::<<PrunedAccountState as StateEntity>::Key>(key),
         FirstMintSet::NS => exact::<<FirstMintSet as StateEntity>::Key>(key),
         FirstScriptSet::NS => exact::<<FirstScriptSet as StateEntity>::Key>(key),
         PaymentAddressSet::NS => exact::<<PaymentAddressSet as StateEntity>::Key>(key),
@@ -193,6 +193,7 @@ pub fn check_log_key(ns: Namespace, key: &[u8]) -> Result<(), Error> {
         AddressStats::NS => exact::<<AddressStats as LogEntity>::Key>(key),
         AssetMintChunk::NS => exact::<<AssetMintChunk as LogEntity>::Key>(key),
         DRepEpochLog::NS => exact::<<DRepEpochLog as LogEntity>::Key>(key),
+        DRepState::NS => exact::<<DRepState as LogEntity>::Key>(key),
         EpochState::NS => exact::<<EpochState as LogEntity>::Key>(key),
         FirstMintChunk::NS => exact::<<FirstMintChunk as LogEntity>::Key>(key),
         FirstScriptChunk::NS => exact::<<FirstScriptChunk as LogEntity>::Key>(key),

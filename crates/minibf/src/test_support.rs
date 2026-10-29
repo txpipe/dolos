@@ -1,6 +1,10 @@
 use std::{
     collections::HashMap,
-    sync::Arc,
+    future::Future,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -13,8 +17,8 @@ use dolos_cardano::{indexes::CardanoIndexDeltaBuilder, periods::stats::TOTALS};
 use dolos_core::{
     config::{CacheConfig, HistoryConfig, HistoryWindow, MinibfConfig, RoutePrefix},
     import::ImportExt as _,
-    ArchiveStore as _, ArchiveWriter as _, CacheStore as _, ChainPoint, Domain, RawBlock,
-    StateStore,
+    ArchiveStore as _, ArchiveWriter as _, CacheStore as _, ChainPoint, Domain, QueryLimiter,
+    RawBlock, StateStore,
 };
 use dolos_testing::{
     synthetic::{
@@ -632,9 +636,10 @@ impl TestApp {
         Self::from_domain(domain, None, None, minibf)
     }
 
-    fn from_domain(
+    /// App over `domain`, its chain described by `vectors`.
+    pub fn from_domain(
         domain: ToyDomain,
-        vectors: Option<SyntheticVectors>,
+        vectors: impl Into<Option<SyntheticVectors>>,
         fault: Option<TestFault>,
         minibf: MinibfConfig,
     ) -> Self {
@@ -653,7 +658,7 @@ impl TestApp {
         Self {
             router,
             facade,
-            vectors,
+            vectors: vectors.into(),
         }
     }
 
@@ -769,6 +774,48 @@ impl TestApp {
 
         summary.epoch_start(epoch)
     }
+}
+
+/// App whose address holds `assets` assets of one policy, minted in its first
+/// block, on a query limiter of `permits`.
+pub fn many_assets_app(assets: usize, permits: usize) -> TestApp {
+    let mints = (0..assets)
+        .map(|i| ([0x5a; 28], format!("M{i:02}"), 1))
+        .collect();
+
+    let cfg = SyntheticBlockConfig {
+        block_count: 5,
+        txs_per_block: 1,
+        mints_by_block: vec![vec![mints]],
+        ..Default::default()
+    };
+
+    TestApp::new_with_cfg_and_domain(cfg, |domain| {
+        domain.with_query_limiter(QueryLimiter::new(permits))
+    })
+}
+
+/// The most archive entity-index reads `app` runs at once while `f` runs, with
+/// `f`'s output. Each read is held a few milliseconds, so that reads that may
+/// overlap do: an asset read starts with one, under a query permit.
+pub async fn readers_at_once<T>(app: &TestApp, f: impl Future<Output = T>) -> (usize, T) {
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    app.facade.inner.during_entity_slots({
+        let (in_flight, peak) = (in_flight.clone(), peak.clone());
+
+        move || {
+            let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(5));
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+        }
+    });
+
+    let out = f.await;
+
+    (peak.load(Ordering::SeqCst), out)
 }
 
 /// The delay of a slow-read fault in a stall test.

@@ -122,7 +122,7 @@ use dolos_cardano::model::{
 };
 use dolos_cardano::pots::{apply_delta, EpochIncentives, PotDelta, Pots};
 use dolos_cardano::ChainSummary;
-use dolos_core::{ArchiveStore as _, BlockSlot, Genesis, StateStore, TxOrder};
+use dolos_core::{ArchiveStore, BlockSlot, Genesis, StateStore, TxOrder};
 use indicatif::ProgressBar;
 use miette::{Context as _, IntoDiagnostic as _};
 use pallas::ledger::primitives::conway::DRep;
@@ -653,6 +653,21 @@ pub struct DRepFacts {
     pub unregistered_at: Option<(BlockSlot, TxOrder)>,
 }
 
+impl DRepFacts {
+    fn of(drep: &DRepState) -> Self {
+        Self {
+            identifier: drep.identifier.clone(),
+            // A row that unregistered and registered again is registered, and
+            // the stale `unregistered_at` it still carries is not a position
+            // any boundary owes a drop against.
+            unregistered_at: drep
+                .is_unregistered()
+                .then_some(drep.unregistered_at)
+                .flatten(),
+        }
+    }
+}
+
 /// The chain positions the vote-delegation rules are measured against.
 ///
 /// Each is `None` when the store cannot place it, and a rule without its
@@ -766,12 +781,16 @@ fn dangling_pool_referents(account: &AccountState, referents: &Referents) -> Vec
 /// 3. **The PV10 migration has run on what it covered.** The hard fork into
 ///    protocol major 10 carries a one-shot migration dropping every live
 ///    delegation that names a credential not registered at that boundary
-///    (`BoundaryWork::pv10_migration`). A `DRepState` row is never deleted —
-///    retirement and expiry are flags written onto it — so a credential with no
-///    row at all never registered, and a delegation to one made *before* the
-///    migration boundary is a delegation the migration should have cleared. One
-///    made after it is legitimate again, and is not reported: that is the shape
-///    the two preprod accounts have.
+///    (`BoundaryWork::pv10_migration`). A DRep that leaves state keeps its
+///    final row in the log (`DRepState::leaves_state_at`), and rules 1 and 2
+///    read that row, but pruning drops log rows. A credential with no row in
+///    state or in the retained log never registered, or retired and had its
+///    final row pruned. Either way a delegation to it made *before* the
+///    migration boundary is a missing drop, the migration's or the
+///    retirement's. One made after the boundary is not reported: to a
+///    credential that never registered it is legitimate again, the shape the
+///    two preprod accounts have, and against a pruned retirement it cannot be
+///    judged.
 ///
 /// Rules 2 and 3 each need a position on the chain the store may not be able
 /// to place; without it the rule does not run. See [`Anchors`].
@@ -799,8 +818,9 @@ fn dangling_vote_referent(account: &AccountState, referents: &Referents) -> Opti
         }
 
         return Some(format!(
-            "vote delegation to the never-registered drep {} made at slot {}, which the \
-             protocol-10 migration at slot {pv10} drops",
+            "vote delegation to drep {}, with no row in state or in the retained dreps log, \
+             made at slot {}, which the protocol-10 migration at slot {pv10} or a retirement \
+             drops",
             describe_drep(drep),
             delegated_at.0,
         ));
@@ -899,7 +919,11 @@ pub fn scan_accounts<E: std::fmt::Display>(
     (registered, issues)
 }
 
-pub fn load_referents<S: StateStore>(state: &S, anchors: Anchors) -> miette::Result<Referents> {
+pub fn load_referents<S: StateStore, A: ArchiveStore>(
+    state: &S,
+    archive: &A,
+    anchors: Anchors,
+) -> miette::Result<Referents> {
     let mut pools = HashSet::new();
     let mut registered_pools = 0;
 
@@ -923,6 +947,21 @@ pub fn load_referents<S: StateStore>(state: &S, anchors: Anchors) -> miette::Res
 
     let mut dreps = HashMap::new();
 
+    // A DRep that left state keeps its final row in the log, in slot order, so
+    // a later row replaces an older one, and a state row, made by a
+    // registration after the move, replaces both.
+    for record in archive
+        .iter_logs_typed::<DRepState>(None)
+        .into_diagnostic()
+        .context("iterating the dreps log")?
+    {
+        let (_, key, drep) = record
+            .into_diagnostic()
+            .context("decoding a drep final row")?;
+
+        dreps.insert(key, DRepFacts::of(&drep));
+    }
+
     for record in state
         .iter_entities_typed::<DRepState>(None)
         .into_diagnostic()
@@ -930,18 +969,7 @@ pub fn load_referents<S: StateStore>(state: &S, anchors: Anchors) -> miette::Res
     {
         let (key, drep) = record.into_diagnostic().context("decoding a drep")?;
 
-        let facts = DRepFacts {
-            identifier: drep.identifier.clone(),
-            // A row that unregistered and registered again is registered, and
-            // the stale `unregistered_at` it still carries is not a position
-            // any boundary owes a drop against.
-            unregistered_at: drep
-                .is_unregistered()
-                .then_some(drep.unregistered_at)
-                .flatten(),
-        };
-
-        dreps.insert(key, facts);
+        dreps.insert(key, DRepFacts::of(&drep));
     }
 
     Ok(Referents {
@@ -1043,12 +1071,13 @@ pub fn sum_drep_deposits<S: StateStore>(state: &S) -> miette::Result<u64> {
 ///
 /// Split from [`run`] so the suite can drive it against a harness-built store
 /// as well as against an open data directory.
-pub fn recompute<S: StateStore>(
+pub fn recompute<S: StateStore, A: ArchiveStore>(
     state: &S,
+    archive: &A,
     anchors: Anchors,
     mut on_progress: impl FnMut(&str, u64),
 ) -> miette::Result<(Recomputed, Vec<Issue>)> {
-    let referents = load_referents(state, anchors)?;
+    let referents = load_referents(state, archive, anchors)?;
 
     let accounts = state
         .iter_entities_typed::<AccountState>(None)
@@ -1102,11 +1131,12 @@ pub fn run(
 
     let mut issues = boundaries.issues;
 
-    let (found, referent_issues) = recompute(&stores.state, anchors, |what, seen| {
-        if seen.is_multiple_of(100_000) {
-            progress.set_message(format!("totals: {seen} {what}"));
-        }
-    })?;
+    let (found, referent_issues) =
+        recompute(&stores.state, &stores.archive, anchors, |what, seen| {
+            if seen.is_multiple_of(100_000) {
+                progress.set_message(format!("totals: {seen} {what}"));
+            }
+        })?;
 
     issues.extend(referent_issues);
 
@@ -1933,10 +1963,10 @@ mod tests {
         assert!(issues.is_empty(), "{issues:?}");
     }
 
-    /// Rule 3. A `DRepState` row is never deleted — retirement and expiry are
-    /// flags written onto it — so a credential with no row never registered,
-    /// and the protocol-10 migration drops every delegation to one that
-    /// predates it.
+    /// Rule 3. A credential with no row, in state or in the retained
+    /// final-row log, is unregistered, and a delegation to it that predates
+    /// the protocol-10 migration is a drop the migration, or a retirement
+    /// whose row was pruned, owed.
     #[test]
     fn a_delegation_the_migration_should_have_dropped_is_reported() {
         let drep = drep_key(3);
@@ -1952,7 +1982,7 @@ mod tests {
         let (_, issues) = scan(vec![voter(1, drep, 100)], &referents);
 
         assert_eq!(issues.len(), 1, "{issues:?}");
-        assert!(issues[0].detail.contains("never-registered drep"));
+        assert!(issues[0].detail.contains("with no row in state"));
         assert!(issues[0].detail.contains("protocol-10 migration"));
     }
 

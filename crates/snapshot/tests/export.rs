@@ -75,7 +75,7 @@ use watcher::Watcher;
 
 /// The identity of an export over the skeleton store set.
 const GOLDEN_SKELETON: &str =
-    "sha256:c4dd083dc2221f41f70e5c47fc4cae1fcb96a1f79670168ea1ee5b2acd871f9c";
+    "sha256:1fd9411d1f84b9c8c0d24350bc1fcf4434d3105ec03b41d1612975a7dbe32c9e";
 
 /// Where the skeleton fixture stands: on the first block of epoch 2 under
 /// [`skeleton_summary`], after fifty empty slots, so the export covers three
@@ -1540,22 +1540,6 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:964771e3ed841725948305ad74029c7be92b0aad4e6c43a7569fb09b8e67253f","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":49},"#,
     r#"{"diffId":"sha256:4400a639af46be80f2a3e76d30fc196fdf750f42513a5be55236c47949d9f3c8","kind":"state-address-stats","mediaType":"application/vnd.dolos.stele.state-address-stats.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":54},"#,
     r#"{"diffId":"sha256:64f06aaf8b772ba285c46d00936a46ca9ca3782eb14267c363877870a3111804","kind":"state-asset-mints","mediaType":"application/vnd.dolos.stele.state-asset-mints.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":52},"#,
-    r#"{"diffId":"sha256:6b217ee2a4173c3446c8ea31bc84d8c59f1c0b2eb583439f443322ada7dfb5a1","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:833ffb5dbd39bb5eaacf1c2439de47fdd31ad3a100c2ec50f6f1100eeee0801a","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:321c3b09a833a633a61fc7af4e6df23e3f3adfd3f08a11505efcf9069d9da8e2","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":2},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:f68da008f436dbac4425da5b7c582a35ea077559312e128755b0eef2899c1f12","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":3},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:9f6c54e7404ddd5d37db028eef00fe943dc5a29746f5af17fb9ed022f1c4489f","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":4},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:6e87f3f58d31f08051f7c7bdb404767203d56f699f6f05129921017328390946","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":5},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:adf44192f4f91e651b43a841fbc81ee74c0bf42bac15c059bcd4e9277ef9a08f","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":6},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:542b315989aa1e5f5c8a3fcf2bee5750b9de87ecf63e19aebb1544c5c303edbc","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":7},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:ec60a65290505b4351128d7e5676376f691656b9080fb4a9ade9dce8e3a760e7","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":8},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:68ef06144365168b8a36c352a3e1d26dcde9029a2857be937c01cda5906172ae","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":9},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:ddb6a5961aade95fb820a669d97dcf116021a1b54d8a0d59d4820849b922f286","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":10},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:9049a9631a589437e0dc2005552e44cbf414915ae25970d37dd78452162de6ac","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":11},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:403ac5c18e878ce6193b5697d754100267961e9a13d7dd5920a741c6a861de00","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":12},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:21660b8e2e4fadede65e89589ca10fd9aa467dd0845a7487ada048545d889cdc","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":13},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:7bf0d679da18a075420267ce16f38cfefb68efec28b5a74e8c1b7be9fed86654","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":47},"#,
-    r#"{"diffId":"sha256:8899bed13545893de75851c8537b383608ea92b29e9beeca19c6ff8f6e64109a","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":47},"#,
     r#"{"diffId":"sha256:5c79490ba5bd0febb78a297aa3273fff7119c9af37fa48a8fba01b3c4e93ba1a","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":47},"#,
     r#"{"diffId":"sha256:128bba0aeae290cbe00284557a591198676a94dd8c948c5c5b8bf78deb892978","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":47},"#,
     r#"{"diffId":"sha256:a1f52ea5164adaecaa2cdb1e306772afe5209fbe81d8ab1bcd66badfeb5238d5","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":2},"uncompressedSize":47},"#,
@@ -1586,6 +1570,7 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:ad5994d901c69e757457b2ad6bac6a2679e45ae25769cc616375c10c8c6dc582","kind":"state-pending-rewards","mediaType":"application/vnd.dolos.stele.state-pending-rewards.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":56},"#,
     r#"{"diffId":"sha256:da799488bcc20ea1d8c8e236169d7204e328b34f806075a951f266819bd35e34","kind":"state-pools","mediaType":"application/vnd.dolos.stele.state-pools.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:640c0f9db84510212ae0d71860df7c518244db6eed6728e9fcc6540d99bdcbe7","kind":"state-proposals","mediaType":"application/vnd.dolos.stele.state-proposals.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":50},"#,
+    r#"{"diffId":"sha256:6c5ea114b1337e7b24b9f67168aef38d08d82c9e625de68b666b0406f6fc75e8","kind":"state-pruned-accounts","mediaType":"application/vnd.dolos.stele.state-pruned-accounts.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":56},"#,
     r#"{"diffId":"sha256:6978ebcdd1accb802d0711afbe6c25747eea28f533de050c184ea24bade637a5","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:aa056a5c4a03811c52492eec692ba0612f7f32f9c447ddd63f64a4c7b1c5ed4a","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:c0055cfef082a8ebe5ada0637de774cc2613d00714d05f74b19690ced71e89c2","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":2},"uncompressedSize":46},"#,
@@ -1603,10 +1588,10 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:fa3101937f3491ae614180384787cfeb1d2ffb7e522c4c731b60208472573917","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:e59d8b7ec7144216a9caab188b2de8d09d98c7c419e228a41131722796b81711","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":46}"#,
     r#"],"parameters":{"#,
-    r#""entities":{"asset":32,"script":28},"#,
+    r#""entities":{"asset":32,"script":28,"stake":29},"#,
     r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-address-chunks":1,"account-addresses":1,"account-epochs":1,"account-stakes":0,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"assets":1,"datums":1,"drep-epochs":1,"drep-sightings":1,"dreps":2,"epochs":4,"eras":2,"first-mint-chunks":2,"first-mints":2,"first-script-chunks":1,"first-scripts":1,"gov":4,"leader-rewards":0,"member-rewards":0,"metadata-labels":2,"payment-address-chunks":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-mint-chunks":1,"pool-deposit-refunds":0,"pool-epochs":2,"pools":3,"proposals":4,"utxos":1},"#,
-    r#""shards":{"account-addresses":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"assets":16,"datums":16,"drep-sightings":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"utxos":16},"#,
+    r#""schemas":{"account-address-chunks":1,"account-addresses":1,"account-epochs":1,"account-stakes":0,"account-stats":1,"accounts":1,"address-stats":1,"asset-mint-chunks":1,"asset-mints":1,"datums":1,"drep-epochs":1,"drep-sightings":1,"dreps":2,"epochs":4,"eras":2,"first-mint-chunks":2,"first-mints":2,"first-script-chunks":1,"first-scripts":1,"gov":4,"leader-rewards":0,"member-rewards":0,"metadata-labels":2,"payment-address-chunks":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"policy-mint-chunks":1,"pool-deposit-refunds":0,"pool-epochs":2,"pools":3,"proposals":4,"pruned-accounts":1,"utxos":1},"#,
+    r#""shards":{"account-addresses":1,"account-stats":1,"accounts":16,"address-stats":1,"asset-mints":1,"datums":16,"drep-sightings":1,"dreps":1,"epochs":1,"eras":1,"first-mints":1,"first-scripts":1,"gov":1,"metadata-labels":1,"payment-addresses":1,"payment-stats":1,"pending-mirs":1,"pending-rewards":1,"pools":1,"proposals":1,"pruned-accounts":1,"utxos":16},"#,
     r#""stateEpochs":[]"#,
     r#"},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"018f99053185b9f7bae6fad0b8aa50710ebc131352dbb47f32d5030622bf51df","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
 );
@@ -2571,7 +2556,7 @@ fn entity_layers_exist_only_where_an_entity_was_first_seen() {
     // The parameters declare every kind the publisher writes, layers or not.
     assert_eq!(
         inscription.parameters["entities"],
-        serde_json::json!({"asset": 32, "script": 28})
+        serde_json::json!({"asset": 32, "script": 28, "stake": 29})
     );
 }
 

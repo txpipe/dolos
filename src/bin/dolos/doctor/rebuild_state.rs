@@ -29,12 +29,24 @@
 //! leaves WAL(origin) behind a partial state cursor, which the next startup
 //! refuses loudly (`InconsistentState`); re-running this command recovers.
 //!
-//! An archive whose seals wrote no script entries — one written before the
-//! entity index existed, or by an earlier build that kept the index but
-//! indexed no scripts — holds none, so a rebuild without `--rewrite-logs`
-//! over it, in place, `--target` or `--ephemeral`, would take every script a
-//! sealed epoch saw for a new one. Rebuild such an archive in place with
-//! `--rewrite-logs` first: its seals write the index as the replay goes.
+//! An archive whose seals wrote no script or asset entries — one written
+//! before the entity index existed, or by an earlier build that kept the
+//! index but indexed no scripts or first mints — holds none, so a rebuild
+//! without `--rewrite-logs` over it, in place, `--target` or `--ephemeral`,
+//! would take every script a sealed epoch saw, and every asset it minted, for
+//! a new one. Rebuild such an archive in place with `--rewrite-logs` first:
+//! its seals write the index as the replay goes, and write again each
+//! first-mint list a build that staged re-mints as first mints sealed,
+//! deleting the list of an epoch where the replay stages no first mint and
+//! the chunks past each new list's length. An `assets` cache entry built from
+//! such a re-mint records the epoch it started at, so the first read, or
+//! `dolos cache warm`, after the rebuild builds it again.
+//!
+//! Nor does such an archive hold `stake` entries if its seals predate them.
+//! No sync pass reads those, so state rebuilds the same without them, but
+//! `/accounts/{stake}` finds a pruned never-registered credential last seen
+//! in a sealed epoch through them alone; the same `--rewrite-logs` rebuild
+//! writes them.
 
 use std::io::IsTerminal as _;
 use std::path::PathBuf;

@@ -6,18 +6,32 @@
 //! appearance within the epoch. An address active in several epochs is in
 //! each of their rows, so readers keep its first appearance and drop the
 //! rest.
+//!
+//! The same seal records each account's first slot in the archive's entity
+//! index, under the stake address the `stake` tag files its addresses under:
+//! the existence witness `/accounts/{stake}` reads ([`stake_seen`]).
 
 use std::{
     collections::{BTreeMap, HashSet},
     ops::RangeInclusive,
 };
 
-use dolos_core::{ArchiveWriter as _, ChainError, Domain, Entity as _, RangeOf, StateStore};
-use pallas::{codec::minicbor::bytes::ByteVec, ledger::primitives::Epoch};
+use dolos_core::{
+    ArchiveStore, ArchiveWriter as _, BlockSlot, ChainError, Domain, Entity as _, RangeOf,
+    StateStore,
+};
+use pallas::{
+    codec::minicbor::bytes::ByteVec,
+    ledger::{
+        addresses::{Network, StakeAddress},
+        primitives::Epoch,
+    },
+};
 
-use super::Period;
+use super::{GroupKey, Period};
 use crate::{
-    indexes::SlotOrder, AccountAddressChunk, AccountAddressSet, AccountKey, ChainSummary,
+    indexes::{entities, CardanoArchiveIndexExt as _, SlotOrder},
+    pallas_extras, AccountAddressChunk, AccountAddressSet, AccountKey, AddressKey, ChainSummary,
     FixedNamespace as _,
 };
 
@@ -30,10 +44,60 @@ fn staged_addresses(mut rows: Vec<AccountAddressSet>) -> Vec<Vec<u8>> {
     rows.into_iter().map(|row| row.address).collect()
 }
 
+/// The stake address the `stake` tag files a staged row's address under: the
+/// row's account, on the network its address's header names. `None` for an
+/// empty address, which no row holds.
+fn stake_address(row: &AccountAddressSet) -> Option<StakeAddress> {
+    let header = row.address.first()?;
+    let network = Network::from(header & 0x0f);
+
+    Some(pallas_extras::stake_credential_to_address(
+        network,
+        &row.account,
+    ))
+}
+
+/// Record in the entity index the first slot each stake address of `chunk`
+/// was seen at, unless the index holds it at that slot or earlier.
+///
+/// A chunk holds every sealed row of its accounts, and earlier chunks have
+/// committed, so the read finds whatever an earlier seal recorded.
+fn index_stakes<A: ArchiveStore>(
+    archive: &A,
+    chunk: &[(GroupKey<AccountKey, AddressKey>, AccountAddressSet)],
+    writer: &A::Writer,
+) -> Result<(), ChainError> {
+    let mut first: BTreeMap<Vec<u8>, BlockSlot> = BTreeMap::new();
+
+    for (_, row) in chunk {
+        let Some(stake) = stake_address(row) else {
+            continue;
+        };
+
+        first
+            .entry(stake.to_vec())
+            .and_modify(|slot| *slot = (*slot).min(row.slot))
+            .or_insert(row.slot);
+    }
+
+    let keys: Vec<&[u8]> = first.keys().map(Vec::as_slice).collect();
+    let indexed = archive.entity_slots(entities::STAKE, &keys)?;
+
+    for ((stake, slot), indexed) in first.iter().zip(indexed) {
+        if indexed.is_none_or(|indexed| *slot < indexed) {
+            writer.write_entity(entities::STAKE, stake, *slot)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Seal the account addresses of every epoch `sealable` accepts.
 ///
 /// Each (epoch, account) row depends on its group's staged rows alone, so the
-/// rows seal chunk by chunk, and a re-run writes the same row again.
+/// rows seal chunk by chunk, and a re-run writes the same row again. The
+/// chunk's archive commit also records its accounts' first slots
+/// ([`index_stakes`]), before the state commit deletes their staged rows.
 pub(crate) fn seal<D: Domain>(
     state: &D::State,
     archive: &D::Archive,
@@ -81,9 +145,57 @@ pub(crate) fn seal<D: Domain>(
                 }
             }
 
-            Ok(())
+            index_stakes(archive, chunk, writer)
         },
     )
+}
+
+/// Whether the chain ever filed an address under `stake`, a stake address's
+/// bytes, as the `stake` tag does: an output paid to an address under it, or
+/// an input spending one.
+///
+/// The entity index answers for the epochs the seal took. For the epochs it
+/// left staged ([`super::staged_epochs`]), where the index holds nothing yet,
+/// the `stake` tag answers from the first of them on. The seal commits its
+/// entries before the ledger leaves their epochs staged, so after a miss in
+/// the tag the index is read again: an entry the seal committed between the
+/// first index read and the tag read is found then.
+pub fn stake_seen<D: Domain>(domain: &D, stake: &[u8]) -> Result<bool, ChainError> {
+    let indexed = || -> Result<bool, ChainError> {
+        let slots = domain.archive().entity_slots(entities::STAKE, &[stake])?;
+
+        Ok(slots.into_iter().next().flatten().is_some())
+    };
+
+    if indexed()? {
+        return Ok(true);
+    }
+
+    let state = domain.state();
+
+    let Some(cursor) = state.read_cursor()? else {
+        return Ok(false);
+    };
+
+    let chain = crate::eras::load_era_summary::<D>(state)?;
+    let (tip, _) = chain.slot_epoch(cursor.slot());
+    let ledger = crate::load_epoch::<D>(state)?.number;
+    let mutable_slots = crate::utils::mutable_slots(&domain.genesis());
+
+    let staged = super::staged_epochs(&chain, mutable_slots, ledger, tip);
+
+    let tagged = domain
+        .archive()
+        .slots_by_stake(stake, chain.epoch_start(*staged.start()), BlockSlot::MAX)?
+        .next()
+        .transpose()?
+        .is_some();
+
+    if tagged {
+        return Ok(true);
+    }
+
+    indexed()
 }
 
 /// Every address `account` saw over `epochs`, in order of first appearance,
@@ -280,6 +392,23 @@ mod tests {
             .collect()
     }
 
+    /// The stake address the seeded rows file `account` under: their
+    /// addresses' header names network 1.
+    fn stake(account: &StakeCredential) -> Vec<u8> {
+        pallas_extras::stake_credential_to_address(Network::Mainnet, account).to_vec()
+    }
+
+    /// The entity index's slot for each of `accounts`.
+    fn indexed(domain: &ToyDomain, accounts: &[StakeCredential]) -> Vec<Option<BlockSlot>> {
+        let keys: Vec<Vec<u8>> = accounts.iter().map(stake).collect();
+        let keys: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+
+        domain
+            .archive()
+            .entity_slots(entities::STAKE, &keys)
+            .unwrap()
+    }
+
     fn staged(domain: &ToyDomain) -> Vec<(GroupKey<AccountKey, AddressKey>, AccountAddressSet)> {
         domain
             .state()
@@ -361,15 +490,59 @@ mod tests {
         assert_eq!(desc, asc);
     }
 
+    /// The seal records each account under its stake address at the first
+    /// slot its sealed rows name. A later seal keeps that slot, and records an
+    /// account the later epoch saw first.
+    #[test]
+    fn a_seal_indexes_each_account_at_its_first_slot() {
+        let domain = seeded();
+        let chain = chain(&domain);
+
+        seal_as(&domain, &domain).unwrap();
+
+        let first = chain.epoch_start(5) + 10;
+        assert_eq!(indexed(&domain, &[a(), b()]), [Some(first), Some(first)]);
+
+        // epoch 7 stays staged, so nothing it alone saw is indexed yet
+        let c = StakeCredential::AddrKeyhash([0x22; 28].into());
+        let row = AccountAddressSet {
+            account: c.clone(),
+            address: vec![0x01, 0x42],
+            epoch: 7,
+            slot: chain.epoch_start(7) + 5,
+            tx_index: 0,
+            output_index: 0,
+        };
+
+        let writer = domain.state().start_writer().unwrap();
+        writer.write_entity_typed(&row.key(), &row).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(indexed(&domain, std::slice::from_ref(&c)), [None]);
+
+        let mutable = crate::utils::mutable_slots(&domain.genesis());
+        let later = |epoch| is_sealable(&chain, mutable, epoch, BOUNDARY + 1);
+        assert!(later(7));
+
+        seal::<ToyDomain>(domain.state(), domain.archive(), &chain, &later, 2).unwrap();
+
+        assert!(staged(&domain).is_empty());
+        assert_eq!(
+            indexed(&domain, &[a(), b(), c]),
+            [Some(first), Some(first), Some(row.slot)]
+        );
+    }
+
     /// Done criterion 1 of the framework, seal idempotence: whichever commit
-    /// the seal dies after, a re-run leaves exactly the rows of a seal that
-    /// never crashed and nothing staged for the sealed epochs.
+    /// the seal dies after, a re-run leaves exactly the rows and index entries
+    /// of a seal that never crashed, and nothing staged for the sealed epochs.
     #[test]
     fn a_crash_at_any_commit_seals_the_same_rows() {
         let clean = seeded();
         seal_as(&clean, &clean).unwrap();
 
-        let expected = (logs(&clean), staged(&clean));
+        let entries = |domain: &ToyDomain| indexed(domain, &[a(), b()]);
+        let expected = (logs(&clean), staged(&clean), entries(&clean));
 
         let mut crash_after = 0;
 
@@ -385,7 +558,7 @@ mod tests {
             seal_as(&domain, &domain).expect("re-run");
 
             assert_eq!(
-                (logs(&domain), staged(&domain)),
+                (logs(&domain), staged(&domain), entries(&domain)),
                 expected,
                 "after a crash following commit {crash_after}"
             );

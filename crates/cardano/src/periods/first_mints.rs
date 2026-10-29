@@ -3,61 +3,176 @@
 //!
 //! A sealed epoch holds two lists, in mint order: every subject it first
 //! minted, at `epoch_start(e) ‖ chunk`, and each policy's names, at
-//! `epoch_start(e) ‖ policy ‖ chunk`. `AssetState.initial_slot` is the witness
-//! that keeps re-mints out, at seal time and when reading staged rows.
+//! `epoch_start(e) ‖ policy ‖ chunk`. The roll's witness decides which mint
+//! is an asset's first, so every staged row is listed, and the seal records
+//! each one in the archive's entity index, where the witness finds it once
+//! the staged row is gone.
 
-use std::{collections::BTreeMap, ops::RangeInclusive};
+use std::{
+    collections::{BTreeMap, HashSet},
+    ops::RangeInclusive,
+};
 
 use dolos_core::{
-    ArchiveStore, ArchiveWriter as _, ChainError, Domain, EntityValue, LogKey, RangeOf, StateStore,
+    ArchiveStore, ArchiveWriter as _, ChainError, Domain, EntityValue, RangeOf, StateStore,
 };
 use pallas::{crypto::hash::Hash, ledger::primitives::Epoch};
 
-use super::{Period, Segment};
+use super::{ChunkRow as _, Period, Segment, CHUNK_LEN};
 use crate::{
-    indexes::SlotOrder, AssetKey, AssetState, ChainSummary, FirstMintChunk, FirstMintSet,
-    FixedNamespace as _, PolicyKey, PolicyMintChunk,
+    indexes::{entities, SlotOrder},
+    AssetKey, ChainSummary, FirstMintChunk, FirstMintSet, PolicyKey, PolicyMintChunk,
 };
-
-/// Asset states read per state call when telling first mints from re-mints.
-const LOOKUP_BATCH: usize = 1_000;
 
 fn policy_key(policy: &Hash<28>, chunk: u32) -> (PolicyKey, u32) {
     (PolicyKey(*policy), chunk)
 }
 
-/// Whether each staged row is its asset's first mint ever: the asset's
-/// `initial_slot` is the row's slot.
-fn first_mint_flags<'a, S: StateStore>(
-    state: &S,
-    rows: impl IntoIterator<Item = &'a FirstMintSet>,
-) -> Result<Vec<bool>, ChainError> {
-    let rows: Vec<&FirstMintSet> = rows.into_iter().collect();
-    let mut flags = Vec::with_capacity(rows.len());
+/// The all-subjects list sealed for `epoch`, `None` where there is none.
+fn sealed_list<A: ArchiveStore>(
+    archive: &A,
+    chain: &ChainSummary,
+    epoch: Epoch,
+) -> Result<Option<Vec<Vec<u8>>>, ChainError> {
+    let Some(head) = archive.read_log_typed::<FirstMintChunk>(chain.epoch_start(epoch), &0)? else {
+        return Ok(None);
+    };
 
-    for batch in rows.chunks(LOOKUP_BATCH) {
-        let keys: Vec<AssetKey> = batch.iter().map(|row| row.asset_key()).collect();
-        let assets = state.read_entities_typed::<AssetState>(&keys.iter().collect::<Vec<_>>())?;
+    let chunks = head.count.div_ceil(CHUNK_LEN as u64) as u32;
+    let mut out = head.into_items();
 
-        for (row, asset) in batch.iter().zip(assets) {
-            flags.push(asset.and_then(|x| x.initial_slot) == Some(row.slot));
+    for chunk in super::load_chunks::<_, FirstMintChunk>(archive, chain, epoch, 1..chunks, |i| i)? {
+        out.extend(chunk.into_items());
+    }
+
+    Ok(Some(out))
+}
+
+/// Whether `listed`, the all-subjects list sealed for `epoch`, is the one this
+/// seal writes from `staged`, the subjects staged for it now, before or after
+/// a crash: it names every staged subject, and each subject it names that is
+/// no longer staged has its entity index entry in `epoch`, which the commit
+/// that deleted its row wrote.
+///
+/// A list an earlier run wrote from other rows fails this: a rebuild with
+/// `--rewrite-logs` replays the archive into a fresh state over lists that a
+/// build which staged re-mints as first mints sealed.
+fn sealed_from<A: ArchiveStore>(
+    archive: &A,
+    chain: &ChainSummary,
+    epoch: Epoch,
+    listed: &[Vec<u8>],
+    staged: &[Vec<u8>],
+) -> Result<bool, ChainError> {
+    let staged: HashSet<&[u8]> = staged.iter().map(Vec::as_slice).collect();
+    let named: HashSet<&[u8]> = listed.iter().map(Vec::as_slice).collect();
+
+    if !staged.is_subset(&named) {
+        return Ok(false);
+    }
+
+    let gone: Vec<AssetKey> = named
+        .difference(&staged)
+        .map(|subject| AssetKey::of(subject))
+        .collect();
+
+    for batch in gone.chunks(1_000) {
+        let keys: Vec<&[u8]> = batch.iter().map(|key| key.0.as_slice()).collect();
+
+        for slot in archive.entity_slots(entities::ASSET, &keys)? {
+            if slot.map(|slot| chain.slot_epoch(slot).0) != Some(epoch) {
+                return Ok(false);
+            }
         }
     }
 
-    Ok(flags)
+    Ok(true)
+}
+
+/// The number of chunks a list of `count` entries seals into.
+fn chunks_of(count: u64) -> u32 {
+    count.div_ceil(CHUNK_LEN as u64) as u32
+}
+
+/// Writes `epoch`'s lists again from `mints`, its staged rows in mint order,
+/// over `stale`, an all-subjects list an earlier run sealed from other rows:
+/// the all-subjects list and each policy list that either names, in one
+/// commit that also deletes each list's chunks past its new count. The group
+/// commits that follow write the same policy rows again.
+fn rewrite<A: ArchiveStore>(
+    archive: &A,
+    chain: &ChainSummary,
+    epoch: Epoch,
+    stale: &[Vec<u8>],
+    mints: &[&FirstMintSet],
+) -> Result<(), ChainError> {
+    let slot = chain.epoch_start(epoch);
+    let writer = archive.start_writer()?;
+
+    let subjects: Vec<Vec<u8>> = mints.iter().map(|row| row.subject()).collect();
+    let chunks = super::chunk::<FirstMintChunk>(subjects);
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        writer.write_log_typed(slot, &(i as u32), chunk)?;
+    }
+
+    for i in chunks.len() as u32..chunks_of(stale.len() as u64) {
+        writer.delete_log_typed::<FirstMintChunk>(slot, &i)?;
+    }
+
+    let mut names: BTreeMap<Hash<28>, Vec<Vec<u8>>> = stale
+        .iter()
+        .filter_map(|subject| Some((Hash::<28>::from(subject.get(..28)?), vec![])))
+        .collect();
+
+    for row in mints {
+        names.entry(row.policy).or_default().push(row.name.clone());
+    }
+
+    for (policy, names) in names {
+        let sealed = archive
+            .read_log_typed::<PolicyMintChunk>(slot, &policy_key(&policy, 0))?
+            .map_or(0, |head| chunks_of(head.count));
+
+        let chunks = super::chunk::<PolicyMintChunk>(names);
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            writer.write_log_typed(slot, &policy_key(&policy, i as u32), chunk)?;
+        }
+
+        for i in chunks.len() as u32..sealed {
+            writer.delete_log_typed::<PolicyMintChunk>(slot, &policy_key(&policy, i))?;
+        }
+    }
+
+    writer.commit()?;
+
+    Ok(())
 }
 
 /// Seal the staged first mints of every epoch `sealable` accepts.
 ///
 /// The all-subjects list of an epoch depends on every staged row of it, so it
 /// is written first, whole and in one archive commit, before any of those rows
-/// is deleted; a re-run that finds it sealed leaves it alone. The per-policy
-/// lists depend on their group only, and seal chunk by chunk.
+/// is deleted; a re-run that finds it sealed from the same rows leaves it
+/// alone. The per-policy lists depend on their group only, and seal chunk by
+/// chunk.
+///
+/// A list sealed from other rows is written again from the staged ones, with
+/// its policy lists ([`rewrite`]). `newly`, the epochs no earlier boundary
+/// could seal, are checked even where nothing is staged: a list there that a
+/// crash did not leave behind was sealed from other rows, and is deleted with
+/// its policy lists.
+///
+/// Each chunk's archive commit also writes its rows' entity index entries,
+/// before the state commit deletes the rows, so the roll's witness finds every
+/// sealed first mint in one of the two.
 pub(crate) fn seal<D: Domain>(
     state: &D::State,
     archive: &D::Archive,
     chain: &ChainSummary,
     sealable: &dyn Fn(Epoch) -> bool,
+    newly: &[Epoch],
     batch: usize,
 ) -> Result<(), ChainError> {
     let mut rows = Vec::new();
@@ -70,55 +185,45 @@ pub(crate) fn seal<D: Domain>(
         }
     }
 
-    if rows.is_empty() {
-        return Ok(());
-    }
+    let mut epochs: BTreeMap<Epoch, Vec<&FirstMintSet>> =
+        newly.iter().map(|epoch| (*epoch, Vec::new())).collect();
 
-    let flags = first_mint_flags(state, rows.iter().map(|(_, row)| row))?;
-
-    let mut epochs: BTreeMap<Epoch, Vec<&FirstMintSet>> = BTreeMap::new();
-
-    for ((_, row), first) in rows.iter().zip(&flags) {
-        if *first {
-            epochs.entry(row.epoch).or_default().push(row);
-        }
+    for (_, row) in &rows {
+        epochs.entry(row.epoch).or_default().push(row);
     }
 
     for (epoch, mut mints) in epochs {
-        let slot = chain.epoch_start(epoch);
-        let head = LogKey::of(slot, &0u32);
-
-        if archive.read_logs(FirstMintChunk::NS, &[&head])?[0].is_some() {
-            continue;
-        }
-
         mints.sort_by_key(|row| row.mint_order());
-        let subjects = mints.into_iter().map(FirstMintSet::subject).collect();
+        let subjects: Vec<Vec<u8>> = mints.iter().map(|row| row.subject()).collect();
 
-        let writer = archive.start_writer()?;
+        match sealed_list(archive, chain, epoch)? {
+            None if subjects.is_empty() => {}
+            None => {
+                let slot = chain.epoch_start(epoch);
+                let writer = archive.start_writer()?;
 
-        for (i, chunk) in super::chunk::<FirstMintChunk>(subjects)
-            .into_iter()
-            .enumerate()
-        {
-            writer.write_log_typed(slot, &(i as u32), &chunk)?;
+                for (i, chunk) in super::chunk::<FirstMintChunk>(subjects)
+                    .into_iter()
+                    .enumerate()
+                {
+                    writer.write_log_typed(slot, &(i as u32), &chunk)?;
+                }
+
+                writer.commit()?;
+            }
+            Some(listed) if sealed_from(archive, chain, epoch, &listed, &subjects)? => {}
+            Some(listed) => rewrite(archive, chain, epoch, &listed, &mints)?,
         }
-
-        writer.commit()?;
     }
 
-    let rows = rows
-        .into_iter()
-        .zip(flags)
-        .map(|((key, row), first)| Ok((key, (row, first))));
+    let rows = rows.into_iter().map(Ok);
 
     super::seal_groups::<D, FirstMintSet, _, _, _>(state, archive, rows, batch, |chunk, writer| {
         let mut groups: BTreeMap<(Epoch, Hash<28>), Vec<&FirstMintSet>> = BTreeMap::new();
 
-        for (_, (row, first)) in chunk {
-            if *first {
-                groups.entry((row.epoch, row.policy)).or_default().push(row);
-            }
+        for (key, row) in chunk {
+            writer.write_entity(entities::ASSET, key.member.0.as_slice(), row.slot)?;
+            groups.entry((row.epoch, row.policy)).or_default().push(row);
         }
 
         for ((epoch, policy), mut mints) in groups {
@@ -140,8 +245,7 @@ pub(crate) fn seal<D: Domain>(
 
 /// Per-epoch segments of one list: staged epochs keep their first mints in
 /// mint order, sealed ones their count.
-fn segments<S: StateStore>(
-    state: &S,
+fn segments(
     periods: BTreeMap<Epoch, Period<FirstMintSet, EntityValue>>,
     item: impl Fn(FirstMintSet) -> Vec<u8>,
 ) -> Result<Vec<Segment<Vec<u8>>>, ChainError> {
@@ -149,15 +253,7 @@ fn segments<S: StateStore>(
 
     for (epoch, period) in periods {
         let segment = match period {
-            Period::Staged(rows) => {
-                let flags = first_mint_flags(state, &rows)?;
-
-                let mut mints: Vec<FirstMintSet> = rows
-                    .into_iter()
-                    .zip(flags)
-                    .filter_map(|(row, first)| first.then_some(row))
-                    .collect();
-
+            Period::Staged(mut mints) => {
                 mints.sort_by_key(|row| row.mint_order());
 
                 Segment::Staged(mints.into_iter().map(&item).collect())
@@ -191,7 +287,7 @@ pub fn all_page<D: Domain>(
 
     let sealed = super::read_sealed::<_, FirstMintChunk>(archive, chain, epochs, |_| 0)?;
 
-    let segments = segments(state, super::join(staged, sealed), |row| row.subject())?;
+    let segments = segments(super::join(staged, sealed), |row| row.subject())?;
 
     super::page::<FirstMintChunk>(segments, order, skip, count, |epoch, chunks| {
         super::load_chunks(archive, chain, epoch, chunks, |i| i)
@@ -220,7 +316,7 @@ pub fn policy_page<D: Domain>(
         policy_key(policy, 0)
     })?;
 
-    let segments = segments(state, super::join(staged, sealed), |row| row.name)?;
+    let segments = segments(super::join(staged, sealed), |row| row.name)?;
 
     if segments.iter().all(Segment::is_empty) {
         return Ok(None);
@@ -250,6 +346,7 @@ mod tests {
 
     use super::*;
     use crate::periods::{is_sealable, GroupKey, GroupRow as _};
+    use crate::AssetKey;
 
     /// The epoch the sealing boundary opens: 5 and 6 are immutable at it, 7 is
     /// not.
@@ -257,6 +354,9 @@ mod tests {
 
     const P: [u8; 28] = [0x11; 28];
     const Q: [u8; 28] = [0x22; 28];
+
+    /// The policy of the re-mints a build staging them as first mints listed.
+    const R: [u8; 28] = [0x33; 28];
 
     /// Shares all of `P` but its last byte, so its staged keys sort right
     /// after `P`'s.
@@ -270,9 +370,9 @@ mod tests {
         crate::eras::load_era_summary::<ToyDomain>(domain.state()).unwrap()
     }
 
-    /// Staged first mints in epochs 5 to 7, the asset states that witness
-    /// them, and one re-mint of an asset first minted in epoch 5. `Q` mints
-    /// more names in epoch 6 than a sealed chunk holds.
+    /// Staged first mints in epochs 5 to 7, one row per asset as the roll's
+    /// witness stages them. `Q` mints more names in epoch 6 than a sealed
+    /// chunk holds.
     fn seeded() -> ToyDomain {
         let domain = ToyDomain::new(None, None);
         let chain = chain(&domain);
@@ -305,41 +405,28 @@ mod tests {
 
         for row in &rows {
             writer.write_entity_typed(&row.key(), row).unwrap();
-
-            let asset = AssetState {
-                initial_slot: Some(row.slot),
-                ..Default::default()
-            };
-            writer.write_entity_typed(&row.asset_key(), &asset).unwrap();
         }
-
-        // P's "A" again in epoch 6: staged, but its asset was first minted in 5
-        let remint = FirstMintSet {
-            policy: P.into(),
-            name: b"A".to_vec(),
-            epoch: 6,
-            slot: chain.epoch_start(6) + 1,
-            tx_index: 0,
-        };
-        writer.write_entity_typed(&remint.key(), &remint).unwrap();
 
         writer.commit().unwrap();
 
         domain
     }
 
-    fn sealable(domain: &ToyDomain) -> impl Fn(Epoch) -> bool {
-        let chain = chain(domain);
-        let mutable = crate::utils::mutable_slots(&domain.genesis());
-        move |epoch| is_sealable(&chain, mutable, epoch, BOUNDARY)
+    fn seal_as<D: Domain>(domain: &D, at: &ToyDomain) -> Result<(), ChainError> {
+        seal_at(domain, at, BOUNDARY)
     }
 
-    fn seal_as<D: Domain>(domain: &D, at: &ToyDomain) -> Result<(), ChainError> {
+    /// The seal of the boundary opening `boundary`.
+    fn seal_at<D: Domain>(domain: &D, at: &ToyDomain, boundary: Epoch) -> Result<(), ChainError> {
+        let chain = chain(at);
+        let mutable = crate::utils::mutable_slots(&at.genesis());
+
         seal::<D>(
             domain.state(),
             domain.archive(),
-            &chain(at),
-            &sealable(at),
+            &chain,
+            &|epoch| is_sealable(&chain, mutable, epoch, boundary),
+            &crate::periods::newly_sealable(&chain, mutable, boundary),
             2,
         )
     }
@@ -443,7 +530,8 @@ mod tests {
             ]
         );
 
-        // the re-mint of P's "A" is in no list
+        // every staged row is listed: the roll's witness stages first mints
+        // only, so the seal applies none
         let p = policy_page(
             &domain,
             &chain(&domain),
@@ -455,7 +543,137 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(p.iter().filter(|s| s[28..] == *b"A").count(), 1);
+        let names: Vec<_> = p.iter().map(|s| s[28..].to_vec()).collect();
+        assert_eq!(names, [b"E", b"B", b"A", b"D", b"C", b"F", b"G"]);
+    }
+
+    /// A rebuild's seal over lists that a build staging re-mints as first
+    /// mints sealed: `X` of policy `R` was first minted in epoch 5, which the
+    /// replay sealed and indexed, and its re-mint was listed again in epoch 6.
+    /// The seal writes epoch 6's lists again from the staged rows and deletes
+    /// `R`'s, leaving the rows of a clean seal.
+    #[test]
+    fn a_seal_writes_again_a_list_sealed_from_other_rows() {
+        let clean = seeded();
+        seal_as(&clean, &clean).unwrap();
+
+        let domain = seeded();
+        let chain = chain(&domain);
+        let x = [R.as_slice(), b"X"].concat();
+
+        let mut epoch_6: Vec<FirstMintSet> = staged(&domain)
+            .into_iter()
+            .map(|(_, row)| row)
+            .filter(|row| row.epoch == 6)
+            .collect();
+        epoch_6.sort_by_key(FirstMintSet::mint_order);
+
+        let mut listed: Vec<Vec<u8>> = epoch_6.iter().map(FirstMintSet::subject).collect();
+        listed.push(x.clone());
+
+        let slot = chain.epoch_start(6);
+        let writer = domain.archive().start_writer().unwrap();
+
+        for (i, chunk) in crate::periods::chunk::<FirstMintChunk>(listed)
+            .into_iter()
+            .enumerate()
+        {
+            writer.write_log_typed(slot, &(i as u32), &chunk).unwrap();
+        }
+
+        let names = PolicyMintChunk::new(1, vec![b"X".to_vec()]);
+        writer
+            .write_log_typed(slot, &policy_key(&R.into(), 0), &names)
+            .unwrap();
+
+        let first = chain.epoch_start(5) + 40;
+        writer
+            .write_entity(entities::ASSET, AssetKey::of(&x).0.as_slice(), first)
+            .unwrap();
+
+        writer.commit().unwrap();
+
+        seal_as(&domain, &domain).unwrap();
+
+        // R's list, which only X was in, is deleted
+        assert_eq!(logs(&domain), logs(&clean));
+        assert_eq!(pages(&domain), pages(&clean));
+
+        let r = policy_page(
+            &domain,
+            &chain,
+            0..=BOUNDARY,
+            &R.into(),
+            SlotOrder::Asc,
+            0,
+            10,
+        )
+        .unwrap();
+        assert_eq!(r, None);
+    }
+
+    /// Each staged row's first-mint slot in the entity index, `None` where
+    /// the index holds none.
+    fn indexed(domain: &ToyDomain, rows: &[FirstMintSet]) -> Vec<Option<BlockSlot>> {
+        let keys: Vec<AssetKey> = rows.iter().map(FirstMintSet::asset_key).collect();
+        let keys: Vec<&[u8]> = keys.iter().map(|k| k.0.as_slice()).collect();
+
+        domain
+            .archive()
+            .entity_slots(entities::ASSET, &keys)
+            .unwrap()
+    }
+
+    /// The seal records every sealed first mint's slot in the entity index, in
+    /// the archive commit that seals its group, and a crash at any commit
+    /// leaves the same entries after the re-run. Between the commits an asset
+    /// is in the index or staged, never in neither.
+    #[test]
+    fn the_seal_indexes_each_sealed_asset_once_whatever_commit_it_dies_at() {
+        let clean = seeded();
+        let rows: Vec<FirstMintSet> = staged(&clean).into_iter().map(|(_, r)| r).collect();
+        seal_as(&clean, &clean).unwrap();
+
+        let expected: Vec<_> = rows
+            .iter()
+            .map(|r| (r.epoch < 7).then_some(r.slot))
+            .collect();
+        assert_eq!(indexed(&clean, &rows), expected);
+
+        let mut crash_after = 0;
+
+        loop {
+            let domain = seeded();
+            let crashing =
+                FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(crash_after));
+
+            if seal_as(&crashing, &domain).is_ok() {
+                break;
+            }
+
+            let still: std::collections::HashSet<_> =
+                staged(&domain).into_iter().map(|(k, _)| k.member).collect();
+
+            for (row, slot) in rows.iter().zip(indexed(&domain, &rows)) {
+                assert!(
+                    slot.is_some() || still.contains(&row.asset_key()),
+                    "lost {} after commit {crash_after}",
+                    hex::encode(row.subject())
+                );
+            }
+
+            seal_as(&domain, &domain).expect("re-run");
+            assert_eq!(
+                indexed(&domain, &rows),
+                expected,
+                "crash after commit {crash_after}"
+            );
+
+            crash_after += 1;
+        }
+
+        // the epoch-wide commit plus a pair per group chunk
+        assert!(crash_after > 4, "only {crash_after} commits");
     }
 
     /// Done criterion 1, seal idempotence: whichever commit the seal dies
@@ -549,7 +767,7 @@ mod tests {
         )
         .unwrap();
 
-        let all = segments(state, crate::periods::join(staged_all, sealed_all), |row| {
+        let all = segments(crate::periods::join(staged_all, sealed_all), |row| {
             row.subject()
         })
         .unwrap();
@@ -560,10 +778,7 @@ mod tests {
         let expected = all_page(&fresh, &chain, 0..=BOUNDARY, SlotOrder::Asc, 0, 400).unwrap();
         assert_eq!(all, expected);
 
-        let q = segments(state, crate::periods::join(staged_q, sealed_q), |row| {
-            row.name
-        })
-        .unwrap();
+        let q = segments(crate::periods::join(staged_q, sealed_q), |row| row.name).unwrap();
         let q = crate::periods::page::<PolicyMintChunk>(q, SlotOrder::Desc, 3, 290, |e, c| {
             crate::periods::load_chunks(archive, &chain, e, c, |i| policy_key(&Q.into(), i))
         })
@@ -584,5 +799,258 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(q, expected);
+    }
+
+    fn r_subject(name: &[u8]) -> Vec<u8> {
+        [R.as_slice(), name].concat()
+    }
+
+    /// Epoch 6's staged rows, in mint order.
+    fn epoch_6(domain: &ToyDomain) -> Vec<FirstMintSet> {
+        let mut rows: Vec<FirstMintSet> = staged(domain)
+            .into_iter()
+            .map(|(_, row)| row)
+            .filter(|row| row.epoch == 6)
+            .collect();
+
+        rows.sort_by_key(FirstMintSet::mint_order);
+        rows
+    }
+
+    /// Seals `listed` as `epoch`'s all-subjects list, and `names` as `R`'s, as
+    /// an earlier run did, indexing each subject at `indexed` where given.
+    fn seal_earlier(
+        domain: &ToyDomain,
+        epoch: Epoch,
+        listed: Vec<Vec<u8>>,
+        names: Vec<Vec<u8>>,
+        indexed: &[(Vec<u8>, BlockSlot)],
+    ) {
+        let slot = chain(domain).epoch_start(epoch);
+        let writer = domain.archive().start_writer().unwrap();
+
+        for (i, chunk) in crate::periods::chunk::<FirstMintChunk>(listed)
+            .into_iter()
+            .enumerate()
+        {
+            writer.write_log_typed(slot, &(i as u32), &chunk).unwrap();
+        }
+
+        for (i, chunk) in crate::periods::chunk::<PolicyMintChunk>(names)
+            .into_iter()
+            .enumerate()
+        {
+            writer
+                .write_log_typed(slot, &policy_key(&R.into(), i as u32), &chunk)
+                .unwrap();
+        }
+
+        for (subject, slot) in indexed {
+            writer
+                .write_entity(entities::ASSET, AssetKey::of(subject).0.as_slice(), *slot)
+                .unwrap();
+        }
+
+        writer.commit().unwrap();
+    }
+
+    fn r_page(domain: &ToyDomain) -> Option<Vec<Vec<u8>>> {
+        policy_page(
+            domain,
+            &chain(domain),
+            0..=BOUNDARY,
+            &R.into(),
+            SlotOrder::Asc,
+            0,
+            1_000,
+        )
+        .unwrap()
+    }
+
+    /// The seals of every boundary up to [`BOUNDARY`], as a replay runs them.
+    fn seal_through(domain: &ToyDomain) {
+        for boundary in 1..=BOUNDARY {
+            seal_at(domain, domain, boundary).unwrap();
+        }
+    }
+
+    /// A rebuild's seal of an epoch where it stages nothing, over the lists a
+    /// build staging re-mints as first mints sealed there: `X`, first minted
+    /// in epoch 3 and re-minted in epoch 4. The seal of the boundary that
+    /// first seals epoch 4 deletes its lists, and keeps epoch 3's, which name
+    /// `X` where the index has it.
+    #[test]
+    fn a_seal_deletes_a_list_sealed_from_other_rows_where_nothing_is_staged() {
+        let x = r_subject(b"X");
+        let first = chain(&seeded()).epoch_start(3) + 40;
+
+        let clean = seeded();
+        seal_earlier(
+            &clean,
+            3,
+            vec![x.clone()],
+            vec![b"X".to_vec()],
+            &[(x.clone(), first)],
+        );
+        seal_through(&clean);
+
+        let domain = seeded();
+        seal_earlier(
+            &domain,
+            3,
+            vec![x.clone()],
+            vec![b"X".to_vec()],
+            &[(x.clone(), first)],
+        );
+        seal_earlier(&domain, 4, vec![x.clone()], vec![b"X".to_vec()], &[]);
+        seal_through(&domain);
+
+        assert_eq!(logs(&domain), logs(&clean));
+        assert_eq!(pages(&domain), pages(&clean));
+        assert_eq!(r_page(&domain), Some(vec![x]));
+    }
+
+    /// A rewritten list shorter than the one an earlier run sealed: epoch 6's
+    /// 302 subjects and 300 re-mints of `R` (three chunks) become 302 (two),
+    /// and `R`'s 300 names (two chunks) none. No chunk past a new count
+    /// survives, so the archive holds a clean seal's rows.
+    #[test]
+    fn a_rewritten_list_drops_the_chunks_past_its_new_count() {
+        let clean = seeded();
+        seal_as(&clean, &clean).unwrap();
+
+        let domain = seeded();
+        let first = chain(&domain).epoch_start(5) + 40;
+
+        let names: Vec<Vec<u8>> = (0..300).map(|i| format!("X{i:03}").into_bytes()).collect();
+        let remints: Vec<Vec<u8>> = names.iter().map(|name| r_subject(name)).collect();
+
+        let mut listed: Vec<Vec<u8>> = epoch_6(&domain).iter().map(FirstMintSet::subject).collect();
+        listed.extend(remints.iter().cloned());
+        assert_eq!(listed.len(), 602);
+
+        let indexed: Vec<_> = remints.iter().map(|x| (x.clone(), first)).collect();
+        seal_earlier(&domain, 6, listed, names, &indexed);
+
+        seal_as(&domain, &domain).unwrap();
+
+        assert_eq!(logs(&domain), logs(&clean));
+        assert_eq!(pages(&domain), pages(&clean));
+        assert_eq!(r_page(&domain), None);
+
+        let sealed = crate::periods::assets::sealed_subjects(&domain).unwrap();
+        let clean_sealed = crate::periods::assets::sealed_subjects(&clean).unwrap();
+        assert_eq!(sealed, clean_sealed);
+    }
+
+    /// Whichever commit a rewriting seal dies after, a re-run leaves a clean
+    /// seal's rows.
+    #[test]
+    fn a_crash_at_any_commit_of_a_rewrite_seals_the_same_rows() {
+        let clean = seeded();
+        seal_as(&clean, &clean).unwrap();
+
+        let expected = (logs(&clean), staged(&clean));
+
+        let earlier = |domain: &ToyDomain| {
+            let x = r_subject(b"X");
+            let first = chain(domain).epoch_start(5) + 40;
+
+            let mut listed: Vec<Vec<u8>> =
+                epoch_6(domain).iter().map(FirstMintSet::subject).collect();
+            listed.push(x.clone());
+
+            seal_earlier(domain, 6, listed, vec![b"X".to_vec()], &[(x, first)]);
+        };
+
+        let mut crash_after = 0;
+
+        loop {
+            let domain = seeded();
+            earlier(&domain);
+
+            let crashing =
+                FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(crash_after));
+
+            if seal_as(&crashing, &domain).is_ok() {
+                break;
+            }
+
+            seal_as(&domain, &domain).expect("re-run");
+
+            assert_eq!(
+                (logs(&domain), staged(&domain)),
+                expected,
+                "after a crash following commit {crash_after}"
+            );
+
+            crash_after += 1;
+        }
+
+        assert!(crash_after > 4, "only {crash_after} commits");
+    }
+
+    /// A list that leaves out a subject staged for its epoch was sealed from
+    /// other rows, and is written again.
+    #[test]
+    fn a_list_missing_a_staged_subject_is_written_again() {
+        let clean = seeded();
+        seal_as(&clean, &clean).unwrap();
+
+        let domain = seeded();
+        let f = [P.as_slice(), b"F"].concat();
+
+        let listed: Vec<Vec<u8>> = epoch_6(&domain)
+            .iter()
+            .map(FirstMintSet::subject)
+            .filter(|subject| *subject != f)
+            .collect();
+        assert_eq!(listed.len(), 301);
+
+        seal_earlier(&domain, 6, listed, vec![], &[]);
+        seal_as(&domain, &domain).unwrap();
+
+        assert_eq!(logs(&domain), logs(&clean));
+        assert_eq!(pages(&domain), pages(&clean));
+    }
+
+    /// A list naming a subject that is neither staged nor in the index was
+    /// sealed from other rows, and is written again.
+    #[test]
+    fn a_list_naming_an_unindexed_subject_is_written_again() {
+        let clean = seeded();
+        seal_as(&clean, &clean).unwrap();
+
+        let domain = seeded();
+        let x = r_subject(b"X");
+
+        let mut listed: Vec<Vec<u8>> = epoch_6(&domain).iter().map(FirstMintSet::subject).collect();
+        listed.push(x);
+
+        seal_earlier(&domain, 6, listed, vec![b"X".to_vec()], &[]);
+        seal_as(&domain, &domain).unwrap();
+
+        assert_eq!(logs(&domain), logs(&clean));
+        assert_eq!(pages(&domain), pages(&clean));
+        assert_eq!(r_page(&domain), None);
+    }
+
+    /// A seal that dies between an epoch's list commit and its group commits
+    /// leaves listed subjects unindexed but still staged, which a restart
+    /// seals: they are not counted as unindexed.
+    #[test]
+    fn a_crash_mid_seal_leaves_no_listed_subject_unindexed_and_unstaged() {
+        for crash_after in [1, 2, 3] {
+            let domain = seeded();
+            let crashing =
+                FaultyToyDomain::new(domain.clone(), TestFault::CrashAfterCommits(crash_after));
+            assert!(seal_as(&crashing, &domain).is_err());
+
+            let subjects = crate::periods::assets::sealed_subjects(&domain).unwrap();
+            assert!(!subjects.is_empty());
+
+            let unindexed = crate::periods::assets::count_unindexed(&domain, &subjects).unwrap();
+            assert_eq!(unindexed, 0, "after commit {crash_after}");
+        }
     }
 }

@@ -6,8 +6,8 @@ use axum::{
 };
 use dolos_cardano::{
     model::{
-        gov::GovState, AccountState, AssetState, DRepState, EpochState, MetadataLabelState,
-        PoolState, ProposalState,
+        gov::GovState, AccountState, DRepState, EpochState, MetadataLabelState, PoolState,
+        ProposalState,
     },
     ChainSummary, PParamsSet,
 };
@@ -289,7 +289,6 @@ where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
-    Option<AssetState>: From<D::Entity>,
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
@@ -307,7 +306,6 @@ where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
-    Option<AssetState>: From<D::Entity>,
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,
@@ -324,6 +322,11 @@ where
     // disposable: without the namespace the totals routes fold uncached
     if let Err(error) = dolos_cardano::periods::stats::register_totals_cache(&facade.inner) {
         tracing::warn!(%error, "totals cache not registered");
+    }
+
+    // disposable: without the namespace the asset routes fold uncached
+    if let Err(error) = dolos_cardano::periods::assets::register_assets_cache(&facade.inner) {
+        tracing::warn!(%error, "assets cache not registered");
     }
 
     // disposable: without the namespaces the pool routes read the archive
@@ -746,7 +749,6 @@ where
     D: Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
-    Option<AssetState>: From<D::Entity>,
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
     Option<ProposalState>: From<D::Entity>,

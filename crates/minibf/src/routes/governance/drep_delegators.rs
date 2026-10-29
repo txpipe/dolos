@@ -101,6 +101,8 @@ where
         match domain.read_cardano_entity::<DRepState>(&drep_key)? {
             Some(state) if !drep_is_retired(&state) => state.registered_at,
             // Blockfrost returns an empty list for an unknown or retired DRep.
+            // A DRep moved to the final-row log is retired, so the state row
+            // alone decides.
             _ => return Ok(Json(vec![])),
         }
     };
