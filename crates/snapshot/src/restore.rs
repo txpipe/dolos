@@ -33,8 +33,8 @@
 //! reads as restored exactly when that cursor is there. Writing it after step 4
 //! makes it the completion marker for the whole restore rather than for the
 //! state tip alone: a node whose ledger is complete and whose live-UTxO
-//! dimensions are not has no cursor, and the next `bootstrap` treats it as
-//! empty — which is what it is.
+//! dimensions are not has no cursor, and `has_existing_data()` reports no node
+//! — which is what it is.
 //!
 //! No state or tag write needs the cursor. The tip is never checkpointed, so
 //! every resume rewrites its UTxOs and their tags together, including when an
@@ -42,10 +42,10 @@
 //!
 //! What it leaves is worth stating rather than discovering: an interruption
 //! anywhere in a restore leaves a node `has_existing_data()` reports as empty.
-//! `--continue` repairs it cheaply, because the epoch layers stay checkpointed;
-//! without it the stele is restored again from the top over keyed writes, which
-//! is a rewrite and not a duplication — the behaviour every interruption before
-//! the tip already had.
+//! A resumed restore repairs it cheaply, because the epoch layers stay
+//! checkpointed; without one the stele is restored again from the top over
+//! keyed writes, which is a rewrite and not a duplication — the behaviour
+//! every interruption before the tip already had.
 //!
 //! ## Resume, and where the checkpoint goes
 //!
@@ -967,7 +967,7 @@ impl Summary {
 ///
 /// The [`Checkpoint`] takes the path it is given — the driver never derives
 /// dolos layout — and this is where dolos derives it. The `resume` flag a
-/// checkpoint is opened with is the operator's `--continue`, and the driver's
+/// checkpoint is opened with is the caller's, and the driver's
 /// ignore-unless-resuming rule is the reason `--force` is safe: clearing
 /// storage removes this file with the rest of it, and even a progress file
 /// that somehow survived its stores cannot skip layers onto empty ones.
@@ -1009,7 +1009,7 @@ pub struct Restoring<'a> {
     pub max_history: Option<u64>,
     /// `storage.path` — where the stores live, and with them the progress file.
     pub storage_path: &'a Path,
-    /// The operator's `--continue`.
+    /// Whether to honour the progress file an interrupted restore left.
     pub resume: bool,
     /// The operator explicitly accepted the risk of restoring without checking
     /// the destination and staging volumes against the stele's declared sizes.
@@ -1022,7 +1022,7 @@ pub struct Restoring<'a> {
 /// Which store set is legitimate depends on `checkpoint`: an empty one always
 /// is, and one carrying what an interrupted attempt left behind is exactly what
 /// a [`Checkpoint`] opened with `resume` describes. Deciding between them is
-/// `bootstrap`'s, and it already owns `--force` and `--continue`.
+/// the caller's.
 ///
 /// `observer` hears about it as it happens, and is forwarded to `stele`:
 /// this loop knows which layer of how many and whether the resume skipped it,

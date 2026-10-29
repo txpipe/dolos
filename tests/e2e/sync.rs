@@ -11,7 +11,7 @@ use common::*;
 fn daemon_syncs(workspace: &ScenarioWorkspace) {
     println!("e2e sync start: {}", workspace.name());
 
-    reset_and_bootstrap(workspace);
+    reset_genesis(workspace);
 
     let before = fetch_summary(workspace);
 
@@ -66,7 +66,7 @@ fn daemon_syncs(workspace: &ScenarioWorkspace) {
 /// asks for one header at a time, so the run takes minutes over a remote
 /// relay.
 fn sync_passes_the_first_epoch_boundary(workspace: &ScenarioWorkspace) {
-    reset_and_bootstrap(workspace);
+    reset_genesis(workspace);
 
     let mut cmd = prepare_scenario_process(workspace);
 

@@ -6,6 +6,7 @@ use miette::{Context, Result};
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod banner;
+mod bootstrap;
 mod cache;
 mod common;
 mod config;
@@ -23,9 +24,6 @@ mod init;
 
 #[cfg(feature = "utils")]
 mod data;
-
-#[cfg(feature = "mithril")]
-mod bootstrap;
 
 #[cfg(feature = "minibf")]
 mod minibf;
@@ -67,8 +65,8 @@ enum Command {
     /// Fill, clear, inspect and check the cache, with the node stopped
     Cache(cache::Args),
 
-    /// Bootstrap the node using Mithril
-    #[cfg(feature = "mithril")]
+    /// Fill the node's stores from a Stelae snapshot, Mithril or a local
+    /// ImmutableDB
     Bootstrap(bootstrap::Args),
 
     /// runs a minibf query in-process
@@ -144,7 +142,6 @@ fn main() -> Result<()> {
         #[cfg(feature = "utils")]
         (Ok(config), Command::Data(args)) => data::run(&config, &args, &feedback),
 
-        #[cfg(feature = "mithril")]
         (Ok(config), Command::Bootstrap(args)) => bootstrap::run(&config, &args, &feedback),
 
         #[cfg(feature = "minibf")]

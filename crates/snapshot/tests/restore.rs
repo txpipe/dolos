@@ -1987,7 +1987,7 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     assert_utxo_tags_match(blank.state(), reference.state());
 }
 
-/// The resume is `--continue`'s and nobody else's.
+/// The resume is the caller's `resume` and nobody else's.
 ///
 /// A progress file sitting beside the stores does not make the next restore
 /// skip anything. That is what makes `--force` safe: a wipe removes the file,

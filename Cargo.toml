@@ -21,7 +21,6 @@ hex.workspace = true
 itertools.workspace = true
 pallas.workspace = true
 rayon.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -73,9 +72,7 @@ comfy-table = { version = "7.1.1", optional = true }
 inquire = { version = "0.9.4", optional = true }
 toml = { version = "0.8.13", optional = true }
 console-subscriber = { version = "0.4.1", optional = true }
-flate2 = "1.0.34"
 zstd = "0.13"
-tar = "0.4.41"
 paste = "1.0.15"
 redb-extras = "0.6.1"
 
@@ -137,10 +134,6 @@ path = "tests/e2e/smoke.rs"
 [[test]]
 name = "sync"
 path = "tests/e2e/sync.rs"
-
-[[test]]
-name = "snapshot"
-path = "tests/e2e/snapshot.rs"
 
 [[test]]
 name = "epoch_pots"

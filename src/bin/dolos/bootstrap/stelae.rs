@@ -1,12 +1,5 @@
 //! `dolos bootstrap stelae` — rebuild a node from a Stelae snapshot.
 //!
-//! A sibling of [`super::snapshot`] rather than a mode of it. The two share a
-//! goal and nothing else: one unpacks a gzip tar of the storage engines' own
-//! files over the data directory, the other reads a set of deterministic CBOR
-//! layers through the store traits. Their flags, their failure modes and their
-//! trust stories are all different, so folding the second into the first would
-//! have meant a command whose options only make sense in pairs.
-//!
 //! Everything below this module is `dolos_snapshot::restore`, which is generic
 //! over the store traits. What only this module knows is the node: its network
 //! magic, which comes from genesis and never from a file an operator can edit,
@@ -21,17 +14,12 @@
 //! which names which stele in a repository to read, and `--insecure`, which is
 //! for a registry on a loopback address.
 //!
-//! ## `--continue` is the resume
+//! ## A restore has no resume
 //!
-//! `bootstrap`'s `--continue` already meant "go ahead even though there is data
-//! here, the subcommand knows how to resume". For a stele restore that is now
-//! literally true: it is what makes the run consult the progress file an
-//! interrupted attempt left in the storage directory, so the layers that
-//! attempt committed are not fetched again.
-//!
-//! Without it a restore starts over, and it starts over *properly* — a progress
-//! file it did not ask to honour is overwritten rather than obeyed.
-//! `dolos_snapshot::restore::Checkpoint` states why: a progress file that
+//! An interrupted restore leaves data in storage, which `bootstrap` refuses
+//! until `--force` clears it, so a restore always starts from empty stores. The
+//! progress file it writes as it goes is overwritten rather than obeyed:
+//! `dolos_snapshot::restore::Checkpoint` states why a progress file that
 //! outlived the stores it describes would otherwise skip layers onto nothing.
 
 use std::path::PathBuf;
@@ -88,6 +76,7 @@ pub struct Args {
 }
 
 impl Args {
+    #[cfg(feature = "utils")]
     pub fn inquire() -> miette::Result<Self> {
         let source = inquire::Text::new("where is the stele?")
             .with_help_message(
@@ -158,7 +147,6 @@ struct Node {
 #[derive(Clone, Copy)]
 struct RestoreOptions<'a> {
     feedback: &'a Feedback,
-    resume: bool,
     skip_space_check: bool,
 }
 
@@ -183,16 +171,12 @@ impl Node {
     }
 
     /// What this node knows about itself, as the restore driver takes it.
-    fn restoring(
-        &self,
-        resume: bool,
-        skip_space_check: bool,
-    ) -> dolos_snapshot::restore::Restoring<'_> {
+    fn restoring(&self, skip_space_check: bool) -> dolos_snapshot::restore::Restoring<'_> {
         dolos_snapshot::restore::Restoring {
             network_magic: self.magic,
             max_history: self.max_history,
             storage_path: &self.root,
-            resume,
+            resume: false,
             skip_space_check,
         }
     }
@@ -218,7 +202,7 @@ fn restore(
     let node = Node::open(config)?;
     let progress = SteleProgress::restoring(options.feedback);
     let observer = progress.observer();
-    let restoring = node.restoring(options.resume, options.skip_space_check);
+    let restoring = node.restoring(options.skip_space_check);
 
     let outcome = match inputs {
         Inputs::Dir(dir) => snapshot::restore(
@@ -269,8 +253,7 @@ fn restore(
 ///
 /// Still printed after the restore, and now that is a choice rather than a gap:
 /// the run itself is drawn while it happens through the profile observer seam,
-/// so what is left for the end is the arithmetic a bar cannot carry — what a
-/// resumed run cost rather than what an unresumed one would have.
+/// so what is left for the end is the arithmetic a bar cannot carry.
 fn report(
     plan: &dolos_snapshot::restore::Plan,
     outlook: &dolos_snapshot::restore::Outlook,
@@ -341,13 +324,6 @@ fn report(
         );
     }
 
-    if outlook.inherited > 0 {
-        println!(
-            "resumed:  {} layer(s) an earlier attempt had already committed",
-            outlook.inherited,
-        );
-    }
-
     println!(
         "fetched:  {} layers ({} skipped), {} compressed bytes planned",
         summary.layers_fetched, summary.layers_skipped, outlook.remaining.compressed_bytes,
@@ -369,11 +345,9 @@ pub(super) fn run(
     args: &Args,
     inputs: Inputs,
     feedback: &Feedback,
-    resume: bool,
 ) -> miette::Result<()> {
     let options = RestoreOptions {
         feedback,
-        resume,
         skip_space_check: args.skip_space_check,
     };
 

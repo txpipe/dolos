@@ -191,6 +191,23 @@ const WAL_METADATA: TableDefinition<&str, u32> = TableDefinition::new("wal_metad
 
 const WAL_METADATA_VERSION_KEY: &str = "version";
 
+/// Whether the WAL file at `path` holds an entry, read without writing to it.
+///
+/// Opening the file as a [`RedbWalStore`] stamps its version, and wipes one
+/// of another version, so a caller deciding whether to touch the WAL at all
+/// reads it here instead. A file that needs repair, or one another process
+/// holds, is an error.
+pub fn holds_entries(path: impl AsRef<Path>) -> Result<bool, RedbWalError> {
+    let db = redb::ReadOnlyDatabase::open(path)?;
+    let rx = db.begin_read()?;
+
+    match rx.open_table(WAL) {
+        Ok(table) => Ok(!table.is_empty()?),
+        Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Current WAL on-disk schema version.
 ///
 /// Bump this whenever the serialized format of WAL entries changes in a way
@@ -921,6 +938,46 @@ mod tests {
     /// simulate legacy on-disk state that predates the metadata table.
     fn open_raw_db(path: &Path) -> redb::Database {
         redb::Database::builder().create(path).unwrap()
+    }
+
+    /// An entry is seen whatever version the file records, and reading it
+    /// leaves the file as it was.
+    #[test]
+    fn holds_entries_reads_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        open_test_store(&path).unwrap();
+        assert!(!holds_entries(&path).unwrap());
+
+        {
+            let db = open_raw_db(&path);
+            let wx = db.begin_write().unwrap();
+            {
+                let mut metadata = wx.open_table(WAL_METADATA).unwrap();
+                metadata.insert(WAL_METADATA_VERSION_KEY, 1).unwrap();
+
+                let mut table = wx.open_table(WAL).unwrap();
+                let key = DbChainPoint::from(ChainPoint::Specific(42, [1u8; 32].into()));
+                table.insert(key, vec![0xDEu8, 0xAD, 0xBE, 0xEF]).unwrap();
+            }
+            wx.commit().unwrap();
+        }
+
+        let before = std::fs::read(&path).unwrap();
+        assert!(holds_entries(&path).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// A file with no WAL table, as a fresh redb file is, holds no entry.
+    #[test]
+    fn holds_entries_without_a_table_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        drop(open_raw_db(&path));
+
+        assert!(!holds_entries(&path).unwrap());
     }
 
     #[test]

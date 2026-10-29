@@ -1502,7 +1502,8 @@ const MOVED_TO_ARGUMENTS: [(&str, &str); 3] = [
     ),
     (
         "snapshot",
-        "`dolos bootstrap snapshot --download-url` and `dolos snapshot … --state-epochs`",
+        "`dolos snapshot … --state-epochs` (the download URL left with `dolos bootstrap \
+         snapshot`)",
     ),
     (
         "stelae",

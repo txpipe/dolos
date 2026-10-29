@@ -1,29 +1,45 @@
 use std::io::IsTerminal;
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use inquire::list_option::ListOption;
 use miette::{bail, IntoDiagnostic};
 use tracing::info;
 
 use crate::feedback::Feedback;
 use dolos::storage::{Existing, ExistingDataPolicy};
+use dolos_core::config::RootConfig;
 use dolos_core::{seed_wal_from_state, WalSeed};
 
+mod immutable;
+mod immutabledb;
+#[cfg(feature = "mithril")]
 pub(crate) mod mithril;
-mod ranged;
-mod relay;
-mod snapshot;
 mod stelae;
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum Command {
-    Relay(relay::Args),
+    /// Download a Mithril-certified ImmutableDB and replay it
+    #[cfg(feature = "mithril")]
     Mithril(mithril::Args),
-    Snapshot(snapshot::Args),
+
+    /// Restore a Stelae snapshot
     Stelae(stelae::Args),
+
+    /// Replay the ImmutableDB of a local Cardano node database
+    Immutabledb(immutabledb::Args),
 }
 
 impl Command {
+    /// `--continue`, which only the replays take.
+    fn resumes(&self) -> bool {
+        match self {
+            #[cfg(feature = "mithril")]
+            Command::Mithril(args) => args.replay.resume,
+            Command::Stelae(_) => false,
+            Command::Immutabledb(args) => args.replay.resume,
+        }
+    }
+
     /// Ask the operator which bootstrap method to use.
     ///
     /// Refused outright when there is no terminal to ask on, *before* the
@@ -38,33 +54,61 @@ impl Command {
             bail!("no bootstrap method given and no terminal to ask on; pass a subcommand instead (see `dolos bootstrap --help`)");
         }
 
-        let cmd = inquire::Select::new(
-            "which bootstrap method would you like to use?",
-            vec![
-                ListOption::new(0, "Dolos snapshot (a few mins, trust me bro)"),
-                ListOption::new(
-                    1,
-                    "Stelae snapshot (a few mins, from a stele you can verify)",
-                ),
-                ListOption::new(2, "Mithril snapshot (a few hours, trust Mithril SPOs)"),
-                ListOption::new(3, "Relay chain-sync (several days, trust your relay)"),
-            ],
-        )
-        .prompt()
-        .into_diagnostic()?;
+        Self::prompt()
+    }
 
-        match cmd.index {
-            0 => Ok(Command::Snapshot(snapshot::Args::inquire()?)),
-            1 => Ok(Command::Stelae(stelae::Args::inquire()?)),
-            2 => Ok(Command::Mithril(from_environment()?)),
-            3 => Ok(Command::Relay(relay::Args::default())),
-            _ => unreachable!(),
+    #[cfg(feature = "utils")]
+    fn prompt() -> miette::Result<Self> {
+        let mut methods = vec![Method::Stelae];
+        #[cfg(feature = "mithril")]
+        methods.push(Method::Mithril);
+        methods.push(Method::Immutabledb);
+
+        let method = inquire::Select::new("which bootstrap method would you like to use?", methods)
+            .prompt()
+            .into_diagnostic()?;
+
+        match method {
+            Method::Stelae => Ok(Command::Stelae(stelae::Args::inquire()?)),
+            #[cfg(feature = "mithril")]
+            Method::Mithril => Ok(Command::Mithril(from_environment()?)),
+            Method::Immutabledb => Ok(Command::Immutabledb(immutabledb::Args::inquire()?)),
         }
+    }
+
+    #[cfg(not(feature = "utils"))]
+    fn prompt() -> miette::Result<Self> {
+        bail!("no bootstrap method given and this build has no prompt; pass a subcommand instead (see `dolos bootstrap --help`)");
+    }
+}
+
+/// What the prompt offers.
+#[cfg(feature = "utils")]
+#[derive(Debug, Clone, Copy)]
+enum Method {
+    Stelae,
+    #[cfg(feature = "mithril")]
+    Mithril,
+    Immutabledb,
+}
+
+#[cfg(feature = "utils")]
+impl std::fmt::Display for Method {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Method::Stelae => "Stelae snapshot (a few mins, from a stele you can verify)",
+            #[cfg(feature = "mithril")]
+            Method::Mithril => "Mithril snapshot (a few hours, trust Mithril SPOs)",
+            Method::Immutabledb => {
+                "Local ImmutableDB (a few hours, from a Cardano node database you hold)"
+            }
+        })
     }
 }
 
 /// A subcommand's arguments as an invocation naming none parses them, so
 /// that the prompted path still reads the environment inputs.
+#[cfg(feature = "utils")]
 fn from_environment<T: clap::Args>() -> miette::Result<T> {
     #[derive(Parser)]
     struct Environment<T: clap::Args> {
@@ -79,19 +123,14 @@ fn from_environment<T: clap::Args>() -> miette::Result<T> {
 
 #[derive(Debug, Parser, Default)]
 pub struct Args {
-    /// Clear existing data before bootstrapping
+    /// Replace any data already in storage
     #[arg(long, global = true)]
     force: bool,
 
-    /// Skip bootstrap if data already exists (exit 0); a store this release
-    /// refuses is an error instead
-    #[arg(long, alias = "skip-if-not-empty", global = true)]
+    /// Exit 0 without bootstrapping when storage already holds data; a store
+    /// this release refuses is an error instead
+    #[arg(long, global = true)]
     skip_if_data: bool,
-
-    /// Continue bootstrap even if data exists, trusting the subcommand to
-    /// handle resumption; a store this release refuses is an error instead
-    #[arg(long, alias = "resume", global = true)]
-    r#continue: bool,
 
     /// Enable verbose logging output
     #[arg(long, action, global = true)]
@@ -101,44 +140,63 @@ pub struct Args {
     command: Option<Command>,
 }
 
-use dolos_core::config::RootConfig;
+impl Args {
+    /// What to do about data already in storage, as the flags say it.
+    ///
+    /// `--force`, `--skip-if-data` and `--continue` each answer that question
+    /// differently, so two of them together is a usage error. Checked here
+    /// rather than by clap, which does not compare a group's global flags
+    /// with a subcommand's.
+    fn policy(&self) -> Result<ExistingDataPolicy, clap::Error> {
+        let policy = ExistingDataPolicy {
+            force: self.force,
+            skip_if_data: self.skip_if_data,
+            r#continue: self.command.as_ref().is_some_and(Command::resumes),
+        };
 
-/// What to do about data already in storage, and the flags that say it.
-///
-/// The decision is [`dolos::storage::inspect_existing_data`]'s — a wipe is
-/// storage lifecycle rather than anything a bootstrap method knows about — and
-/// what is here is the three flags that reach it.
-fn inspect_existing_data(config: &RootConfig, args: &Args) -> miette::Result<Existing> {
-    let policy = ExistingDataPolicy {
-        force: args.force,
-        skip_if_data: args.skip_if_data,
-        r#continue: args.r#continue,
-    };
+        let given: Vec<_> = [
+            (policy.force, "--force"),
+            (policy.skip_if_data, "--skip-if-data"),
+            (policy.r#continue, "--continue"),
+        ]
+        .into_iter()
+        .filter_map(|(given, flag)| given.then_some(flag))
+        .collect();
 
-    dolos::storage::inspect_existing_data(config, policy).into_diagnostic()
+        if given.len() > 1 {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::ArgumentConflict,
+                format!("{} cannot be used together\n", given.join(" and ")),
+            ));
+        }
+
+        Ok(policy)
+    }
 }
 
-/// A command with its inputs resolved: what it defaults from the network, and
-/// the credentials it reads with.
+/// A command with its inputs resolved: what it defaults from the network, the
+/// credentials it reads with, the source it was pointed at.
 ///
 /// Resolved once, before `--force` clears anything, so that a missing or bad
 /// input is refused with the node intact and the run uses exactly what was
 /// checked. A credentials file can be a pipe that reads only once.
 enum Resolved<'a> {
-    Relay(&'a relay::Args),
+    #[cfg(feature = "mithril")]
     Mithril(&'a mithril::Args, dolos_mithril::MithrilSource),
-    Snapshot(&'a snapshot::Args),
     Stelae(&'a stelae::Args, stelae::Inputs),
+    Immutabledb(&'a immutabledb::Args, PathBuf),
 }
 
 fn resolve<'a>(config: &RootConfig, command: &'a Command) -> miette::Result<Resolved<'a>> {
     let network = dolos_cardano::networks::KnownNetwork::by_name(&config.chain.network);
 
     let resolved = match command {
-        Command::Relay(args) => Resolved::Relay(args),
+        #[cfg(feature = "mithril")]
         Command::Mithril(args) => Resolved::Mithril(args, mithril::mithril_source(args, network)?),
-        Command::Snapshot(args) => Resolved::Snapshot(args),
         Command::Stelae(args) => Resolved::Stelae(args, stelae::resolve(args, network)?),
+        Command::Immutabledb(args) => {
+            Resolved::Immutabledb(args, immutabledb::resolve(config, args)?)
+        }
     };
 
     Ok(resolved)
@@ -148,19 +206,14 @@ fn dispatch(
     config: &RootConfig,
     resolved: Resolved<'_>,
     feedback: &Feedback,
-    resume: bool,
 ) -> miette::Result<()> {
     match resolved {
-        Resolved::Relay(args) => relay::run(config, args, feedback),
+        #[cfg(feature = "mithril")]
         Resolved::Mithril(args, source) => mithril::run(config, args, &source, feedback),
-        Resolved::Snapshot(args) => snapshot::run(config, args, feedback),
-        // `resume` is `--continue`, and this is the only subcommand that does
-        // anything with it. For the others it has always meant no more than
-        // "proceed even though there is data here"; for a stele restore it is
-        // also the instruction to read the progress file an interrupted attempt
-        // left behind. Passing it rather than re-reading `args` keeps that one
-        // flag with one meaning per subcommand instead of two spellings.
-        Resolved::Stelae(args, inputs) => stelae::run(config, args, inputs, feedback, resume),
+        Resolved::Stelae(args, inputs) => stelae::run(config, args, inputs, feedback),
+        Resolved::Immutabledb(args, immutable) => {
+            immutabledb::run(config, args, &immutable, feedback)
+        }
     }
 }
 
@@ -193,9 +246,13 @@ fn setup_tracing(config: &RootConfig, verbose: bool) -> miette::Result<()> {
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+    let policy = args.policy().unwrap_or_else(|error| error.exit());
+
     setup_tracing(config, args.verbose)?;
 
-    let existing = inspect_existing_data(config, args)?;
+    // The decision is the storage lifecycle's rather than any source's: one
+    // policy over every managed store, whichever source fills them.
+    let existing = dolos::storage::inspect_existing_data(config, policy).into_diagnostic()?;
 
     if matches!(existing, Existing::Skip) {
         info!("existing data detected, skipping bootstrap");
@@ -210,15 +267,15 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     let resolved = resolve(config, &command)?;
 
     // The first destructive step, and deliberately the last one before the run:
-    // everything that could still refuse — the flags, the prompts, the source a
-    // stele restore was given — has already had its say.
+    // everything that could still refuse — the flags, the prompts, the source
+    // the command was given — has already had its say.
     if matches!(existing, Existing::Clear) {
         info!("existing data detected, clearing storage due to --force");
 
         dolos::storage::clear_storage(&config.storage.path).into_diagnostic()?;
     }
 
-    dispatch(config, resolved, feedback, args.r#continue)?;
+    dispatch(config, resolved, feedback)?;
 
     // Reset WAL after any successful bootstrap so that `find_intersect` works.
     // Some bootstrap mechanisms skip WAL commits for performance, leaving it empty
@@ -229,4 +286,62 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(flags: &[&str]) -> Result<Args, clap::Error> {
+        Args::try_parse_from(std::iter::once("bootstrap").chain(flags.iter().copied()))
+    }
+
+    #[test]
+    fn continue_belongs_to_the_replays() {
+        let replays = [
+            #[cfg(feature = "mithril")]
+            &["mithril", "--continue"][..],
+            &["immutabledb", "--source", "db", "--continue"][..],
+        ];
+
+        for flags in replays {
+            let policy = parsed(flags).unwrap().policy().unwrap();
+            assert!(policy.r#continue, "{flags:?}");
+        }
+
+        for flags in [
+            &["--continue", "stelae"][..],
+            &["stelae", "--continue"][..],
+            &["--continue"][..],
+        ] {
+            assert_eq!(parsed(flags).unwrap_err().exit_code(), 2, "{flags:?}");
+        }
+    }
+
+    #[test]
+    fn two_answers_about_existing_data_are_a_usage_error() {
+        for flags in [
+            &["--force", "--skip-if-data", "stelae"][..],
+            &["--force", "stelae", "--skip-if-data"][..],
+            &["--force", "immutabledb", "--source", "db", "--continue"][..],
+            &[
+                "immutabledb",
+                "--source",
+                "db",
+                "--continue",
+                "--skip-if-data",
+            ][..],
+        ] {
+            let error = parsed(flags).unwrap().policy().unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{flags:?}");
+        }
+
+        for flags in [
+            &["--force", "stelae"][..],
+            &["stelae", "--skip-if-data"][..],
+            &["immutabledb", "--source", "db"][..],
+        ] {
+            assert!(parsed(flags).unwrap().policy().is_ok(), "{flags:?}");
+        }
+    }
 }

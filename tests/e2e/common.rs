@@ -234,7 +234,9 @@ pub fn shutdown_gracefully(handle: &mut Child) {
     handle.wait().expect("failed to wait for process");
 }
 
-pub fn reset_and_bootstrap(workspace: &ScenarioWorkspace) {
+/// Write the scenario's genesis files. A fresh workspace holds no data, so the
+/// node starts from genesis with no bootstrap.
+pub fn reset_genesis(workspace: &ScenarioWorkspace) {
     let mut cmd = prepare_scenario_process(workspace);
 
     let reset = cmd
@@ -249,22 +251,6 @@ pub fn reset_and_bootstrap(workspace: &ScenarioWorkspace) {
         "doctor reset-genesis failed for scenario {}: {}",
         workspace.name(),
         String::from_utf8_lossy(&reset.stderr)
-    );
-
-    let mut cmd = prepare_scenario_process(workspace);
-
-    let bootstrap = cmd
-        .args(["bootstrap", "relay", "--force"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("failed to bootstrap data");
-
-    assert!(
-        bootstrap.status.success(),
-        "bootstrap relay failed for scenario {}: {}",
-        workspace.name(),
-        String::from_utf8_lossy(&bootstrap.stderr)
     );
 }
 

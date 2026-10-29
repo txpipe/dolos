@@ -1,21 +1,20 @@
 //! `dolos bootstrap mithril` — the interactive fetch-and-import.
 //!
 //! Parse and render: the download, its plan and its verification are
-//! [`dolos_mithril`]'s. What is here is the operator's arguments, the runtime
-//! the async fetch is driven on, the progress bars it reports through, and the
-//! import into a domain the root library assembles.
+//! [`dolos_mithril`]'s, and the import is the ImmutableDB replay
+//! `bootstrap immutabledb` runs too. What is here is the operator's
+//! arguments, the runtime the async fetch is driven on and the progress bars
+//! it reports through.
 
 use dolos_cardano::networks::KnownNetwork;
 use dolos_core::config::RootConfig;
 use dolos_mithril::{fetch_snapshot, Fetch, MithrilSource};
-use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
+use super::immutable::ReplayOptions;
 use crate::feedback::{Feedback, MithrilFeedback};
-use dolos::engine::BulkReplaySession;
-use dolos::prelude::*;
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct Args {
@@ -44,14 +43,6 @@ pub struct Args {
     #[arg(long, action)]
     pub(crate) retain_snapshot: bool,
 
-    /// Number of blocks to process in each chunk, more is faster but uses more
-    /// memory
-    #[arg(long, default_value = "500")]
-    pub(crate) chunk_size: usize,
-
-    #[arg(long)]
-    pub(crate) start_from: Option<ChainPoint>,
-
     /// Start downloading from this immutable file number (inclusive)
     #[arg(long)]
     pub(crate) download_start: Option<u64>,
@@ -60,9 +51,8 @@ pub struct Args {
     #[arg(long)]
     pub(crate) download_end: Option<u64>,
 
-    /// Stop the import once the ledger reaches this epoch
-    #[arg(long, value_name = "N")]
-    pub(crate) stop_epoch: Option<u64>,
+    #[command(flatten)]
+    pub(crate) replay: ReplayOptions,
 }
 
 impl Default for Args {
@@ -74,11 +64,9 @@ impl Default for Args {
             skip_validation: Default::default(),
             skip_download: Default::default(),
             retain_snapshot: Default::default(),
-            chunk_size: 500,
-            start_from: None,
             download_start: None,
             download_end: None,
-            stop_epoch: None,
+            replay: ReplayOptions::default(),
         }
     }
 }
@@ -117,109 +105,6 @@ pub(crate) fn mithril_source(
         aggregator,
         genesis_vkey,
     })
-}
-
-fn define_starting_point(
-    args: &Args,
-    cursor: Option<ChainPoint>,
-) -> Result<pallas::network::miniprotocols::Point, miette::Error> {
-    if let Some(point) = &args.start_from {
-        Ok(point.clone().try_into().unwrap())
-    } else {
-        let point = cursor
-            .map(|c| c.try_into().unwrap())
-            .unwrap_or(pallas::network::miniprotocols::Point::Origin);
-
-        Ok(point)
-    }
-}
-
-/// Inner import function that can return errors.
-/// The outer function ensures shutdown is called regardless of success/failure.
-fn do_import(
-    cursor: Option<ChainPoint>,
-    mut import: impl FnMut(Vec<RawBlock>) -> miette::Result<BlockSlot>,
-    args: &Args,
-    immutable_path: &Path,
-    feedback: &Feedback,
-    chunk_size: usize,
-) -> Result<(), miette::Error> {
-    let tip = pallas::interop::hardano::storage::immutable::get_tip(immutable_path)
-        .map_err(|err| miette::miette!(err.to_string()))
-        .context("reading immutable db tip")?
-        .ok_or(miette::miette!("immutable db has no tip"))?;
-
-    let cursor = define_starting_point(args, cursor)?;
-
-    let mut iter = pallas::interop::hardano::storage::immutable::read_blocks_from_point(
-        immutable_path,
-        cursor.clone(),
-    )
-    .map_err(|err| miette::miette!(err.to_string()))
-    .context("reading immutable db tip")?;
-
-    // unless we're starting from the origin of the chain, we need to skip the first
-    // result since the iterator will be standing in the last slot already
-    // processed, we don't want to import it twice.
-    if cursor != pallas::network::miniprotocols::Point::Origin {
-        iter.next();
-    }
-
-    let progress = feedback.slot_progress_bar();
-
-    progress.set_message("importing immutable db");
-    progress.set_length(tip.slot_or_default());
-
-    for batch in iter.chunks(chunk_size).into_iter() {
-        let batch: Vec<_> = batch
-            .try_collect()
-            .into_diagnostic()
-            .context("reading block data")?;
-
-        // we need to wrap them on a ref counter since bytes are going to be shared
-        // around throughout the pipeline
-        let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
-
-        let last = import(batch)?;
-
-        progress.set_position(last);
-    }
-
-    progress.abandon_with_message("immutable db import complete");
-
-    Ok(())
-}
-
-fn import_hardano_into_domain(
-    args: &Args,
-    config: &RootConfig,
-    immutable_path: &Path,
-    feedback: &Feedback,
-    chunk_size: usize,
-) -> Result<(), miette::Error> {
-    let genesis = Arc::new(crate::common::open_genesis(config)?);
-    let session = BulkReplaySession::open(config, genesis, args.stop_epoch)
-        .map_err(|error| miette::miette!("opening the bulk-replay session: {error}"))?;
-
-    session
-        .run(|session| {
-            let cursor = session.committed_position().into_diagnostic()?;
-            do_import(
-                cursor,
-                |blocks| {
-                    let progress = session.import_blocks(blocks).into_diagnostic()?;
-                    if progress.is_boundary() {
-                        return Err(miette::miette!("{}", DomainError::StopEpochReached));
-                    }
-                    Ok(progress.position().slot())
-                },
-                args,
-                immutable_path,
-                feedback,
-                chunk_size,
-            )
-        })
-        .map_err(|error| miette::miette!("{error}"))
 }
 
 pub fn run(
@@ -263,8 +148,7 @@ pub fn run(
 
     let immutable_path = Path::new(&args.download_dir).join("immutable");
 
-    // Import is now fully sync - no Tokio runtime needed
-    import_hardano_into_domain(args, config, &immutable_path, feedback, args.chunk_size)?;
+    super::immutable::replay_immutabledb(config, &immutable_path, args.replay, feedback)?;
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");
@@ -283,85 +167,6 @@ pub fn run(
 mod tests {
     use super::*;
     use dolos_cardano::networks;
-    use dolos_core::{ArchiveStore, Domain, ImportExt};
-    use dolos_testing::{
-        blocks::write_immutable_fixture,
-        synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
-        toy_domain::{FjallStores, ToyDomain},
-    };
-    use pallas::ledger::traverse::MultiEraBlock;
-
-    fn import_fixture<D: Domain>(
-        domain: &D,
-        args: &Args,
-        path: &Path,
-        feedback: &Feedback,
-        chunk_size: usize,
-    ) -> miette::Result<()> {
-        do_import(
-            domain.state().read_cursor().into_diagnostic()?,
-            |blocks| domain.import_blocks(blocks).into_diagnostic(),
-            args,
-            path,
-            feedback,
-            chunk_size,
-        )
-    }
-
-    #[test]
-    fn mithril_import_resumes_through_the_automatic_writer() {
-        let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig {
-            block_count: 8,
-            metadata_value: "payload".repeat(32 << 10),
-            slot: 100,
-            ..Default::default()
-        });
-        let domain: ToyDomain<FjallStores> = ToyDomain::with_backend(
-            Arc::new(dolos_cardano::include::preview::load()),
-            config,
-            None,
-            None,
-        );
-        domain.import_blocks(vec![blocks[0].clone()]).unwrap();
-        let first = MultiEraBlock::decode(&blocks[0]).unwrap();
-        let args = Args {
-            start_from: Some(ChainPoint::Specific(first.slot(), first.hash())),
-            ..Default::default()
-        };
-        let dir = tempfile::tempdir().unwrap();
-        write_immutable_fixture(dir.path(), &blocks);
-        import_fixture(&domain, &args, dir.path(), &Feedback::hidden(), 3).unwrap();
-        let stats = domain.archive().append_stats();
-        assert!(stats.serial_batches >= 1, "{stats:?}");
-        assert_eq!(
-            stats.parallel_batches > 0,
-            rayon::current_num_threads() > 1,
-            "{stats:?}"
-        );
-        let restored: Vec<_> = domain
-            .archive()
-            .get_range(None, None)
-            .unwrap()
-            .map(|(_, body)| body)
-            .collect();
-        assert_eq!(
-            restored,
-            blocks
-                .iter()
-                .map(|body| body.as_ref().clone())
-                .collect::<Vec<_>>()
-        );
-        let before = domain.archive().append_stats();
-        import_fixture(
-            &domain,
-            &Args::default(),
-            dir.path(),
-            &Feedback::hidden(),
-            3,
-        )
-        .unwrap();
-        assert_eq!(domain.archive().append_stats(), before);
-    }
 
     #[test]
     fn a_known_network_defaults_the_aggregator_and_key() {
@@ -405,6 +210,7 @@ mod tests {
 
     /// The prompted path parses no arguments and still reads the
     /// environment, with every other flag at its default.
+    #[cfg(feature = "utils")]
     #[test]
     fn the_environment_reaches_the_flags() {
         let _guard = crate::common::ENV_LOCK
@@ -426,6 +232,6 @@ mod tests {
         );
         assert_eq!(args.genesis_vkey.as_deref(), Some("5b31"));
         assert_eq!(args.download_dir, Args::default().download_dir);
-        assert_eq!(args.chunk_size, Args::default().chunk_size);
+        assert_eq!(args.replay.chunk_size, Args::default().replay.chunk_size);
     }
 }

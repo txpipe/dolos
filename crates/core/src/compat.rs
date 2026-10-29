@@ -39,9 +39,9 @@ impl Display for IncompatibleStore {
 
         write!(
             f,
-            "; this dolos opens stores that record `{}`. Clear it and re-sync (`dolos bootstrap \
-             relay --force`), or restore it from a stele (`dolos bootstrap stelae --force`); see \
-             {MIGRATION_GUIDE_URL}",
+            "; this dolos opens stores that record `{}`. Restore it from a stele (`dolos \
+             bootstrap stelae --force`), or replay an ImmutableDB over it (`dolos bootstrap \
+             immutabledb --force`); see {MIGRATION_GUIDE_URL}",
             Compatibility::current()
         )
     }
@@ -66,7 +66,7 @@ mod tests {
             assert!(message.contains("data/state"), "{message}");
             assert!(message.contains(SUPPORTED_CONTRACTS[0]), "{message}");
             assert!(
-                message.contains("dolos bootstrap relay --force"),
+                message.contains("dolos bootstrap immutabledb --force"),
                 "{message}"
             );
             assert!(

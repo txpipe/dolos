@@ -10,24 +10,34 @@ use dolos_testing::{
     toy_domain::{FjallStores, ToyDomain},
 };
 
+/// `bootstrap immutabledb` keeps two blocks sharing a slot, a Byron epoch
+/// boundary block and the block after it, in the database's order, and a
+/// resumed run over the same database imports nothing twice.
 #[test]
-fn archive_import_cli_preserves_same_slot_byron_order_and_resume() {
-    use dolos_testing::blocks::{make_byron_ebb, make_conway_block, write_immutable_fixture};
+fn immutabledb_bootstrap_preserves_same_slot_byron_order_and_resume() {
+    use dolos_testing::blocks::{
+        make_byron_ebb, make_conway_block_with_prev, write_immutable_fixture,
+    };
     let node = node::Node::new();
     let source = tempfile::tempdir().unwrap();
-    let (_, origin) = make_byron_ebb(0, pallas::crypto::hash::Hash::new([0; 32]));
-    let (boundary, ebb) = make_byron_ebb(1, pallas::crypto::hash::Hash::new([0; 32]));
-    let (_, regular) = make_conway_block(boundary.slot());
-    let (_, next) = make_conway_block(boundary.slot() + 1);
+    let immutable = source.path().join("immutable");
+    std::fs::create_dir_all(&immutable).unwrap();
+    std::fs::write(source.path().join("protocolMagicId"), "2").unwrap();
+    // Chained, as a replay checks each block's parent.
+    let (genesis, origin) = make_byron_ebb(0, pallas::crypto::hash::Hash::new([0; 32]));
+    let (boundary, ebb) = make_byron_ebb(1, genesis.hash().unwrap());
+    let (regular_point, regular) = make_conway_block_with_prev(boundary.slot(), boundary.hash(), 1);
+    let (_, next) = make_conway_block_with_prev(boundary.slot() + 1, regular_point.hash(), 2);
     let blocks = vec![origin, ebb, regular, next];
-    write_immutable_fixture(source.path(), &blocks);
-    for _repeat in 0..2 {
+    write_immutable_fixture(&immutable, &blocks);
+    for resume in [&[][..], &["--continue"][..]] {
         let status = std::process::Command::new(env!("CARGO_BIN_EXE_dolos"))
             .arg("--config")
             .arg(node.config_path())
-            .args(["data", "import-archive", "--source"])
+            .args(["bootstrap", "immutabledb", "--source"])
             .arg(source.path())
             .args(["--chunk-size", "3"])
+            .args(resume)
             .status()
             .unwrap();
         assert!(status.success());

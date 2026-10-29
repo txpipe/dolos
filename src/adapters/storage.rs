@@ -61,9 +61,9 @@ pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
 /// A `remove_dir_all` of the whole path and not a per-store wipe, which matters
 /// for one thing that is not a store: a stele restore's progress file lives
 /// inside `storage.path`, and a progress file that outlived the stores it
-/// describes would tell the next `--continue` to skip layers whose data is
-/// gone. Anything that clears storage has to clear that too, and taking the
-/// directory is how this does it without having to remember.
+/// describes would tell a resumed restore to skip layers whose data is gone.
+/// Anything that clears storage has to clear that too, and taking the directory
+/// is how this does it without having to remember.
 pub fn clear_storage(storage_path: &Path) -> Result<(), Error> {
     std::fs::remove_dir_all(storage_path)
         .map_err(|e| Error::StorageError(format!("removing existing storage: {e}")))?;
@@ -133,10 +133,10 @@ pub enum Existing {
 pub struct ExistingDataPolicy {
     /// `--force`: clear storage and re-bootstrap.
     pub force: bool,
-    /// `--skip-if-data`: leave a node alone and exit zero. A store this
+    /// `--skip-if-data`: leave the data alone and exit zero. A store this
     /// release refuses is not skipped.
     pub skip_if_data: bool,
-    /// `--continue`: go ahead, trusting the run to resume.
+    /// `--continue`: go ahead, resuming a replay from its committed position.
     pub r#continue: bool,
 }
 
@@ -150,15 +150,16 @@ struct Found {
     unreadable: Option<Error>,
     /// The first identity refusal.
     refused: Option<Error>,
-    /// The state, archive and segment directories holding data: a store with
-    /// data or one this release refuses, an archive that fails to open, or
-    /// block segments.
+    /// The WAL, state, archive and segment directories holding data: a store
+    /// with data or one this release refuses, a WAL or an archive that fails
+    /// to open, or block segments.
     held: Vec<PathBuf>,
 }
 
 /// Open the stores whose directories exist, creating no store directory: a
 /// state cursor is a node, and failures to open or to read the cursor are
-/// reported rather than raised.
+/// reported rather than raised. The WAL is read without opening it as a
+/// store, which would stamp or wipe one of another version.
 fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
     let mut found = Found::default();
 
@@ -182,6 +183,12 @@ fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
                 found.held.push(path);
             }
             Err(error) => found.unreadable = Some(error),
+        }
+    }
+
+    if let Some(path) = config.wal_path().filter(|path| path.exists()) {
+        if dolos_redb3::wal::holds_entries(&path).unwrap_or(true) {
+            found.held.push(path);
         }
     }
 
@@ -263,7 +270,9 @@ pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
 ///
 /// The refusals happen here — a skip, and the refusal for existing data with no
 /// flag saying what to do about it — so neither is a question asked of an
-/// operator whose answer is then thrown away.
+/// operator whose answer is then thrown away. Any managed store holding data
+/// is existing data, a state without a cursor included: an interrupted
+/// bootstrap leaves one.
 ///
 /// A store this release refuses to open is data in the way that only `--force`
 /// on its own clears; every other flag, `--continue` included, gets its
@@ -289,7 +298,7 @@ pub fn inspect_existing_data(
         return Err(error);
     }
 
-    if !found.node {
+    if found.held.is_empty() {
         return Ok(Existing::Proceed);
     }
 
@@ -301,10 +310,17 @@ pub fn inspect_existing_data(
         return Ok(Existing::Clear);
     }
 
-    Err(Error::message(
-        "existing data detected in storage. Use --force to clear and re-bootstrap, \
-         --skip-if-data to skip, or --continue to resume",
-    ))
+    let held: Vec<_> = found
+        .held
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+
+    Err(Error::message(format!(
+        "existing data detected in storage ({}). Use --force to replace it, or \
+         --skip-if-data to leave it and exit 0",
+        held.join(", "),
+    )))
 }
 
 /// The decision on storage holding a store this release refuses. `--force` on
@@ -359,9 +375,6 @@ fn clear_refused(
         left.join("\n"),
     )))
 }
-
-/// The data format this binary reads, as snapshot download URLs name it.
-pub const CURRENT_STORAGE_VERSION: &str = "v4";
 
 /// Ensure directory exists for a store path.
 fn ensure_store_path(path: &Path) -> Result<(), Error> {
@@ -452,15 +465,6 @@ where
         archive: open_archive_store(config)?,
         mempool: open_mempool_store(config)?,
     })
-}
-
-/// Open the state and archive stores through their identity check, then
-/// close them, for a writer that filled storage without opening them.
-pub fn check_store_identities(config: &RootConfig) -> Result<(), Error> {
-    open_state_store(config)?.shutdown()?;
-    open_archive_store(config)?.shutdown()?;
-
-    Ok(())
 }
 
 /// Admit a persistent store only if it records an identity this release
@@ -2200,8 +2204,8 @@ mod tests {
             .expect("the stores opened")
             .to_string();
         for remedy in [
-            "dolos bootstrap relay --force",
             "dolos bootstrap stelae --force",
+            "dolos bootstrap immutabledb --force",
         ] {
             assert!(message.contains(remedy), "{message}");
         }
@@ -2308,19 +2312,50 @@ mod tests {
         state
     }
 
+    /// A WAL holding an entry and nothing else in storage.
+    fn written_wal(config: &RootConfig) {
+        let wal = open_wal_store::<dolos_cardano::CardanoDelta>(config).unwrap();
+        wal.reset_to(&ChainPoint::Origin).unwrap();
+        wal.shutdown().unwrap();
+    }
+
     /// Over stores this release opens, `--continue` proceeds whatever storage
-    /// holds, and the other flags decide only about a node, a state with a
-    /// cursor: empty storage, or a state with rows and no cursor, proceeds
-    /// under every one.
+    /// holds, and the other flags decide about any store holding data: only
+    /// empty storage, or an empty WAL file, proceeds under every one. A node
+    /// is a state with a cursor.
     #[test]
     fn inspecting_storage_follows_the_flags_over_stores_this_release_opens() {
-        let writes: [fn(&RootConfig); 3] = [
-            |_| {},
-            written_state_without_cursor,
-            |config| written_state(config, current().as_deref()),
+        /// What a case writes, whether storage then holds data, and whether
+        /// it holds a node.
+        type Case = (fn(&RootConfig), bool, bool);
+
+        let writes: [Case; 6] = [
+            (|_| {}, false, false),
+            (
+                |config| {
+                    open_wal_store::<dolos_cardano::CardanoDelta>(config)
+                        .unwrap()
+                        .shutdown()
+                        .unwrap()
+                },
+                false,
+                false,
+            ),
+            (written_wal, true, false),
+            (
+                |config| written_archive(config, current().as_deref()),
+                true,
+                false,
+            ),
+            (written_state_without_cursor, true, false),
+            (
+                |config| written_state(config, current().as_deref()),
+                true,
+                true,
+            ),
         ];
 
-        for (write, node) in writes.into_iter().zip([false, false, true]) {
+        for (write, held, node) in writes {
             let temp = tempfile::tempdir().unwrap();
             let config = config_over(&temp.path().join("data"));
             write(&config);
@@ -2328,19 +2363,37 @@ mod tests {
             for policy in every_policy() {
                 let inspected = inspect_existing_data(&config, policy);
 
-                if policy.r#continue || !node {
+                if policy.r#continue || !held {
                     assert_eq!(inspected.unwrap(), Existing::Proceed, "{policy:?}");
                 } else if policy.skip_if_data {
                     assert_eq!(inspected.unwrap(), Existing::Skip, "{policy:?}");
                 } else if policy.force {
                     assert_eq!(inspected.unwrap(), Existing::Clear, "{policy:?}");
                 } else {
-                    assert!(inspected.is_err(), "{policy:?}");
+                    let message = inspected.unwrap_err().to_string();
+                    assert!(message.contains("existing data detected"), "{message}");
+                    assert!(message.contains("--force"), "{message}");
+                    assert!(message.contains("--skip-if-data"), "{message}");
                 }
             }
 
             assert_eq!(has_existing_data(&config).unwrap(), node);
         }
+    }
+
+    /// The WAL is read without being opened as a store, which would stamp
+    /// its version: inspecting leaves its file as it was.
+    #[test]
+    fn inspecting_storage_reads_the_wal_without_writing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_wal(&config);
+
+        let path = config.wal_path().unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        assert!(inspect_existing_data(&config, ExistingDataPolicy::default()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     /// Bootstrap's look at storage opens nothing absent, lets `--force` on
@@ -2456,9 +2509,8 @@ mod tests {
     /// refuses while a directory outside the root holds data, naming it: a
     /// state or archive with data, refused or current, an archive it can't
     /// open, or block segments. Looking doesn't recreate a directory the
-    /// operator removed. Once it is gone, `--force` clears a store still
-    /// refused, and with a refused state removed nothing is left refused, so
-    /// it clears nothing.
+    /// operator removed. Once it is gone, `--force` clears what the root
+    /// still holds, refused or not.
     #[test]
     fn force_names_data_outside_the_root() {
         let stores = [
@@ -2511,14 +2563,7 @@ mod tests {
                 let inspected = inspect_existing_data(&config, force()).unwrap();
                 assert!(!outside.exists(), "{}", outside.display());
 
-                let state_kept = config.storage.state_path().unwrap().exists();
-                let expected = if state_kept || archive == Kept::Refused {
-                    Existing::Clear
-                } else {
-                    Existing::Proceed
-                };
-
-                assert_eq!(inspected, expected, "{state:?} {archive:?}");
+                assert_eq!(inspected, Existing::Clear, "{state:?} {archive:?}");
             }
         }
     }
@@ -2719,9 +2764,9 @@ mod tests {
         }
     }
 
-    /// A state that opens but whose rows fail to read is no node without a
-    /// cursor, so every flag goes ahead and leaves the failure to the command
-    /// that uses the state.
+    /// A state that opens but whose rows fail to read counts as data, so the
+    /// flags decide about it as about any data, and the failure is left to
+    /// the command that uses the state.
     #[test]
     fn a_state_whose_rows_fail_to_read_is_left_to_the_command() {
         let temp = tempfile::tempdir().unwrap();
@@ -2730,12 +2775,20 @@ mod tests {
         assert!(open_state_store(&config).unwrap().holds_data().is_err());
 
         for policy in every_policy() {
-            assert_eq!(
-                inspect_existing_data(&config, policy).unwrap(),
-                Existing::Proceed,
-                "{policy:?}"
-            );
+            let inspected = inspect_existing_data(&config, policy);
+
+            if policy.r#continue {
+                assert_eq!(inspected.unwrap(), Existing::Proceed, "{policy:?}");
+            } else if policy.skip_if_data {
+                assert_eq!(inspected.unwrap(), Existing::Skip, "{policy:?}");
+            } else if policy.force {
+                assert_eq!(inspected.unwrap(), Existing::Clear, "{policy:?}");
+            } else {
+                assert!(inspected.is_err(), "{policy:?}");
+            }
         }
+
+        assert!(!has_existing_data(&config).unwrap());
     }
 
     /// A state whose cursor fails to read can't be told from a node, so it is

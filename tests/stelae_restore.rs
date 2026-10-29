@@ -143,9 +143,8 @@ fn a_forced_restore_replaces_a_store_this_release_refuses() {
     for refused in [
         node.run(&["data", "summary"]),
         node.bootstrap_headless(&["--skip-if-data"]),
-        node.bootstrap_headless(&["--continue"]),
         node.bootstrap_headless(&[]),
-        node.run(&["bootstrap", "relay", "--continue"]),
+        node.run(&["bootstrap", "immutabledb", "--source", "db", "--continue"]),
     ] {
         assert!(!refused.status.success());
 
