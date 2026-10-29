@@ -531,7 +531,11 @@ where
             Some(failed) => MetadataBody::Failed(failed.error.clone()),
             // a fill that panicked or was dropped
             None => {
-                tracing::warn!(%error, "off-chain metadata cache unavailable, fetching uncached");
+                tracing::warn!(
+                    namespace = namespaces.bodies,
+                    %error,
+                    "off-chain metadata cache unavailable, fetching uncached"
+                );
                 uncached(cache, location, namespaces, fetch()).await
             }
         },
