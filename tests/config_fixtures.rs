@@ -625,6 +625,38 @@ fn write_genesis_for_a_named_network_needs_no_configuration() {
     assert_embedded_genesis(&out, "preview");
 }
 
+/// One existing file is enough to refuse: only it is named, and none of the
+/// others is written.
+#[test]
+fn write_genesis_refuses_naming_only_the_existing_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    std::fs::write(out.join("conway.json"), "edited").unwrap();
+
+    let output = run_dolos(
+        dir.path(),
+        &[
+            "config",
+            "write-genesis",
+            "--network",
+            "preview",
+            "--dir",
+            "out",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("conway.json"), "{stderr}");
+
+    for name in ["byron.json", "shelley.json", "alonzo.json"] {
+        assert!(!stderr.contains(name), "{name}: {stderr}");
+    }
+
+    assert_eq!(entries(&out), ["conway.json"]);
+    assert_eq!(std::fs::read(out.join("conway.json")).unwrap(), b"edited");
+}
+
 /// Without `--network` the configuration's network is written to
 /// `./genesis`, and nothing appears under `storage.path`.
 #[test]
@@ -1063,6 +1095,7 @@ fn shipped_configurations_pass_config_check() {
                     "preview",
                     "--dir",
                     ".",
+                    "--force",
                 ],
             );
             assert!(
@@ -1188,11 +1221,8 @@ fn init_without_a_terminal_writes_only_the_configuration() {
         ],
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "{stdout}{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}{stderr}");
 
     assert_eq!(entries(dir.path()), ["node.toml"]);
     assert_eq!(
@@ -1202,7 +1232,52 @@ fn init_without_a_terminal_writes_only_the_configuration() {
 
     let bootstrap = format!("dolos --config {} bootstrap", path.display());
     assert!(stdout.contains(&bootstrap), "{stdout}");
-    assert!(!stdout.contains("Which network"), "{stdout}");
+    assert!(!stderr.contains("Which network"), "{stderr}");
+}
+
+/// An unattended re-run keeps the file's history window unless
+/// `--max-chain-history` replaces it.
+#[test]
+#[serial]
+fn init_without_a_terminal_keeps_the_history_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dolos.toml");
+    let init = ["init", "--known-network", "preview"];
+
+    let output = run_dolos(
+        dir.path(),
+        &[&init[..], &["--max-chain-history", "86400"]].concat(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let day = HistoryConfig::rolling(HistoryWindow::slots(86_400));
+    assert_eq!(load(Some(&path)).unwrap().history, day);
+
+    let output = run_dolos(dir.path(), &init);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(load(Some(&path)).unwrap().history, day);
+
+    let output = run_dolos(
+        dir.path(),
+        &[&init[..], &["--max-chain-history", "3600"]].concat(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        load(Some(&path)).unwrap().history,
+        HistoryConfig::rolling(HistoryWindow::slots(3_600))
+    );
 }
 
 /// Without a terminal and without `--known-network`, `init` is a usage error

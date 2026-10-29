@@ -56,15 +56,6 @@ impl From<HistoryPrunningOptions> for HistoryConfig {
     }
 }
 
-impl From<Option<u64>> for HistoryPrunningOptions {
-    fn from(value: Option<u64>) -> Self {
-        match value {
-            None => Self::KeepEverything,
-            Some(x) => Self::Custom(x),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AvailableApi {
     UtxoRpc,
@@ -216,6 +207,14 @@ impl ConfigEditor {
         self
     }
 
+    /// Only a given window replaces the file's history; without one it is kept.
+    fn apply_max_chain_history(self, value: Option<u64>) -> Self {
+        match value {
+            Some(slots) => self.apply_history_pruning(HistoryPrunningOptions::Custom(slots)),
+            None => self,
+        }
+    }
+
     fn apply_serve_grpc(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
@@ -306,7 +305,7 @@ impl ConfigEditor {
     fn fill_values_from_args(self, args: &Args) -> Self {
         self.apply_known_network(args.known_network)
             .apply_remote_peer(args.remote_peer.as_ref())
-            .apply_history_pruning(args.max_chain_history.into())
+            .apply_max_chain_history(args.max_chain_history)
             .apply_serve_grpc(args.serve_grpc)
             .apply_serve_minibf(args.serve_minibf)
             .apply_serve_minikupo(args.serve_minikupo)
