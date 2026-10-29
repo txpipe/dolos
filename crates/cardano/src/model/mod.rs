@@ -180,6 +180,7 @@ pub enum CardanoEntity {
     MetadataLabelState(Box<MetadataLabelState>),
     AssetMintSet(Box<AssetMintSet>),
     AssetMintChunk(Box<AssetMintChunk>),
+    PrunedAccountState(Box<PrunedAccountState>),
 }
 
 macro_rules! variant_boilerplate {
@@ -230,6 +231,7 @@ variant_boilerplate!(FirstScriptChunk);
 variant_boilerplate!(MetadataLabelState);
 variant_boilerplate!(AssetMintSet);
 variant_boilerplate!(AssetMintChunk);
+variant_boilerplate!(PrunedAccountState);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -267,6 +269,7 @@ impl dolos_core::Entity for CardanoEntity {
             MetadataLabelState::NS => MetadataLabelState::decode_entity(ns, value).map(Into::into),
             AssetMintSet::NS => AssetMintSet::decode_entity(ns, value).map(Into::into),
             AssetMintChunk::NS => AssetMintChunk::decode_entity(ns, value).map(Into::into),
+            PrunedAccountState::NS => PrunedAccountState::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -302,6 +305,7 @@ impl dolos_core::Entity for CardanoEntity {
             Self::MetadataLabelState(x) => MetadataLabelState::encode_entity(x),
             Self::AssetMintSet(x) => AssetMintSet::encode_entity(x),
             Self::AssetMintChunk(x) => AssetMintChunk::encode_entity(x),
+            Self::PrunedAccountState(x) => PrunedAccountState::encode_entity(x),
         }
     }
 }
@@ -340,6 +344,7 @@ pub fn build_schema() -> StateSchema {
     register_state::<FirstScriptSet>(&mut schema);
     register_state::<MetadataLabelState>(&mut schema);
     register_state::<AssetMintSet>(&mut schema);
+    register_state::<PrunedAccountState>(&mut schema);
     schema
 }
 
@@ -359,6 +364,7 @@ pub fn build_log_schema() -> StateSchema {
     register_log::<AccountStats>(&mut schema);
     register_log::<AssetMintChunk>(&mut schema);
     register_log::<ProposalState>(&mut schema);
+    register_log::<DRepState>(&mut schema);
     register_log::<PoolState>(&mut schema);
     schema
 }
@@ -394,7 +400,7 @@ mod schema_tests {
         let states = build_schema();
         let logs = build_log_schema();
 
-        for ns in [ProposalState::NS, PoolState::NS] {
+        for ns in [ProposalState::NS, DRepState::NS, PoolState::NS] {
             assert!(states.contains_key(ns), "{ns} is not a state namespace");
             assert!(logs.contains_key(ns), "{ns} is not a log namespace");
         }

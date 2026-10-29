@@ -125,9 +125,9 @@ impl OrderCheck {
 #[cfg(test)]
 mod tests {
     use dolos_cardano::model::{
-        AccountAddressChunk, AccountStats, AddressStats, AssetMintChunk, DRepEpochLog, EpochState,
-        FirstMintChunk, FirstScriptChunk, FixedNamespace as _, PaymentAddressChunk, PolicyKey,
-        PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalState,
+        AccountAddressChunk, AccountStats, AddressStats, AssetMintChunk, DRepEpochLog, DRepState,
+        EpochState, FirstMintChunk, FirstScriptChunk, FixedNamespace as _, PaymentAddressChunk,
+        PolicyKey, PolicyMintChunk, PoolEpochLog, PoolKey, PoolState, ProposalState,
     };
 
     use super::*;
@@ -159,7 +159,7 @@ mod tests {
     /// Each log takes exactly the keys of its kind after the slot: none for
     /// the epoch log, a chunk index for first mints and first scripts, a policy
     /// and a chunk for the per-policy list, an asset key and a chunk for an
-    /// asset's mints, a pool or a proposal for its final row.
+    /// asset's mints, a pool, a proposal or a DRep for its final row.
     #[test]
     fn keys_are_held_to_their_namespace_kind() {
         let slot = 7u64.to_be_bytes();
@@ -198,21 +198,23 @@ mod tests {
         )
         .unwrap();
 
-        // drep epochs take a drep: a credential header and its hash, or the
-        // one-byte tag of Abstain or NoConfidence
-        for drep in [&[0x22][..], &[0x23], &[0x00], &[0x01]] {
-            let hash: &[u8] = if drep[0] > 1 { &[1; 28] } else { &[] };
-            let key = [slot.as_slice(), drep, hash].concat();
-            decode(DRepEpochLog::NS, wire(&key).as_bytes()).unwrap();
-        }
+        // drep epochs and a DRep's final row take a drep: a credential
+        // header and its hash, or the one-byte tag of Abstain or NoConfidence
+        for ns in [DRepEpochLog::NS, DRepState::NS] {
+            for drep in [&[0x22][..], &[0x23], &[0x00], &[0x01]] {
+                let hash: &[u8] = if drep[0] > 1 { &[1; 28] } else { &[] };
+                let key = [slot.as_slice(), drep, hash].concat();
+                decode(ns, wire(&key).as_bytes()).unwrap_or_else(|err| panic!("{ns}: {err:?}"));
+            }
 
-        for drep in [&[][..], &[0x22; 28], &[0x22; 30], &[0x00, 0x01], &[0x02]] {
-            let key = [slot.as_slice(), drep].concat();
-            let err = decode(DRepEpochLog::NS, wire(&key).as_bytes()).unwrap_err();
-            assert!(
-                matches!(err, Error::MalformedRecord { .. }),
-                "drep-epochs/{drep:02x?}: {err:?}"
-            );
+            for drep in [&[][..], &[0x22; 28], &[0x22; 30], &[0x00, 0x01], &[0x02]] {
+                let key = [slot.as_slice(), drep].concat();
+                let err = decode(ns, wire(&key).as_bytes()).unwrap_err();
+                assert!(
+                    matches!(err, Error::MalformedRecord { .. }),
+                    "{ns}/{drep:02x?}: {err:?}"
+                );
+            }
         }
 
         for (ns, len) in [
