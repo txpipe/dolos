@@ -3,9 +3,10 @@
 //!
 //! Both code paths stream: each entity namespace is read one record at a
 //! time and the result is written immediately. Per-shard commits rotate
-//! the shard's account-range slice in that same pass and flush
-//! `EpochState`'s `EStartProgress`; the finalize commit applies the
-//! queued pool / drep / proposal transitions, the closing
+//! the shard's account-range slice in that same pass, deleting the dead
+//! accounts that did not deregister in the closing epoch, and flush
+//! `EpochState`'s `EStartProgress`; the finalize commit
+//! applies the queued pool / drep / proposal transitions, the closing
 //! `EpochTransition` and optional era-summary writes, moves the
 //! boundary's final rows from state to the archive, and advances the
 //! cursor.
@@ -134,9 +135,11 @@ impl super::WorkContext {
     /// Commit a single per-shard run in one state transaction: stream the
     /// accounts of the shard's key ranges once, adding each to the shard's
     /// tally and writing its stake-only account-epoch row to the archive as
-    /// it stands, then rotating it and writing it back. The shard's
-    /// `EStartProgress` (carrying the tally) applies to `EpochState` in the
-    /// same transaction, after the rows reach the archive.
+    /// it stands, then rotating it and writing it back, or deleting it when
+    /// it is dead and not deregistered in the closing epoch
+    /// ([`super::prune`]). The shard's `EStartProgress` (carrying
+    /// the tally) applies to `EpochState` in the same transaction, after the
+    /// rows reach the archive.
     ///
     /// No per-account deltas are built: ESTART writes no WAL and is never
     /// undone. A crash before the state commit leaves the shard's accounts
@@ -160,7 +163,10 @@ impl super::WorkContext {
 
         let next_epoch = self.starting_epoch_no();
         let slot = self.account_epoch_slot();
+        let closing_start = self.chain_summary.epoch_start(self.ended_state().number);
         let mut tally = BTreeMap::new();
+        let mut pruned = 0u64;
+        let mut remainders = 0u64;
 
         for range in ranges {
             for record in state.iter_entities_typed::<AccountState>(Some(range))? {
@@ -174,9 +180,19 @@ impl super::WorkContext {
 
                 account.rotate(next_epoch);
 
-                writer.write_entity_typed::<AccountState>(&account_id, &account)?;
+                if super::prune::prunes(&account, closing_start) {
+                    pruned += 1;
+
+                    if super::prune::prune_account(state, &writer, &account_id, &account)? {
+                        remainders += 1;
+                    }
+                } else {
+                    writer.write_entity_typed::<AccountState>(&account_id, &account)?;
+                }
             }
         }
+
+        debug!(pruned, remainders, "pruned dead accounts");
 
         self.add_delta(EStartProgress::new(shard_index, total_shards, tally));
 

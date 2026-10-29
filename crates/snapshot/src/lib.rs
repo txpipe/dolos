@@ -114,7 +114,7 @@ use dolos_cardano::model::{
     DatumState, EpochState, EraState, FirstMintChunk, FirstMintSet, FirstScriptChunk,
     FirstScriptSet, FixedNamespace, GovState, MetadataLabelState, PaymentAddressChunk,
     PaymentAddressSet, PaymentStats, PendingMirState, PendingRewardState, PolicyMintChunk,
-    PoolEpochLog, PoolState, ProposalState,
+    PoolEpochLog, PoolState, ProposalState, PrunedAccountState,
 };
 use dolos_core::{ChainPoint, EntityKind, Namespace};
 use serde_json::json;
@@ -175,13 +175,14 @@ pub const LOG_NAMESPACES: [Namespace; LOG_KINDS.len()] = {
 /// Nothing in the tree marks an entity as log-bearing, so this table is where
 /// the log namespaces are spelled, held to the entity types by
 /// `log_kinds_derive_from_their_namespaces` in `tests/coverage.rs`.
-pub const LOG_KINDS: [(&str, Namespace); 14] = [
+pub const LOG_KINDS: [(&str, Namespace); 15] = [
     ("log-account-address-chunks", AccountAddressChunk::NS),
     ("log-account-epochs", AccountEpochLog::NS),
     ("log-account-stats", AccountStats::NS),
     ("log-address-stats", AddressStats::NS),
     ("log-asset-mint-chunks", AssetMintChunk::NS),
     ("log-drep-epochs", DRepEpochLog::NS),
+    ("log-dreps", DRepState::NS),
     ("log-epochs", EpochState::NS),
     ("log-first-mint-chunks", FirstMintChunk::NS),
     ("log-first-script-chunks", FirstScriptChunk::NS),
@@ -205,9 +206,10 @@ pub const LOG_KINDS: [(&str, Namespace); 14] = [
 /// Epoch `e`'s entries are written by the seal at the boundary opening
 /// `e + 2`, so the first stele whose `e` window carries one is cut there,
 /// exactly as for `log-first-script-chunks`.
-pub const ENTITY_KINDS: [(&str, EntityKind); 2] = [
+pub const ENTITY_KINDS: [(&str, EntityKind); 3] = [
     ("entity-asset", entities::ASSET),
     ("entity-script", entities::SCRIPT),
+    ("entity-stake", entities::STAKE),
 ];
 
 /// The entity kinds an earlier profile witnessed in a state namespace, with
@@ -277,7 +279,7 @@ pub fn entity_kind_for(kind: &str) -> Option<EntityKind> {
 /// namespace is a single blob. Re-sharding a namespace is a media-type-version
 /// event for that namespace's kind, decided by the format's owner; it is not a
 /// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 21] = [
+pub const STATE_KINDS: [(&str, Namespace, u8); 22] = [
     ("state-account-addresses", AccountAddressSet::NS, 1),
     ("state-account-stats", AccountStats::NS, 1),
     ("state-accounts", AccountState::NS, 16),
@@ -298,6 +300,7 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 21] = [
     ("state-pending-rewards", PendingRewardState::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
+    ("state-pruned-accounts", PrunedAccountState::NS, 1),
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 

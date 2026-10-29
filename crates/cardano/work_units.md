@@ -58,10 +58,10 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 ### `finalize()` — Estart global pass
 
 - Builds a fresh `WorkContext` via `WorkContext::load_finalize` (using the AVVM total computed in `initialize`).
-- Iterates pools / dreps / proposals; emits transition deltas via the `nonces` and `reset` visitors, and gathers the rows that leave state via the `final_rows` visitor: a pool whose every snapshot is retired once rotated (`PoolState::leaves_state`, the boundary opening its retiring epoch + 3), and a proposal resolved at a boundary before the one just crossed (`ProposalState::leaves_state_at`).
+- Iterates pools / dreps / proposals; emits transition deltas via the `nonces` and `reset` visitors, and gathers the rows that leave state via the `final_rows` visitor: a pool whose every snapshot is retired once rotated (`PoolState::leaves_state`, the boundary opening its retiring epoch + 3), a DRep unregistered and refunded before the closing epoch and before every proposal the next boundary can still ratify was submitted (`DRepState::leaves_state_at`), and a proposal resolved at a boundary before the one just crossed (`ProposalState::leaves_state_at`).
 - Emits the closing `EpochTransition` delta (rotates `number` / `initial_pots` / `rolling` / `pparams`, seeds `EpochState.end = Some(EndStats::default())`, resets *both* `ewrap_progress = None` and `estart_progress = None`).
 - Direct writes: `EraState` writes during era transitions (Shelley→Allegra etc.).
-- Direct writes and deletes (`crate::final_rows`): each moved row's final row (a pool's last state row as it stands; a proposal's without its vote maps) goes to the log of its own namespace under `epoch_start` of the closing epoch, and its state row is deleted, along with the transition delta the `reset` visitor queued for it. The archive commits before the state, so a crash in between re-runs finalize over the same rows.
+- Direct writes and deletes (`crate::final_rows`): each moved row's final row (a pool's or a DRep's last state row as it stands; a proposal's without its vote maps) goes to the log of its own namespace under `epoch_start` of the closing epoch, and its state row is deleted, along with the transition delta the `reset` visitor queued for it. The archive commits before the state, so a crash in between re-runs finalize over the same rows.
 - **Sets the cursor** to `ChainPoint::Slot(boundary_slot)` — the only phase across all work units that moves the cursor. A crash before `finalize()` restarts from the boundary block.
 - Deltas emitted in finalize:
   - `NonceTransition` — `estart/nonces.rs:92`. Targets `epochs`.
@@ -70,7 +70,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 
 The rotation is not idempotent (rotating twice double-rolls), so a resumed boundary skips the shards `estart_progress` records as committed. A shard is all or nothing: its rows and its `EStartProgress` commit together, so a crash inside a shard leaves its rows untouched for the resumed run to read again.
 
-- Namespaces touched: `accounts` (shard range, per shard), `pools`, `epochs`, `eras`, `pools` and `proposals` (deletes, and their logs) (in finalize).
+- Namespaces touched: `accounts` (shard range, per shard), `pools`, `epochs`, `eras`, `pools`, `dreps` and `proposals` (deletes, and their logs) (in finalize).
 
 ## 2. `RollWorkUnit` — applies a batch of blocks
 
