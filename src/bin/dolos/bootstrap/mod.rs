@@ -1,12 +1,12 @@
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use miette::{bail, IntoDiagnostic};
 use tracing::info;
 
 use crate::feedback::Feedback;
-use dolos::storage::{Existing, ExistingDataPolicy};
+use dolos::storage::{Existing, ExistingDataPolicy, Removal};
 use dolos_core::config::RootConfig;
 use dolos_core::{seed_wal_from_state, WalSeed};
 
@@ -182,7 +182,7 @@ impl Args {
 /// checked. A credentials file can be a pipe that reads only once.
 enum Resolved<'a> {
     #[cfg(feature = "mithril")]
-    Mithril(&'a mithril::Args, dolos_mithril::MithrilSource),
+    Mithril(&'a mithril::Args, dolos_mithril::MithrilSource, PathBuf),
     Stelae(&'a stelae::Args, stelae::Inputs),
     Immutabledb(&'a immutabledb::Args, PathBuf),
 }
@@ -199,9 +199,12 @@ fn resolve<'a>(
     let resolved = match command {
         #[cfg(feature = "mithril")]
         Command::Mithril(args) => {
-            Resolved::Mithril(args, mithril::resolve(config, args, network, clears)?)
+            let (source, download_dir) = mithril::resolve(config, args, network, clears)?;
+            Resolved::Mithril(args, source, download_dir)
         }
-        Command::Stelae(args) => Resolved::Stelae(args, stelae::resolve(args, network)?),
+        Command::Stelae(args) => {
+            Resolved::Stelae(args, stelae::resolve(config, args, network, clears)?)
+        }
         Command::Immutabledb(args) => {
             Resolved::Immutabledb(args, immutabledb::resolve(config, args, clears)?)
         }
@@ -217,12 +220,57 @@ fn dispatch(
 ) -> miette::Result<()> {
     match resolved {
         #[cfg(feature = "mithril")]
-        Resolved::Mithril(args, source) => mithril::run(config, args, &source, feedback),
-        Resolved::Stelae(args, inputs) => stelae::run(config, args, inputs, feedback),
+        Resolved::Mithril(args, source, download_dir) => {
+            mithril::run(config, args, &source, &download_dir, feedback)
+        }
+        Resolved::Stelae(args, inputs) => {
+            stelae::run(config, args, inputs, feedback)?;
+
+            // A restore writes the state and the archive, never the WAL, so
+            // the WAL is seeded at the restored cursor for `find_intersect`.
+            // A replay needs no seed: finishing it reconciles the WAL with
+            // the state, and keeps the window of a node it had nothing to
+            // add to.
+            if let Err(e) = seed_wal(config) {
+                tracing::error!("failed to seed WAL from state: {}", e);
+            }
+
+            Ok(())
+        }
         Resolved::Immutabledb(args, immutable) => {
             immutabledb::run(config, args, &immutable, feedback)
         }
     }
+}
+
+/// Whether clearing the storage root, as `--force` does before a run, would
+/// take the source at `dir`: `dir` lies there, the way to it passes a
+/// directory or link there, or so does the way a link under it leads.
+pub(super) fn the_clear_takes(config: &RootConfig, dir: &Path) -> miette::Result<bool> {
+    let clear = Removal::of(&config.storage.path).into_diagnostic()?;
+
+    if clear.takes(dir).into_diagnostic()? {
+        return Ok(true);
+    }
+
+    let mut pending = vec![dir.to_path_buf()];
+
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).into_diagnostic()? {
+            let entry = entry.into_diagnostic()?;
+            let kind = entry.file_type().into_diagnostic()?;
+
+            if kind.is_symlink() && clear.takes(&entry.path()).into_diagnostic()? {
+                return Ok(true);
+            }
+
+            if kind.is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 /// Seed the WAL from the state cursor so that `find_intersect` works after
@@ -285,17 +333,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         dolos::storage::clear_storage(&config.storage.path).into_diagnostic()?;
     }
 
-    dispatch(config, resolved, feedback)?;
-
-    // Reset WAL after any successful bootstrap so that `find_intersect` works.
-    // Some bootstrap mechanisms skip WAL commits for performance, leaving it empty
-    // or stale. This ensures the WAL tip matches the state cursor regardless of
-    // which bootstrap method was used.
-    if let Err(e) = seed_wal(config) {
-        tracing::error!("failed to seed WAL from state: {}", e);
-    }
-
-    Ok(())
+    dispatch(config, resolved, feedback)
 }
 
 #[cfg(test)]

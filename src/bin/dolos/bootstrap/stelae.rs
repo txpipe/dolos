@@ -22,7 +22,7 @@
 //! `dolos_snapshot::restore::Checkpoint` states why a progress file that
 //! outlived the stores it describes would otherwise skip layers onto nothing.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use dolos_cardano::networks::KnownNetwork;
 use dolos_core::config::RootConfig;
@@ -123,17 +123,47 @@ pub(super) enum Inputs {
 }
 
 /// Resolves the source and, for a repository, the credentials, so that
-/// `--force` clears nothing for a restore that would refuse them, and the
-/// restore reads with the credentials that were checked.
-pub(super) fn resolve(args: &Args, network: Option<&KnownNetwork>) -> miette::Result<Inputs> {
+/// `--force`, which `clears` says is to clear storage, clears nothing for a
+/// restore that would refuse them, and the restore reads with the credentials
+/// that were checked.
+pub(super) fn resolve(
+    config: &RootConfig,
+    args: &Args,
+    network: Option<&KnownNetwork>,
+    clears: bool,
+) -> miette::Result<Inputs> {
     match source(args, network)? {
-        Source::Dir(dir) => Ok(Inputs::Dir(dir)),
+        Source::Dir(dir) => Ok(Inputs::Dir(check_dir(config, &dir, clears)?)),
         Source::Repo(repo) => {
             let auth = args.credentials.auth(&repo, network)?;
 
             Ok(Inputs::Repo(repo, auth))
         }
     }
+}
+
+/// The stele directory `dir`, once it is known to hold a stele and, when
+/// `clears`, to lie out of the reach of the clear. The restore reads it by
+/// the path checked, with any `..` in it resolved.
+fn check_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::Result<PathBuf> {
+    let dir = dolos::storage::resolve_parent_dirs(dir)
+        .into_diagnostic()
+        .context("resolving --source")?;
+
+    dolos_snapshot::dir::SteleDir::open(&dir)
+        .into_diagnostic()
+        .with_context(|| format!("{} holds no stele", dir.display()))?;
+
+    if clears && super::the_clear_takes(config, &dir)? {
+        miette::bail!(
+            "the stele at {} lies in the storage root {}, or is reached through it, which \
+             `--force` clears before the restore",
+            dir.display(),
+            config.storage.path.display()
+        );
+    }
+
+    Ok(dir)
 }
 
 /// What every restore needs before it can read a layer, whatever the source is.

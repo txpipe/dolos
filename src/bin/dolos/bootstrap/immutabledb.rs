@@ -38,6 +38,10 @@ impl Args {
             .prompt()
             .into_diagnostic()?;
 
+        if source.trim().is_empty() {
+            miette::bail!("no Cardano node database given");
+        }
+
         Ok(Self {
             source: source.into(),
             replay: ReplayOptions::default(),
@@ -50,16 +54,21 @@ impl Args {
 ///
 /// Resolved before `--force` clears anything, which `clears` says it is to,
 /// so that a database for another network, a directory that isn't one, or
-/// one the clear would take costs the operator nothing.
+/// one the clear would take costs the operator nothing. The replay reads
+/// the database by the path checked, with any `..` in it resolved, so that
+/// it doesn't go through a directory it never reads from.
 pub(super) fn resolve(config: &RootConfig, args: &Args, clears: bool) -> miette::Result<PathBuf> {
     let expected = match config.chain.protocol {
         Protocol::Cardano => u64::from(crate::common::open_genesis(config)?.network_magic()),
     };
 
-    let immutable =
-        super::immutable::check_database(config, &args.source, args.replay.resume, clears)?;
+    let db = dolos::storage::resolve_parent_dirs(&args.source)
+        .into_diagnostic()
+        .context("resolving --source")?;
 
-    let found = network_magic(&args.source)?;
+    let immutable = super::immutable::check_database(config, &db, args.replay.resume, clears)?;
+
+    let found = network_magic(&db)?;
 
     if found != expected {
         miette::bail!(

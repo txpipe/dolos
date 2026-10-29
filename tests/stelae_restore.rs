@@ -298,22 +298,29 @@ fn a_well_formed_repository_reaches_the_registry() {
     );
 }
 
-/// A directory that is not a stele is a clean refusal, not a half-restore.
+/// A directory that is not a stele is a clean refusal, not a half-restore:
+/// it is refused before `--force` clears anything, so the node it was to
+/// replace is left as it was.
 #[test]
 fn a_source_that_is_not_a_stele_is_refused() {
     let node = Node::new();
     node.sync();
+    let before = Contents::read(&node);
+    assert!(before.cursor.is_some());
 
     let empty = node.root.path().join("not-a-stele");
     std::fs::create_dir_all(&empty).unwrap();
 
     let output = node.bootstrap_stelae(&format!("file://{}", empty.display()));
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
 
-    // `--force` cleared the storage on the way in, so what this asserts is that
-    // the failure is total: no cursor, nothing a later `bootstrap` would read
-    // as a restored node.
-    assert!(Contents::read(&node).cursor.is_none());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let said: Vec<_> = stderr
+        .split_whitespace()
+        .filter(|word| *word != "│")
+        .collect();
+    assert!(said.join(" ").contains("holds no stele"), "{stderr}");
+    assert_eq!(Contents::read(&node), before);
 }
 
 /// `--force` must not clear the node before the command it is going to run is

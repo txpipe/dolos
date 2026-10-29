@@ -92,83 +92,198 @@ pub fn outside_storage_root(
     Ok(outside)
 }
 
-/// Whether the way to `path` passes through `dir`: `path` resolves to `dir`
-/// or under it, or a directory entry on the way to it, a link included, lies
-/// there. Removing `dir` then takes `path` away, and writing at `path` may
-/// write under `dir`.
+/// What removing a directory takes, as [`std::fs::remove_dir_all`] removes
+/// it: the directory, and every directory and link under it, links not
+/// followed. Known by file identity, so that a second name for one of them,
+/// a bind mount, a macOS firmlink or another case on a case-insensitive
+/// volume, is the same directory.
 ///
-/// Links and `..` are followed as the OS follows them, and the part of a
-/// path that doesn't exist is taken as written. On Unix the comparison is by
-/// file identity too, so that a second name for `dir`, such as a bind mount
-/// or a macOS firmlink, is `dir`.
-pub fn reaches_into(path: &Path, dir: &Path) -> std::io::Result<bool> {
-    let (_, dir) = entries_along(dir)?;
-    let (entries, resolved) = entries_along(path)?;
-
-    if entries
-        .iter()
-        .chain([&resolved])
-        .any(|entry| entry.starts_with(&dir))
-    {
-        return Ok(true);
-    }
-
-    let passed = entries.iter().filter_map(|entry| entry.parent());
-
-    Ok(same_file_on_the_way(
-        passed.chain([resolved.as_path()]),
-        &dir,
-    ))
+/// Taken when the directory exists. Of one that doesn't, only its path is
+/// known, and a path reaches into it as written.
+pub struct Removal {
+    taken: std::collections::HashSet<FileId>,
+    pending: Option<PathBuf>,
 }
 
-/// The directory entries the OS passes on its way to `path`, each named by
-/// its directory's resolved path, and where `path` resolves to. A `..` leads
-/// out of the directory the OS reached, through a link's target included.
-fn entries_along(path: &Path) -> std::io::Result<(Vec<PathBuf>, PathBuf)> {
-    let mut entries = Vec::new();
+/// How many links a path may pass through, as the OS limits them.
+const MAX_LINKS: usize = 40;
+
+impl Removal {
+    pub fn of(dir: &Path) -> std::io::Result<Self> {
+        let mut taken = std::collections::HashSet::new();
+
+        let meta = match std::fs::symlink_metadata(dir) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    taken,
+                    pending: Some(settled(dir)?),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+
+        collect(dir, &meta, &mut taken)?;
+
+        Ok(Self {
+            taken,
+            pending: None,
+        })
+    }
+
+    /// Whether the removal takes `path`, or a directory or link the OS passes
+    /// on its way to it: links and `..` are followed as the OS follows them,
+    /// and the part of `path` that doesn't exist yet is made under the last
+    /// directory that does.
+    pub fn takes(&self, path: &Path) -> std::io::Result<bool> {
+        if let Some(pending) = &self.pending {
+            return Ok(settled(path)?.starts_with(pending));
+        }
+
+        self.takes_on_the_way(path, MAX_LINKS)
+    }
+
+    fn takes_on_the_way(&self, path: &Path, links: usize) -> std::io::Result<bool> {
+        let mut reached = PathBuf::new();
+
+        for component in std::path::absolute(path)?.components() {
+            reached.push(component);
+
+            if let Component::Prefix(_) = component {
+                continue;
+            }
+
+            let meta = match std::fs::symlink_metadata(&reached) {
+                Ok(meta) => meta,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error),
+            };
+
+            if self.taken.contains(&file_id(&reached, &meta)?) {
+                return Ok(true);
+            }
+
+            if meta.is_symlink() {
+                let links = links.checked_sub(1).ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "{} passes through too many links",
+                        path.display()
+                    ))
+                })?;
+
+                let target = std::fs::read_link(&reached)?;
+                let target = reached.parent().unwrap_or(&reached).join(target);
+
+                if self.takes_on_the_way(&target, links)? {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+}
+
+/// Whether removing `dir` takes `path`; see [`Removal::takes`].
+pub fn reaches_into(path: &Path, dir: &Path) -> std::io::Result<bool> {
+    Removal::of(dir)?.takes(path)
+}
+
+/// Add `path`, whose metadata is `meta`, to `taken`, with what is under it
+/// when it is a directory and not a link.
+fn collect(
+    path: &Path,
+    meta: &std::fs::Metadata,
+    taken: &mut std::collections::HashSet<FileId>,
+) -> std::io::Result<()> {
+    taken.insert(file_id(path, meta)?);
+
+    if !meta.is_dir() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+
+        if kind.is_dir() || kind.is_symlink() {
+            let path = entry.path();
+            collect(&path, &std::fs::symlink_metadata(&path)?, taken)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+type FileId = (u64, u64);
+
+#[cfg(not(unix))]
+type FileId = PathBuf;
+
+/// What a file is, whatever it is called: its device and inode.
+#[cfg(unix)]
+fn file_id(_: &Path, meta: &std::fs::Metadata) -> std::io::Result<FileId> {
+    use std::os::unix::fs::MetadataExt;
+
+    Ok((meta.dev(), meta.ino()))
+}
+
+/// What a file is, whatever it is called: its final path, which Windows
+/// spells with the case the volume records. A link is its entry in its
+/// directory's final path.
+#[cfg(not(unix))]
+fn file_id(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<FileId> {
+    if !meta.is_symlink() {
+        return std::fs::canonicalize(path);
+    }
+
+    let parent = path.parent().unwrap_or(path);
+    let name = path.file_name().unwrap_or_default();
+
+    Ok(std::fs::canonicalize(parent)?.join(name))
+}
+
+/// `path` made absolute, with each part that exists resolved as the OS
+/// resolves it and the rest as written.
+fn settled(path: &Path) -> std::io::Result<PathBuf> {
     let mut reached = PathBuf::new();
 
     for component in std::path::absolute(path)?.components() {
         match component {
-            Component::Prefix(_) => reached.push(component),
-            Component::RootDir => {
-                reached.push(component);
-                reached = std::fs::canonicalize(&reached).unwrap_or(reached);
-            }
             Component::CurDir => {}
             Component::ParentDir => {
                 reached.pop();
             }
-            Component::Normal(name) => {
-                let entry = reached.join(name);
-                reached = std::fs::canonicalize(&entry).unwrap_or_else(|_| entry.clone());
-                entries.push(entry);
+            Component::Prefix(_) => reached.push(component),
+            Component::RootDir | Component::Normal(_) => {
+                reached.push(component);
+                reached = std::fs::canonicalize(&reached).unwrap_or(reached);
             }
         }
     }
 
-    Ok((entries, reached))
+    Ok(reached)
 }
 
-/// Whether one of `passed`, the directories on the way to a path, or a
-/// directory one of them lies in is the file `dir` is.
-#[cfg(unix)]
-fn same_file_on_the_way<'a>(passed: impl Iterator<Item = &'a Path>, dir: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
+/// `path` made absolute, with each `..` taken as the OS takes it: out of the
+/// directory reached, through a link's target. Any other link is kept as
+/// written, so the path still names what it named.
+pub fn resolve_parent_dirs(path: &Path) -> std::io::Result<PathBuf> {
+    let mut reached = PathBuf::new();
 
-    let Ok(dir) = std::fs::metadata(dir) else {
-        return false;
-    };
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                reached = std::fs::canonicalize(&reached).unwrap_or(reached);
+                reached.pop();
+            }
+            other => reached.push(other),
+        }
+    }
 
-    passed
-        .flat_map(Path::ancestors)
-        .filter_map(|ancestor| std::fs::metadata(ancestor).ok())
-        .any(|ancestor| (ancestor.dev(), ancestor.ino()) == (dir.dev(), dir.ino()))
-}
-
-#[cfg(not(unix))]
-fn same_file_on_the_way<'a>(_: impl Iterator<Item = &'a Path>, _: &Path) -> bool {
-    false
+    Ok(reached)
 }
 
 /// `path` made absolute with `..` resolved lexically. Only a relative path
@@ -2788,15 +2903,25 @@ mod tests {
             config
         };
 
-        let held = with_wal(elsewhere.join("held"));
-        let wal = open_wal_store::<dolos_cardano::CardanoDelta>(&held).unwrap();
-        wal.reset_to(&ChainPoint::Origin).unwrap();
-        std::fs::copy(elsewhere.join("held"), elsewhere.join("unclean")).unwrap();
-        wal.shutdown().unwrap();
-
         std::fs::write(elsewhere.join("garbage"), b"not a store").unwrap();
 
-        for name in ["unclean", "garbage"] {
+        #[allow(unused_mut)]
+        let mut names = vec!["garbage"];
+
+        // Windows locks a WAL redb holds against the copy that leaves it
+        // unclean.
+        #[cfg(unix)]
+        {
+            let held = with_wal(elsewhere.join("held"));
+            let wal = open_wal_store::<dolos_cardano::CardanoDelta>(&held).unwrap();
+            wal.reset_to(&ChainPoint::Origin).unwrap();
+            std::fs::copy(elsewhere.join("held"), elsewhere.join("unclean")).unwrap();
+            wal.shutdown().unwrap();
+
+            names.push("unclean");
+        }
+
+        for name in names {
             let path = elsewhere.join(name);
             assert!(dolos_redb3::wal::probe(&path).is_err(), "{name}");
 

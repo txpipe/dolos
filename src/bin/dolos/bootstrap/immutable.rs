@@ -13,6 +13,7 @@ use std::{
 
 use dolos::engine::{BulkReplayRunError, BulkReplaySession};
 use dolos::prelude::*;
+use dolos::storage::Removal;
 use dolos_core::config::RootConfig;
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
@@ -71,6 +72,7 @@ fn written_stores(config: &RootConfig) -> Vec<(&'static str, PathBuf)> {
         ("state store", config.storage.state_path()),
         ("WAL", config.wal_path()),
         ("mempool", config.mempool_path()),
+        ("cache", config.storage.cache_path()),
     ];
 
     if config.keeps_archive() {
@@ -84,52 +86,61 @@ fn written_stores(config: &RootConfig) -> Vec<(&'static str, PathBuf)> {
         .collect()
 }
 
-/// Refuse a Cardano node database at `db` that the bootstrap would write
-/// under or, when `clears`, clear: one the storage root or a store lies in,
-/// one inside a store, and, when `--force` is to clear the storage root, one
-/// inside the root.
+/// The storage root, or the first store the bootstrap writes, that removing
+/// `dir` would take, with what it is called.
+pub(super) fn store_in(
+    config: &RootConfig,
+    dir: &Path,
+) -> miette::Result<Option<(&'static str, PathBuf)>> {
+    let removal = Removal::of(dir).into_diagnostic()?;
+
+    let stores = std::iter::once(("storage root", config.storage.path.clone()))
+        .chain(written_stores(config));
+
+    for (name, store) in stores {
+        if removal.takes(&store).into_diagnostic()? {
+            return Ok(Some((name, store)));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Refuse a Cardano node database at any of `dbs` that the bootstrap would
+/// write under: one the storage root or a store lies in, whether removing it
+/// would take them or a link leads into it, and one inside a store. Without
+/// a clear, a database may lie in the storage root beside the stores, as a
+/// Mithril download into it does.
 ///
 /// Checked before `--force` clears anything and before a Mithril download
 /// writes, so that a source the run would take costs the operator nothing.
-/// Without a clear, a database may lie in the storage root beside the stores,
-/// as a Mithril download into it does.
-pub(super) fn check_placement(config: &RootConfig, db: &Path, clears: bool) -> miette::Result<()> {
-    let root = &config.storage.path;
+pub(super) fn check_placement(config: &RootConfig, dbs: &[&Path]) -> miette::Result<()> {
+    for db in dbs {
+        let real = std::fs::canonicalize(db).ok();
 
-    if dolos::storage::reaches_into(root, db).into_diagnostic()? {
-        miette::bail!(
-            "the storage root {} lies in the database at {}, and the bootstrap writes under the \
-             storage root",
-            root.display(),
-            db.display()
-        );
+        for dir in std::iter::once(*db).chain(real.as_deref()) {
+            if let Some((name, store)) = store_in(config, dir)? {
+                miette::bail!(
+                    "the {name} at {} lies in the database at {}, and the bootstrap writes there",
+                    store.display(),
+                    db.display()
+                );
+            }
+        }
     }
 
     for (name, store) in written_stores(config) {
-        if dolos::storage::reaches_into(&store, db).into_diagnostic()? {
-            miette::bail!(
-                "the {name} at {} lies in the database at {}, and the replay writes the {name}",
-                store.display(),
-                db.display()
-            );
-        }
+        let removal = Removal::of(&store).into_diagnostic()?;
 
-        if dolos::storage::reaches_into(db, &store).into_diagnostic()? {
-            miette::bail!(
-                "the database at {} lies in the {name} at {}, which the replay writes",
-                db.display(),
-                store.display()
-            );
+        for db in dbs {
+            if removal.takes(db).into_diagnostic()? {
+                miette::bail!(
+                    "the database at {} lies in the {name} at {}, which the replay writes",
+                    db.display(),
+                    store.display()
+                );
+            }
         }
-    }
-
-    if clears && dolos::storage::reaches_into(db, root).into_diagnostic()? {
-        miette::bail!(
-            "the database at {} lies in the storage root {}, which `--force` clears before the \
-             replay",
-            db.display(),
-            root.display()
-        );
     }
 
     Ok(())
@@ -137,7 +148,8 @@ pub(super) fn check_placement(config: &RootConfig, db: &Path, clears: bool) -> m
 
 /// The ImmutableDB of the Cardano node database `db`, once it is known that
 /// a replay can read it: placed apart from the storage the replay fills,
-/// holding blocks, and, for a replay from the origin, starting there.
+/// holding blocks, and, for a replay from the origin, starting there; and,
+/// when `clears`, out of the reach of the clear.
 ///
 /// Checked before `--force` clears anything, so that a source the clear
 /// would take, or one that isn't a whole database, costs the operator
@@ -149,14 +161,23 @@ pub(super) fn check_database(
     resume: bool,
     clears: bool,
 ) -> miette::Result<PathBuf> {
-    check_placement(config, db, clears)?;
-
     let path = db.join("immutable");
 
     if !path.is_dir() {
         miette::bail!(
             "{} holds no `immutable` directory, so it is no Cardano node database",
             db.display()
+        );
+    }
+
+    check_placement(config, &[db, &path])?;
+
+    if clears && super::the_clear_takes(config, &path)? {
+        miette::bail!(
+            "the ImmutableDB at {} lies in the storage root {}, or is reached through it, \
+             which `--force` clears before the replay",
+            path.display(),
+            config.storage.path.display()
         );
     }
 
@@ -324,17 +345,21 @@ pub fn replay_immutabledb(
                 session.import_blocks(blocks).into_diagnostic()
             })
         })
-        // The operation's report keeps its causes, which its message alone
-        // would drop.
-        .map_err(|error| match error {
-            BulkReplayRunError::Operation(report) => report.wrap_err("bulk replay failed"),
-            BulkReplayRunError::Finish(finish) => {
-                miette::miette!("finishing bulk replay failed: {finish}")
-            }
-            BulkReplayRunError::OperationAndFinish { operation, finish } => operation.wrap_err(
-                format!("bulk replay failed, and finalization also failed ({finish})"),
-            ),
-        })
+        .map_err(replay_failure)
+}
+
+/// A failed replay as one report. The operation's report keeps its causes,
+/// which its message alone would drop.
+fn replay_failure(error: BulkReplayRunError<miette::Report>) -> miette::Report {
+    match error {
+        BulkReplayRunError::Operation(report) => report.wrap_err("bulk replay failed"),
+        BulkReplayRunError::Finish(finish) => {
+            miette::miette!("finishing bulk replay failed: {finish}")
+        }
+        BulkReplayRunError::OperationAndFinish { operation, finish } => operation.wrap_err(
+            format!("bulk replay failed, and finalization also failed ({finish})"),
+        ),
+    }
 }
 
 /// Feed `import` the blocks after `start`, every block when it is `None`,
@@ -715,14 +740,24 @@ mod tests {
             std::fs::remove_file(&secondary).unwrap();
 
             let message = refused(false);
+            let cause = message.split("fails to open: ").nth(1);
             assert!(
                 message.contains(&format!("chunk {chunk} of the ImmutableDB"))
-                    && message.contains("fails to open"),
+                    && cause.is_some_and(|cause| !cause.trim().is_empty()),
                 "{message}"
             );
 
             std::fs::write(&secondary, kept).unwrap();
         }
+
+        database(&db, &[&blocks, &[]]);
+        let message = refused(false);
+        assert!(
+            message.contains("chunk 00001 of the ImmutableDB")
+                && message.contains("holds no blocks"),
+            "{message}"
+        );
+        database(&db, &[&blocks[..2], &blocks[2..]]);
 
         for file in ["00000.chunk", "00000.primary", "00000.secondary"] {
             std::fs::remove_file(immutable.join(file)).unwrap();
@@ -732,8 +767,8 @@ mod tests {
     }
 
     /// A database the bootstrap would write under, or one inside a store it
-    /// writes, is refused; one inside the storage root only when `--force`
-    /// is to clear the root.
+    /// writes, is refused, whichever store the replay writes; one beside
+    /// the stores in the storage root is not.
     #[test]
     fn a_database_is_placed_apart_from_what_the_bootstrap_writes() {
         let temp = tempfile::tempdir().unwrap();
@@ -741,43 +776,216 @@ mod tests {
         let root = config.storage.path.clone();
         let db = temp.path().join("db");
 
-        let refusal = |config: &RootConfig, db: &Path, clears| {
-            check_placement(config, db, clears)
+        let refusal = |config: &RootConfig, db: &Path| {
+            check_placement(config, &[db])
                 .err()
                 .map(|error| error.to_string())
         };
 
-        assert_eq!(refusal(&config, &db, true), None);
-        assert_eq!(refusal(&config, &root.join("snapshot"), false), None);
-
-        let message = refusal(&config, &root.join("snapshot"), true).unwrap();
-        assert!(message.contains("which `--force` clears"), "{message}");
+        assert_eq!(refusal(&config, &db), None);
+        assert_eq!(refusal(&config, &root.join("snapshot")), None);
 
         for db in [root.clone(), temp.path().to_path_buf()] {
-            for clears in [false, true] {
-                let message = refusal(&config, &db, clears).unwrap();
-                assert!(message.contains("the storage root"), "{message}");
-                assert!(message.contains("lies in the database"), "{message}");
-            }
+            let message = refusal(&config, &db).unwrap();
+            assert!(message.contains("the storage root"), "{message}");
+            assert!(message.contains("lies in the database"), "{message}");
         }
 
-        let message = refusal(&config, &root.join("state").join("db"), false).unwrap();
+        let message = refusal(&config, &root.join("state").join("db")).unwrap();
         assert!(message.contains("lies in the state store"), "{message}");
+
+        type Place = fn(&mut RootConfig, &Path);
+
+        let stores: [(&str, Place); 6] = [
+            ("state store", |config, db| {
+                config.storage.state.path = Some(db.join("state"))
+            }),
+            ("WAL", |config, db| {
+                config.sync.wal_path = Some(db.join("wal"))
+            }),
+            ("mempool", |config, db| {
+                config.mempool.persistent = true;
+                config.mempool.path = Some(db.join("mempool"));
+            }),
+            ("cache", |config, db| {
+                config.storage.cache.path = Some(db.join("cache"))
+            }),
+            ("archive", |config, db| {
+                config.storage.archive.path = Some(db.join("archive"))
+            }),
+            ("block segments", |config, db| {
+                config.storage.archive.blocks_path = Some(db.join("blocks"))
+            }),
+        ];
+
+        for (name, place) in stores {
+            let mut placed = config.clone();
+            place(&mut placed, &db);
+
+            let message = refusal(&placed, &db).unwrap();
+            assert!(
+                message.contains(&format!("the {name} at"))
+                    && message.contains("lies in the database"),
+                "{message}"
+            );
+        }
 
         let mut archived = config.clone();
         archived.storage.archive.path = Some(db.join("archive"));
-        let message = refusal(&archived, &db, false).unwrap();
-        assert!(
-            message.contains("the archive at") && message.contains("lies in the database"),
-            "{message}"
+        archived.history.mode = dolos_core::config::HistoryMode::None;
+        assert_eq!(refusal(&archived, &db), None);
+    }
+
+    /// A database linked to from elsewhere is compared as what it is: a store
+    /// configured in the directory the link names lies in the database.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_database_is_placed_by_what_it_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let mut config = config_over(temp.path());
+        config.storage.archive.path = Some(real.join("archive"));
+
+        let message = check_placement(&config, &[&link]).unwrap_err().to_string();
+        assert!(message.contains("the archive at"), "{message}");
+    }
+
+    /// Under `--force`, an ImmutableDB the clear would take is refused,
+    /// whatever names it: one in the storage root, one a link leads into the
+    /// root, through a chain of links or `..` included, and one whose chunk
+    /// is a link there. A database beside the root is not, whatever `..`
+    /// its path goes through.
+    #[cfg(unix)]
+    #[test]
+    fn a_database_the_clear_would_take_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(temp.path());
+        let root = config.storage.path.clone();
+        let blocks = chain(4);
+
+        let check = |db: &Path| {
+            check_database(&config, db, false, true)
+                .err()
+                .map(|error| error.to_string())
+        };
+
+        let outside = temp.path().join("db");
+        database(&outside, &[&blocks]);
+        let inside = root.join("snapshot");
+        database(&inside, &[&blocks]);
+
+        assert_eq!(check(&outside), None);
+        let message = check(&inside).unwrap();
+        assert!(message.contains("which `--force` clears"), "{message}");
+
+        let linked = temp.path().join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        symlink(inside.join("immutable"), linked.join("immutable")).unwrap();
+        assert!(check(&linked).is_some_and(|m| m.contains("which `--force` clears")));
+
+        symlink(&outside, root.join("hop")).unwrap();
+        let chained = temp.path().join("chained");
+        symlink(root.join("hop"), &chained).unwrap();
+        assert!(check(&chained).is_some_and(|m| m.contains("which `--force` clears")));
+
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let back = temp.path().join("back");
+        symlink(root.join("sub").join("..").join("..").join("db"), &back).unwrap();
+        assert!(check(&back).is_some_and(|m| m.contains("which `--force` clears")));
+
+        let chunked = temp.path().join("chunked");
+        database(&chunked, &[&blocks]);
+        let chunk = chunked.join("immutable").join("00000.chunk");
+        std::fs::rename(&chunk, root.join("00000.chunk")).unwrap();
+        symlink(root.join("00000.chunk"), &chunk).unwrap();
+        assert!(check(&chunked).is_some_and(|m| m.contains("which `--force` clears")));
+
+        let around = dolos::storage::resolve_parent_dirs(&root.join("..").join("db")).unwrap();
+        assert_eq!(check(&around), None);
+    }
+
+    /// Another name for the storage root, the macOS firmlink alias or another
+    /// case on a case-insensitive volume, is the root to the clear.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_second_name_for_the_root_is_the_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(temp.path());
+        let root = std::fs::canonicalize(temp.path()).unwrap().join("data");
+        let blocks = chain(4);
+        database(&root.join("snapshot"), &[&blocks]);
+
+        let alias = Path::new("/System/Volumes/Data").join(root.strip_prefix("/").unwrap());
+        let upper = root.with_file_name("DATA");
+
+        for name in [alias, upper] {
+            if !name.is_dir() {
+                continue;
+            }
+
+            let message = check_database(&config, &name.join("snapshot"), false, true)
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains("which `--force` clears"), "{message}");
+        }
+    }
+
+    /// An open that fails to open the stores, so that its error is a real
+    /// finalization error.
+    fn a_finish_error() -> dolos::engine::BulkReplayError {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        let mut config = config_over(temp.path());
+        config.storage.path = file;
+
+        let genesis = Arc::new(dolos_cardano::include::preview::load());
+
+        match BulkReplaySession::open(&config, genesis, None) {
+            Err(error) => error,
+            Ok(session) => {
+                session.finish().unwrap();
+                panic!("the session opened over a file");
+            }
+        }
+    }
+
+    /// A failed replay keeps the operation's cause, and says when finishing
+    /// failed too.
+    #[test]
+    fn a_failed_replay_keeps_its_causes() {
+        let cause = || miette::miette!("the cause").wrap_err("the operation");
+
+        let report = replay_failure(BulkReplayRunError::Operation(cause()));
+        let chain: Vec<_> = report.chain().map(ToString::to_string).collect();
+        assert_eq!(chain, ["bulk replay failed", "the operation", "the cause"]);
+
+        let finish = a_finish_error().to_string();
+
+        let report = replay_failure(BulkReplayRunError::Finish(a_finish_error()));
+        assert_eq!(
+            report.to_string(),
+            format!("finishing bulk replay failed: {finish}")
         );
 
-        archived.history.mode = dolos_core::config::HistoryMode::None;
-        assert_eq!(refusal(&archived, &db, false), None);
-
-        let mut walled = config.clone();
-        walled.sync.wal_path = Some(db.join("wal"));
-        let message = refusal(&walled, &db, false).unwrap();
-        assert!(message.contains("the WAL at"), "{message}");
+        let report = replay_failure(BulkReplayRunError::OperationAndFinish {
+            operation: cause(),
+            finish: a_finish_error(),
+        });
+        let chain: Vec<_> = report.chain().map(ToString::to_string).collect();
+        assert_eq!(
+            chain,
+            [
+                format!("bulk replay failed, and finalization also failed ({finish})"),
+                "the operation".to_owned(),
+                "the cause".to_owned(),
+            ]
+        );
     }
 }

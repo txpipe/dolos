@@ -645,6 +645,21 @@ fn force_refuses_a_source_it_would_lose_the_node_over() {
 
         sources.push((linked, "which `--force` clears"));
         sources.push((to_sub.join("..").join("node-db"), "which `--force` clears"));
+
+        // A database whose ImmutableDB is a link into the root, and one
+        // reached through a chain of links that passes through the root.
+        let split = node.root.path().join("split-db");
+        std::fs::create_dir_all(&split).unwrap();
+        std::fs::write(split.join("protocolMagicId"), MAGIC.to_string()).unwrap();
+        std::os::unix::fs::symlink(inside.join("immutable"), split.join("immutable")).unwrap();
+
+        let hop = root.join("hop");
+        std::os::unix::fs::symlink(fixture.db(), &hop).unwrap();
+        let chained = node.root.path().join("chained-db");
+        std::os::unix::fs::symlink(&hop, &chained).unwrap();
+
+        sources.push((split, "which `--force` clears"));
+        sources.push((chained, "which `--force` clears"));
     }
 
     for (source, named) in &sources {
@@ -713,7 +728,7 @@ fn force_refuses_a_source_it_would_lose_the_node_over() {
 
         assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
         assert!(
-            said(&output).contains("lacks immutable file 0"),
+            said(&output).contains("immutable file 0 in"),
             "{}",
             stderr(&output)
         );
@@ -919,6 +934,158 @@ fn a_failed_replay_names_its_cause() {
     assert!(
         said(&output).contains("chunk 00002 of the ImmutableDB")
             && said(&output).contains("fails to open"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// A database named through `..` out of the storage root is the database
+/// beside it, which `--force` doesn't take: the replay reads it by that
+/// name, after the clear.
+#[test]
+fn force_replays_a_source_named_through_the_root() {
+    let fixture = Fixture::new();
+    let node = fixture.node();
+    fixture.populate(&node, 3);
+
+    let root = node.config.storage.path.clone();
+    let beside = root.parent().unwrap().join("node-db");
+    fixture.write_at(&beside, &[&fixture.blocks], MAGIC.into());
+    let source = root.join("..").join("node-db").display().to_string();
+
+    assert_ok(&node.run(&["bootstrap", "--force", "immutabledb", "--source", &source]));
+    assert_eq!(contents(&node).cursor, Some(fixture.tip()));
+    assert!(beside.join("immutable").is_dir(), "the source was cleared");
+}
+
+/// A node synced on past its database: the first three blocks by the
+/// replay, the rest through the live path, which writes the WAL entries a
+/// rollback undoes.
+fn synced_past_the_db(fixture: &Fixture) -> Node {
+    use dolos_core::SyncExt as _;
+
+    let node = fixture.node();
+    fixture.write(3, MAGIC.into());
+    assert_ok(&immutabledb(&node, &fixture.source(), &[]));
+
+    let domain = dolos::engine::DomainBuilder::new(&node.config, preview())
+        .build()
+        .unwrap();
+
+    for block in &fixture.blocks[3..] {
+        domain.roll_forward(block.clone()).unwrap();
+    }
+
+    domain.shutdown().unwrap();
+
+    node
+}
+
+fn preview() -> std::sync::Arc<dolos_core::Genesis> {
+    std::sync::Arc::new(dolos_cardano::include::preview::load())
+}
+
+/// The points the WAL holds, oldest first.
+fn wal_points(node: &Node) -> Vec<ChainPoint> {
+    let wal = dolos::storage::open_wal_store::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+    let points = wal.iter_all().unwrap().map(|(point, _)| point).collect();
+    wal.shutdown().unwrap();
+
+    points
+}
+
+/// A `--continue` with nothing to replay, over a node synced on past its
+/// database, leaves the node's WAL as it was, with the window a rollback
+/// needs. Mithril deletes the snapshot all the same, as at any tip.
+#[test]
+fn continue_past_the_source_tip_keeps_the_wal_window() {
+    use dolos_core::SyncExt as _;
+
+    let fixture = Fixture::new();
+
+    type Run = fn(&Node, &str, &[&str]) -> std::process::Output;
+
+    #[allow(unused_mut)]
+    let mut runs: Vec<Run> = vec![immutabledb];
+    #[cfg(feature = "mithril")]
+    runs.push(mithril);
+
+    for run in runs {
+        let node = synced_past_the_db(&fixture);
+        let before = wal_points(&node);
+        assert!(before.len() > 3, "{before:?}");
+
+        assert_ok(&run(&node, &fixture.source(), &["--continue"]));
+        assert_eq!(wal_points(&node), before);
+        assert_eq!(contents(&node).cursor, Some(fixture.tip()));
+
+        let domain = dolos::engine::DomainBuilder::new(&node.config, preview())
+            .build()
+            .unwrap();
+        domain.rollback(&fixture.point(4)).unwrap();
+        domain.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "mithril")]
+    assert!(!fixture.db().exists(), "the snapshot outlived the resume");
+}
+
+/// A stele directory is resolved before `--force` clears anything: one
+/// holding no stele, and one inside the storage root, are refused with the
+/// node, and the stele, as they were.
+#[test]
+fn force_refuses_a_stele_it_would_lose_the_node_over() {
+    let synced = Node::new();
+    synced.sync();
+    synced.stand_at_boundary();
+
+    let fixture = Fixture::new();
+    let node = fixture.node();
+    fixture.populate(&node, 3);
+    let before = contents(&node);
+
+    let stele = node.config.storage.path.join("stele");
+    synced.write_stele(&stele);
+    let stele_before = files(&stele);
+
+    for (source, named) in [
+        (node.root.path().join("no-such-stele"), "holds no stele"),
+        (stele.clone(), "which `--force` clears"),
+    ] {
+        let source = format!("file://{}", source.display());
+        let output = node.run(&["bootstrap", "--force", "stelae", "--source", &source]);
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{source}: {}",
+            stderr(&output)
+        );
+        assert!(
+            said(&output).contains(named),
+            "{source}: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            contents(&node),
+            before,
+            "{source}: --force cleared the node"
+        );
+    }
+
+    assert_eq!(files(&stele), stele_before, "the stele changed");
+}
+
+/// An empty download directory names no directory, and is a usage error.
+#[cfg(feature = "mithril")]
+#[test]
+fn an_empty_download_directory_is_a_usage_error() {
+    let node = Node::new();
+    let output = node.run(&["bootstrap", "mithril", "--download-dir", ""]);
+
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        said(&output).contains("--download-dir"),
         "{}",
         stderr(&output)
     );
