@@ -92,39 +92,83 @@ pub fn outside_storage_root(
     Ok(outside)
 }
 
-/// Whether `path` and the storage root are the same directory or one holds
-/// the other, so that clearing the root reaches `path` or writing under the
-/// root writes under it. Links are followed where the paths exist.
-pub fn overlaps_storage_root(config: &RootConfig, path: &Path) -> std::io::Result<bool> {
-    let root = resolve_links(&config.storage.path)?;
-    let path = resolve_links(path)?;
+/// Whether the way to `path` passes through `dir`: `path` resolves to `dir`
+/// or under it, or a directory entry on the way to it, a link included, lies
+/// there. Removing `dir` then takes `path` away, and writing at `path` may
+/// write under `dir`.
+///
+/// Links and `..` are followed as the OS follows them, and the part of a
+/// path that doesn't exist is taken as written. On Unix the comparison is by
+/// file identity too, so that a second name for `dir`, such as a bind mount
+/// or a macOS firmlink, is `dir`.
+pub fn reaches_into(path: &Path, dir: &Path) -> std::io::Result<bool> {
+    let (_, dir) = entries_along(dir)?;
+    let (entries, resolved) = entries_along(path)?;
 
-    Ok(root.starts_with(&path) || path.starts_with(&root))
+    if entries
+        .iter()
+        .chain([&resolved])
+        .any(|entry| entry.starts_with(&dir))
+    {
+        return Ok(true);
+    }
+
+    let passed = entries.iter().filter_map(|entry| entry.parent());
+
+    Ok(same_file_on_the_way(
+        passed.chain([resolved.as_path()]),
+        &dir,
+    ))
 }
 
-/// `path` [normalized](normalize), with the part of it that exists resolved
-/// through its links and the rest appended as written.
-fn resolve_links(path: &Path) -> std::io::Result<PathBuf> {
-    let normalized = normalize(path)?;
-    let mut existing = normalized.as_path();
-    let mut missing = Vec::new();
+/// The directory entries the OS passes on its way to `path`, each named by
+/// its directory's resolved path, and where `path` resolves to. A `..` leads
+/// out of the directory the OS reached, through a link's target included.
+fn entries_along(path: &Path) -> std::io::Result<(Vec<PathBuf>, PathBuf)> {
+    let mut entries = Vec::new();
+    let mut reached = PathBuf::new();
 
-    loop {
-        if let Ok(resolved) = std::fs::canonicalize(existing) {
-            return Ok(missing
-                .into_iter()
-                .rev()
-                .fold(resolved, |path, part| path.join(part)));
-        }
-
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(part)) => {
-                missing.push(part);
-                existing = parent;
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            Component::Prefix(_) => reached.push(component),
+            Component::RootDir => {
+                reached.push(component);
+                reached = std::fs::canonicalize(&reached).unwrap_or(reached);
             }
-            _ => return Ok(normalized),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                reached.pop();
+            }
+            Component::Normal(name) => {
+                let entry = reached.join(name);
+                reached = std::fs::canonicalize(&entry).unwrap_or_else(|_| entry.clone());
+                entries.push(entry);
+            }
         }
     }
+
+    Ok((entries, reached))
+}
+
+/// Whether one of `passed`, the directories on the way to a path, or a
+/// directory one of them lies in is the file `dir` is.
+#[cfg(unix)]
+fn same_file_on_the_way<'a>(passed: impl Iterator<Item = &'a Path>, dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(dir) = std::fs::metadata(dir) else {
+        return false;
+    };
+
+    passed
+        .flat_map(Path::ancestors)
+        .filter_map(|ancestor| std::fs::metadata(ancestor).ok())
+        .any(|ancestor| (ancestor.dev(), ancestor.ino()) == (dir.dev(), dir.ino()))
+}
+
+#[cfg(not(unix))]
+fn same_file_on_the_way<'a>(_: impl Iterator<Item = &'a Path>, _: &Path) -> bool {
+    false
 }
 
 /// `path` made absolute with `..` resolved lexically. Only a relative path
@@ -2729,25 +2773,66 @@ mod tests {
         );
     }
 
-    /// A path overlaps the storage root when either holds the other, however
-    /// it is written: through `..`, or through a link.
+    /// A WAL that fails to read, one left unclean by a process killed while
+    /// it held it or one that is no store at all, counts as data: outside
+    /// the root, `--force` names it rather than leave it behind.
     #[test]
-    fn a_path_overlaps_the_storage_root_when_either_holds_the_other() {
+    fn force_names_an_unreadable_wal_outside_the_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        let with_wal = |wal: PathBuf| {
+            let mut config = config_over(&temp.path().join("data"));
+            config.sync.wal_path = Some(wal);
+            config
+        };
+
+        let held = with_wal(elsewhere.join("held"));
+        let wal = open_wal_store::<dolos_cardano::CardanoDelta>(&held).unwrap();
+        wal.reset_to(&ChainPoint::Origin).unwrap();
+        std::fs::copy(elsewhere.join("held"), elsewhere.join("unclean")).unwrap();
+        wal.shutdown().unwrap();
+
+        std::fs::write(elsewhere.join("garbage"), b"not a store").unwrap();
+
+        for name in ["unclean", "garbage"] {
+            let path = elsewhere.join(name);
+            assert!(dolos_redb3::wal::probe(&path).is_err(), "{name}");
+
+            let config = with_wal(path.clone());
+
+            let message = inspect_existing_data(&config, force())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.contains(&format!("{}: data outside", path.display())),
+                "{message}"
+            );
+
+            assert!(inspect_existing_data(&config, ExistingDataPolicy::default()).is_err());
+        }
+    }
+
+    /// A path reaches into a directory however it is written: as it, under
+    /// it, or through `..`; and, where the paths exist, through a link to it,
+    /// a link inside it, or a link followed by `..`.
+    #[test]
+    fn a_path_reaches_into_a_directory_however_it_is_written() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
-        let config = config_over(&root);
 
-        for (path, overlaps) in [
+        for (path, reaches) in [
             (root.clone(), true),
             (root.join("node-db"), true),
-            (temp.path().to_path_buf(), true),
             (root.join("..").join("data").join("db"), true),
+            (temp.path().to_path_buf(), false),
             (temp.path().join("elsewhere"), false),
             (temp.path().join("data-db"), false),
         ] {
             assert_eq!(
-                overlaps_storage_root(&config, &path).unwrap(),
-                overlaps,
+                reaches_into(&path, &root).unwrap(),
+                reaches,
                 "{}",
                 path.display()
             );
@@ -2755,11 +2840,33 @@ mod tests {
 
         #[cfg(unix)]
         {
-            std::fs::create_dir_all(&root).unwrap();
-            let link = temp.path().join("link");
-            std::os::unix::fs::symlink(&root, &link).unwrap();
+            let elsewhere = temp.path().join("elsewhere");
+            std::fs::create_dir_all(root.join("sub")).unwrap();
+            std::fs::create_dir_all(&elsewhere).unwrap();
 
-            assert!(overlaps_storage_root(&config, &link.join("db")).unwrap());
+            let to_root = temp.path().join("to-root");
+            std::os::unix::fs::symlink(&root, &to_root).unwrap();
+            assert!(reaches_into(&to_root.join("db"), &root).unwrap());
+
+            let inside = root.join("node-db");
+            std::os::unix::fs::symlink(&elsewhere, &inside).unwrap();
+            assert!(reaches_into(&inside, &root).unwrap());
+            assert!(!reaches_into(&elsewhere, &root).unwrap());
+
+            let to_sub = temp.path().join("to-sub");
+            std::os::unix::fs::symlink(root.join("sub"), &to_sub).unwrap();
+            assert!(reaches_into(&to_sub.join("..").join("node-db"), &root).unwrap());
+            assert!(reaches_into(&to_sub.join("..").join("missing"), &root).unwrap());
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let resolved = std::fs::canonicalize(&root).unwrap();
+            let alias = Path::new("/System/Volumes/Data").join(resolved.strip_prefix("/").unwrap());
+
+            if alias.is_dir() {
+                assert!(reaches_into(&alias.join("node-db"), &root).unwrap());
+            }
         }
     }
 

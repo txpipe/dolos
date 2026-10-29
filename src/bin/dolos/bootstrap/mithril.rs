@@ -39,7 +39,8 @@ pub struct Args {
     #[arg(long, action)]
     pub(crate) skip_download: bool,
 
-    /// Retain downloaded snapshot instead of deleting it
+    /// Retain downloaded snapshot instead of deleting it. A replay that stops
+    /// at `--stop-epoch` keeps it either way, for `--continue --skip-download`
     #[arg(long, action)]
     pub(crate) retain_snapshot: bool,
 
@@ -71,26 +72,56 @@ impl Default for Args {
     }
 }
 
-/// The aggregator to trust, once the run is known to reach its stop epoch
-/// and, under `--skip-download`, the database already in the download
-/// directory to be one the replay reads, as `bootstrap immutabledb` checks
-/// its source.
+/// The aggregator to trust, once the run is known to reach its stop epoch,
+/// and its download directory to lie apart from what the bootstrap writes
+/// and, when `clears`, clears. The run deletes that directory at the end.
+///
+/// Under `--skip-download` the database already there must be one the
+/// replay reads, as `bootstrap immutabledb` checks its source; a download
+/// from a later immutable file must find the files before it there.
 pub(crate) fn resolve(
     config: &RootConfig,
     args: &Args,
     network: Option<&KnownNetwork>,
+    clears: bool,
 ) -> miette::Result<MithrilSource> {
     super::immutable::check_stop_epoch(config, &args.replay)?;
 
+    let download_dir = Path::new(&args.download_dir);
+
     if args.skip_download {
-        super::immutable::check_database(
-            config,
-            Path::new(&args.download_dir),
-            args.replay.resume,
-        )?;
+        super::immutable::check_database(config, download_dir, args.replay.resume, clears)?;
+    } else {
+        super::immutable::check_placement(config, download_dir, clears)?;
+        check_download_start(args, download_dir)?;
     }
 
     mithril_source(args, network)
+}
+
+/// Refuse a download from a later immutable file for a replay from the
+/// origin, unless the download directory already holds every file before
+/// it: the download skips them, and the replay reads from the first.
+fn check_download_start(args: &Args, download_dir: &Path) -> miette::Result<()> {
+    let start = match args.download_start {
+        Some(start) if start > 0 && !args.replay.resume => start,
+        _ => return Ok(()),
+    };
+
+    let immutable = download_dir.join("immutable");
+
+    let missing = (0..start).find(|number| !immutable.join(format!("{number:05}.chunk")).is_file());
+
+    if let Some(missing) = missing {
+        miette::bail!(
+            "--download-start {start} skips the immutable files before {start}, and {} lacks \
+             immutable file {missing}, which a replay from the origin reads: start the download \
+             at 0, or pass --continue to resume a node that holds them",
+            immutable.display()
+        );
+    }
+
+    Ok(())
 }
 
 /// The aggregator to trust: what the invocation names, else the known
@@ -240,6 +271,91 @@ mod tests {
         };
         let message = mithril_source(&args, None).unwrap_err().to_string();
         assert!(message.contains("--genesis-vkey"), "{message}");
+    }
+
+    fn config_over(root: &Path) -> RootConfig {
+        let mut config = RootConfig::new(dolos_core::config::ChainConfig::known("preview"));
+        config.storage.path = root.join("data");
+        config
+    }
+
+    /// A downloading run into `dir`.
+    fn downloading(dir: &Path) -> Args {
+        Args {
+            aggregator: Some("https://aggregator.invalid".to_owned()),
+            genesis_vkey: Some("5b31".to_owned()),
+            download_dir: dir.display().to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// A download directory that holds the storage root, which the run would
+    /// delete the node with at the end, is refused before the download
+    /// whatever is to be cleared. One beside the stores in the root is
+    /// refused only when `--force` is to clear the root, so that the resume
+    /// over it a stop recommends is accepted as the download was.
+    #[test]
+    fn the_download_directory_is_checked_before_the_download() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(temp.path());
+        let root = config.storage.path.clone();
+
+        for dir in [root.clone(), temp.path().to_path_buf()] {
+            for clears in [false, true] {
+                let message = resolve(&config, &downloading(&dir), None, clears)
+                    .unwrap_err()
+                    .to_string();
+                assert!(message.contains("lies in the database"), "{message}");
+            }
+        }
+
+        let inside = root.join("snapshot");
+        assert!(resolve(&config, &downloading(&inside), None, false).is_ok());
+
+        let message = resolve(&config, &downloading(&inside), None, true)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("which `--force` clears"), "{message}");
+    }
+
+    /// A download from a later immutable file leaves the files before it to
+    /// the download directory, so a replay from the origin is refused until
+    /// they are there. A resume reads on from its committed position.
+    #[test]
+    fn a_later_download_start_needs_the_files_before_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(temp.path());
+        let dir = temp.path().join("snapshot");
+        let immutable = dir.join("immutable");
+
+        let mut args = downloading(&dir);
+        args.download_start = Some(2);
+
+        for (present, missing) in [(None, 0), (Some("00000.chunk"), 1)] {
+            if let Some(file) = present {
+                std::fs::create_dir_all(&immutable).unwrap();
+                std::fs::write(immutable.join(file), []).unwrap();
+            }
+
+            let message = resolve(&config, &args, None, false)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.contains(&format!("lacks immutable file {missing}")),
+                "{message}"
+            );
+        }
+
+        std::fs::write(immutable.join("00001.chunk"), []).unwrap();
+        assert!(resolve(&config, &args, None, false).is_ok());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        args.replay.resume = true;
+        assert!(resolve(&config, &args, None, false).is_ok());
+
+        args.replay.resume = false;
+        args.download_start = Some(0);
+        assert!(resolve(&config, &args, None, false).is_ok());
     }
 
     /// The prompted path parses no arguments and still reads the

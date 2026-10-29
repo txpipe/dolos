@@ -498,7 +498,8 @@ fn a_stop_epoch_stops_the_replay_and_continue_carries_on() {
 }
 
 /// A Mithril replay that stops keeps the snapshot it was to delete, since
-/// the resume reads the rest of it; `--continue --skip-download` then
+/// the resume reads the rest of it. A stop the ledger already stands at is
+/// refused with the snapshot kept, and `--continue --skip-download` then
 /// reaches the tip and deletes it.
 #[cfg(feature = "mithril")]
 #[test]
@@ -516,6 +517,22 @@ fn a_mithril_stop_keeps_the_snapshot_for_the_resume() {
         fixture.db().join("immutable").is_dir(),
         "the stop deleted the snapshot"
     );
+
+    let stopped = contents(&node);
+    for stop in ["1", "0"] {
+        let output = mithril(&node, &source, &["--continue", "--stop-epoch", stop]);
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        assert!(
+            said(&output).contains("the ledger stands in epoch 1"),
+            "{}",
+            stderr(&output)
+        );
+        assert_eq!(contents(&node), stopped, "--stop-epoch {stop} ran past");
+        assert!(
+            fixture.db().join("immutable").is_dir(),
+            "the refusal deleted the snapshot"
+        );
+    }
 
     assert_ok(&mithril(&node, &source, &["--continue"]));
     let resumed = contents(&node);
@@ -553,17 +570,29 @@ fn a_replay_that_ends_short_of_the_tip_fails() {
     assert_healthy_at(&node, &fixture.tip());
 }
 
-/// A source `--force` would clear, or one a replay can't read from the
-/// origin, is refused before the clear, so the node it was to replace is
-/// left as it was.
+/// A database in 2-block chunks at `db`, without `files`.
+fn chunked_without(fixture: &Fixture, db: &Path, files: &[&str]) {
+    let chunks: Vec<&[RawBlock]> = fixture.blocks.chunks(2).collect();
+    fixture.write_at(db, &chunks, MAGIC.into());
+
+    for file in files {
+        std::fs::remove_file(db.join("immutable").join(file)).unwrap();
+    }
+}
+
+/// A source `--force` would clear, however it is named, or one a replay
+/// can't read from the origin, is refused before the clear, so the node it
+/// was to replace is left as it was.
 #[test]
 fn force_refuses_a_source_it_would_lose_the_node_over() {
     let fixture = Fixture::new();
     let node = fixture.node();
     fixture.populate(&node, 3);
     let before = contents(&node);
+    let source_before = files(&fixture.db());
 
-    let inside = node.config.storage.path.join("node-db");
+    let root = node.config.storage.path.clone();
+    let inside = root.join("node-db");
     fixture.write_at(&inside, &[&fixture.blocks], MAGIC.into());
 
     let missing = tempfile::tempdir().unwrap();
@@ -572,21 +601,51 @@ fn force_refuses_a_source_it_would_lose_the_node_over() {
     std::fs::create_dir_all(empty.path().join("immutable")).unwrap();
 
     let later = tempfile::tempdir().unwrap();
-    let chunks: Vec<&[RawBlock]> = fixture.blocks.chunks(2).collect();
-    fixture.write_at(later.path(), &chunks, MAGIC.into());
-    for file in ["00000.chunk", "00000.primary", "00000.secondary"] {
-        std::fs::remove_file(later.path().join("immutable").join(file)).unwrap();
-    }
+    chunked_without(
+        &fixture,
+        later.path(),
+        &["00000.chunk", "00000.primary", "00000.secondary"],
+    );
 
-    let sources = [
-        (inside.clone(), "overlap"),
+    let unopened = tempfile::tempdir().unwrap();
+    chunked_without(&fixture, unopened.path(), &["00000.secondary"]);
+
+    let unread = tempfile::tempdir().unwrap();
+    chunked_without(&fixture, unread.path(), &[]);
+    let chunk = unread.path().join("immutable").join("00000.chunk");
+    let bytes = std::fs::read(&chunk).unwrap();
+    std::fs::write(&chunk, &bytes[..10]).unwrap();
+
+    #[allow(unused_mut)]
+    let mut sources = vec![
+        (inside.clone(), "which `--force` clears"),
         (missing.path().to_path_buf(), "no `immutable` directory"),
         (empty.path().to_path_buf(), "holds no blocks"),
         (
             later.path().to_path_buf(),
             "does not start at the chain's origin",
         ),
+        (unopened.path().to_path_buf(), "fails to open"),
+        (
+            unread.path().to_path_buf(),
+            "reading the ImmutableDB's first block",
+        ),
     ];
+
+    // A link inside the root to a database elsewhere goes with the clear,
+    // and so does the database a link followed by `..` leads back into.
+    #[cfg(unix)]
+    {
+        let linked = root.join("linked-db");
+        std::os::unix::fs::symlink(fixture.db(), &linked).unwrap();
+
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let to_sub = node.root.path().join("to-sub");
+        std::os::unix::fs::symlink(root.join("sub"), &to_sub).unwrap();
+
+        sources.push((linked, "which `--force` clears"));
+        sources.push((to_sub.join("..").join("node-db"), "which `--force` clears"));
+    }
 
     for (source, named) in &sources {
         let source = source.display().to_string();
@@ -633,7 +692,236 @@ fn force_refuses_a_source_it_would_lose_the_node_over() {
         );
     }
 
+    // A download from a later immutable file replays from the origin only
+    // over the files before it, which an empty download directory lacks.
+    #[cfg(feature = "mithril")]
+    {
+        let snapshot = node.root.path().join("snapshot").display().to_string();
+        let output = node.run(&[
+            "bootstrap",
+            "--force",
+            "mithril",
+            "--download-dir",
+            &snapshot,
+            "--download-start",
+            "1",
+            "--aggregator",
+            "https://aggregator.invalid",
+            "--genesis-vkey",
+            "5b31",
+        ]);
+
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        assert!(
+            said(&output).contains("lacks immutable file 0"),
+            "{}",
+            stderr(&output)
+        );
+        assert_eq!(contents(&node), before, "--force cleared the node");
+    }
+
     assert!(inside.join("immutable").is_dir(), "the source was cleared");
+    assert_eq!(files(&fixture.db()), source_before, "the source changed");
+}
+
+/// A database the bootstrap would write under is refused before anything
+/// is written, whatever the flags: one a store is configured inside, and one
+/// holding the storage root, which Mithril would delete with the node at the
+/// end.
+#[test]
+fn a_source_the_bootstrap_would_write_under_is_refused() {
+    let fixture = Fixture::new();
+
+    let archive = fixture.db().join("archive");
+    let mut node = Node::with_tables(&format!(
+        "[storage.archive]\npath = {}\n",
+        node::toml_string(&archive)
+    ));
+    node.config.chain = node.custom_chain(MAGIC, fixture.utxos.clone());
+    node.write_chain(&node.config.chain);
+
+    let before = files(&fixture.db());
+
+    #[allow(unused_mut)]
+    let mut runs = vec![immutabledb(&node, &fixture.source(), &[])];
+    #[cfg(feature = "mithril")]
+    runs.push(mithril(&node, &fixture.source(), &[]));
+
+    for output in runs {
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        assert!(
+            said(&output).contains("the archive at"),
+            "{}",
+            stderr(&output)
+        );
+    }
+
+    assert_eq!(files(&fixture.db()), before, "the source was written");
+
+    let node = fixture.node();
+    let home = node.root.path().to_path_buf();
+    fixture.write_at(&home, &[&fixture.blocks], MAGIC.into());
+
+    #[allow(unused_mut)]
+    let mut runs = vec![immutabledb(&node, &home.display().to_string(), &[])];
+    #[cfg(feature = "mithril")]
+    runs.push(mithril(&node, &home.display().to_string(), &[]));
+
+    for output in runs {
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        assert!(
+            said(&output).contains("lies in the database"),
+            "{}",
+            stderr(&output)
+        );
+        assert!(node.config_path().is_file(), "the node's home was deleted");
+        assert!(!node.config.storage.path.exists());
+    }
+}
+
+/// Without a clear, a database may lie in the storage root beside the
+/// stores, as a Mithril download into it does: the replay reads it, stops,
+/// and resumes over it to the tip.
+#[test]
+fn a_database_beside_the_stores_replays_and_resumes() {
+    let fixture = Fixture::spanning_epochs();
+    let node = fixture.node();
+    let inside = node.config.storage.path.join("node-db");
+    fixture.write_at(&inside, &[&fixture.blocks], MAGIC.into());
+    let source = inside.display().to_string();
+
+    assert_ok(&immutabledb(&node, &source, &["--stop-epoch", "1"]));
+    assert_ok(&immutabledb(&node, &source, &["--continue"]));
+    assert_eq!(contents(&node).cursor, Some(fixture.tip()));
+    assert_healthy_at(&node, &fixture.tip());
+
+    #[cfg(feature = "mithril")]
+    {
+        let node = fixture.node();
+        let snapshot = node.config.storage.path.join("snapshot");
+        fixture.write_at(&snapshot, &[&fixture.blocks], MAGIC.into());
+        let source = snapshot.display().to_string();
+
+        assert_ok(&mithril(&node, &source, &["--stop-epoch", "1"]));
+        assert!(
+            snapshot.join("immutable").is_dir(),
+            "the stop deleted the snapshot"
+        );
+
+        assert_ok(&mithril(&node, &source, &["--continue"]));
+        assert_eq!(contents(&node).cursor, Some(fixture.tip()));
+        assert!(!snapshot.exists(), "the snapshot outlived the replay");
+        assert_healthy_at(&node, &fixture.tip());
+    }
+}
+
+/// A resumed replay reads on from its committed position, so a database
+/// whose early chunks are gone, as a download from a later immutable file
+/// leaves it, serves through either command.
+#[test]
+fn continue_reads_a_database_without_its_origin_chunk() {
+    let fixture = Fixture::new();
+    let gone = ["00000.chunk", "00000.primary", "00000.secondary"];
+
+    type Run = fn(&Node, &str, &[&str]) -> std::process::Output;
+
+    #[allow(unused_mut)]
+    let mut runs: Vec<Run> = vec![immutabledb];
+    #[cfg(feature = "mithril")]
+    runs.push(mithril);
+
+    for run in runs {
+        let node = fixture.node();
+        fixture.populate(&node, 3);
+
+        let later = tempfile::tempdir().unwrap();
+        chunked_without(&fixture, later.path(), &gone);
+
+        assert_ok(&run(
+            &node,
+            &later.path().display().to_string(),
+            &["--continue"],
+        ));
+
+        let resumed = contents(&node);
+        assert_eq!(resumed.cursor, Some(fixture.tip()));
+        assert_eq!(resumed.blocks, fixture.bodies(fixture.blocks.len()));
+    }
+}
+
+/// A node whose committed position is past the database's tip, as one
+/// synced on from it leaves, has nothing to replay, and `--continue` exits
+/// 0 with the node as it was.
+#[test]
+fn continue_past_the_source_tip_has_nothing_to_replay() {
+    let fixture = Fixture::new();
+    let node = fixture.node();
+
+    assert_ok(&immutabledb(&node, &fixture.source(), &[]));
+    let synced = contents(&node);
+
+    fixture.write(3, MAGIC.into());
+    assert_ok(&immutabledb(&node, &fixture.source(), &["--continue"]));
+    assert_eq!(contents(&node), synced);
+}
+
+/// A replay that fails says why, down to the cause pallas reports, and a
+/// chunk that fails to open is named rather than taken for no blocks.
+#[test]
+fn a_failed_replay_names_its_cause() {
+    let fixture = Fixture::new();
+
+    let node = fixture.node();
+    let chunks: Vec<&[RawBlock]> = fixture.blocks.chunks(3).collect();
+    fixture.write_at(&fixture.db(), &chunks, MAGIC.into());
+    let chunk = fixture.db().join("immutable").join("00000.chunk");
+    let bytes = std::fs::read(&chunk).unwrap();
+    let cut = fixture.blocks[0].len() + fixture.blocks[1].len() / 2;
+    std::fs::write(&chunk, &bytes[..cut]).unwrap();
+
+    let output = immutabledb(&node, &fixture.source(), &[]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        said(&output).contains("reading block data") && said(&output).contains("Cannot read block"),
+        "{}",
+        stderr(&output)
+    );
+
+    let node = fixture.node();
+    fixture.populate(&node, 3);
+    chunked_without(
+        &fixture,
+        &fixture.db(),
+        &[
+            "00000.chunk",
+            "00000.primary",
+            "00000.secondary",
+            "00001.chunk",
+            "00001.primary",
+            "00001.secondary",
+        ],
+    );
+
+    let output = immutabledb(&node, &fixture.source(), &["--continue"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        said(&output).contains("finding the start position")
+            && said(&output).contains("Cannot find block"),
+        "{}",
+        stderr(&output)
+    );
+
+    let node = fixture.node();
+    chunked_without(&fixture, &fixture.db(), &["00002.secondary"]);
+
+    let output = immutabledb(&node, &fixture.source(), &[]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        said(&output).contains("chunk 00002 of the ImmutableDB")
+            && said(&output).contains("fails to open"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 /// `--continue` belongs to the replays, and says something about data in

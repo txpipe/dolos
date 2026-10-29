@@ -11,7 +11,7 @@ use std::{
     sync::Arc,
 };
 
-use dolos::engine::BulkReplaySession;
+use dolos::engine::{BulkReplayRunError, BulkReplaySession};
 use dolos::prelude::*;
 use dolos_core::config::RootConfig;
 use itertools::Itertools;
@@ -65,9 +65,79 @@ pub enum Replayed {
     StopEpoch,
 }
 
+/// The stores a replay writes, each with what it is called.
+fn written_stores(config: &RootConfig) -> Vec<(&'static str, PathBuf)> {
+    let mut stores = vec![
+        ("state store", config.storage.state_path()),
+        ("WAL", config.wal_path()),
+        ("mempool", config.mempool_path()),
+    ];
+
+    if config.keeps_archive() {
+        stores.push(("archive", config.storage.archive_path()));
+        stores.push(("block segments", config.storage.blocks_path()));
+    }
+
+    stores
+        .into_iter()
+        .filter_map(|(name, path)| Some((name, path?)))
+        .collect()
+}
+
+/// Refuse a Cardano node database at `db` that the bootstrap would write
+/// under or, when `clears`, clear: one the storage root or a store lies in,
+/// one inside a store, and, when `--force` is to clear the storage root, one
+/// inside the root.
+///
+/// Checked before `--force` clears anything and before a Mithril download
+/// writes, so that a source the run would take costs the operator nothing.
+/// Without a clear, a database may lie in the storage root beside the stores,
+/// as a Mithril download into it does.
+pub(super) fn check_placement(config: &RootConfig, db: &Path, clears: bool) -> miette::Result<()> {
+    let root = &config.storage.path;
+
+    if dolos::storage::reaches_into(root, db).into_diagnostic()? {
+        miette::bail!(
+            "the storage root {} lies in the database at {}, and the bootstrap writes under the \
+             storage root",
+            root.display(),
+            db.display()
+        );
+    }
+
+    for (name, store) in written_stores(config) {
+        if dolos::storage::reaches_into(&store, db).into_diagnostic()? {
+            miette::bail!(
+                "the {name} at {} lies in the database at {}, and the replay writes the {name}",
+                store.display(),
+                db.display()
+            );
+        }
+
+        if dolos::storage::reaches_into(db, &store).into_diagnostic()? {
+            miette::bail!(
+                "the database at {} lies in the {name} at {}, which the replay writes",
+                db.display(),
+                store.display()
+            );
+        }
+    }
+
+    if clears && dolos::storage::reaches_into(db, root).into_diagnostic()? {
+        miette::bail!(
+            "the database at {} lies in the storage root {}, which `--force` clears before the \
+             replay",
+            db.display(),
+            root.display()
+        );
+    }
+
+    Ok(())
+}
+
 /// The ImmutableDB of the Cardano node database `db`, once it is known that
-/// a replay can read it: apart from the storage the replay fills, holding
-/// blocks, and, for a replay from the origin, starting there.
+/// a replay can read it: placed apart from the storage the replay fills,
+/// holding blocks, and, for a replay from the origin, starting there.
 ///
 /// Checked before `--force` clears anything, so that a source the clear
 /// would take, or one that isn't a whole database, costs the operator
@@ -77,15 +147,9 @@ pub(super) fn check_database(
     config: &RootConfig,
     db: &Path,
     resume: bool,
+    clears: bool,
 ) -> miette::Result<PathBuf> {
-    if dolos::storage::overlaps_storage_root(config, db).into_diagnostic()? {
-        miette::bail!(
-            "the database at {} and the storage root {} overlap: `--force` would clear the \
-             database, and the replay would write under it",
-            db.display(),
-            config.storage.path.display()
-        );
-    }
+    check_placement(config, db, clears)?;
 
     let path = db.join("immutable");
 
@@ -96,39 +160,89 @@ pub(super) fn check_database(
         );
     }
 
-    let tip = immutable::get_tip(&path)
-        .map_err(|err| miette::miette!(err.to_string()))
-        .context("reading the ImmutableDB tip")?;
-
-    if tip.is_none() {
-        miette::bail!("the ImmutableDB at {} holds no blocks", path.display());
-    }
+    read_tip(&path)?;
 
     if !resume {
-        let first = immutable::read_blocks_from_point(&path, Point::Origin)
-            .map_err(|err| miette::miette!(err.to_string()))
-            .with_context(|| {
-                format!(
-                    "the ImmutableDB at {} does not start at the chain's origin",
-                    path.display()
-                )
-            })?
-            .next();
-
-        match first {
-            Some(block) => {
-                block
-                    .into_diagnostic()
-                    .context("reading the ImmutableDB's first block")?;
-            }
-            None => miette::bail!(
-                "the first chunk of the ImmutableDB at {} fails to open",
-                path.display()
-            ),
-        }
+        check_origin(&path)?;
     }
 
     Ok(path)
+}
+
+/// Refuse an ImmutableDB at `path` whose first block can't be read from the
+/// chain's origin.
+pub(super) fn check_origin(path: &Path) -> miette::Result<()> {
+    let first = immutable::read_blocks_from_point(path, Point::Origin)
+        .map_err(|err| miette::miette!(err.to_string()))
+        .with_context(|| {
+            format!(
+                "the ImmutableDB at {} does not start at the chain's origin",
+                path.display()
+            )
+        })?
+        .next();
+
+    match first {
+        Some(block) => {
+            block
+                .into_diagnostic()
+                .context("reading the ImmutableDB's first block")?;
+
+            Ok(())
+        }
+        None => Err(unopened(path, chunks(path).first())),
+    }
+}
+
+/// The ImmutableDB's tip: the last block of its last immutable chunk.
+fn read_tip(path: &Path) -> miette::Result<Point> {
+    let tip = immutable::get_tip(path)
+        .map_err(|err| miette::miette!(err.to_string()))
+        .context("reading the ImmutableDB tip")?;
+
+    // pallas reads no tip from a last chunk that fails to open, just as from
+    // a database without one.
+    tip.ok_or_else(|| unopened(path, chunks(path).last()))
+}
+
+/// The immutable chunks pallas reads at `path`, in order: every chunk file
+/// but the last, which the node is still writing.
+fn chunks(path: &Path) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "chunk")
+        })
+        .filter_map(|path| Some(path.file_stem()?.to_string_lossy().into_owned()))
+        .collect();
+
+    names.sort();
+    names.pop();
+
+    names
+}
+
+/// Why pallas read nothing from `chunk` at `path`: it fails to open, or it
+/// holds no blocks; with no chunk, the database holds none.
+fn unopened(path: &Path, chunk: Option<&String>) -> miette::Report {
+    let Some(chunk) = chunk else {
+        return miette::miette!("the ImmutableDB at {} holds no blocks", path.display());
+    };
+
+    match immutable::chunk::read_blocks(path, chunk) {
+        Err(error) => miette::miette!(
+            "chunk {chunk} of the ImmutableDB at {} fails to open: {error}",
+            path.display()
+        ),
+        Ok(_) => miette::miette!(
+            "chunk {chunk} of the ImmutableDB at {} holds no blocks",
+            path.display()
+        ),
+    }
 }
 
 /// Refuse a stop epoch the replay would run past: the stop fires on entering
@@ -210,11 +324,24 @@ pub fn replay_immutabledb(
                 session.import_blocks(blocks).into_diagnostic()
             })
         })
-        .map_err(|error| miette::miette!("{error}"))
+        // The operation's report keeps its causes, which its message alone
+        // would drop.
+        .map_err(|error| match error {
+            BulkReplayRunError::Operation(report) => report.wrap_err("bulk replay failed"),
+            BulkReplayRunError::Finish(finish) => {
+                miette::miette!("finishing bulk replay failed: {finish}")
+            }
+            BulkReplayRunError::OperationAndFinish { operation, finish } => operation.wrap_err(
+                format!("bulk replay failed, and finalization also failed ({finish})"),
+            ),
+        })
 }
 
 /// Feed `import` the blocks after `start`, every block when it is `None`,
 /// in batches of `chunk_size`, until the tip or a stop boundary.
+///
+/// A `start` past the tip, as a node synced on from the database leaves,
+/// has nothing to replay.
 fn read_blocks(
     path: &Path,
     start: Option<ChainPoint>,
@@ -222,10 +349,20 @@ fn read_blocks(
     feedback: &Feedback,
     mut import: impl FnMut(Vec<RawBlock>) -> miette::Result<ReplayProgress>,
 ) -> miette::Result<Replayed> {
-    let tip = immutable::get_tip(path)
-        .map_err(|err| miette::miette!(err.to_string()))
-        .context("reading the ImmutableDB tip")?
-        .ok_or_else(|| miette::miette!("the ImmutableDB at {} holds no blocks", path.display()))?;
+    let tip = read_tip(path)?;
+
+    if let Some(start) = start
+        .as_ref()
+        .filter(|start| start.slot() > tip.slot_or_default())
+    {
+        info!(
+            %start,
+            tip = tip.slot_or_default(),
+            "the committed position is past the ImmutableDB's tip, nothing to replay"
+        );
+
+        return Ok(Replayed::Tip);
+    }
 
     let iter = blocks_after(path, start.as_ref())?;
 
@@ -545,58 +682,102 @@ mod tests {
     }
 
     /// A database is readable when it holds blocks from the origin, or, for
-    /// a resume, from anywhere.
+    /// a resume, from anywhere. A chunk that fails to open is named with its
+    /// cause, not taken for a database without blocks.
     #[test]
     fn a_database_is_checked_before_anything_is_cleared() {
         let temp = tempfile::tempdir().unwrap();
         let config = config_over(temp.path());
         let blocks = chain(4);
         let db = temp.path().join("db");
+        let immutable = db.join("immutable");
 
         let refused = |resume| {
-            check_database(&config, &db, resume)
+            check_database(&config, &db, resume, false)
                 .expect_err("the database was accepted")
                 .to_string()
         };
 
         assert!(refused(false).contains("no `immutable` directory"));
 
-        std::fs::create_dir_all(db.join("immutable")).unwrap();
+        std::fs::create_dir_all(&immutable).unwrap();
         assert!(refused(false).contains("holds no blocks"));
 
         database(&db, &[&blocks[..2], &blocks[2..]]);
         assert_eq!(
-            check_database(&config, &db, false).unwrap(),
-            db.join("immutable")
+            check_database(&config, &db, false, false).unwrap(),
+            immutable
         );
 
+        for chunk in ["00000", "00001"] {
+            let secondary = immutable.join(format!("{chunk}.secondary"));
+            let kept = std::fs::read(&secondary).unwrap();
+            std::fs::remove_file(&secondary).unwrap();
+
+            let message = refused(false);
+            assert!(
+                message.contains(&format!("chunk {chunk} of the ImmutableDB"))
+                    && message.contains("fails to open"),
+                "{message}"
+            );
+
+            std::fs::write(&secondary, kept).unwrap();
+        }
+
         for file in ["00000.chunk", "00000.primary", "00000.secondary"] {
-            std::fs::remove_file(db.join("immutable").join(file)).unwrap();
+            std::fs::remove_file(immutable.join(file)).unwrap();
         }
         assert!(refused(false).contains("does not start at the chain's origin"));
-        assert!(check_database(&config, &db, true).is_ok());
+        assert!(check_database(&config, &db, true, false).is_ok());
     }
 
-    /// A database inside the storage root, or holding it, is refused:
-    /// `--force` would clear it, and the replay would write under it.
+    /// A database the bootstrap would write under, or one inside a store it
+    /// writes, is refused; one inside the storage root only when `--force`
+    /// is to clear the root.
     #[test]
-    fn a_database_overlapping_the_storage_root_is_refused() {
+    fn a_database_is_placed_apart_from_what_the_bootstrap_writes() {
         let temp = tempfile::tempdir().unwrap();
-        let blocks = chain(2);
+        let config = config_over(temp.path());
+        let root = config.storage.path.clone();
+        let db = temp.path().join("db");
 
-        let mut config = config_over(temp.path());
-        let inside = config.storage.path.join("node-db");
-        database(&inside, &[&blocks]);
+        let refusal = |config: &RootConfig, db: &Path, clears| {
+            check_placement(config, db, clears)
+                .err()
+                .map(|error| error.to_string())
+        };
 
-        let message = check_database(&config, &inside, false)
-            .unwrap_err()
-            .to_string();
-        assert!(message.contains("overlap"), "{message}");
+        assert_eq!(refusal(&config, &db, true), None);
+        assert_eq!(refusal(&config, &root.join("snapshot"), false), None);
 
-        config.storage.path = inside.join("dolos");
-        let message = check_database(&config, &inside, false)
-            .unwrap_err()
-            .to_string();
-        assert!(message.contains("overlap"), "{message}");
+        let message = refusal(&config, &root.join("snapshot"), true).unwrap();
+        assert!(message.contains("which `--force` clears"), "{message}");
+
+        for db in [root.clone(), temp.path().to_path_buf()] {
+            for clears in [false, true] {
+                let message = refusal(&config, &db, clears).unwrap();
+                assert!(message.contains("the storage root"), "{message}");
+                assert!(message.contains("lies in the database"), "{message}");
+            }
+        }
+
+        let message = refusal(&config, &root.join("state").join("db"), false).unwrap();
+        assert!(message.contains("lies in the state store"), "{message}");
+
+        let mut archived = config.clone();
+        archived.storage.archive.path = Some(db.join("archive"));
+        let message = refusal(&archived, &db, false).unwrap();
+        assert!(
+            message.contains("the archive at") && message.contains("lies in the database"),
+            "{message}"
+        );
+
+        archived.history.mode = dolos_core::config::HistoryMode::None;
+        assert_eq!(refusal(&archived, &db, false), None);
+
+        let mut walled = config.clone();
+        walled.sync.wal_path = Some(db.join("wal"));
+        let message = refusal(&walled, &db, false).unwrap();
+        assert!(message.contains("the WAL at"), "{message}");
     }
 }

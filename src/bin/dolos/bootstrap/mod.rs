@@ -187,15 +187,23 @@ enum Resolved<'a> {
     Immutabledb(&'a immutabledb::Args, PathBuf),
 }
 
-fn resolve<'a>(config: &RootConfig, command: &'a Command) -> miette::Result<Resolved<'a>> {
+/// `clears` says that `--force` is to clear storage once the command is
+/// resolved, so that a source the clear would take is refused here.
+fn resolve<'a>(
+    config: &RootConfig,
+    command: &'a Command,
+    clears: bool,
+) -> miette::Result<Resolved<'a>> {
     let network = dolos_cardano::networks::KnownNetwork::by_name(&config.chain.network);
 
     let resolved = match command {
         #[cfg(feature = "mithril")]
-        Command::Mithril(args) => Resolved::Mithril(args, mithril::resolve(config, args, network)?),
+        Command::Mithril(args) => {
+            Resolved::Mithril(args, mithril::resolve(config, args, network, clears)?)
+        }
         Command::Stelae(args) => Resolved::Stelae(args, stelae::resolve(args, network)?),
         Command::Immutabledb(args) => {
-            Resolved::Immutabledb(args, immutabledb::resolve(config, args)?)
+            Resolved::Immutabledb(args, immutabledb::resolve(config, args, clears)?)
         }
     };
 
@@ -264,12 +272,14 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         None => Command::inquire()?,
     };
 
-    let resolved = resolve(config, &command)?;
+    let clears = matches!(existing, Existing::Clear);
+
+    let resolved = resolve(config, &command, clears)?;
 
     // The first destructive step, and deliberately the last one before the run:
     // everything that could still refuse — the flags, the prompts, the source
     // the command was given — has already had its say.
-    if matches!(existing, Existing::Clear) {
+    if clears {
         info!("existing data detected, clearing storage due to --force");
 
         dolos::storage::clear_storage(&config.storage.path).into_diagnostic()?;

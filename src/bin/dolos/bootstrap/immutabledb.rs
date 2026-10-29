@@ -48,14 +48,16 @@ impl Args {
 /// The ImmutableDB `args` names, once it is known to be readable, to belong
 /// to the configured network, and to reach the stop epoch.
 ///
-/// Resolved before `--force` clears anything, so that a database for another
-/// network, or a directory that isn't one, costs the operator nothing.
-pub(super) fn resolve(config: &RootConfig, args: &Args) -> miette::Result<PathBuf> {
+/// Resolved before `--force` clears anything, which `clears` says it is to,
+/// so that a database for another network, a directory that isn't one, or
+/// one the clear would take costs the operator nothing.
+pub(super) fn resolve(config: &RootConfig, args: &Args, clears: bool) -> miette::Result<PathBuf> {
     let expected = match config.chain.protocol {
         Protocol::Cardano => u64::from(crate::common::open_genesis(config)?.network_magic()),
     };
 
-    let immutable = super::immutable::check_database(config, &args.source, args.replay.resume)?;
+    let immutable =
+        super::immutable::check_database(config, &args.source, args.replay.resume, clears)?;
 
     let found = network_magic(&args.source)?;
 
