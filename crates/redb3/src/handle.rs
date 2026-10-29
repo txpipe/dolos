@@ -64,16 +64,29 @@ impl fmt::Debug for Handle {
 /// Whether `error`, or an error it wraps, is redb refusing a file another
 /// handle holds open.
 pub fn is_already_open(error: &(dyn std::error::Error + 'static)) -> bool {
+    any_cause(error, |database, any| {
+        matches!(database, Some(redb::DatabaseError::DatabaseAlreadyOpen))
+            || matches!(any, Some(redb::Error::DatabaseAlreadyOpen))
+    })
+}
+
+/// Whether `error`, or an error it wraps, is redb refusing a read-only open
+/// of a file that was not shut down cleanly and needs a repair first.
+pub fn needs_repair(error: &(dyn std::error::Error + 'static)) -> bool {
+    any_cause(error, |database, any| {
+        matches!(database, Some(redb::DatabaseError::RepairAborted))
+            || matches!(any, Some(redb::Error::RepairAborted))
+    })
+}
+
+fn any_cause(
+    error: &(dyn std::error::Error + 'static),
+    is: impl Fn(Option<&redb::DatabaseError>, Option<&redb::Error>) -> bool,
+) -> bool {
     let mut next = Some(error);
 
     while let Some(error) = next {
-        if matches!(
-            error.downcast_ref::<redb::DatabaseError>(),
-            Some(redb::DatabaseError::DatabaseAlreadyOpen)
-        ) || matches!(
-            error.downcast_ref::<redb::Error>(),
-            Some(redb::Error::DatabaseAlreadyOpen)
-        ) {
+        if is(error.downcast_ref(), error.downcast_ref()) {
             return true;
         }
 

@@ -540,6 +540,10 @@ pub enum OpenError {
     #[error("{} is locked by another process", .path.display())]
     InUse { path: PathBuf },
 
+    /// A redb file a crash left behind: only a writable open repairs it.
+    #[error("{} was not shut down cleanly", .path.display())]
+    Unclean { path: PathBuf },
+
     #[error(transparent)]
     Storage(Error),
 }
@@ -553,6 +557,9 @@ impl miette::Diagnostic for OpenError {
             ))),
             Self::InUse { .. } => Some(Box::new(
                 "dataset in use by another dolos process (stop it, or query its APIs)",
+            )),
+            Self::Unclean { .. } => Some(Box::new(
+                "a reading command cannot open it until a writing one repairs it: start `dolos sync` or `dolos daemon` once",
             )),
             Self::Storage(_) => None,
         }
@@ -575,7 +582,8 @@ impl From<Error> for OpenError {
 /// [`OpenError::Missing`], never created; a missing mempool file is the one
 /// exception, opened empty in memory, since it holds no chain data. Nothing
 /// is caught up or bootstrapped: the stores are as the last writer left them.
-/// A store another process holds is [`OpenError::InUse`].
+/// A store another process holds is [`OpenError::InUse`]. Observing a redb
+/// file a crash left unrepaired is [`OpenError::Unclean`].
 pub fn open_existing_stores<D>(config: &RootConfig, access: Access) -> Result<Stores<D>, OpenError>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
@@ -595,7 +603,7 @@ where
                 }
             };
 
-            WalStoreBackend::Redb(redb_opened(&path, opened)?)
+            WalStoreBackend::Redb(redb_existing(&path, opened)?)
         }
         None => WalStoreBackend::in_memory().map_err(Error::from)?,
     };
@@ -640,7 +648,7 @@ where
                 }
             };
 
-            MempoolBackend::Redb(redb_opened(&path, opened)?)
+            MempoolBackend::Redb(redb_existing(&path, opened)?)
         }
         None => MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
     };
@@ -651,6 +659,20 @@ where
         archive,
         mempool,
     })
+}
+
+/// [`redb_opened`], with a read-only open refused for want of a repair
+/// reported as [`OpenError::Unclean`].
+fn redb_existing<T, E>(path: &Path, opened: Result<T, E>) -> Result<T, OpenError>
+where
+    E: std::error::Error + Into<Error> + 'static,
+{
+    match opened {
+        Err(error) if dolos_redb3::handle::needs_repair(&error) => Err(OpenError::Unclean {
+            path: path.to_path_buf(),
+        }),
+        opened => Ok(redb_opened(path, opened)?),
+    }
 }
 
 fn existing(path: &Path) -> Result<(), OpenError> {
