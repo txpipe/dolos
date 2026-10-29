@@ -136,7 +136,13 @@ mod tests {
             }
         });
 
-        crate::offchain::cache_verified_body(app.facade().inner.cache(), &anchor, body).await;
+        crate::offchain::cache_verified_body(
+            app.facade().inner.cache(),
+            crate::offchain::OFFCHAIN.name,
+            &anchor,
+            body,
+        )
+        .await;
 
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}/metadata");

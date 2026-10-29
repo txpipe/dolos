@@ -226,7 +226,7 @@ pub fn register<D: Domain>(domain: &D) -> miette::Result<Namespaces<D>> {
     #[cfg(feature = "minibf")]
     {
         dolos_minibf::register_network_cache(domain.cache()).into_diagnostic()?;
-        dolos_minibf::register_governance_caches(domain.cache());
+        dolos_minibf::register_offchain_caches(domain.cache());
     }
 
     let mut namespaces = Namespaces {

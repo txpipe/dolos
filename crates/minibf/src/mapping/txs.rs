@@ -48,9 +48,9 @@ use dolos_cardano::{
 use dolos_core::{ArchiveStore as _, Domain, EraCbor, TxHash, TxOrder, TxoRef};
 
 use super::{
-    bech32_pool, list_assets, pool_offchain_metadata, rational_to_f64, redeemer_fee,
-    redeemer_script_hash, stake_cred_to_address, try_into_or_500, vkey_to_stake_address, IntoModel,
-    PoolOffchainMetadata, UtxoOutputModelBuilder,
+    bech32_pool, list_assets, rational_to_f64, redeemer_fee, redeemer_script_hash,
+    stake_cred_to_address, try_into_or_500, vkey_to_stake_address, IntoModel, PoolOffchainMetadata,
+    UtxoOutputModelBuilder,
 };
 use crate::Facade;
 
@@ -300,48 +300,23 @@ impl<'a> TxModelBuilder<'a> {
         Ok(())
     }
 
-    pub async fn fetch_pool_metadata(&mut self) -> Result<(), StatusCode> {
+    pub async fn fetch_pool_metadata<C: dolos_core::CacheStore>(
+        &mut self,
+        cache: &C,
+    ) -> Result<(), StatusCode> {
         let pool_registrations = self
             .tx()?
             .certs()
             .iter()
-            .filter_map(|cert| match cert {
-                MultiEraCert::AlonzoCompatible(cow) => {
-                    if let AlonzoCert::PoolRegistration {
-                        operator,
-                        ref pool_metadata,
-                        ..
-                    } = *(**cow).clone()
-                    {
-                        pool_metadata
-                            .as_ref()
-                            .map(|meta| (operator, meta.url.clone(), meta.hash.clone()))
-                    } else {
-                        None
-                    }
-                }
-                MultiEraCert::Conway(cow) => {
-                    if let ConwayCert::PoolRegistration {
-                        operator,
-                        ref pool_metadata,
-                        ..
-                    } = *(**cow).clone()
-                    {
-                        pool_metadata
-                            .as_ref()
-                            .map(|meta| (operator, meta.url.clone(), meta.hash.clone()))
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
+            .filter_map(pallas_extras::cert_as_pool_registration)
+            .filter_map(|reg| reg.pool_metadata.map(|metadata| (reg.operator, metadata)))
             .collect_vec();
 
         self.pool_metadata = join_all(pool_registrations.iter().map(
-            |(pool_hash, url, hash)| async move {
-                pool_offchain_metadata(url, Some(hash.as_slice()))
+            |(pool_hash, metadata)| async move {
+                crate::offchain::fetch_pool_metadata(cache, metadata)
                     .await
+                    .0
                     .map(|meta| (*pool_hash, meta))
             },
         ))

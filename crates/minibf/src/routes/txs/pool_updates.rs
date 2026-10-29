@@ -31,7 +31,7 @@ where
     let mut tx = TxModelBuilder::new(&raw, order)?
         .with_network(network)
         .with_chain(chain);
-    tx.fetch_pool_metadata().await?;
+    tx.fetch_pool_metadata(domain.inner.cache()).await?;
     tx.set_pool_registrations(&domain)?;
 
     tx.into_response()
@@ -49,6 +49,127 @@ mod tests {
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/pool_updates");
         let _: Vec<TxContentPoolCertsInner> = get_ok(&app, &path).await;
+    }
+
+    #[tokio::test]
+    async fn all_pool_metadata_routes_serve_a_cached_body_without_the_upstream() {
+        use dolos_core::{CacheEntry, CacheStore as _};
+        use dolos_testing::synthetic::SyntheticBlockConfig;
+        use pallas::{
+            crypto::hash::Hasher,
+            ledger::primitives::{conway::Certificate, Bytes, PoolMetadata, RationalNumber, Set},
+        };
+        use std::convert::Infallible;
+
+        let body = br#"{"name":"Cached pool","description":"A pool","ticker":"CACHE","homepage":"https://example.com"}"#;
+        let metadata = PoolMetadata {
+            url: "https://example.invalid/pool.json".to_string(),
+            hash: Hasher::<256>::hash(body).to_vec().into(),
+        };
+        let operator = [0x79; 28];
+        let registration = Certificate::PoolRegistration {
+            operator: operator.into(),
+            vrf_keyhash: [1u8; 32].into(),
+            pledge: 0,
+            cost: 0,
+            margin: RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account: Bytes::from([&[0xe0][..], &[0x21; 28][..]].concat()),
+            pool_owners: Set::from(vec![[2u8; 28].into()]),
+            relays: vec![],
+            pool_metadata: Some(metadata.clone()),
+        };
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 1,
+            extra_certs_by_block: vec![vec![vec![registration]]],
+            ..Default::default()
+        });
+        app.facade()
+            .inner
+            .cache()
+            .get_or_fill_async(
+                crate::offchain::POOL_OFFCHAIN.name,
+                metadata.hash.as_slice(),
+                async move { Ok::<_, Infallible>(CacheEntry::new(body.to_vec(), 0)) },
+            )
+            .await
+            .unwrap();
+
+        let pool_id = crate::mapping::bech32_pool(operator).unwrap();
+        let tx_hash = &app.vectors().blocks[0].tx_hashes[0];
+        let single: serde_json::Value = get_ok(&app, &format!("/pools/{pool_id}/metadata")).await;
+        let extended: Vec<serde_json::Value> = get_ok(&app, "/pools/extended").await;
+        let updates: Vec<serde_json::Value> =
+            get_ok(&app, &format!("/txs/{tx_hash}/pool_updates")).await;
+        let listed = extended
+            .iter()
+            .find(|row| row["pool_id"] == pool_id)
+            .unwrap();
+        let update = updates
+            .iter()
+            .find(|row| row["pool_id"] == pool_id)
+            .unwrap();
+        for metadata in [&single, &listed["metadata"], &update["metadata"]] {
+            assert_eq!(metadata["ticker"], "CACHE");
+            assert_eq!(metadata["name"], "Cached pool");
+            assert_eq!(metadata["description"], "A pool");
+            assert_eq!(metadata["homepage"], "https://example.com");
+            assert_eq!(metadata["url"], "https://example.invalid/pool.json");
+            assert_eq!(metadata["hash"], hex::encode(Hasher::<256>::hash(body)));
+        }
+        assert!(single["error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn the_pool_list_and_metadata_routes_share_a_cached_failure() {
+        use dolos_testing::synthetic::SyntheticBlockConfig;
+        use pallas::ledger::primitives::{
+            conway::Certificate, Bytes, PoolMetadata, RationalNumber, Set,
+        };
+
+        let metadata = PoolMetadata {
+            url: "https://example.invalid/failed.json".to_string(),
+            hash: vec![7u8; 32].into(),
+        };
+        let operator = [0x7a; 28];
+        let registration = Certificate::PoolRegistration {
+            operator: operator.into(),
+            vrf_keyhash: [1u8; 32].into(),
+            pledge: 0,
+            cost: 0,
+            margin: RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account: Bytes::from([&[0xe0][..], &[0x22; 28][..]].concat()),
+            pool_owners: Set::from(vec![[3u8; 28].into()]),
+            relays: vec![],
+            pool_metadata: Some(metadata.clone()),
+        };
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 1,
+            extra_certs_by_block: vec![vec![vec![registration]]],
+            ..Default::default()
+        });
+        let error = crate::mapping::pool_connection_error(&metadata.url);
+        crate::offchain::cache_pool_failure(app.facade().inner.cache(), &metadata, error.clone())
+            .await;
+
+        let pool_id = crate::mapping::bech32_pool(operator).unwrap();
+        let expected = serde_json::to_value(&error).unwrap();
+        let single: serde_json::Value = get_ok(&app, &format!("/pools/{pool_id}/metadata")).await;
+        let extended: Vec<serde_json::Value> = get_ok(&app, "/pools/extended").await;
+        let listed = extended
+            .iter()
+            .find(|row| row["pool_id"] == pool_id)
+            .unwrap();
+        assert_eq!(single["error"], expected);
+        assert_eq!(listed["metadata"]["error"], expected);
+        assert!(listed["metadata"]["ticker"].is_null());
     }
 
     /// db-sync's rule: a certificate registers a pool that was not registered

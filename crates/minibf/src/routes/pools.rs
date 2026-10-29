@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Duration,
 };
 
 use axum::{
@@ -9,7 +10,6 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    dreps_inner_metadata_error::Code,
     pool::Pool,
     pool_calidus_key::PoolCalidusKey,
     pool_delegators_inner::PoolDelegatorsInner,
@@ -33,16 +33,13 @@ use dolos_core::{
 };
 use futures::{future::join_all, StreamExt};
 use itertools::Itertools;
-use pallas::{
-    crypto::hash::Hasher,
-    ledger::{
-        addresses::Network,
-        primitives::{
-            conway::{Vote, Voter},
-            StakeCredential,
-        },
-        traverse::MultiEraBlock,
+use pallas::ledger::{
+    addresses::Network,
+    primitives::{
+        conway::{Vote, Voter},
+        StakeCredential,
     },
+    traverse::MultiEraBlock,
 };
 use serde::Serialize;
 
@@ -50,15 +47,22 @@ use crate::{
     error::Error,
     log_and_500,
     mapping::{
-        bech32_calidus, bech32_pool, i32_or_500, pool_offchain_body, pool_offchain_metadata,
-        rational_to_f64, stake_cred_to_address, vkey_to_stake_address, IntoModel,
-        OffchainFetchError, MAX_POOL_METADATA_BYTES,
+        bech32_calidus, bech32_pool, i32_or_500, rational_to_f64, stake_cred_to_address,
+        vkey_to_stake_address, IntoModel,
+    },
+    offchain::{
+        cached_pool_metadata, fetch_listed_pool_metadata, settle_within, PoolMetadataLoad,
+        MAX_CONCURRENT_POOL_FETCHES,
     },
     pagination::{Pagination, PaginationParameters},
     routes::governance::voter_casts,
     scan::{EntityScan, ENTITY_CHUNK},
     Facade,
 };
+
+/// How long `/pools/extended` waits for the metadata of its misses, the wait
+/// for a fill permit included.
+const PAGE_METADATA_DEADLINE: Duration = Duration::from_secs(5);
 
 type ActivePools = HashSet<PoolHash>;
 
@@ -822,7 +826,7 @@ pub struct EmptyObject {}
 
 fn build_pool_extended_metadata(
     onchain: Option<&pallas::ledger::primitives::PoolMetadata>,
-    offchain: Option<crate::mapping::PoolOffchainMetadata>,
+    (offchain, error): PoolMetadataLoad,
 ) -> Option<Box<PoolListExtendedInnerMetadata>> {
     onchain.map(|onchain| {
         Box::new(match offchain {
@@ -838,6 +842,7 @@ fn build_pool_extended_metadata(
             None => PoolListExtendedInnerMetadata {
                 url: Some(onchain.url.clone()),
                 hash: Some(hex::encode(&*onchain.hash)),
+                error: error.map(Box::new),
                 ..Default::default()
             },
         })
@@ -869,80 +874,68 @@ fn build_pool_metadata_response(
     }))
 }
 
-fn hash_mismatch_error(
-    url: &str,
-    expected_hash: &[u8],
-    actual_hash: &[u8],
-) -> blockfrost_openapi::models::DrepsInnerMetadataError {
-    DrepsInnerMetadataError::new(
-        Code::HashMismatch,
-        format!(
-            "Hash mismatch when fetching metadata from {url}. Expected \"{}\" but got \"{}\".",
-            hex::encode(expected_hash),
-            hex::encode(actual_hash),
-        ),
+/// The off-chain metadata of each row of a pool page, in page order, within
+/// [`PAGE_METADATA_DEADLINE`].
+async fn page_pool_metadata<C: dolos_core::CacheStore>(
+    cache: &C,
+    onchain: &[Option<&pallas::ledger::primitives::PoolMetadata>],
+) -> Vec<PoolMetadataLoad> {
+    page_pool_metadata_with(
+        cache,
+        onchain,
+        |metadata| fetch_listed_pool_metadata(cache, metadata),
+        PAGE_METADATA_DEADLINE,
     )
+    .await
 }
 
-fn http_response_error(url: &str, status: StatusCode) -> DrepsInnerMetadataError {
-    let reason = status.canonical_reason().unwrap_or("Unknown");
-
-    DrepsInnerMetadataError::new(
-        Code::HttpResponseError,
-        format!(
-            "Error Offchain Pool: HTTP Response error from {url} resulted in HTTP status code : {} \"{reason}\"",
-            status.as_u16(),
-        ),
-    )
-}
-
-fn connection_error(url: &str) -> DrepsInnerMetadataError {
-    DrepsInnerMetadataError::new(
-        Code::ConnectionError,
-        format!("Error Offchain Pool: Connection failure error when fetching metadata from {url}."),
-    )
-}
-
-fn size_error(url: &str) -> DrepsInnerMetadataError {
-    DrepsInnerMetadataError::new(
-        Code::SizeExceeded,
-        format!(
-            "Error Offchain Pool: Size error, fetching metadata from {url} exceeded {MAX_POOL_METADATA_BYTES} bytes."
-        ),
-    )
-}
-
-fn pool_fetch_error(url: &str, error: OffchainFetchError) -> Option<DrepsInnerMetadataError> {
-    match error {
-        OffchainFetchError::Client | OffchainFetchError::Body => None,
-        OffchainFetchError::Connection => Some(connection_error(url)),
-        OffchainFetchError::HttpResponse(status) => Some(http_response_error(url, status)),
-        OffchainFetchError::SizeExceeded => Some(size_error(url)),
-    }
-}
-
-async fn fetch_pool_offchain_metadata(
-    pool: &PoolState,
-) -> Option<crate::mapping::PoolOffchainMetadata> {
-    let metadata = pool
-        .snapshot
-        .live()
-        .and_then(|x| x.params.pool_metadata.as_ref());
-
-    match metadata {
-        Some(metadata) => {
-            pool_offchain_metadata(&metadata.url, Some(metadata.hash.as_slice())).await
+/// [`page_pool_metadata`] over `load`. Starts at most
+/// [`MAX_CONCURRENT_POOL_FETCHES`] misses at a time.
+async fn page_pool_metadata_with<'a, C, L>(
+    cache: &C,
+    onchain: &[Option<&'a pallas::ledger::primitives::PoolMetadata>],
+    load: impl Fn(&'a pallas::ledger::primitives::PoolMetadata) -> L,
+    deadline: Duration,
+) -> Vec<PoolMetadataLoad>
+where
+    C: dolos_core::CacheStore,
+    L: std::future::Future<Output = PoolMetadataLoad>,
+{
+    let cached = join_all(onchain.iter().map(|metadata| async move {
+        match metadata {
+            Some(metadata) => cached_pool_metadata(cache, metadata).await,
+            None => Some((None, None)),
         }
-        None => None,
-    }
+    }))
+    .await;
+
+    // only a row with on-chain metadata can miss
+    let loads = onchain
+        .iter()
+        .zip(&cached)
+        .filter(|(_, cached)| cached.is_none())
+        .filter_map(|(metadata, _)| *metadata)
+        .map(load)
+        .collect();
+
+    let mut settled = settle_within(loads, MAX_CONCURRENT_POOL_FETCHES, deadline)
+        .await
+        .into_iter();
+
+    cached
+        .into_iter()
+        .map(|cached| {
+            cached
+                .or_else(|| settled.next().flatten())
+                .unwrap_or((None, None))
+        })
+        .collect()
 }
 
-async fn fetch_pool_metadata_with_error(
+async fn fetch_pool_metadata_with_error<C: dolos_core::CacheStore>(
+    cache: &C,
     pool: &PoolState,
-) -> (
-    Option<crate::mapping::PoolOffchainMetadata>,
-    Option<DrepsInnerMetadataError>,
-) {
+) -> PoolMetadataLoad {
     let Some(metadata) = pool
         .snapshot
         .live()
@@ -950,29 +943,7 @@ async fn fetch_pool_metadata_with_error(
     else {
         return (None, None);
     };
-
-    let body = match pool_offchain_body(&metadata.url).await {
-        Ok(body) => body,
-        Err(error) => return (None, pool_fetch_error(&metadata.url, error)),
-    };
-
-    let actual_hash = Hasher::<256>::hash(body.as_ref());
-
-    if actual_hash.as_ref() != metadata.hash.as_slice() {
-        return (
-            None,
-            Some(hash_mismatch_error(
-                &metadata.url,
-                metadata.hash.as_slice(),
-                actual_hash.as_ref(),
-            )),
-        );
-    }
-
-    match serde_json::from_slice(body.as_ref()) {
-        Ok(offchain) => (Some(offchain), None),
-        Err(_) => (None, None),
-    }
+    crate::offchain::fetch_pool_metadata(cache, metadata).await
 }
 
 /// The listing order of `/pools` and `/pools/extended`: the slot of each
@@ -1128,12 +1099,16 @@ where
     .await
     .map_err(log_and_500("failed to derive the pools' lifetime blocks"))?;
 
-    let metadata_futures: Vec<_> = pools
+    let onchain: Vec<_> = pools
         .iter()
-        .map(|(_, pool)| fetch_pool_offchain_metadata(pool))
+        .map(|(_, pool)| {
+            pool.snapshot
+                .live()
+                .and_then(|x| x.params.pool_metadata.as_ref())
+        })
         .collect();
 
-    let metadata_results = join_all(metadata_futures).await;
+    let metadata_results = page_pool_metadata(domain.inner.cache(), &onchain).await;
 
     let mut out = vec![];
 
@@ -1459,7 +1434,7 @@ where
         .snapshot
         .live()
         .and_then(|x| x.params.pool_metadata.as_ref());
-    let (offchain, error) = fetch_pool_metadata_with_error(&pool).await;
+    let (offchain, error) = fetch_pool_metadata_with_error(domain.inner.cache(), &pool).await;
 
     Ok(Json(build_pool_metadata_response(
         hash, onchain, offchain, error,
@@ -1984,11 +1959,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mapping::{
+        offchain_hash_mismatch_error as hash_mismatch_error,
+        pool_connection_error as connection_error, pool_fetch_error,
+        pool_http_response_error as http_response_error, OffchainFetchError,
+    };
     use crate::pagination::Order;
     use crate::test_support::{
         bech32_encode_values, bech32_values_from_bytes, health_beside, pool_id_cases,
         replicated_app, PoolIdCase, TestApp, TestFault, REG_POOL_HEX, REG_POOL_ID, SLOW_READ,
     };
+    use blockfrost_openapi::models::dreps_inner_metadata_error::Code;
     use blockfrost_openapi::models::{
         block_content::BlockContent, pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
         pool_list_extended_inner::PoolListExtendedInner,
@@ -2001,7 +1982,7 @@ mod tests {
     use dolos_testing::synthetic::{SyntheticBlockConfig, SyntheticProposalRef, SyntheticVote};
     use pallas::{
         codec::utils::Bytes,
-        crypto::hash::Hash,
+        crypto::hash::{Hash, Hasher},
         ledger::primitives::{alonzo, conway::GovAction, PoolMetadata, Relay, StakeCredential},
     };
     use serde_json::Value;
@@ -3248,7 +3229,10 @@ mod tests {
             hash: vec![2u8; 32].into(),
         });
 
-        let (metadata, error) = fetch_pool_metadata_with_error(&pool).await;
+        let app = TestApp::new();
+        let facade = app.facade();
+        let cache = facade.inner.cache();
+        let (metadata, error) = fetch_pool_metadata_with_error(cache, &pool).await;
 
         assert!(metadata.is_none());
         assert_eq!(
@@ -3260,8 +3244,136 @@ mod tests {
         );
         assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
 
-        assert!(fetch_pool_offchain_metadata(&pool).await.is_none());
+        let onchain = pool.snapshot.live().unwrap().params.pool_metadata.as_ref();
+        let (listed, _) = page_pool_metadata(cache, &[onchain]).await.remove(0);
+        assert!(listed.is_none());
         assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+    }
+
+    #[tokio::test]
+    async fn a_pool_list_stops_waiting_while_its_cache_fill_continues() {
+        use dolos_core::{CacheEntry, CacheStore as _};
+        use std::convert::Infallible;
+        use tokio::sync::oneshot;
+
+        let body = br#"{"name":"Pool","description":"Pool","ticker":"POOL","homepage":"https://example.com"}"#;
+        let metadata = PoolMetadata {
+            url: "https://example.invalid/pool.json".to_string(),
+            hash: Hasher::<256>::hash(body).to_vec().into(),
+        };
+        let mut pool = retiring_pool([1u8; 28], None);
+        pool.snapshot.unwrap_live_mut().params.pool_metadata = Some(metadata.clone());
+        let app = TestApp::new();
+        let cache = app.facade().inner.cache().clone();
+        let (started, ready) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let fill = tokio::spawn({
+            let (cache, metadata) = (cache.clone(), metadata.clone());
+            async move {
+                cache
+                    .get_or_fill_async(
+                        crate::offchain::POOL_OFFCHAIN.name,
+                        metadata.hash.as_slice(),
+                        async move {
+                            let _ = started.send(());
+                            released.await.unwrap();
+                            Ok::<_, Infallible>(CacheEntry::new(body.to_vec(), 0))
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        ready.await.unwrap();
+        let onchain = [pool.snapshot.live().unwrap().params.pool_metadata.as_ref()];
+        let (listed, _) =
+            tokio::time::timeout(Duration::from_secs(6), page_pool_metadata(&cache, &onchain))
+                .await
+                .expect("the list waited beyond its metadata deadline")
+                .remove(0);
+        assert!(listed.is_none());
+        release.send(()).unwrap();
+        fill.await.unwrap();
+        let (listed, _) = page_pool_metadata(&cache, &onchain).await.remove(0);
+        assert_eq!(listed.unwrap().ticker, "POOL");
+    }
+
+    /// A cold page starts at most one fill per permit and queues none. Its
+    /// started fills keep their bodies, and the next request fetches the
+    /// rest.
+    #[tokio::test]
+    async fn a_cold_page_starts_no_more_fetches_than_its_slots() {
+        use crate::offchain::{load_pool_metadata, OnOverload};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Semaphore;
+
+        let rows = MAX_CONCURRENT_POOL_FETCHES + 4;
+        let bodies: Vec<_> = (0..rows)
+            .map(|i| {
+                format!(r#"{{"name":"P{i}","description":"","ticker":"P{i}","homepage":""}}"#)
+                    .into_bytes()
+            })
+            .collect();
+        let metadata: Vec<_> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| PoolMetadata {
+                url: format!("https://example.invalid/{i}.json"),
+                hash: Hasher::<256>::hash(body).to_vec().into(),
+            })
+            .collect();
+        let onchain: Vec<_> = metadata.iter().map(Some).collect();
+
+        let app = TestApp::new();
+        let cache = app.facade().inner.cache().clone();
+        let gate = Arc::new(Semaphore::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let held = |index: usize| {
+            let (body, gate, started) = (bodies[index].clone(), gate.clone(), started.clone());
+            move |_| {
+                let (body, gate, started) = (body.clone(), gate.clone(), started.clone());
+                async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    let _ = gate.acquire().await;
+                    Ok(body)
+                }
+            }
+        };
+        let page = |deadline| {
+            page_pool_metadata_with(
+                &cache,
+                &onchain,
+                |metadata| {
+                    let index = metadata.url.trim_end_matches(".json");
+                    let index: usize = index.rsplit('/').next().unwrap().parse().unwrap();
+                    load_pool_metadata(&cache, metadata, OnOverload::Unfetched, held(index))
+                },
+                deadline,
+            )
+        };
+
+        let cold = page(Duration::from_millis(100)).await;
+        assert!(cold.iter().all(|(listed, _)| listed.is_none()));
+        assert_eq!(started.load(Ordering::SeqCst), MAX_CONCURRENT_POOL_FETCHES);
+
+        // the started fetches outlive the page and keep their bodies
+        gate.add_permits(Semaphore::MAX_PERMITS / 2);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let kept = page_pool_metadata(&cache, &onchain[..MAX_CONCURRENT_POOL_FETCHES]);
+                if kept.await.iter().all(|(listed, _)| listed.is_some()) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a fetch the cold page started never kept its body");
+        assert_eq!(started.load(Ordering::SeqCst), MAX_CONCURRENT_POOL_FETCHES);
+
+        let warm = page(Duration::from_secs(5)).await;
+        assert!(warm.iter().all(|(listed, _)| listed.is_some()));
+        assert_eq!(started.load(Ordering::SeqCst), rows);
     }
 
     #[test]
@@ -3285,10 +3397,39 @@ mod tests {
     }
 
     #[test]
-    fn pool_fetch_error_suppresses_client_and_body_errors() {
-        for error in [OffchainFetchError::Client, OffchainFetchError::Body] {
-            assert!(pool_fetch_error("https://example.com/pool.json", error).is_none());
-        }
+    fn pool_fetch_error_suppresses_client_errors() {
+        assert!(
+            pool_fetch_error("https://example.com/pool.json", OffchainFetchError::Client).is_none()
+        );
+    }
+
+    #[test]
+    fn pool_fetch_error_maps_body_errors_to_connection_errors() {
+        let error = pool_fetch_error("https://example.com/pool.json", OffchainFetchError::Body)
+            .expect("The body error is missing.");
+        assert_eq!(error, connection_error("https://example.com/pool.json"));
+    }
+
+    #[tokio::test]
+    async fn an_extended_row_carries_the_error_of_a_failed_fetch() {
+        let failed = PoolMetadata {
+            url: "https://example.invalid/failed.json".to_string(),
+            hash: vec![3u8; 32].into(),
+        };
+        let app = TestApp::new();
+        let cache = app.facade().inner.cache().clone();
+        let error = connection_error(&failed.url);
+        crate::offchain::cache_pool_failure(&cache, &failed, error.clone()).await;
+
+        let loaded = page_pool_metadata(&cache, &[Some(&failed), None]).await;
+        assert!(loaded[0].0.is_none());
+        assert_eq!(loaded[0].1, Some(error.clone()));
+        assert!(loaded[1].0.is_none() && loaded[1].1.is_none());
+
+        let row = build_pool_extended_metadata(Some(&failed), loaded[0].clone()).unwrap();
+        assert_eq!(row.url.as_deref(), Some(failed.url.as_str()));
+        assert_eq!(row.error.as_deref(), Some(&error));
+        assert!(row.ticker.is_none());
     }
 
     #[test]

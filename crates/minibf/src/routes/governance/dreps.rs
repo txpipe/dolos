@@ -15,14 +15,13 @@ use dolos_cardano::{
     ChainSummary, PParamsSet,
 };
 use dolos_core::{BlockSlot, Domain};
-use futures::{stream, FutureExt as _, StreamExt as _};
 use pallas::ledger::primitives::conway::{Anchor, DRep};
 use serde::Deserialize;
 
 use crate::{
     error::Error,
     mapping::governance::dreps::{drep_amount, drep_is_expired, drep_is_retired, drep_list_item},
-    offchain::{cached_drep_metadata, fetch_drep_metadata, unfetched, OnOverload},
+    offchain::{cached_drep_metadata, fetch_drep_metadata, settle_within, unfetched, OnOverload},
     pagination::{Order, Pagination, PaginationParameters},
     scan::{EntityScan, ENTITY_CHUNK},
     Facade,
@@ -45,31 +44,6 @@ const MAX_CONCURRENT_METADATA_FETCHES: usize = 8;
 /// unfetched, the way Blockfrost serves a DRep whose metadata db-sync has not
 /// fetched yet.
 const PAGE_METADATA_DEADLINE: Duration = Duration::from_secs(3);
-
-/// Runs `loads`, at most `concurrency` at a time, and returns, in order, what
-/// each one settled to within `deadline`: `None` for a load still running or
-/// never started. Every load is dropped at the deadline, so one that should
-/// outlive it has to detach its own work, the way `fetch_drep_metadata` does.
-async fn settle_within<F: Future>(
-    loads: Vec<F>,
-    concurrency: usize,
-    deadline: Duration,
-) -> Vec<Option<F::Output>> {
-    let mut settled: Vec<_> = loads.iter().map(|_| None).collect();
-
-    let mut running = stream::iter(loads.into_iter().enumerate())
-        .map(|(index, load)| load.map(move |value| (index, value)))
-        .buffer_unordered(concurrency);
-
-    let _ = tokio::time::timeout(deadline, async {
-        while let Some((index, value)) = running.next().await {
-            settled[index] = Some(value);
-        }
-    })
-    .await;
-
-    settled
-}
 
 /// The metadata of each anchor of a page, in page order. What `cached` holds
 /// is answered up front, outside the fetch slots: only the misses go to
@@ -463,47 +437,6 @@ mod tests {
             StakeCredential,
         },
     };
-
-    /// A page answers by its deadline: a slow load leaves its row unsettled,
-    /// and the deadline drops it along with every load not started yet, so a
-    /// page leaves nothing of its own running once it has answered.
-    #[tokio::test]
-    async fn settle_within_answers_by_the_deadline_and_drops_the_rest() {
-        let (_release, released) = tokio::sync::oneshot::channel::<()>();
-        let (dropped, was_dropped) = tokio::sync::oneshot::channel::<()>();
-
-        let slow = async move {
-            // dropped with the load, which closes the channel
-            let _dropped = dropped;
-            let _ = released.await;
-            2
-        }
-        .boxed();
-
-        let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-        let queued = {
-            let started = started.clone();
-
-            async move {
-                started.store(true, std::sync::atomic::Ordering::SeqCst);
-                3
-            }
-            .boxed()
-        };
-
-        // one at a time: the slow load holds the only slot past the deadline
-        let loads = vec![async { 1 }.boxed(), slow, queued];
-
-        let settled = settle_within(loads, 1, Duration::from_millis(100)).await;
-
-        assert_eq!(settled, vec![Some(1), None, None]);
-
-        // the deadline dropped the slow load rather than leaving it running,
-        // and the queued one never started
-        assert!(was_dropped.await.is_err());
-        assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
-    }
 
     /// A row already at hand goes out with its metadata however many slow
     /// misses come before it on the page: only the misses wait for a fetch

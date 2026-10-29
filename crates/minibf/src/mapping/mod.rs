@@ -436,28 +436,46 @@ pub struct PoolOffchainMetadata {
     pub homepage: String,
 }
 
-fn parse_pool_offchain_metadata(
-    body: &[u8],
-    expected_hash: Option<&[u8]>,
-) -> Option<PoolOffchainMetadata> {
-    if let Some(expected_hash) = expected_hash {
-        let actual_hash = Hasher::<256>::hash(body);
+pub(crate) fn pool_http_response_error(url: &str, status: StatusCode) -> DrepsInnerMetadataError {
+    let reason = status.canonical_reason().unwrap_or("Unknown");
 
-        if actual_hash.as_ref() != expected_hash {
-            return None;
-        }
-    }
-
-    serde_json::from_slice(body).ok()
+    DrepsInnerMetadataError::new(
+        Code::HttpResponseError,
+        format!(
+            "Error Offchain Pool: HTTP Response error from {url} resulted in HTTP status code : {} \"{reason}\"",
+            status.as_u16(),
+        ),
+    )
 }
 
-pub async fn pool_offchain_metadata(
-    url: &str,
-    expected_hash: Option<&[u8]>,
-) -> Option<PoolOffchainMetadata> {
-    let body = pool_offchain_body(url).await.ok()?;
+pub(crate) fn pool_connection_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::ConnectionError,
+        format!("Error Offchain Pool: Connection failure error when fetching metadata from {url}."),
+    )
+}
 
-    parse_pool_offchain_metadata(&body, expected_hash)
+fn pool_size_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::SizeExceeded,
+        format!(
+            "Error Offchain Pool: Size error, fetching metadata from {url} exceeded {MAX_POOL_METADATA_BYTES} bytes."
+        ),
+    )
+}
+
+pub(crate) fn pool_fetch_error(
+    url: &str,
+    error: OffchainFetchError,
+) -> Option<DrepsInnerMetadataError> {
+    match error {
+        OffchainFetchError::Client => None,
+        OffchainFetchError::Connection | OffchainFetchError::Body => {
+            Some(pool_connection_error(url))
+        }
+        OffchainFetchError::HttpResponse(status) => Some(pool_http_response_error(url, status)),
+        OffchainFetchError::SizeExceeded => Some(pool_size_error(url)),
+    }
 }
 
 pub(crate) async fn pool_offchain_body(url: &str) -> Result<Vec<u8>, OffchainFetchError> {
@@ -777,24 +795,12 @@ fn resolve_anchor_urls(url: &str, ipfs_gateways: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// This function fetches metadata from a governance-anchor URL.
-///
-/// The function returns the JSON body and the raw bytes. On failure, it
-/// returns a typed error that keeps the original on-chain URL. See
-/// [`anchor_offchain_body`] for the fetch rules.
-pub async fn anchor_offchain_metadata(
-    url: &str,
-    expected_hash: &[u8],
-    ipfs_gateways: &[String],
-) -> (Option<AnchorMetadata>, Option<DrepsInnerMetadataError>) {
-    let metadata = anchor_offchain_body(url, expected_hash, ipfs_gateways)
-        .await
-        .and_then(|body| anchor_metadata_from_body(url, &body));
+/// The longest [`anchor_offchain_body`] can take for `url`: one request
+/// timeout for each candidate URL it tries in turn.
+pub(crate) fn anchor_fetch_budget(url: &str, ipfs_gateways: &[String]) -> Duration {
+    let candidates = resolve_anchor_urls(url, ipfs_gateways).len().max(1);
 
-    match metadata {
-        Ok(metadata) => (Some(metadata), None),
-        Err(error) => (None, Some(error)),
-    }
+    ANCHOR_FETCH_TIMEOUT.saturating_mul(u32::try_from(candidates).unwrap_or(u32::MAX))
 }
 
 /// This function fetches the raw body of a governance anchor and makes sure
@@ -970,13 +976,10 @@ mod offchain_tests {
                 .expect("Cannot read the test server address.")
         );
 
-        let (metadata, error) = anchor_offchain_metadata(&url, &[0; 32], &[]).await;
-
-        assert!(metadata.is_none());
-        assert_eq!(
-            error.expect("The connection error is absent.").code,
-            Code::ConnectionError
-        );
+        let error = anchor_offchain_body(&url, &[0; 32], &[])
+            .await
+            .expect_err("The loopback URL was accepted.");
+        assert_eq!(error.code, Code::ConnectionError);
         assert_eq!(
             listener
                 .accept()
@@ -1200,32 +1203,6 @@ mod offchain_tests {
     }
 
     #[tokio::test]
-    async fn pool_metadata_accepts_valid_body_and_checks_optional_hash() {
-        let mut body = br#"{"name":"Dolos","description":"Pool","ticker":"DLS","homepage":"https://example.com"}"#.to_vec();
-        body.resize(MAX_POOL_METADATA_BYTES, b' ');
-        let hash = Hasher::<256>::hash(&body);
-        let (url, server) = serve_body(body, None);
-        let (client, request_url) = local_candidate_client(&url);
-        let body = fetch_offchain_body(
-            &client,
-            &request_url,
-            Duration::from_secs(5),
-            MAX_POOL_METADATA_BYTES,
-        )
-        .await
-        .unwrap();
-        server.join().unwrap();
-
-        for expected_hash in [None, Some(hash.as_ref())] {
-            let metadata = parse_pool_offchain_metadata(&body, expected_hash).unwrap();
-            assert_eq!(metadata.name, "Dolos");
-            assert_eq!(metadata.ticker, "DLS");
-        }
-        assert!(parse_pool_offchain_metadata(&body, Some(&[0; 32])).is_none());
-        assert!(parse_pool_offchain_metadata(b"not JSON", None).is_none());
-    }
-
-    #[tokio::test]
     async fn anchor_candidate_keeps_governance_size_limit() {
         assert_eq!(MAX_POOL_METADATA_BYTES, 512);
         assert_eq!(MAX_ANCHOR_METADATA_BYTES, 3_000_000);
@@ -1374,6 +1351,26 @@ mod offchain_tests {
                 "https://gateway.pinata.cloud/ipfs/bafkreigmd7xasljkmisbal5pu2xcqolr2fkre4jnlllgqrof4wctadxa7m"
                     .to_string(),
             ],
+        );
+    }
+
+    #[test]
+    fn anchor_fetch_budget_allows_one_timeout_per_candidate() {
+        let gateways = [
+            "https://ipfs.io".to_string(),
+            "https://gateway.pinata.cloud".to_string(),
+        ];
+
+        let direct = anchor_fetch_budget("https://example.com/a.json", &gateways);
+        assert_eq!(direct, ANCHOR_FETCH_TIMEOUT);
+
+        let ipfs = anchor_fetch_budget("ipfs://bafyfoo", &gateways);
+        assert_eq!(ipfs, ANCHOR_FETCH_TIMEOUT * 2);
+
+        // no gateway, no request: the budget still has one timeout
+        assert_eq!(
+            anchor_fetch_budget("ipfs://bafyfoo", &[]),
+            ANCHOR_FETCH_TIMEOUT
         );
     }
 

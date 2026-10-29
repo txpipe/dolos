@@ -10,22 +10,30 @@ Dolos keeps a cache of answers it derives from its other stores, so that an expe
 
 The cache is split into namespaces, one per use. Each namespace has a format version; an upgrade that changes a namespace's encoding bumps it, and the entries kept under the old version are wiped when the node starts.
 
-| namespace            | validity   | serves                                                                                                        |
-| -------------------- | ---------- | ------------------------------------------------------------------------------------------------------------- |
-| `totals`             | immutable  | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total`           |
-| `assets`             | immutable  | each asset's supply, mint count, first mint and metadata tx, for `/assets*` and `/addresses/{address}/extended` |
-| `network`            | tip-scoped | the `/network` body, for 30 seconds                                                                           |
-| `offchain`           | immutable  | the verified DRep metadata of `/governance/dreps` and `/governance/dreps/{drep_id}/metadata`, by content hash |
-| `offchain-failures`  | tip-scoped | failed metadata fetches, for 10 minutes, so a dead host is not asked again on every request                   |
-| `pool-registrations` | immutable  | where each pool first registered, for the order of `/pools` and `/pools/extended`                             |
-| `pool-blocks`        | immutable  | each pool's lifetime blocks, for `blocks_minted` in `/pools/extended` and `/pools/{pool_id}`                  |
+| namespace                    | validity   | serves                                                                                                                     |
+| ---------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `totals`                     | immutable  | the lifetime totals of `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total`                        |
+| `assets`                     | immutable  | each asset's supply, mint count, first mint and metadata tx, for `/assets*` and `/addresses/{address}/extended`            |
+| `network`                    | tip-scoped | the `/network` body, for 30 seconds                                                                                        |
+| `offchain`                   | immutable  | the verified DRep metadata of `/governance/dreps` and `/governance/dreps/{drep_id}/metadata`, by content hash              |
+| `offchain-failures`          | tip-scoped | failed DRep metadata fetches, for 10 minutes, so a dead host is not asked again on every request                           |
+| `proposal-offchain`          | immutable  | verified proposal metadata for both `/governance/proposals` metadata endpoints, by content hash                            |
+| `proposal-offchain-failures` | tip-scoped | failed proposal metadata fetches, for 10 minutes, keyed by content hash and URL                                            |
+| `pool-offchain`              | immutable  | verified pool metadata for `/pools/{pool_id}/metadata`, `/pools/extended`, and `/txs/{hash}/pool_updates`, by content hash |
+| `pool-offchain-failures`     | tip-scoped | failed pool metadata fetches, for 10 minutes, keyed by content hash and URL                                                |
+| `pool-registrations`         | immutable  | where each pool first registered, for the order of `/pools` and `/pools/extended`                                          |
+| `pool-blocks`                | immutable  | each pool's lifetime blocks, for `blocks_minted` in `/pools/extended` and `/pools/{pool_id}`                               |
 
 A namespace has one of two validity models:
 
-- **Immutable** entries are never stale. An `offchain` body is pinned by its anchor's content hash, which every read checks again. The other immutable entries are built from sealed data only, so they are at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. An `assets` entry folds an asset's mints and burns over the epochs no rollback can reach, up to its watermark, in the same way. For a CIP-68 reference token, building the entry also reads the blocks that carry the token, newest first, back to the newest that sets its metadata, with no bound: this happens once per entry, on the first read of the token, a list read included, after the cache file is new, cleared or has evicted it. It also records the epoch of the asset's first mint, and a read whose first mint is in another epoch, as after `dolos doctor rebuild-state --rewrite-logs` corrects it, builds the entry again. The `pool-registrations` and `pool-blocks` namespaces each hold a single entry that covers every pool, up to the last slot or epoch no rollback can undo, and a read adds what came after. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
-- **Tip-scoped** entries are valid for a while. After that, a `network` entry is served stale while one rebuild replaces it, and an `offchain-failures` entry is ignored, so the next request fetches again. They are kept in memory only.
+- **Immutable** entries are never stale. An `offchain`, `proposal-offchain` or `pool-offchain` body is pinned by its advertised content hash, which every read checks again. The other immutable entries are built from sealed data only, so they are at most incomplete: a `totals` entry sums a credential's sealed epochs up to its _watermark_, the last epoch it covers, and a read adds the epochs after it. An `assets` entry folds an asset's mints and burns over the epochs no rollback can reach, up to its watermark, in the same way. For a CIP-68 reference token, building the entry also reads the blocks that carry the token, newest first, back to the newest that sets its metadata, with no bound: this happens once per entry, on the first read of the token, a list read included, after the cache file is new, cleared or has evicted it. It also records the epoch of the asset's first mint, and a read whose first mint is in another epoch, as after `dolos doctor rebuild-state --rewrite-logs` corrects it, builds the entry again. The `pool-registrations` and `pool-blocks` namespaces each hold a single entry that covers every pool, up to the last slot or epoch no rollback can undo, and a read adds what came after. Once more epochs seal, the entry is extended in the background. Immutable entries are kept in memory and on disk.
+- **Tip-scoped** entries are valid for a while. After that, a `network` entry is served stale while one rebuild replaces it, and an `offchain-failures`, `proposal-offchain-failures` or `pool-offchain-failures` entry is ignored, so the next request fetches again. They are kept in memory only.
 
 The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writes skip the fsync, and the node makes them durable when it shuts down, so a crash loses at most the entries written since. A file found corrupt, cut short, or laid out by another release, such as one you rolled back from, is recreated empty; one that fails to open for another reason, such as its permissions, is an error and the node does not start.
+
+DRep, proposal and pool metadata each have their own namespaces and fetch limits. One kind never waits for the fetches of another. DRep and proposal metadata run at most 16 fetches at once and keep at most 64 in progress, because such a body can reach 3 MB. Pool metadata runs at most 64 fetches at once and keeps at most 128 in progress, because a pool body is at most 512 bytes. A fetch continues after its request ends and keeps its result for the next request.
+
+A verified body stays available during an upstream outage until a tier evicts it. A new advertised hash starts a new fetch.
 
 ## Budgets and admission
 
@@ -37,7 +45,7 @@ The disk tier is a single Redb file, `<storage.path>/cache/cache.redb`. Its writ
 
 When a tier is full, it evicts the entries with the lowest build cost per byte first, and the least recently used among equals.
 
-An entry is kept only if building it cost at least its namespace's admission threshold, so cheap answers do not crowd out expensive ones. A `totals` entry's cost is the number of per-epoch unit sums its build read, and it is kept from 100,000. An `assets` entry is kept whatever it cost: a crawl of random assets reads each one once, so a threshold would serve it at the cost of the fold; its cost is the sealed chunks and blocks its build read. Set `[storage.cache.admission]` to change a threshold, for example `totals = 20000` to keep more credentials. See the [`storage.cache`](../configuration/schema#storagecache) section for every setting.
+An entry is kept only if building it cost at least its namespace's admission threshold, so cheap answers do not crowd out expensive ones. A `totals` entry's cost is the number of per-epoch unit sums its build read, and it is kept from 100,000. An `assets` entry is kept whatever it cost: a crawl of random assets reads each one once, so a threshold would serve it at the cost of the fold; its cost is the sealed chunks and blocks its build read. An off-chain metadata entry costs 0, as a DRep entry always has: the default threshold of 0 keeps it, and a full tier evicts it first. Set `[storage.cache.admission]` to change a threshold, for example `totals = 20000` to keep more credentials. See the [`storage.cache`](../configuration/schema#storagecache) section for every setting.
 
 ## Footprint
 
@@ -59,6 +67,17 @@ These figures size the `totals` namespace on mainnet. They were measured with do
 All of `--scan` fits the 4 GiB default disk budget, and the benchmark set fits the 512 MiB default memory budget. All of `--scan` does not fit the memory budget: it exceeds 512 MiB (536,870,912 bytes) by 2.1 MB. Under the default, a node whose clients read every kept key serves its lowest cost-per-byte entries from the disk tier. To keep the whole namespace in memory, raise `storage.cache.memory_mb` above 514 (539 MB); the namespace grows with the chain, so leave headroom.
 
 The `assets` namespace holds one entry per asset. On preprod, at commit `742169fb`, `dolos cache warm --namespace assets --scan` built all 1,502,407 assets a sealed epoch first minted, up to watermark 304, in 119 to 132 s on an SSD. They hold 215.9 MB of entry bytes, 144 bytes per asset. The cache file was 1.39 GB after one warm and 2.16 GB after another into a new file: Redb grows its file by more than the entry bytes, by an amount that varies from run to run. The entry bytes fit both default budgets. Mainnet has about 11.2 million assets, so its whole namespace is about 1.6 GB of entry bytes, inside the default disk budget and three times the default memory budget. A read that misses the memory tier is served from the disk tier.
+
+The off-chain metadata namespaces were measured at commit `4b60d5d3` by requesting every `/pools/extended` page twice and every proposal's metadata once:
+
+| namespace           | network | entries | bytes on disk | per entry |
+| ------------------- | ------- | ------- | ------------- | --------- |
+| `pool-offchain`     | mainnet | 1,729   | 465,665       | 269 B     |
+| `pool-offchain`     | preview | 356     | 79,141        | 222 B     |
+| `proposal-offchain` | mainnet | 55      | 770,060       | 14.0 KB   |
+| `proposal-offchain` | preview | 161     | 4,129,183     | 25.6 KB   |
+
+Mainnet listed 2,885 pools and 161 proposals, preview 731 pools and 1,583 proposals. The other rows have no metadata, or their fetch failed; failures stay in memory only. Every off-chain namespace fits both default budgets.
 
 ## Commands
 
@@ -105,4 +124,6 @@ That makes the pool lists slower with the cache off, since `/pools` and `/pools/
 | `/pools?count=100`          | 2.3 ms   | 26.7 ms         | 158 ms                |
 | `/pools/extended?count=100` | 5.32 s   | 5.45 s          | 5.53 s                |
 
-The cost grows with the number of pools, so on mainnet it is several times larger. `/pools/{pool_id}` reads only its own pool and is not affected.
+The `/pools/extended` row was measured before pool metadata was cached, so it shows a page whose metadata is not cached yet. The cost grows with the number of pools, so on mainnet it is several times larger. `/pools/{pool_id}` reads only its own pool and is not affected.
+
+The off-chain metadata namespaces, `offchain`, `proposal-offchain` and `pool-offchain` with their failures, read neither the archive nor the state, so they stay on in rolling history. They stay on while `storage.cache.enabled = false` too, as `totals` does: nothing is kept, so each request fetches again, within the same fetch limits.
