@@ -810,6 +810,15 @@ fn a_database_beside_the_stores_replays_and_resumes() {
     assert_eq!(contents(&node).cursor, Some(fixture.tip()));
     assert_healthy_at(&node, &fixture.tip());
 
+    // `--force` over an empty node clears nothing, so it takes nothing.
+    let node = fixture.node();
+    let inside = node.config.storage.path.join("node-db");
+    fixture.write_at(&inside, &[&fixture.blocks], MAGIC.into());
+    let source = inside.display().to_string();
+
+    assert_ok(&immutabledb(&node, &source, &["--force"]));
+    assert_eq!(contents(&node).cursor, Some(fixture.tip()));
+
     #[cfg(feature = "mithril")]
     {
         let node = fixture.node();
