@@ -64,6 +64,7 @@ fn proposal(byte: u8, ratified: Option<Epoch>, canceled: Option<Epoch>) -> Propo
         cc_votes: BTreeMap::from([(credential(0xc0), vote(20))]),
         drep_votes: BTreeMap::from([(credential(0xd0), vote(21))]),
         spo_votes: BTreeMap::from([([0xe0; 28].into(), vote(22))]),
+        cost_models_present: !byte.is_multiple_of(2),
     }
 }
 

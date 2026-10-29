@@ -206,7 +206,8 @@ const WAL_METADATA_VERSION_KEY: &str = "version";
 ///    `DRepAnchorUpdate` and `DRepPowerUpdate` retire.
 /// 7: `ScriptFirstSeen` retires.
 /// 8: `MintStatsUpdate` and `MetadataTxUpdate` retire.
-pub const CURRENT_WAL_VERSION: u32 = 8;
+/// 9: `NewProposalV2` carries whether its proposal includes cost models.
+pub const CURRENT_WAL_VERSION: u32 = 9;
 
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 
@@ -1016,6 +1017,53 @@ mod tests {
     #[test]
     fn a_version_5_wal_is_wiped_on_open() {
         assert_wiped_on_open(5);
+    }
+
+    #[test]
+    fn older_version_db_with_data_gets_wiped_on_open() {
+        for version in 2..CURRENT_WAL_VERSION {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wal.redb");
+
+            {
+                let db = open_raw_db(&path);
+                let wx = db.begin_write().unwrap();
+                {
+                    let mut table = wx.open_table(WAL).unwrap();
+                    let key = DbChainPoint::from(ChainPoint::Specific(42, [1u8; 32].into()));
+                    table.insert(key, vec![0xDEu8, 0xAD, 0xBE, 0xEF]).unwrap();
+                    let mut metadata = wx.open_table(WAL_METADATA).unwrap();
+                    metadata.insert(WAL_METADATA_VERSION_KEY, version).unwrap();
+                }
+                wx.commit().unwrap();
+            }
+
+            {
+                let db = open_raw_db(&path);
+                let rx = db.begin_read().unwrap();
+                let table = rx.open_table(WAL).unwrap();
+                assert_eq!(table.len().unwrap(), 1);
+                let metadata = rx.open_table(WAL_METADATA).unwrap();
+                assert_eq!(
+                    metadata
+                        .get(WAL_METADATA_VERSION_KEY)
+                        .unwrap()
+                        .unwrap()
+                        .value(),
+                    version
+                );
+            }
+
+            let store = open_test_store(&path).unwrap();
+            assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
+            assert!(store.data_table_is_empty().unwrap());
+            assert!(store.iter_logs(None, None).unwrap().next().is_none());
+            drop(store);
+
+            let reopened = open_test_store(&path).unwrap();
+            assert_eq!(reopened.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
+            assert!(reopened.data_table_is_empty().unwrap());
+        }
     }
 
     #[test]

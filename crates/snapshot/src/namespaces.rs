@@ -125,7 +125,7 @@ pub const SCHEMA_REVS: [(Namespace, u64); 31] = [
     (PolicyMintChunk::NS, 1),
     (PoolEpochLog::NS, 2),
     (PoolState::NS, 3),
-    (ProposalState::NS, 4),
+    (ProposalState::NS, 5),
     (PrunedAccountState::NS, 1),
     (UTXOS, 1),
 ];

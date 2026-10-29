@@ -398,6 +398,10 @@ pub fn registry() -> Vec<Entry> {
                     rev: 4,
                     hex: include_str!("goldens/proposals.rev4.hex"),
                 },
+                Pinned {
+                    rev: 5,
+                    hex: include_str!("goldens/proposals.rev5.hex"),
+                },
             ]
         ),
         entity_entry!(

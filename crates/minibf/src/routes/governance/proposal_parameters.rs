@@ -45,7 +45,12 @@ fn read_parameters<D: Domain>(
         return Err(StatusCode::NOT_FOUND.into());
     };
 
-    let model = ProposalParametersBuilder { tx, idx, params };
+    let model = ProposalParametersBuilder {
+        tx,
+        idx,
+        params,
+        cost_models_present: state.cost_models_present,
+    };
 
     Ok(model.into_model()?)
 }
@@ -93,6 +98,8 @@ mod tests {
         routes::governance::testing::*,
         test_support::{TestApp, TestFault},
     };
+    use dolos_cardano::ProposalState;
+    use dolos_core::StateStore as _;
     use dolos_testing::synthetic::SyntheticBlockConfig;
     use itertools::Itertools;
     use pallas::ledger::primitives::{
@@ -375,6 +382,120 @@ mod tests {
             cost_models["PlutusV3"],
             serde_json::json!([100_788, 420, 1, 1])
         );
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_parameters_distinguish_absent_and_empty_cost_models() {
+        let empty_models = CostModels {
+            plutus_v1: None,
+            plutus_v2: None,
+            plutus_v3: None,
+            unknown: Default::default(),
+        };
+        let updates = [
+            empty_update(),
+            ProtocolParamUpdate {
+                cost_models_for_script_languages: Some(empty_models.clone()),
+                ..empty_update()
+            },
+            ProtocolParamUpdate {
+                max_block_body_size: Some(90_015),
+                cost_models_for_script_languages: Some(empty_models.clone()),
+                ..empty_update()
+            },
+            ProtocolParamUpdate {
+                cost_models_for_script_languages: Some(CostModels {
+                    plutus_v1: Some(vec![]),
+                    ..empty_models.clone()
+                }),
+                ..empty_update()
+            },
+            ProtocolParamUpdate {
+                cost_models_for_script_languages: Some(CostModels {
+                    unknown: [(7, vec![1, -2])].into(),
+                    ..empty_models
+                }),
+                ..empty_update()
+            },
+        ];
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 1,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![vec![updates
+                .into_iter()
+                .map(|update| GovAction::ParameterChange(None, Box::new(update), None))
+                .collect()]],
+            ..Default::default()
+        });
+        let tx: Hash<32> = tx_hash_of_block(&app, 0).parse().unwrap();
+        let expected = [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({}),
+            serde_json::json!({"PlutusV1": []}),
+            serde_json::json!({}),
+        ];
+
+        for (idx, cost_models) in expected.into_iter().enumerate() {
+            let state = app
+                .facade()
+                .state()
+                .read_entity_typed::<ProposalState>(&ProposalKey::new(tx, idx as u32))
+                .unwrap()
+                .unwrap();
+            assert_eq!(state.cost_models_present, idx != 0);
+            if idx < 4 {
+                let ProposalAction::ParamChange(params) = state.action else {
+                    panic!("The proposal action was not a parameter change.");
+                };
+                assert!(params.cost_models_unknown().is_none());
+            }
+
+            let id = bech32_gov_action(&tx, idx as u32).unwrap();
+            let paths = [
+                format!("/governance/proposals/{tx}/{idx}/parameters"),
+                format!("/governance/proposals/{id}/parameters"),
+            ];
+            let mut responses = vec![];
+            for path in &paths {
+                let (status, bytes) = app.get_bytes(path).await;
+                assert_eq!(status, StatusCode::OK, "{path}");
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    value["parameters"].get("cost_models"),
+                    Some(&cost_models),
+                    "{path}"
+                );
+                if idx == 2 {
+                    assert_eq!(value["parameters"]["max_block_size"], 90_015);
+                }
+                responses.push(bytes);
+            }
+            assert_eq!(responses[0], responses[1]);
+        }
+
+        let mut responses = vec![];
+        for idx in 0..5 {
+            let id = bech32_gov_action(&tx, idx).unwrap();
+            for path in [
+                format!("/governance/proposals/{tx}/{idx}/parameters"),
+                format!("/governance/proposals/{id}/parameters"),
+            ] {
+                responses.push((path.clone(), app.get_bytes(&path).await));
+            }
+        }
+
+        enact_proposals(&app.facade().inner, true);
+        assert!(app
+            .facade()
+            .state()
+            .iter_entities_typed::<ProposalState>(None)
+            .unwrap()
+            .next()
+            .is_none());
+        for (path, expected) in responses {
+            assert_eq!(app.get_bytes(&path).await, expected, "{path}");
+        }
     }
 
     #[tokio::test]

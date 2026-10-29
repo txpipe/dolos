@@ -252,6 +252,10 @@ pub struct ProposalState {
     #[n(18)]
     #[cbor(default)]
     pub spo_votes: BTreeMap<PoolHash, VoteEntry>,
+
+    #[n(19)]
+    #[cbor(default)]
+    pub cost_models_present: bool,
 }
 
 /// A governance proposal: its transaction, then its index, `tx ‖ idx`, 36 B —
@@ -315,6 +319,7 @@ impl crate::final_rows::FinalRow for ProposalState {
             tx: self.tx,
             idx: self.idx,
             action: self.action.clone(),
+            cost_models_present: self.cost_models_present,
             max_epoch: self.max_epoch,
             ratified_epoch: self.ratified_epoch,
             canceled_epoch: self.canceled_epoch,
@@ -414,6 +419,7 @@ pub(crate) mod testing {
             cc_votes in prop::collection::btree_map(root::any_stake_credential(), any_vote_entry(), 0..3),
             drep_votes in prop::collection::btree_map(root::any_stake_credential(), any_vote_entry(), 0..3),
             spo_votes in prop::collection::btree_map(root::any_hash_28(), any_vote_entry(), 0..3),
+            cost_models_present in any::<bool>(),
         ) -> ProposalState {
             ProposalState {
                 slot,
@@ -432,6 +438,7 @@ pub(crate) mod testing {
                 cc_votes,
                 drep_votes,
                 spo_votes,
+                cost_models_present,
             }
         }
     }
@@ -732,6 +739,7 @@ impl dolos_core::EntityDelta for NewProposal {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
+            cost_models_present: false,
         };
 
         let _ = entity.insert(state);
@@ -773,6 +781,7 @@ pub struct NewProposalV2 {
     pub(crate) anchor: Option<Anchor>,
 
     pub(crate) prev: Option<ProposalState>,
+    pub(crate) cost_models_present: bool,
 }
 
 impl NewProposalV2 {
@@ -791,6 +800,7 @@ impl NewProposalV2 {
         parent: Option<GovActionId>,
         purpose: Option<GovPurpose>,
         anchor: Option<Anchor>,
+        cost_models_present: bool,
     ) -> Self {
         Self {
             slot,
@@ -807,6 +817,7 @@ impl NewProposalV2 {
             purpose,
             anchor,
             prev: None,
+            cost_models_present,
         }
     }
 }
@@ -841,6 +852,7 @@ impl dolos_core::EntityDelta for NewProposalV2 {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
+            cost_models_present: self.cost_models_present,
         };
 
         let _ = entity.insert(state);
@@ -1135,6 +1147,7 @@ mod compat_tests {
             assert!(decoded.cc_votes.is_empty());
             assert!(decoded.drep_votes.is_empty());
             assert!(decoded.spo_votes.is_empty());
+            assert!(!decoded.cost_models_present);
         }
     }
 
@@ -1169,6 +1182,7 @@ mod compat_tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
+            cost_models_present: false,
         };
 
         state.cc_votes.insert(
@@ -1199,10 +1213,29 @@ mod compat_tests {
             },
         );
 
-        let bytes = minicbor::to_vec(&state).unwrap();
-        let decoded: ProposalState = minicbor::decode(&bytes).unwrap();
+        for cost_models_present in [false, true] {
+            state.cost_models_present = cost_models_present;
+            let bytes = minicbor::to_vec(&state).unwrap();
+            let decoded: ProposalState = minicbor::decode(&bytes).unwrap();
+            assert_eq!(decoded, state);
 
-        assert_eq!(decoded, state);
+            let mut legacy = bytes;
+            assert_eq!(legacy[0], 0x94);
+            legacy[0] = 0x93;
+            legacy.pop();
+            let decoded: ProposalState = minicbor::decode(&legacy).unwrap();
+            assert_eq!(
+                decoded,
+                ProposalState {
+                    cost_models_present: false,
+                    ..state.clone()
+                }
+            );
+
+            let bytes = bincode::serialize(&state).unwrap();
+            let decoded: ProposalState = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(decoded, state);
+        }
     }
 }
 
@@ -1249,12 +1282,13 @@ mod prop_tests {
             parent in prop::option::of(root::any_gov_action_id()),
             purpose in prop::option::of(super::testing::any_gov_purpose()),
             anchor in prop::option::of(root::any_anchor()),
+            cost_models_present in any::<bool>(),
         ) -> NewProposalV2 {
             NewProposalV2::new(
                 slot, tx, idx, action,
                 deposit, reward_account, validity_period,
                 current_epoch, network_magic, protocol,
-                parent, purpose, anchor,
+                parent, purpose, anchor, cost_models_present,
             )
         }
     }
@@ -1365,6 +1399,7 @@ mod prop_tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
+            cost_models_present: false,
         }
     }
 
@@ -1649,6 +1684,7 @@ mod resolution_tests {
             cc_votes: Default::default(),
             drep_votes: Default::default(),
             spo_votes: Default::default(),
+            cost_models_present: false,
         }
     }
 
@@ -1682,6 +1718,70 @@ mod resolution_tests {
 
             delta.undo(&mut entity);
             assert_eq!(entity, Some(proposal()), "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn creation_cost_models_presence_survives_serialized_undo_and_reapply() {
+        for cost_models_present in [false, true] {
+            for previous in [None, Some(false), Some(true)] {
+                let before = previous.map(|present| ProposalState {
+                    cost_models_present: present,
+                    ..proposal()
+                });
+                let mut entity = before.clone();
+                let mut delta = NewProposalV2::new(
+                    10,
+                    [3u8; 32].into(),
+                    1,
+                    ProposalAction::ParamChange(PParamsSet::default()),
+                    Some(100),
+                    None,
+                    Some(10),
+                    500,
+                    764824073,
+                    10,
+                    None,
+                    Some(GovPurpose::PParamUpdate),
+                    None,
+                    cost_models_present,
+                );
+                delta.apply(&mut entity);
+                assert_eq!(
+                    entity.as_ref().unwrap().cost_models_present,
+                    cost_models_present
+                );
+                let applied = entity.clone();
+                let bytes = bincode::serialize(&delta).unwrap();
+                let mut restored: NewProposalV2 = bincode::deserialize(&bytes).unwrap();
+                assert_eq!(restored.cost_models_present, cost_models_present);
+                restored.undo(&mut entity);
+                assert_eq!(entity, before);
+                restored.apply(&mut entity);
+                assert_eq!(entity, applied);
+
+                let mut legacy = NewProposal::new(
+                    10,
+                    [3u8; 32].into(),
+                    1,
+                    ProposalAction::ParamChange(PParamsSet::default()),
+                    None,
+                    None,
+                    None,
+                    500,
+                    764824073,
+                    10,
+                );
+                legacy.apply(&mut entity);
+                assert!(!entity.as_ref().unwrap().cost_models_present);
+                let legacy_applied = entity.clone();
+                let bytes = bincode::serialize(&legacy).unwrap();
+                let mut restored: NewProposal = bincode::deserialize(&bytes).unwrap();
+                restored.undo(&mut entity);
+                assert_eq!(entity, applied);
+                restored.apply(&mut entity);
+                assert_eq!(entity, legacy_applied);
+            }
         }
     }
 
@@ -1739,6 +1839,7 @@ mod resolution_tests {
             None,
             None,
             None,
+            false,
         );
 
         delta.apply(&mut entity);

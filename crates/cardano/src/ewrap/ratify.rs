@@ -44,6 +44,8 @@ pub struct RatifyProposal {
 
     pub action: ProposalAction,
 
+    pub cost_models_present: bool,
+
     /// Lineage parent declared by the action (`None` for tree roots and
     /// for the lineage-less actions).
     pub parent: Option<GovActionId>,
@@ -389,7 +391,7 @@ fn active_committee_size(input: &RatifyInput, committee: &Committee) -> u64 {
 
 /// `votingDRepThreshold` over the run's evolving pparams and committee.
 /// All thresholds collapse to zero during bootstrap.
-fn drep_threshold(run: &RunState, action: &ProposalAction) -> Threshold {
+fn drep_threshold(run: &RunState, action: &ProposalAction, cost_models_present: bool) -> Threshold {
     let thresholds = if bootstrap_phase(&run.pparams) {
         bootstrap_drep_thresholds()
     } else {
@@ -405,9 +407,11 @@ fn drep_threshold(run: &RunState, action: &ProposalAction) -> Threshold {
         }),
         ProposalAction::NewConstitution { .. } => Some(thresholds.update_constitution),
         ProposalAction::HardFork(_) => Some(thresholds.hard_fork_initiation),
-        ProposalAction::ParamChange(update) => {
-            Some(pparams_update_drep_threshold(&thresholds, update))
-        }
+        ProposalAction::ParamChange(update) => Some(pparams_update_drep_threshold(
+            &thresholds,
+            update,
+            cost_models_present,
+        )),
         ProposalAction::TreasuryWithdrawal(_) => Some(thresholds.treasury_withdrawal),
         ProposalAction::Info | ProposalAction::Other => None,
     }
@@ -418,8 +422,13 @@ fn drep_threshold(run: &RunState, action: &ProposalAction) -> Threshold {
 fn pparams_update_drep_threshold(
     thresholds: &DRepVotingThresholds,
     update: &PParamsSet,
+    cost_models_present: bool,
 ) -> RationalNumber {
-    let mut max = zero_threshold();
+    let mut max = if cost_models_present {
+        thresholds.pp_technical_group.clone()
+    } else {
+        zero_threshold()
+    };
 
     for value in update.iter() {
         let Some(group) = pparam_drep_group(value.kind()) else {
@@ -739,7 +748,7 @@ pub fn ratify(input: &RatifyInput) -> RatifyOutcome {
             .as_ref()
             .is_some_and(|threshold| ratio_meets(cc.0, cc.1, threshold));
 
-        let drep_threshold = drep_threshold(&run, &proposal.action);
+        let drep_threshold = drep_threshold(&run, &proposal.action, proposal.cost_models_present);
         let is_no_confidence = matches!(proposal.action, ProposalAction::NoConfidence);
         let drep = drep_tally(
             input.current_epoch,
@@ -968,6 +977,7 @@ mod tests {
             key: ProposalKey::new([byte; 32].into(), 0),
             id: action_id(byte),
             action,
+            cost_models_present: false,
             parent: None,
             expires_after: 1_000,
             order: (byte as u64, [byte; 32].into(), 0),
@@ -1013,6 +1023,89 @@ mod tests {
         ProposalAction::ParamChange(PParamsSet::default().with(kind_value))
     }
 
+    #[test]
+    fn populated_cost_models_are_technical_not_security_without_presence_flag() {
+        let input = base_input();
+        let run = run_state(&input);
+
+        for value in [
+            PParamValue::CostModelsPlutusV1(vec![1]),
+            PParamValue::CostModelsPlutusV2(vec![2]),
+            PParamValue::CostModelsPlutusV3(vec![3]),
+            PParamValue::CostModelsUnknown(BTreeMap::from([(7, vec![4])])),
+        ] {
+            assert_eq!(pparam_drep_group(value.kind()), Some(DRepGroup::Technical));
+            assert!(!pparam_is_security(value.kind()));
+            let action = param_change(value);
+            assert_eq!(
+                drep_threshold(&run, &action, false),
+                Some(rational(58, 100))
+            );
+            assert_eq!(spo_threshold(&run, &action), Some(zero_threshold()));
+        }
+    }
+
+    #[test]
+    fn explicit_cost_models_presence_selects_technical_group() {
+        let mut run = run_state(&base_input());
+        let empty = ProposalAction::ParamChange(PParamsSet::default());
+        assert_eq!(drep_threshold(&run, &empty, false), Some(zero_threshold()));
+        assert_eq!(drep_threshold(&run, &empty, true), Some(rational(58, 100)));
+        assert_eq!(spo_threshold(&run, &empty), Some(zero_threshold()));
+
+        for (value, expected, spo_expected) in [
+            (
+                PParamValue::MinFeeA(1),
+                rational(58, 100),
+                rational(65, 100),
+            ),
+            (
+                PParamValue::DrepDeposit(1),
+                rational(59, 100),
+                zero_threshold(),
+            ),
+        ] {
+            let action = param_change(value);
+            assert_eq!(drep_threshold(&run, &action, true), Some(expected));
+            assert_eq!(spo_threshold(&run, &action), Some(spo_expected));
+        }
+
+        run.pparams.set(PParamValue::ProtocolVersion((9, 0)));
+        assert_eq!(drep_threshold(&run, &empty, true), Some(zero_threshold()));
+        let security = param_change(PParamValue::MinFeeA(1));
+        assert_eq!(
+            drep_threshold(&run, &security, true),
+            Some(zero_threshold())
+        );
+        assert_eq!(spo_threshold(&run, &security), Some(rational(65, 100)));
+        assert_eq!(drep_threshold(&run, &ProposalAction::Info, true), None);
+    }
+
+    #[test]
+    fn ratification_uses_cost_models_presence() {
+        for (present, bootstrap, expected) in [
+            (false, false, Verdict::Accepted),
+            (true, false, Verdict::Continuing),
+            (true, true, Verdict::Accepted),
+        ] {
+            let mut proposal = proposal(1, ProposalAction::ParamChange(PParamsSet::default()));
+            proposal.cost_models_present = present;
+            let mut input = all_yes_input(vec![proposal]);
+            input.proposals[0].drep_votes.clear();
+            input.proposals[0].spo_votes.clear();
+            if bootstrap {
+                input.pparams.set(PParamValue::ProtocolVersion((9, 0)));
+            }
+            let outcome = ratify(&input);
+            assert_eq!(outcome.verdicts[0].verdict, expected);
+            assert_eq!(
+                outcome.verdicts[0].tallies.spo_threshold,
+                Some(zero_threshold())
+            );
+            assert!(outcome.verdicts[0].tallies.spo_accepted);
+        }
+    }
+
     // §5.3.1 — threshold resolution
 
     /// Each pparam group resolves to its own DRep threshold; an update
@@ -1029,10 +1122,22 @@ mod tests {
         let technical = param_change(PParamValue::CollateralPercentage(1));
         let governance = param_change(PParamValue::DrepDeposit(1));
 
-        assert_eq!(drep_threshold(&run, &network), Some(rational(56, 100)));
-        assert_eq!(drep_threshold(&run, &economic), Some(rational(57, 100)));
-        assert_eq!(drep_threshold(&run, &technical), Some(rational(58, 100)));
-        assert_eq!(drep_threshold(&run, &governance), Some(rational(59, 100)));
+        assert_eq!(
+            drep_threshold(&run, &network, false),
+            Some(rational(56, 100))
+        );
+        assert_eq!(
+            drep_threshold(&run, &economic, false),
+            Some(rational(57, 100))
+        );
+        assert_eq!(
+            drep_threshold(&run, &technical, false),
+            Some(rational(58, 100))
+        );
+        assert_eq!(
+            drep_threshold(&run, &governance, false),
+            Some(rational(59, 100))
+        );
 
         // technical (58) + governance (59) → max = 59
         let multi = ProposalAction::ParamChange(
@@ -1040,7 +1145,7 @@ mod tests {
                 .with(PParamValue::CollateralPercentage(1))
                 .with(PParamValue::DrepDeposit(1)),
         );
-        assert_eq!(drep_threshold(&run, &multi), Some(rational(59, 100)));
+        assert_eq!(drep_threshold(&run, &multi, false), Some(rational(59, 100)));
 
         // security param → SPO security threshold; non-security → auto-accept
         assert_eq!(spo_threshold(&run, &network), Some(rational(65, 100)));
@@ -1133,15 +1238,18 @@ mod tests {
         };
 
         assert_eq!(
-            drep_threshold(&run, &ProposalAction::NoConfidence),
+            drep_threshold(&run, &ProposalAction::NoConfidence, false),
             Some(rational(51, 100))
         );
-        assert_eq!(drep_threshold(&run, &update), Some(rational(52, 100)));
+        assert_eq!(
+            drep_threshold(&run, &update, false),
+            Some(rational(52, 100))
+        );
 
         let mut no_committee = run_state(&input);
         no_committee.committee = None;
         assert_eq!(
-            drep_threshold(&no_committee, &update),
+            drep_threshold(&no_committee, &update, false),
             Some(rational(53, 100))
         );
 
@@ -1151,28 +1259,32 @@ mod tests {
                 &ProposalAction::NewConstitution {
                     anchor: anchor(),
                     guardrail_script: None,
-                }
+                },
+                false,
             ),
             Some(rational(54, 100))
         );
         assert_eq!(
-            drep_threshold(&run, &ProposalAction::HardFork((11, 0))),
+            drep_threshold(&run, &ProposalAction::HardFork((11, 0)), false),
             Some(rational(55, 100))
         );
         assert_eq!(
-            drep_threshold(&run, &ProposalAction::TreasuryWithdrawal(vec![])),
+            drep_threshold(&run, &ProposalAction::TreasuryWithdrawal(vec![]), false),
             Some(rational(60, 100))
         );
-        assert_eq!(drep_threshold(&run, &ProposalAction::Info), None);
+        assert_eq!(drep_threshold(&run, &ProposalAction::Info, false), None);
 
         // bootstrap: every resolvable threshold collapses to zero
         let mut bootstrap = run_state(&input);
         bootstrap.pparams.set(PParamValue::ProtocolVersion((9, 0)));
         assert_eq!(
-            drep_threshold(&bootstrap, &ProposalAction::HardFork((10, 0))),
+            drep_threshold(&bootstrap, &ProposalAction::HardFork((10, 0)), false),
             Some(rational(0, 1))
         );
-        assert_eq!(drep_threshold(&bootstrap, &ProposalAction::Info), None);
+        assert_eq!(
+            drep_threshold(&bootstrap, &ProposalAction::Info, false),
+            None
+        );
     }
 
     // §5.3.2 — committee tally
@@ -1616,6 +1728,7 @@ mod tests {
             tx: [1u8; 32].into(),
             idx: 0,
             action: ProposalAction::Info,
+            cost_models_present: false,
             max_epoch: None,
             ratified_epoch: None,
             canceled_epoch: None,
