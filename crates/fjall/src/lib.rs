@@ -14,6 +14,7 @@
 //!   the exact lookups that project the blocks
 //! - [`keys`]: Shared key encoding utilities
 //! - [`preset`]: The named tunings both stores open with
+//! - [`view`]: A read-only open, over a temporary mirror of a database
 
 use dolos_core::{ArchiveError, StateError};
 
@@ -21,6 +22,7 @@ pub mod archive;
 pub mod keys;
 pub mod preset;
 pub mod state;
+pub mod view;
 
 /// The segment file crate the archive's locations belong to.
 pub use dolos_flatfiles as flatfiles;

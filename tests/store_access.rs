@@ -14,6 +14,7 @@ use dolos::storage::{open_existing_stores, Access, OpenError, Stores};
 use dolos_cardano::CardanoDelta;
 use dolos_core::{
     bootstrap::{recovery_plan, RecoveredStore},
+    config::RootConfig,
     ChainPoint, LogValue, StateStore as _, WalStore as _,
 };
 use node::Node;
@@ -54,13 +55,56 @@ fn assert_unchanged(before: &BTreeMap<PathBuf, Vec<u8>>, after: &BTreeMap<PathBu
     }
 }
 
-/// Leave the redb file at `path` as a killed process leaves it: copied while
-/// `held` keeps it open, and put back once the handle is gone, since dropping
-/// a handle shuts the file down cleanly.
-fn left_by_a_crash(path: &Path, held: Held) {
-    let bytes = std::fs::read(path).unwrap();
-    drop(held);
-    std::fs::write(path, bytes).unwrap();
+/// Set, in the child process [`crash`] starts, to the node's `dolos.toml`.
+const CRASHING: &str = "DOLOS_TEST_CRASHING_CONFIG";
+
+/// The exit code of a child that crashed as asked.
+const CRASHED: i32 = 17;
+
+/// The configuration of the node to crash, when this process is the child
+/// [`crash`] started.
+fn crashing() -> Option<RootConfig> {
+    let path = std::env::var_os(CRASHING)?;
+
+    Some(toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap())
+}
+
+/// Leave the node's dataset as a killed process leaves it: `test` runs again,
+/// alone, in a child process, whose [`crashing`] branch opens stores, writes,
+/// and exits through [`exit_holding`]. Dropping a handle would shut its file
+/// down cleanly.
+fn crash(node: &Node, test: &str) {
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env(CRASHING, node.config_path())
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(CRASHED),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// End the child [`crash`] started, its stores never shut down.
+fn exit_holding<T>(stores: T) -> ! {
+    std::mem::forget(stores);
+    std::process::exit(CRASHED)
+}
+
+/// A WAL entry 10 slots past `point`, with a block nothing decodes.
+fn ahead_of(point: &ChainPoint) -> (ChainPoint, LogValue<CardanoDelta>) {
+    let ahead = ChainPoint::Specific(point.slot() + 10, [7u8; 32].into());
+
+    let entry = LogValue {
+        block: vec![0x80],
+        ..LogValue::origin()
+    };
+
+    (ahead, entry)
 }
 
 #[test]
@@ -91,24 +135,21 @@ fn a_missing_dataset_is_missing_and_left_missing() {
 /// A stopped node whose WAL is ahead of its state, as a crash between the
 /// WAL and the state commits leaves it: observing it shows the lag, and
 /// leaves every file under storage as it was.
+///
+/// Nothing opens the fjall stores between the sync that wrote them and the
+/// snapshot, since their first open after a run rewrites files.
 #[test]
 fn observing_a_lagging_dataset_changes_no_file() {
     let node = Node::new();
     node.sync();
 
     let tip = {
-        let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
-        let cursor = stores.state.read_cursor().unwrap().unwrap();
-        let ahead = ChainPoint::Specific(cursor.slot() + 10, [7u8; 32].into());
+        // The synced WAL is empty; any slot past the synthetic blocks is
+        // ahead of the state.
+        let wal = dolos::storage::open_wal_store::<CardanoDelta>(&node.config).unwrap();
+        let (ahead, entry) = ahead_of(&ChainPoint::Slot(1_000_000));
 
-        let entry = LogValue {
-            block: vec![0x80],
-            ..LogValue::origin()
-        };
-        stores
-            .wal
-            .append_entries(vec![(ahead.clone(), entry)])
-            .unwrap();
+        wal.append_entries(vec![(ahead.clone(), entry)]).unwrap();
 
         ahead
     };
@@ -138,26 +179,21 @@ type Held = Box<dyn std::any::Any>;
 /// WAL, and changes no file; a writing open repairs it and finds the lag.
 #[test]
 fn observing_a_dataset_a_crash_left_is_unclean() {
+    if let Some(config) = crashing() {
+        let stores = dolos::storage::open_data_stores::<CardanoDelta>(&config).unwrap();
+        let cursor = stores.state.read_cursor().unwrap().unwrap();
+
+        stores.wal.append_entries(vec![ahead_of(&cursor)]).unwrap();
+
+        exit_holding(stores);
+    }
+
     let node = Node::new();
     node.sync();
 
+    crash(&node, "observing_a_dataset_a_crash_left_is_unclean");
+
     let wal = node.config.wal_path().unwrap();
-
-    let stores = dolos::storage::open_data_stores::<CardanoDelta>(&node.config).unwrap();
-    let cursor = stores.state.read_cursor().unwrap().unwrap();
-    let tip = ChainPoint::Specific(cursor.slot() + 10, [7u8; 32].into());
-
-    let entry = LogValue {
-        block: vec![0x80],
-        ..LogValue::origin()
-    };
-    stores
-        .wal
-        .append_entries(vec![(tip.clone(), entry)])
-        .unwrap();
-
-    left_by_a_crash(&wal, Box::new(stores));
-
     let before = files(&node.config.storage.path);
 
     let error = open(&node, Access::Observe).err().unwrap();
@@ -175,31 +211,60 @@ fn observing_a_dataset_a_crash_left_is_unclean() {
     let plan = recovery_plan(&stores.wal, &stores.state, &stores.archive).unwrap();
     drop(stores);
 
-    assert_eq!(plan.wal, Some(tip));
+    let state = plan.state.clone().unwrap();
+    assert_eq!(plan.wal, Some(ahead_of(&state).0));
     assert!(!plan.is_current(), "{plan:?}");
 
     open(&node, Access::Observe).unwrap();
 }
 
-/// A persistent mempool a crash left unrepaired is refused by observing too.
+/// A persistent mempool a crash left unrepaired is refused by observing too,
+/// before any other store is opened, so no file changes.
 #[test]
 fn observing_a_mempool_a_crash_left_is_unclean() {
+    if let Some(config) = crashing() {
+        exit_holding(dolos::storage::open_mempool_store(&config).unwrap());
+    }
+
     let node = Node::with_tables("[mempool]\npersistent = true\n");
     node.sync();
 
-    let config = &node.config;
-    let mempool = config.mempool_path().unwrap();
+    crash(&node, "observing_a_mempool_a_crash_left_is_unclean");
 
-    left_by_a_crash(
-        &mempool,
-        Box::new(dolos::storage::open_mempool_store(config).unwrap()),
-    );
+    let mempool = node.config.mempool_path().unwrap();
+    let before = files(&node.config.storage.path);
 
     let error = open(&node, Access::Observe).err().unwrap();
     assert!(
         matches!(&error, OpenError::Unclean { path } if *path == mempool),
         "{error:?}"
     );
+
+    assert_unchanged(&before, &files(&node.config.storage.path));
+
+    open(&node, Access::Mutate).unwrap();
+    open(&node, Access::Observe).unwrap();
+}
+
+/// A WAL file a crash left empty, before redb initialised it, is refused by
+/// observing, and changes no file; a writing open initialises it.
+#[test]
+fn observing_an_empty_wal_file_is_unclean() {
+    let node = Node::new();
+    node.sync();
+
+    let wal = node.config.wal_path().unwrap();
+    std::fs::write(&wal, []).unwrap();
+
+    let before = files(&node.config.storage.path);
+
+    let error = open(&node, Access::Observe).err().unwrap();
+    assert!(
+        matches!(&error, OpenError::Unclean { path } if *path == wal),
+        "{error:?}"
+    );
+
+    assert_unchanged(&before, &files(&node.config.storage.path));
 
     open(&node, Access::Mutate).unwrap();
     open(&node, Access::Observe).unwrap();
@@ -217,7 +282,7 @@ fn a_dataset_missing_a_store_is_missing_it() {
 
     let cases = [
         (storage.state_path().unwrap(), storage.state_path().unwrap()),
-        (archive.join("index"), archive.clone()),
+        (archive.join("index"), archive.join("index")),
         (
             storage.blocks_path().unwrap(),
             storage.blocks_path().unwrap(),

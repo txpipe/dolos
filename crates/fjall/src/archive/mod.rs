@@ -78,6 +78,7 @@ use dolos_flatfiles::{decode_locations, encode_locations, BlockLocation, FlatFil
 
 use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
 use crate::preset::{Preset, Tuning};
+use crate::view::View;
 use crate::Error;
 
 pub mod entity;
@@ -180,6 +181,8 @@ pub struct ArchiveStore {
     /// material.
     index_sweep: Arc<Mutex<IndexSweepState>>,
     _tempdir: Option<Arc<tempfile::TempDir>>,
+    /// The mirror a read-only store opened over, dropped after the database.
+    _view: Option<Arc<View>>,
 }
 
 impl ArchiveStore {
@@ -200,9 +203,47 @@ impl ArchiveStore {
         let segments_dir = blocks_path.unwrap_or(path).to_path_buf();
         let flatfiles = FlatFileStore::new(segments_dir).map_err(|e| Error::Io(e.to_string()))?;
 
-        let store = Self::from_database(&path.join("index"), schema, flatfiles, preset, None)?;
+        let store =
+            Self::from_database(&path.join("index"), schema, flatfiles, preset, None, None)?;
 
         tracing::info!(tuning = %store.tuning(), "archive store opened");
+
+        Ok(store)
+    }
+
+    /// Open the archive store at `path` without writing to it: its index
+    /// over a [`View`], whose writes are dropped with it, and its segment
+    /// files, which only appends write, where they are. Both have to exist.
+    pub fn open_view(
+        schema: StateSchema,
+        path: impl AsRef<Path>,
+        blocks_path: Option<&Path>,
+        preset: Preset,
+    ) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let view = Arc::new(View::of(&path.join("index"))?);
+
+        let segments_dir = blocks_path.unwrap_or(path);
+
+        if !segments_dir.is_dir() {
+            return Err(Error::Io(format!(
+                "{} does not exist",
+                segments_dir.display()
+            )));
+        }
+
+        let flatfiles = FlatFileStore::new(segments_dir).map_err(|e| Error::Io(e.to_string()))?;
+
+        let store = Self::from_database(
+            view.path(),
+            schema,
+            flatfiles,
+            preset,
+            None,
+            Some(Arc::clone(&view)),
+        )?;
+
+        tracing::info!(tuning = %store.tuning(), "archive store opened read-only");
 
         Ok(store)
     }
@@ -223,6 +264,7 @@ impl ArchiveStore {
             flatfiles,
             Preset::Standard,
             Some(Arc::new(dir)),
+            None,
         )
     }
 
@@ -232,6 +274,7 @@ impl ArchiveStore {
         flatfiles: FlatFileStore,
         preset: Preset,
         tempdir: Option<Arc<tempfile::TempDir>>,
+        view: Option<Arc<View>>,
     ) -> Result<Self, Error> {
         let tuning = preset.archive();
         let db = tuning.database.builder(index_path).open()?;
@@ -249,6 +292,7 @@ impl ArchiveStore {
             preset,
             index_sweep: Arc::new(Mutex::new(IndexSweepState::default())),
             _tempdir: tempdir,
+            _view: view,
         })
     }
 

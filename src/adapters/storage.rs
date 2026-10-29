@@ -405,8 +405,9 @@ pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error>
     open_state_at(config, &path, Access::Mutate)
 }
 
-/// [`ArchiveStoreBackend::open`], with a lock another handle holds reported
-/// as [`Error::InUse`].
+/// [`ArchiveStoreBackend::open`], read-only over a view under
+/// [`Access::Observe`], with a lock another handle holds reported as
+/// [`Error::InUse`].
 fn open_archive_at(
     config: &RootConfig,
     path: &Path,
@@ -416,12 +417,20 @@ fn open_archive_at(
 
     match config.storage.archive.kind {
         StoreType::Fjall { preset } => {
-            let store = dolos_fjall::archive::ArchiveStore::open(
-                schema,
-                path,
-                config.storage.blocks_path().as_deref(),
-                preset.into(),
-            )
+            let blocks = config.storage.blocks_path();
+            let blocks = blocks.as_deref();
+
+            let store = match access {
+                Access::Observe => dolos_fjall::archive::ArchiveStore::open_view(
+                    schema,
+                    path,
+                    blocks,
+                    preset.into(),
+                ),
+                Access::Mutate => {
+                    dolos_fjall::archive::ArchiveStore::open(schema, path, blocks, preset.into())
+                }
+            }
             .map_err(|error| fjall_failure(path, error, ArchiveError::from))?;
 
             Ok(ArchiveStoreBackend::admitted_fjall(store, path, access)?)
@@ -430,7 +439,8 @@ fn open_archive_at(
     }
 }
 
-/// [`StateStoreBackend::open`], with a lock another handle holds reported as
+/// [`StateStoreBackend::open`], read-only over a view under
+/// [`Access::Observe`], with a lock another handle holds reported as
 /// [`Error::InUse`].
 fn open_state_at(
     config: &RootConfig,
@@ -439,8 +449,11 @@ fn open_state_at(
 ) -> Result<StateStoreBackend, Error> {
     match config.storage.state.kind {
         StoreType::Fjall { preset } => {
-            let store = dolos_fjall::StateStore::open(path, preset.into())
-                .map_err(|error| fjall_failure(path, error, StateError::from))?;
+            let store = match access {
+                Access::Observe => dolos_fjall::StateStore::open_view(path, preset.into()),
+                Access::Mutate => dolos_fjall::StateStore::open(path, preset.into()),
+            }
+            .map_err(|error| fjall_failure(path, error, StateError::from))?;
 
             Ok(StateStoreBackend::admitted_fjall(store, path, access)?)
         }
@@ -524,8 +537,9 @@ where
 /// What a command does with the stores it opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
-    /// Reads only: the WAL and the mempool open read-only, and no identity
-    /// is recorded on a store.
+    /// Reads only: the WAL and the mempool open read-only, the fjall stores
+    /// over a temporary view of their files, and no identity is recorded on
+    /// a store.
     Observe,
     /// Reads and writes, as the node does.
     Mutate,
@@ -534,7 +548,8 @@ pub enum Access {
 /// Why [`open_existing_stores`] did not open a dataset.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
-    #[error("{} does not exist", .path.display())]
+    /// The store at `path`, a file or a database directory, is not there.
+    #[error("no store at {}", .path.display())]
     Missing { path: PathBuf },
 
     #[error("{} is locked by another process", .path.display())]
@@ -582,14 +597,18 @@ impl From<Error> for OpenError {
 /// [`OpenError::Missing`], never created; a missing mempool file is the one
 /// exception, opened empty in memory, since it holds no chain data. Nothing
 /// is caught up or bootstrapped: the stores are as the last writer left them.
-/// A store another process holds is [`OpenError::InUse`]. Observing a redb
-/// file a crash left unrepaired is [`OpenError::Unclean`].
+/// A store another process holds is [`OpenError::InUse`]. Observing writes
+/// no file of the dataset, and a redb file a crash left unrepaired, or empty,
+/// is [`OpenError::Unclean`]; while the observed stores live, a writer cannot
+/// open them.
 pub fn open_existing_stores<D>(config: &RootConfig, access: Access) -> Result<Stores<D>, OpenError>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     existing(&config.storage.path)?;
 
+    // The redb files first: an observing open refused for a crash-left one
+    // has then opened no fjall store.
     let wal = match config.wal_path() {
         Some(path) => {
             existing(&path)?;
@@ -606,34 +625,6 @@ where
             WalStoreBackend::Redb(redb_existing(&path, opened)?)
         }
         None => WalStoreBackend::in_memory().map_err(Error::from)?,
-    };
-
-    let state_path = config.storage.state_path().unwrap_or_default();
-
-    if matches!(config.storage.state.kind, StoreType::Fjall { .. })
-        && !dolos_fjall::database_exists(&state_path)
-    {
-        return Err(OpenError::Missing { path: state_path });
-    }
-
-    let state = open_state_at(config, &state_path, access)?;
-
-    let archive = if !config.keeps_archive() {
-        ArchiveStoreBackend::noop()
-    } else {
-        let path = config.storage.archive_path().unwrap_or_default();
-
-        if matches!(config.storage.archive.kind, StoreType::Fjall { .. }) {
-            if !dolos_fjall::database_exists(&path.join("index")) {
-                return Err(OpenError::Missing { path });
-            }
-
-            if let Some(blocks) = config.storage.blocks_path() {
-                existing(&blocks)?;
-            }
-        }
-
-        open_archive_at(config, &path, access)?
     };
 
     let mempool = match config.mempool_path().filter(|path| path.exists()) {
@@ -653,6 +644,27 @@ where
         None => MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
     };
 
+    let state_path = config.storage.state_path().unwrap_or_default();
+
+    if matches!(config.storage.state.kind, StoreType::Fjall { .. }) {
+        fjall_existing(&state_path)?;
+    }
+
+    let state = open_state_at(config, &state_path, access)?;
+
+    let archive = if !config.keeps_archive() {
+        ArchiveStoreBackend::noop()
+    } else {
+        let path = config.storage.archive_path().unwrap_or_default();
+
+        if matches!(config.storage.archive.kind, StoreType::Fjall { .. }) {
+            fjall_existing(&path.join("index"))?;
+            existing(&config.storage.blocks_path().unwrap_or_else(|| path.clone()))?;
+        }
+
+        open_archive_at(config, &path, access)?
+    };
+
     Ok(Stores {
         wal,
         state,
@@ -661,17 +673,40 @@ where
     })
 }
 
-/// [`redb_opened`], with a read-only open refused for want of a repair
-/// reported as [`OpenError::Unclean`].
+/// [`redb_opened`], with a read-only open refused for want of a repair, or
+/// of an initialised file, reported as [`OpenError::Unclean`].
 fn redb_existing<T, E>(path: &Path, opened: Result<T, E>) -> Result<T, OpenError>
 where
     E: std::error::Error + Into<Error> + 'static,
 {
     match opened {
-        Err(error) if dolos_redb3::handle::needs_repair(&error) => Err(OpenError::Unclean {
-            path: path.to_path_buf(),
-        }),
+        Err(error)
+            if !dolos_redb3::handle::is_already_open(&error)
+                && (dolos_redb3::handle::needs_repair(&error) || is_empty(path)) =>
+        {
+            Err(OpenError::Unclean {
+                path: path.to_path_buf(),
+            })
+        }
         opened => Ok(redb_opened(path, opened)?),
+    }
+}
+
+/// Whether the file at `path` is empty, as a crash during its creation
+/// leaves it: a writable open initialises it, a read-only one cannot.
+fn is_empty(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0)
+}
+
+/// [`existing`] for a fjall database, which a directory without its marker
+/// is not.
+fn fjall_existing(path: &Path) -> Result<(), OpenError> {
+    if dolos_fjall::database_exists(path) {
+        Ok(())
+    } else {
+        Err(OpenError::Missing {
+            path: path.to_path_buf(),
+        })
     }
 }
 

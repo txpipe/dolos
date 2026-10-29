@@ -31,7 +31,7 @@
 //! entity and UTxO keyspaces'.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use dolos_core::{
     ChainPoint, EntityKey, EntityValue, KeyRange, Namespace, StateError,
@@ -46,6 +46,7 @@ pub mod tags;
 pub mod utxos;
 
 use crate::preset::{Preset, Tuning};
+use crate::view::View;
 use crate::Error;
 
 /// Keyspace names for state store
@@ -85,13 +86,28 @@ pub struct StateStore {
     /// Live-UTxO tags keyspace
     tags: Keyspace,
     preset: Preset,
+    /// The mirror a read-only store opened over, dropped after the database.
+    _view: Option<Arc<View>>,
 }
 
 impl StateStore {
     /// Open or create a state store at the given path, tuned by `preset`.
     pub fn open(path: impl AsRef<Path>, preset: Preset) -> Result<Self, Error> {
+        Self::open_at(path.as_ref(), preset, None)
+    }
+
+    /// Open the state store at `path` without writing to it, over a
+    /// [`View`]. Writes the store takes land in the view and are dropped
+    /// with it.
+    pub fn open_view(path: impl AsRef<Path>, preset: Preset) -> Result<Self, Error> {
+        let view = Arc::new(View::of(path.as_ref())?);
+
+        Self::open_at(view.path(), preset, Some(Arc::clone(&view)))
+    }
+
+    fn open_at(path: &Path, preset: Preset, view: Option<Arc<View>>) -> Result<Self, Error> {
         let tuning = preset.state();
-        let db = tuning.database.builder(path.as_ref()).open()?;
+        let db = tuning.database.builder(path).open()?;
 
         let store = Self {
             cursor: db.keyspace(keyspace_names::CURSOR, || tuning.cursor.options())?,
@@ -100,6 +116,7 @@ impl StateStore {
             tags: db.keyspace(keyspace_names::TAGS, || tuning.tags.options())?,
             db,
             preset,
+            _view: view,
         };
 
         tracing::info!(tuning = %store.tuning(), "state store opened");

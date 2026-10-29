@@ -249,8 +249,10 @@ pub struct RecoveryStep {
     /// Whether the WAL holds every block after `from`: it reaches back to
     /// `from`, and no `reset_to` past `from` discarded blocks. Catch-up does
     /// not check this: with real blocks after the gap it replays them and
-    /// reaches the WAL tip, the gap's blocks never applied. It fails only when
-    /// the tip itself is a synthetic entry it cannot reach. A no-op archive
+    /// reaches the WAL tip, the gap's blocks never applied. When the tip
+    /// itself is a synthetic entry it cannot reach, the state's catch-up
+    /// fails, while the archive's logs it and leaves the archive behind. A
+    /// no-op archive
     /// (`history.mode = "none"`) has no tip, so it always replays from
     /// nothing.
     pub covered: bool,
