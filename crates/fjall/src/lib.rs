@@ -14,7 +14,7 @@
 //!   the exact lookups that project the blocks
 //! - [`keys`]: Shared key encoding utilities
 //! - [`preset`]: The named tunings both stores open with
-//! - [`view`]: A read-only open, over a temporary mirror of a database
+//! - [`view`]: A read-only open, over a mirror of a database beside it
 
 use dolos_core::{ArchiveError, StateError};
 
@@ -54,6 +54,17 @@ pub enum Error {
 
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// A read-only open could not mirror the database beside its store.
+    #[error("cannot mirror {} for a read-only open: {reason}", .path.display())]
+    View {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+
+    /// A write on a store opened read-only.
+    #[error("the store is open read-only")]
+    ReadOnly,
 }
 
 impl Error {

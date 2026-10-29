@@ -79,6 +79,17 @@ pub fn needs_repair(error: &(dyn std::error::Error + 'static)) -> bool {
     })
 }
 
+/// Whether `error`, or an error it wraps, is redb refusing a read-only open
+/// of a file holding no database, as a writable open initialises an empty one.
+pub fn is_uninitialised(error: &(dyn std::error::Error + 'static)) -> bool {
+    let invalid = |error: &io::Error| error.kind() == io::ErrorKind::InvalidData;
+
+    any_cause(error, |database, any| {
+        matches!(database, Some(redb::DatabaseError::Storage(redb::StorageError::Io(error))) if invalid(error))
+            || matches!(any, Some(redb::Error::Io(error)) if invalid(error))
+    })
+}
+
 fn any_cause(
     error: &(dyn std::error::Error + 'static),
     is: impl Fn(Option<&redb::DatabaseError>, Option<&redb::Error>) -> bool,

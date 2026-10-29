@@ -2,16 +2,17 @@
 //!
 //! Every fjall open writes: it trims the journal to its last valid entry,
 //! persists a new version and deletes the older ones, and drops orphaned
-//! tables. A [`View`] takes those writes instead. It is a temporary directory
-//! holding a copy of every file fjall may rewrite and a link to every table
-//! and blob file, which fjall only ever opens for reading and, at most,
-//! deletes, removing the link. The journal is replayed from the copy, so rows
-//! still in the memtable read as they do from the database.
+//! tables. A [`View`] takes those writes instead. It is a folder beside the
+//! store holding a copy of every file fjall may rewrite and a hard link to
+//! every table and blob file, which fjall only ever opens for reading and, at
+//! most, deletes, removing the link. The journal is replayed from the copy,
+//! so rows still in the memtable read as they do from the database.
 
 use std::{
     fs::{self, File, TryLockError},
     io,
-    path::Path,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crate::Error;
@@ -23,52 +24,140 @@ const IMMUTABLE_FOLDERS: [&str; 2] = ["tables", "blobs"];
 /// fresh one in the mirror.
 const LOCK_FILE: &str = "lock";
 
-/// A temporary mirror of a fjall database, for one read-only open.
+/// The file a live view holds locked, in its folder beside the mirror.
+const VIEW_LOCK_FILE: &str = "view.lock";
+
+/// The mirror's folder inside the view's.
+const MIRROR: &str = "db";
+
+/// A mirror of a fjall database beside its store, for one read-only open.
 ///
 /// While it lives it holds a shared lock on the database's own lock file, so
 /// it fails while a writer holds the database, and a writer fails while it
-/// is held: no writer compacts away a table the view links to.
+/// is held: no writer compacts away a table under the view. It also holds
+/// its own folder's lock, which tells a later view that it is not stale.
 pub struct View {
-    dir: tempfile::TempDir,
-    _lock: File,
+    dir: PathBuf,
+    mirror: PathBuf,
+    lock: Option<File>,
+    _database_lock: File,
 }
 
 impl View {
-    /// Mirror the database at `path`.
-    pub fn of(path: &Path) -> Result<Self, Error> {
-        let path = std::path::absolute(path).map_err(io_error)?;
+    /// Mirror the database at `database` in the folder holding `store`, the
+    /// store directory the database belongs to, first removing the mirrors
+    /// there that no live view holds.
+    pub fn of(database: &Path, store: &Path) -> Result<Self, Error> {
+        let database = std::path::absolute(database).map_err(io_error)?;
+        let store = std::path::absolute(store).map_err(io_error)?;
 
-        let lock = File::open(path.join(LOCK_FILE)).map_err(io_error)?;
+        let database_lock = File::open(database.join(LOCK_FILE)).map_err(io_error)?;
 
-        lock.try_lock_shared().map_err(|error| match error {
-            TryLockError::WouldBlock => Error::Fjall(fjall::Error::Locked),
-            TryLockError::Error(error) => io_error(error),
-        })?;
+        database_lock
+            .try_lock_shared()
+            .map_err(|error| match error {
+                TryLockError::WouldBlock => Error::Fjall(fjall::Error::Locked),
+                TryLockError::Error(error) => io_error(error),
+            })?;
 
-        let dir = tempfile::tempdir().map_err(io_error)?;
-        mirror(&path, dir.path(), false).map_err(io_error)?;
-        File::create(dir.path().join(LOCK_FILE)).map_err(io_error)?;
+        let parent = store.parent().unwrap_or(&store);
+        let prefix = prefix(&store);
 
-        Ok(Self { dir, _lock: lock })
+        sweep(parent, &prefix);
+
+        let dir = tempfile::Builder::new()
+            .prefix(&prefix)
+            .tempdir_in(parent)
+            .map_err(|error| view_error(parent, error))?
+            .keep();
+
+        // Built before the mirror, so a failure part-way removes the folder.
+        let mut view = Self {
+            mirror: dir.join(MIRROR),
+            dir,
+            lock: None,
+            _database_lock: database_lock,
+        };
+
+        let lock_path = view.dir.join(VIEW_LOCK_FILE);
+        let lock = File::create(&lock_path).map_err(|error| view_error(&lock_path, error))?;
+
+        lock.try_lock()
+            .map_err(|error| view_error(&lock_path, io::Error::other(error.to_string())))?;
+        view.lock = Some(lock);
+
+        mirror(&database, &view.mirror, false)?;
+
+        let lock_path = view.mirror.join(LOCK_FILE);
+        File::create(&lock_path).map_err(|error| view_error(&lock_path, error))?;
+
+        Ok(view)
     }
 
     /// Where fjall opens the mirror.
     pub fn path(&self) -> &Path {
-        self.dir.path()
+        &self.mirror
     }
 }
 
-fn mirror(from: &Path, to: &Path, immutable: bool) -> io::Result<()> {
-    fs::create_dir_all(to)?;
+impl Drop for View {
+    fn drop(&mut self) {
+        // Windows removes no file a handle holds open, the lock's included.
+        drop(self.lock.take());
 
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
+        if let Err(error) = fs::remove_dir_all(&self.dir) {
+            tracing::warn!(path = %self.dir.display(), %error, "could not remove a read-only view");
+        }
+    }
+}
+
+/// The name every view of `store` starts with, beside it.
+fn prefix(store: &Path) -> String {
+    let name = store
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    format!(".{name}.view-")
+}
+
+/// Remove the views in `parent` named with `prefix` whose lock no live view
+/// holds, as a killed process leaves them. A folder with no lock file yet is
+/// one a view is still creating.
+fn sweep(parent: &Path, prefix: &str) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let stale = entry.file_name().to_string_lossy().starts_with(prefix)
+            && File::open(entry.path().join(VIEW_LOCK_FILE))
+                .is_ok_and(|lock| lock.try_lock().is_ok());
+
+        if stale {
+            if let Err(error) = fs::remove_dir_all(entry.path()) {
+                tracing::warn!(path = %entry.path().display(), %error, "could not remove a stale read-only view");
+            }
+        }
+    }
+}
+
+fn mirror(from: &Path, to: &Path, immutable: bool) -> Result<(), Error> {
+    fs::create_dir_all(to).map_err(|error| view_error(to, error))?;
+
+    for entry in fs::read_dir(from).map_err(|error| view_error(from, error))? {
+        let entry = entry.map_err(|error| view_error(from, error))?;
         let source = entry.path();
         let target = to.join(entry.file_name());
 
         if entry.file_name() == LOCK_FILE {
             continue;
-        } else if entry.file_type()?.is_dir() {
+        }
+
+        // Followed, so a folder linked into the database mirrors as one.
+        let metadata = fs::metadata(&source).map_err(|error| view_error(&source, error))?;
+
+        if metadata.is_dir() {
             let immutable = IMMUTABLE_FOLDERS
                 .iter()
                 .any(|folder| entry.file_name() == *folder);
@@ -77,36 +166,89 @@ fn mirror(from: &Path, to: &Path, immutable: bool) -> io::Result<()> {
         } else if immutable {
             link(&source, &target)?;
         } else {
-            fs::copy(&source, &target)?;
+            fs::copy(&source, &target).map_err(|error| view_error(&source, error))?;
         }
     }
 
     Ok(())
 }
 
-/// A link to `source` at `target`, or a copy where the platform links
-/// neither way, as Windows refuses symbolic links without the privilege and
-/// hard links across volumes.
-fn link(source: &Path, target: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    let linked = std::os::unix::fs::symlink(source, target);
-    #[cfg(windows)]
-    let linked = std::os::windows::fs::symlink_file(source, target);
+/// A hard link to `source` at `target`, or a symbolic one where the two are
+/// on different volumes or the filesystem has no hard links. Never a copy: a
+/// store's tables run to hundreds of gigabytes.
+fn link(source: &Path, target: &Path) -> Result<(), Error> {
+    fs::hard_link(source, target)
+        .or_else(|_| {
+            #[cfg(unix)]
+            let linked = std::os::unix::fs::symlink(source, target);
+            #[cfg(windows)]
+            let linked = std::os::windows::fs::symlink_file(source, target);
 
-    linked
-        .or_else(|_| fs::hard_link(source, target))
-        .or_else(|_| fs::copy(source, target).map(drop))
+            linked
+        })
+        .map_err(|error| view_error(source, error))
 }
 
 fn io_error(error: io::Error) -> Error {
     Error::Io(error.to_string())
 }
 
+fn view_error(path: &Path, error: io::Error) -> Error {
+    Error::View {
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    }
+}
+
+/// An iterator over a store opened over a [`View`], holding the view until
+/// it is dropped: lsm-tree reopens table files by their path in the mirror.
+pub struct Viewed<I> {
+    inner: I,
+    _view: Option<Arc<View>>,
+}
+
+impl<I> Viewed<I> {
+    pub fn new(inner: I, view: Option<&Arc<View>>) -> Self {
+        Self {
+            inner,
+            _view: view.cloned(),
+        }
+    }
+}
+
+impl<I: Iterator> Iterator for Viewed<I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<I: DoubleEndedIterator> DoubleEndedIterator for Viewed<I> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back()
+    }
+}
+
+impl<I: dolos_core::archive::Skippable> dolos_core::archive::Skippable for Viewed<I> {
+    fn skip_forward(&mut self, n: usize) {
+        self.inner.skip_forward(n)
+    }
+
+    fn skip_backward(&mut self, n: usize) {
+        self.inner.skip_backward(n)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::collections::BTreeMap;
 
     fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut found = BTreeMap::new();
@@ -128,35 +270,56 @@ mod tests {
         fjall::Database::builder(path).open().unwrap()
     }
 
+    /// A database with one row flushed to a table and one in the journal.
+    fn written(path: &Path) {
+        let db = database(path);
+        let rows = db.keyspace("rows", Default::default).unwrap();
+
+        rows.insert("flushed", "1").unwrap();
+        rows.rotate_memtable_and_wait().unwrap();
+        rows.insert("journaled", "2").unwrap();
+        db.persist(fjall::PersistMode::SyncAll).unwrap();
+    }
+
+    fn assert_reads(view: &View) {
+        let db = database(view.path());
+        let rows = db.keyspace("rows", Default::default).unwrap();
+
+        assert_eq!(&*rows.get("flushed").unwrap().unwrap(), b"1");
+        assert_eq!(&*rows.get("journaled").unwrap().unwrap(), b"2");
+    }
+
+    fn views(parent: &Path) -> Vec<PathBuf> {
+        fs::read_dir(parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains(".view-")
+            })
+            .collect()
+    }
+
     /// A database written by one open, then read through a view: the rows,
-    /// the journal's included, read back, and no file of the database changes.
+    /// the journal's included, read back, no file of the database changes,
+    /// and the view leaves nothing behind.
     #[test]
     fn a_view_reads_the_database_and_changes_no_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
 
-        {
-            let db = database(&path);
-            let rows = db.keyspace("rows", Default::default).unwrap();
-
-            rows.insert("flushed", "1").unwrap();
-            rows.rotate_memtable_and_wait().unwrap();
-            rows.insert("journaled", "2").unwrap();
-            db.persist(fjall::PersistMode::SyncAll).unwrap();
-        }
-
-        let before = files(&path);
+        written(&path);
+        let before = files(dir.path());
 
         {
-            let view = View::of(&path).unwrap();
-            let db = database(view.path());
-            let rows = db.keyspace("rows", Default::default).unwrap();
-
-            assert_eq!(&*rows.get("flushed").unwrap().unwrap(), b"1");
-            assert_eq!(&*rows.get("journaled").unwrap().unwrap(), b"2");
+            let view = View::of(&path, &path).unwrap();
+            assert!(view.path().starts_with(dir.path()));
+            assert_reads(&view);
         }
 
-        let after = files(&path);
+        let after = files(dir.path());
         let changed: Vec<_> = before
             .keys()
             .chain(after.keys())
@@ -169,17 +332,86 @@ mod tests {
     #[test]
     fn a_view_of_a_held_database_is_locked() {
         let dir = tempfile::tempdir().unwrap();
-        let held = database(dir.path());
+        let path = dir.path().join("db");
+        let held = database(&path);
 
-        assert!(View::of(dir.path()).err().unwrap().is_locked());
+        assert!(View::of(&path, &path).err().unwrap().is_locked());
 
         drop(held);
-        let view = View::of(dir.path()).unwrap();
+        let view = View::of(&path, &path).unwrap();
 
-        let error = fjall::Database::builder(dir.path()).open().err().unwrap();
+        let error = fjall::Database::builder(&path).open().err().unwrap();
         assert!(matches!(error, fjall::Error::Locked), "{error:?}");
 
         drop(view);
-        database(dir.path());
+        database(&path);
+    }
+
+    /// A view a killed process left, its lock free, goes with the next view;
+    /// a live one stays.
+    #[test]
+    fn a_stale_view_is_removed_and_a_live_one_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+
+        let stale = dir.path().join(".db.view-stale");
+        fs::create_dir_all(stale.join(MIRROR)).unwrap();
+        File::create(stale.join(VIEW_LOCK_FILE)).unwrap();
+        File::create(stale.join(MIRROR).join("0.jnl")).unwrap();
+
+        let live = View::of(&path, &path).unwrap();
+        assert_eq!(views(dir.path()), vec![live.path().parent().unwrap()]);
+
+        let other = View::of(&path, &path).unwrap();
+        assert_eq!(views(dir.path()).len(), 2);
+        assert_reads(&other);
+
+        drop(live);
+        drop(other);
+        assert!(views(dir.path()).is_empty());
+    }
+
+    /// A folder of the database that is a link to one elsewhere mirrors
+    /// like any other.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_folder_is_mirrored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+
+        let tables = files(&path)
+            .into_keys()
+            .find(|file| file.parent().unwrap().ends_with("tables"))
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        let elsewhere = dir.path().join("elsewhere");
+        fs::rename(&tables, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &tables).unwrap();
+
+        assert_reads(&View::of(&path, &path).unwrap());
+    }
+
+    /// A file the view cannot mirror is named in the error.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_the_view_cannot_mirror_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+
+        let dangling = path.join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).unwrap();
+
+        let error = View::of(&path, &path).err().unwrap();
+        assert!(
+            matches!(&error, Error::View { path, .. } if *path == dangling),
+            "{error:?}"
+        );
+        assert!(views(dir.path()).is_empty());
     }
 }

@@ -466,12 +466,12 @@ fn fjall_failure<E: Into<Error>>(
     error: dolos_fjall::Error,
     wrap: impl FnOnce(dolos_fjall::Error) -> E,
 ) -> Error {
-    if error.is_locked() {
-        Error::InUse {
+    match error {
+        error if error.is_locked() => Error::InUse {
             path: path.to_path_buf(),
-        }
-    } else {
-        wrap(error).into()
+        },
+        dolos_fjall::Error::View { path, reason } => Error::Unviewable { path, reason },
+        error => wrap(error).into(),
     }
 }
 
@@ -538,8 +538,8 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     /// Reads only: the WAL and the mempool open read-only, the fjall stores
-    /// over a temporary view of their files, and no identity is recorded on
-    /// a store.
+    /// over a view of their files beside them, refusing writers, and no
+    /// identity is recorded on a store.
     Observe,
     /// Reads and writes, as the node does.
     Mutate,
@@ -559,6 +559,10 @@ pub enum OpenError {
     #[error("{} was not shut down cleanly", .path.display())]
     Unclean { path: PathBuf },
 
+    /// A fjall store an observing open could not mirror beside it.
+    #[error("cannot mirror {} for a read-only open: {reason}", .path.display())]
+    Unviewable { path: PathBuf, reason: String },
+
     #[error(transparent)]
     Storage(Error),
 }
@@ -576,6 +580,9 @@ impl miette::Diagnostic for OpenError {
             Self::Unclean { .. } => Some(Box::new(
                 "a reading command cannot open it until a writing one repairs it: start `dolos sync` or `dolos daemon` once",
             )),
+            Self::Unviewable { .. } => Some(Box::new(
+                "a reading command mirrors a store in the folder beside it, linking its tables: it needs write access there, on a filesystem with hard or symbolic links",
+            )),
             Self::Storage(_) => None,
         }
     }
@@ -585,6 +592,7 @@ impl From<Error> for OpenError {
     fn from(error: Error) -> Self {
         match error {
             Error::InUse { path } => Self::InUse { path },
+            Error::Unviewable { path, reason } => Self::Unviewable { path, reason },
             other => Self::Storage(other),
         }
     }
@@ -599,8 +607,9 @@ impl From<Error> for OpenError {
 /// is caught up or bootstrapped: the stores are as the last writer left them.
 /// A store another process holds is [`OpenError::InUse`]. Observing writes
 /// no file of the dataset, and a redb file a crash left unrepaired, or empty,
-/// is [`OpenError::Unclean`]; while the observed stores live, a writer cannot
-/// open them.
+/// is [`OpenError::Unclean`]; it mirrors each fjall store in a folder beside
+/// it while the store lives, [`OpenError::Unviewable`] where it cannot. While
+/// the observed stores live, a writer cannot open them.
 pub fn open_existing_stores<D>(config: &RootConfig, access: Access) -> Result<Stores<D>, OpenError>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
@@ -622,7 +631,7 @@ where
                 }
             };
 
-            WalStoreBackend::Redb(redb_existing(&path, opened)?)
+            WalStoreBackend::Redb(redb_existing(&path, access, opened)?)
         }
         None => WalStoreBackend::in_memory().map_err(Error::from)?,
     };
@@ -639,7 +648,7 @@ where
                 }
             };
 
-            MempoolBackend::Redb(redb_existing(&path, opened)?)
+            MempoolBackend::Redb(redb_existing(&path, access, opened)?)
         }
         None => MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
     };
@@ -673,16 +682,18 @@ where
     })
 }
 
-/// [`redb_opened`], with a read-only open refused for want of a repair, or
-/// of an initialised file, reported as [`OpenError::Unclean`].
-fn redb_existing<T, E>(path: &Path, opened: Result<T, E>) -> Result<T, OpenError>
+/// [`redb_opened`], with an observing open refused for want of a repair,
+/// or of an initialised file, reported as [`OpenError::Unclean`].
+fn redb_existing<T, E>(path: &Path, access: Access, opened: Result<T, E>) -> Result<T, OpenError>
 where
     E: std::error::Error + Into<Error> + 'static,
 {
+    use dolos_redb3::handle::{is_uninitialised, needs_repair};
+
     match opened {
         Err(error)
-            if !dolos_redb3::handle::is_already_open(&error)
-                && (dolos_redb3::handle::needs_repair(&error) || is_empty(path)) =>
+            if access == Access::Observe
+                && (needs_repair(&error) || is_uninitialised(&error) && is_empty(path)) =>
         {
             Err(OpenError::Unclean {
                 path: path.to_path_buf(),

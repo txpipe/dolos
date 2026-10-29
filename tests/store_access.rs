@@ -15,7 +15,7 @@ use dolos_cardano::CardanoDelta;
 use dolos_core::{
     bootstrap::{recovery_plan, RecoveredStore},
     config::RootConfig,
-    ChainPoint, LogValue, StateStore as _, WalStore as _,
+    ArchiveStore as _, ChainPoint, LogValue, StateStore as _, WalStore as _,
 };
 use node::Node;
 
@@ -133,8 +133,8 @@ fn a_missing_dataset_is_missing_and_left_missing() {
 }
 
 /// A stopped node whose WAL is ahead of its state, as a crash between the
-/// WAL and the state commits leaves it: observing it shows the lag, and
-/// leaves every file under storage as it was.
+/// WAL and the state commits leaves it: observing it shows the lag, reads
+/// what a writing open reads, and leaves every file under storage as it was.
 ///
 /// Nothing opens the fjall stores between the sync that wrote them and the
 /// snapshot, since their first open after a run rewrites files.
@@ -158,6 +158,7 @@ fn observing_a_lagging_dataset_changes_no_file() {
 
     let stores = open(&node, Access::Observe).unwrap();
     let plan = recovery_plan(&stores.wal, &stores.state, &stores.archive).unwrap();
+    let observed = read(&stores);
     drop(stores);
 
     assert_eq!(plan.wal, Some(tip));
@@ -169,6 +170,37 @@ fn observing_a_lagging_dataset_changes_no_file() {
     );
 
     assert_unchanged(&before, &files(&node.config.storage.path));
+
+    let stores = open(&node, Access::Mutate).unwrap();
+    let written = read(&stores);
+    drop(stores);
+
+    assert!(written.0.is_some() && written.1.is_some(), "{written:?}");
+    assert_eq!(observed, written);
+    assert_eq!(plan.state, written.0);
+}
+
+/// The state's cursor, and the archive's tip with the block read back at
+/// its slot.
+type Read = (Option<ChainPoint>, Option<(u64, Vec<u8>)>, Option<Vec<u8>>);
+
+fn read(stores: &Stores<CardanoDelta>) -> Read {
+    let cursor = stores.state.read_cursor().unwrap();
+    let tip = stores
+        .archive
+        .get_tip()
+        .unwrap()
+        .map(|(slot, body)| (slot, body.to_vec()));
+
+    let block = tip.as_ref().and_then(|(slot, _)| {
+        stores
+            .archive
+            .get_block_by_slot(slot)
+            .unwrap()
+            .map(|body| body.to_vec())
+    });
+
+    (cursor, tip, block)
 }
 
 /// A store kept open until dropped.
@@ -268,6 +300,58 @@ fn observing_an_empty_wal_file_is_unclean() {
 
     open(&node, Access::Mutate).unwrap();
     open(&node, Access::Observe).unwrap();
+}
+
+/// A writing open's own failure on an empty WAL file is reported as it is,
+/// not as a file a crash left.
+#[test]
+fn mutating_an_empty_wal_file_it_cannot_write_fails_as_it_is() {
+    let node = Node::new();
+    node.sync();
+
+    let wal = node.config.wal_path().unwrap();
+    std::fs::write(&wal, []).unwrap();
+
+    let mut permissions = std::fs::metadata(&wal).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&wal, permissions).unwrap();
+
+    let error = open(&node, Access::Mutate).err().unwrap();
+    assert!(matches!(error, OpenError::Storage(_)), "{error:?}");
+    assert!(
+        format!("{error:?}").contains("PermissionDenied"),
+        "{error:?}"
+    );
+}
+
+/// A dataset whose folder a reading command cannot write is refused with a
+/// typed error naming that folder, and changes no file.
+#[cfg(unix)]
+#[test]
+fn observing_a_dataset_it_cannot_mirror_is_unviewable() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let node = Node::new();
+    node.sync();
+
+    let storage = node.config.storage.path.clone();
+    let before = files(&storage);
+    let mode = |mode| std::fs::set_permissions(&storage, std::fs::Permissions::from_mode(mode));
+
+    mode(0o555).unwrap();
+    let opened = open(&node, Access::Observe);
+    mode(0o755).unwrap();
+
+    let error = opened.err().unwrap();
+    assert!(
+        matches!(&error, OpenError::Unviewable { path, .. } if *path == storage),
+        "{error:?}"
+    );
+
+    let help = miette::Diagnostic::help(&error).unwrap().to_string();
+    assert!(help.contains("write access"), "{help}");
+
+    assert_unchanged(&before, &files(&storage));
 }
 
 /// A dataset missing one of its stores is missing that store, whichever the
