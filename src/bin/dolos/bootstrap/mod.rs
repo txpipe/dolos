@@ -192,7 +192,7 @@ fn resolve<'a>(config: &RootConfig, command: &'a Command) -> miette::Result<Reso
 
     let resolved = match command {
         #[cfg(feature = "mithril")]
-        Command::Mithril(args) => Resolved::Mithril(args, mithril::mithril_source(args, network)?),
+        Command::Mithril(args) => Resolved::Mithril(args, mithril::resolve(config, args, network)?),
         Command::Stelae(args) => Resolved::Stelae(args, stelae::resolve(args, network)?),
         Command::Immutabledb(args) => {
             Resolved::Immutabledb(args, immutabledb::resolve(config, args)?)

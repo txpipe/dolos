@@ -11,8 +11,9 @@ use dolos_testing::{
 };
 
 /// `bootstrap immutabledb` keeps two blocks sharing a slot, a Byron epoch
-/// boundary block and the block after it, in the database's order, and a
-/// resumed run over the same database imports nothing twice.
+/// boundary block and the block after it, in the database's order. A resume
+/// from the block after the boundary block, which pallas finds only by its
+/// slot, carries on past it, and one from the tip imports nothing twice.
 #[test]
 fn immutabledb_bootstrap_preserves_same_slot_byron_order_and_resume() {
     use dolos_testing::blocks::{
@@ -28,9 +29,13 @@ fn immutabledb_bootstrap_preserves_same_slot_byron_order_and_resume() {
     let (boundary, ebb) = make_byron_ebb(1, genesis.hash().unwrap());
     let (regular_point, regular) = make_conway_block_with_prev(boundary.slot(), boundary.hash(), 1);
     let (_, next) = make_conway_block_with_prev(boundary.slot() + 1, regular_point.hash(), 2);
-    let blocks = vec![origin, ebb, regular, next];
-    write_immutable_fixture(&immutable, &blocks);
-    for resume in [&[][..], &["--continue"][..]] {
+    let blocks = [origin, ebb, regular, next];
+    for (written, resume) in [
+        (3, &[][..]),
+        (blocks.len(), &["--continue"][..]),
+        (blocks.len(), &["--continue"][..]),
+    ] {
+        write_immutable_fixture(&immutable, &blocks[..written]);
         let status = std::process::Command::new(env!("CARGO_BIN_EXE_dolos"))
             .arg("--config")
             .arg(node.config_path())
@@ -48,7 +53,7 @@ fn immutabledb_bootstrap_preserves_same_slot_byron_order_and_resume() {
                 .unwrap()
                 .map(|(_, body)| body)
                 .collect::<Vec<_>>(),
-            blocks
+            blocks[..written]
                 .iter()
                 .map(|body| body.as_ref().clone())
                 .collect::<Vec<_>>()

@@ -40,8 +40,9 @@ impl Display for IncompatibleStore {
         write!(
             f,
             "; this dolos opens stores that record `{}`. Restore it from a stele (`dolos \
-             bootstrap stelae --force`), or replay an ImmutableDB over it (`dolos bootstrap \
-             immutabledb --force`); see {MIGRATION_GUIDE_URL}",
+             bootstrap stelae --force`), replay a Cardano node database over it (`dolos \
+             bootstrap immutabledb --source <db> --force`), or clear it and sync from genesis \
+             (`dolos data cleanup --force`, then `dolos daemon`); see {MIGRATION_GUIDE_URL}",
             Compatibility::current()
         )
     }
@@ -65,14 +66,13 @@ mod tests {
 
             assert!(message.contains("data/state"), "{message}");
             assert!(message.contains(SUPPORTED_CONTRACTS[0]), "{message}");
-            assert!(
-                message.contains("dolos bootstrap immutabledb --force"),
-                "{message}"
-            );
-            assert!(
-                message.contains("dolos bootstrap stelae --force"),
-                "{message}"
-            );
+            for remedy in [
+                "dolos bootstrap stelae --force",
+                "dolos bootstrap immutabledb --source <db> --force",
+                "dolos data cleanup --force",
+            ] {
+                assert!(message.contains(remedy), "{message}");
+            }
             assert!(message.contains(MIGRATION_GUIDE_URL), "{message}");
 
             match found {

@@ -92,6 +92,41 @@ pub fn outside_storage_root(
     Ok(outside)
 }
 
+/// Whether `path` and the storage root are the same directory or one holds
+/// the other, so that clearing the root reaches `path` or writing under the
+/// root writes under it. Links are followed where the paths exist.
+pub fn overlaps_storage_root(config: &RootConfig, path: &Path) -> std::io::Result<bool> {
+    let root = resolve_links(&config.storage.path)?;
+    let path = resolve_links(path)?;
+
+    Ok(root.starts_with(&path) || path.starts_with(&root))
+}
+
+/// `path` [normalized](normalize), with the part of it that exists resolved
+/// through its links and the rest appended as written.
+fn resolve_links(path: &Path) -> std::io::Result<PathBuf> {
+    let normalized = normalize(path)?;
+    let mut existing = normalized.as_path();
+    let mut missing = Vec::new();
+
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(existing) {
+            return Ok(missing
+                .into_iter()
+                .rev()
+                .fold(resolved, |path, part| path.join(part)));
+        }
+
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(part)) => {
+                missing.push(part);
+                existing = parent;
+            }
+            _ => return Ok(normalized),
+        }
+    }
+}
+
 /// `path` made absolute with `..` resolved lexically. Only a relative path
 /// reads the working directory, so absolute ones survive a deleted one.
 fn normalize(path: &Path) -> std::io::Result<PathBuf> {
@@ -148,6 +183,8 @@ struct Found {
     /// The state failed to open for a reason other than its identity, or its
     /// cursor failed to read.
     unreadable: Option<Error>,
+    /// The WAL, when another process holds it open.
+    wal_in_use: Option<PathBuf>,
     /// The first identity refusal.
     refused: Option<Error>,
     /// The WAL, state, archive and segment directories holding data: a store
@@ -187,8 +224,13 @@ fn found_in_storage(config: &RootConfig) -> Result<Found, Error> {
     }
 
     if let Some(path) = config.wal_path().filter(|path| path.exists()) {
-        if dolos_redb3::wal::holds_entries(&path).unwrap_or(true) {
-            found.held.push(path);
+        use dolos_redb3::wal::WalProbe;
+
+        match dolos_redb3::wal::probe(&path) {
+            Ok(WalProbe::Empty) => {}
+            Ok(WalProbe::InUse) => found.wal_in_use = Some(path),
+            // A WAL that fails to read counts as data, as the archive does.
+            Ok(WalProbe::Entries) | Err(_) => found.held.push(path),
         }
     }
 
@@ -277,9 +319,9 @@ pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
 /// A store this release refuses to open is data in the way that only `--force`
 /// on its own clears; every other flag, `--continue` included, gets its
 /// refusal. A state that fails to open for another reason, or whose cursor
-/// fails to read, is left to `--continue`, and stops every other flag,
-/// `--force` included: whether it holds a node can't be told, and a running
-/// node holds its stores that way.
+/// fails to read, and a WAL another process holds, are left to `--continue`,
+/// and stop every other flag, `--force` included: whether they hold a node
+/// can't be told, and a running node holds its stores that way.
 pub fn inspect_existing_data(
     config: &RootConfig,
     policy: ExistingDataPolicy,
@@ -298,6 +340,13 @@ pub fn inspect_existing_data(
         return Err(error);
     }
 
+    if let Some(wal) = found.wal_in_use {
+        return Err(Error::message(format!(
+            "the WAL at {} is in use by another process. Stop it, then run the bootstrap again",
+            wal.display()
+        )));
+    }
+
     if found.held.is_empty() {
         return Ok(Existing::Proceed);
     }
@@ -306,29 +355,25 @@ pub fn inspect_existing_data(
         return Ok(Existing::Skip);
     }
 
-    if policy.force {
-        return Ok(Existing::Clear);
-    }
-
     let held: Vec<_> = found
         .held
         .iter()
         .map(|path| path.display().to_string())
         .collect();
 
+    let detected = format!("existing data detected in storage ({})", held.join(", "));
+
+    if policy.force {
+        return clear(config, &detected, found);
+    }
+
     Err(Error::message(format!(
-        "existing data detected in storage ({}). Use --force to replace it, or \
-         --skip-if-data to leave it and exit 0",
-        held.join(", "),
+        "{detected}. Use --force to replace it, or --skip-if-data to leave it and exit 0"
     )))
 }
 
-/// The decision on storage holding a store this release refuses. `--force` on
-/// its own clears it, unless storage also holds a state that fails to open
-/// for another reason or whose cursor fails to read, which `--force` never
-/// clears, or a directory outside the root that holds data, which clearing
-/// the root doesn't reach. Those are named for removal by hand, after the
-/// refusal, each with the reason `--force` leaves it.
+/// The decision on storage holding a store this release refuses: `--force`
+/// on its own clears it, as it clears any other data.
 fn clear_refused(
     config: &RootConfig,
     policy: ExistingDataPolicy,
@@ -346,6 +391,16 @@ fn clear_refused(
         )));
     }
 
+    clear(config, &refusal.to_string(), found)
+}
+
+/// `--force`'s decision: clear the storage root, unless storage also holds
+/// what clearing the root doesn't reach — a state that fails to open for
+/// another reason or whose cursor fails to read, which `--force` never
+/// clears, a WAL another process holds, or a directory outside the root that
+/// holds data. Those are named for removal by hand, after `detected`, each
+/// with the reason `--force` leaves it.
+fn clear(config: &RootConfig, detected: &str, found: Found) -> Result<Existing, Error> {
     let mut left = Vec::new();
 
     if let Some(error) = found.unreadable {
@@ -354,6 +409,13 @@ fn clear_refused(
             "  {}: a state store that fails to open or to read its cursor, which `--force` \
              never clears: {error}",
             state.display()
+        ));
+    }
+
+    if let Some(wal) = found.wal_in_use {
+        left.push(format!(
+            "  {}: a WAL another process holds open, which `--force` never clears",
+            wal.display()
         ));
     }
 
@@ -370,7 +432,7 @@ fn clear_refused(
     }
 
     Err(Error::message(format!(
-        "{refusal}\n`--force` would leave:\n{}\nStop anything using them, remove them by \
+        "{detected}\n`--force` would leave:\n{}\nStop anything using them, remove them by \
          hand, then run the bootstrap again",
         left.join("\n"),
     )))
@@ -2205,7 +2267,8 @@ mod tests {
             .to_string();
         for remedy in [
             "dolos bootstrap stelae --force",
-            "dolos bootstrap immutabledb --force",
+            "dolos bootstrap immutabledb --source <db> --force",
+            "dolos data cleanup --force",
         ] {
             assert!(message.contains(remedy), "{message}");
         }
@@ -2565,6 +2628,138 @@ mod tests {
 
                 assert_eq!(inspected, Existing::Clear, "{state:?} {archive:?}");
             }
+        }
+    }
+
+    /// Over stores this release opens, `--force` refuses the same way while
+    /// data outside the root, a WAL included, would outlive the clear: the
+    /// node it leaves wouldn't start. Once that data is gone, it clears.
+    #[test]
+    fn force_names_current_data_outside_the_root() {
+        let wal: (Edit, Outside) = (
+            |config, elsewhere| config.sync.wal_path = Some(elsewhere.join("wal")),
+            |config| config.wal_path(),
+        );
+
+        for (edit, outside) in outside_layouts().into_iter().chain([wal]) {
+            let temp = tempfile::tempdir().unwrap();
+            let mut config = config_over(&temp.path().join("data"));
+            edit(&mut config, &temp.path().join("elsewhere"));
+            std::fs::create_dir_all(&config.storage.path).unwrap();
+            std::fs::create_dir_all(temp.path().join("elsewhere")).unwrap();
+
+            keep_state(&config, Kept::Current);
+            keep_archive(&config, Kept::Current);
+            written_wal(&config);
+
+            if let Some(blocks) = config.storage.blocks_path() {
+                written_segment(&blocks);
+            }
+
+            let outside = outside(&config).unwrap();
+
+            let message = match inspect_existing_data(&config, force()) {
+                Err(Error::Message(message)) => message,
+                other => panic!("{} not refused: {other:?}", outside.display()),
+            };
+
+            assert!(message.contains("existing data detected"), "{message}");
+            assert!(
+                message.contains(&format!(
+                    "{}: data outside {}, the storage root `--force` clears",
+                    outside.display(),
+                    config.storage.path.display()
+                )),
+                "{message}"
+            );
+
+            if outside.is_dir() {
+                std::fs::remove_dir_all(&outside).unwrap();
+            } else {
+                std::fs::remove_file(&outside).unwrap();
+            }
+
+            assert_eq!(
+                inspect_existing_data(&config, force()).unwrap(),
+                Existing::Clear,
+                "{}",
+                outside.display()
+            );
+        }
+    }
+
+    /// A WAL another process holds can't be read, so it is in use rather
+    /// than data: every flag but `--continue` refuses it, `--force` included,
+    /// beside a refused store too. Once it is closed, it is data again.
+    #[test]
+    fn a_wal_another_process_holds_is_in_use() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(&temp.path().join("data"));
+        written_wal(&config);
+
+        let held = open_wal_store::<dolos_cardano::CardanoDelta>(&config).unwrap();
+
+        for policy in every_policy() {
+            let inspected = inspect_existing_data(&config, policy);
+
+            if policy.r#continue {
+                assert_eq!(inspected.unwrap(), Existing::Proceed, "{policy:?}");
+            } else {
+                let message = inspected.unwrap_err().to_string();
+                assert!(message.contains("in use by another process"), "{message}");
+            }
+        }
+
+        written_archive(&config, None);
+
+        let message = inspect_existing_data(&config, force())
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("no compatibility identity"), "{message}");
+        assert!(
+            message.contains("a WAL another process holds open"),
+            "{message}"
+        );
+
+        drop(held);
+
+        assert_eq!(
+            inspect_existing_data(&config, force()).unwrap(),
+            Existing::Clear
+        );
+    }
+
+    /// A path overlaps the storage root when either holds the other, however
+    /// it is written: through `..`, or through a link.
+    #[test]
+    fn a_path_overlaps_the_storage_root_when_either_holds_the_other() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let config = config_over(&root);
+
+        for (path, overlaps) in [
+            (root.clone(), true),
+            (root.join("node-db"), true),
+            (temp.path().to_path_buf(), true),
+            (root.join("..").join("data").join("db"), true),
+            (temp.path().join("elsewhere"), false),
+            (temp.path().join("data-db"), false),
+        ] {
+            assert_eq!(
+                overlaps_storage_root(&config, &path).unwrap(),
+                overlaps,
+                "{}",
+                path.display()
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(&root).unwrap();
+            let link = temp.path().join("link");
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+
+            assert!(overlaps_storage_root(&config, &link.join("db")).unwrap());
         }
     }
 

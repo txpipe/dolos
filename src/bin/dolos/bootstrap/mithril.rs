@@ -13,7 +13,7 @@ use miette::{Context, IntoDiagnostic};
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
-use super::immutable::ReplayOptions;
+use super::immutable::{ReplayOptions, Replayed};
 use crate::feedback::{Feedback, MithrilFeedback};
 
 #[derive(Debug, clap::Args, Clone)]
@@ -69,6 +69,28 @@ impl Default for Args {
             replay: ReplayOptions::default(),
         }
     }
+}
+
+/// The aggregator to trust, once the run is known to reach its stop epoch
+/// and, under `--skip-download`, the database already in the download
+/// directory to be one the replay reads, as `bootstrap immutabledb` checks
+/// its source.
+pub(crate) fn resolve(
+    config: &RootConfig,
+    args: &Args,
+    network: Option<&KnownNetwork>,
+) -> miette::Result<MithrilSource> {
+    super::immutable::check_stop_epoch(config, &args.replay)?;
+
+    if args.skip_download {
+        super::immutable::check_database(
+            config,
+            Path::new(&args.download_dir),
+            args.replay.resume,
+        )?;
+    }
+
+    mithril_source(args, network)
 }
 
 /// The aggregator to trust: what the invocation names, else the known
@@ -146,14 +168,26 @@ pub fn run(
         warn!("skipping download, assuming download dir has snapshot and it's validated")
     }
 
-    let immutable_path = Path::new(&args.download_dir).join("immutable");
+    let immutable_path = target_directory.join("immutable");
 
-    super::immutable::replay_immutabledb(config, &immutable_path, args.replay, feedback)?;
+    let replayed =
+        super::immutable::replay_immutabledb(config, &immutable_path, args.replay, feedback)?;
+
+    // A stop leaves the rest of the snapshot to replay, so it stays for the
+    // resume whether or not it was to be retained.
+    if replayed == Replayed::StopEpoch {
+        info!(
+            snapshot = %target_directory.display(),
+            "stop epoch reached, keeping the snapshot for `--continue --skip-download`"
+        );
+
+        return Ok(());
+    }
 
     if !args.retain_snapshot {
         info!("deleting downloaded snapshot");
 
-        std::fs::remove_dir_all(Path::new(&args.download_dir))
+        std::fs::remove_dir_all(target_directory)
             .into_diagnostic()
             .context("removing downloaded snapshot")?;
     }

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use dolos_core::config::{Protocol, RootConfig};
 use miette::{Context as _, IntoDiagnostic as _};
 
-use super::immutable::ReplayOptions;
+use super::immutable::{ReplayOptions, Replayed};
 use crate::feedback::Feedback;
 
 /// The file cardano-node and a Mithril download record the network magic in.
@@ -45,8 +45,8 @@ impl Args {
     }
 }
 
-/// The ImmutableDB `args` names, once it is known to belong to the
-/// configured network.
+/// The ImmutableDB `args` names, once it is known to be readable, to belong
+/// to the configured network, and to reach the stop epoch.
 ///
 /// Resolved before `--force` clears anything, so that a database for another
 /// network, or a directory that isn't one, costs the operator nothing.
@@ -55,15 +55,7 @@ pub(super) fn resolve(config: &RootConfig, args: &Args) -> miette::Result<PathBu
         Protocol::Cardano => u64::from(crate::common::open_genesis(config)?.network_magic()),
     };
 
-    let immutable = args.source.join("immutable");
-
-    if !immutable.is_dir() {
-        miette::bail!(
-            "{} holds no `immutable` directory; --source names a Cardano node database \
-             directory",
-            args.source.display()
-        );
-    }
+    let immutable = super::immutable::check_database(config, &args.source, args.replay.resume)?;
 
     let found = network_magic(&args.source)?;
 
@@ -74,6 +66,8 @@ pub(super) fn resolve(config: &RootConfig, args: &Args) -> miette::Result<PathBu
             args.source.display()
         );
     }
+
+    super::immutable::check_stop_epoch(config, &args.replay)?;
 
     Ok(immutable)
 }
@@ -104,9 +98,12 @@ pub(super) fn run(
     immutable: &Path,
     feedback: &Feedback,
 ) -> miette::Result<()> {
-    super::immutable::replay_immutabledb(config, immutable, args.replay, feedback)?;
-
-    tracing::info!("bootstrap complete, run `dolos daemon` to start the node");
+    match super::immutable::replay_immutabledb(config, immutable, args.replay, feedback)? {
+        Replayed::Tip => tracing::info!("bootstrap complete, run `dolos daemon` to start the node"),
+        Replayed::StopEpoch => {
+            tracing::info!("stop epoch reached, `--continue` resumes the replay")
+        }
+    }
 
     Ok(())
 }

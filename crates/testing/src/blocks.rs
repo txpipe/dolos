@@ -17,20 +17,28 @@ use std::collections::BTreeMap;
 
 /// Write one deterministic immutable chunk and an excluded volatile tail.
 pub fn write_immutable_fixture(dir: &std::path::Path, blocks: &[RawBlock]) {
-    let mut primary = vec![1u8];
-    let mut secondary = Vec::new();
-    let mut chunk = Vec::new();
-    for (index, body) in blocks.iter().enumerate() {
-        primary.extend_from_slice(&((index * 56) as u32).to_be_bytes());
-        secondary.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
-        secondary.extend_from_slice(&[0u8; 48]);
-        chunk.extend_from_slice(body);
+    write_immutable_chunks(dir, &[blocks]);
+}
+
+/// [`write_immutable_fixture`] over several chunks, numbered from `00000` in
+/// order, each holding its blocks.
+pub fn write_immutable_chunks(dir: &std::path::Path, chunks: &[&[RawBlock]]) {
+    for (number, blocks) in chunks.iter().enumerate() {
+        let mut primary = vec![1u8];
+        let mut secondary = Vec::new();
+        let mut chunk = Vec::new();
+        for (index, body) in blocks.iter().enumerate() {
+            primary.extend_from_slice(&((index * 56) as u32).to_be_bytes());
+            secondary.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
+            secondary.extend_from_slice(&[0u8; 48]);
+            chunk.extend_from_slice(body);
+        }
+        primary.extend_from_slice(&((blocks.len() * 56) as u32).to_be_bytes());
+        std::fs::write(dir.join(format!("{number:05}.primary")), primary).unwrap();
+        std::fs::write(dir.join(format!("{number:05}.secondary")), secondary).unwrap();
+        std::fs::write(dir.join(format!("{number:05}.chunk")), chunk).unwrap();
     }
-    primary.extend_from_slice(&((blocks.len() * 56) as u32).to_be_bytes());
-    std::fs::write(dir.join("00000.primary"), primary).unwrap();
-    std::fs::write(dir.join("00000.secondary"), secondary).unwrap();
-    std::fs::write(dir.join("00000.chunk"), chunk).unwrap();
-    std::fs::write(dir.join("00001.chunk"), []).unwrap();
+    std::fs::write(dir.join(format!("{:05}.chunk", chunks.len())), []).unwrap();
 }
 
 pub fn slot_to_hash(slot: u64) -> BlockHash {

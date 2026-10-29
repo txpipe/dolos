@@ -977,9 +977,22 @@ fn link_dir(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
+/// The corpus files hard-linked one by one, or copied where the volume can't
+/// link them: a directory symlink needs Developer Mode or admin rights here.
 #[cfg(windows)]
 fn link_dir(target: &Path, link: &Path) -> io::Result<()> {
-    std::os::windows::fs::symlink_dir(target, link)
+    std::fs::create_dir_all(link)?;
+    for entry in std::fs::read_dir(target)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let to = link.join(entry.file_name());
+        if std::fs::hard_link(entry.path(), &to).is_err() {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
 }
 
 struct Instance {

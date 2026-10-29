@@ -191,19 +191,33 @@ const WAL_METADATA: TableDefinition<&str, u32> = TableDefinition::new("wal_metad
 
 const WAL_METADATA_VERSION_KEY: &str = "version";
 
+/// What [`probe`] found in a WAL file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalProbe {
+    Empty,
+    Entries,
+    /// Another process holds the file open, so what it holds can't be read.
+    InUse,
+}
+
 /// Whether the WAL file at `path` holds an entry, read without writing to it.
 ///
 /// Opening the file as a [`RedbWalStore`] stamps its version, and wipes one
 /// of another version, so a caller deciding whether to touch the WAL at all
-/// reads it here instead. A file that needs repair, or one another process
-/// holds, is an error.
-pub fn holds_entries(path: impl AsRef<Path>) -> Result<bool, RedbWalError> {
-    let db = redb::ReadOnlyDatabase::open(path)?;
+/// reads it here instead. A file that needs repair is an error.
+pub fn probe(path: impl AsRef<Path>) -> Result<WalProbe, RedbWalError> {
+    let db = match redb::ReadOnlyDatabase::open(path) {
+        Ok(db) => db,
+        Err(redb::DatabaseError::DatabaseAlreadyOpen) => return Ok(WalProbe::InUse),
+        Err(error) => return Err(error.into()),
+    };
+
     let rx = db.begin_read()?;
 
     match rx.open_table(WAL) {
-        Ok(table) => Ok(!table.is_empty()?),
-        Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
+        Ok(table) if table.is_empty()? => Ok(WalProbe::Empty),
+        Ok(_) => Ok(WalProbe::Entries),
+        Err(redb::TableError::TableDoesNotExist(_)) => Ok(WalProbe::Empty),
         Err(error) => Err(error.into()),
     }
 }
@@ -943,12 +957,12 @@ mod tests {
     /// An entry is seen whatever version the file records, and reading it
     /// leaves the file as it was.
     #[test]
-    fn holds_entries_reads_without_writing() {
+    fn probe_reads_without_writing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal.redb");
 
         open_test_store(&path).unwrap();
-        assert!(!holds_entries(&path).unwrap());
+        assert_eq!(probe(&path).unwrap(), WalProbe::Empty);
 
         {
             let db = open_raw_db(&path);
@@ -965,19 +979,33 @@ mod tests {
         }
 
         let before = std::fs::read(&path).unwrap();
-        assert!(holds_entries(&path).unwrap());
+        assert_eq!(probe(&path).unwrap(), WalProbe::Entries);
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     /// A file with no WAL table, as a fresh redb file is, holds no entry.
     #[test]
-    fn holds_entries_without_a_table_is_empty() {
+    fn probe_without_a_table_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal.redb");
 
         drop(open_raw_db(&path));
 
-        assert!(!holds_entries(&path).unwrap());
+        assert_eq!(probe(&path).unwrap(), WalProbe::Empty);
+    }
+
+    /// A file a store holds open is in use, not data, and is still in use
+    /// until the store closes.
+    #[test]
+    fn probe_under_an_open_store_is_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        let store = open_test_store(&path).unwrap();
+        assert_eq!(probe(&path).unwrap(), WalProbe::InUse);
+
+        drop(store);
+        assert_eq!(probe(&path).unwrap(), WalProbe::Empty);
     }
 
     #[test]
