@@ -54,6 +54,20 @@ pub enum Error {
     Config(String),
 }
 
+impl Error {
+    /// Whether another handle, in this process or another, holds the
+    /// database's lock.
+    pub fn is_locked(&self) -> bool {
+        matches!(self, Error::Fjall(fjall::Error::Locked))
+    }
+}
+
+/// Whether a fjall database lives at `path`: fjall recovers a directory that
+/// holds its version marker and creates a new database anywhere else.
+pub fn database_exists(path: &std::path::Path) -> bool {
+    path.join("version").is_file()
+}
+
 impl From<Error> for StateError {
     fn from(error: Error) -> Self {
         StateError::InternalStoreError(error.to_string())

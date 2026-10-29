@@ -379,10 +379,10 @@ where
     match config.wal_path() {
         Some(path) => {
             ensure_store_path(&path)?;
-            Ok(WalStoreBackend::open_redb(
+            redb_opened(
                 &path,
-                &RedbWalConfig::default(),
-            )?)
+                WalStoreBackend::open_redb(&path, &RedbWalConfig::default()),
+            )
         }
         None => Ok(WalStoreBackend::in_memory()?),
     }
@@ -396,22 +396,87 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
 
     let path = config.storage.archive_path().unwrap_or_default();
     ensure_store_path(&path)?;
-    Ok(ArchiveStoreBackend::open(
-        &path,
-        config.storage.blocks_path(),
-        dolos_cardano::model::build_log_schema(),
-        config.storage.archive.kind,
-    )?)
+    open_archive_at(config, &path, Access::Mutate)
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
     let path = config.storage.state_path().unwrap_or_default();
     ensure_store_path(&path)?;
-    Ok(StateStoreBackend::open(
-        &path,
-        dolos_cardano::model::build_schema(),
-        &config.storage.state,
-    )?)
+    open_state_at(config, &path, Access::Mutate)
+}
+
+/// [`ArchiveStoreBackend::open`], with a lock another handle holds reported
+/// as [`Error::InUse`].
+fn open_archive_at(
+    config: &RootConfig,
+    path: &Path,
+    access: Access,
+) -> Result<ArchiveStoreBackend, Error> {
+    let schema = dolos_cardano::model::build_log_schema();
+
+    match config.storage.archive.kind {
+        StoreType::Fjall { preset } => {
+            let store = dolos_fjall::archive::ArchiveStore::open(
+                schema,
+                path,
+                config.storage.blocks_path().as_deref(),
+                preset.into(),
+            )
+            .map_err(|error| fjall_failure(path, error, ArchiveError::from))?;
+
+            Ok(ArchiveStoreBackend::admitted_fjall(store, path, access)?)
+        }
+        StoreType::Ephemeral => Ok(ArchiveStoreBackend::in_memory(schema)?),
+    }
+}
+
+/// [`StateStoreBackend::open`], with a lock another handle holds reported as
+/// [`Error::InUse`].
+fn open_state_at(
+    config: &RootConfig,
+    path: &Path,
+    access: Access,
+) -> Result<StateStoreBackend, Error> {
+    match config.storage.state.kind {
+        StoreType::Fjall { preset } => {
+            let store = dolos_fjall::StateStore::open(path, preset.into())
+                .map_err(|error| fjall_failure(path, error, StateError::from))?;
+
+            Ok(StateStoreBackend::admitted_fjall(store, path, access)?)
+        }
+        StoreType::Ephemeral => Ok(StateStoreBackend::in_memory()?),
+    }
+}
+
+fn fjall_failure<E: Into<Error>>(
+    path: &Path,
+    error: dolos_fjall::Error,
+    wrap: impl FnOnce(dolos_fjall::Error) -> E,
+) -> Error {
+    if error.is_locked() {
+        Error::InUse {
+            path: path.to_path_buf(),
+        }
+    } else {
+        wrap(error).into()
+    }
+}
+
+/// A redb open, with a file another handle holds reported as
+/// [`Error::InUse`].
+fn redb_opened<T, E>(path: &Path, opened: Result<T, E>) -> Result<T, Error>
+where
+    E: std::error::Error + Into<Error> + 'static,
+{
+    opened.map_err(|error| {
+        if dolos_redb3::handle::is_already_open(&error) {
+            Error::InUse {
+                path: path.to_path_buf(),
+            }
+        } else {
+            error.into()
+        }
+    })
 }
 
 pub fn open_mempool_store(config: &RootConfig) -> Result<MempoolBackend, Error> {
@@ -421,9 +486,11 @@ pub fn open_mempool_store(config: &RootConfig) -> Result<MempoolBackend, Error> 
         )),
         Some(path) => {
             ensure_store_path(&path)?;
-            Ok(MempoolBackend::Redb(
-                dolos_redb3::mempool::RedbMempool::open(path, &RedbMempoolConfig::default())?,
-            ))
+            let mempool = redb_opened(
+                &path,
+                dolos_redb3::mempool::RedbMempool::open(&path, &RedbMempoolConfig::default()),
+            )?;
+            Ok(MempoolBackend::Redb(mempool))
         }
     }
 }
@@ -452,6 +519,148 @@ where
         archive: open_archive_store(config)?,
         mempool: open_mempool_store(config)?,
     })
+}
+
+/// What a command does with the stores it opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Reads only: the WAL and the mempool open read-only, and no identity
+    /// is recorded on a store.
+    Observe,
+    /// Reads and writes, as the node does.
+    Mutate,
+}
+
+/// Why [`open_existing_stores`] did not open a dataset.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    #[error("{} does not exist", .path.display())]
+    Missing { path: PathBuf },
+
+    #[error("{} is locked by another process", .path.display())]
+    InUse { path: PathBuf },
+
+    #[error(transparent)]
+    Storage(Error),
+}
+
+impl miette::Diagnostic for OpenError {
+    fn help<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
+        match self {
+            Self::Missing { path } => Some(Box::new(format!(
+                "no dataset at {} (run `dolos bootstrap`)",
+                path.display()
+            ))),
+            Self::InUse { .. } => Some(Box::new(
+                "dataset in use by another dolos process (stop it, or query its APIs)",
+            )),
+            Self::Storage(_) => None,
+        }
+    }
+}
+
+impl From<Error> for OpenError {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::InUse { path } => Self::InUse { path },
+            other => Self::Storage(other),
+        }
+    }
+}
+
+/// Open the stores of a dataset that is already there, as `access` says,
+/// without changing what is on disk to do it.
+///
+/// Unlike [`open_data_stores`], a store that is not there is
+/// [`OpenError::Missing`], never created; a missing mempool file is the one
+/// exception, opened empty in memory, since it holds no chain data. Nothing
+/// is caught up or bootstrapped: the stores are as the last writer left them.
+/// A store another process holds is [`OpenError::InUse`].
+pub fn open_existing_stores<D>(config: &RootConfig, access: Access) -> Result<Stores<D>, OpenError>
+where
+    D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    existing(&config.storage.path)?;
+
+    let wal = match config.wal_path() {
+        Some(path) => {
+            existing(&path)?;
+
+            let opened = match access {
+                Access::Observe => {
+                    dolos_redb3::wal::RedbWalStore::open_read_only(&path, &RedbWalConfig::default())
+                }
+                Access::Mutate => {
+                    dolos_redb3::wal::RedbWalStore::open(&path, &RedbWalConfig::default())
+                }
+            };
+
+            WalStoreBackend::Redb(redb_opened(&path, opened)?)
+        }
+        None => WalStoreBackend::in_memory().map_err(Error::from)?,
+    };
+
+    let state_path = config.storage.state_path().unwrap_or_default();
+
+    if matches!(config.storage.state.kind, StoreType::Fjall { .. })
+        && !dolos_fjall::database_exists(&state_path)
+    {
+        return Err(OpenError::Missing { path: state_path });
+    }
+
+    let state = open_state_at(config, &state_path, access)?;
+
+    let archive = if !config.keeps_archive() {
+        ArchiveStoreBackend::noop()
+    } else {
+        let path = config.storage.archive_path().unwrap_or_default();
+
+        if matches!(config.storage.archive.kind, StoreType::Fjall { .. }) {
+            if !dolos_fjall::database_exists(&path.join("index")) {
+                return Err(OpenError::Missing { path });
+            }
+
+            if let Some(blocks) = config.storage.blocks_path() {
+                existing(&blocks)?;
+            }
+        }
+
+        open_archive_at(config, &path, access)?
+    };
+
+    let mempool = match config.mempool_path().filter(|path| path.exists()) {
+        Some(path) => {
+            let opened = match access {
+                Access::Observe => dolos_redb3::mempool::RedbMempool::open_read_only(
+                    &path,
+                    &RedbMempoolConfig::default(),
+                ),
+                Access::Mutate => {
+                    dolos_redb3::mempool::RedbMempool::open(&path, &RedbMempoolConfig::default())
+                }
+            };
+
+            MempoolBackend::Redb(redb_opened(&path, opened)?)
+        }
+        None => MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
+    };
+
+    Ok(Stores {
+        wal,
+        state,
+        archive,
+        mempool,
+    })
+}
+
+fn existing(path: &Path) -> Result<(), OpenError> {
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(OpenError::Missing {
+            path: path.to_path_buf(),
+        })
+    }
 }
 
 /// Open the state and archive stores through their identity check, then
@@ -790,12 +999,26 @@ impl StateStoreBackend {
         let path = path.as_ref();
         let store = dolos_fjall::StateStore::open(path, preset)?;
 
+        Self::admitted_fjall(store, path, Access::Mutate)
+    }
+
+    /// The fjall store opened at `path`, through [`admit`]. Under
+    /// [`Access::Observe`] a new store is admitted without recording its
+    /// identity.
+    fn admitted_fjall(
+        store: dolos_fjall::StateStore,
+        path: &Path,
+        access: Access,
+    ) -> Result<Self, StateError> {
         admit::<StateError>(
             "state",
             path,
             store.identity()?,
             || store.holds_data(),
-            |identity| store.record_identity(identity),
+            |identity| match access {
+                Access::Observe => Ok(()),
+                Access::Mutate => store.record_identity(identity),
+            },
         )?;
 
         Ok(Self::Fjall(store))
@@ -1153,12 +1376,26 @@ impl ArchiveStoreBackend {
         let path = path.as_ref();
         let store = dolos_fjall::archive::ArchiveStore::open(schema, path, blocks_path, preset)?;
 
+        Self::admitted_fjall(store, path, Access::Mutate)
+    }
+
+    /// The fjall store opened at `path`, through [`admit`]. Under
+    /// [`Access::Observe`] a new store is admitted without recording its
+    /// identity.
+    fn admitted_fjall(
+        store: dolos_fjall::archive::ArchiveStore,
+        path: &Path,
+        access: Access,
+    ) -> Result<Self, ArchiveError> {
         admit::<ArchiveError>(
             "archive",
             path,
             store.identity()?,
             || store.holds_data(),
-            |identity| store.record_identity(identity),
+            |identity| match access {
+                Access::Observe => Ok(()),
+                Access::Mutate => store.record_identity(identity),
+            },
         )?;
 
         Ok(Self::Fjall(store))
