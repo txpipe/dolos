@@ -519,42 +519,178 @@ fn an_invalid_log_filter_stops_every_command_before_its_stores() {
     assert!(!output.status.success());
 }
 
-/// The genesis files land where the configuration reads them, whatever the
-/// working directory.
-#[test]
-#[serial]
-fn reset_genesis_writes_the_configured_files() {
-    let dir = tempfile::tempdir().unwrap();
-    let elsewhere = tempfile::tempdir().unwrap();
+/// The embedded Byron, Shelley, Alonzo and Conway files of a known network.
+fn embedded_genesis(network: &str) -> [(&'static str, &'static [u8]); 4] {
+    use dolos_cardano::include::{mainnet, preprod, preview};
 
-    let path = dir.path().join("dolos.toml");
-    let config = std::fs::read_to_string(fixture("custom.toml"))
-        .unwrap()
-        .replace("magic = 42", "magic = 2");
-    std::fs::write(&path, config).unwrap();
-
-    let output = run_dolos(
-        elsewhere.path(),
-        &[
-            "--config",
-            path.to_str().unwrap(),
-            "doctor",
-            "reset-genesis",
+    let files = match network {
+        "mainnet" => [
+            mainnet::BYRON,
+            mainnet::SHELLEY,
+            mainnet::ALONZO,
+            mainnet::CONWAY,
         ],
-    );
+        "preprod" => [
+            preprod::BYRON,
+            preprod::SHELLEY,
+            preprod::ALONZO,
+            preprod::CONWAY,
+        ],
+        "preview" => [
+            preview::BYRON,
+            preview::SHELLEY,
+            preview::ALONZO,
+            preview::CONWAY,
+        ],
+        other => panic!("no embedded genesis for {other}"),
+    };
+
+    let [byron, shelley, alonzo, conway] = files;
+
+    [
+        ("byron.json", byron),
+        ("shelley.json", shelley),
+        ("alonzo.json", alonzo),
+        ("conway.json", conway),
+    ]
+}
+
+fn assert_embedded_genesis(dir: &Path, network: &str) {
+    for (name, bytes) in embedded_genesis(network) {
+        assert_eq!(
+            std::fs::read(dir.join(name)).unwrap(),
+            bytes,
+            "{network} {name}"
+        );
+    }
+}
+
+/// The names in `dir`, sorted.
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// With `--network` no configuration is read: from an empty directory the
+/// four embedded files are written and nothing else. A second run refuses and
+/// keeps them; `--force` overwrites.
+#[test]
+fn write_genesis_for_a_named_network_needs_no_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let args = [
+        "config",
+        "write-genesis",
+        "--network",
+        "preview",
+        "--dir",
+        "out",
+    ];
+
+    let output = run_dolos(dir.path(), &args);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
 
-    for era in ["byron", "shelley", "alonzo", "conway"] {
-        assert!(dir.path().join(format!("genesis/{era}.json")).is_file());
-    }
-    assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+    let out = dir.path().join("out");
+    assert_embedded_genesis(&out, "preview");
+    assert_eq!(entries(dir.path()), ["out"]);
 
-    let config = check(&path).unwrap();
-    assert_eq!(config.chain.cardano.unwrap().magic, 2);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for (name, _) in embedded_genesis("preview") {
+        assert!(stdout.contains(&format!("out/{name}")), "{stdout}");
+    }
+
+    let shelley = out.join("shelley.json");
+    std::fs::write(&shelley, "edited").unwrap();
+
+    let output = run_dolos(dir.path(), &args);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("shelley.json"), "{stderr}");
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert_eq!(std::fs::read(&shelley).unwrap(), b"edited");
+
+    let output = run_dolos(dir.path(), &[&args[..], &["--force"]].concat());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_embedded_genesis(&out, "preview");
+}
+
+/// Without `--network` the configuration's network is written to
+/// `./genesis`, and nothing appears under `storage.path`.
+#[test]
+fn write_genesis_writes_the_configured_network() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture("minimal.toml"), dir.path().join("dolos.toml")).unwrap();
+
+    let output = run_dolos(dir.path(), &["config", "write-genesis"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_embedded_genesis(&dir.path().join("genesis"), "preprod");
+    assert_eq!(entries(dir.path()), ["dolos.toml", "genesis"]);
+}
+
+/// A custom network's genesis is never generated, whether it is configured
+/// or named, and not even when its magic is a known network's.
+#[test]
+fn write_genesis_refuses_a_custom_network() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = std::fs::read_to_string(fixture("custom.toml"))
+        .unwrap()
+        .replace("magic = 42", "magic = 2");
+    std::fs::write(dir.path().join("dolos.toml"), config).unwrap();
+
+    let message = "custom genesis is never generated; provide the files";
+
+    let output = run_dolos(dir.path(), &["config", "write-genesis"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains(message), "{stderr}");
+
+    let output = run_dolos(
+        dir.path(),
+        &["config", "write-genesis", "--network", "custom"],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains(message), "{stderr}");
+
+    assert_eq!(entries(dir.path()), ["dolos.toml"]);
+}
+
+/// `config --help` lists the configuration commands.
+#[test]
+fn config_help_lists_check_and_write_genesis() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = run_dolos(dir.path(), &["config", "--help"]);
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let commands: Vec<&str> = stdout
+        .lines()
+        .skip_while(|line| !line.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+
+    assert_eq!(commands, ["check", "write-genesis", "help"], "{stdout}");
 }
 
 /// What tells the known networks' genesis apart. Their Alonzo genesis is the
@@ -572,8 +708,8 @@ fn fingerprint(genesis: &Genesis) -> impl PartialEq + std::fmt::Debug {
     )
 }
 
-/// The files `reset-genesis` writes for a network load to the genesis Dolos
-/// embeds for it.
+/// The files `config write-genesis` writes for a network load to the genesis
+/// Dolos embeds for it.
 #[test]
 fn every_known_network_saves_the_genesis_it_embeds() {
     for network in KnownNetwork::all() {
@@ -913,12 +1049,28 @@ fn shipped_configurations_pass_config_check() {
         let name = scenario.display().to_string();
         let dir = copy_files(&scenario);
 
-        let output = run_dolos(dir.path(), &["doctor", "reset-genesis"]);
-        assert!(
-            output.status.success(),
-            "{name}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        // A custom scenario runs on preview's genesis; a known network's is
+        // built in.
+        let config = std::fs::read_to_string(dir.path().join("dolos.toml")).unwrap();
+
+        if config.contains("network = \"custom\"") {
+            let output = run_dolos(
+                dir.path(),
+                &[
+                    "config",
+                    "write-genesis",
+                    "--network",
+                    "preview",
+                    "--dir",
+                    ".",
+                ],
+            );
+            assert!(
+                output.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
 
         assert_config_check_passes(dir.path(), &name);
     }
@@ -1015,6 +1167,56 @@ fn init_refuses_a_custom_config_without_its_genesis() {
     assert!(stderr.contains("untouched"), "{stderr}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+/// Without a terminal, `init --known-network` writes the selected file and
+/// nothing else: no store, no genesis, no prompt. It names the next step.
+#[test]
+#[serial]
+fn init_without_a_terminal_writes_only_the_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.toml");
+
+    let output = run_dolos(
+        dir.path(),
+        &[
+            "--config",
+            path.to_str().unwrap(),
+            "init",
+            "--known-network",
+            "preview",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(entries(dir.path()), ["node.toml"]);
+    assert_eq!(
+        load(Some(&path)).unwrap().chain,
+        ChainConfig::known("preview")
+    );
+
+    let bootstrap = format!("dolos --config {} bootstrap", path.display());
+    assert!(stdout.contains(&bootstrap), "{stdout}");
+    assert!(!stdout.contains("Which network"), "{stdout}");
+}
+
+/// Without a terminal and without `--known-network`, `init` is a usage error
+/// naming the flags, and writes nothing.
+#[test]
+fn init_without_a_terminal_needs_a_network() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = run_dolos(dir.path(), &["init"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("--known-network"), "{stderr}");
+    assert_eq!(entries(dir.path()), Vec::<String>::new());
 }
 
 /// `init --config` checks the file it names: an alpha.0 file there is
