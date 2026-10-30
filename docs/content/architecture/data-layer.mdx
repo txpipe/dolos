@@ -208,7 +208,7 @@ Six namespaces live in both stores: `epochs`, `address-stats` and `account-stats
 
 ### Archive tag dimensions
 
-`archive-tags` is keyed `dim_hash(8) ‖ xxh3_64(key)(8) ‖ slot(8)`, with `dim_hash = xxh3_64("block:" + dimension)` and an empty value. A tag says that the block at the slot touches the key. A phase-2-invalid transaction contributes its collateral inputs and collateral return, never its ordinary inputs and outputs, and none of its witness or auxiliary scripts. The rest of what it carries is tagged, and readers filter it: its metadata labels, certificates, withdrawals, witness and redeemer datums, votes, and the scripts its redeemers execute, except spend redeemers, which name ordinary inputs and so stay untagged.
+`archive-tags` is keyed `dim_hash(8) ‖ xxh3_64(key)(8) ‖ slot(8)`, with `dim_hash = xxh3_64("block:" + dimension)` and an empty value. A tag says that the block at the slot touches the key. A phase-2-invalid transaction contributes its collateral inputs and collateral return, never its ordinary inputs and outputs, and none of its witness or auxiliary scripts. The rest of what it carries is tagged: its metadata labels, certificates, withdrawals, witness and redeemer datums, votes, and the scripts its redeemers execute, except spend redeemers, which name ordinary inputs and so stay untagged. A reader that answers for valid transactions only filters these tags; a datum lookup does not, and serves a datum an invalid transaction carried.
 
 | Dimension | Key | Tags the block of | Rows | On disk |
 |---|---|---|---:|---:|
