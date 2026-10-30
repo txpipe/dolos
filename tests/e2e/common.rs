@@ -234,23 +234,38 @@ pub fn shutdown_gracefully(handle: &mut Child) {
     handle.wait().expect("failed to wait for process");
 }
 
-/// Write the scenario's genesis files. A fresh workspace holds no data, so the
-/// node starts from genesis with no bootstrap.
-pub fn reset_genesis(workspace: &ScenarioWorkspace) {
+/// A custom scenario runs on preview's genesis under preview's magic, its
+/// files beside its `dolos.toml`; a known network's genesis is built in.
+pub fn write_custom_genesis(workspace: &ScenarioWorkspace) {
+    let config = std::fs::read_to_string(workspace.path().join("dolos.toml"))
+        .expect("failed to read the scenario config");
+
+    if !config.contains("network = \"custom\"") {
+        return;
+    }
+
     let mut cmd = prepare_scenario_process(workspace);
 
-    let reset = cmd
-        .args(["doctor", "reset-genesis"])
+    let write = cmd
+        .args([
+            "config",
+            "write-genesis",
+            "--network",
+            "preview",
+            "--dir",
+            ".",
+            "--force",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to reset genesis");
+        .expect("failed to write genesis");
 
     assert!(
-        reset.status.success(),
-        "doctor reset-genesis failed for scenario {}: {}",
+        write.status.success(),
+        "config write-genesis failed for scenario {}: {}",
         workspace.name(),
-        String::from_utf8_lossy(&reset.stderr)
+        String::from_utf8_lossy(&write.stderr)
     );
 }
 

@@ -19,7 +19,7 @@ fn daemon_runs(workspace: &ScenarioWorkspace) {
 
     assert_file_released(workspace, "dolos.socket");
 
-    reset_genesis(workspace);
+    write_custom_genesis(workspace);
 
     let mut cmd = prepare_scenario_process(workspace);
 
