@@ -155,7 +155,13 @@ fn check_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::Result<Pa
         .with_context(|| format!("{} holds no stele", dir.display()))?;
 
     if clears {
-        super::refuse_what_the_clear_takes(config, &dir, "the stele", "the restore")?;
+        super::refuse_what_the_clear_takes(
+            config,
+            &dir,
+            "the stele",
+            "the restore",
+            "move the stele out of the storage root",
+        )?;
     }
 
     Ok(dir)

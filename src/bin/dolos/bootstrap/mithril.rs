@@ -106,6 +106,11 @@ pub(crate) fn resolve(
         super::immutable::check_database(config, &download_dir, args.replay.resume, clears)?;
     } else {
         check_download_start(args, &download_dir)?;
+
+        if clears {
+            check_past_the_download_end(args, &download_dir)?;
+        }
+
         check_download_dir(config, &download_dir, clears)?;
     }
 
@@ -131,6 +136,8 @@ fn check_download_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::
                 dir,
                 "the download directory",
                 "the download",
+                "download outside the storage root, or resume the replay a stop left there with \
+                 --continue --skip-download, without --force",
             )?;
         }
 
@@ -141,34 +148,72 @@ fn check_download_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::
 
     let made = make_dirs(&[dir, &config.storage.path])?;
 
-    check().inspect_err(|_| {
-        for dir in made.iter().rev() {
-            let _ = std::fs::remove_dir(dir);
-        }
-    })
+    check().inspect_err(|_| remove_made(&made))
 }
 
 /// Create the directories at `dirs`, and return those made that weren't
-/// there, each before the ones made inside it.
+/// there, each before the ones made inside it. A directory that fails to be
+/// made removes those made before it.
 fn make_dirs(dirs: &[&Path]) -> miette::Result<Vec<PathBuf>> {
     let mut made = Vec::new();
 
     for dir in dirs {
-        let missing: Vec<_> = dir
-            .ancestors()
-            .filter(|ancestor| !ancestor.as_os_str().is_empty())
-            .take_while(|ancestor| std::fs::symlink_metadata(ancestor).is_err())
-            .map(Path::to_path_buf)
-            .collect();
-
-        std::fs::create_dir_all(dir)
-            .into_diagnostic()
-            .with_context(|| format!("creating {}", dir.display()))?;
-
-        made.extend(missing.into_iter().rev());
+        if let Err(error) = make_dir(dir, &mut made) {
+            remove_made(&made);
+            return Err(error);
+        }
     }
 
     Ok(made)
+}
+
+/// Create the directory at `dir` a part at a time, as the OS walks it, and
+/// add those made to `made`: a `..` is the OS's to take, so the directory a
+/// path names through one that is missing is made once, and one already
+/// there is never taken for made.
+fn make_dir(dir: &Path, made: &mut Vec<PathBuf>) -> miette::Result<()> {
+    use std::io::ErrorKind;
+    use std::path::Component;
+
+    let creating = || format!("creating {}", dir.display());
+    let mut reached = PathBuf::new();
+
+    for component in std::path::absolute(dir)
+        .into_diagnostic()
+        .with_context(creating)?
+        .components()
+    {
+        reached.push(component);
+
+        if !matches!(component, Component::Normal(_)) {
+            continue;
+        }
+
+        match std::fs::symlink_metadata(&reached) {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                std::fs::create_dir(&reached)
+                    .into_diagnostic()
+                    .with_context(creating)?;
+
+                made.push(reached.clone());
+            }
+            Err(error) => return Err(error).into_diagnostic().with_context(creating),
+        }
+    }
+
+    // A link there that leads nowhere is no directory.
+    std::fs::create_dir_all(dir)
+        .into_diagnostic()
+        .with_context(creating)
+}
+
+/// Remove the directories [`make_dirs`] made, each before the one it was
+/// made in.
+fn remove_made(made: &[PathBuf]) {
+    for dir in made.iter().rev() {
+        let _ = std::fs::remove_dir(dir);
+    }
 }
 
 /// Refuse a download that starts at a later immutable file for a replay from
@@ -204,6 +249,37 @@ fn check_download_start(args: &Args, download_dir: &Path) -> miette::Result<()> 
                  doesn't read whole, which a replay from the origin reads: pass \
                  --download-start 0 to download them, or --continue to resume a node that holds \
                  them",
+                immutable.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Refuse a download that ends before immutable files already in the
+/// download directory, unless each of them the replay reads reads whole: the
+/// download leaves them as they are, and the replay reads on into them, to
+/// every file but the last. Checked under a clear, so that a cut one is
+/// found before the node goes, as one before a later start is.
+fn check_past_the_download_end(args: &Args, download_dir: &Path) -> miette::Result<()> {
+    let Some(end) = args.download_end else {
+        return Ok(());
+    };
+
+    let immutable = download_dir.join("immutable");
+
+    let Some(last) = super::immutable::last_chunk(&immutable) else {
+        return Ok(());
+    };
+
+    for number in end.saturating_add(1)..last {
+        super::immutable::check_whole(&immutable, &format!("{number:05}")).with_context(|| {
+            format!(
+                "--download-end {end} leaves the immutable files after it as they are, and \
+                 immutable file {number} in {} doesn't read whole, which the replay reads on \
+                 into up to file {last}, the last there: remove the files after {end}, or pass \
+                 a later --download-end to download them",
                 immutable.display()
             )
         })?;
@@ -430,7 +506,9 @@ mod tests {
             .to_string();
         assert!(
             message.contains("the download directory")
-                && message.contains("which `--force` clears"),
+                && message.contains("which `--force` clears")
+                && message.contains("download outside the storage root")
+                && message.contains("--continue --skip-download, without --force"),
             "{message}"
         );
     }
@@ -438,36 +516,82 @@ mod tests {
     /// The download directory and the storage root are made before they are
     /// compared, so that another case of the root's name on a
     /// case-insensitive volume is refused before the download. The refusal
-    /// removes what it made.
+    /// removes what it made, one level or several deep.
     #[test]
     fn a_second_name_for_the_root_is_refused_before_the_download() {
-        let temp = tempfile::tempdir().unwrap();
-        let probe = temp.path().join("probe");
-        std::fs::create_dir_all(&probe).unwrap();
+        let cases: [(&[&str], &[&str]); 2] = [
+            (&["Cardano"], &["cardano", "dolos"]),
+            (&["Cardano", "preview"], &["cardano", "preview", "dolos"]),
+        ];
 
-        if !temp.path().join("PROBE").is_dir() {
-            return;
+        for (download, root) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let probe = temp.path().join("probe");
+            std::fs::create_dir_all(&probe).unwrap();
+
+            if !temp.path().join("PROBE").is_dir() {
+                return;
+            }
+
+            let mut config = config_over(temp.path());
+            config.storage.path = root
+                .iter()
+                .fold(temp.path().to_path_buf(), |p, c| p.join(c));
+            let dir = download
+                .iter()
+                .fold(temp.path().to_path_buf(), |p, c| p.join(c));
+
+            let message = resolve(&config, &downloading(&dir), None, false)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.contains("lies in the download directory"),
+                "{download:?}: {message}"
+            );
+            assert!(
+                !temp.path().join("cardano").exists(),
+                "{download:?}: the refusal left what it made"
+            );
         }
+    }
+
+    /// What is made through a `..` out of a directory that is missing is
+    /// the missing directory alone: one already there that the path then
+    /// names is no more made than it is removed again.
+    #[test]
+    fn a_directory_already_there_is_never_taken_for_made() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let through = temp.path().join("missing").join("..").join("data");
+
+        let made = make_dirs(&[&through]).unwrap();
+        assert!(made.iter().all(|dir| !dir.ends_with("data")), "{made:?}");
+
+        remove_made(&made);
+        assert!(
+            data.is_dir(),
+            "removing what was made took {}",
+            data.display()
+        );
+        assert!(!temp.path().join("missing").exists());
+    }
+
+    /// A directory that fails to be made, as a storage root that is a link
+    /// leading nowhere does, removes those made before it.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_fails_to_be_made_removes_those_made_before_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let dangling = temp.path().join("data");
+        std::os::unix::fs::symlink(temp.path().join("nowhere"), &dangling).unwrap();
 
         let mut config = config_over(temp.path());
-        config.storage.path = temp.path().join("cardano").join("dolos");
+        config.storage.path = dangling;
+        let dir = temp.path().join("newdl");
 
-        let message = resolve(
-            &config,
-            &downloading(&temp.path().join("Cardano")),
-            None,
-            false,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(
-            message.contains("lies in the download directory"),
-            "{message}"
-        );
-        assert!(
-            !temp.path().join("cardano").exists(),
-            "the refusal left what it made"
-        );
+        assert!(resolve(&config, &downloading(&dir), None, false).is_err());
+        assert!(!dir.exists(), "the failure left {}", dir.display());
     }
 
     /// A download directory named through `..` out of the storage root is
@@ -490,8 +614,10 @@ mod tests {
     /// Under `--force`, the download directory is read through the links
     /// already in it, which the download reads and writes through: one whose
     /// `immutable` directory, or a file in it, links into the storage root is
-    /// refused before the clear, naming the link. Without a clear, it lies
-    /// beside the stores.
+    /// refused before the clear, naming the link, and so is one whose
+    /// `immutable` directory links to a directory elsewhere whose files link
+    /// there, with a range and without. Without a clear, it lies beside the
+    /// stores.
     #[cfg(unix)]
     #[test]
     fn under_a_clear_the_download_directory_is_read_through_its_links() {
@@ -506,33 +632,186 @@ mod tests {
         std::fs::create_dir_all(&linked).unwrap();
         symlink(&kept, linked.join("immutable")).unwrap();
 
+        let link_each_file = |dir: &Path| {
+            std::fs::create_dir_all(dir).unwrap();
+            for entry in std::fs::read_dir(&kept).unwrap() {
+                let file = entry.unwrap().path();
+                symlink(&file, dir.join(file.file_name().unwrap())).unwrap();
+            }
+        };
+
         let each = temp.path().join("each");
-        std::fs::create_dir_all(each.join("immutable")).unwrap();
-        for entry in std::fs::read_dir(&kept).unwrap() {
-            let file = entry.unwrap().path();
-            symlink(
-                &file,
-                each.join("immutable").join(file.file_name().unwrap()),
-            )
-            .unwrap();
-        }
+        link_each_file(&each.join("immutable"));
+
+        let nested = temp.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        link_each_file(&temp.path().join("outside").join("imm"));
+        symlink(
+            temp.path().join("outside").join("imm"),
+            nested.join("immutable"),
+        )
+        .unwrap();
 
         for (dir, link) in [
             (&linked, linked.join("immutable")),
             (&each, each.join("immutable")),
+            (&nested, nested.join("immutable")),
         ] {
-            let mut args = downloading(dir);
-            args.download_start = Some(2);
+            for start in [Some(2), None] {
+                let mut args = downloading(dir);
+                args.download_start = start;
 
-            let message = resolve(&config, &args, None, true).unwrap_err().to_string();
+                let message = resolve(&config, &args, None, true).unwrap_err().to_string();
+                assert!(
+                    message.contains(&format!("the link {}", link.display()))
+                        && message.contains("which `--force` clears"),
+                    "{start:?}: {message}"
+                );
+
+                assert!(resolve(&config, &args, None, false).is_ok(), "{start:?}");
+            }
+        }
+    }
+
+    /// Under `--force`, a directory in the download directory that can't be
+    /// searched, as a non-root user's `lost+found`, holds nothing the run
+    /// reads, and is passed over. One that can be searched but not listed
+    /// is refused, since what is reached through it can't be told.
+    #[cfg(unix)]
+    #[test]
+    fn under_a_clear_a_directory_that_cant_be_listed_is_refused_unless_it_cant_be_searched() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(temp.path());
+        let kept = config.storage.path.join("snapshot").join("immutable");
+        immutable_files(&kept, [0, 1]);
+
+        let volume = temp.path().join("volume");
+        let lost = volume.join("lost+found");
+        std::fs::create_dir_all(&lost).unwrap();
+
+        let searched = temp.path().join("searched");
+        std::fs::create_dir_all(&searched).unwrap();
+        symlink(&kept, searched.join("immutable")).unwrap();
+
+        let mode = |dir: &Path, mode| {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+
+        mode(&lost, 0o000);
+        mode(&searched, 0o311);
+
+        // Permissions don't bind a superuser, who lists both anyway.
+        let bound = std::fs::read_dir(&lost).is_err();
+
+        let passed = resolve(&config, &downloading(&volume), None, true).map(drop);
+        let refused = resolve(&config, &downloading(&searched), None, true).map(drop);
+
+        mode(&lost, 0o755);
+        mode(&searched, 0o755);
+
+        if !bound {
+            return;
+        }
+
+        passed.unwrap();
+
+        let message = refused
+            .unwrap_err()
+            .chain()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(": ");
+        assert!(
+            message.contains("which `--force` clears")
+                && message.contains("can be searched but not listed")
+                && message.contains(&searched.display().to_string()),
+            "{message}"
+        );
+    }
+
+    /// Under `--force`, the immutable files a download that ends early
+    /// leaves as they are must read whole, every one the replay reads on
+    /// into, which is all but the last file there: a cut or missing one is
+    /// refused before anything is cleared, with a range and with only an
+    /// end, while the last, here the empty chunk a node is still writing,
+    /// is never read. Without a clear, the replay finds out.
+    #[test]
+    fn under_a_clear_the_files_past_the_download_end_read_whole() {
+        use dolos_testing::{
+            blocks::write_immutable_chunks,
+            synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(temp.path());
+        let dir = temp.path().join("snapshot");
+        let immutable = dir.join("immutable");
+        std::fs::create_dir_all(&immutable).unwrap();
+
+        let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 4,
+            slot: 0,
+            start_block: 0,
+            ..Default::default()
+        });
+        let write = || {
+            write_immutable_chunks(
+                &immutable,
+                &[&blocks[..1], &blocks[1..2], &blocks[2..3], &blocks[3..]],
+            )
+        };
+
+        let cut = |number: u64| {
+            let path = immutable.join(format!("{number:05}.chunk"));
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+        };
+
+        let ending = |start: Option<u64>, end: u64| {
+            let mut args = downloading(&dir);
+            args.download_start = start;
+            args.download_end = Some(end);
+            args
+        };
+
+        let refused = |args: &Args| {
+            let report = resolve(&config, args, None, true).unwrap_err();
+            report
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": ")
+        };
+
+        for args in [ending(Some(0), 1), ending(None, 1)] {
+            write();
+            assert!(resolve(&config, &args, None, true).is_ok());
+
+            cut(2);
+            let message = refused(&args);
             assert!(
-                message.contains(&format!("the link {}", link.display()))
-                    && message.contains("which `--force` clears"),
+                message.contains("--download-end 1 leaves")
+                    && message.contains("immutable file 2 in")
+                    && message.contains("doesn't read whole")
+                    && message.contains("up to file 4"),
                 "{message}"
             );
-
             assert!(resolve(&config, &args, None, false).is_ok());
+
+            assert!(resolve(&config, &ending(args.download_start, 2), None, true).is_ok());
         }
+
+        write();
+        cut(1);
+        assert!(refused(&ending(None, 0)).contains("immutable file 1 in"));
+
+        write();
+        for extension in ["chunk", "primary", "secondary"] {
+            std::fs::remove_file(immutable.join(format!("00002.{extension}"))).unwrap();
+        }
+        assert!(refused(&ending(None, 1)).contains("immutable file 2 in"));
     }
 
     /// Write immutable files `numbers`, each holding no blocks.

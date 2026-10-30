@@ -24,8 +24,8 @@
 //!    set. They are never shipped — ADR-004's Amendment 2.
 //! 5. Set the cursor as the last write, after all state and tags have landed.
 //!
-//! Nothing is added for the WAL: `bootstrap::run` already reseeds it from the
-//! state cursor after any bootstrap method.
+//! Nothing is added for the WAL: `bootstrap::run` reseeds it from the state
+//! cursor after a Stelae restore.
 //!
 //! ## Why `set_cursor` is the last write
 //!

@@ -424,6 +424,100 @@ fn every_source_refuses_existing_data_unless_told() {
     }
 }
 
+/// Data without a node, a state holding rows but no cursor as an
+/// interrupted bootstrap leaves it, is no node to skip: every source refuses
+/// it under `--skip-if-data`, naming `--force`, and replaces it under
+/// `--force`.
+#[test]
+fn skip_if_data_refuses_data_without_a_node() {
+    use dolos_core::{
+        EraCbor, StateStore as _, StateWriter as _, TxHash, TxoRef, UtxoSetDelta, UtxoValue,
+    };
+
+    let fixture = Fixture::new();
+    let source = fixture.source();
+
+    #[cfg_attr(not(feature = "mithril"), allow(unused_mut))]
+    let mut sources: Vec<(&str, Vec<&str>)> = vec![
+        ("immutabledb", vec!["immutabledb", "--source", &source]),
+        (
+            "stelae",
+            vec!["stelae", "--source", "file:///no/stele/is/read"],
+        ),
+    ];
+
+    #[cfg(feature = "mithril")]
+    sources.push((
+        "mithril",
+        vec![
+            "mithril",
+            "--skip-download",
+            "--skip-validation",
+            "--retain-snapshot",
+            "--download-dir",
+            &source,
+            "--aggregator",
+            "https://aggregator.invalid",
+            "--genesis-vkey",
+            "5b31",
+        ],
+    ));
+
+    for (name, command) in sources {
+        let node = fixture.node();
+
+        let state = dolos::storage::open_state_store(&node.config).unwrap();
+        let writer = state.start_writer().unwrap();
+        writer
+            .apply_utxoset(&UtxoSetDelta {
+                produced_utxo: [(
+                    TxoRef(TxHash::from([1u8; 32]), 0),
+                    std::sync::Arc::new(UtxoValue::new(EraCbor(0, vec![0x80]), None)),
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            })
+            .unwrap();
+        writer.commit().unwrap();
+        state.shutdown().unwrap();
+        drop(state);
+
+        let before = contents(&node);
+        assert_eq!(before.cursor, None);
+
+        let mut args = vec!["bootstrap", "--skip-if-data"];
+        args.extend_from_slice(&command);
+        let refused = node.run(&args);
+
+        assert_eq!(
+            refused.status.code(),
+            Some(1),
+            "{name}: {}",
+            stderr(&refused)
+        );
+        for named in ["existing data detected", "no node", "--force"] {
+            assert!(
+                said(&refused).contains(named),
+                "{name}: {}",
+                stderr(&refused)
+            );
+        }
+        assert_eq!(
+            contents(&node),
+            before,
+            "{name}: the refusal changed the node"
+        );
+
+        if name != "stelae" {
+            let mut args = vec!["bootstrap", "--force"];
+            args.extend_from_slice(&command);
+            assert_ok(&node.run(&args));
+            assert_eq!(contents(&node).cursor, Some(fixture.tip()), "{name}");
+        }
+    }
+}
+
 /// An interrupted replay resumes from its committed position under
 /// `--continue`, and imports each block once.
 #[test]
@@ -1122,20 +1216,34 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
         symlink(relative, srv.join("stele")).unwrap();
         sources.push((srv.join("stele"), "which `--force` clears"));
 
-        // A stele of its own whose blob directories are the root's stele's.
-        let view = node.root.path().join("stele-view");
-        std::fs::create_dir_all(view.join("blobs")).unwrap();
-        for entry in std::fs::read_dir(&stele).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_file() {
-                std::fs::copy(&path, view.join(path.file_name().unwrap())).unwrap();
+        // A stele of its own whose blob directories are the root's stele's,
+        // linked from its `blobs` directory, and from a directory elsewhere
+        // that its `blobs` links to.
+        let viewing = |view: &Path, blobs: &Path| {
+            std::fs::create_dir_all(view).unwrap();
+            for entry in std::fs::read_dir(&stele).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_file() {
+                    std::fs::copy(&path, view.join(path.file_name().unwrap())).unwrap();
+                }
             }
-        }
-        for entry in std::fs::read_dir(stele.join("blobs")).unwrap() {
-            let path = entry.unwrap().path();
-            symlink(&path, view.join("blobs").join(path.file_name().unwrap())).unwrap();
-        }
+
+            std::fs::create_dir_all(blobs).unwrap();
+            for entry in std::fs::read_dir(stele.join("blobs")).unwrap() {
+                let path = entry.unwrap().path();
+                symlink(&path, blobs.join(path.file_name().unwrap())).unwrap();
+            }
+        };
+
+        let view = node.root.path().join("stele-view");
+        viewing(&view, &view.join("blobs"));
         sources.push((view, "leads into the storage root"));
+
+        let nested = node.root.path().join("stele-nested");
+        let elsewhere = node.root.path().join("elsewhere").join("blobs");
+        viewing(&nested, &elsewhere);
+        symlink(&elsewhere, nested.join("blobs")).unwrap();
+        sources.push((nested, "leads into the storage root"));
     }
 
     for (source, named) in sources {

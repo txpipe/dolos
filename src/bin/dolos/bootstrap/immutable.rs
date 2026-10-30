@@ -234,7 +234,14 @@ pub(super) fn check_database(
     check_placement(config, &[db, &path], Placed::Database)?;
 
     if clears {
-        super::refuse_what_the_clear_takes(config, &path, "the ImmutableDB", "the replay")?;
+        super::refuse_what_the_clear_takes(
+            config,
+            &path,
+            "the ImmutableDB",
+            "the replay",
+            "move the database out of the storage root, or resume the replay a stop left over \
+             it with --continue, without --force",
+        )?;
     }
 
     read_tip(&path)?;
@@ -397,6 +404,19 @@ fn read_tip(path: &Path) -> miette::Result<Point> {
 /// The immutable chunks pallas reads at `path`, in order: every chunk file
 /// but the last, which the node is still writing.
 fn chunks(path: &Path) -> Vec<String> {
+    let mut names = chunk_files(path);
+    names.pop();
+
+    names
+}
+
+/// The number of the last chunk file at `path`, the one pallas doesn't read.
+pub(super) fn last_chunk(path: &Path) -> Option<u64> {
+    chunk_files(path).last()?.parse().ok()
+}
+
+/// The names of the chunk files at `path`, in order.
+fn chunk_files(path: &Path) -> Vec<String> {
     let mut names: Vec<_> = std::fs::read_dir(path)
         .into_iter()
         .flatten()
@@ -410,7 +430,6 @@ fn chunks(path: &Path) -> Vec<String> {
         .collect();
 
     names.sort();
-    names.pop();
 
     names
 }
@@ -1002,6 +1021,36 @@ mod tests {
         archived.storage.archive.path = Some(db.join("archive"));
         archived.history.mode = dolos_core::config::HistoryMode::None;
         assert_eq!(refusal(&archived, &db), None);
+    }
+
+    /// A store whose directory holds one that can't be listed, as an archive
+    /// on a volume root holds a non-root user's `lost+found`, is read as far
+    /// as it can be: a database apart from it is placed apart.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_holding_a_directory_that_cant_be_listed_is_read_around_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let volume = temp.path().join("volume");
+        let lost = volume.join("lost+found");
+        std::fs::create_dir_all(&lost).unwrap();
+
+        let mut config = config_over(temp.path());
+        config.storage.archive.path = Some(volume);
+
+        let mode = |mode| std::fs::set_permissions(&lost, std::fs::Permissions::from_mode(mode));
+        mode(0o000).unwrap();
+
+        // Permissions don't bind a superuser, who lists it anyway.
+        let bound = std::fs::read_dir(&lost).is_err();
+        let placed = check_placement(&config, &[&temp.path().join("db")], Placed::Database);
+
+        mode(0o755).unwrap();
+
+        if bound {
+            placed.unwrap();
+        }
     }
 
     /// A database linked to from elsewhere is compared as what it is: a store

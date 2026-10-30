@@ -383,8 +383,8 @@ pub enum Existing {
 pub struct ExistingDataPolicy {
     /// `--force`: clear storage and re-bootstrap.
     pub force: bool,
-    /// `--skip-if-data`: leave the data alone and exit zero. A store this
-    /// release refuses is not skipped.
+    /// `--skip-if-data`: leave a node alone and exit zero. Data without a
+    /// node, and a store this release refuses, are not skipped.
     pub skip_if_data: bool,
     /// `--continue`: go ahead, resuming a replay from its committed position.
     pub r#continue: bool,
@@ -529,7 +529,8 @@ pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
 /// flag saying what to do about it — so neither is a question asked of an
 /// operator whose answer is then thrown away. Any managed store holding data
 /// is existing data, a state without a cursor included: an interrupted
-/// bootstrap leaves one.
+/// bootstrap leaves one. `--skip-if-data` skips only a node, and refuses data
+/// without one, which a daemon would sync from the origin on top of.
 ///
 /// A store this release refuses to open is data in the way that only `--force`
 /// on its own clears; every other flag, `--continue` included, gets its
@@ -566,7 +567,7 @@ pub fn inspect_existing_data(
         return Ok(Existing::Proceed);
     }
 
-    if policy.skip_if_data {
+    if policy.skip_if_data && found.node {
         return Ok(Existing::Skip);
     }
 
@@ -577,6 +578,13 @@ pub fn inspect_existing_data(
         .collect();
 
     let detected = format!("existing data detected in storage ({})", held.join(", "));
+
+    if policy.skip_if_data {
+        return Err(Error::message(format!(
+            "{detected}, but no node: there is no state cursor, as an interrupted bootstrap \
+             leaves none, and `--skip-if-data` leaves only a node. Use --force to replace it"
+        )));
+    }
 
     if policy.force {
         return clear(config, &detected, found);
@@ -2600,7 +2608,8 @@ mod tests {
     /// Over stores this release opens, `--continue` proceeds whatever storage
     /// holds, and the other flags decide about any store holding data: only
     /// empty storage, or an empty WAL file, proceeds under every one. A node
-    /// is a state with a cursor.
+    /// is a state with a cursor, and only a node is skipped: data without
+    /// one is refused under `--skip-if-data`, naming `--force`.
     #[test]
     fn inspecting_storage_follows_the_flags_over_stores_this_release_opens() {
         /// What a case writes, whether storage then holds data, and whether
@@ -2643,8 +2652,13 @@ mod tests {
 
                 if policy.r#continue || !held {
                     assert_eq!(inspected.unwrap(), Existing::Proceed, "{policy:?}");
-                } else if policy.skip_if_data {
+                } else if policy.skip_if_data && node {
                     assert_eq!(inspected.unwrap(), Existing::Skip, "{policy:?}");
+                } else if policy.skip_if_data {
+                    let message = inspected.unwrap_err().to_string();
+                    assert!(message.contains("existing data detected"), "{message}");
+                    assert!(message.contains("no node"), "{message}");
+                    assert!(message.contains("--force"), "{message}");
                 } else if policy.force {
                     assert_eq!(inspected.unwrap(), Existing::Clear, "{policy:?}");
                 } else {
@@ -3326,8 +3340,8 @@ mod tests {
     }
 
     /// A state that opens but whose rows fail to read counts as data, so the
-    /// flags decide about it as about any data, and the failure is left to
-    /// the command that uses the state.
+    /// flags decide about it as about any data without a node, and the
+    /// failure is left to the command that uses the state.
     #[test]
     fn a_state_whose_rows_fail_to_read_is_left_to_the_command() {
         let temp = tempfile::tempdir().unwrap();
@@ -3341,7 +3355,8 @@ mod tests {
             if policy.r#continue {
                 assert_eq!(inspected.unwrap(), Existing::Proceed, "{policy:?}");
             } else if policy.skip_if_data {
-                assert_eq!(inspected.unwrap(), Existing::Skip, "{policy:?}");
+                let message = inspected.unwrap_err().to_string();
+                assert!(message.contains("no node"), "{message}");
             } else if policy.force {
                 assert_eq!(inspected.unwrap(), Existing::Clear, "{policy:?}");
             } else {

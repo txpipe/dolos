@@ -439,8 +439,8 @@ fn a_decision_that_needs_no_command_does_not_ask_for_one() {
 /// The WAL is not in a stele, and does not need to be.
 ///
 /// `dolos_snapshot::restore` carries no `WalStore` at all — deliberately,
-/// because `bootstrap::run` reseeds the WAL from the state cursor after any
-/// bootstrap method. So a restored node's WAL tip *is* its state cursor, which
+/// because `bootstrap::run` reseeds the WAL from the state cursor after a
+/// Stelae restore. So a restored node's WAL tip *is* its state cursor, which
 /// is what `find_intersect` needs in order to resume chain-sync from a relay.
 ///
 /// Asserted as a property of the restored node rather than as a comparison

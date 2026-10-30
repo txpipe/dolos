@@ -127,8 +127,9 @@ pub struct Args {
     #[arg(long, global = true)]
     force: bool,
 
-    /// Exit 0 without bootstrapping when storage already holds data; a store
-    /// this release refuses is an error instead
+    /// Exit 0 without bootstrapping when storage already holds a node; data
+    /// without one, as an interrupted bootstrap leaves, and a store this
+    /// release refuses are errors instead
     #[arg(long, global = true)]
     skip_if_data: bool,
 
@@ -245,9 +246,14 @@ fn dispatch(
 
 /// What clearing the storage root, as `--force` does before a run, would
 /// take of the source at `dir`: `dir` itself, when it lies there or the way
-/// to it passes a directory or link there, or else the first link under it
-/// whose way does. A directory under `dir` that can't be listed, or one gone
-/// by the time it is read, holds no link the run reads through.
+/// to it passes a directory or link there, or else the first directory or
+/// link under it, through the links under it, that the clear takes. Each
+/// directory is read once, whatever names it.
+///
+/// A directory that can't be searched, as a non-root user's `lost+found`, or
+/// one gone by the time it is read, holds nothing the run reads through. One
+/// that can be searched but not listed is refused: the OS reaches what it
+/// holds by name, and what that is can't be told.
 pub(super) fn the_clear_takes(config: &RootConfig, dir: &Path) -> miette::Result<Option<PathBuf>> {
     use std::io::ErrorKind;
 
@@ -268,20 +274,32 @@ pub(super) fn the_clear_takes(config: &RootConfig, dir: &Path) -> miette::Result
         return Ok(Some(dir.to_path_buf()));
     }
 
+    let mut read = std::collections::HashSet::new();
     let mut pending = vec![dir.to_path_buf()];
 
     while let Some(next) = pending.pop() {
+        match identity(&next) {
+            Ok(id) if !read.insert(id) => continue,
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).into_diagnostic().with_context(|| reading(&next)),
+        }
+
         let entries = match std::fs::read_dir(&next) {
             Ok(entries) => entries,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::NotFound | ErrorKind::PermissionDenied
-                ) =>
-            {
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == ErrorKind::PermissionDenied && !searched(&next) => {
                 continue
             }
-            Err(error) => return Err(error).into_diagnostic().with_context(|| reading(&next)),
+            Err(error) => {
+                return Err(error).into_diagnostic().with_context(|| {
+                    format!(
+                        "reading {}, which can be searched but not listed, so what it holds \
+                         can't be told",
+                        next.display()
+                    )
+                })
+            }
         };
 
         for entry in entries {
@@ -292,12 +310,23 @@ pub(super) fn the_clear_takes(config: &RootConfig, dir: &Path) -> miette::Result
                 .into_diagnostic()
                 .with_context(|| reading(&path))?;
 
-            if kind.is_symlink() && takes(&path)? {
+            if !kind.is_symlink() && !kind.is_dir() {
+                continue;
+            }
+
+            if takes(&path)? {
                 return Ok(Some(path));
             }
 
-            if kind.is_dir() {
-                pending.push(path);
+            match std::fs::metadata(&path) {
+                Ok(meta) if meta.is_dir() => pending.push(path),
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::NotFound | ErrorKind::PermissionDenied
+                    ) => {}
+                Err(error) => return Err(error).into_diagnostic().with_context(|| reading(&path)),
             }
         }
     }
@@ -305,29 +334,68 @@ pub(super) fn the_clear_takes(config: &RootConfig, dir: &Path) -> miette::Result
     Ok(None)
 }
 
+/// What the directory at `path` is, through any link, whatever it is called:
+/// its device and inode.
+#[cfg(unix)]
+fn identity(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = std::fs::metadata(path)?;
+
+    Ok((meta.dev(), meta.ino()))
+}
+
+/// What the directory at `path` is, through any link, whatever it is called:
+/// its final path.
+#[cfg(not(unix))]
+fn identity(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path)
+}
+
+/// Whether the OS can pass through the directory at `dir` to what is in it.
+fn searched(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir.join(".")).is_ok()
+}
+
 /// Refuse `what`, the source at `dir`, when the clear `--force` runs before
-/// `before` would take it, or a link under it.
+/// `before` would take it, or a directory or link under it, naming `remedy`.
 pub(super) fn refuse_what_the_clear_takes(
     config: &RootConfig,
     dir: &Path,
     what: &str,
     before: &str,
+    remedy: &str,
 ) -> miette::Result<()> {
     let root = config.storage.path.display();
 
-    match the_clear_takes(config, dir)? {
+    let taken = the_clear_takes(config, dir).with_context(|| {
+        format!(
+            "checking {what} at {} against the storage root {root}, which `--force` clears \
+             before {before}",
+            dir.display()
+        )
+    })?;
+
+    match taken {
         None => Ok(()),
         Some(taken) if taken == dir => bail!(
             "{what} at {} lies in the storage root {root}, or is reached through it, which \
-             `--force` clears before {before}",
+             `--force` clears before {before}: {remedy}",
             dir.display()
         ),
-        Some(link) => bail!(
-            "the link {} in {what} at {} leads into the storage root {root}, which `--force` \
-             clears before {before}",
-            link.display(),
-            dir.display()
-        ),
+        Some(entry) => {
+            let kind = match std::fs::symlink_metadata(&entry) {
+                Ok(meta) if !meta.is_symlink() => "directory",
+                _ => "link",
+            };
+
+            bail!(
+                "the {kind} {} in {what} at {} leads into the storage root {root}, which \
+                 `--force` clears before {before}: {remedy}",
+                entry.display(),
+                dir.display()
+            )
+        }
     }
 }
 
