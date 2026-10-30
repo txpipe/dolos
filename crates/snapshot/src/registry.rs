@@ -165,11 +165,10 @@ use stelae::{
 /// resolved them to.
 pub use stelae::oci::{Auth, Registry, Repository, DEFAULT_CONCURRENCY, SCHEME};
 
-use stelae_driver::publish::Chained;
+use stelae_driver::{digests, publish::Chained};
 
 use crate::{
     export::{self, Plan, Predecessor as _, Settling, Standing},
-    layers::digests,
     restore::{Outlook, Restoring, Summary, Target},
     DolosProfile, Error,
 };

@@ -37,8 +37,7 @@
 //! empty — which is what it is.
 //!
 //! No state or tag write needs the cursor. The tip is never checkpointed, so
-//! every resume rewrites its UTxOs and their tags together, including when an
-//! older restore stopped after writing UTxOs without their tags.
+//! every resume rewrites its UTxOs and their tags together.
 //!
 //! What it leaves is worth stating rather than discovering: an interruption
 //! anywhere in a restore leaves a node `has_existing_data()` reports as empty.
@@ -155,11 +154,12 @@ use tracing::info;
 use crate::{
     entity_kind_for,
     layers::{blocks, entities, indexes, logs, state},
-    log_ns_for, preflight, read_position,
+    log_ns_for, read_position,
     reporting::Cursor,
-    state_ns_for, DolosProfile, Error, Position, BLOCKS, DIGESTS, ENTITY_KINDS, INDEXES,
-    NAMESPACES, RETIRED_SCHEMA_REV, SCOPE_REQUIRED, STATE_KINDS, STATE_WITNESSED_KINDS, UTXOS,
+    state_ns_for, DolosProfile, Error, Position, BLOCKS, ENTITY_KINDS, INDEXES, NAMESPACES,
+    RETIRED_SCHEMA_REV, SCOPE_REQUIRED, STATE_KINDS, UTXOS,
 };
+use stelae_driver::preflight;
 
 pub use stelae_driver::restore::{Budget, Checkpoint, Outlook};
 
@@ -428,12 +428,13 @@ impl Plan {
 
     /// Refuse a restore that cannot fit, before it starts writing.
     ///
-    /// Two needs, one policy ([`crate::preflight`]): the stores this restore
-    /// will write, and — for a transport that stages — the one layer it holds
-    /// on disk while it drains it. Both are handed to the same check rather
-    /// than compared separately, because whenever the scratch directory sits on
-    /// the storage filesystem they are two claims on one pool of free bytes,
-    /// and the default `<storage.path>/scratch` makes that the ordinary case.
+    /// Two needs, one policy ([`stelae_driver::preflight`]): the stores this
+    /// restore will write, and — for a transport that stages — the one
+    /// layer it holds on disk while it drains it. Both are handed to the
+    /// same check rather than compared separately, because whenever the
+    /// scratch directory sits on the storage filesystem they are two claims
+    /// on one pool of free bytes, and the default `<storage.path>/scratch`
+    /// makes that the ordinary case.
     ///
     /// Both needs are resume-aware, and for the same reason: what a run has to
     /// fit is what *this* run will move, not what the plan describes. The
@@ -615,11 +616,6 @@ fn check_namespaces(inscription: &Inscription) -> Result<(), Error> {
 /// A declared kind this build does not register is not a refusal: its layers
 /// are of a kind this build does not implement, which [`unknown_layers`]
 /// skips and reports, and nothing here reads it.
-///
-/// A declared kind is still refused when the stele also declares the state
-/// namespace an earlier profile witnessed it in ([`STATE_WITNESSED_KINDS`])
-/// at any revision but the retired one: that publisher's seals wrote none of
-/// the kind's entries.
 fn check_entities(inscription: &Inscription) -> Result<(), Error> {
     let declared =
         match inscription.parameters.get("entities") {
@@ -645,24 +641,6 @@ fn check_entities(inscription: &Inscription) -> Result<(), Error> {
                 kind: kind.name(),
                 declared: width,
                 registered: kind.key_len(),
-            });
-        }
-    }
-
-    let schemas = inscription
-        .parameters
-        .get("schemas")
-        .and_then(serde_json::Value::as_object);
-
-    for (kind, namespace) in STATE_WITNESSED_KINDS {
-        let witnessed = schemas
-            .and_then(|map| map.get(namespace))
-            .is_some_and(|rev| rev.as_u64() != Some(RETIRED_SCHEMA_REV));
-
-        if witnessed {
-            return Err(Error::StateWitnessedEntityKind {
-                kind: kind.name(),
-                namespace,
             });
         }
     }
@@ -1592,13 +1570,6 @@ fn restore_state<R: SteleReader, S: StateStore>(
     Ok((entities, 0))
 }
 
-/// The kinds a restore reads nothing from, for a caller reporting what it
-/// skipped.
-///
-/// `digests` is verification metadata about Mithril immutable files; ADR-004 is
-/// explicit that nothing is written to the stores from it.
-pub const UNRESTORED_KINDS: [&str; 1] = [DIGESTS];
-
 /// Where a `--source` points.
 ///
 /// The scheme is what selects a restore path, which is why this is parsed
@@ -1715,7 +1686,7 @@ mod tests {
     use stelae::{inscription::LayerDescriptor, Digest, RestoreProgress};
 
     use super::*;
-    use crate::MAINNET_MAGIC;
+    use crate::{DIGESTS, MAINNET_MAGIC};
 
     fn descriptor(kind: &str, scope: serde_json::Value, byte: u8) -> LayerDescriptor {
         LayerDescriptor {
@@ -2308,12 +2279,16 @@ mod tests {
             Err(Error::UndeclaredEntityKind { kind: refused }) if refused == kind.name()
         ));
 
-        // A stele published before the declaration existed carries none.
-        let mut older = inscription(state_layers());
-        older.parameters.as_object_mut().unwrap().remove("entities");
+        // A stele without the map declares no kind at all.
+        let mut undeclared = inscription(state_layers());
+        undeclared
+            .parameters
+            .as_object_mut()
+            .unwrap()
+            .remove("entities");
 
         assert!(matches!(
-            check_entities(&older),
+            check_entities(&undeclared),
             Err(Error::UndeclaredEntityKind { .. })
         ));
 
@@ -2329,58 +2304,6 @@ mod tests {
             plan(&stele, MAINNET_MAGIC, None),
             Err(Error::UndeclaredEntityKind { .. })
         ));
-    }
-
-    /// A stele that still declares `assets` or `scripts` was published by a
-    /// build that witnessed first mints or scripts in state and sealed no
-    /// entries of the kind, though it declares it: restoring it would take
-    /// every known asset or script for a first sighting.
-    #[test]
-    fn a_stele_witnessing_a_kind_in_state_refuses_the_restore() {
-        // The names an earlier publisher wrote: `AssetState`'s and
-        // `ScriptState`'s namespaces.
-        let names: Vec<_> = STATE_WITNESSED_KINDS
-            .iter()
-            .map(|(kind, namespace)| (kind.name(), *namespace))
-            .collect();
-        assert_eq!(names, [("asset", "assets"), ("script", "scripts")]);
-
-        for (kind, namespace) in STATE_WITNESSED_KINDS {
-            for rev in [json!(1), json!(99), json!("1")] {
-                let mut witnessed = inscription(state_layers());
-                witnessed.parameters["schemas"][namespace] = rev;
-
-                let err = check_entities(&witnessed).unwrap_err();
-                assert!(
-                    matches!(
-                        err,
-                        Error::StateWitnessedEntityKind { kind: refused, namespace: ns }
-                            if refused == kind.name() && ns == namespace
-                    ),
-                    "{err:?}"
-                );
-            }
-
-            // Retired, the namespace says its publisher no longer witnesses
-            // there.
-            let mut retired = inscription(state_layers());
-            retired.parameters["schemas"][namespace] = json!(RETIRED_SCHEMA_REV);
-
-            check_entities(&retired).unwrap();
-
-            // And `plan` asks before a store could be opened.
-            let mut bare = inscription(vec![]);
-            bare.parameters["schemas"][namespace] = json!(1);
-
-            let temp = tempfile::tempdir().unwrap();
-            let stele = stelae::dir::SteleDir::create(temp.path()).unwrap();
-            stelae::SteleWriter::seal(&stele, &DolosProfile, &bare).unwrap();
-
-            assert!(matches!(
-                plan(&stele, MAINNET_MAGIC, None),
-                Err(Error::StateWitnessedEntityKind { .. })
-            ));
-        }
     }
 
     #[test]
@@ -2608,7 +2531,7 @@ mod tests {
     /// The destination need is nil here — no layers, so nothing to write — so
     /// what the refusal is about is unambiguous. That the two needs are
     /// *summed* when they share a volume is the policy's own property and is
-    /// tested where the policy lives, in [`crate::preflight`].
+    /// tested where the policy lives, in [`stelae_driver::preflight`].
     #[test]
     fn the_preflight_refuses_a_scratch_volume_that_cannot_hold_a_layer() {
         let temp = tempfile::tempdir().unwrap();

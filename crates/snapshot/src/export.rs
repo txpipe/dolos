@@ -76,9 +76,10 @@ use stelae::{
     progress::{Observer, Outcome},
     transport::{LayerSpec, RecordSink, SteleWriter},
 };
+use stelae_driver::digests;
 
 use crate::{
-    layers::{blocks, digests, entities, indexes, logs, state},
+    layers::{blocks, entities, indexes, logs, state},
     namespaces::NAMESPACES,
     reporting::{Cursor, Records},
     state_layer_count, DigestsScope, DolosProfile, EpochScope, Error, Network, RetainedEpochs,

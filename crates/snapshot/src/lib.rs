@@ -50,8 +50,6 @@
 //!   empty store set, in the order ADR-004 specifies.
 //! - [`facade`] — supported headless assembly for planning, encoding,
 //!   inspection, verification and directory/OCI restoration.
-//! - [`preflight`] — the free-space policy both drivers refuse under, so a run
-//!   that cannot fit its volume says so at minute zero.
 //! - [`registry`] — publishing into an OCI repository: the history chain, and
 //!   the layers a publish inherits instead of rebuilding.
 //! - [`planning`] — the epoch selection every command that walks these stores
@@ -73,11 +71,6 @@ pub mod planning;
 pub mod registry;
 pub mod restore;
 pub mod source;
-
-/// The free-space policy, which is [`stelae_driver`]'s: it is one rule over
-/// paths and byte counts and knows nothing about what fills them. Re-exported
-/// at its old path.
-pub use stelae_driver::preflight;
 
 /// The bounded patience a run spends on an external that fails in bursts, which
 /// is [`stelae_driver`]'s: one policy over attempts and a clock, and nothing
@@ -140,7 +133,7 @@ pub const INDEXES: &str = "indexes";
 
 /// Spelled by the codec that reads and writes the kind, so the vocabulary has
 /// one definition on both sides of the crate boundary.
-pub use layers::digests::DIGESTS;
+pub use stelae_driver::digests::DIGESTS;
 
 /// The namespaces the ledger writes epoch-boundary logs under: the namespace
 /// column of [`LOG_KINDS`], byte-sorted.
@@ -211,18 +204,6 @@ pub const ENTITY_KINDS: [(&str, EntityKind); 3] = [
     ("entity-script", entities::SCRIPT),
     ("entity-stake", entities::STAKE),
 ];
-
-/// The entity kinds an earlier profile witnessed in a state namespace, with
-/// that namespace, in kind name order: `AssetState`'s `assets` for first
-/// mints, `ScriptState`'s `scripts` for first sightings of scripts.
-///
-/// A publisher that still declares the namespace in `parameters.schemas`
-/// kept the kind's first sightings there, so its seals wrote none of the
-/// kind's entries even where it declares the kind. This build reads the
-/// witness from the entity index and does not restore the namespace, so a
-/// restore refuses such a stele before a store is opened.
-pub const STATE_WITNESSED_KINDS: [(EntityKind, Namespace); 2] =
-    [(entities::ASSET, "assets"), (entities::SCRIPT, "scripts")];
 
 /// The entity kinds alone, in [`ENTITY_KINDS`] order: what an export walks
 /// the archive's entity index for.
@@ -394,8 +375,7 @@ pub const fn state_layer_count() -> usize {
 ///   wanted.
 ///
 /// Empty is valid and is the default: a publisher that retains nothing
-/// publishes the tip alone, which is what every stele published before
-/// decision 0026 carries.
+/// publishes the tip alone.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RetainedEpochs(Vec<u64>);
 
@@ -737,18 +717,6 @@ pub enum Error {
     )]
     UndeclaredEntityKind { kind: &'static str },
 
-    /// An entity kind the stele's publisher witnessed in a state namespace
-    /// ([`STATE_WITNESSED_KINDS`]), so the stele holds none of its entries.
-    #[error(
-        "this stele's publisher keeps entity kind {kind:?}'s first sightings in state namespace \
-         {namespace:?} and wrote no {kind} entries; restoring it would take every known {kind} \
-         for a first sighting"
-    )]
-    StateWitnessedEntityKind {
-        kind: &'static str,
-        namespace: Namespace,
-    },
-
     /// An entity kind the stele declares at a different id width than this
     /// build registers: its ids could not be the ids this build looks up.
     #[error(
@@ -800,8 +768,8 @@ pub enum Error {
     /// The removed-kind rule (ADR-0027). Unlike an unknown kind, a retired one
     /// leaves nothing in the inscription to skip and report: its layers are
     /// absent, and absence is how the format spells "no records in this
-    /// window". A reader that would restore an empty `member-rewards` history
-    /// and call it a success is the failure this refuses, so it refuses before
+    /// window". A reader that would restore a namespace's history empty and
+    /// call it a success is the failure this refuses, so it refuses before
     /// a store is opened and names the namespace an operator has to go and
     /// read about.
     #[error(
@@ -832,9 +800,9 @@ pub enum Error {
     /// Raised only from a number that was actually measured against free space
     /// that was actually read — everything else warns and proceeds. One
     /// variant for both directions because it is one policy; see
-    /// [`crate::preflight`], where it is raised. There is deliberately no flag
-    /// that overrides it: `--scratch-dir` pointed at a bigger volume is the
-    /// escape hatch.
+    /// [`stelae_driver::preflight`], where it is raised. There is deliberately
+    /// no flag that overrides it: `--scratch-dir` pointed at a bigger
+    /// volume is the escape hatch.
     #[error("not enough space: {0}")]
     NotEnoughSpace(String),
 
@@ -1299,8 +1267,8 @@ pub fn parameters(retained: &RetainedEpochs) -> serde_json::Value {
         .into_iter()
         .chain(
             RETIRED_NAMESPACES
-                .into_iter()
-                .map(|ns| (ns, RETIRED_SCHEMA_REV)),
+                .iter()
+                .map(|ns| (*ns, RETIRED_SCHEMA_REV)),
         )
         .map(|(ns, rev)| (ns.to_owned(), json!(rev)))
         .collect();
@@ -1707,10 +1675,6 @@ mod tests {
 
         assert_eq!(parameters["indexKeyHash"], INDEX_KEY_HASH);
         assert_eq!(parameters["stateEpochs"], json!([4, 100]));
-        assert!(
-            parameters.get("stateShards").is_none(),
-            "the flat shard count was replaced by the per-namespace map"
-        );
 
         // The two maps are the two tables, entry for entry — and nothing more:
         // a namespace in the JSON that no table has would be a claim about code
@@ -1730,7 +1694,7 @@ mod tests {
         // Plus the retired namespaces, declared at revision 0 rather than
         // dropped: what a reader that still models one consults to find out
         // that the absence of its layers is normative (ADR-0027).
-        for ns in RETIRED_NAMESPACES {
+        for &ns in RETIRED_NAMESPACES {
             assert_eq!(parameters["schemas"][ns], RETIRED_SCHEMA_REV, "{ns}");
             assert!(!NAMESPACES.contains(&ns), "{ns} is both live and retired");
         }
