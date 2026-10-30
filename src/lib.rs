@@ -4,6 +4,7 @@ pub mod engine;
 pub mod prelude;
 pub mod relay;
 pub mod serve;
+pub mod service;
 pub mod sync;
 
 // Re-export storage from adapters for backward compatibility

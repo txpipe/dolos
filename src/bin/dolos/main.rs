@@ -18,6 +18,7 @@ mod feedback;
 mod output;
 mod registry;
 mod serve;
+mod service;
 mod snapshot;
 mod sync;
 
@@ -69,6 +70,9 @@ enum Command {
 
     /// Fill, clear, inspect and check the cache, with the node stopped
     Cache(cache::Args),
+
+    /// Install the node as an OS service, or uninstall it
+    Service(service::Args),
 
     /// Bootstrap the node using Mithril
     #[cfg(feature = "mithril")]
@@ -129,6 +133,7 @@ fn run() -> Result<()> {
         Command::Snapshot(args) => snapshot::run(&load()?, &args),
         Command::Cache(args) => cache::run(&load()?, &args),
         Command::Config(args) => config::run(config_file, &args),
+        Command::Service(args) => service::run(config_file, &args),
 
         // the init command is special because it knows how to execute with or without a valid
         // configuration, that is why we pass the whole result and let the command logic decide what
