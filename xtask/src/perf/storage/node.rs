@@ -1478,9 +1478,10 @@ mod tests {
     #[test]
     fn the_instance_config_selects_the_dialect_and_only_the_grpc_service() {
         let grpc = "127.0.0.1:3900".parse().unwrap();
-        // `/g` has no drive on Windows, so the loader would anchor it.
-        let dir = tempfile::tempdir().unwrap();
-        let genesis = dir.path();
+        // `/g` has no drive on Windows, so the loader would anchor it. The
+        // genesis lives apart from the config, so a relative path can't pass.
+        let genesis_dir = tempfile::tempdir().unwrap();
+        let genesis = genesis_dir.path();
         let byron = genesis.join("byron.json");
 
         let legacy = Bin::parse("baseline=/tmp/dolos-old:v3").unwrap();
@@ -1493,6 +1494,7 @@ mod tests {
 
         let current = Bin::parse("candidate=target/release/dolos").unwrap();
         let toml = config_toml(&current, genesis, 42, true, grpc);
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dolos.toml");
         std::fs::write(&path, &toml).unwrap();
         let config = dolos_core::config::load(Some(&path)).unwrap();
