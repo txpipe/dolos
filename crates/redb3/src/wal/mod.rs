@@ -208,6 +208,8 @@ pub enum WalProbe {
 /// of another version, so a caller deciding whether to touch the WAL at all
 /// reads it here instead. A file that needs repair is an error.
 pub fn probe(path: impl AsRef<Path>) -> Result<WalProbe, RedbWalError> {
+    use redb::ReadableDatabase as _;
+
     let db = match redb::ReadOnlyDatabase::open(path) {
         Ok(db) => db,
         Err(redb::DatabaseError::DatabaseAlreadyOpen) => return Ok(WalProbe::InUse),
