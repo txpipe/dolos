@@ -217,7 +217,7 @@ pub const RETIRED_SCHEMA_REV: u64 = 0;
 
 /// The namespaces this profile version once defined and no longer does.
 ///
-/// They stay in `parameters.schemas` at [`RETIRED_SCHEMA_REV`] rather than
+/// Each stays in `parameters.schemas` at [`RETIRED_SCHEMA_REV`] rather than
 /// being dropped from it, because **removing a kind is not made safe by
 /// `required: true`** (ADR-0027). The compatibility rule decision 0026 sets
 /// covers a kind a reader does not *know*: the layer is there, the reader can
@@ -225,26 +225,12 @@ pub const RETIRED_SCHEMA_REV: u64 = 0;
 /// is the opposite shape — its layers are simply not there, and absence
 /// already means something else entirely: `write_logs` omits an empty log
 /// layer by rule, and [`crate::restore`]'s epoch grouping passes over a kind it
-/// does not recognise. A reader that models `member-rewards`, finds no such
-/// layer and restores happily has no mechanism to notice that it has just
-/// built a node with no reward history in it.
-///
-/// So the retirement is declared instead of inferred, and
-/// [`crate::restore::plan`] fails closed on it. The declaration only binds
-/// readers from the version that reads it forward; what protects the ones
-/// already deployed is that every namespace retired here is also a *state*
-/// namespace, and the state tip's completeness check refuses a stele
-/// missing any kind it expects. A log-only namespace would have had no such
-/// backstop, which is the case this rule exists for.
+/// does not recognise. So the retirement is declared instead of inferred, and
+/// [`crate::restore::plan`] fails closed on it.
 ///
 /// One-way, like `required`: a namespace named here constrains every reader
 /// older than the retirement, forever. Naming one is an ADR-level act.
-pub const RETIRED_NAMESPACES: [Namespace; 4] = [
-    "account-stakes",
-    "leader-rewards",
-    "member-rewards",
-    "pool-deposit-refunds",
-];
+pub const RETIRED_NAMESPACES: &[Namespace] = &[];
 
 /// Resolve a namespace read off the wire to the `&'static str` the stores use.
 ///

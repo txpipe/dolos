@@ -600,10 +600,10 @@ fn utxo_tags_are_queryable_after_each_batch_on_fjall() {
     utxo_tags_commit_with_each_batch::<FjallStores>();
 }
 
-/// An older restore could have committed the UTxO set without starting its
-/// final tag rebuild. The unconditional state-tip replay must repair it.
+/// A node holding the UTxO set without its tags is repaired by the
+/// unconditional state-tip replay.
 #[test]
-fn resume_repairs_utxos_written_without_tags_by_an_older_restore() {
+fn resume_repairs_utxos_written_without_tags() {
     let domain: ToyDomain<FjallStores> = harness();
     let temp = tempfile::tempdir().unwrap();
     export_to(temp.path(), &domain);
