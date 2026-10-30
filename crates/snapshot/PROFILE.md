@@ -30,8 +30,7 @@ transport — and this one for every byte inside it.
 The protocol's coexistence rules (SPEC.md, "Profiles, naming and media
 types") govern a kind the reader does not implement: rule 3 lets a restore
 skip it and report the skip, unless the layer's `scope` marks it
-`required`. This profile's own history puts flesh on both edges of that
-rule:
+`required`. Two edges of that rule need spelling out:
 
 Rule 3 answers for a kind the reader does not *know*. It says nothing about a kind the publisher no longer *carries*, and `required: true` cannot be stretched to cover one: `required` is a property of a layer, and a retired kind has no layer to put it on. Absence is already meaningful in this format — a `log-{ns}` layer exists if and only if it holds a record, and a restore passes over a kind it does not recognise — so a reader that still models a retired namespace, finds none of its layers, and reports a clean restore has just built a node missing that namespace's history and no way to have noticed.
 
@@ -186,7 +185,7 @@ An archive that cannot show step 3 is **insufficient evidence**, and is refused 
 
 **The stores must be still for the duration.** The check reads them once, before the walk; it does not freeze them, and no cursor check could make an export over stores something else is writing to consistent. Stillness comes from how the stores are opened: the storage backends lock their directories, so no second process — a daemon included — writes to stores a `dolos snapshot` command holds, and an in-process host reads through the headless replay API, whose snapshot is a borrow that no import can run beside.
 
-**Reading is unaffected.** The rule is a publisher eligibility check. A restore, `inspect`, and transport `verify` read any well-formed stele exactly as before. What changes is reproduction: `digest` and `verify --reproduce` only run over stores standing on a boundary, so a historical stele published from mid-epoch stores before this rule can be verified for its transport but no longer reproduced.
+**Reading is unaffected.** The rule is a publisher eligibility check. A restore, `inspect`, and transport `verify` read any well-formed stele. Reproduction is the exception: `digest` and `verify --reproduce` only run over stores standing on a boundary.
 
 ### Position, parameters and the inscription
 

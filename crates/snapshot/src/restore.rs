@@ -2191,6 +2191,40 @@ mod tests {
         assert_eq!(*namespace, retired);
     }
 
+    /// `plan` asks before a store could be opened.
+    #[test]
+    fn plan_refuses_a_retired_namespace() {
+        let retired = NAMESPACES[0];
+
+        let mut bare = inscription(vec![]);
+        bare.parameters["schemas"][retired] = json!(RETIRED_SCHEMA_REV);
+
+        let temp = tempfile::tempdir().unwrap();
+        let stele = stelae::dir::SteleDir::create(temp.path()).unwrap();
+        stelae::SteleWriter::seal(&stele, &DolosProfile, &bare).unwrap();
+
+        assert!(matches!(
+            plan(&stele, MAINNET_MAGIC, None),
+            Err(Error::RetiredNamespace { namespace }) if namespace == retired
+        ));
+    }
+
+    /// A namespace this build does not model is not a refusal, at any
+    /// revision: a newer publisher's addition and an older one's retirement
+    /// are both namespaces this reader has no history to lose in.
+    #[test]
+    fn a_namespace_this_build_does_not_model_is_not_a_refusal() {
+        let unmodeled = "not-a-namespace";
+        assert!(!NAMESPACES.contains(&unmodeled));
+
+        for rev in [json!(RETIRED_SCHEMA_REV), json!(1)] {
+            let mut inscription = inscription(state_layers());
+            inscription.parameters["schemas"][unmodeled] = rev;
+
+            check_namespaces(&inscription).unwrap();
+        }
+    }
+
     /// A namespace dropped from `schemas` outright says the same thing as one
     /// declared retired, and is refused the same way: the rule is that a
     /// publisher declares what it carries, not that it declares what it lost.

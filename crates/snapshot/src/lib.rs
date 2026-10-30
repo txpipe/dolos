@@ -1263,15 +1263,7 @@ pub fn parameters(retained: &RetainedEpochs) -> serde_json::Value {
         .map(|(_, ns, shards)| (ns.to_owned(), json!(shards)))
         .collect();
 
-    let schemas: serde_json::Map<String, serde_json::Value> = SCHEMA_REVS
-        .into_iter()
-        .chain(
-            RETIRED_NAMESPACES
-                .iter()
-                .map(|ns| (*ns, RETIRED_SCHEMA_REV)),
-        )
-        .map(|(ns, rev)| (ns.to_owned(), json!(rev)))
-        .collect();
+    let schemas = schemas(RETIRED_NAMESPACES);
 
     let entities: serde_json::Map<String, serde_json::Value> = ENTITY_KINDS
         .into_iter()
@@ -1285,6 +1277,16 @@ pub fn parameters(retained: &RetainedEpochs) -> serde_json::Value {
         "schemas": schemas,
         "stateEpochs": retained.as_slice(),
     })
+}
+
+/// `parameters.schemas`: every live namespace at its revision, and each of
+/// `retired` at [`RETIRED_SCHEMA_REV`].
+fn schemas(retired: &[Namespace]) -> serde_json::Map<String, serde_json::Value> {
+    SCHEMA_REVS
+        .into_iter()
+        .chain(retired.iter().map(|ns| (*ns, RETIRED_SCHEMA_REV)))
+        .map(|(ns, rev)| (ns.to_owned(), json!(rev)))
+        .collect()
 }
 
 /// The compression this profile publishes under.
@@ -1703,6 +1705,17 @@ mod tests {
             parameters["schemas"].as_object().unwrap().len(),
             SCHEMA_REVS.len() + RETIRED_NAMESPACES.len()
         );
+
+        // The same on a synthetic retirement, since the profile has none.
+        let retired = "retired-namespace";
+        assert!(!NAMESPACES.contains(&retired));
+
+        let synthetic = schemas(&[retired]);
+        assert_eq!(synthetic[retired], RETIRED_SCHEMA_REV);
+        for (ns, rev) in SCHEMA_REVS {
+            assert_eq!(synthetic[ns], rev, "{ns}");
+        }
+        assert_eq!(synthetic.len(), SCHEMA_REVS.len() + 1);
 
         // The routing rule behind the map: a sixteen-way namespace covers every
         // shard its count promises, and a single blob is always shard 0.
