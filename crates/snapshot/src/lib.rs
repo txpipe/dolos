@@ -115,6 +115,7 @@ use stelae::{
     dir::LayerSpec,
     frame::{self, CanonicalCbor},
     inscription::HistoryEntry,
+    profile::MediaType,
     Compression, Profile,
 };
 
@@ -606,6 +607,18 @@ pub const MEDIA_TYPE_VERSION: u64 = 1;
 /// part of a stele's identity — see [`stelae::inscription`].
 pub const MEDIA_TYPE_CODEC: &str = "zstd";
 
+/// The payload media type this profile names `kind` with, whether or not it
+/// defines the kind. Stelae's [`MediaType`] spells the infix.
+pub(crate) fn payload_media_type(kind: &str) -> String {
+    MediaType {
+        vendor: MEDIA_TYPE_VENDOR.to_owned(),
+        kind: kind.to_owned(),
+        version: MEDIA_TYPE_VERSION,
+        codec: MEDIA_TYPE_CODEC.to_owned(),
+    }
+    .to_string()
+}
+
 /// Largest single record this profile writes or reads: 64 MiB.
 ///
 /// Four times the protocol's 16 MiB default, and raised for one record shape
@@ -1001,9 +1014,7 @@ impl Profile for DolosProfile {
             });
         }
 
-        Ok(format!(
-            "application/vnd.{MEDIA_TYPE_VENDOR}.stele.{kind}.v{MEDIA_TYPE_VERSION}+{MEDIA_TYPE_CODEC}"
-        ))
+        Ok(payload_media_type(kind))
     }
 
     /// The profile sets the protocol's `sequence` to the Cardano epoch, so the
@@ -1502,7 +1513,7 @@ impl Scope for DigestsScope {
 #[cfg(test)]
 mod tests {
     use dolos_core::BlockHash;
-    use stelae::profile::{checked_layer_media_type, checked_tag_for_sequence, MediaType};
+    use stelae::profile::{checked_layer_media_type, checked_tag_for_sequence};
 
     use super::*;
 
@@ -1514,6 +1525,8 @@ mod tests {
             let media_type = checked_layer_media_type(&DolosProfile, kind).unwrap();
             let parsed = MediaType::parse(&media_type).unwrap();
 
+            assert!(media_type.contains(".stelae."), "{media_type}");
+            assert_eq!(parsed.to_string(), media_type);
             assert_eq!(parsed.vendor, MEDIA_TYPE_VENDOR);
             assert_eq!(parsed.kind, kind);
             assert_eq!(parsed.version, MEDIA_TYPE_VERSION);
