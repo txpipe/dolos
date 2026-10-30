@@ -1478,10 +1478,13 @@ mod tests {
     #[test]
     fn the_instance_config_selects_the_dialect_and_only_the_grpc_service() {
         let grpc = "127.0.0.1:3900".parse().unwrap();
-        let byron = Path::new("/g").join("byron.json");
+        // `/g` has no drive on Windows, so the loader would anchor it.
+        let dir = tempfile::tempdir().unwrap();
+        let genesis = dir.path();
+        let byron = genesis.join("byron.json");
 
         let legacy = Bin::parse("baseline=/tmp/dolos-old:v3").unwrap();
-        let toml = config_toml(&legacy, Path::new("/g"), 42, true, grpc);
+        let toml = config_toml(&legacy, genesis, 42, true, grpc);
         assert!(toml.contains("version = \"v3\""));
         assert!(toml.contains(&format!("byron_path = {:?}", byron.display().to_string())));
         assert!(toml.contains("[serve.grpc]\nlisten_address = \"127.0.0.1:3900\""));
@@ -1489,8 +1492,7 @@ mod tests {
         assert!(!toml.contains("minibf"));
 
         let current = Bin::parse("candidate=target/release/dolos").unwrap();
-        let toml = config_toml(&current, Path::new("/g"), 42, true, grpc);
-        let dir = tempfile::tempdir().unwrap();
+        let toml = config_toml(&current, genesis, 42, true, grpc);
         let path = dir.path().join("dolos.toml");
         std::fs::write(&path, &toml).unwrap();
         let config = dolos_core::config::load(Some(&path)).unwrap();

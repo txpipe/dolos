@@ -603,7 +603,8 @@ fn write_genesis_for_a_named_network_needs_no_configuration() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     for (name, _) in embedded_genesis("preview") {
-        assert!(stdout.contains(&format!("out/{name}")), "{stdout}");
+        let path = Path::new("out").join(name);
+        assert!(stdout.contains(&path.display().to_string()), "{stdout}");
     }
 
     let shelley = out.join("shelley.json");
