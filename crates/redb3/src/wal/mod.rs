@@ -1,6 +1,6 @@
 use bincode;
 use itertools::Itertools;
-use redb::{Range, ReadableDatabase, ReadableTableMetadata, TableDefinition};
+use redb::{Range, ReadableTableMetadata, TableDefinition};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{marker::PhantomData, ops::RangeBounds, path::Path, sync::Arc};
 use thiserror::Error;
@@ -10,6 +10,8 @@ use dolos_core::{
     config::RedbWalConfig, BlockSlot, ChainPoint, EntityDelta, LogEntry, LogValue, RawBlock,
     WalError, WalStore,
 };
+
+use crate::handle::Handle;
 
 #[derive(Debug, Error)]
 #[error(transparent)]
@@ -319,7 +321,7 @@ const DEFAULT_CACHE_SIZE_MB: usize = 50;
 /// Concrete implementation of WalStore using Redb
 #[derive(Clone, Debug)]
 pub struct RedbWalStore<T> {
-    db: Arc<redb::Database>,
+    db: Arc<Handle>,
     _phantom: PhantomData<T>,
 }
 
@@ -362,7 +364,7 @@ where
             .map_err(WalError::internal)?;
 
         let out = Self {
-            db: Arc::new(db),
+            db: Arc::new(Handle::Writable(db)),
             _phantom: Default::default(),
         };
 
@@ -380,7 +382,7 @@ where
             .map_err(WalError::internal)?;
 
         let out = Self {
-            db: Arc::new(inner),
+            db: Arc::new(Handle::Writable(inner)),
             _phantom: Default::default(),
         };
 
@@ -390,8 +392,35 @@ where
         Ok(out)
     }
 
+    /// Open an existing WAL read-only (see [`Handle`]), without the
+    /// initialization and version stamps [`Self::open`] writes. A WAL of
+    /// another version is refused: only a writable open converts it.
+    pub fn open_read_only(
+        path: impl AsRef<Path>,
+        config: &RedbWalConfig,
+    ) -> Result<Self, WalError> {
+        let db = Handle::open_read_only(
+            path,
+            1024 * 1024 * config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB),
+        )
+        .map_err(WalError::internal)?;
+
+        let out = Self {
+            db: Arc::new(db),
+            _phantom: Default::default(),
+        };
+
+        match out.read_version()? {
+            Some(CURRENT_WAL_VERSION) => Ok(out),
+            found => Err(WalError::IncompatibleVersion {
+                found: found.unwrap_or_default(),
+                expected: CURRENT_WAL_VERSION,
+            }),
+        }
+    }
+
     pub fn db_mut(&mut self) -> Option<&mut redb::Database> {
-        Arc::get_mut(&mut self.db)
+        Arc::get_mut(&mut self.db).and_then(Handle::writable_mut)
     }
 
     pub fn ensure_initialized(&self) -> Result<(), RedbWalError> {
@@ -909,6 +938,7 @@ where
 mod tests {
     use super::*;
     use dolos_core::{ChainError, Entity, EntityValue, Namespace, NsKey};
+    use redb::ReadableDatabase as _;
     use serde::{Deserialize, Serialize};
 
     /// Minimal delta type used by tests to satisfy `RedbWalStore`'s generic
@@ -1012,6 +1042,55 @@ mod tests {
     fn fresh_in_memory_stamps_current_version() {
         let store = TestStore::memory().unwrap();
         assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
+    }
+
+    /// A read-only open leaves the file as it found it, refuses writes, and
+    /// is refused while a writer holds the file.
+    #[test]
+    fn read_only_open_never_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        let writer = open_test_store(&path).unwrap();
+        writer.reset_to(&ChainPoint::Origin).unwrap();
+
+        let error = TestStore::open_read_only(&path, &RedbWalConfig::default()).unwrap_err();
+        assert!(crate::handle::is_already_open(&error), "{error}");
+
+        drop(writer);
+        let before = std::fs::read(&path).unwrap();
+
+        let store = TestStore::open_read_only(&path, &RedbWalConfig::default()).unwrap();
+        assert_eq!(store.find_tip().unwrap().unwrap().0, ChainPoint::Origin);
+        assert!(store.reset_to(&ChainPoint::Origin).is_err());
+        drop(store);
+
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn read_only_open_refuses_another_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        {
+            let db = open_raw_db(&path);
+            let wx = db.begin_write().unwrap();
+            wx.open_table(WAL).unwrap();
+            wx.commit().unwrap();
+        }
+
+        let error = TestStore::open_read_only(&path, &RedbWalConfig::default()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                WalError::IncompatibleVersion {
+                    found: 0,
+                    expected: CURRENT_WAL_VERSION
+                }
+            ),
+            "{error}"
+        );
     }
 
     #[test]

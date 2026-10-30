@@ -603,7 +603,8 @@ fn write_genesis_for_a_named_network_needs_no_configuration() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     for (name, _) in embedded_genesis("preview") {
-        assert!(stdout.contains(&format!("out/{name}")), "{stdout}");
+        let path = Path::new("out").join(name);
+        assert!(stdout.contains(&path.display().to_string()), "{stdout}");
     }
 
     let shelley = out.join("shelley.json");
@@ -2131,4 +2132,53 @@ fn removed_and_renamed_keys_are_refused() {
             "{table} {lines}: {found}"
         );
     }
+}
+
+/// `config check --format json` prints one JSON object on stdout, and only
+/// that; a configuration it refuses exits 1 with nothing on stdout.
+#[test]
+fn config_check_prints_json_on_request() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture("ordinary.toml"), dir.path().join("dolos.toml")).unwrap();
+
+    let output = run_dolos(dir.path(), &["config", "check", "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+
+    let checked: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let data: PathBuf = ["data"].iter().collect();
+
+    assert_eq!(checked["valid"], "dolos.toml");
+    assert_eq!(
+        checked["network"],
+        serde_json::json!({"name": "mainnet", "magic": 764824073, "testnet": false})
+    );
+    assert_eq!(checked["state"]["kind"], "fjall");
+    assert_eq!(
+        checked["state"]["path"],
+        data.join("state").display().to_string()
+    );
+    assert_eq!(checked["mempool"], serde_json::Value::Null);
+
+    let (dir, path) = beside_genesis("reject/cardano-on-a-known-network.toml", 42);
+    let output = run_dolos(
+        dir.path(),
+        &[
+            "--config",
+            path.to_str().unwrap(),
+            "config",
+            "check",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
 }

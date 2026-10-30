@@ -4,8 +4,8 @@
 //!
 //! The namespace is not in the record: it is the layer's *kind*, one per log
 //! namespace (`crate::LOG_KINDS`), so a shape change to one namespace's logs
-//! costs a backfill of that namespace's blobs and leaves the other eight alone.
-//! Which is also why this module has one codec rather than nine — the nine
+//! costs a backfill of that namespace's blobs and leaves the others alone.
+//! Which is also why this module has one codec rather than one per kind — the
 //! kinds differ in what they carry, never in how a record is written — and why
 //! its refusals name the record shape, `log`, rather than a layer.
 //!
@@ -37,7 +37,7 @@ use stelae::codec::{blob, close, open};
 
 /// The name this codec refuses under.
 ///
-/// One record shape serves all six `log-{ns}` kinds, so an error names the
+/// One record shape serves every `log-{ns}` kind, so an error names the
 /// shape rather than a layer — the layer is already in the message the caller
 /// wraps it in.
 const LOG: &str = "log";

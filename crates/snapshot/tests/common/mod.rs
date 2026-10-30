@@ -42,7 +42,6 @@ use dolos_core::{
 use dolos_snapshot::{
     layers::{
         blocks::BlockRecord,
-        digests::ImmutableDigests,
         logs::LogRecord,
         state::{self, StateRecord},
     },
@@ -55,6 +54,7 @@ use stelae::{
     inscription::LayerDescriptor,
     Digest, Profile, SteleReader, SteleWriter,
 };
+use stelae_driver::digests::ImmutableDigests;
 
 pub const NETWORK_MAGIC: u64 = dolos_snapshot::MAINNET_MAGIC;
 
@@ -407,9 +407,9 @@ pub fn write_layer(
 /// per populated shard in each role, dump and tip.
 pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     use dolos_snapshot::layers::{
-        blocks, digests as digests_layer, entities as entities_layer, indexes as indexes_layer,
-        logs,
+        blocks, entities as entities_layer, indexes as indexes_layer, logs,
     };
+    use stelae_driver::digests as digests_layer;
 
     let mut layers: Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> = vec![
         (
@@ -462,7 +462,9 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     layers.push((
         DIGESTS,
         Box::new(digests_scope()),
-        encode_all(&self::digests(), digests_layer::encode),
+        encode_all(&self::digests(), |record| {
+            Ok(digests_layer::encode(record)?)
+        }),
     ));
 
     layers

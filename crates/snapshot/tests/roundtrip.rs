@@ -11,7 +11,7 @@ mod common;
 use common::*;
 use dolos_core::{ExactKind, ExactRecord, IndexRecord, MAX_EXACT_KEY_LEN};
 use dolos_snapshot::{
-    layers::{blocks, digests, indexes, logs, state},
+    layers::{blocks, indexes, logs, state},
     shards_for, DolosProfile, Error, Scope, BLOCKS, DIGESTS, INDEXES, LOG_KINDS,
 };
 use stelae::{
@@ -19,6 +19,7 @@ use stelae::{
     frame::{self, CanonicalCbor},
     Profile, SteleReader, SteleWriter,
 };
+use stelae_driver::digests;
 
 /// Write one layer, read it back both ways, and decode what comes out.
 fn roundtrip<T>(
@@ -173,8 +174,8 @@ fn digests_round_trip_through_a_layer() {
         DIGESTS,
         &digests_scope(),
         &records,
-        digests::encode,
-        digests::decode,
+        |record| Ok(digests::encode(record)?),
+        |bytes| Ok(digests::decode(bytes)?),
     );
 
     let mut order = digests::OrderCheck::default();
