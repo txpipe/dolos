@@ -478,7 +478,7 @@ fn plant_store_markers(dir: &Path) -> Vec<PathBuf> {
 /// that only reads.
 const STORE_COMMANDS: [&[&str]; 4] = [
     &["bootstrap", "relay", "--force"],
-    &["doctor", "rebuild-state", "--force"],
+    &["data", "rebuild", "--force"],
     &["doctor", "reset-wal"],
     &["data", "summary"],
 ];

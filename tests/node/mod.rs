@@ -142,7 +142,7 @@ impl Node {
         // The synthetic chain's initial UTxOs are seeded through the chain
         // config's `custom_utxos`, so they are part of this chain's genesis.
         // Persist them into `dolos.toml`: a separate process replaying from
-        // origin (`doctor rebuild-state`) runs genesis from the file and must
+        // origin (`data rebuild`) runs genesis from the file and must
         // seed the same set. Only a custom network carries them, so the file
         // becomes the genesis under a custom chain.
         self.write_chain(&ChainConfig::custom(CardanoConfig {

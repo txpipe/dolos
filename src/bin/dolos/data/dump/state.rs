@@ -6,9 +6,10 @@ use dolos_cardano::{
     PendingRewardState, PoolSnapshot, PoolState, ProposalAction, ProposalState,
 };
 use miette::{Context, IntoDiagnostic};
-use tracing_subscriber::{filter::Targets, prelude::*};
+use serde::Serialize;
 
-use crate::data::OutputFormat;
+use super::{Bounds, Layout, Output};
+use crate::output::{emit_record, Format};
 use dolos::prelude::*;
 use dolos_cardano::{network_from_genesis, pallas_extras};
 use pallas::ledger::addresses::Network as AddressNetwork;
@@ -20,18 +21,30 @@ pub struct Args {
     #[arg(long)]
     namespace: String,
 
-    /// output format
-    #[arg(long, value_enum, default_value = "default")]
-    format: OutputFormat,
+    #[command(flatten)]
+    bounds: Bounds,
 
-    /// count of entities to dump
-    #[arg(long, default_value = "100")]
-    count: usize,
+    #[command(flatten)]
+    output: Output,
 }
 
-trait TableRow: StateEntity {
-    fn header(format: OutputFormat) -> Vec<&'static str>;
-    fn row(&self, key: &Self::Key, network: AddressNetwork, format: OutputFormat) -> Vec<String>;
+const NAMESPACES: [&str; 8] = [
+    "eras",
+    "epochs",
+    "accounts",
+    "pools",
+    "proposals",
+    "dreps",
+    "pending-rewards",
+    "datums",
+];
+
+trait TableRow: StateEntity + Serialize {
+    /// Whether the entity has a dbsync layout.
+    const DBSYNC: bool = false;
+
+    fn header(format: Layout) -> Vec<&'static str>;
+    fn row(&self, key: &Self::Key, network: AddressNetwork, format: Layout) -> Vec<String>;
 }
 
 fn format_stake_at(account: &AccountState, epoch: Epoch) -> String {
@@ -52,9 +65,9 @@ fn format_stake_at(account: &AccountState, epoch: Epoch) -> String {
 }
 
 impl TableRow for AccountState {
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for accounts state (#1032)");
+    fn header(format: Layout) -> Vec<&'static str> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for accounts state (#1032)");
         }
         vec![
             "cred",
@@ -70,9 +83,9 @@ impl TableRow for AccountState {
         ]
     }
 
-    fn row(&self, key: &Self::Key, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for accounts state (#1032)");
+    fn row(&self, key: &Self::Key, _network: AddressNetwork, format: Layout) -> Vec<String> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for accounts state (#1032)");
         }
         let epoch = self.stake.epoch().unwrap_or_default();
 
@@ -95,9 +108,9 @@ impl TableRow for AccountState {
 }
 
 impl TableRow for EpochState {
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for epochs state (#1032)");
+    fn header(format: Layout) -> Vec<&'static str> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for epochs state (#1032)");
         }
         vec![
             "number",
@@ -114,9 +127,9 @@ impl TableRow for EpochState {
         ]
     }
 
-    fn row(&self, _key: &Self::Key, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for epochs state (#1032)");
+    fn row(&self, _key: &Self::Key, _network: AddressNetwork, format: Layout) -> Vec<String> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for epochs state (#1032)");
         }
         let pparams = self.pparams.live();
 
@@ -158,8 +171,10 @@ impl TableRow for EpochState {
 }
 
 impl TableRow for EraState {
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        if matches!(format, OutputFormat::Dbsync) {
+    const DBSYNC: bool = true;
+
+    fn header(format: Layout) -> Vec<&'static str> {
+        if matches!(format, Layout::Dbsync) {
             return vec!["protocol", "start_epoch", "epoch_length", "slot_length"];
         }
         vec![
@@ -175,8 +190,8 @@ impl TableRow for EraState {
         ]
     }
 
-    fn row(&self, key: &Self::Key, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
-        if matches!(format, OutputFormat::Dbsync) {
+    fn row(&self, key: &Self::Key, _network: AddressNetwork, format: Layout) -> Vec<String> {
+        if matches!(format, Layout::Dbsync) {
             return vec![
                 self.protocol.to_string(),
                 self.start.epoch.to_string(),
@@ -203,9 +218,9 @@ impl TableRow for EraState {
 }
 
 impl TableRow for PendingRewardState {
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for pending rewards state (#1032)");
+    fn header(format: Layout) -> Vec<&'static str> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for pending rewards state (#1032)");
         }
         vec![
             "stake bech32",
@@ -219,9 +234,9 @@ impl TableRow for PendingRewardState {
         ]
     }
 
-    fn row(&self, key: &Self::Key, network: AddressNetwork, format: OutputFormat) -> Vec<String> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for pending rewards state (#1032)");
+    fn row(&self, key: &Self::Key, network: AddressNetwork, format: Layout) -> Vec<String> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for pending rewards state (#1032)");
         }
         let stake_hex = EntityKey::of(key).to_string();
         let stake_bech32 = pallas_extras::stake_credential_to_address(network, &self.credential)
@@ -244,11 +259,13 @@ impl TableRow for PendingRewardState {
 }
 
 impl TableRow for DatumState {
-    fn header(_format: OutputFormat) -> Vec<&'static str> {
+    const DBSYNC: bool = true;
+
+    fn header(_format: Layout) -> Vec<&'static str> {
         vec!["hash", "refcount", "bytes"]
     }
 
-    fn row(&self, key: &Self::Key, _network: AddressNetwork, _format: OutputFormat) -> Vec<String> {
+    fn row(&self, key: &Self::Key, _network: AddressNetwork, _format: Layout) -> Vec<String> {
         vec![
             hex::encode(key.0),
             self.refcount.to_string(),
@@ -276,9 +293,9 @@ fn format_pool_epoch(values: &EpochValue<PoolSnapshot>, epoch_delta: u64) -> Str
 }
 
 impl TableRow for PoolState {
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for pools state (#1032)");
+    fn header(format: Layout) -> Vec<&'static str> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for pools state (#1032)");
         }
         vec![
             "key",
@@ -293,9 +310,9 @@ impl TableRow for PoolState {
         ]
     }
 
-    fn row(&self, key: &Self::Key, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for pools state (#1032)");
+    fn row(&self, key: &Self::Key, _network: AddressNetwork, format: Layout) -> Vec<String> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for pools state (#1032)");
         }
         let pool_hash: &[u8] = key.0.as_ref();
         let pool_hex = hex::encode(pool_hash);
@@ -324,9 +341,9 @@ impl TableRow for PoolState {
 }
 
 impl TableRow for DRepState {
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for dreps state (#1032)");
+    fn header(format: Layout) -> Vec<&'static str> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for dreps state (#1032)");
         }
         vec![
             "credential",
@@ -339,9 +356,9 @@ impl TableRow for DRepState {
         ]
     }
 
-    fn row(&self, _key: &Self::Key, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for dreps state (#1032)");
+    fn row(&self, _key: &Self::Key, _network: AddressNetwork, format: Layout) -> Vec<String> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for dreps state (#1032)");
         }
 
         let (credential, kind) = match &self.identifier {
@@ -368,9 +385,9 @@ impl TableRow for DRepState {
 }
 
 impl TableRow for ProposalState {
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for proposals state (#1032)");
+    fn header(format: Layout) -> Vec<&'static str> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for proposals state (#1032)");
         }
         vec![
             "key",
@@ -385,9 +402,9 @@ impl TableRow for ProposalState {
         ]
     }
 
-    fn row(&self, key: &Self::Key, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
-        if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for proposals state (#1032)");
+    fn row(&self, key: &Self::Key, _network: AddressNetwork, format: Layout) -> Vec<String> {
+        if matches!(format, Layout::Dbsync) {
+            unreachable!("dbsync format not supported for proposals state (#1032)");
         }
         let action = match &self.action {
             ProposalAction::ParamChange(x) => format!("Params({})", x.len()),
@@ -439,26 +456,24 @@ impl TableRow for ProposalState {
 enum Formatter<T: TableRow> {
     Table(Table, PhantomData<T>),
     Csv,
-    // TODO
-    // Json,
 }
 
 impl<T: TableRow> Formatter<T> {
-    fn new(format: OutputFormat) -> Self {
+    fn new(format: Layout) -> Self {
         match format {
-            OutputFormat::Default => {
+            Layout::Table => {
                 let mut table = Table::new();
-                table.set_header(T::header(OutputFormat::Default));
+                table.set_header(T::header(Layout::Table));
                 Self::Table(table, PhantomData::<T>)
             }
-            OutputFormat::Dbsync => {
-                println!("{}", T::header(OutputFormat::Dbsync).join(","));
+            Layout::Dbsync => {
+                println!("{}", T::header(Layout::Dbsync).join(","));
                 Self::Csv
             }
         }
     }
 
-    fn write(&mut self, key: T::Key, value: T, network: AddressNetwork, format: OutputFormat) {
+    fn write(&mut self, key: T::Key, value: T, network: AddressNetwork, format: Layout) {
         match self {
             Formatter::Table(table, _) => {
                 let row = value.row(&key, network, format);
@@ -479,29 +494,53 @@ impl<T: TableRow> Formatter<T> {
     }
 }
 
+/// One entity, as a JSON line.
+#[derive(Serialize)]
+struct Record<'a, T> {
+    key: String,
+    value: &'a T,
+}
+
 fn dump_state<T: TableRow>(
     state: &impl StateStore,
-    count: usize,
+    bounds: &Bounds,
     network: AddressNetwork,
-    format: OutputFormat,
+    format: Format,
+    layout: Layout,
 ) -> miette::Result<()> {
-    let mut formatter = Formatter::<T>::new(format);
+    if layout == Layout::Dbsync && !T::DBSYNC {
+        return Err(crate::output::Usage::new(
+            format!("the {} namespace has no dbsync layout", T::NS),
+            None,
+        )
+        .into());
+    }
 
-    let iter = state
+    let entities = state
         .iter_entities_typed::<T>(None)
         .into_diagnostic()
         .context("iterating entities")?;
 
-    if count == 0 {
-        iter.for_each(|x| match x {
-            Ok((key, value)) => formatter.write(key, value, network, format),
-            Err(e) => panic!("{e}"),
-        });
-    } else {
-        iter.take(count).for_each(|x| match x {
-            Ok((key, value)) => formatter.write(key, value, network, format),
-            Err(e) => panic!("{e}"),
-        });
+    let entities = bounds.apply(entities);
+
+    if format == Format::Json {
+        for entity in entities {
+            let (key, value) = entity.into_diagnostic()?;
+
+            emit_record(&Record {
+                key: EntityKey::of(&key).to_string(),
+                value: &value,
+            })?;
+        }
+
+        return Ok(());
+    }
+
+    let mut formatter = Formatter::<T>::new(layout);
+
+    for entity in entities {
+        let (key, value) = entity.into_diagnostic()?;
+        formatter.write(key, value, network, layout);
     }
 
     formatter.flush();
@@ -512,42 +551,32 @@ fn dump_state<T: TableRow>(
 use dolos_core::config::RootConfig;
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    setup_tracing_for_format(config, args.format)?;
+    let output = args.output.checked()?;
+    output.setup_tracing()?;
 
-    let state = crate::common::open_state_store(config)?;
+    if !NAMESPACES.contains(&args.namespace.as_str()) {
+        return Err(super::unknown_namespace("state", &args.namespace, &NAMESPACES).into());
+    }
+
+    let stores = super::observe(config)?;
     let genesis = crate::common::open_genesis(config)?;
     let network = network_from_genesis(&genesis);
 
+    let state = &stores.state;
+    let bounds = &args.bounds;
+    let (format, layout) = (output.format.format, output.layout);
+
     match args.namespace.as_str() {
-        "eras" => dump_state::<EraState>(&state, args.count, network, args.format)?,
-        "epochs" => dump_state::<EpochState>(&state, args.count, network, args.format)?,
-        "accounts" => dump_state::<AccountState>(&state, args.count, network, args.format)?,
-        "pools" => dump_state::<PoolState>(&state, args.count, network, args.format)?,
-        "proposals" => dump_state::<ProposalState>(&state, args.count, network, args.format)?,
-        "dreps" => dump_state::<DRepState>(&state, args.count, network, args.format)?,
+        "eras" => dump_state::<EraState>(state, bounds, network, format, layout),
+        "epochs" => dump_state::<EpochState>(state, bounds, network, format, layout),
+        "accounts" => dump_state::<AccountState>(state, bounds, network, format, layout),
+        "pools" => dump_state::<PoolState>(state, bounds, network, format, layout),
+        "proposals" => dump_state::<ProposalState>(state, bounds, network, format, layout),
+        "dreps" => dump_state::<DRepState>(state, bounds, network, format, layout),
         "pending-rewards" => {
-            dump_state::<PendingRewardState>(&state, args.count, network, args.format)?;
+            dump_state::<PendingRewardState>(state, bounds, network, format, layout)
         }
-        "datums" => dump_state::<DatumState>(&state, args.count, network, args.format)?,
-        _ => todo!(),
+        "datums" => dump_state::<DatumState>(state, bounds, network, format, layout),
+        _ => unreachable!("checked against NAMESPACES"),
     }
-
-    Ok(())
-}
-
-fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette::Result<()> {
-    if matches!(format, OutputFormat::Dbsync) {
-        let filter = Targets::new().with_default(tracing::Level::ERROR);
-
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-            .with(filter)
-            .init();
-
-        tracing_log::LogTracer::init().ok();
-
-        return Ok(());
-    }
-
-    crate::common::setup_tracing(&config.logging, config.telemetry.as_ref())
 }

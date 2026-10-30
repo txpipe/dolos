@@ -1,5 +1,4 @@
-//! `dolos doctor rebuild-state` — regenerate the state store from the local
-//! archive.
+//! `dolos data rebuild` — regenerate the state store from the local archive.
 //!
 //! The archive holds the full raw chain, and state computation reads nothing
 //! of it but the entity index below each batch, which a replay without
@@ -60,7 +59,9 @@ use pallas::ledger::traverse::MultiEraBlock;
 
 use dolos::adapters::DomainAdapter;
 use dolos::prelude::*;
-use dolos::storage::{ArchiveStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend};
+use dolos::storage::{
+    Access, ArchiveStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend,
+};
 
 use crate::feedback::Feedback;
 
@@ -418,7 +419,9 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         bail!("--chunk must be at least 1");
     }
 
-    let archive = open_store("archive", crate::common::open_archive_store(config))?;
+    // Held for the run, so no node starts on the dataset meanwhile; the
+    // state it rebuilds may be missing, the archive it replays may not.
+    let archive = dolos::storage::open_existing_archive(config, Access::Mutate)?;
 
     let tip = preflight(&archive)?;
 

@@ -10,7 +10,7 @@
 //! ## The evidence
 //!
 //! The archive has to start at the chain's origin: its first block is the
-//! chain's first, by the test `doctor rebuild-state` applies (block number at
+//! chain's first, by the test `data rebuild` applies (block number at
 //! most 1). A pruned archive's sweep has taken the entity index entries of its
 //! pruned blocks with them, so its node stages a re-carried script or asset
 //! again as a first sighting and seals it into its period logs. That is a
@@ -510,7 +510,7 @@ mod tests {
     }
 
     /// The chain's first block may be its second in number: the test is the
-    /// one `doctor rebuild-state` applies, which tolerates a first block
+    /// one `data rebuild` applies, which tolerates a first block
     /// numbered 1.
     #[test]
     fn an_archive_whose_first_block_is_number_one_starts_at_origin() {

@@ -194,7 +194,8 @@ impl StateStore {
         Ok(false)
     }
 
-    /// Per-keyspace disk footprint: `(name, bytes, path)`.
+    /// Per-keyspace disk footprint: `(name, bytes, path)`, the path in the
+    /// store's own folder.
     pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
         [
             (keyspace_names::CURSOR, &self.cursor),
@@ -202,8 +203,16 @@ impl StateStore {
             (keyspace_names::ENTITIES, &self.entities),
             (keyspace_names::TAGS, &self.tags),
         ]
-        .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
+        .map(|(name, ks)| (name, ks.disk_space(), self.source_of(ks.path())))
         .to_vec()
+    }
+
+    /// Where `path` is in the store itself, when it is in a view's mirror.
+    fn source_of(&self, path: &Path) -> std::path::PathBuf {
+        match &self.view {
+            Some(view) => view.source_of(path),
+            None => path.to_path_buf(),
+        }
     }
 
     /// Gracefully shutdown the state store.
@@ -590,5 +599,25 @@ mod tests {
 
         let _store = StateStore::open(&path, Preset::Standard).unwrap();
         assert_eq!(left(dir.path()), ["state"]);
+    }
+
+    /// A view reports its footprint under the store's own folder, not the
+    /// mirror it is dropped with.
+    #[test]
+    fn a_view_reports_the_paths_of_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        written(&path, 1);
+
+        let store = std::path::absolute(&path).unwrap();
+        let view = StateStore::open_view(&path, Preset::Standard).unwrap();
+
+        for (name, _, keyspace) in view.disk_usage() {
+            assert!(
+                keyspace.starts_with(&store),
+                "{name}: {}",
+                keyspace.display()
+            );
+        }
     }
 }

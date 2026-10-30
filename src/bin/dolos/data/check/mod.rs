@@ -7,7 +7,9 @@
 //!
 //! It is the at-rest complement of the sync-time guards, not a replacement:
 //! `dolos doctor wal-integrity` still owns the WAL, and nothing here runs
-//! during sync or repairs anything it finds.
+//! during sync or repairs anything it finds. It opens the stores without
+//! writing to them, prints what it found on stdout, and exits 3 when that is
+//! anything.
 //!
 //! Each check lives in its own module and exposes a pure function over the
 //! data it inspects plus a `run` that reads that data from the open stores.
@@ -19,7 +21,10 @@
 
 use clap::ValueEnum;
 use dolos_core::config::RootConfig;
+use serde::Serialize;
 use std::time::{Duration, Instant};
+
+use crate::output::{FormatArgs, Unhealthy};
 
 mod accounts;
 mod archive;
@@ -28,7 +33,8 @@ mod epoch_log;
 mod totals;
 
 /// The five checks, cheapest first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum CheckKind {
     /// WAL, archive and state tips tell one story
     Cursors,
@@ -136,6 +142,9 @@ pub struct Args {
     /// check to run; repeatable, runs all of them when omitted
     #[arg(long = "check", value_enum)]
     checks: Vec<CheckKind>,
+
+    #[command(flatten)]
+    format: FormatArgs,
 }
 
 impl Args {
@@ -153,16 +162,69 @@ impl Args {
     }
 }
 
-/// What one check cost, reported whether or not it found anything.
+/// What one check found, and what it cost, reported whether or not it found
+/// anything.
 ///
 /// The full-scan checks are minutes on mainnet, and an operator deciding
 /// whether to run this after every restore needs the number rather than a
 /// warning about it.
-struct Timing {
+#[derive(Debug, Serialize)]
+struct Ran {
     check: CheckKind,
+    #[serde(skip)]
     elapsed: Duration,
-    issues: usize,
-    not_assertable: usize,
+    elapsed_ms: u128,
+    issues: Vec<String>,
+    not_assertable: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct Report {
+    checks: Vec<Ran>,
+}
+
+impl Report {
+    fn issues(&self) -> usize {
+        self.checks.iter().map(|ran| ran.issues.len()).sum()
+    }
+}
+
+impl std::fmt::Display for Report {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for ran in &self.checks {
+            for detail in &ran.issues {
+                writeln!(f, "[{}] {detail}", ran.check)?;
+            }
+
+            for detail in &ran.not_assertable {
+                writeln!(f, "[{}] not assertable: {detail}", ran.check)?;
+            }
+        }
+
+        writeln!(f)?;
+
+        for ran in &self.checks {
+            let skipped = match ran.not_assertable.len() {
+                0 => String::new(),
+                count => format!(", {count} not assertable at this tip"),
+            };
+
+            writeln!(
+                f,
+                "{:<20} {:>10.2?}  {} issue(s){}",
+                ran.check.name(),
+                ran.elapsed,
+                ran.issues.len(),
+                skipped,
+            )?;
+        }
+
+        if self.issues() == 0 {
+            write!(f, "\nno consistency issues found")?;
+        }
+
+        Ok(())
+    }
 }
 
 pub fn run(
@@ -170,11 +232,10 @@ pub fn run(
     args: &Args,
     feedback: &crate::feedback::Feedback,
 ) -> miette::Result<()> {
-    let stores = crate::common::open_data_stores(config)?;
+    let stores = crate::common::open_existing_stores(config, dolos::storage::Access::Observe)?;
     let genesis = crate::common::open_genesis(config)?;
 
-    let mut issues: Vec<Issue> = Vec::new();
-    let mut timings: Vec<Timing> = Vec::new();
+    let mut report = Report { checks: Vec::new() };
 
     for check in args.selected() {
         let progress = feedback.indeterminate_progress_bar();
@@ -198,51 +259,29 @@ pub fn run(
 
         let found = found?;
 
-        for issue in &found.issues {
-            eprintln!("{issue}");
-        }
-
-        for skipped in &found.not_assertable {
-            println!("{skipped}");
-        }
-
-        timings.push(Timing {
+        report.checks.push(Ran {
             check,
             elapsed,
-            issues: found.issues.len(),
-            not_assertable: found.not_assertable.len(),
+            elapsed_ms: elapsed.as_millis(),
+            issues: found.issues.into_iter().map(|x| x.detail).collect(),
+            not_assertable: found.not_assertable.into_iter().map(|x| x.detail).collect(),
         });
-
-        issues.extend(found.issues);
     }
 
-    println!();
+    crate::output::emit(&report, &args.format)?;
 
-    for timing in &timings {
-        let skipped = match timing.not_assertable {
-            0 => String::new(),
-            count => format!(", {count} not assertable at this tip"),
-        };
-
-        println!(
-            "{:<20} {:>10.2?}  {} issue(s){}",
-            timing.check.name(),
-            timing.elapsed,
-            timing.issues,
-            skipped,
-        );
+    match report.issues() {
+        0 => Ok(()),
+        issues => Err(Unhealthy(format!(
+            "found {issues} consistency issue(s) across {} check(s)",
+            report
+                .checks
+                .iter()
+                .filter(|ran| !ran.issues.is_empty())
+                .count(),
+        ))
+        .into()),
     }
-
-    if issues.is_empty() {
-        println!("\nno consistency issues found");
-        return Ok(());
-    }
-
-    Err(miette::miette!(
-        "found {} consistency issue(s) across {} check(s)",
-        issues.len(),
-        timings.iter().filter(|x| x.issues > 0).count(),
-    ))
 }
 
 #[cfg(test)]
@@ -904,7 +943,10 @@ mod tests {
     /// cheapest-first order regardless of how it was typed.
     #[test]
     fn selection_normalizes_to_cheapest_first() {
-        let all = Args { checks: vec![] };
+        let all = Args {
+            checks: vec![],
+            format: Default::default(),
+        };
         assert_eq!(all.selected(), CheckKind::ALL.to_vec());
 
         let picked = Args {
@@ -914,6 +956,7 @@ mod tests {
                 CheckKind::Totals,
                 CheckKind::EpochLog,
             ],
+            format: Default::default(),
         };
 
         assert_eq!(

@@ -661,18 +661,7 @@ where
 
     let state = open_state_at(config, &state_path, access)?;
 
-    let archive = if !config.keeps_archive() {
-        ArchiveStoreBackend::noop()
-    } else {
-        let path = config.storage.archive_path().unwrap_or_default();
-
-        if matches!(config.storage.archive.kind, StoreType::Fjall { .. }) {
-            fjall_existing(&path.join("index"))?;
-            existing(&config.storage.blocks_path().unwrap_or_else(|| path.clone()))?;
-        }
-
-        open_archive_at(config, &path, access)?
-    };
+    let archive = existing_archive(config, access)?;
 
     Ok(Stores {
         wal,
@@ -680,6 +669,31 @@ where
         archive,
         mempool,
     })
+}
+
+/// The archive alone, opened as [`open_existing_stores`] opens it: never
+/// created, a no-op one when `history.mode` is `none`.
+pub fn open_existing_archive(
+    config: &RootConfig,
+    access: Access,
+) -> Result<ArchiveStoreBackend, OpenError> {
+    existing(&config.storage.path)?;
+    existing_archive(config, access)
+}
+
+fn existing_archive(config: &RootConfig, access: Access) -> Result<ArchiveStoreBackend, OpenError> {
+    if !config.keeps_archive() {
+        return Ok(ArchiveStoreBackend::noop());
+    }
+
+    let path = config.storage.archive_path().unwrap_or_default();
+
+    if matches!(config.storage.archive.kind, StoreType::Fjall { .. }) {
+        fjall_existing(&path.join("index"))?;
+        existing(&config.storage.blocks_path().unwrap_or_else(|| path.clone()))?;
+    }
+
+    Ok(open_archive_at(config, &path, access)?)
 }
 
 /// [`redb_opened`], with an observing open refused for want of a repair,
@@ -1402,7 +1416,7 @@ pub enum ArchiveStoreBackend {
     /// appends and undos are discarded.
     ///
     /// This exists for replays over an archive that already holds the chain
-    /// (`dolos doctor rebuild-state --rewrite-logs`): block appends are not
+    /// (`dolos data rebuild --rewrite-logs`): block appends are not
     /// idempotent — replaying them would double every shared segment file,
     /// whichever backend owns the index — while boundary log keys are
     /// slot-derived and identical under replay, so re-written log rows
@@ -1420,7 +1434,7 @@ pub enum ArchiveStoreBackend {
     /// as in [`Self::NoOp`].
     ///
     /// This exists for replays into a fresh state over an archive that holds
-    /// the chain (`dolos doctor rebuild-state` without `--rewrite-logs`): the
+    /// the chain (`dolos data rebuild` without `--rewrite-logs`): the
     /// roll tells a script's first sighting from a repeat by the entity index
     /// below its batch, which only the source archive holds, while the seal
     /// must not read the logs the source sealed.

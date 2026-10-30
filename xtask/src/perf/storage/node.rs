@@ -17,10 +17,10 @@
 //! HTTP/2 connection each, with the server's counters sampled around every
 //! workload. An archive-only import writes neither the hash index nor the
 //! era summary the block mappers need, so before the server starts the
-//! state is seeded by `doctor rebuild-state --stop-epoch 1`: a replay of
+//! state is seeded by `data rebuild --stop-epoch 1`: a replay of
 //! the first Byron epoch, which is why the immutable directory has to
 //! begin with chunk 00000. The scan is `dolos data
-//! dump-blocks` over the corpus's contiguous tail, the node's own iterator
+//! dump blocks` over the corpus's contiguous tail, the node's own iterator
 //! over every frame, run while the server is down because the store is
 //! exclusively locked.
 
@@ -825,7 +825,7 @@ fn run_reads(
 ) -> io::Result<Value> {
     debug_assert!(
         !params.scan,
-        "the scan runs through dump-blocks, not the server"
+        "the scan runs through data dump blocks, not the server"
     );
     let threads = params.threads.max(1);
     let before = pid_counters(server_pid);
@@ -1054,7 +1054,7 @@ fn read_import_metrics(path: &Path) -> io::Result<Option<Value>> {
 
 impl Instance {
     /// Seed the state store with the era summary the block mappers need:
-    /// `doctor rebuild-state` into the instance's own state path, stopping
+    /// `data rebuild` into the instance's own state path, stopping
     /// at epoch 1, so it replays exactly the first Byron epoch. Unmeasured.
     fn seed_state(&self, bin: &Bin) -> io::Result<()> {
         let state = self.dir.join("data").join("state");
@@ -1062,30 +1062,33 @@ impl Instance {
             std::fs::remove_dir_all(&state)?;
         }
         let mut cmd = self.command(bin);
-        cmd.args(["doctor", "rebuild-state", "--target"])
-            .arg(&state)
-            .args(["--stop-epoch", "1", "--chunk", "500"]);
+        cmd.args(["data", "rebuild", "--target"]).arg(&state).args([
+            "--stop-epoch",
+            "1",
+            "--chunk",
+            "500",
+        ]);
         let mut child = cmd.spawn()?;
         let usage = wait_child(&mut child)?;
         if usage.status != 0 {
             return Err(io::Error::other(format!(
-                "{} rebuild-state exited with {}",
+                "{} data rebuild exited with {}",
                 bin.label, usage.status
             )));
         }
         Ok(())
     }
 
-    /// `dolos data dump-blocks` over the whole corpus, measured: the node's
+    /// `dolos data dump blocks` over the whole corpus, measured: the node's
     /// own iterator over every frame, with its output discarded.
     fn scan(&self, bin: &Bin, keys: &Keys, params: &ReadParams) -> io::Result<Value> {
         let tail = &keys.keys[keys.contiguous_tail()..];
         let first = tail[0].slot;
         let last = tail[tail.len() - 1].slot;
         let mut cmd = self.command(bin);
-        cmd.args(["data", "dump-blocks", "--from"])
+        cmd.args(["data", "dump", "blocks", "--limit", "0", "--from-slot"])
             .arg(first.to_string())
-            .arg("--to")
+            .arg("--to-slot")
             .arg(last.to_string());
         let started = Instant::now();
         let mut child = cmd.spawn()?;
@@ -1093,7 +1096,7 @@ impl Instance {
         let wall = started.elapsed().as_secs_f64();
         if usage.status != 0 {
             return Err(io::Error::other(format!(
-                "{} dump-blocks exited with {}",
+                "{} data dump blocks exited with {}",
                 bin.label, usage.status
             )));
         }

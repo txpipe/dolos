@@ -177,7 +177,7 @@ impl<D: Domain> CacheUse<D> for Assets {
         let start = self.start(domain, key)?.ok_or_else(|| {
             format!(
                 "asset {} has no first mint: it was never minted, or the archive's seals \
-                 predate its asset index (run `dolos doctor rebuild-state --rewrite-logs`)",
+                 predate its asset index (run `dolos data rebuild --rewrite-logs`)",
                 hex::encode(key)
             )
         })?;
@@ -196,7 +196,7 @@ impl<D: Domain> CacheUse<D> for Assets {
     }
 
     /// One at `watermark` that also started at the epoch of the asset's first
-    /// mint, which `dolos doctor rebuild-state --rewrite-logs` may have moved
+    /// mint, which `dolos data rebuild --rewrite-logs` may have moved
     /// since it was built.
     fn is_current(
         &self,
@@ -231,7 +231,7 @@ impl<D: Domain> CacheUse<D> for Assets {
             return Err(format!(
                 "{unindexed} of the {} assets the sealed epochs list have no first mint in the \
                  archive's entity index, which seals before this version did not write; run \
-                 `dolos doctor rebuild-state --rewrite-logs` first",
+                 `dolos data rebuild --rewrite-logs` first",
                 subjects.len()
             )
             .into());

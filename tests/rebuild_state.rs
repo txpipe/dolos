@@ -1,4 +1,4 @@
-//! `dolos doctor rebuild-state`, end to end against real on-disk stores.
+//! `dolos data rebuild`, end to end against real on-disk stores.
 //!
 //! The rebuild-equality claim: a chain built through the import lifecycle,
 //! its state wiped, rebuilt from nothing but the instance's own archive,
@@ -148,7 +148,7 @@ fn rebuild(node: &Node, extra: &[&str]) -> std::process::Output {
     command
         .arg("--config")
         .arg(node.config_path())
-        .args(["doctor", "rebuild-state"])
+        .args(["data", "rebuild"])
         .args(extra);
 
     command.output().unwrap()

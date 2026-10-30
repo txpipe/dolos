@@ -1816,7 +1816,7 @@ fn a_plan_the_stores_have_moved_past_is_refused_before_a_layer() {
     assert_eq!(watcher.layers(), 0, "a refused export announced a layer");
 }
 
-/// An archive that runs past a boundary state, as `doctor rebuild-state
+/// An archive that runs past a boundary state, as `data rebuild
 /// --stop-epoch` over a synced archive leaves one, is refused before a layer:
 /// the blocks after the cursor wrote log and index rows inside the stele's
 /// windows. A plan at the archive's tip is refused for the state it does not

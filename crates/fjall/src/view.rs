@@ -37,6 +37,7 @@ const MIRROR: &str = "db";
 /// is held: no writer compacts away a table under the view. It also holds
 /// its own folder's lock, which tells a later view that it is not stale.
 pub struct View {
+    database: PathBuf,
     dir: PathBuf,
     mirror: PathBuf,
     lock: Option<File>,
@@ -71,6 +72,7 @@ impl View {
 
         // Built before the mirror, so a failure part-way removes the folder.
         let mut view = Self {
+            database,
             mirror: dir.join(MIRROR),
             dir,
             lock: None,
@@ -84,7 +86,7 @@ impl View {
         lock.lock().map_err(|error| view_error(&lock_path, error))?;
         view.lock = Some(lock);
 
-        mirror(&database, &view.mirror, false)?;
+        mirror(&view.database, &view.mirror, false)?;
 
         let lock_path = view.mirror.join(LOCK_FILE);
         File::create(&lock_path).map_err(|error| view_error(&lock_path, error))?;
@@ -95,6 +97,14 @@ impl View {
     /// Where fjall opens the mirror.
     pub fn path(&self) -> &Path {
         &self.mirror
+    }
+
+    /// The database's own path for `path` inside the mirror.
+    pub fn source_of(&self, path: &Path) -> PathBuf {
+        match path.strip_prefix(&self.mirror) {
+            Ok(relative) => self.database.join(relative),
+            Err(_) => path.to_path_buf(),
+        }
     }
 }
 

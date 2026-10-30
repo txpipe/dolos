@@ -1,11 +1,120 @@
-use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
+use comfy_table::Table;
+use dolos::storage::{Access, ArchiveStoreBackend, StateStoreBackend};
 use dolos_core::config::RootConfig;
 use dolos_redb3::TableFootprint;
 use miette::{bail, IntoDiagnostic as _};
-use serde_json::json;
+use serde::Serialize;
+use serde_json::{json, Value};
+
+use crate::output::FormatArgs;
 
 #[derive(Debug, clap::Args)]
-pub struct Args {}
+pub struct Args {
+    #[command(flatten)]
+    format: FormatArgs,
+}
+
+/// Each persistent store's footprint, in the shape its engine reports.
+#[derive(Debug, Serialize)]
+struct Report {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive: Option<Value>,
+}
+
+impl std::fmt::Display for Report {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sections = [("state", &self.state), ("archive", &self.archive)];
+        let mut first = true;
+
+        for (store, section) in sections {
+            let Some(section) = section else {
+                continue;
+            };
+
+            if !std::mem::take(&mut first) {
+                writeln!(f)?;
+            }
+
+            let mut table = Table::new();
+
+            if section["engine"] == "fjall" {
+                let tuning = &section["tuning"];
+
+                writeln!(
+                    f,
+                    "{store}: fjall, preset {}, cache {} MB, journal {} MB, {} workers, flush on commit {}",
+                    cell(&tuning["preset"]),
+                    cell(&tuning["cache_mb"]),
+                    cell(&tuning["journal_mb"]),
+                    cell(&tuning["workers"]),
+                    cell(&tuning["flush_on_commit"]),
+                )?;
+
+                table.set_header([
+                    "keyspace",
+                    "disk bytes",
+                    "memtable MB",
+                    "L0 threshold",
+                    "table MB",
+                    "level ratio",
+                ]);
+
+                for (name, keyspace) in section["keyspaces"].as_object().into_iter().flatten() {
+                    let tuning = &keyspace["tuning"];
+                    let compaction = &tuning["compaction"];
+
+                    table.add_row([
+                        name.clone(),
+                        cell(&keyspace["disk_bytes"]),
+                        cell(&tuning["memtable_mb"]),
+                        cell(&compaction["l0_threshold"]),
+                        cell(&compaction["table_mb"]),
+                        cell(&compaction["level_ratio"]),
+                    ]);
+                }
+            } else {
+                writeln!(f, "{store}: {}", cell(&section["engine"]))?;
+
+                table.set_header([
+                    "table",
+                    "rows",
+                    "bytes per row",
+                    "leaf fill",
+                    "stored bytes",
+                    "fragmented bytes",
+                    "tree height",
+                ]);
+
+                for (name, footprint) in section["tables"].as_object().into_iter().flatten() {
+                    table.add_row([
+                        name.clone(),
+                        cell(&footprint["rows"]),
+                        cell(&footprint["bytes_per_row"]),
+                        cell(&footprint["leaf_fill"]),
+                        cell(&footprint["stored_bytes"]),
+                        cell(&footprint["fragmented_bytes"]),
+                        cell(&footprint["tree_height"]),
+                    ]);
+                }
+            }
+
+            write!(f, "{table}")?;
+        }
+
+        Ok(())
+    }
+}
+
+/// A JSON value as a table cell: strings unquoted, absence as `-`.
+fn cell(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => "-".to_string(),
+        other => other.to_string(),
+    }
+}
 
 fn footprint_to_json(footprint: &TableFootprint) -> serde_json::Value {
     let stats = &footprint.stats;
@@ -23,10 +132,13 @@ fn footprint_to_json(footprint: &TableFootprint) -> serde_json::Value {
     })
 }
 
-pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
-    let stores = crate::common::open_data_stores(config)?;
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    let stores = crate::common::open_existing_stores(config, Access::Observe)?;
 
-    let mut json = serde_json::Map::new();
+    let mut report = Report {
+        state: None,
+        archive: None,
+    };
 
     // Each engine reports the shape it actually has: redb gets per-table
     // B-tree footprints (rows, leaf fill, page counts), fjall gets per-keyspace
@@ -37,23 +149,17 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
         StateStoreBackend::Redb(state) => {
             let stats = state.utxoset_stats().into_diagnostic()?;
 
-            json.insert("state".to_string(), redb_section(stats));
+            report.state = Some(redb_section(stats));
         }
         StateStoreBackend::Fjall(state) => {
-            json.insert(
-                "state".to_string(),
-                fjall_section(state.disk_usage(), &state.tuning()),
-            );
+            report.state = Some(fjall_section(state.disk_usage(), &state.tuning()));
         }
         StateStoreBackend::Memory(_) => (),
     }
 
     match &stores.archive {
         ArchiveStoreBackend::Fjall(archive) => {
-            json.insert(
-                "archive".to_string(),
-                fjall_section(archive.disk_usage(), &archive.tuning()),
-            );
+            report.archive = Some(fjall_section(archive.disk_usage(), &archive.tuning()));
         }
         ArchiveStoreBackend::Memory(_)
         | ArchiveStoreBackend::LogsOnly(_)
@@ -61,13 +167,11 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
         | ArchiveStoreBackend::NoOp(_) => (),
     }
 
-    if json.is_empty() {
+    if report.state.is_none() && report.archive.is_none() {
         bail!("no persistent store backends are configured, nothing to report");
     }
 
-    println!("{}", serde_json::to_string_pretty(&json).unwrap());
-
-    Ok(())
+    crate::output::emit(&report, &args.format)
 }
 
 fn redb_section<'a>(
