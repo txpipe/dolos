@@ -1191,10 +1191,10 @@ fn continue_past_the_source_tip_keeps_the_wal_window() {
 
 /// A stele directory is resolved before `--force` clears anything: one
 /// holding no stele, one inside the storage root or a relative link to it,
-/// and one whose blobs link there, are refused with the node, and the stele,
-/// as they were. One beside the root, named through it, is restored, and
-/// what it holds beside the stele's own files, as a volume's `.Trashes`, is
-/// never read.
+/// one whose blobs link there, and one whose inscription or blob index links
+/// there, are refused with the node, and the stele, as they were. One beside
+/// the root, named through it, is restored, and what it holds beside the
+/// stele's own files, as a volume's `.Trashes`, is never read.
 #[test]
 fn force_refuses_a_stele_it_would_lose_the_node_over() {
     let synced = Node::new();
@@ -1259,6 +1259,32 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
         viewing(&nested, &elsewhere);
         symlink(&elsewhere, nested.join("blobs")).unwrap();
         sources.push((nested, "leads into the storage root"));
+
+        // A stele of its own, blobs and all, but for one file of the root's
+        // stele, linked in its place.
+        fn copy_tree(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap() {
+                let path = entry.unwrap().path();
+                let copy = to.join(path.file_name().unwrap());
+                if path.is_dir() {
+                    copy_tree(&path, &copy);
+                } else {
+                    std::fs::copy(&path, &copy).unwrap();
+                }
+            }
+        }
+
+        for (view, linked) in [
+            ("stele-inscription", dolos_snapshot::dir::INSCRIPTION_FILE),
+            ("stele-blob-index", dolos_snapshot::dir::BLOB_INDEX_FILE),
+        ] {
+            let view = node.root.path().join(view);
+            copy_tree(&stele, &view);
+            std::fs::remove_file(view.join(linked)).unwrap();
+            symlink(stele.join(linked), view.join(linked)).unwrap();
+            sources.push((view, "leads into the storage root"));
+        }
     }
 
     for (source, named) in sources {
