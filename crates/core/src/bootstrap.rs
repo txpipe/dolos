@@ -9,8 +9,8 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::{
-    sync::drain_pending_work, ArchiveStore, ArchiveWriter as _, ChainLogic, ChainPoint, Domain,
-    DomainError, EntityMap, StateStore, StateWriter as _, WalStore,
+    sync::drain_pending_work, ArchiveStore, ArchiveWriter as _, BlockSlot, ChainLogic, ChainPoint,
+    Domain, DomainError, EntityMap, StateStore, StateWriter as _, WalStore,
 };
 
 /// Extension trait for domain bootstrapping operations.
@@ -197,8 +197,9 @@ fn verify_caught_up(
 /// the most advanced store. Every other store reconciles forward to the WAL
 /// tip: state first (covering a crash between `commit_wal` and
 /// `commit_state`), then the archive with its index entries (covering a crash
-/// between the state commit and the archive commit).
-fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
+/// between the state commit and the archive commit). [`recovery_plan`] says
+/// what this would do, without doing it.
+pub fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
     let target = match domain.wal().find_tip()? {
         // nothing to catch up
         None => return Ok(()),
@@ -212,6 +213,141 @@ fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
     catch_up_archive(domain, &target)?;
 
     Ok(())
+}
+
+/// What [`catch_up_stores`] would do to the stores as they stand.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RecoveryPlan {
+    /// The WAL tip, which every store catches up to.
+    pub wal: Option<ChainPoint>,
+    pub state: Option<ChainPoint>,
+    /// The archive tip's slot.
+    pub archive: Option<BlockSlot>,
+    /// Whether every step is [`RecoveryStep::covered`].
+    pub covers_lag: bool,
+    /// The replays, in the order they run; none when every store is at the
+    /// WAL tip.
+    pub steps: Vec<RecoveryStep>,
+}
+
+impl RecoveryPlan {
+    /// Whether the stores are already at the WAL tip.
+    pub fn is_current(&self) -> bool {
+        self.steps.is_empty()
+    }
+}
+
+/// A store's replay of the WAL entries after its own position.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RecoveryStep {
+    pub store: RecoveredStore,
+    /// The slot the store stands at; `None` for a store with nothing applied.
+    pub from: Option<BlockSlot>,
+    pub to: ChainPoint,
+    /// The WAL entries replayed, synthetic ones aside.
+    pub entries: u64,
+    /// Whether the WAL holds every block after `from`: it reaches back to
+    /// `from`, and no `reset_to` past `from` discarded blocks. Catch-up does
+    /// not check this: with real blocks after the gap it replays them and
+    /// reaches the WAL tip, the gap's blocks never applied. When the tip
+    /// itself is a synthetic entry it cannot reach, the state's catch-up
+    /// fails, while the archive's logs it and leaves the archive behind. A
+    /// no-op archive
+    /// (`history.mode = "none"`) has no tip, so it always replays from
+    /// nothing.
+    pub covered: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveredStore {
+    State,
+    Archive,
+}
+
+/// Compute, reading only, what [`catch_up_stores`] would replay into the
+/// state and archive stores, and whether the WAL holds what it needs to.
+pub fn recovery_plan<W, S, A>(wal: &W, state: &S, archive: &A) -> Result<RecoveryPlan, DomainError>
+where
+    W: WalStore,
+    S: StateStore,
+    A: ArchiveStore,
+{
+    let state_cursor = state.read_cursor()?;
+    let archive_tip = archive.get_tip()?.map(|(slot, _)| slot);
+
+    let mut plan = RecoveryPlan {
+        wal: None,
+        state: state_cursor.clone(),
+        archive: archive_tip,
+        covers_lag: true,
+        steps: Vec::new(),
+    };
+
+    let target = match wal.find_tip()? {
+        None => return Ok(plan),
+        Some((point, _)) => point,
+    };
+
+    plan.wal = Some(target.clone());
+
+    if target == ChainPoint::Origin {
+        return Ok(plan);
+    }
+
+    let wal_start = wal.find_start()?.map(|(point, _)| point.slot());
+
+    // As `catch_up_state` reads it: Origin, or no cursor, is nothing applied.
+    let state_slot = match &state_cursor {
+        None | Some(ChainPoint::Origin) => None,
+        Some(point) => Some(point.slot()),
+    };
+
+    let stores = [
+        (RecoveredStore::State, state_slot),
+        (RecoveredStore::Archive, archive_tip),
+    ];
+
+    for (store, from) in stores {
+        if from.is_some_and(|slot| slot >= target.slot()) {
+            continue;
+        }
+
+        // The WAL has to reach back to the store, and hold real blocks all
+        // the way from it: a synthetic entry past the store is a `reset_to`
+        // that discarded the blocks before it.
+        let mut covered = wal_start.is_some_and(|start| start <= from.unwrap_or(0));
+        let mut entries = 0;
+
+        let start = match from {
+            Some(slot) => wal.locate_point(slot)?,
+            None => None,
+        };
+
+        for (point, block) in wal.iter_blocks(start, Some(target.clone()))? {
+            if Some(point.slot()) <= from {
+                continue;
+            }
+
+            if block.is_empty() {
+                covered &= point == ChainPoint::Origin;
+            } else {
+                entries += 1;
+            }
+        }
+
+        plan.covers_lag &= covered;
+
+        plan.steps.push(RecoveryStep {
+            store,
+            from,
+            to: target.clone(),
+            entries,
+            covered,
+        });
+    }
+
+    Ok(plan)
 }
 
 /// Catch up the state store by replaying WAL entries.

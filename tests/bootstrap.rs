@@ -10,8 +10,10 @@ use std::sync::Arc;
 
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
-    sync::SyncExt as _, ArchiveStore as _, BootstrapExt, ChainLogic, ChainPoint, Domain,
-    StateStore, StateWriter, TagDimension, TxoRef, UtxoSetDelta, WalStore, WorkUnit,
+    bootstrap::{catch_up_stores, recovery_plan, RecoveredStore, RecoveryPlan, RecoveryStep},
+    sync::SyncExt as _,
+    ArchiveStore as _, BootstrapExt, ChainLogic, ChainPoint, Domain, StateStore, StateWriter,
+    TagDimension, TxoRef, UtxoSetDelta, WalStore, WorkUnit,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
@@ -561,4 +563,198 @@ fn test_bootstrap_origin_cursor_is_noop() {
 
     // Archive should still be empty — no real blocks were processed.
     assert!(domain.archive().get_tip().unwrap().is_none());
+}
+
+fn plan_for(domain: &ToyDomain) -> RecoveryPlan {
+    recovery_plan(domain.wal(), domain.state(), domain.archive()).unwrap()
+}
+
+fn step(plan: &RecoveryPlan, store: RecoveredStore) -> Option<&RecoveryStep> {
+    plan.steps.iter().find(|step| step.store == store)
+}
+
+/// The WAL ahead of state and archive, holding every entry since: the plan
+/// replays all of them into both, and computing it moves no store.
+#[test]
+fn test_recovery_plan_when_the_wal_covers_the_lag() {
+    let (blocks, _, cardano_config) = build_synthetic_blocks(SyntheticBlockConfig::default());
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    feed_blocks_partial(&domain, &blocks, CrashAfter::Wal);
+
+    let (wal_tip, _) = domain.wal().find_tip().unwrap().unwrap();
+    let state = domain.state().read_cursor().unwrap();
+
+    let plan = plan_for(&domain);
+
+    assert_eq!(plan.wal.as_ref(), Some(&wal_tip));
+    assert_eq!(plan.state, state);
+    assert!(plan.covers_lag, "{plan:?}");
+
+    for store in [RecoveredStore::State, RecoveredStore::Archive] {
+        let step = step(&plan, store).unwrap();
+        assert_eq!(step.entries, blocks.len() as u64, "{store:?}");
+        assert_eq!(step.to, wal_tip);
+        assert!(step.covered);
+    }
+
+    assert_eq!(domain.state().read_cursor().unwrap(), state);
+
+    catch_up_stores(&domain).unwrap();
+
+    assert_eq!(domain.state().read_cursor().unwrap(), Some(wal_tip.clone()));
+    assert!(plan_for(&domain).is_current());
+}
+
+/// A WAL reset to its tip, past the state, holds only the synthetic entry
+/// there: the plan says the lag is not covered, and catch-up, unable to reach
+/// the tip, fails.
+#[test]
+fn test_recovery_plan_when_the_wal_is_short() {
+    let (blocks, _, cardano_config) = build_synthetic_blocks(SyntheticBlockConfig::default());
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    feed_blocks_partial(&domain, &blocks, CrashAfter::Wal);
+
+    let (wal_tip, _) = domain.wal().find_tip().unwrap().unwrap();
+    domain.wal().reset_to(&wal_tip).unwrap();
+
+    let plan = plan_for(&domain);
+
+    assert!(!plan.covers_lag, "{plan:?}");
+
+    let state = step(&plan, RecoveredStore::State).unwrap();
+    assert!(!state.covered);
+    assert_eq!(state.entries, 0);
+
+    assert!(matches!(
+        catch_up_stores(&domain),
+        Err(dolos_core::DomainError::InconsistentState { .. })
+    ));
+}
+
+/// A WAL pruned past the state, with no synthetic entry left: it no longer
+/// reaches back to the state, so the lag is not covered. Catch-up still
+/// replays what remains and reaches the tip, the pruned blocks never applied.
+#[test]
+fn test_recovery_plan_when_the_wal_is_pruned_past_the_state() {
+    let (blocks, _, cardano_config) = build_synthetic_blocks(SyntheticBlockConfig::default());
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    feed_blocks_partial(&domain, &blocks, CrashAfter::Wal);
+
+    let (wal_tip, _) = domain.wal().find_tip().unwrap().unwrap();
+    let (start, _) = domain.wal().find_start().unwrap().unwrap();
+
+    domain.wal().prune_history(0, Some(2)).unwrap();
+
+    let (pruned, _) = domain.wal().find_start().unwrap().unwrap();
+    assert!(pruned.slot() > start.slot(), "nothing was pruned");
+
+    let synthetic = domain
+        .wal()
+        .iter_blocks(None, None)
+        .unwrap()
+        .filter(|(_, block)| block.is_empty())
+        .count();
+    assert_eq!(synthetic, 0);
+
+    let plan = plan_for(&domain);
+    assert!(!plan.covers_lag, "{plan:?}");
+
+    for store in [RecoveredStore::State, RecoveredStore::Archive] {
+        assert!(!step(&plan, store).unwrap().covered, "{store:?}");
+    }
+
+    catch_up_stores(&domain).unwrap();
+    assert_eq!(domain.state().read_cursor().unwrap(), Some(wal_tip));
+}
+
+/// A WAL that still reaches back to the state, but holds a synthetic entry
+/// past it where a block was: the blocks before that entry were discarded, so
+/// the lag is not covered, though catch-up replays the rest to the tip.
+#[test]
+fn test_recovery_plan_when_a_synthetic_entry_is_past_the_state() {
+    let (blocks, _, cardano_config) = build_synthetic_blocks(SyntheticBlockConfig::default());
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    feed_blocks_partial(&domain, &blocks, CrashAfter::Wal);
+
+    let (wal_tip, _) = domain.wal().find_tip().unwrap().unwrap();
+
+    let discarded = domain
+        .wal()
+        .iter_blocks(None, None)
+        .unwrap()
+        .filter(|(_, block)| !block.is_empty())
+        .map(|(point, _)| point)
+        .nth(1)
+        .unwrap();
+    assert_ne!(discarded, wal_tip);
+
+    WalStore::append_entries(
+        domain.wal(),
+        vec![(discarded, dolos_core::LogValue::origin())],
+    )
+    .unwrap();
+
+    let plan = plan_for(&domain);
+    assert!(!plan.covers_lag, "{plan:?}");
+
+    for store in [RecoveredStore::State, RecoveredStore::Archive] {
+        let step = step(&plan, store).unwrap();
+        assert!(!step.covered, "{store:?}");
+        assert_eq!(step.entries, blocks.len() as u64 - 1);
+    }
+
+    catch_up_stores(&domain).unwrap();
+    assert_eq!(domain.state().read_cursor().unwrap(), Some(wal_tip));
+}
+
+/// State at the WAL tip with the archive behind it: only the archive replays.
+#[test]
+fn test_recovery_plan_when_the_archive_is_behind_state() {
+    let (blocks, _, cardano_config) = build_synthetic_blocks(SyntheticBlockConfig::default());
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    let archive = domain.archive().get_tip().unwrap().map(|(slot, _)| slot);
+
+    feed_blocks_partial(&domain, &blocks, CrashAfter::State);
+
+    let (wal_tip, _) = domain.wal().find_tip().unwrap().unwrap();
+    let plan = plan_for(&domain);
+
+    assert!(plan.covers_lag, "{plan:?}");
+    assert_eq!(plan.archive, archive);
+    assert!(step(&plan, RecoveredStore::State).is_none(), "{plan:?}");
+
+    let step = step(&plan, RecoveredStore::Archive).unwrap();
+    assert_eq!(step.from, archive);
+    assert_eq!(step.entries, blocks.len() as u64);
+
+    catch_up_stores(&domain).unwrap();
+
+    assert_eq!(
+        domain.archive().get_tip().unwrap().map(|(slot, _)| slot),
+        Some(wal_tip.slot())
+    );
+}
+
+/// Every store committed: nothing to replay.
+#[test]
+fn test_recovery_plan_of_committed_stores_is_current() {
+    let (blocks, _, cardano_config) = build_synthetic_blocks(SyntheticBlockConfig::default());
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    feed_blocks_partial(&domain, &blocks, CrashAfter::Archive);
+
+    let plan = plan_for(&domain);
+    assert!(plan.is_current(), "{plan:?}");
+    assert!(plan.covers_lag);
 }

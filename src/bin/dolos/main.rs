@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use miette::Result;
 
+use crate::output::ExitCode;
+
 #[cfg(all(feature = "jemalloc", target_os = "linux"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -13,6 +15,7 @@ mod daemon;
 mod doctor;
 mod eval;
 mod feedback;
+mod output;
 mod registry;
 mod serve;
 mod snapshot;
@@ -92,7 +95,18 @@ struct Cli {
     config: Option<std::path::PathBuf>,
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => ExitCode::Ok.into(),
+        Err(report) => {
+            // What returning the error from `main` prints.
+            eprintln!("Error: {report:?}");
+            ExitCode::of(&report).into()
+        }
+    }
+}
+
+fn run() -> Result<()> {
     // reqwest 0.13 (via mithril-client) uses `rustls-no-provider`: it reads the
     // process-default provider and panics if none is installed.
     let _ = rustls::crypto::ring::default_provider().install_default();
