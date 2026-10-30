@@ -1691,7 +1691,7 @@ mod tests {
     fn descriptor(kind: &str, scope: serde_json::Value, byte: u8) -> LayerDescriptor {
         LayerDescriptor {
             kind: kind.to_owned(),
-            media_type: format!("application/vnd.dolos.stele.{kind}.v1+zstd"),
+            media_type: crate::payload_media_type(kind),
             diff_id: Digest::from_bytes([byte; 32]),
             records: 1,
             uncompressed_size: 100,

@@ -18,7 +18,7 @@ transport — and this one for every byte inside it.
 
 - Profile name `io.txpipe.dolos.cardano`, version 1; the media-type vendor
   token is `dolos` (IANA `vnd.` custom).
-- Payload media types: `application/vnd.dolos.stele.{blocks|indexes|log-{ns}|entity-{kind}|state-{ns}|digests}.v1+zstd`.
+- Payload media types: `application/vnd.dolos.stelae.{blocks|indexes|log-{ns}|entity-{kind}|state-{ns}|digests}.v1+zstd`.
 - One repository per network — e.g. `ghcr.io/txpipe/dolos-snapshots/mainnet`.
 - Tags: immutable `epoch-E` per sequence plus a moving `latest`, where E is
   the newly started epoch — equal to `sequence` and to `position.epoch`; the
@@ -38,7 +38,7 @@ Rule 3 answers for a kind the reader does not *know*. It says nothing about a ki
 
 Like `required`, the rule binds forward and not backward: it constrains readers from the version that implements it onward, and cannot reach the ones already deployed. Retiring a namespace is a spec-level act, for the same reason marking one `required` is.
 
-Rule 3's skip is available at layer granularity and at no finer one. Index **dimensions** stay fail-closed: `indexes` is a single layer per epoch, so an unknown dimension surfaces mid-stream — record by record, inside a layer the plan has already committed to restoring — where skipping it would be silent data loss rather than a visible plan-time choice, and where the store cannot look the name up in any case (it keeps a hash of the name, not the name). Changing the dimension set therefore remains a media-type-version event. The same reasoning is why a new *namespace* is additive and a new dimension is not: a namespace arrives as its own `log-{ns}` or `state-{ns}` layer, which a plan can decline; a dimension arrives inside one.
+Rule 3's skip is available at layer granularity and at no finer one. Index **dimensions** stay fail-closed: `indexes` is a single layer per epoch, so an unknown dimension surfaces mid-stream — record by record, inside a layer the plan has already committed to restoring — where skipping it would be silent data loss rather than a visible plan-time choice, and where the store cannot look the name up in any case (it keeps a hash of the name, not the name). From the v2 data-model freeze on, changing the dimension set is therefore a media-type-version event; changes made before it kept `.v1` (decision 0063). The same reasoning is why a new *namespace* is additive and a new dimension is not: a namespace arrives as its own `log-{ns}` or `state-{ns}` layer, which a plan can decline; a dimension arrives inside one.
 
 ### Layer formats
 
@@ -211,19 +211,19 @@ and the meaning of `sequence`:
     {"sequence": 548, "inscriptionDigest": "sha256:…"},
     {"sequence": 549, "inscriptionDigest": "sha256:…"} ],
   "layers": [
-    {"kind": "blocks", "mediaType": "application/vnd.dolos.stele.blocks.v1+zstd",
+    {"kind": "blocks", "mediaType": "application/vnd.dolos.stelae.blocks.v1+zstd",
      "diffId": "sha256:…", "records": 21600, "uncompressedSize": 43210000,
      "scope": {"epoch": 0, "startSlot": 0, "endSlot": 21599}},
-    {"kind": "state-utxos", "mediaType": "application/vnd.dolos.stele.state-utxos.v1+zstd",
+    {"kind": "state-utxos", "mediaType": "application/vnd.dolos.stelae.state-utxos.v1+zstd",
      "diffId": "sha256:…", "records": 812345, "uncompressedSize": 402653184,
      "scope": {"shard": 0}},
-    {"kind": "state-pools", "mediaType": "application/vnd.dolos.stele.state-pools.v1+zstd",
+    {"kind": "state-pools", "mediaType": "application/vnd.dolos.stelae.state-pools.v1+zstd",
      "diffId": "sha256:…", "records": 3210, "uncompressedSize": 1048576,
      "scope": {"shard": 0}},
-    {"kind": "state-pools", "mediaType": "application/vnd.dolos.stele.state-pools.v1+zstd",
+    {"kind": "state-pools", "mediaType": "application/vnd.dolos.stelae.state-pools.v1+zstd",
      "diffId": "sha256:…", "records": 2980, "uncompressedSize": 972800,
      "scope": {"epoch": 365, "shard": 0}},
-    {"kind": "digests", "mediaType": "application/vnd.dolos.stele.digests.v1+zstd",
+    {"kind": "digests", "mediaType": "application/vnd.dolos.stelae.digests.v1+zstd",
      "diffId": "sha256:…", "records": 6188, "uncompressedSize": 618800,
      "scope": {"lastImmutable": 6187}} ] }
 ```
