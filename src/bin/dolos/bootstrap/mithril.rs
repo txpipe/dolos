@@ -117,10 +117,15 @@ pub(crate) fn resolve(
     Ok((source, download_dir))
 }
 
+/// What the download writes in its directory: the `immutable` directory the
+/// replay reads, and the two files mithril-client creates beside it.
+const DOWNLOAD_WRITES: [&str; 3] = ["immutable", "protocolMagicId", "clean"];
+
 /// Refuse a directory to download into that the bootstrap would write under
 /// or, when `clears`, that clearing the storage root takes, with what is
-/// already in its `immutable` directory, the one the download writes and
-/// the replay reads: they read and write through the links there.
+/// already at the names the download writes there ([`DOWNLOAD_WRITES`]):
+/// the replay reads through the links in `immutable`, and the download
+/// creates its two files through a link at their names.
 ///
 /// The directory and the storage root are made before the second look, so
 /// that a second name for one of them, another case on a case-insensitive
@@ -135,7 +140,7 @@ fn check_download_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::
             super::refuse_what_the_clear_takes(
                 config,
                 dir,
-                &[dir.join("immutable")],
+                &DOWNLOAD_WRITES.map(|name| dir.join(name)),
                 "the download directory",
                 "the download",
                 "download outside the storage root, or resume the replay a stop left there with \
@@ -614,12 +619,13 @@ mod tests {
     }
 
     /// Under `--force`, the download directory is read through the links
-    /// already in it, which the download reads and writes through: one whose
-    /// `immutable` directory, or a file in it, links into the storage root is
-    /// refused before the clear, naming the link, and so is one whose
-    /// `immutable` directory links to a directory elsewhere whose files link
-    /// there, with a range and without. Without a clear, it lies beside the
-    /// stores. A link back to the directory it is in is read once.
+    /// already at the names the download writes: one whose `immutable`
+    /// directory, or a file in it, links into the storage root is refused
+    /// before the clear, naming the link, and so is one whose `immutable`
+    /// directory links to a directory elsewhere whose files link there, and
+    /// one whose `protocolMagicId` or `clean` links there, with a range and
+    /// without. Without a clear, it lies beside the stores. A link back to
+    /// the directory it is in is read once.
     #[cfg(unix)]
     #[test]
     fn under_a_clear_the_download_directory_is_read_through_its_links() {
@@ -654,10 +660,22 @@ mod tests {
         )
         .unwrap();
 
+        let beside = |dir: &str, name: &str| {
+            let dir = temp.path().join(dir);
+            immutable_files(&dir.join("immutable"), [0, 1]);
+            symlink(config.storage.path.join("x").join(name), dir.join(name)).unwrap();
+            dir
+        };
+
+        let magic = beside("magic", "protocolMagicId");
+        let marked = beside("marked", "clean");
+
         for (dir, link) in [
             (&linked, linked.join("immutable")),
             (&each, each.join("immutable")),
             (&nested, nested.join("immutable")),
+            (&magic, magic.join("protocolMagicId")),
+            (&marked, marked.join("clean")),
         ] {
             for start in [Some(2), None] {
                 let mut args = downloading(dir);
