@@ -12,7 +12,6 @@ mod dump_blocks;
 mod dump_entity;
 mod dump_logs;
 mod dump_state;
-mod dump_wal;
 mod export;
 mod find_seq;
 mod housekeeping;
@@ -20,7 +19,6 @@ mod import_archive;
 mod prune_chain;
 mod prune_wal;
 mod stats;
-mod summary;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OutputFormat {
@@ -30,12 +28,8 @@ pub enum OutputFormat {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// shows a summary of managed data
-    Summary(summary::Args),
     /// checks the consistency of the managed data
     Check(check::Args),
-    /// dumps data from the WAL
-    DumpWal(dump_wal::Args),
     /// dumps data from the state
     DumpState(dump_state::Args),
     /// dumps an entity from the state
@@ -82,9 +76,7 @@ pub fn run(
     feedback: &super::feedback::Feedback,
 ) -> miette::Result<()> {
     match &args.command {
-        Command::Summary(x) => summary::run(config, x)?,
         Command::Check(x) => check::run(config, x, feedback)?,
-        Command::DumpWal(x) => dump_wal::run(config, x)?,
         Command::DumpState(x) => dump_state::run(config, x)?,
         Command::DumpEntity(x) => dump_entity::run(config, x)?,
         Command::DumpLogs(x) => dump_logs::run(config, x)?,

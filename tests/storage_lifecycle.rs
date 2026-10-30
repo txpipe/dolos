@@ -8,15 +8,11 @@ use std::sync::Arc;
 
 use dolos::adapters::DomainAdapter;
 use dolos::core::{
-    ArchiveStore as _, ChainLogic as _, ChainPoint, Domain as _, Genesis, MempoolStore as _,
-    RawBlock, StateStore as _, SyncExt as _, TxHash, WalStore as _, WorkUnit,
+    ArchiveStore as _, ChainPoint, Domain as _, Genesis, MempoolStore as _, RawBlock,
+    StateStore as _, SyncExt as _, TxHash, WalStore as _,
 };
-use dolos::engine::DomainBuilder;
-use dolos_cardano::CardanoLogic;
 use dolos_testing::mempool::make_test_mempool_tx;
-use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
-use node::{assert_ok, Node};
-use pallas::ledger::traverse::MultiEraBlock;
+use node::{assert_ok, feed_until_crash, fixture, point, start, store_positions, CrashAfter, Node};
 
 const EPHEMERAL_STORES: &str = r#"
 [storage.state]
@@ -37,34 +33,6 @@ persistent = true
 "#;
 
 const PENDING: [u8; 32] = [7; 32];
-
-/// A node over `tables` on the synthetic chain's network, and that chain's
-/// blocks.
-fn fixture(tables: &str) -> (Node, Arc<Genesis>, Vec<RawBlock>) {
-    let mut node = Node::with_tables(tables);
-    let (blocks, _, chain) = build_synthetic_blocks(SyntheticBlockConfig {
-        block_count: 4,
-        slot: 100,
-        ..Default::default()
-    });
-    node.config.chain = node.custom_chain(2, chain.custom_utxos);
-    node.write_chain(&node.config.chain);
-
-    let genesis = Arc::new(dolos_cardano::include::preview::load());
-
-    (node, genesis, blocks)
-}
-
-fn start(node: &Node, genesis: &Arc<Genesis>) -> DomainAdapter {
-    DomainBuilder::new(&node.config, genesis.clone())
-        .build()
-        .unwrap()
-}
-
-fn point(block: &RawBlock) -> ChainPoint {
-    let block = MultiEraBlock::decode(block).unwrap();
-    ChainPoint::Specific(block.slot(), block.hash())
-}
 
 fn cursor(domain: &DomainAdapter) -> Option<ChainPoint> {
     domain.state().read_cursor().unwrap()
@@ -177,64 +145,8 @@ fn ephemeral_stores_start_over() {
     }
 }
 
-/// The store commits a crash lets through after the WAL's.
-#[derive(Clone, Copy, Debug)]
-enum CrashAfter {
-    Wal,
-    State,
-}
-
-/// Feed `blocks` through the work-unit lifecycle, stopping each unit after
-/// the commits `crash` lets through.
-fn feed_until_crash(domain: &DomainAdapter, blocks: &[RawBlock], crash: CrashAfter) {
-    let mut chain = domain.write_chain();
-
-    for block in blocks {
-        if !chain.can_receive_block() {
-            drain_until_crash(&mut chain, domain, crash);
-        }
-        chain.receive_block(block.clone()).unwrap();
-    }
-
-    drain_until_crash(&mut chain, domain, crash);
-}
-
-fn drain_until_crash(chain: &mut CardanoLogic, domain: &DomainAdapter, crash: CrashAfter) {
-    while let Some(mut work) = chain.pop_work::<DomainAdapter>(domain) {
-        WorkUnit::<DomainAdapter>::initialize(&mut work, domain).unwrap();
-
-        let shards = WorkUnit::<DomainAdapter>::start_shard(&work)
-            ..WorkUnit::<DomainAdapter>::total_shards(&work);
-
-        for shard in shards {
-            WorkUnit::<DomainAdapter>::load(&mut work, domain, shard).unwrap();
-            WorkUnit::<DomainAdapter>::compute(&mut work, shard).unwrap();
-            WorkUnit::<DomainAdapter>::commit_wal(&mut work, domain, shard).unwrap();
-
-            if matches!(crash, CrashAfter::State) {
-                WorkUnit::<DomainAdapter>::commit_state(&mut work, domain, shard).unwrap();
-            }
-        }
-    }
-}
-
-/// The WAL tip, state cursor and archive tip, read without recovery.
-fn store_positions(node: &Node) -> (Option<ChainPoint>, Option<ChainPoint>, Option<u64>) {
-    let stores =
-        dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
-
-    let wal = stores.wal.find_tip().unwrap().map(|(point, _)| point);
-    let state = stores.state.read_cursor().unwrap();
-    let archive = stores.archive.get_tip().unwrap().map(|(slot, _)| slot);
-
-    stores.state.shutdown().unwrap();
-    stores.archive.shutdown().unwrap();
-
-    (wal, state, archive)
-}
-
 /// A batch the WAL committed and the other stores did not is recovered by
-/// `doctor check`, a command that does not sync, from the WAL at
+/// `sync recover`, a command that does not sync, from the WAL at
 /// `sync.wal_path`.
 #[test]
 fn a_command_that_does_not_sync_recovers_a_crash_from_the_wal() {
@@ -266,7 +178,7 @@ fn a_command_that_does_not_sync_recovers_a_crash_from_the_wal() {
         assert!(storage.join("journal").exists());
         assert!(!storage.join("wal").exists());
 
-        assert_ok(&node.run(&["doctor", "check"]));
+        assert_ok(&node.run(&["sync", "recover"]));
 
         assert_eq!(
             store_positions(&node),

@@ -1,0 +1,481 @@
+//! The `sync` group's WAL commands over datasets a live sync wrote: in
+//! agreement, left behind the WAL by a crash, beside a WAL that cannot replay
+//! them, and with a WAL whose blocks do not chain.
+
+mod node;
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Output;
+
+use dolos_cardano::CardanoDelta;
+use dolos_core::{ChainPoint, RawBlock, SyncExt as _, WalStore as _};
+use node::{feed_until_crash, fixture, point, start, store_positions, CrashAfter, Node};
+
+/// The four synthetic blocks synced live, the stores in agreement at the last.
+fn synced() -> (Node, Vec<RawBlock>) {
+    let (node, genesis, blocks) = fixture("");
+
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks.clone()).unwrap();
+    domain.shutdown().unwrap();
+
+    (node, blocks)
+}
+
+/// Two blocks synced, then two more the WAL committed and a crash kept from
+/// the stores `crash` names: the state and the archive stand at the second,
+/// or only the archive does.
+fn lagging(crash: CrashAfter) -> (Node, Vec<RawBlock>) {
+    let (node, genesis, blocks) = fixture("");
+
+    let domain = start(&node, &genesis);
+    domain.roll_forward_batch(blocks[..2].to_vec()).unwrap();
+    feed_until_crash(&domain, &blocks[2..], crash);
+    domain.shutdown().unwrap();
+
+    (node, blocks)
+}
+
+/// Reset the WAL to `to`, as a pruned or reseeded WAL leaves it: one entry,
+/// and none of the blocks before it.
+fn reset_wal(node: &Node, to: &ChainPoint) {
+    let wal = dolos::storage::open_wal_store::<CardanoDelta>(&node.config).unwrap();
+    wal.reset_to(to).unwrap();
+    wal.shutdown().unwrap();
+}
+
+/// Replace the block of the WAL entry at `at` with `block`.
+fn rewrite_wal_block(node: &Node, at: &ChainPoint, block: Vec<u8>) {
+    let wal = dolos::storage::open_wal_store::<CardanoDelta>(&node.config).unwrap();
+
+    let mut entry = wal.read_entry(at).unwrap().unwrap();
+    entry.block = block;
+    wal.append_entries(vec![(at.clone(), entry)]).unwrap();
+
+    wal.shutdown().unwrap();
+}
+
+/// Every file under `dir`, with its bytes.
+fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut found = BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                found.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+
+    found
+}
+
+fn assert_unchanged(
+    args: &[&str],
+    before: &BTreeMap<PathBuf, Vec<u8>>,
+    after: &BTreeMap<PathBuf, Vec<u8>>,
+) {
+    assert_eq!(
+        before.keys().collect::<Vec<_>>(),
+        after.keys().collect::<Vec<_>>(),
+        "{args:?} added or removed a file"
+    );
+
+    for (path, bytes) in before {
+        assert!(after[path] == *bytes, "{args:?} changed {}", path.display());
+    }
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// stderr with every run of whitespace one space, so a phrase the diagnostic
+/// renderer wrapped across lines still reads as one.
+fn stderr_words(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr)
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn code(output: &Output) -> Option<i32> {
+    output.status.code()
+}
+
+fn json(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {}{}", stdout(output), stderr_words(output)))
+}
+
+fn hash_of(point: &ChainPoint) -> String {
+    point.hash().unwrap().to_string()
+}
+
+#[test]
+fn a_synced_dataset_is_healthy_and_left_as_it_was() {
+    let (node, blocks) = synced();
+    let tip = point(&blocks[3]);
+    let before = files(&node.config.storage.path);
+
+    let output = node.run(&["sync", "status", "--format", "json"]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+
+    let status = json(&output);
+    assert_eq!(status["wal"]["tip_slot"], tip.slot());
+    assert_eq!(status["state"]["tip_slot"], tip.slot());
+    assert_eq!(status["archive"]["tip_slot"], tip.slot());
+    assert_eq!(status["disagreements"], serde_json::json!([]));
+    assert_eq!(status["integrity"]["complete"], true);
+    assert_eq!(status["integrity"]["blocks"], 4);
+    assert_eq!(status["rollback_window"]["to_slot"], tip.slot());
+    assert_eq!(status["rollback_window"]["blocks"], 4);
+    assert_eq!(status["healthy"], true);
+
+    let text = node.run(&["sync", "status"]);
+    assert_eq!(code(&text), Some(0));
+    assert!(stdout(&text).ends_with("healthy\n"), "{}", stdout(&text));
+
+    for args in [
+        &["sync", "status"][..],
+        &["sync", "dump"],
+        &["sync", "recover", "--dry-run"],
+    ] {
+        let output = node.run(args);
+        assert_eq!(
+            code(&output),
+            Some(0),
+            "{args:?}: {}",
+            stderr_words(&output)
+        );
+        assert_unchanged(args, &before, &files(&node.config.storage.path));
+    }
+}
+
+#[test]
+fn a_wal_whose_blocks_do_not_chain_is_unhealthy() {
+    // One block's bytes swapped for its predecessor's: the scan reads on
+    // past the broken link.
+    let (node, blocks) = synced();
+    rewrite_wal_block(&node, &point(&blocks[1]), blocks[0].to_vec());
+
+    let output = node.run(&["sync", "status", "--format", "json"]);
+    assert_eq!(code(&output), Some(3), "{}", stderr_words(&output));
+
+    let status = json(&output);
+    assert_eq!(status["disagreements"], serde_json::json!([]));
+    assert_eq!(status["integrity"]["complete"], true);
+    assert_eq!(status["integrity"]["failures"][0]["kind"], "discontinuity");
+    assert_eq!(status["healthy"], false);
+    assert!(stderr_words(&output).contains("do not chain"));
+
+    // A block that does not decode, where the scan stops.
+    let (node, blocks) = synced();
+    rewrite_wal_block(&node, &point(&blocks[2]), vec![0x80]);
+
+    let output = node.run(&["sync", "status", "--format", "json"]);
+    assert_eq!(code(&output), Some(3), "{}", stderr_words(&output));
+
+    let status = json(&output);
+    assert_eq!(status["integrity"]["complete"], false);
+    assert_eq!(status["integrity"]["failures"][0]["kind"], "undecodable");
+    assert!(stderr_words(&output).contains("cannot decode"));
+}
+
+#[test]
+fn a_missing_dataset_is_refused_and_left_missing() {
+    let node = Node::new();
+    let data = node.config.storage.path.clone();
+    let tip = ChainPoint::Specific(100, [1; 32].into());
+    let hash = hash_of(&tip);
+
+    for args in [
+        &["sync", "status"][..],
+        &["sync", "dump"],
+        &["sync", "recover"],
+        &["sync", "recover", "--dry-run"],
+        &[
+            "sync", "rollback", "--slot", "100", "--hash", &hash, "--yes",
+        ],
+    ] {
+        let output = node.run(args);
+
+        assert_eq!(
+            code(&output),
+            Some(1),
+            "{args:?}: {}",
+            stderr_words(&output)
+        );
+        assert!(
+            stderr_words(&output).contains("run `dolos bootstrap`"),
+            "{args:?}: {}",
+            stderr_words(&output)
+        );
+        assert!(!data.exists(), "{args:?} created {}", data.display());
+    }
+}
+
+#[test]
+fn a_lag_the_wal_covers_is_replayed() {
+    for crash in [CrashAfter::Wal, CrashAfter::State] {
+        let (node, blocks) = lagging(crash);
+        let tip = point(&blocks[3]);
+
+        let status = node.run(&["sync", "status", "--format", "json"]);
+        assert_eq!(code(&status), Some(3), "{crash:?}");
+        assert!(!json(&status)["disagreements"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        let before = files(&node.config.storage.path);
+        let args = ["sync", "recover", "--dry-run", "--format", "json"];
+        let dry_run = node.run(&args);
+        assert_eq!(code(&dry_run), Some(0), "{}", stderr_words(&dry_run));
+        assert_eq!(json(&dry_run)["action"], "replay", "{crash:?}");
+        assert_unchanged(&args, &before, &files(&node.config.storage.path));
+
+        let output = node.run(&["sync", "recover", "--format", "json"]);
+        assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+        assert_eq!(json(&output)["action"], "replay");
+
+        assert_eq!(
+            store_positions(&node),
+            (Some(tip.clone()), Some(tip.clone()), Some(tip.slot())),
+            "{crash:?}"
+        );
+
+        let status = node.run(&["sync", "status"]);
+        assert_eq!(code(&status), Some(0), "{crash:?}: {}", stdout(&status));
+    }
+}
+
+/// The state and the archive two blocks back, and a WAL reset to the tip, so
+/// it holds none of the blocks between.
+#[test]
+fn a_wal_that_cannot_replay_the_stores_is_discarded_only_when_asked() {
+    let (node, blocks) = lagging(CrashAfter::Wal);
+    let tip = point(&blocks[3]);
+    let state = point(&blocks[1]);
+    reset_wal(&node, &tip);
+
+    let refused = node.run(&["sync", "recover"]);
+    let message = stderr_words(&refused);
+    assert_eq!(code(&refused), Some(2), "{message}");
+    assert!(
+        message.contains(&format!("history starts at slot {}", tip.slot())),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("state at slot {}", state.slot())),
+        "{message}"
+    );
+    assert!(message.contains("--discard-wal"), "{message}");
+    assert_eq!(
+        store_positions(&node),
+        (Some(tip.clone()), Some(state.clone()), Some(state.slot()))
+    );
+
+    let before = files(&node.config.storage.path);
+    let args = [
+        "sync",
+        "recover",
+        "--discard-wal",
+        "--dry-run",
+        "--format",
+        "json",
+    ];
+    let dry_run = node.run(&args);
+    assert_eq!(code(&dry_run), Some(0), "{}", stderr_words(&dry_run));
+    assert_eq!(json(&dry_run)["action"], "discard_wal");
+    assert_unchanged(&args, &before, &files(&node.config.storage.path));
+
+    let discarded = node.run(&["sync", "recover", "--discard-wal"]);
+    assert_eq!(code(&discarded), Some(0), "{}", stderr_words(&discarded));
+    assert!(
+        stderr_words(&discarded).contains("rollback history is lost"),
+        "{}",
+        stderr_words(&discarded)
+    );
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(state.clone()), Some(state.clone()), Some(state.slot()))
+    );
+
+    let status = node.run(&["sync", "status"]);
+    assert_eq!(code(&status), Some(0), "{}", stdout(&status));
+}
+
+/// The state at the tip, the archive two blocks back, and a WAL reset to the
+/// tip: resetting the WAL to the state cannot fill the archive.
+#[test]
+fn an_archive_behind_the_state_is_refused_even_with_the_flag() {
+    let (node, blocks) = lagging(CrashAfter::State);
+    let tip = point(&blocks[3]);
+    let archive = point(&blocks[1]).slot();
+    reset_wal(&node, &tip);
+
+    for args in [
+        &["sync", "recover"][..],
+        &["sync", "recover", "--discard-wal"],
+    ] {
+        let output = node.run(args);
+        let message = stderr_words(&output);
+
+        assert_eq!(code(&output), Some(1), "{args:?}: {message}");
+        assert!(message.contains("is behind the state"), "{message}");
+        assert!(message.contains("dolos data rebuild"), "{message}");
+        assert!(message.contains("dolos bootstrap --force"), "{message}");
+        assert_eq!(
+            store_positions(&node),
+            (Some(tip.clone()), Some(tip.clone()), Some(archive)),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn a_rollback_moves_every_store_to_the_point() {
+    let (node, blocks) = synced();
+    let tip = point(&blocks[3]);
+    let to = point(&blocks[1]);
+    let slot = to.slot().to_string();
+    let hash = hash_of(&to);
+
+    let before = files(&node.config.storage.path);
+    let unconfirmed = ["sync", "rollback", "--slot", &slot, "--hash", &hash];
+    let output = node.run(&unconfirmed);
+    assert_eq!(code(&output), Some(2), "{}", stderr_words(&output));
+    assert!(stderr_words(&output).contains("--yes"));
+    assert_unchanged(&unconfirmed, &before, &files(&node.config.storage.path));
+
+    // The tip's slot under another block's hash: not a point the WAL holds.
+    let elsewhere = hash_of(&point(&blocks[0]));
+    let tip_slot = tip.slot().to_string();
+    let outside = [
+        "sync", "rollback", "--slot", &tip_slot, "--hash", &elsewhere, "--yes",
+    ];
+    let output = node.run(&outside);
+    assert_eq!(code(&output), Some(1), "{}", stderr_words(&output));
+    assert!(stderr_words(&output).contains("is not in the WAL"));
+    assert_eq!(
+        store_positions(&node),
+        (Some(tip.clone()), Some(tip.clone()), Some(tip.slot()))
+    );
+
+    let output = node.run(&[
+        "sync", "rollback", "--slot", &slot, "--hash", &hash, "--yes",
+    ]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(to.clone()), Some(to.clone()), Some(to.slot()))
+    );
+
+    let status = node.run(&["sync", "status"]);
+    assert_eq!(code(&status), Some(0), "{}", stdout(&status));
+}
+
+#[test]
+fn a_rollback_refuses_stores_behind_the_wal() {
+    let (node, blocks) = lagging(CrashAfter::Wal);
+    let to = point(&blocks[1]);
+    let slot = to.slot().to_string();
+    let hash = hash_of(&to);
+
+    let output = node.run(&[
+        "sync", "rollback", "--slot", &slot, "--hash", &hash, "--yes",
+    ]);
+    let message = stderr_words(&output);
+
+    assert_eq!(code(&output), Some(1), "{message}");
+    assert!(message.contains("the stores disagree"), "{message}");
+    assert!(message.contains("dolos sync recover"), "{message}");
+    assert_eq!(
+        store_positions(&node),
+        (Some(point(&blocks[3])), Some(to.clone()), Some(to.slot()))
+    );
+}
+
+#[test]
+fn a_dump_is_bounded_by_its_limit() {
+    let (node, blocks) = synced();
+
+    let output = node.run(&["sync", "dump", "--limit", "2", "--format", "json"]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+
+    let records: Vec<serde_json::Value> = stdout(&output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2, "{}", stdout(&output));
+
+    for record in &records {
+        for field in ["slot", "hash", "block_size", "state_deltas", "inputs"] {
+            assert!(record.get(field).is_some(), "{field}: {record}");
+        }
+    }
+
+    // Origin, then every block.
+    let output = node.run(&["sync", "dump", "--limit", "0", "--format", "json"]);
+    assert_eq!(stdout(&output).lines().count(), blocks.len() + 1);
+
+    let start = point(&blocks[2]).slot().to_string();
+    let output = node.run(&["sync", "dump", "--start", &start, "--format", "json"]);
+    let first: serde_json::Value =
+        serde_json::from_str(stdout(&output).lines().next().unwrap()).unwrap();
+    assert_eq!(first["slot"], point(&blocks[2]).slot());
+    assert_eq!(first["hash"], hash_of(&point(&blocks[2])));
+}
+
+/// The commands under `dolos sync --help`.
+fn listed_commands(help: &str) -> Vec<&str> {
+    help.lines()
+        .skip_while(|line| !line.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect()
+}
+
+#[test]
+fn sync_lists_its_commands_and_runs_none_bare() {
+    let node = Node::new();
+
+    let output = node.run(&["sync", "--help"]);
+    assert_eq!(code(&output), Some(0));
+    assert_eq!(
+        listed_commands(&stdout(&output)),
+        ["catchup", "status", "recover", "dump", "rollback", "help"],
+        "{}",
+        stdout(&output)
+    );
+
+    let output = node.run(&["sync"]);
+    let help = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(code(&output), Some(2), "{help}");
+    assert_eq!(
+        listed_commands(&help),
+        ["catchup", "status", "recover", "dump", "rollback", "help"],
+        "{help}"
+    );
+
+    for removed in [
+        &["sync", "--until-tip"][..],
+        &["sync", "catchup", "--max-blocks", "1"],
+    ] {
+        let output = node.run(removed);
+        assert_eq!(code(&output), Some(2), "{removed:?}");
+    }
+}

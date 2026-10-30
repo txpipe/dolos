@@ -289,25 +289,27 @@ pub fn reset_and_bootstrap(workspace: &ScenarioWorkspace) {
     );
 }
 
+/// The cursors `sync status` reports. A status that ran and found the stores
+/// unhealthy (exit 3) still reports them.
 pub fn fetch_summary(workspace: &ScenarioWorkspace) -> dolos::cli::DataSummary {
     let mut cmd = prepare_scenario_process(workspace);
 
     let data = cmd
-        .args(["data", "summary"])
+        .args(["sync", "status", "--format", "json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to get data summary");
+        .expect("failed to get sync status");
 
     assert!(
-        data.status.success(),
-        "data summary failed for scenario {}: {}",
+        matches!(data.status.code(), Some(0 | 3)),
+        "sync status failed for scenario {}: {}",
         workspace.name(),
         String::from_utf8_lossy(&data.stderr)
     );
 
     serde_json::from_slice::<dolos::cli::DataSummary>(&data.stdout)
-        .expect("failed to parse data summary")
+        .expect("failed to parse sync status")
 }
 
 pub struct ProcessGuard(Option<Child>);

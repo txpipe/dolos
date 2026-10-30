@@ -1,0 +1,485 @@
+use std::fmt;
+
+use dolos::storage::Access;
+use dolos_core::{
+    bootstrap::{catch_up_stores, recovery_plan, RecoveredStore, RecoveryPlan},
+    config::RootConfig,
+    seed_wal_from_state, BlockSlot,
+};
+use miette::{Context, IntoDiagnostic};
+use serde::Serialize;
+
+use dolos::prelude::*;
+
+use super::{applied, relative_to_wal, Positions};
+use crate::output::{emit, FormatArgs, Usage};
+
+#[derive(Debug, clap::Args)]
+pub struct Args {
+    /// When the WAL cannot bring the stores to its tip, reset it to the state
+    /// cursor instead, losing its rollback history
+    #[arg(long)]
+    discard_wal: bool,
+
+    /// Print what recovery would do, and change nothing
+    #[arg(long)]
+    dry_run: bool,
+
+    #[command(flatten)]
+    format: FormatArgs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Action {
+    /// Nothing in the WAL to replay.
+    None,
+    /// Replay the WAL into the stores behind its tip.
+    Replay,
+    /// Reset the WAL to the state cursor.
+    DiscardWal,
+    /// Refused until `--discard-wal` allows resetting the WAL.
+    NeedsDiscard,
+    /// Refused, `--discard-wal` or not.
+    Refuse,
+}
+
+/// What `sync recover` does to the stores as they stand, and why.
+#[derive(Debug, Serialize)]
+struct Recovery {
+    #[serde(flatten)]
+    plan: RecoveryPlan,
+    action: Action,
+    /// What the WAL lacks to bring the stores to its tip.
+    gap: Option<String>,
+    /// Why recovery refuses even with `--discard-wal`.
+    refusal: Option<String>,
+    /// What still disagrees once the action is done.
+    remains: Vec<String>,
+}
+
+impl Recovery {
+    /// Plan the recovery of the stores at `positions`, as `plan` replays
+    /// them; `discard_wal` allows resetting the WAL.
+    fn decide(mut plan: RecoveryPlan, positions: &Positions, discard_wal: bool) -> Self {
+        // A no-op archive always shows an archive step, uncovered: there is
+        // nothing to replay into.
+        if !positions.archive_kept {
+            plan.steps
+                .retain(|step| step.store != RecoveredStore::Archive);
+            plan.covers_lag = plan.steps.iter().all(|step| step.covered);
+        }
+
+        let gap = gap(&plan, positions);
+
+        let (action, refusal) = match &gap {
+            None if plan.steps.is_empty() => (Action::None, None),
+            None => (Action::Replay, None),
+            Some(_) => match discard_refusal(positions) {
+                Some(refusal) => (Action::Refuse, Some(refusal)),
+                None if discard_wal => (Action::DiscardWal, None),
+                None => (Action::NeedsDiscard, None),
+            },
+        };
+
+        // Replaying or reseeding brings the state to the WAL tip; an archive
+        // ahead of it stays where it is.
+        let remains = match action {
+            Action::None | Action::Replay | Action::DiscardWal => {
+                let target = match action {
+                    Action::DiscardWal => positions.state(),
+                    _ => positions.wal(),
+                };
+
+                match positions.archive {
+                    Some(archive) if positions.archive_kept && Some(archive) > target => {
+                        vec![relative_to_wal("archive", Some(archive), target)]
+                    }
+                    _ => vec![],
+                }
+            }
+            Action::NeedsDiscard | Action::Refuse => positions.disagreements(),
+        };
+
+        Self {
+            plan,
+            action,
+            gap,
+            refusal,
+            remains,
+        }
+    }
+}
+
+/// What the WAL lacks to bring the stores to its tip: the blocks between a
+/// store and a WAL that starts past it, or every block a state ahead of the
+/// WAL applied.
+fn gap(plan: &RecoveryPlan, positions: &Positions) -> Option<String> {
+    if positions.state() > positions.wal() {
+        return Some(format!(
+            "{}, so it lacks the blocks the state applied",
+            relative_to_wal("state", positions.state(), positions.wal())
+        ));
+    }
+
+    let missing: Vec<_> = plan
+        .steps
+        .iter()
+        .filter(|step| !step.covered)
+        .map(|step| {
+            let store = match step.store {
+                RecoveredStore::State => "state",
+                RecoveredStore::Archive => "archive",
+            };
+
+            let at = match step.from {
+                Some(slot) => format!("at slot {slot}"),
+                None => "empty".to_string(),
+            };
+
+            match positions.wal_history {
+                Some(start) => format!(
+                    "the WAL's history starts at slot {start}, past the {store} {at}, so it lacks the blocks in between"
+                ),
+                None => format!("the WAL lacks blocks past the {store} {at}"),
+            }
+        })
+        .collect();
+
+    (!missing.is_empty()).then(|| missing.join("; "))
+}
+
+/// Why resetting the WAL to the state cursor would not leave a dataset a node
+/// can sync on from; none when it would.
+fn discard_refusal(positions: &Positions) -> Option<String> {
+    let Some(cursor) = &positions.state else {
+        return Some("the state has no cursor to reset the WAL to".into());
+    };
+
+    if !cursor.is_fully_defined() {
+        return Some(format!(
+            "the state cursor at slot {} has no block hash to reset the WAL to",
+            cursor.slot()
+        ));
+    }
+
+    if positions.archive_kept && positions.archive < positions.state() {
+        let archive = match positions.archive {
+            Some(slot) => format!("at slot {slot}"),
+            None => "empty".to_string(),
+        };
+
+        return Some(format!(
+            "the archive, {archive}, is behind the state at slot {}, and the WAL cannot fill it",
+            cursor.slot()
+        ));
+    }
+
+    None
+}
+
+const REFUSED_HELP: &str = "rebuild the state from the archive with `dolos data rebuild`, or replace the dataset with `dolos bootstrap --force`";
+
+const DISCARD_HELP: &str =
+    "pass `--discard-wal` to reset the WAL to the state cursor, losing its rollback history";
+
+fn slot(slot: Option<BlockSlot>) -> String {
+    slot.map_or("empty".to_string(), |slot| format!("slot {slot}"))
+}
+
+impl fmt::Display for Recovery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "wal        {}", slot(applied(self.plan.wal.as_ref())))?;
+        writeln!(f, "state      {}", slot(applied(self.plan.state.as_ref())))?;
+        writeln!(f, "archive    {}", slot(self.plan.archive))?;
+
+        for step in &self.plan.steps {
+            let store = match step.store {
+                RecoveredStore::State => "state",
+                RecoveredStore::Archive => "archive",
+            };
+
+            writeln!(
+                f,
+                "replay     {} block(s) into the {store}, from {} to slot {}{}",
+                step.entries,
+                slot(step.from),
+                step.to.slot(),
+                if step.covered { "" } else { ", with a gap" },
+            )?;
+        }
+
+        if let Some(gap) = &self.gap {
+            writeln!(f, "gap        {gap}")?;
+        }
+
+        for remaining in &self.remains {
+            writeln!(f, "remains    {remaining}")?;
+        }
+
+        match self.action {
+            Action::None => write!(f, "action     none: nothing in the WAL to replay"),
+            Action::Replay => write!(
+                f,
+                "action     replay the WAL into the stores behind its tip"
+            ),
+            Action::DiscardWal => write!(
+                f,
+                "action     reset the WAL to the state cursor at {}, losing its rollback history",
+                slot(applied(self.plan.state.as_ref()))
+            ),
+            Action::NeedsDiscard => write!(f, "action     refused: {DISCARD_HELP}"),
+            Action::Refuse => write!(
+                f,
+                "action     refused: {}",
+                self.refusal.as_deref().unwrap_or_default()
+            ),
+        }
+    }
+}
+
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    crate::common::setup_tracing_warnings()?;
+
+    let access = if args.dry_run {
+        Access::Observe
+    } else {
+        Access::Mutate
+    };
+
+    let stores = crate::common::open_existing_stores(config, access)?;
+    let positions = Positions::read(config, &stores)?;
+
+    let plan = recovery_plan(&stores.wal, &stores.state, &stores.archive)
+        .into_diagnostic()
+        .context("planning the recovery")?;
+
+    let recovery = Recovery::decide(plan, &positions, args.discard_wal);
+
+    emit(&recovery, &args.format)?;
+
+    if args.dry_run {
+        return Ok(());
+    }
+
+    match recovery.action {
+        Action::None => {}
+        Action::Replay => {
+            let domain = crate::common::assemble_domain(config, &stores)?;
+
+            catch_up_stores(&domain)
+                .into_diagnostic()
+                .context("replaying the WAL")?;
+
+            domain
+                .shutdown()
+                .into_diagnostic()
+                .context("closing the stores")?;
+        }
+        Action::DiscardWal => {
+            let seeded = seed_wal_from_state(&stores.state, &stores.wal).into_diagnostic()?;
+
+            stores.wal.shutdown().into_diagnostic()?;
+
+            if let WalSeed::Seeded(point) = seeded {
+                eprintln!(
+                    "warning: the WAL now starts at the state cursor, {point}: its rollback history is lost"
+                );
+            }
+        }
+        Action::NeedsDiscard => {
+            let gap = recovery.gap.unwrap_or_default();
+
+            return Err(Usage::new(
+                format!("the WAL cannot bring the stores to its tip: {gap}"),
+                DISCARD_HELP,
+            )
+            .into());
+        }
+        Action::Refuse => {
+            let refusal = recovery.refusal.unwrap_or_default();
+
+            return Err(miette::miette!(help = REFUSED_HELP, "{refusal}"));
+        }
+    }
+
+    for remaining in &recovery.remains {
+        eprintln!("warning: {remaining}, which recovery does not change");
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_core::{bootstrap::RecoveryStep, ChainPoint};
+
+    use super::*;
+
+    fn point(slot: BlockSlot) -> ChainPoint {
+        ChainPoint::Specific(slot, [slot as u8 + 1; 32].into())
+    }
+
+    /// Stores with the WAL from `start` to `tip`, the state at `state` and
+    /// the archive, kept, at `archive`.
+    fn positions(
+        start: BlockSlot,
+        tip: BlockSlot,
+        state: BlockSlot,
+        archive: Option<BlockSlot>,
+    ) -> Positions {
+        Positions {
+            wal_start: Some(point(start)),
+            wal_tip: Some(point(tip)),
+            wal_history: Some(start),
+            state: Some(point(state)),
+            archive,
+            archive_kept: true,
+        }
+    }
+
+    /// The plan `recovery_plan` makes for `positions`.
+    fn plan(positions: &Positions) -> RecoveryPlan {
+        let tip = positions.wal_tip.clone().unwrap();
+        let start = positions.wal_start.as_ref().unwrap().slot();
+
+        let stores = [
+            (RecoveredStore::State, positions.state()),
+            (RecoveredStore::Archive, positions.archive),
+        ];
+
+        let steps: Vec<_> = stores
+            .into_iter()
+            .filter(|(_, from)| *from < Some(tip.slot()))
+            .map(|(store, from)| RecoveryStep {
+                store,
+                from,
+                to: tip.clone(),
+                entries: tip.slot() - from.unwrap_or(start),
+                covered: start <= from.unwrap_or(0),
+            })
+            .collect();
+
+        RecoveryPlan {
+            wal: Some(tip),
+            state: positions.state.clone(),
+            archive: positions.archive,
+            covers_lag: steps.iter().all(|step| step.covered),
+            steps,
+        }
+    }
+
+    fn decide(positions: &Positions, discard_wal: bool) -> Recovery {
+        Recovery::decide(plan(positions), positions, discard_wal)
+    }
+
+    #[test]
+    fn stores_at_the_wal_tip_need_nothing() {
+        let at_tip = positions(100, 200, 200, Some(200));
+
+        let recovery = decide(&at_tip, false);
+        assert_eq!(recovery.action, Action::None);
+        assert!(recovery.remains.is_empty());
+    }
+
+    #[test]
+    fn a_lag_the_wal_covers_is_replayed() {
+        let lagging = positions(100, 200, 150, Some(120));
+
+        let recovery = decide(&lagging, false);
+        assert_eq!(recovery.action, Action::Replay);
+        assert_eq!(recovery.gap, None);
+        assert_eq!(recovery.plan.steps.len(), 2);
+    }
+
+    #[test]
+    fn a_wal_that_starts_past_the_state_needs_discarding() {
+        let short = positions(180, 200, 150, Some(150));
+
+        let recovery = decide(&short, false);
+        assert_eq!(recovery.action, Action::NeedsDiscard);
+        let gap = recovery.gap.unwrap();
+        assert!(gap.contains("history starts at slot 180"), "{gap}");
+        assert!(gap.contains("state at slot 150"), "{gap}");
+
+        assert_eq!(decide(&short, true).action, Action::DiscardWal);
+    }
+
+    #[test]
+    fn a_state_ahead_of_the_wal_needs_discarding() {
+        let ahead = positions(100, 200, 250, Some(250));
+
+        let recovery = decide(&ahead, false);
+        assert_eq!(recovery.action, Action::NeedsDiscard);
+        assert!(recovery.gap.unwrap().contains("ahead of the WAL tip"));
+
+        let empty = Positions {
+            wal_start: None,
+            wal_tip: None,
+            wal_history: None,
+            ..ahead.clone()
+        };
+        let recovery = Recovery::decide(
+            RecoveryPlan {
+                wal: None,
+                state: empty.state.clone(),
+                archive: empty.archive,
+                covers_lag: true,
+                steps: vec![],
+            },
+            &empty,
+            true,
+        );
+        assert_eq!(recovery.action, Action::DiscardWal);
+    }
+
+    #[test]
+    fn an_archive_behind_the_state_is_refused_with_the_flag() {
+        let short = positions(180, 200, 200, Some(150));
+
+        for discard_wal in [false, true] {
+            let recovery = decide(&short, discard_wal);
+            assert_eq!(recovery.action, Action::Refuse);
+            assert!(recovery.refusal.unwrap().contains("archive, at slot 150"));
+        }
+    }
+
+    #[test]
+    fn an_archive_ahead_of_the_state_allows_discarding() {
+        let short = positions(180, 200, 150, Some(190));
+
+        let recovery = decide(&short, true);
+        assert_eq!(recovery.action, Action::DiscardWal);
+        assert_eq!(recovery.remains.len(), 1, "{:?}", recovery.remains);
+    }
+
+    #[test]
+    fn a_no_op_archive_is_left_out() {
+        let mut lagging = positions(100, 200, 150, None);
+        lagging.archive_kept = false;
+
+        let mut plan = plan(&lagging);
+        plan.steps.push(RecoveryStep {
+            store: RecoveredStore::Archive,
+            from: None,
+            to: point(200),
+            entries: 100,
+            covered: false,
+        });
+
+        let recovery = Recovery::decide(plan, &lagging, false);
+        assert_eq!(recovery.action, Action::Replay);
+        assert!(recovery.plan.covers_lag);
+        assert_eq!(recovery.plan.steps.len(), 1);
+    }
+
+    #[test]
+    fn a_state_cursor_without_a_hash_cannot_be_reset_to() {
+        let mut short = positions(180, 200, 150, Some(150));
+        short.state = Some(ChainPoint::Slot(150));
+
+        let recovery = decide(&short, true);
+        assert_eq!(recovery.action, Action::Refuse);
+        assert!(recovery.refusal.unwrap().contains("no block hash"));
+    }
+}

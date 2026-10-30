@@ -61,7 +61,7 @@ fn daemon_syncs(workspace: &ScenarioWorkspace) {
     );
 }
 
-/// `dolos sync --stop-epoch 1` from genesis ends once the ledger enters
+/// `dolos sync catchup --stop-epoch 1` from genesis ends once the ledger enters
 /// epoch 1, so the state tip is past the first epoch boundary. Chain-sync
 /// asks for one header at a time, so the run takes minutes over a remote
 /// relay.
@@ -71,7 +71,7 @@ fn sync_passes_the_first_epoch_boundary(workspace: &ScenarioWorkspace) {
     let mut cmd = prepare_scenario_process(workspace);
 
     let handle = cmd
-        .args(["sync", "--stop-epoch", "1"])
+        .args(["sync", "catchup", "--stop-epoch", "1"])
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()

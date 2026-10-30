@@ -578,7 +578,7 @@ impl miette::Diagnostic for OpenError {
                 "dataset in use by another dolos process (stop it, or query its APIs)",
             )),
             Self::Unclean { .. } => Some(Box::new(
-                "a reading command cannot open it until a writing one repairs it: start `dolos sync` or `dolos daemon` once",
+                "a reading command cannot open it until a writing one repairs it: run `dolos sync recover` once",
             )),
             Self::Unviewable { .. } => Some(Box::new(
                 "a reading command mirrors a store in the folder beside it, linking its tables: it needs write access there, on a filesystem with hard or symbolic links",

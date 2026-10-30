@@ -58,8 +58,8 @@ impl<D: Domain> BootstrapExt for D {
 ///
 /// WAL at or ahead of state is normal — `catch_up_stores` replays WAL entries
 /// to bring every other store (state included) up to the WAL tip. State ahead
-/// of WAL is an error that requires explicit repair via `dolos doctor
-/// reset-wal`.
+/// of WAL is an error that requires explicit repair via `dolos sync recover
+/// --discard-wal`.
 fn check_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError> {
     let wal = domain.wal().find_tip()?.map(|(point, _)| point);
     let state = domain.state().read_cursor()?;
