@@ -55,7 +55,8 @@ use dolos_snapshot::{
     is_state_kind,
     restore::{self, default_budget, progress_path_in, Budget, Checkpoint},
     state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL,
-    ENTITY_INDEX_KINDS, ENTITY_KINDS, KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
+    ENTITY_INDEX_KINDS, ENTITY_KINDS, KINDS, LOG_NAMESPACES, MEDIA_TYPE_CODEC, MEDIA_TYPE_VENDOR,
+    MEDIA_TYPE_VERSION, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::{
     faults::{FaultyStateStore, TestFault},
@@ -68,6 +69,7 @@ use stelae::{
     frame::{encode, Limits},
     inscription::{Inscription, LayerDescriptor},
     plan::RestoreProgress,
+    profile::MediaType,
     progress::{Event, Observer, Outcome, Progress},
     transport::BlobIndex,
     Digest, LayerReader, Profile, SteleReader, SteleWriter,
@@ -264,7 +266,13 @@ impl Profile for AheadProfile {
 
     fn layer_media_type(&self, kind: &str) -> Result<String, stelae::Error> {
         match kind {
-            AHEAD_KIND => Ok(format!("application/vnd.dolos.stele.{AHEAD_KIND}.v1+zstd")),
+            AHEAD_KIND => Ok(MediaType {
+                vendor: MEDIA_TYPE_VENDOR.to_owned(),
+                kind: AHEAD_KIND.to_owned(),
+                version: MEDIA_TYPE_VERSION,
+                codec: MEDIA_TYPE_CODEC.to_owned(),
+            }
+            .to_string()),
             known => DolosProfile.layer_media_type(known),
         }
     }
