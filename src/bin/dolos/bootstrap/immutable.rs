@@ -237,6 +237,7 @@ pub(super) fn check_database(
         super::refuse_what_the_clear_takes(
             config,
             &path,
+            std::slice::from_ref(&path),
             "the ImmutableDB",
             "the replay",
             "move the database out of the storage root, or resume the replay a stop left over \
@@ -411,6 +412,7 @@ fn chunks(path: &Path) -> Vec<String> {
 }
 
 /// The number of the last chunk file at `path`, the one pallas doesn't read.
+#[cfg(feature = "mithril")]
 pub(super) fn last_chunk(path: &Path) -> Option<u64> {
     chunk_files(path).last()?.parse().ok()
 }

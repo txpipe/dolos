@@ -127,9 +127,10 @@ pub struct Args {
     #[arg(long, global = true)]
     force: bool,
 
-    /// Exit 0 without bootstrapping when storage already holds a node; data
-    /// without one, as an interrupted bootstrap leaves, and a store this
-    /// release refuses are errors instead
+    /// Exit 0 without bootstrapping when storage already holds a node, as an
+    /// interrupted replay leaves one for `--continue` to resume; data without
+    /// one, as an interrupted Stelae restore leaves, and a store this release
+    /// refuses are errors instead
     #[arg(long, global = true)]
     skip_if_data: bool,
 
@@ -245,16 +246,23 @@ fn dispatch(
 }
 
 /// What clearing the storage root, as `--force` does before a run, would
-/// take of the source at `dir`: `dir` itself, when it lies there or the way
-/// to it passes a directory or link there, or else the first directory or
-/// link under it, through the links under it, that the clear takes. Each
-/// directory is read once, whatever names it.
+/// take of the source at `dir`, of which the run reads `reads`: `dir`
+/// itself, when it lies there or the way to it passes a directory or link
+/// there, or else the first of `reads`, or of the directories and links
+/// under them, through the links under them, that the clear takes. Each
+/// directory is read once, whatever names it, and nothing else in `dir` is
+/// read.
 ///
 /// A directory that can't be searched, as a non-root user's `lost+found`, or
-/// one gone by the time it is read, holds nothing the run reads through. One
-/// that can be searched but not listed is refused: the OS reaches what it
-/// holds by name, and what that is can't be told.
-pub(super) fn the_clear_takes(config: &RootConfig, dir: &Path) -> miette::Result<Option<PathBuf>> {
+/// one gone by the time it is read, holds nothing the run reads through, and
+/// nor does a link whose way passes one. One that can be searched but not
+/// listed is refused: the OS reaches what it holds by name, and what that is
+/// can't be told.
+pub(super) fn the_clear_takes(
+    config: &RootConfig,
+    dir: &Path,
+    reads: &[PathBuf],
+) -> miette::Result<Option<PathBuf>> {
     use std::io::ErrorKind;
 
     let root = &config.storage.path;
@@ -269,18 +277,44 @@ pub(super) fn the_clear_takes(config: &RootConfig, dir: &Path) -> miette::Result
             .into_diagnostic()
             .with_context(|| reading(path))
     };
+    let directory = |path: &Path| match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.is_dir()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error).into_diagnostic().with_context(|| reading(path)),
+    };
 
     if takes(dir)? {
         return Ok(Some(dir.to_path_buf()));
     }
 
-    let mut read = std::collections::HashSet::new();
-    let mut pending = vec![dir.to_path_buf()];
+    let mut pending = Vec::new();
+
+    for path in reads {
+        if takes(path)? {
+            return Ok(Some(path.clone()));
+        }
+
+        if directory(path)? {
+            pending.push(path.clone());
+        }
+    }
+
+    let mut listed = std::collections::HashSet::new();
 
     while let Some(next) = pending.pop() {
         match identity(&next) {
-            Ok(id) if !read.insert(id) => continue,
-            Ok(_) => {}
+            Ok(id) => {
+                if !listed.insert(id) {
+                    continue;
+                }
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => return Err(error).into_diagnostic().with_context(|| reading(&next)),
         }
@@ -288,18 +322,20 @@ pub(super) fn the_clear_takes(config: &RootConfig, dir: &Path) -> miette::Result
         let entries = match std::fs::read_dir(&next) {
             Ok(entries) => entries,
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) if error.kind() == ErrorKind::PermissionDenied && !searched(&next) => {
-                continue
-            }
-            Err(error) => {
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                if !searched(&next) {
+                    continue;
+                }
+
                 return Err(error).into_diagnostic().with_context(|| {
                     format!(
-                        "reading {}, which can be searched but not listed, so what it holds \
-                         can't be told",
+                        "reading {}, which can be searched but not listed, so what is reached \
+                         through it can't be told: make it readable to run with --force",
                         next.display()
                     )
-                })
+                });
             }
+            Err(error) => return Err(error).into_diagnostic().with_context(|| reading(&next)),
         };
 
         for entry in entries {
@@ -314,19 +350,15 @@ pub(super) fn the_clear_takes(config: &RootConfig, dir: &Path) -> miette::Result
                 continue;
             }
 
-            if takes(&path)? {
-                return Ok(Some(path));
+            match clear.takes(&path) {
+                Ok(true) => return Ok(Some(path)),
+                Ok(false) => {}
+                Err(error) if error.kind() == ErrorKind::PermissionDenied => continue,
+                Err(error) => return Err(error).into_diagnostic().with_context(|| reading(&path)),
             }
 
-            match std::fs::metadata(&path) {
-                Ok(meta) if meta.is_dir() => pending.push(path),
-                Ok(_) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        ErrorKind::NotFound | ErrorKind::PermissionDenied
-                    ) => {}
-                Err(error) => return Err(error).into_diagnostic().with_context(|| reading(&path)),
+            if directory(&path)? {
+                pending.push(path);
             }
         }
     }
@@ -358,17 +390,19 @@ fn searched(dir: &Path) -> bool {
 }
 
 /// Refuse `what`, the source at `dir`, when the clear `--force` runs before
-/// `before` would take it, or a directory or link under it, naming `remedy`.
+/// `before` would take it, or what the run reads of it, `reads`, naming
+/// `remedy`.
 pub(super) fn refuse_what_the_clear_takes(
     config: &RootConfig,
     dir: &Path,
+    reads: &[PathBuf],
     what: &str,
     before: &str,
     remedy: &str,
 ) -> miette::Result<()> {
     let root = config.storage.path.display();
 
-    let taken = the_clear_takes(config, dir).with_context(|| {
+    let taken = the_clear_takes(config, dir, reads).with_context(|| {
         format!(
             "checking {what} at {} against the storage root {root}, which `--force` clears \
              before {before}",
@@ -385,7 +419,8 @@ pub(super) fn refuse_what_the_clear_takes(
         ),
         Some(entry) => {
             let kind = match std::fs::symlink_metadata(&entry) {
-                Ok(meta) if !meta.is_symlink() => "directory",
+                Ok(meta) if meta.is_dir() => "directory",
+                Ok(meta) if meta.is_file() => "file",
                 _ => "link",
             };
 

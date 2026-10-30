@@ -119,7 +119,8 @@ pub(crate) fn resolve(
 
 /// Refuse a directory to download into that the bootstrap would write under
 /// or, when `clears`, that clearing the storage root takes, with what is
-/// already in it: the download reads and writes through the links there.
+/// already in its `immutable` directory, the one the download writes and
+/// the replay reads: they read and write through the links there.
 ///
 /// The directory and the storage root are made before the second look, so
 /// that a second name for one of them, another case on a case-insensitive
@@ -134,6 +135,7 @@ fn check_download_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::
             super::refuse_what_the_clear_takes(
                 config,
                 dir,
+                &[dir.join("immutable")],
                 "the download directory",
                 "the download",
                 "download outside the storage root, or resume the replay a stop left there with \
@@ -617,7 +619,7 @@ mod tests {
     /// refused before the clear, naming the link, and so is one whose
     /// `immutable` directory links to a directory elsewhere whose files link
     /// there, with a range and without. Without a clear, it lies beside the
-    /// stores.
+    /// stores. A link back to the directory it is in is read once.
     #[cfg(unix)]
     #[test]
     fn under_a_clear_the_download_directory_is_read_through_its_links() {
@@ -671,12 +673,26 @@ mod tests {
                 assert!(resolve(&config, &args, None, false).is_ok(), "{start:?}");
             }
         }
+
+        let looped = temp.path().join("looped");
+        immutable_files(&looped.join("immutable"), [0, 1]);
+        symlink(
+            looped.join("immutable"),
+            looped.join("immutable").join("loop"),
+        )
+        .unwrap();
+        resolve(&config, &downloading(&looped), None, true).unwrap();
     }
 
-    /// Under `--force`, a directory in the download directory that can't be
-    /// searched, as a non-root user's `lost+found`, holds nothing the run
-    /// reads, and is passed over. One that can be searched but not listed
-    /// is refused, since what is reached through it can't be told.
+    /// Under `--force`, only the download directory's `immutable` directory
+    /// is read, the one the download writes and the replay reads: what lies
+    /// beside it, as a volume's `lost+found` or `.Trashes`, is never read,
+    /// whatever links it holds. In it, a directory that can't be searched
+    /// holds nothing the run reads, and nor does a link through one, so both
+    /// are passed over. One that can be searched but not listed is refused,
+    /// since what is reached through it can't be told, and so is a download
+    /// directory that can't be listed whose `immutable` directory links into
+    /// the root. Any other error reading the source is named as it is.
     #[cfg(unix)]
     #[test]
     fn under_a_clear_a_directory_that_cant_be_listed_is_refused_unless_it_cant_be_searched() {
@@ -688,45 +704,111 @@ mod tests {
         immutable_files(&kept, [0, 1]);
 
         let volume = temp.path().join("volume");
+        std::fs::create_dir_all(volume.join("immutable")).unwrap();
         let lost = volume.join("lost+found");
         std::fs::create_dir_all(&lost).unwrap();
+        let trashes = volume.join(".Trashes");
+        std::fs::create_dir_all(&trashes).unwrap();
+        symlink(&kept, trashes.join("kept")).unwrap();
+
+        let unsearched = temp.path().join("unsearched");
+        let locked = unsearched.join("immutable").join("lost+found");
+        std::fs::create_dir_all(&locked).unwrap();
+
+        let through = temp.path().join("through");
+        std::fs::create_dir_all(through.join("immutable")).unwrap();
+        let sealed = temp.path().join("outside").join("sealed");
+        let tree = temp.path().join("outside").join("tree");
+        std::fs::create_dir_all(&sealed).unwrap();
+        std::fs::create_dir_all(&tree).unwrap();
+        symlink(sealed.join("kept"), tree.join("kept")).unwrap();
+        symlink(&tree, through.join("immutable").join("extra")).unwrap();
 
         let searched = temp.path().join("searched");
         std::fs::create_dir_all(&searched).unwrap();
         symlink(&kept, searched.join("immutable")).unwrap();
 
+        let unlisted = temp.path().join("unlisted").join("immutable");
+        std::fs::create_dir_all(&unlisted).unwrap();
+        symlink(kept.join("00000.chunk"), unlisted.join("00000.chunk")).unwrap();
+
         let mode = |dir: &Path, mode| {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap()
         };
 
-        mode(&lost, 0o000);
-        mode(&searched, 0o311);
+        let modes = [
+            (&lost, 0o000),
+            (&trashes, 0o1311),
+            (&locked, 0o000),
+            (&sealed, 0o000),
+            (&searched, 0o311),
+            (&unlisted, 0o311),
+        ];
 
-        // Permissions don't bind a superuser, who lists both anyway.
+        for (dir, bits) in modes {
+            mode(dir, bits);
+        }
+
+        // Permissions don't bind a superuser, who lists them all anyway.
         let bound = std::fs::read_dir(&lost).is_err();
 
-        let passed = resolve(&config, &downloading(&volume), None, true).map(drop);
-        let refused = resolve(&config, &downloading(&searched), None, true).map(drop);
+        let passed = [&volume, &unsearched, &through]
+            .map(|dir| resolve(&config, &downloading(dir), None, true).map(drop));
+        let linked = resolve(&config, &downloading(&searched), None, true).map(drop);
+        let refused = resolve(
+            &config,
+            &downloading(unlisted.parent().unwrap()),
+            None,
+            true,
+        )
+        .map(drop);
 
-        mode(&lost, 0o755);
-        mode(&searched, 0o755);
+        for (dir, _) in modes {
+            mode(dir, 0o755);
+        }
+
+        let said = |result: miette::Result<()>| {
+            result
+                .unwrap_err()
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": ")
+        };
+
+        let message = said(linked);
+        assert!(
+            message.contains("which `--force` clears")
+                && message.contains(&format!(
+                    "the link {}",
+                    searched.join("immutable").display()
+                )),
+            "{message}"
+        );
+
+        let file = temp.path().join("snapfile");
+        std::fs::write(&file, []).unwrap();
+        let message = said(resolve(&config, &downloading(&file), None, true).map(drop));
+        assert!(
+            message.contains(&format!("reading {}", file.join("immutable").display()))
+                && !message.contains("can be searched"),
+            "{message}"
+        );
 
         if !bound {
             return;
         }
 
-        passed.unwrap();
+        for result in passed {
+            result.unwrap();
+        }
 
-        let message = refused
-            .unwrap_err()
-            .chain()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(": ");
+        let message = said(refused);
         assert!(
             message.contains("which `--force` clears")
                 && message.contains("can be searched but not listed")
-                && message.contains(&searched.display().to_string()),
+                && message.contains(&unlisted.display().to_string())
+                && message.contains("make it readable"),
             "{message}"
         );
     }
@@ -812,6 +894,10 @@ mod tests {
             std::fs::remove_file(immutable.join(format!("00002.{extension}"))).unwrap();
         }
         assert!(refused(&ending(None, 1)).contains("immutable file 2 in"));
+
+        write();
+        cut(3);
+        assert!(refused(&ending(None, 1)).contains("immutable file 3 in"));
     }
 
     /// Write immutable files `numbers`, each holding no blocks.

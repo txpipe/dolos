@@ -143,8 +143,9 @@ pub(super) fn resolve(
 }
 
 /// The stele directory `dir`, once it is known to hold a stele and, when
-/// `clears`, to lie out of the reach of the clear. The restore reads it by
-/// the path checked, with any `..` in it resolved.
+/// `clears`, to lie out of the reach of the clear with the stele's own
+/// files, the ones the restore reads. The restore reads it by the path
+/// checked, with any `..` in it resolved.
 fn check_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::Result<PathBuf> {
     let dir = dolos::storage::resolve_parent_dirs(dir)
         .into_diagnostic()
@@ -155,9 +156,12 @@ fn check_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::Result<Pa
         .with_context(|| format!("{} holds no stele", dir.display()))?;
 
     if clears {
+        use dolos_snapshot::dir::{BLOBS_DIR, BLOB_INDEX_FILE, INSCRIPTION_FILE};
+
         super::refuse_what_the_clear_takes(
             config,
             &dir,
+            &[INSCRIPTION_FILE, BLOB_INDEX_FILE, BLOBS_DIR].map(|name| dir.join(name)),
             "the stele",
             "the restore",
             "move the stele out of the storage root",

@@ -529,8 +529,10 @@ pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
 /// flag saying what to do about it — so neither is a question asked of an
 /// operator whose answer is then thrown away. Any managed store holding data
 /// is existing data, a state without a cursor included: an interrupted
-/// bootstrap leaves one. `--skip-if-data` skips only a node, and refuses data
-/// without one, which a daemon would sync from the origin on top of.
+/// Stelae restore leaves one. `--skip-if-data` skips only a node, an
+/// interrupted replay's included, and refuses data without one, which a
+/// daemon would sync from the origin on top of; the refusal with no flag
+/// offers it only over a node.
 ///
 /// A store this release refuses to open is data in the way that only `--force`
 /// on its own clears; every other flag, `--continue` included, gets its
@@ -581,13 +583,20 @@ pub fn inspect_existing_data(
 
     if policy.skip_if_data {
         return Err(Error::message(format!(
-            "{detected}, but no node: there is no state cursor, as an interrupted bootstrap \
-             leaves none, and `--skip-if-data` leaves only a node. Use --force to replace it"
+            "{detected}, but no node: there is no state cursor, as an interrupted Stelae \
+             restore leaves none, and `--skip-if-data` leaves only a node. Use --force to \
+             replace it"
         )));
     }
 
     if policy.force {
         return clear(config, &detected, found);
+    }
+
+    if !found.node {
+        return Err(Error::message(format!(
+            "{detected}. Use --force to replace it"
+        )));
     }
 
     Err(Error::message(format!(
@@ -2609,7 +2618,8 @@ mod tests {
     /// holds, and the other flags decide about any store holding data: only
     /// empty storage, or an empty WAL file, proceeds under every one. A node
     /// is a state with a cursor, and only a node is skipped: data without
-    /// one is refused under `--skip-if-data`, naming `--force`.
+    /// one is refused under `--skip-if-data`, naming `--force`, and the
+    /// refusal with no flag offers `--skip-if-data` only over a node.
     #[test]
     fn inspecting_storage_follows_the_flags_over_stores_this_release_opens() {
         /// What a case writes, whether storage then holds data, and whether
@@ -2665,7 +2675,7 @@ mod tests {
                     let message = inspected.unwrap_err().to_string();
                     assert!(message.contains("existing data detected"), "{message}");
                     assert!(message.contains("--force"), "{message}");
-                    assert!(message.contains("--skip-if-data"), "{message}");
+                    assert_eq!(message.contains("--skip-if-data"), node, "{message}");
                 }
             }
 

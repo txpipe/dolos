@@ -425,8 +425,8 @@ fn every_source_refuses_existing_data_unless_told() {
 }
 
 /// Data without a node, a state holding rows but no cursor as an
-/// interrupted bootstrap leaves it, is no node to skip: every source refuses
-/// it under `--skip-if-data`, naming `--force`, and replaces it under
+/// interrupted Stelae restore leaves it, is no node to skip: every source
+/// refuses it under `--skip-if-data`, naming `--force`, and replaces it under
 /// `--force`.
 #[test]
 fn skip_if_data_refuses_data_without_a_node() {
@@ -712,7 +712,10 @@ fn force_refuses_a_source_it_would_lose_the_node_over() {
 
     #[allow(unused_mut)]
     let mut sources = vec![
-        (inside.clone(), "which `--force` clears"),
+        (
+            inside.clone(),
+            "which `--force` clears before the replay: move the database out of the storage root",
+        ),
         (missing.path().to_path_buf(), "no `immutable` directory"),
         (empty.path().to_path_buf(), "holds no blocks"),
         (
@@ -1182,7 +1185,9 @@ fn continue_past_the_source_tip_keeps_the_wal_window() {
 /// A stele directory is resolved before `--force` clears anything: one
 /// holding no stele, one inside the storage root or a relative link to it,
 /// and one whose blobs link there, are refused with the node, and the stele,
-/// as they were. One beside the root, named through it, is restored.
+/// as they were. One beside the root, named through it, is restored, and
+/// what it holds beside the stele's own files, as a volume's `.Trashes`, is
+/// never read.
 #[test]
 fn force_refuses_a_stele_it_would_lose_the_node_over() {
     let synced = Node::new();
@@ -1201,7 +1206,10 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
     #[allow(unused_mut)]
     let mut sources = vec![
         (node.root.path().join("no-such-stele"), "holds no stele"),
-        (stele.clone(), "which `--force` clears"),
+        (
+            stele.clone(),
+            "which `--force` clears before the restore: move the stele out of the storage root",
+        ),
     ];
 
     #[cfg(unix)]
@@ -1274,13 +1282,33 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
     synced.write_stele(&beside);
     let through = node.config.storage.path.join("..").join("stele-beside");
 
-    assert_ok(&node.run(&[
+    #[cfg(unix)]
+    let trashes = {
+        use std::os::unix::fs::PermissionsExt;
+
+        let trashes = beside.join(".Trashes");
+        std::fs::create_dir_all(&trashes).unwrap();
+        std::os::unix::fs::symlink(&stele, trashes.join("stele")).unwrap();
+        std::fs::set_permissions(&trashes, std::fs::Permissions::from_mode(0o1311)).unwrap();
+        trashes
+    };
+
+    let restored = node.run(&[
         "bootstrap",
         "--force",
         "stelae",
         "--source",
         &format!("file://{}", through.display()),
-    ]));
+    ]);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(&trashes, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    assert_ok(&restored);
     assert_eq!(contents(&node).cursor, contents(&synced).cursor);
 }
 
