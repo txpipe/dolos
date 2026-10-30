@@ -431,10 +431,10 @@ fn every_source_refuses_existing_data_unless_told() {
     }
 }
 
-/// Data without a node, a state holding rows but no cursor as an
-/// interrupted Stelae restore leaves it, is no node to skip: every source
-/// refuses it under `--skip-if-data`, naming `--force`, and replaces it under
-/// `--force`.
+/// Data without a node, a state holding rows but no cursor as a bootstrap
+/// interrupted before it commits one leaves it, is no node to skip: every
+/// source refuses it under `--skip-if-data`, naming `--force`, and replaces it
+/// under `--force`.
 #[test]
 fn skip_if_data_refuses_data_without_a_node() {
     use dolos_core::{

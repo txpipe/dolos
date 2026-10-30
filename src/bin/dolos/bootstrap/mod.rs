@@ -128,9 +128,9 @@ pub struct Args {
     force: bool,
 
     /// Exit 0 without bootstrapping when storage already holds a node, as an
-    /// interrupted replay leaves one for `--continue` to resume; data without
-    /// one, as an interrupted Stelae restore leaves, and a store this release
-    /// refuses are errors instead
+    /// interrupted replay that has committed leaves one for `--continue` to
+    /// resume; data without one, as a bootstrap interrupted before it commits
+    /// a cursor leaves, and a store this release refuses are errors instead
     #[arg(long, global = true)]
     skip_if_data: bool,
 

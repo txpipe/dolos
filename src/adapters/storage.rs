@@ -528,11 +528,13 @@ pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
 /// The refusals happen here — a skip, and the refusal for existing data with no
 /// flag saying what to do about it — so neither is a question asked of an
 /// operator whose answer is then thrown away. Any managed store holding data
-/// is existing data, a state without a cursor included: an interrupted
-/// Stelae restore leaves one. `--skip-if-data` skips only a node, an
-/// interrupted replay's included, and refuses data without one, which a
-/// daemon would sync from the origin on top of; the refusal with no flag
-/// offers it only over a node.
+/// is existing data, a state without a cursor included: a bootstrap
+/// interrupted before it commits a cursor leaves one, a Stelae restore,
+/// which commits it last, or a replay stopped before its first commit.
+/// `--skip-if-data` skips only a node, that of a replay interrupted after it
+/// committed included, and refuses data without one, which a daemon would
+/// sync from the origin on top of; the refusal with no flag offers it only
+/// over a node.
 ///
 /// A store this release refuses to open is data in the way that only `--force`
 /// on its own clears; every other flag, `--continue` included, gets its
@@ -583,9 +585,9 @@ pub fn inspect_existing_data(
 
     if policy.skip_if_data {
         return Err(Error::message(format!(
-            "{detected}, but no node: there is no state cursor, as an interrupted Stelae \
-             restore leaves none, and `--skip-if-data` leaves only a node. Use --force to \
-             replace it"
+            "{detected}, but no node: there is no state cursor, as a bootstrap interrupted \
+             before it commits one leaves none, and `--skip-if-data` leaves only a node. Use \
+             --force to replace it"
         )));
     }
 
