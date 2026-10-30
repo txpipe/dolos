@@ -2,9 +2,10 @@
 //! instance. systemd on Linux, the user's launchd agents on macOS.
 //!
 //! `install` reads the configuration it installs; `uninstall` reads one only
-//! to derive a name it is not given.
+//! to derive a name it is not given. Both read the file alone, as the service
+//! does: the shell's `DOLOS_` overrides do not reach it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use dolos::service::{self, Name, ServiceBackend, ServiceError};
@@ -117,8 +118,8 @@ fn refused(error: ServiceError) -> miette::Report {
 
 /// This command line under `sudo`, naming the binary by its path.
 fn as_root() -> String {
-    let binary = std::env::current_exe()
-        .map(|path| path.into_os_string())
+    let binary = binary()
+        .map(PathBuf::into_os_string)
         .unwrap_or_else(|_| "dolos".into());
 
     let words: Vec<String> = std::iter::once(binary)
@@ -129,18 +130,46 @@ fn as_root() -> String {
     format!("sudo {}", words.join(" "))
 }
 
+/// The configuration as the service reads it: the file alone.
+fn load(config_file: &Path) -> miette::Result<RootConfig> {
+    let ignored = dolos_core::config::override_variables().unwrap_or_default();
+
+    if !ignored.is_empty() {
+        eprintln!(
+            "warning: the service reads {} alone; ignoring {} from this shell",
+            config_file.display(),
+            ignored.join(", ")
+        );
+    }
+
+    crate::common::load_file_config(config_file)
+        .map_err(miette::Report::from_err)
+        .context("loading configuration")
+}
+
+/// The running binary, by the path it was run as.
+fn binary() -> miette::Result<PathBuf> {
+    let exe = std::env::current_exe().into_diagnostic()?;
+    let cwd = std::env::current_dir().into_diagnostic()?;
+    let invoked = std::env::args_os().next();
+    let path = std::env::var_os("PATH");
+
+    service::locate_binary(invoked.as_deref(), path.as_deref(), &cwd, &exe)
+        .into_diagnostic()
+        .context("locating the dolos binary")
+}
+
 fn install(config_file: &Path, args: &InstallArgs) -> miette::Result<()> {
     let backend = backend(args.system)?;
-    let config = crate::common::load_and_check_config(config_file)?;
+    let config = load(config_file)?;
+    crate::common::check_network(&config).context("loading configuration")?;
 
     let name = match &args.name {
         Some(name) => name.clone(),
         None => derived(&config)?,
     };
 
-    let binary = std::env::current_exe()
-        .into_diagnostic()
-        .context("locating the dolos binary")?;
+    let binary = binary()?;
 
     let request = service::Install {
         name,
@@ -164,13 +193,7 @@ fn uninstall(config_file: &Path, args: &UninstallArgs) -> miette::Result<()> {
 
     let name = match &args.name {
         Some(name) => name.clone(),
-        None => {
-            let config = crate::common::load_config(Some(config_file))
-                .map_err(miette::Report::from_err)
-                .context("loading configuration")?;
-
-            derived(&config)?
-        }
+        None => derived(&load(config_file)?)?,
     };
 
     let uninstalled = service::uninstall(backend.as_ref(), &name).map_err(refused)?;

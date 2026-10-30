@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     shell_quote, text, Autostart, CommandRunner, Commands, Failure, Manager, Name, Recorded,
-    RegisterError, Scope, ServiceBackend, ServiceError, Unit,
+    RegisterError, Scope, ServiceBackend, ServiceError, Unit, MARKER,
 };
 
 pub struct Launchd<R> {
@@ -104,7 +104,7 @@ impl<R: CommandRunner> ServiceBackend for Launchd<R> {
         Ok(format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Written by `dolos service install`. To change it, uninstall and install again. -->
+<!-- {MARKER} To change it, uninstall and install again. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
@@ -159,6 +159,12 @@ impl<R: CommandRunner> ServiceBackend for Launchd<R> {
         Ok(())
     }
 
+    fn active(&self, name: &Name) -> bool {
+        self.runner
+            .run("launchctl", &["print", &self.target(name)])
+            .is_ok()
+    }
+
     fn register(&self, name: &Name, start: bool) -> Result<(), RegisterError> {
         if !start {
             return Ok(());
@@ -175,11 +181,9 @@ impl<R: CommandRunner> ServiceBackend for Launchd<R> {
     }
 
     fn unregister(&self, name: &Name) -> Result<(), Failure> {
-        let target = self.target(name);
-
         // Only a loaded agent can be booted out.
-        if self.runner.run("launchctl", &["print", &target]).is_ok() {
-            self.launchctl(&["bootout", &target])?;
+        if self.active(name) {
+            self.launchctl(&["bootout", &self.target(name)])?;
         }
 
         Ok(())
@@ -211,8 +215,14 @@ impl<R: CommandRunner> ServiceBackend for Launchd<R> {
         }
     }
 
-    fn notes(&self) -> Vec<String> {
-        vec!["`stop` unloads it until it is started again or you log in again".into()]
+    fn notes(&self, name: &Name) -> Vec<String> {
+        vec![
+            "`stop` unloads it until it is started again or you log in again".into(),
+            format!(
+                "its log, {}, is never rotated, and uninstalling keeps it",
+                self.log(name).display()
+            ),
+        ]
     }
 }
 

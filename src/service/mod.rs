@@ -5,7 +5,12 @@
 //! The service manager owns background execution and restarts; nothing here
 //! supervises. A [`ServiceBackend`] keeps a manager's files under a directory
 //! it is given and runs the manager's commands through a [`CommandRunner`], so
-//! tests install over fixture directories and register nothing.
+//! tests install over fixture directories and register nothing. An install or
+//! uninstall holds an exclusive lock on that directory throughout, so that two
+//! installs cannot both pass the conflict check.
+//!
+//! Configurations are read from their files alone: a service starts without
+//! the installing shell's `DOLOS_` variables.
 
 mod conflicts;
 mod launchd;
@@ -15,11 +20,13 @@ pub use launchd::Launchd;
 pub use systemd::Systemd;
 
 use std::borrow::Cow;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+use dolos_cardano::networks::ResolvedNetwork;
 use dolos_core::config::{Protocol, RootConfig, DEFAULT_CONFIG_FILE};
 use serde::Serialize;
 
@@ -47,13 +54,19 @@ impl Name {
     }
 
     /// `{chain.protocol}-{chain.network}`: the name an instance gets when
-    /// none is given.
+    /// none is given. A known network is named as the catalog spells it,
+    /// since it loads in any case.
     pub fn derive(config: &RootConfig) -> Result<Self, ServiceError> {
         let protocol = match config.chain.protocol {
             Protocol::Cardano => "cardano",
         };
 
-        Self::parse(&format!("{protocol}-{}", config.chain.network))
+        let network = match ResolvedNetwork::resolve(&config.chain) {
+            Ok(ResolvedNetwork::Known(network)) => network.name,
+            _ => &config.chain.network,
+        };
+
+        Self::parse(&format!("{protocol}-{network}"))
     }
 
     pub fn as_str(&self) -> &str {
@@ -136,6 +149,10 @@ impl Unit {
         ])
     }
 }
+
+/// The line every service file Dolos writes carries, and that it removes
+/// only files carrying.
+const MARKER: &str = "Written by `dolos service install`.";
 
 /// `path` as text a service file can hold.
 fn text(path: &Path) -> Result<&str, ServiceError> {
@@ -303,6 +320,9 @@ pub trait ServiceBackend {
     /// Refuses when this process may not change the scope.
     fn check_access(&self) -> Result<(), ServiceError>;
 
+    /// Whether the manager runs `name`'s service, or keeps it loaded.
+    fn active(&self, name: &Name) -> bool;
+
     /// Registers the service in `name`'s written file to start on its own,
     /// and starts it now when `start`. On failure, it undoes what it
     /// registered; the file is removed next, then [`Self::forget`] runs when
@@ -320,7 +340,7 @@ pub trait ServiceBackend {
     fn commands(&self, name: &Name) -> Commands;
 
     /// What the operator should know beyond the commands.
-    fn notes(&self) -> Vec<String>;
+    fn notes(&self, name: &Name) -> Vec<String>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -339,6 +359,16 @@ pub enum ServiceError {
 
     #[error("{identity} is not installed: there is no {}", file.display())]
     NotInstalled { identity: String, file: PathBuf },
+
+    #[error("{} was not written by `dolos service install`, so it is left as it is", file.display())]
+    Foreign { identity: String, file: PathBuf },
+
+    #[error("{identity} has no file at {}, but the service manager still has it; stop it with `{stop}`", file.display())]
+    Orphaned {
+        identity: String,
+        file: PathBuf,
+        stop: String,
+    },
 
     #[error("this configuration conflicts with {identity} ({}): {reason}", file.display())]
     Conflict {
@@ -492,27 +522,59 @@ pub fn install(
 ) -> Result<Installed, ServiceError> {
     backend.check_access()?;
 
-    let name = &request.name;
-    let identity = backend.identity(name);
-    let file = backend.file(name);
-
-    if fs::symlink_metadata(&file).is_ok() {
-        return Err(ServiceError::AlreadyInstalled { identity, file });
-    }
-
+    // The file exists, since it was just read; its canonical path has no
+    // `.`, `..` or symlink, which systemd refuses or the daemon resolves
+    // differently.
     let config_file =
-        std::path::absolute(&request.config_file).map_err(io_error(&request.config_file))?;
+        fs::canonicalize(&request.config_file).map_err(io_error(&request.config_file))?;
     let working_dir = config_file
         .parent()
         .map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
 
     let unit = Unit {
-        name: name.clone(),
+        name: request.name.clone(),
         binary: request.binary.clone(),
         config: config_file,
         working_dir,
     };
     let contents = backend.render(&unit)?;
+
+    let created = create_dirs(backend.dir())?;
+    let installed = lock(backend.dir())
+        .and_then(|_lock| write_and_register(backend, request, &unit, &contents));
+
+    if installed.is_err() {
+        remove_dirs(&created);
+    }
+
+    installed
+}
+
+fn write_and_register(
+    backend: &dyn ServiceBackend,
+    request: &Install<'_>,
+    unit: &Unit,
+    contents: &str,
+) -> Result<Installed, ServiceError> {
+    let name = &request.name;
+    let identity = backend.identity(name);
+    let file = backend.file(name);
+
+    if fs::symlink_metadata(&file).is_ok() {
+        return Err(if ours(&file) {
+            ServiceError::AlreadyInstalled { identity, file }
+        } else {
+            ServiceError::Foreign { identity, file }
+        });
+    }
+
+    if backend.active(name) {
+        return Err(ServiceError::Orphaned {
+            identity,
+            file,
+            stop: backend.commands(name).stop,
+        });
+    }
 
     let ours = Resources::of(request.config, &unit.working_dir);
     let mut warnings = Vec::new();
@@ -526,7 +588,7 @@ pub fn install(
                     .ok_or_else(|| "it does not say which configuration it runs".to_string())
             })
             .and_then(|recorded| {
-                dolos_core::config::load(Some(&recorded.config))
+                dolos_core::config::load_file(Some(&recorded.config))
                     .map(|config| Resources::of(&config, &recorded.working_dir))
                     .map_err(|error| error.to_string())
             });
@@ -548,11 +610,7 @@ pub fn install(
         }
     }
 
-    let created = create_dirs(backend.dir())?;
-
-    if let Err(error) = write_new(&file, &contents) {
-        remove_dirs(&created);
-
+    if let Err(error) = write_new(&file, contents) {
         return Err(match error.kind() {
             io::ErrorKind::AlreadyExists => ServiceError::AlreadyInstalled { identity, file },
             _ => io_error(&file)(error),
@@ -565,8 +623,6 @@ pub fn install(
                 .cleanup
                 .push(format!("could not remove {}: {removing}", file.display()));
         }
-
-        remove_dirs(&created);
 
         if error.loaded {
             if let Err(failure) = backend.forget() {
@@ -588,19 +644,20 @@ pub fn install(
         scope: backend.scope(),
         file,
         storage: unit.working_dir.join(&request.config.storage.path),
-        binary: unit.binary,
-        config: unit.config,
-        working_directory: unit.working_dir,
+        binary: unit.binary.clone(),
+        config: unit.config.clone(),
+        working_directory: unit.working_dir.clone(),
         starts_at: backend.autostart(),
         started: request.start,
         commands: backend.commands(name),
-        notes: backend.notes(),
+        notes: backend.notes(name),
         warnings,
     })
 }
 
 /// Stops and unregisters `name`'s service and removes its file. The
-/// configuration and data it ran with stay as they are.
+/// configuration and data it ran with stay as they are, and so does a file of
+/// the same name that Dolos did not write.
 pub fn uninstall(backend: &dyn ServiceBackend, name: &Name) -> Result<Uninstalled, ServiceError> {
     backend.check_access()?;
 
@@ -608,7 +665,21 @@ pub fn uninstall(backend: &dyn ServiceBackend, name: &Name) -> Result<Uninstalle
     let file = backend.file(name);
 
     if fs::symlink_metadata(&file).is_err() {
-        return Err(ServiceError::NotInstalled { identity, file });
+        return Err(if backend.active(name) {
+            ServiceError::Orphaned {
+                identity,
+                file,
+                stop: backend.commands(name).stop,
+            }
+        } else {
+            ServiceError::NotInstalled { identity, file }
+        });
+    }
+
+    let _lock = lock(backend.dir())?;
+
+    if !ours(&file) {
+        return Err(ServiceError::Foreign { identity, file });
     }
 
     let recorded = fs::read_to_string(&file)
@@ -670,8 +741,23 @@ fn installed(backend: &dyn ServiceBackend) -> Result<Vec<(String, PathBuf)>, Ser
     Ok(found)
 }
 
+/// Whether `file` is a service file Dolos wrote: a regular file carrying
+/// [`MARKER`], unlike a mask or a hand-written unit of the same name.
+fn ours(file: &Path) -> bool {
+    fs::symlink_metadata(file).is_ok_and(|metadata| metadata.is_file())
+        && fs::read_to_string(file).is_ok_and(|contents| contents.contains(MARKER))
+}
+
+/// Holds an exclusive lock on `dir` until the returned handle is dropped.
+fn lock(dir: &Path) -> Result<fs::File, ServiceError> {
+    let handle = fs::File::open(dir).map_err(io_error(dir))?;
+    handle.lock().map_err(io_error(dir))?;
+
+    Ok(handle)
+}
+
 /// Creates `dir` and its missing ancestors, returning those it created,
-/// outermost first.
+/// outermost first. None is writable by group or others, whatever the umask.
 fn create_dirs(dir: &Path) -> Result<Vec<PathBuf>, ServiceError> {
     let missing: Vec<PathBuf> = dir
         .ancestors()
@@ -679,7 +765,13 @@ fn create_dirs(dir: &Path) -> Result<Vec<PathBuf>, ServiceError> {
         .map(Path::to_path_buf)
         .collect();
 
-    fs::create_dir_all(dir).map_err(io_error(dir))?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o755);
+
+    builder.create(dir).map_err(io_error(dir))?;
 
     Ok(missing.into_iter().rev().collect())
 }
@@ -692,13 +784,18 @@ fn remove_dirs(created: &[PathBuf]) {
     }
 }
 
+/// Writes a new `file`, which neither group nor others may write, whatever
+/// the umask: launchd refuses such a file.
 fn write_new(file: &Path, contents: &str) -> io::Result<()> {
     use io::Write as _;
 
-    let mut handle = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(file)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o644);
+
+    let mut handle = options.open(file)?;
 
     handle
         .write_all(contents.as_bytes())
@@ -720,6 +817,57 @@ pub fn shell_quote(word: &str) -> Cow<'_, str> {
     } else {
         Cow::Owned(format!("'{}'", word.replace('\'', r"'\''")))
     }
+}
+
+/// The `dolos` binary a service runs, by an absolute path naming it as it was
+/// run: `invoked` (`argv[0]`), against `cwd` or found on `path` (`PATH`), when
+/// it leads to `exe`, the running binary. Otherwise `exe`, then `exe` with its
+/// symlinks resolved. Linux reports the running binary through its symlinks,
+/// into a versioned directory a package manager's upgrade removes (Homebrew's
+/// `Cellar/dolos/<version>`), while the name it was run by stays.
+pub fn locate_binary(
+    invoked: Option<&OsStr>,
+    path: Option<&OsStr>,
+    cwd: &Path,
+    exe: &Path,
+) -> io::Result<PathBuf> {
+    let exe = cwd.join(exe);
+    let real = fs::canonicalize(&exe)?;
+
+    let invoked = invoked
+        .map(Path::new)
+        .filter(|word| !word.as_os_str().is_empty());
+    let candidates: Vec<PathBuf> = match invoked {
+        Some(word) if word.parent().is_some_and(|dir| !dir.as_os_str().is_empty()) => {
+            vec![cwd.join(word)]
+        }
+        Some(word) => path
+            .map(|path| {
+                std::env::split_paths(path)
+                    .map(|dir| cwd.join(dir).join(word))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    let found = candidates
+        .into_iter()
+        .chain([exe])
+        .filter_map(normal)
+        .find(|candidate| fs::canonicalize(candidate).is_ok_and(|found| found == real));
+
+    Ok(found.unwrap_or(real))
+}
+
+/// `path` without `.` components, when it is absolute and has no `..`, which
+/// only the file system can resolve.
+fn normal(path: PathBuf) -> Option<PathBuf> {
+    let parent = path
+        .components()
+        .any(|component| component == Component::ParentDir);
+
+    (path.is_absolute() && !parent).then(|| path.components().collect())
 }
 
 /// The user's home directory, under which user services live.

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     text, Autostart, CommandRunner, Commands, Failure, Manager, Name, Recorded, RegisterError,
-    Scope, ServiceBackend, ServiceError, Unit,
+    Scope, ServiceBackend, ServiceError, Unit, MARKER,
 };
 
 pub struct Systemd<R> {
@@ -107,7 +107,16 @@ impl<R: CommandRunner> ServiceBackend for Systemd<R> {
 
     fn render(&self, unit: &Unit) -> Result<String, ServiceError> {
         let exec = unit.arguments()?.map(exec_word).join(" ");
-        let working_dir = escape_specifiers(text(&unit.working_dir)?);
+
+        // The value runs to the end of its line, unquoted: systemd strips a
+        // trailing space and reads a trailing `\` as a line continuation.
+        let working_dir = text(&unit.working_dir)?;
+
+        if working_dir.ends_with([' ', '\\']) {
+            return Err(ServiceError::UnsupportedPath(unit.working_dir.clone()));
+        }
+
+        let working_dir = escape_specifiers(working_dir);
 
         let (network, wanted_by) = match self.scope {
             // A user manager has no network target to wait for.
@@ -119,7 +128,7 @@ impl<R: CommandRunner> ServiceBackend for Systemd<R> {
         };
 
         Ok(format!(
-            "# Written by `dolos service install`. To change it, uninstall and install again.\n\
+            "# {MARKER} To change it, uninstall and install again.\n\
              [Unit]\n\
              Description=Dolos ({name})\n\
              {network}\n\
@@ -173,6 +182,11 @@ impl<R: CommandRunner> ServiceBackend for Systemd<R> {
         } else {
             Err(ServiceError::NeedsRoot)
         }
+    }
+
+    fn active(&self, name: &Name) -> bool {
+        self.systemctl(&["is-active", "--quiet", &Self::unit(name)])
+            .is_ok()
     }
 
     fn register(&self, name: &Name, start: bool) -> Result<(), RegisterError> {
@@ -243,12 +257,16 @@ impl<R: CommandRunner> ServiceBackend for Systemd<R> {
         }
     }
 
-    fn notes(&self) -> Vec<String> {
+    fn notes(&self, _name: &Name) -> Vec<String> {
         match self.scope {
             Scope::User => vec![
                 "to start it at boot rather than at login, run `loginctl enable-linger`".into(),
             ],
-            Scope::System => Vec::new(),
+            Scope::System => vec![
+                "it runs as root, so root owns what it writes under its storage directory, and \
+                 `dolos` commands run as another user cannot change that data"
+                    .into(),
+            ],
         }
     }
 }

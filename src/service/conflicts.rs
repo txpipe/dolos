@@ -127,41 +127,29 @@ impl Resources {
     }
 }
 
-/// `path` against `working_dir`, without `.` and `..`, and through the
-/// symlinks of the part that exists, so that two spellings of one place
-/// compare equal.
+/// `path` against `working_dir`, as the file system resolves it: each
+/// existing part through its symlinks before a `..` steps out of it, the
+/// missing rest as written, so that two spellings of one place compare equal.
 fn comparable(path: &Path, working_dir: &Path) -> PathBuf {
-    let mut lexical = PathBuf::new();
+    let mut resolved = PathBuf::new();
 
     for component in working_dir.join(path).components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                lexical.pop();
+                resolved.pop();
             }
-            other => lexical.push(other),
+            other => {
+                resolved.push(other);
+
+                if let Ok(real) = resolved.canonicalize() {
+                    resolved = real;
+                }
+            }
         }
     }
 
-    let mut existing = lexical.as_path();
-    let mut missing = Vec::new();
-
-    loop {
-        if let Ok(real) = existing.canonicalize() {
-            return missing
-                .iter()
-                .rev()
-                .fold(real, |path, part| path.join(part));
-        }
-
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(part)) => {
-                missing.push(part);
-                existing = parent;
-            }
-            _ => return lexical.clone(),
-        }
-    }
+    resolved
 }
 
 fn host_and_port(address: &str) -> Option<(Option<IpAddr>, u16)> {
@@ -220,6 +208,26 @@ mod tests {
         );
         assert!(
             comparable(Path::new("data/state"), &a).starts_with(comparable(Path::new("data"), &a))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_resolve_before_parent_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let real = root.join("real/x");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("link")).unwrap();
+
+        // `link/..` is `real`, where the kernel steps out of the link's target.
+        assert_eq!(
+            comparable(Path::new("../data"), &root.join("link")),
+            root.join("real/data")
+        );
+        assert_eq!(
+            comparable(Path::new("data/../../y"), &root.join("link")),
+            root.join("real/y")
         );
     }
 }

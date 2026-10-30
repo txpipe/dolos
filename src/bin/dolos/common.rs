@@ -70,12 +70,20 @@ pub fn config_file(explicit: Option<&Path>) -> &Path {
 /// Load the configuration, resolve its network against the catalog and parse
 /// its log filter.
 pub fn load_config(explicit_file: Option<&Path>) -> Result<RootConfig, ConfigError> {
-    dolos_core::config::load_checked(explicit_file, |config| {
-        ResolvedNetwork::resolve(&config.chain)
-            .map_err(|error| ConfigError::invalid(["chain.network"], error.to_string()))?;
+    dolos_core::config::load_checked(explicit_file, check_loaded)
+}
 
-        log_filter(&config.logging).map(|_| ())
-    })
+/// [`load_config`] from the file alone, without the `DOLOS_` overrides: the
+/// configuration as a process started without them reads it.
+pub fn load_file_config(file: &Path) -> Result<RootConfig, ConfigError> {
+    dolos_core::config::load_file_checked(Some(file), check_loaded)
+}
+
+fn check_loaded(config: &RootConfig) -> Result<(), ConfigError> {
+    ResolvedNetwork::resolve(&config.chain)
+        .map_err(|error| ConfigError::invalid(["chain.network"], error.to_string()))?;
+
+    log_filter(&config.logging).map(|_| ())
 }
 
 /// Parses `--known-network` / `--network` against the catalog.
