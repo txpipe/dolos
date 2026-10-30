@@ -240,14 +240,21 @@ fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// [`stderr`] with miette's wrapping undone: its words one space apart,
-/// without the bar that starts each wrapped line.
+/// [`stderr`] with miette's wrapping undone: its lines joined without the
+/// bar that starts each wrapped one, a space apart unless miette broke the
+/// line at a hyphen, and its words one space apart.
 fn said(output: &std::process::Output) -> String {
-    stderr(output)
-        .split_whitespace()
-        .filter(|word| *word != "│")
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut said = String::new();
+
+    for line in stderr(output).lines() {
+        if !said.is_empty() && !said.ends_with('-') {
+            said.push(' ');
+        }
+
+        said.push_str(line.trim().trim_start_matches('│').trim_start());
+    }
+
+    said.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[test]
@@ -397,7 +404,7 @@ fn every_source_refuses_existing_data_unless_told() {
         );
         for named in ["existing data detected", "--force", "--skip-if-data"] {
             assert!(
-                stderr(&refused).contains(named),
+                said(&refused).contains(named),
                 "{name}: {}",
                 stderr(&refused)
             );
@@ -1455,7 +1462,7 @@ fn a_foreign_source_is_refused_before_any_write() {
     let output = immutabledb(&empty, &source, &[]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        stderr(&output).contains("network magic 764824073"),
+        said(&output).contains("network magic 764824073"),
         "{}",
         stderr(&output)
     );
@@ -1477,7 +1484,7 @@ fn a_foreign_source_is_refused_before_any_write() {
     let output = immutabledb(&empty, &source, &[]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        stderr(&output).contains("protocolMagicId"),
+        said(&output).contains("protocolMagicId"),
         "{}",
         stderr(&output)
     );
@@ -1494,7 +1501,7 @@ fn a_foreign_source_is_refused_before_any_write() {
     fixture.write(fixture.blocks.len(), MAGIC.into());
     let output = immutabledb(&other, &source, &[]);
     assert_eq!(output.status.code(), Some(1));
-    assert!(stderr(&output).contains("bitcoin"), "{}", stderr(&output));
+    assert!(said(&output).contains("bitcoin"), "{}", stderr(&output));
     assert!(!other.config.storage.path.exists());
 }
 
