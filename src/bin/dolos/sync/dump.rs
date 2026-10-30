@@ -22,6 +22,9 @@ pub struct Args {
     format: FormatArgs,
 }
 
+/// The rows of one text table.
+const TABLE_PAGE: usize = 1000;
+
 /// One WAL entry, as a row of the table or one JSON line.
 #[derive(Debug, Serialize)]
 struct Entry {
@@ -36,7 +39,7 @@ struct Entry {
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     crate::common::setup_tracing_warnings()?;
 
-    let stores = crate::common::open_existing_stores(config, Access::Observe)?;
+    let stores = super::open_stores(config, Access::Observe)?;
     let wal = &stores.wal;
 
     let start = match args.start {
@@ -76,20 +79,30 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
             }
         }
         Format::Text => {
-            let mut table = Table::new();
-            table.set_header(vec!["Slot", "Hash", "Block Size", "State Deltas", "Inputs"]);
+            // A table per page, so a dump of every entry streams rather than
+            // holding each row until the last.
+            let mut entries = entries.peekable();
 
-            for entry in entries {
-                table.add_row(vec![
-                    entry.slot.to_string(),
-                    entry.hash,
-                    entry.block_size.to_string(),
-                    entry.state_deltas.to_string(),
-                    entry.inputs.to_string(),
-                ]);
+            loop {
+                let mut table = Table::new();
+                table.set_header(vec!["Slot", "Hash", "Block Size", "State Deltas", "Inputs"]);
+
+                for entry in entries.by_ref().take(TABLE_PAGE) {
+                    table.add_row(vec![
+                        entry.slot.to_string(),
+                        entry.hash,
+                        entry.block_size.to_string(),
+                        entry.state_deltas.to_string(),
+                        entry.inputs.to_string(),
+                    ]);
+                }
+
+                println!("{table}");
+
+                if entries.peek().is_none() {
+                    break;
+                }
             }
-
-            println!("{table}");
         }
     }
 

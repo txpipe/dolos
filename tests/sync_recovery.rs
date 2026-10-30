@@ -7,27 +7,41 @@ mod node;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::sync::Arc;
 
+use dolos::engine::DomainBuilder;
 use dolos_cardano::CardanoDelta;
-use dolos_core::{ChainPoint, RawBlock, SyncExt as _, WalStore as _};
+use dolos_core::{ChainPoint, Genesis, LogValue, RawBlock, SyncExt as _, WalStore as _};
 use node::{feed_until_crash, fixture, point, start, store_positions, CrashAfter, Node};
 
-/// The four synthetic blocks synced live, the stores in agreement at the last.
-fn synced() -> (Node, Vec<RawBlock>) {
-    let (node, genesis, blocks) = fixture("");
+const EPHEMERAL_ARCHIVE: &str = r#"
+[storage.archive]
+type = "ephemeral"
+"#;
+
+/// The four synthetic blocks synced live over `tables`, the stores in
+/// agreement at the last.
+fn synced_on(tables: &str) -> (Node, Arc<Genesis>, Vec<RawBlock>) {
+    let (node, genesis, blocks) = fixture(tables);
 
     let domain = start(&node, &genesis);
     domain.roll_forward_batch(blocks.clone()).unwrap();
     domain.shutdown().unwrap();
 
+    (node, genesis, blocks)
+}
+
+fn synced() -> (Node, Vec<RawBlock>) {
+    let (node, _, blocks) = synced_on("");
+
     (node, blocks)
 }
 
-/// Two blocks synced, then two more the WAL committed and a crash kept from
-/// the stores `crash` names: the state and the archive stand at the second,
-/// or only the archive does.
-fn lagging(crash: CrashAfter) -> (Node, Vec<RawBlock>) {
-    let (node, genesis, blocks) = fixture("");
+/// Two blocks synced over `tables`, then two more the WAL committed and a
+/// crash kept from the stores `crash` names: the state and the archive stand
+/// at the second, or only the archive does.
+fn lagging_on(crash: CrashAfter, tables: &str) -> (Node, Vec<RawBlock>) {
+    let (node, genesis, blocks) = fixture(tables);
 
     let domain = start(&node, &genesis);
     domain.roll_forward_batch(blocks[..2].to_vec()).unwrap();
@@ -37,12 +51,54 @@ fn lagging(crash: CrashAfter) -> (Node, Vec<RawBlock>) {
     (node, blocks)
 }
 
+fn lagging(crash: CrashAfter) -> (Node, Vec<RawBlock>) {
+    lagging_on(crash, "")
+}
+
 /// Reset the WAL to `to`, as a pruned or reseeded WAL leaves it: one entry,
 /// and none of the blocks before it.
 fn reset_wal(node: &Node, to: &ChainPoint) {
     let wal = dolos::storage::open_wal_store::<CardanoDelta>(&node.config).unwrap();
     wal.reset_to(to).unwrap();
     wal.shutdown().unwrap();
+}
+
+/// Empty the WAL, as a version wipe leaves it.
+fn empty_wal(node: &Node) {
+    std::fs::remove_file(node.config.wal_path().unwrap()).unwrap();
+
+    let wal = dolos::storage::open_wal_store::<CardanoDelta>(&node.config).unwrap();
+    wal.shutdown().unwrap();
+}
+
+/// Append `count` entries without a block past `past`, one a slot.
+fn pad_wal(node: &Node, past: &ChainPoint, count: u64) {
+    let wal = dolos::storage::open_wal_store::<CardanoDelta>(&node.config).unwrap();
+
+    let entries = (1..=count)
+        .map(|n| {
+            let point = ChainPoint::Specific(past.slot() + n, [9u8; 32].into());
+            (point, LogValue::origin())
+        })
+        .collect();
+    wal.append_entries(entries).unwrap();
+
+    wal.shutdown().unwrap();
+}
+
+/// Roll the WAL and the state back to `to` and leave the archive where it
+/// is, ahead of them.
+fn roll_back_past_the_archive(node: &Node, genesis: &Arc<Genesis>, to: &ChainPoint) {
+    let mut stores =
+        dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+    stores.archive.shutdown().unwrap();
+    stores.archive = dolos::storage::ArchiveStoreBackend::noop();
+
+    let domain = DomainBuilder::new(&node.config, genesis.clone())
+        .assemble(&stores)
+        .unwrap();
+    domain.rollback(to).unwrap();
+    domain.shutdown().unwrap();
 }
 
 /// Replace the block of the WAL entry at `at` with `block`.
@@ -135,8 +191,13 @@ fn a_synced_dataset_is_healthy_and_left_as_it_was() {
     assert_eq!(status["disagreements"], serde_json::json!([]));
     assert_eq!(status["integrity"]["complete"], true);
     assert_eq!(status["integrity"]["blocks"], 4);
+    // From Origin, a rollback reaches the first block and undoes the rest.
+    assert_eq!(
+        status["rollback_window"]["from_slot"],
+        point(&blocks[0]).slot()
+    );
     assert_eq!(status["rollback_window"]["to_slot"], tip.slot());
-    assert_eq!(status["rollback_window"]["blocks"], 4);
+    assert_eq!(status["rollback_window"]["blocks"], 3);
     assert_eq!(status["healthy"], true);
 
     let text = node.run(&["sync", "status"]);
@@ -310,6 +371,40 @@ fn a_wal_that_cannot_replay_the_stores_is_discarded_only_when_asked() {
         (Some(state.clone()), Some(state.clone()), Some(state.slot()))
     );
 
+    // The reset point is as far back as a rollback reaches, undoing nothing.
+    let status = node.run(&["sync", "status", "--format", "json"]);
+    assert_eq!(code(&status), Some(0), "{}", stdout(&status));
+    assert_eq!(json(&status)["rollback_window"]["from_slot"], state.slot());
+    assert_eq!(json(&status)["rollback_window"]["blocks"], 0);
+}
+
+/// A WAL emptied beside a state with a cursor, as a version wipe leaves it:
+/// it held no rollback history, so recovery seeds it without the flag, as the
+/// daemon would.
+#[test]
+fn a_wal_without_blocks_is_seeded_without_the_flag() {
+    let (node, blocks) = synced();
+    let tip = point(&blocks[3]);
+    empty_wal(&node);
+
+    let status = node.run(&["sync", "status"]);
+    assert_eq!(code(&status), Some(3), "{}", stdout(&status));
+
+    let dry_run = node.run(&["sync", "recover", "--dry-run", "--format", "json"]);
+    assert_eq!(code(&dry_run), Some(0), "{}", stderr_words(&dry_run));
+    assert_eq!(json(&dry_run)["action"], "seed_wal");
+    assert_eq!(json(&dry_run)["gap"], serde_json::Value::Null);
+
+    let output = node.run(&["sync", "recover"]);
+    let message = stderr_words(&output);
+    assert_eq!(code(&output), Some(0), "{message}");
+    assert!(!message.contains("rollback history is lost"), "{message}");
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(tip.clone()), Some(tip.clone()), Some(tip.slot()))
+    );
+
     let status = node.run(&["sync", "status"]);
     assert_eq!(code(&status), Some(0), "{}", stdout(&status));
 }
@@ -371,6 +466,22 @@ fn a_rollback_moves_every_store_to_the_point() {
         (Some(tip.clone()), Some(tip.clone()), Some(tip.slot()))
     );
 
+    // The all-zero point, which names the WAL's Origin entry, not a block.
+    let zeros = "0".repeat(64);
+    let origin = ["sync", "rollback", "--slot", "0", "--hash", &zeros, "--yes"];
+    let output = node.run(&origin);
+    let message = stderr_words(&output);
+    assert_eq!(code(&output), Some(1), "{message}");
+    assert!(message.contains("is not in the WAL"), "{message}");
+    assert!(
+        message.contains(&format!("holds slot {}", point(&blocks[0]).slot())),
+        "{message}"
+    );
+    assert_eq!(
+        store_positions(&node),
+        (Some(tip.clone()), Some(tip.clone()), Some(tip.slot()))
+    );
+
     let output = node.run(&[
         "sync", "rollback", "--slot", &slot, "--hash", &hash, "--yes",
     ]);
@@ -381,8 +492,89 @@ fn a_rollback_moves_every_store_to_the_point() {
         (Some(to.clone()), Some(to.clone()), Some(to.slot()))
     );
 
-    let status = node.run(&["sync", "status"]);
+    let status = node.run(&["sync", "status", "--format", "json"]);
     assert_eq!(code(&status), Some(0), "{}", stdout(&status));
+    assert_eq!(json(&status)["rollback_window"]["blocks"], 1);
+}
+
+/// The WAL and the state rolled back past the archive, which keeps its later
+/// blocks: only a sync past the archive tip brings the stores together, and
+/// rollback and recovery both say so.
+#[test]
+fn an_archive_ahead_of_the_wal_points_to_a_sync() {
+    let (node, genesis, blocks) = synced_on("");
+    let to = point(&blocks[1]);
+    let archive = point(&blocks[3]).slot();
+    roll_back_past_the_archive(&node, &genesis, &to);
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(to.clone()), Some(to.clone()), Some(archive))
+    );
+
+    let status = node.run(&["sync", "status"]);
+    assert_eq!(code(&status), Some(3), "{}", stdout(&status));
+    assert!(stdout(&status).contains("is ahead of the WAL tip"));
+
+    let first = point(&blocks[0]);
+    let (slot, hash) = (first.slot().to_string(), hash_of(&first));
+    let output = node.run(&[
+        "sync", "rollback", "--slot", &slot, "--hash", &hash, "--yes",
+    ]);
+    let message = stderr_words(&output);
+    assert_eq!(code(&output), Some(1), "{message}");
+    assert!(message.contains("dolos sync catchup"), "{message}");
+    assert!(!message.contains("sync recover"), "{message}");
+
+    let output = node.run(&["sync", "recover"]);
+    let message = stderr_words(&output);
+    assert_eq!(code(&output), Some(0), "{message}");
+    assert!(message.contains("dolos sync catchup"), "{message}");
+
+    assert_eq!(
+        store_positions(&node),
+        (Some(to.clone()), Some(to.clone()), Some(archive))
+    );
+}
+
+/// An ephemeral archive holds only what the running node refills from the
+/// WAL, so no command weighs the stores against it.
+#[test]
+fn an_ephemeral_archive_is_left_out() {
+    let (node, _, blocks) = synced_on(EPHEMERAL_ARCHIVE);
+    let to = point(&blocks[1]);
+
+    let status = node.run(&["sync", "status", "--format", "json"]);
+    assert_eq!(code(&status), Some(0), "{}", stdout(&status));
+    assert_eq!(json(&status)["archive_kept"], false);
+
+    let (slot, hash) = (to.slot().to_string(), hash_of(&to));
+    let output = node.run(&[
+        "sync", "rollback", "--slot", &slot, "--hash", &hash, "--yes",
+    ]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+    assert_eq!(store_positions(&node), (Some(to.clone()), Some(to), None));
+
+    // A lag the WAL covers is replayed into the state alone.
+    let (node, blocks) = lagging_on(CrashAfter::Wal, EPHEMERAL_ARCHIVE);
+    let tip = point(&blocks[3]);
+
+    let output = node.run(&["sync", "recover"]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+    assert_eq!(store_positions(&node), (Some(tip.clone()), Some(tip), None));
+    assert_eq!(code(&node.run(&["sync", "status"])), Some(0));
+
+    // One it cannot cover is discarded without an archive to refuse it.
+    let (node, blocks) = lagging_on(CrashAfter::Wal, EPHEMERAL_ARCHIVE);
+    let state = point(&blocks[1]);
+    reset_wal(&node, &point(&blocks[3]));
+
+    let output = node.run(&["sync", "recover", "--discard-wal"]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+    assert_eq!(
+        store_positions(&node),
+        (Some(state.clone()), Some(state), None)
+    );
 }
 
 #[test]
@@ -435,6 +627,38 @@ fn a_dump_is_bounded_by_its_limit() {
         serde_json::from_str(stdout(&output).lines().next().unwrap()).unwrap();
     assert_eq!(first["slot"], point(&blocks[2]).slot());
     assert_eq!(first["hash"], hash_of(&point(&blocks[2])));
+}
+
+/// Data rows of the text tables in `text`, and how many tables hold them.
+fn table_rows(text: &str) -> (usize, usize) {
+    let tables = text.lines().filter(|line| line.contains("Slot")).count();
+    let rows = text.lines().filter(|line| line.starts_with("| ")).count();
+
+    (rows - tables, tables)
+}
+
+#[test]
+fn a_dump_is_bounded_unless_told_otherwise() {
+    let (node, blocks) = synced();
+    let padding = 1100;
+    pad_wal(&node, &point(&blocks[3]), padding);
+
+    // Origin, every block, then the padding.
+    let entries = 1 + blocks.len() + padding as usize;
+
+    let output = node.run(&["sync", "dump", "--format", "json"]);
+    assert_eq!(stdout(&output).lines().count(), 100);
+
+    let output = node.run(&["sync", "dump", "--limit", "0", "--format", "json"]);
+    assert_eq!(stdout(&output).lines().count(), entries);
+
+    let output = node.run(&["sync", "dump"]);
+    assert_eq!(code(&output), Some(0), "{}", stderr_words(&output));
+    assert_eq!(table_rows(&stdout(&output)), (100, 1));
+
+    // Every entry, a table at a time.
+    let output = node.run(&["sync", "dump", "--limit", "0"]);
+    assert_eq!(table_rows(&stdout(&output)), (entries, 2));
 }
 
 /// The commands under `dolos sync --help`.

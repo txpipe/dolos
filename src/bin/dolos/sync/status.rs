@@ -29,7 +29,8 @@ struct Status {
     archive_kept: bool,
     /// What keeps the stores from standing at the WAL tip.
     disagreements: Vec<String>,
-    /// How far back `sync rollback` reaches; none while the WAL is empty.
+    /// How far back `sync rollback` reaches; none while the WAL holds
+    /// nothing past Origin.
     rollback_window: Option<RollbackWindow>,
     integrity: IntegrityReport,
     healthy: bool,
@@ -37,11 +38,12 @@ struct Status {
 
 #[derive(Debug, Serialize)]
 struct RollbackWindow {
-    /// Where the WAL's unbroken history starts, the oldest point a rollback
-    /// reaches: 0 when it runs from Origin.
+    /// The oldest point a rollback reaches: the WAL's first entry past
+    /// Origin, a reset point or a block.
     from_slot: BlockSlot,
     to_slot: BlockSlot,
-    /// The blocks a rollback to `from_slot` undoes.
+    /// The blocks a rollback to `from_slot` undoes, as the integrity scan
+    /// counted them.
     blocks: u64,
 }
 
@@ -87,7 +89,7 @@ impl fmt::Display for Status {
         if self.archive_kept {
             writeln!(f, "archive    {}", slot(self.cursors.archive.tip_slot))?;
         } else {
-            writeln!(f, "archive    not kept")?;
+            writeln!(f, "archive    not kept on disk")?;
         }
 
         match &self.rollback_window {
@@ -96,7 +98,7 @@ impl fmt::Display for Status {
                 "rollback   back to slot {}, undoing up to {} block(s)",
                 window.from_slot, window.blocks
             )?,
-            None => writeln!(f, "rollback   none: the WAL is empty")?,
+            None => writeln!(f, "rollback   none: the WAL holds nothing past Origin")?,
         }
 
         let scan = if self.integrity.complete {
@@ -145,7 +147,7 @@ impl fmt::Display for Status {
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     crate::common::setup_tracing_warnings()?;
 
-    let stores = crate::common::open_existing_stores(config, Access::Observe)?;
+    let stores = super::open_stores(config, Access::Observe)?;
     let positions = Positions::read(config, &stores)?;
 
     let progress = feedback.slot_progress_bar();
@@ -159,11 +161,15 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     progress.finish_and_clear();
     drop(stores);
 
-    let rollback_window = positions.wal_tip.as_ref().map(|tip| RollbackWindow {
-        from_slot: positions.wal_history.unwrap_or(0),
-        to_slot: tip.slot(),
-        blocks: integrity.blocks,
-    });
+    let rollback_window = positions
+        .rollback_floor
+        .as_ref()
+        .zip(positions.wal_tip.as_ref())
+        .map(|(floor, tip)| RollbackWindow {
+            from_slot: floor.point.slot(),
+            to_slot: tip.slot(),
+            blocks: integrity.blocks.saturating_sub(u64::from(floor.is_block)),
+        });
 
     let disagreements = positions.disagreements();
     let healthy = disagreements.is_empty() && integrity.is_intact();

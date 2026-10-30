@@ -174,6 +174,10 @@ pub fn verify_integrity_with<W: WalStore>(
 /// Synthetic entries written by `WalStore::reset_to` (empty block bytes
 /// and/or points that are not fully defined) are skipped, and the chain check
 /// restarts at the next real block.
+///
+/// The WAL orders the entries of one slot by hash rather than chain order, so
+/// a Byron boundary block and the main block that shares its slot can come
+/// in either order; the blocks of a slot are checked in the order they chain.
 fn scan_chain_integrity(
     blocks: impl Iterator<Item = (ChainPoint, RawBlock)>,
     mut on_progress: impl FnMut(BlockSlot),
@@ -184,12 +188,18 @@ fn scan_chain_integrity(
         failures: Vec::new(),
     };
     let mut last_hash: Option<BlockHash> = None;
+    let mut slot_links: Vec<Link> = Vec::new();
 
     for (point, block) in blocks {
         let slot = point.slot();
         on_progress(slot);
 
+        if slot_links.first().is_some_and(|link| link.slot != slot) {
+            chain_slot(&mut slot_links, &mut last_hash, &mut report);
+        }
+
         if block.is_empty() || !point.is_fully_defined() {
+            chain_slot(&mut slot_links, &mut last_hash, &mut report);
             last_hash = None;
             continue;
         }
@@ -197,33 +207,72 @@ fn scan_chain_integrity(
         let blockd = match pallas::ledger::traverse::MultiEraBlock::decode(&block) {
             Ok(blockd) => blockd,
             Err(error) => {
+                chain_slot(&mut slot_links, &mut last_hash, &mut report);
                 report.failures.push(IntegrityFailure::Undecodable {
                     slot,
                     error: error.to_string(),
                 });
                 report.complete = false;
-                break;
+                return report;
             }
         };
 
         report.blocks += 1;
 
-        if let Some(expected_prev) = last_hash {
-            let got_prev = blockd.header().previous_hash();
-            if got_prev != Some(expected_prev) {
+        slot_links.push(Link {
+            slot,
+            hash: point.hash(),
+            prev: blockd.header().previous_hash(),
+        });
+    }
+
+    chain_slot(&mut slot_links, &mut last_hash, &mut report);
+
+    report
+}
+
+/// A block's place in the prev-hash chain.
+struct Link {
+    slot: BlockSlot,
+    hash: Option<BlockHash>,
+    prev: Option<BlockHash>,
+}
+
+/// Check the blocks of one slot against `last_hash`, taking first the block
+/// that follows it, else one whose parent is not among them.
+fn chain_slot(
+    links: &mut Vec<Link>,
+    last_hash: &mut Option<BlockHash>,
+    report: &mut IntegrityReport,
+) {
+    while !links.is_empty() {
+        let next = links
+            .iter()
+            .position(|link| last_hash.is_some() && link.prev == *last_hash)
+            .or_else(|| {
+                links.iter().position(|link| {
+                    !links
+                        .iter()
+                        .any(|other| other.hash.is_some() && other.hash == link.prev)
+                })
+            })
+            .unwrap_or(0);
+
+        let link = links.remove(next);
+
+        if let Some(expected_prev) = *last_hash {
+            if link.prev != Some(expected_prev) {
                 report.failures.push(IntegrityFailure::Discontinuity {
-                    slot,
-                    block_hash: point.hash(),
+                    slot: link.slot,
+                    block_hash: link.hash,
                     expected_prev: Some(expected_prev),
-                    got_prev,
+                    got_prev: link.prev,
                 });
             }
         }
 
-        last_hash = point.hash();
+        *last_hash = link.hash;
     }
-
-    report
 }
 
 #[cfg(test)]
@@ -395,6 +444,58 @@ mod integrity_tests {
         assert!(
             report.is_intact(),
             "reset_to in the middle should reset the chain, not cause issues"
+        );
+    }
+
+    /// A Byron boundary block and the main block that shares its slot, which
+    /// the WAL orders by hash: the main block can come first, and the pair
+    /// still chains.
+    #[test]
+    fn blocks_sharing_a_slot_chain_in_either_order() {
+        let (p1, b1) = make_block_with_prev(101, None);
+        let (boundary, bb) = make_block_with_prev(120, p1.hash());
+        let (main, bm) = make_block_with_prev(120, boundary.hash());
+        let (p3, b3) = make_block_with_prev(121, main.hash());
+
+        let entries: Vec<(ChainPoint, RawBlock)> = vec![
+            (p1, b1),
+            (main.clone(), bm.clone()),
+            (boundary.clone(), bb.clone()),
+            (p3.clone(), b3.clone()),
+        ];
+
+        let report = scan_chain_integrity(entries.into_iter(), |_| {});
+        assert!(report.is_intact(), "{report:?}");
+        assert_eq!(report.blocks, 4);
+
+        // The pair first in the WAL, with no block before it to chain to.
+        let entries: Vec<(ChainPoint, RawBlock)> = vec![(main, bm), (boundary, bb), (p3, b3)];
+
+        let report = scan_chain_integrity(entries.into_iter(), |_| {});
+        assert!(report.is_intact(), "{report:?}");
+    }
+
+    /// Blocks that share a slot and do not chain are still a discontinuity.
+    #[test]
+    fn blocks_sharing_a_slot_that_do_not_chain_are_reported() {
+        let (p1, b1) = make_block_with_prev(101, None);
+        let (chained, bc) = make_block_with_prev(120, p1.hash());
+        let wrong = Hash::from([0xEE; 32]);
+        let (stray, bs) = make_block_with_prev(120, Some(wrong));
+
+        let entries: Vec<(ChainPoint, RawBlock)> =
+            vec![(p1, b1), (stray.clone(), bs), (chained.clone(), bc)];
+
+        let report = scan_chain_integrity(entries.into_iter(), |_| {});
+        assert!(report.complete);
+        assert_eq!(
+            report.failures,
+            vec![IntegrityFailure::Discontinuity {
+                slot: 120,
+                block_hash: stray.hash(),
+                expected_prev: chained.hash(),
+                got_prev: Some(wrong),
+            }]
         );
     }
 

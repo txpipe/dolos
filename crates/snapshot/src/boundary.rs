@@ -119,7 +119,7 @@ impl std::fmt::Display for Ineligible {
             Self::InitialEpoch => write!(
                 f,
                 "no boundary opens epoch 0, so the first stele a chain can carry is epoch 1; \
-                 run dolos sync catchup --stop-epoch 1"
+                 run dolos sync catchup --follow --stop-epoch 1"
             ),
             Self::MissingCursorBlock => write!(
                 f,
@@ -143,14 +143,14 @@ impl std::fmt::Display for Ineligible {
                 "the cursor block's parent {parent} is in the same epoch, so the state is past \
                  the epoch's first block and the boundary state is no longer in these stores; \
                  restore the stele for this epoch, or cut the next one with \
-                 dolos sync catchup --stop-epoch set to the following epoch"
+                 dolos sync catchup --follow --stop-epoch set to the following epoch"
             ),
             Self::ArchivePastCursor { tip } => write!(
                 f,
                 "the archive runs on past the cursor to {tip}, and the blocks after the cursor \
                  wrote log and index records the stele cannot tell from the boundary's; publish \
-                 from a node whose archive ends at the cursor, as dolos sync catchup --stop-epoch \
-                 leaves it"
+                 from a node whose archive ends at the cursor, as dolos sync catchup --follow \
+                 --stop-epoch leaves it"
             ),
         }
     }
@@ -622,7 +622,7 @@ mod tests {
         assert!(
             message.contains(
                 "publish from a node whose archive ends at the cursor, as dolos sync catchup \
-                 --stop-epoch leaves it"
+                 --follow --stop-epoch leaves it"
             ),
             "{message}"
         );

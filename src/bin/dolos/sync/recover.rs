@@ -38,6 +38,8 @@ enum Action {
     Replay,
     /// Reset the WAL to the state cursor.
     DiscardWal,
+    /// Seed a WAL that holds no block at the state cursor, losing nothing.
+    SeedWal,
     /// Refused until `--discard-wal` allows resetting the WAL.
     NeedsDiscard,
     /// Refused, `--discard-wal` or not.
@@ -70,9 +72,17 @@ impl Recovery {
             plan.covers_lag = plan.steps.iter().all(|step| step.covered);
         }
 
-        let gap = gap(&plan, positions);
+        // A WAL that holds no block has no rollback history to lose, and the
+        // daemon seeds it at the state cursor itself.
+        let seed = positions.wal().is_none() && positions.state().is_some();
+
+        let gap = if seed { None } else { gap(&plan, positions) };
 
         let (action, refusal) = match &gap {
+            None if seed => match discard_refusal(positions) {
+                Some(refusal) => (Action::Refuse, Some(refusal)),
+                None => (Action::SeedWal, None),
+            },
             None if plan.steps.is_empty() => (Action::None, None),
             None => (Action::Replay, None),
             Some(_) => match discard_refusal(positions) {
@@ -85,9 +95,9 @@ impl Recovery {
         // Replaying or reseeding brings the state to the WAL tip; an archive
         // ahead of it stays where it is.
         let remains = match action {
-            Action::None | Action::Replay | Action::DiscardWal => {
+            Action::None | Action::Replay | Action::DiscardWal | Action::SeedWal => {
                 let target = match action {
-                    Action::DiscardWal => positions.state(),
+                    Action::DiscardWal | Action::SeedWal => positions.state(),
                     _ => positions.wal(),
                 };
 
@@ -116,10 +126,20 @@ impl Recovery {
 /// WAL applied.
 fn gap(plan: &RecoveryPlan, positions: &Positions) -> Option<String> {
     if positions.state() > positions.wal() {
-        return Some(format!(
-            "{}, so it lacks the blocks the state applied",
-            relative_to_wal("state", positions.state(), positions.wal())
-        ));
+        let ahead = relative_to_wal("state", positions.state(), positions.wal());
+
+        // A cursor without a hash marks a slot the state reached, such as an
+        // epoch boundary, not a block it applied.
+        let hashless = positions
+            .state
+            .as_ref()
+            .is_some_and(|cursor| !cursor.is_fully_defined());
+
+        return Some(if hashless {
+            format!("{ahead}, and its cursor has no block hash")
+        } else {
+            format!("{ahead}, so it lacks the blocks the state applied")
+        });
     }
 
     let missing: Vec<_> = plan
@@ -183,6 +203,8 @@ const REFUSED_HELP: &str = "rebuild the state from the archive with `dolos data 
 const DISCARD_HELP: &str =
     "pass `--discard-wal` to reset the WAL to the state cursor, losing its rollback history";
 
+const ARCHIVE_AHEAD_HELP: &str = "sync past it with `dolos sync catchup`";
+
 fn slot(slot: Option<BlockSlot>) -> String {
     slot.map_or("empty".to_string(), |slot| format!("slot {slot}"))
 }
@@ -228,6 +250,11 @@ impl fmt::Display for Recovery {
                 "action     reset the WAL to the state cursor at {}, losing its rollback history",
                 slot(applied(self.plan.state.as_ref()))
             ),
+            Action::SeedWal => write!(
+                f,
+                "action     seed the WAL, which holds no block, at the state cursor at {}",
+                slot(applied(self.plan.state.as_ref()))
+            ),
             Action::NeedsDiscard => write!(f, "action     refused: {DISCARD_HELP}"),
             Action::Refuse => write!(
                 f,
@@ -247,7 +274,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         Access::Mutate
     };
 
-    let stores = crate::common::open_existing_stores(config, access)?;
+    let stores = super::open_stores(config, access)?;
     let positions = Positions::read(config, &stores)?;
 
     let plan = recovery_plan(&stores.wal, &stores.state, &stores.archive)
@@ -276,12 +303,12 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
                 .into_diagnostic()
                 .context("closing the stores")?;
         }
-        Action::DiscardWal => {
+        Action::DiscardWal | Action::SeedWal => {
             let seeded = seed_wal_from_state(&stores.state, &stores.wal).into_diagnostic()?;
 
             stores.wal.shutdown().into_diagnostic()?;
 
-            if let WalSeed::Seeded(point) = seeded {
+            if let (Action::DiscardWal, WalSeed::Seeded(point)) = (recovery.action, seeded) {
                 eprintln!(
                     "warning: the WAL now starts at the state cursor, {point}: its rollback history is lost"
                 );
@@ -304,7 +331,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     }
 
     for remaining in &recovery.remains {
-        eprintln!("warning: {remaining}, which recovery does not change");
+        eprintln!("warning: {remaining}, which recovery does not change: {ARCHIVE_AHEAD_HELP}");
     }
 
     Ok(())
@@ -314,6 +341,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 mod tests {
     use dolos_core::{bootstrap::RecoveryStep, ChainPoint};
 
+    use super::super::RollbackFloor;
     use super::*;
 
     fn point(slot: BlockSlot) -> ChainPoint {
@@ -332,6 +360,10 @@ mod tests {
             wal_start: Some(point(start)),
             wal_tip: Some(point(tip)),
             wal_history: Some(start),
+            rollback_floor: Some(RollbackFloor {
+                point: point(start),
+                is_block: true,
+            }),
             state: Some(point(state)),
             archive,
             archive_kept: true,
@@ -411,26 +443,74 @@ mod tests {
 
         let recovery = decide(&ahead, false);
         assert_eq!(recovery.action, Action::NeedsDiscard);
-        assert!(recovery.gap.unwrap().contains("ahead of the WAL tip"));
+        let gap = recovery.gap.unwrap();
+        assert!(gap.contains("ahead of the WAL tip"), "{gap}");
+        assert!(gap.contains("lacks the blocks the state applied"), "{gap}");
+    }
 
-        let empty = Positions {
+    /// A WAL with no block, beside the state cursor at `state`: what a WAL
+    /// version wipe leaves.
+    fn without_wal(state: ChainPoint, archive: Option<BlockSlot>) -> (Positions, RecoveryPlan) {
+        let positions = Positions {
             wal_start: None,
             wal_tip: None,
             wal_history: None,
-            ..ahead.clone()
+            rollback_floor: None,
+            state: Some(state),
+            archive,
+            archive_kept: true,
         };
-        let recovery = Recovery::decide(
-            RecoveryPlan {
-                wal: None,
-                state: empty.state.clone(),
-                archive: empty.archive,
-                covers_lag: true,
-                steps: vec![],
-            },
-            &empty,
-            true,
+
+        let plan = RecoveryPlan {
+            wal: None,
+            state: positions.state.clone(),
+            archive,
+            covers_lag: true,
+            steps: vec![],
+        };
+
+        (positions, plan)
+    }
+
+    #[test]
+    fn a_wal_without_blocks_is_seeded_without_the_flag() {
+        for discard_wal in [false, true] {
+            let (empty, plan) = without_wal(point(250), Some(250));
+
+            let recovery = Recovery::decide(plan, &empty, discard_wal);
+            assert_eq!(recovery.action, Action::SeedWal);
+            assert_eq!(recovery.gap, None);
+            assert!(recovery.remains.is_empty());
+        }
+
+        let (behind, plan) = without_wal(point(250), Some(200));
+        let recovery = Recovery::decide(plan, &behind, true);
+        assert_eq!(recovery.action, Action::Refuse);
+        assert!(recovery.refusal.unwrap().contains("archive, at slot 200"));
+
+        let (hashless, plan) = without_wal(ChainPoint::Slot(250), Some(250));
+        let recovery = Recovery::decide(plan, &hashless, true);
+        assert_eq!(recovery.action, Action::Refuse);
+        assert!(recovery.refusal.unwrap().contains("no block hash"));
+    }
+
+    /// A cursor without a hash names no block, so the gap claims none the
+    /// state applied.
+    #[test]
+    fn a_hashless_state_ahead_of_the_wal_claims_no_blocks() {
+        let mut ahead = positions(100, 200, 250, Some(250));
+        ahead.state = Some(ChainPoint::Slot(250));
+
+        let recovery = decide(&ahead, true);
+        assert_eq!(recovery.action, Action::Refuse);
+
+        let gap = recovery.gap.unwrap();
+        assert!(
+            gap.contains("state, at slot 250, is ahead of the WAL tip at slot 200"),
+            "{gap}"
         );
-        assert_eq!(recovery.action, Action::DiscardWal);
+        assert!(gap.contains("no block hash"), "{gap}");
+        assert!(!gap.contains("lacks"), "{gap}");
     }
 
     #[test]

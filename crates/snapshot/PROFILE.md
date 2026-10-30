@@ -152,7 +152,7 @@ The `digests` layer covers the immutable files fully contained in the stele's bl
 
 ### The cut point and the boundary sliver
 
-A stele is cut by syncing with `dolos sync catchup --stop-epoch E`, and the halt is **one block past the epoch boundary**, not on it. The sync crosses the boundary — Ewrap closes epoch E-1, Estart opens epoch E — and then applies the first block of epoch E before stopping. That block is what makes the stele addressable: Estart alone leaves the cursor a bare `ChainPoint::Slot` carrying no block hash (`estart::commit_finalize`), and `position.point` must carry one for a stele to be verifiable against a chain. The anchoring block may itself sit exactly on `epoch_start(E)`, in which case the sliver is one slot wide.
+A stele is cut by syncing with `dolos sync catchup --follow --stop-epoch E`, and the halt is **one block past the epoch boundary**, not on it. The sync crosses the boundary — Ewrap closes epoch E-1, Estart opens epoch E — and then applies the first block of epoch E before stopping. That block is what makes the stele addressable: Estart alone leaves the cursor a bare `ChainPoint::Slot` carrying no block hash (`estart::commit_finalize`), and `position.point` must carry one for a stele to be verifiable against a chain. The anchoring block may itself sit exactly on `epoch_start(E)`, in which case the sliver is one slot wide.
 
 So the epoch windows a stele covers are `0..=E`: epochs `0..E-1` **complete**, plus epoch E's **boundary sliver** — the window that opens at `epoch_start(E)` and closes at the anchoring block. The sliver is normative, not an artifact of where a publisher happened to stop.
 
@@ -181,7 +181,7 @@ An archive that cannot show step 3 is **insufficient evidence**, and is refused 
 
 **Epoch 0 is never published.** No boundary opens it, so a stele at sequence 0 would follow no transition; the first stele of any chain is `epoch-1`.
 
-**A node past the boundary cannot publish that epoch.** Its stores no longer hold the boundary state, and nothing reconstructs it. The refusal says so and points at the remedies: restore the `epoch-E` stele, or let the node run on to the next boundary and cut that one with `dolos sync catchup --stop-epoch E+1`.
+**A node past the boundary cannot publish that epoch.** Its stores no longer hold the boundary state, and nothing reconstructs it. The refusal says so and points at the remedies: restore the `epoch-E` stele, or let the node run on to the next boundary and cut that one with `dolos sync catchup --follow --stop-epoch E+1`.
 
 **The stores must be still for the duration.** The check reads them once, before the walk; it does not freeze them, and no cursor check could make an export over stores something else is writing to consistent. Stillness comes from how the stores are opened: the storage backends lock their directories, so no second process — a daemon included — writes to stores a `dolos snapshot` command holds, and an in-process host reads through the headless replay API, whose snapshot is a borrow that no import can run beside.
 
@@ -257,7 +257,7 @@ and it counts layers rather than epochs.)
 ### Publisher pipeline
 
 1. Restore the publisher node from the previous stele (self-hosting delta pull; first run via Mithril). The node keeps full history: a publish from an archive that does not start at origin is refused.
-2. Sync with `dolos sync catchup --stop-epoch E` until `StopEpochReached` — the state crosses the boundary and lands on the **first block of epoch E**, the block that gives `position.point` a hash. The publish establishes that from the stores before it writes a layer (see "Only the boundary cut is published").
+2. Sync with `dolos sync catchup --follow --stop-epoch E` until `StopEpochReached` — the state crosses the boundary and lands on the **first block of epoch E**, the block that gives `position.point` a hash. The publish establishes that from the stores before it writes a layer (see "Only the boundary cut is published").
 3. The Stelae Cardano publisher uploads only the newly closed epoch's layers, epoch E's boundary sliver, the `log-account-epochs` layer of epoch E-2, which settled at this boundary, and the epoch E-2 layers the seal at this boundary produced (its period logs and `entity-{kind}` layers); fresh state layers + inscription; tag `epoch-E`, move `latest`. On networks with a Mithril aggregator, fetch the immutable-file digest list from the aggregator's digest route, verify it against a certificate, and write the `digests` layer for the files within the boundary.
 4. Determinism job: an independent runner that synced to the same boundary by any means runs `dolos snapshot digest` and alerts on inscription mismatch.
 5. Matching verifiers sign and push referrer signatures; clients enforce k-of-n.

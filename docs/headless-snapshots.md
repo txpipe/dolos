@@ -31,7 +31,7 @@ be passed to:
 
 Every one of them requires stores standing on the first block of the plan's
 sequence epoch, with the archive ending there, as a sync stopped at that epoch
-(`dolos sync catchup --stop-epoch`, or a headless replay's `stop_epoch`) leaves them;
+(`dolos sync catchup --follow --stop-epoch`, or a headless replay's `stop_epoch`) leaves them;
 `Error::NotABoundary` is the boundary refusal, `Error::UnanchoredPoint` refuses
 a hand-built plan whose cursor has no hash, and none of them writes a layer for
 stores that fail the check. Their own input checks can fail first with other errors: a destination

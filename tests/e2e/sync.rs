@@ -11,9 +11,9 @@ use common::*;
 fn daemon_syncs(workspace: &ScenarioWorkspace) {
     println!("e2e sync start: {}", workspace.name());
 
+    // A relay bootstrap leaves no store with data, and not every store, so
+    // there is nothing to read before the daemon runs: it starts from genesis.
     reset_and_bootstrap(workspace);
-
-    let before = fetch_summary(workspace);
 
     let mut cmd = prepare_scenario_process(workspace);
 
@@ -37,14 +37,6 @@ fn daemon_syncs(workspace: &ScenarioWorkspace) {
 
     let after = fetch_summary(workspace);
 
-    let before_tip = before
-        .wal
-        .tip_slot
-        .into_iter()
-        .chain(before.archive.tip_slot)
-        .chain(before.state.tip_slot)
-        .max()
-        .unwrap_or_default();
     let after_tip = after
         .wal
         .tip_slot
@@ -55,8 +47,8 @@ fn daemon_syncs(workspace: &ScenarioWorkspace) {
         .unwrap_or_default();
 
     assert!(
-        after_tip > before_tip,
-        "expected tip to advance slots for {}, before={before_tip}, after={after_tip}",
+        after_tip > 0,
+        "expected tip to advance past genesis for {}, after={after_tip}",
         workspace.name()
     );
 }

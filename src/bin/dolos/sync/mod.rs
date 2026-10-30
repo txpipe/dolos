@@ -2,7 +2,11 @@
 //! roll back the WAL it writes.
 
 use clap::{Parser, Subcommand};
-use dolos_core::{config::RootConfig, BlockSlot, ChainPoint};
+use dolos::storage::{Access, ArchiveStoreBackend};
+use dolos_core::{
+    config::{RootConfig, StoreType},
+    BlockSlot, ChainPoint,
+};
 use miette::{Context, IntoDiagnostic};
 
 use dolos::prelude::*;
@@ -54,6 +58,25 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     }
 }
 
+/// Whether the dataset keeps an archive between runs: `history.mode` keeps
+/// one, on a store that is not ephemeral. An ephemeral archive holds only
+/// what the running node refilled from the WAL, which no other process sees.
+fn archive_kept(config: &RootConfig) -> bool {
+    config.keeps_archive() && config.storage.archive.kind != StoreType::Ephemeral
+}
+
+/// The dataset's stores, opened as `access` says, with an archive it does not
+/// keep left out.
+fn open_stores(config: &RootConfig, access: Access) -> miette::Result<Stores> {
+    let mut stores = crate::common::open_existing_stores(config, access)?;
+
+    if !archive_kept(config) {
+        stores.archive = ArchiveStoreBackend::noop();
+    }
+
+    Ok(stores)
+}
+
 /// Where each store stands, as read without changing any.
 #[derive(Debug, Clone)]
 struct Positions {
@@ -63,11 +86,23 @@ struct Positions {
     /// first block's in a pruned WAL; none when it holds every block from
     /// Origin, or nothing.
     wal_history: Option<BlockSlot>,
+    /// The oldest point a rollback reaches; none while the WAL holds nothing
+    /// past Origin.
+    rollback_floor: Option<RollbackFloor>,
     state: Option<ChainPoint>,
     /// The archive's tip slot: `None` while it is empty, or not kept.
     archive: Option<BlockSlot>,
-    /// Whether `history.mode` keeps an archive at all.
+    /// Whether the dataset keeps an archive; see [`archive_kept`].
     archive_kept: bool,
+}
+
+/// The first WAL entry past Origin, the oldest point a rollback reaches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RollbackFloor {
+    point: ChainPoint,
+    /// Whether the entry holds a block, which a rollback to it keeps; a reset
+    /// point holds none.
+    is_block: bool,
 }
 
 impl Positions {
@@ -86,7 +121,7 @@ impl Positions {
             .context("reading the WAL tip")?
             .map(|(point, _)| point);
 
-        let wal_history = history_start(&stores.wal)
+        let (wal_history, rollback_floor) = history_start(&stores.wal)
             .into_diagnostic()
             .context("reading the WAL start")?;
 
@@ -107,9 +142,10 @@ impl Positions {
             wal_start,
             wal_tip,
             wal_history,
+            rollback_floor,
             state,
             archive,
-            archive_kept: config.keeps_archive(),
+            archive_kept: archive_kept(config),
         })
     }
 
@@ -139,11 +175,20 @@ impl Positions {
 
         found
     }
+
+    /// Whether the archive is the one store away from the WAL tip, and ahead
+    /// of it: only a sync past the archive tip brings the others to it.
+    fn only_archive_ahead(&self) -> bool {
+        self.state() == self.wal() && self.archive_kept && self.archive > self.wal()
+    }
 }
 
-/// Where the WAL's unbroken history starts. `reset_to` keeps only Origin
+/// Where the WAL's unbroken history starts (see [`Positions::wal_history`]),
+/// and the oldest point a rollback reaches. `reset_to` keeps only Origin
 /// before the entry it writes, so a reset point is the first entry past it.
-fn history_start<W: WalStore>(wal: &W) -> Result<Option<BlockSlot>, WalError> {
+fn history_start<W: WalStore>(
+    wal: &W,
+) -> Result<(Option<BlockSlot>, Option<RollbackFloor>), WalError> {
     let mut entries = wal.iter_blocks(None, None)?;
     let mut first = entries.next();
 
@@ -153,11 +198,18 @@ fn history_start<W: WalStore>(wal: &W) -> Result<Option<BlockSlot>, WalError> {
         first = entries.next();
     }
 
-    Ok(match first {
+    let history = match &first {
         Some((point, block)) if block.is_empty() => Some(point.slot()),
         Some((point, _)) if !from_origin => Some(point.slot()),
         _ => None,
-    })
+    };
+
+    let floor = first.map(|(point, block)| RollbackFloor {
+        point,
+        is_block: !block.is_empty(),
+    });
+
+    Ok((history, floor))
 }
 
 /// The slot a store has applied the chain through: none for no position, or

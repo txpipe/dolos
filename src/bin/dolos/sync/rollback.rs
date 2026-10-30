@@ -36,34 +36,42 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     crate::common::setup_tracing_warnings()?;
 
-    let stores = crate::common::open_existing_stores(config, Access::Mutate)?;
+    let stores = super::open_stores(config, Access::Mutate)?;
     let positions = Positions::read(config, &stores)?;
 
     // Each undone block takes back what it applied, so a store that never
-    // applied it would be unwound past its own position.
+    // applied it would be unwound past its own position. An archive ahead
+    // holds blocks the WAL cannot undo.
     let disagreements = positions.disagreements();
     if !disagreements.is_empty() {
+        let help = if positions.only_archive_ahead() {
+            "sync past the archive tip with `dolos sync catchup` first"
+        } else {
+            "run `dolos sync recover` first"
+        };
+
         miette::bail!(
-            help = "run `dolos sync recover` first",
+            help = help,
             "the stores disagree: {}",
             disagreements.join("; ")
         );
     }
 
-    let held = stores
-        .wal
-        .contains_point(&point)
-        .into_diagnostic()
-        .context("looking the point up in the WAL")?;
+    // The all-zero point names the WAL's Origin entry, which holds no block
+    // to roll back to.
+    let held = point.clone().into_bytes() != ChainPoint::Origin.into_bytes()
+        && stores
+            .wal
+            .contains_point(&point)
+            .into_diagnostic()
+            .context("looking the point up in the WAL")?;
 
     if !held {
-        let window = match &positions.wal_tip {
-            Some(tip) => format!(
-                "slot {} to slot {}",
-                positions.wal_history.unwrap_or(0),
-                tip.slot()
-            ),
-            None => "nothing".to_string(),
+        let window = match (&positions.rollback_floor, &positions.wal_tip) {
+            (Some(floor), Some(tip)) => {
+                format!("slot {} to slot {}", floor.point.slot(), tip.slot())
+            }
+            _ => "nothing past Origin".to_string(),
         };
 
         miette::bail!(

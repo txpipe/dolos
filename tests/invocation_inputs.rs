@@ -468,7 +468,7 @@ fn digest_refuses_stores_off_the_boundary() {
     // The renderer wraps the hint inside `--stop-epoch`, at its hyphen.
     let squeezed: String = message.split_whitespace().collect();
     assert!(
-        squeezed.contains("dolossynccatchup--stop-epoch1"),
+        squeezed.contains("dolossynccatchup--follow--stop-epoch1"),
         "{message}"
     );
     assert!(!inscription.exists(), "a refused digest wrote a document");
@@ -504,8 +504,10 @@ fn digest_refuses_stores_past_the_boundary_as_it_plans() {
         message.contains("restore the stele for this epoch"),
         "{message}"
     );
+    // The renderer can wrap the hint inside `--stop-epoch`, at its hyphen.
+    let squeezed: String = message.split_whitespace().collect();
     assert!(
-        message.contains("dolos sync catchup --stop-epoch set to the following epoch"),
+        squeezed.contains("dolossynccatchup--follow--stop-epochsettothefollowingepoch"),
         "{message}"
     );
     assert!(

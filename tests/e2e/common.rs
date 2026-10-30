@@ -289,8 +289,7 @@ pub fn reset_and_bootstrap(workspace: &ScenarioWorkspace) {
     );
 }
 
-/// The cursors `sync status` reports. A status that ran and found the stores
-/// unhealthy (exit 3) still reports them.
+/// The cursors `sync status` reports, over stores a node left healthy.
 pub fn fetch_summary(workspace: &ScenarioWorkspace) -> dolos::cli::DataSummary {
     let mut cmd = prepare_scenario_process(workspace);
 
@@ -302,9 +301,10 @@ pub fn fetch_summary(workspace: &ScenarioWorkspace) -> dolos::cli::DataSummary {
         .expect("failed to get sync status");
 
     assert!(
-        matches!(data.status.code(), Some(0 | 3)),
-        "sync status failed for scenario {}: {}",
+        data.status.success(),
+        "sync status failed for scenario {}: {}{}",
         workspace.name(),
+        String::from_utf8_lossy(&data.stdout),
         String::from_utf8_lossy(&data.stderr)
     );
 
