@@ -702,15 +702,16 @@ mod tests {
         resolve(&config, &downloading(&looped), None, true).unwrap();
     }
 
-    /// Under `--force`, only the download directory's `immutable` directory
-    /// is read, the one the download writes and the replay reads: what lies
-    /// beside it, as a volume's `lost+found` or `.Trashes`, is never read,
-    /// whatever links it holds. In it, a directory that can't be searched
-    /// holds nothing the run reads, and nor does a link through one, so both
-    /// are passed over. One that can be searched but not listed is refused,
-    /// since what is reached through it can't be told, and so is a download
-    /// directory that can't be listed whose `immutable` directory links into
-    /// the root. Any other error reading the source is named as it is.
+    /// Under `--force`, only the names the download writes in the download
+    /// directory are read, among them its `immutable` directory, the one the
+    /// replay reads: what lies beside them, as a volume's `lost+found` or
+    /// `.Trashes`, is never read, whatever links it holds. In `immutable`, a
+    /// directory that can't be searched holds nothing the run reads, and nor
+    /// does a link through one, so both are passed over. One that can be
+    /// searched but not listed is refused, since what is reached through it
+    /// can't be told, and so is a download directory that can't be listed
+    /// whose `immutable` directory links into the root. Any other error
+    /// reading the source is named as it is.
     #[cfg(unix)]
     #[test]
     fn under_a_clear_a_directory_that_cant_be_listed_is_refused_unless_it_cant_be_searched() {
