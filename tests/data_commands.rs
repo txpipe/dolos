@@ -558,3 +558,254 @@ fn the_old_names_are_gone() {
         );
     }
 }
+
+/// A Conway proposal with a DRep and a committee vote: maps keyed by
+/// credentials, which JSON keys as strings.
+fn voted_proposal() -> dolos_cardano::ProposalState {
+    use dolos_cardano::pallas::ledger::primitives::{conway::Vote, StakeCredential};
+    use dolos_cardano::{ProposalAction, VoteEntry};
+
+    let vote = VoteEntry {
+        newest: (150, Vote::Yes),
+        standing: None,
+        newest_order: 0,
+        standing_order: 0,
+    };
+
+    dolos_cardano::ProposalState {
+        slot: 150,
+        tx: [0x7a; 32].into(),
+        idx: 1,
+        action: ProposalAction::Info,
+        max_epoch: Some(10),
+        ratified_epoch: None,
+        canceled_epoch: None,
+        deposit: Some(100_000_000),
+        reward_account: Some(StakeCredential::AddrKeyhash([0x5e; 28].into())),
+        proposed_in: Some(0),
+        parent: None,
+        purpose: None,
+        anchor: None,
+        cc_votes: BTreeMap::from([(StakeCredential::ScriptHash([0xc0; 28].into()), vote.clone())]),
+        drep_votes: BTreeMap::from([(StakeCredential::AddrKeyhash([0xd0; 28].into()), vote)]),
+        spo_votes: BTreeMap::new(),
+    }
+}
+
+#[test]
+fn json_writes_maps_keyed_by_credentials() {
+    let node = Node::new();
+    node.sync();
+
+    let proposal = voted_proposal();
+    let key = proposal.key();
+
+    {
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+
+        let state = stores.state.start_writer().unwrap();
+        state.write_entity_typed(&key, &proposal).unwrap();
+        state.commit().unwrap();
+
+        let archive = stores.archive.start_writer().unwrap();
+        archive.write_log_typed(150, &key, &proposal).unwrap();
+        archive.commit().unwrap();
+    }
+
+    let mut bytes = dolos_core::KeyBytes::new();
+    dolos_core::KeyCodec::encode_key(&key, &mut bytes);
+    let hex_key = hex::encode(&bytes);
+
+    let drep = format!("AddrKeyhash:{}", "d0".repeat(28));
+    let member = format!("ScriptHash:{}", "c0".repeat(28));
+
+    let runs: [&[&str]; 3] = [
+        &[
+            "data",
+            "inspect",
+            "--namespace",
+            "proposals",
+            "--key",
+            &hex_key,
+            "--format",
+            "json",
+        ],
+        &[
+            "data",
+            "dump",
+            "state",
+            "--namespace",
+            "proposals",
+            "--format",
+            "json",
+        ],
+        &[
+            "data",
+            "dump",
+            "logs",
+            "--namespace",
+            "proposals",
+            "--format",
+            "json",
+        ],
+    ];
+
+    for args in runs {
+        let lines = json_lines(&dolos(&node, args));
+        assert_eq!(lines.len(), 1, "{args:?}");
+
+        // `inspect` prints the entity; the dumps a record around it.
+        let value = match lines[0].get("value") {
+            Some(value) => value,
+            None => &lines[0],
+        };
+
+        assert!(
+            value["drep_votes"].get(&drep).is_some(),
+            "{args:?}: {value}"
+        );
+        assert!(
+            value["cc_votes"].get(&member).is_some(),
+            "{args:?}: {value}"
+        );
+    }
+}
+
+#[test]
+fn the_epoch_range_of_a_log_dump_is_inclusive() {
+    let node = Node::new();
+    node.sync();
+
+    let starts: Vec<u64> = {
+        let stores =
+            dolos::storage::open_data_stores::<dolos_cardano::CardanoDelta>(&node.config).unwrap();
+        let summary = dolos_cardano::load_chain_summary_from_state(&stores.state).unwrap();
+        let starts: Vec<u64> = (0..=5).map(|epoch| summary.epoch_start(epoch)).collect();
+
+        let archive = stores.archive.start_writer().unwrap();
+
+        // Each edge of epochs 2 and 3, and the slots either side.
+        let slots = [
+            starts[2] - 1,
+            starts[2],
+            starts[3],
+            starts[4] - 1,
+            starts[4],
+        ];
+
+        for (i, slot) in slots.into_iter().enumerate() {
+            let drep = DRepKey(DRep::Key([i as u8; 28].into()));
+            let log = DRepEpochLog {
+                voting_power: i as u64,
+                registered: true,
+            };
+            archive.write_log_typed(slot, &drep, &log).unwrap();
+        }
+
+        archive.commit().unwrap();
+
+        starts
+    };
+
+    let lines = json_lines(&dolos(
+        &node,
+        &[
+            "data",
+            "dump",
+            "logs",
+            "--namespace",
+            "drep-epochs",
+            "--from-epoch",
+            "2",
+            "--to-epoch",
+            "3",
+            "--limit",
+            "0",
+            "--format",
+            "json",
+        ],
+    ));
+
+    let slots: Vec<u64> = lines
+        .iter()
+        .map(|line| line["slot"].as_u64().unwrap())
+        .collect();
+
+    assert_eq!(slots, [starts[2], starts[3], starts[4] - 1]);
+}
+
+#[test]
+fn stats_and_the_cache_reports_print_json() {
+    let (node, _) = populated();
+
+    let stats = json_lines(&dolos(&node, &["data", "stats", "--format", "json"]));
+    assert_eq!(stats.len(), 1);
+    assert!(stats[0]["state"].is_object(), "{}", stats[0]);
+    assert!(stats[0]["archive"].is_object(), "{}", stats[0]);
+
+    let cache = json_lines(&dolos(&node, &["cache", "stats", "--format", "json"]));
+    assert_eq!(cache.len(), 1);
+    assert!(cache[0].is_object(), "{}", cache[0]);
+
+    let verified = json_lines(&dolos(
+        &node,
+        &["cache", "verify", "--sample", "5", "--format", "json"],
+    ));
+    assert_eq!(verified.len(), 1);
+    assert!(
+        verified[0]["mismatches"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "{}",
+        verified[0]
+    );
+}
+
+#[test]
+fn an_archive_alone_still_dumps_and_reports() {
+    let (node, totals) = populated();
+
+    for store in [
+        node.config.wal_path().unwrap(),
+        node.config.storage.state_path().unwrap(),
+    ] {
+        if store.is_dir() {
+            std::fs::remove_dir_all(&store).unwrap();
+        } else {
+            std::fs::remove_file(&store).unwrap();
+        }
+    }
+
+    let blocks = json_lines(&dolos(
+        &node,
+        &["data", "dump", "blocks", "--limit", "0", "--format", "json"],
+    ));
+    assert_eq!(blocks.len(), totals.blocks);
+
+    json_lines(&dolos(
+        &node,
+        &[
+            "data",
+            "dump",
+            "logs",
+            "--namespace",
+            "epochs",
+            "--format",
+            "json",
+        ],
+    ));
+
+    let stats = json_lines(&dolos(&node, &["data", "stats", "--format", "json"]));
+    assert!(stats[0]["archive"].is_object(), "{}", stats[0]);
+    assert!(stats[0].get("state").is_none(), "{}", stats[0]);
+
+    // What reads the state still refuses, naming it.
+    let inspect = dolos(&node, &["data", "inspect", "--namespace", "epochs"]);
+    assert_eq!(inspect.status.code(), Some(1), "{}", stderr(&inspect));
+    assert!(
+        stderr(&inspect).contains("no store at"),
+        "{}",
+        stderr(&inspect)
+    );
+}

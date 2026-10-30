@@ -94,7 +94,7 @@ pub fn outside_storage_root(
 
 /// `path` made absolute with `..` resolved lexically. Only a relative path
 /// reads the working directory, so absolute ones survive a deleted one.
-fn normalize(path: &Path) -> std::io::Result<PathBuf> {
+pub fn normalize(path: &Path) -> std::io::Result<PathBuf> {
     let mut normalized = PathBuf::new();
 
     for component in std::path::absolute(path)?.components() {
@@ -653,13 +653,7 @@ where
         None => MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
     };
 
-    let state_path = config.storage.state_path().unwrap_or_default();
-
-    if matches!(config.storage.state.kind, StoreType::Fjall { .. }) {
-        fjall_existing(&state_path)?;
-    }
-
-    let state = open_state_at(config, &state_path, access)?;
+    let state = existing_state(config, access)?;
 
     let archive = existing_archive(config, access)?;
 
@@ -679,6 +673,26 @@ pub fn open_existing_archive(
 ) -> Result<ArchiveStoreBackend, OpenError> {
     existing(&config.storage.path)?;
     existing_archive(config, access)
+}
+
+/// The state alone, opened as [`open_existing_stores`] opens it: never
+/// created.
+pub fn open_existing_state(
+    config: &RootConfig,
+    access: Access,
+) -> Result<StateStoreBackend, OpenError> {
+    existing(&config.storage.path)?;
+    existing_state(config, access)
+}
+
+fn existing_state(config: &RootConfig, access: Access) -> Result<StateStoreBackend, OpenError> {
+    let path = config.storage.state_path().unwrap_or_default();
+
+    if matches!(config.storage.state.kind, StoreType::Fjall { .. }) {
+        fjall_existing(&path)?;
+    }
+
+    Ok(open_state_at(config, &path, access)?)
 }
 
 fn existing_archive(config: &RootConfig, access: Access) -> Result<ArchiveStoreBackend, OpenError> {

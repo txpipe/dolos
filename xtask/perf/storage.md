@@ -53,13 +53,14 @@ The runner creates fresh disposable instances. Binary specs are
 `LABEL=PATH[:STORAGE_VERSION]`. Without a version the binary gets a v2
 configuration file. A version marks a binary that predates v2 configuration,
 such as v1 or v2.0.0-alpha.0, and gives it the older file with that
-`storage.version`; the baseline above is one, at v4. Historical raw revision
+`storage.version`, and the commands before the v2 CLI (`doctor rebuild-state`,
+`data dump-blocks`); the baseline above is one, at v4. Historical raw revision
 `9165dbd8` needs `:v3`; that is a compression baseline, not a redb comparison.
 The network magic defaults to the `networkMagic` of the genesis in `--genesis`;
 `--magic` overrides it.
 
 `import` uses 500-block batches; `live` models one-block commits through offline
-import, **not** daemon sync. `read` uses `dump-blocks` and UTxO RPC point/page
+import, **not** daemon sync. `read` uses `data dump blocks` and UTxO RPC point/page
 queries; `mixed` combines RPC point/page reads. This runner does not append while
 serving: use the store's `concurrent` preset or [minibf live replay](minibf.md#live-replay).
 

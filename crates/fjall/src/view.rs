@@ -134,6 +134,23 @@ pub fn remove_views(store: &Path) {
     }
 }
 
+/// The views beside `store` a live view holds: their folders' locks are
+/// held. A writer opening the store would wait them out; a caller removing
+/// the store must not.
+pub fn live_views(store: &Path) -> Vec<PathBuf> {
+    let Ok((parent, prefix)) = beside(store) else {
+        return Vec::new();
+    };
+
+    views_in(&parent, &prefix)
+        .into_iter()
+        .filter(|dir| {
+            File::open(dir.join(VIEW_LOCK_FILE))
+                .is_ok_and(|lock| matches!(lock.try_lock(), Err(TryLockError::WouldBlock)))
+        })
+        .collect()
+}
+
 /// The folder views of `store` live in, and the name each starts with.
 fn beside(store: &Path) -> Result<(PathBuf, String), Error> {
     let store = std::path::absolute(store).map_err(|error| io_error(store, error))?;
@@ -501,6 +518,25 @@ mod tests {
         });
 
         assert!(views(dir.path()).is_empty());
+    }
+
+    /// Only a view whose folder a live view holds is live: a killed
+    /// observer's is not, and a closed one's is gone.
+    #[test]
+    fn only_a_held_view_is_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+
+        let view = View::of(&path, &path).unwrap();
+        let killed = left_by_a_kill(&path, &path);
+
+        assert_eq!(live_views(&path), [view.path().parent().unwrap()]);
+
+        drop(view);
+
+        assert!(live_views(&path).is_empty());
+        assert_eq!(views(dir.path()), [killed]);
     }
 
     /// A writer's open removes every view beside the store, a killed

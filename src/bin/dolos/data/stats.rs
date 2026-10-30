@@ -1,5 +1,5 @@
 use comfy_table::Table;
-use dolos::storage::{Access, ArchiveStoreBackend, StateStoreBackend};
+use dolos::storage::{Access, ArchiveStoreBackend, OpenError, StateStoreBackend};
 use dolos_core::config::RootConfig;
 use dolos_redb3::TableFootprint;
 use miette::{bail, IntoDiagnostic as _};
@@ -133,7 +133,21 @@ fn footprint_to_json(footprint: &TableFootprint) -> serde_json::Value {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    let stores = crate::common::open_existing_stores(config, Access::Observe)?;
+    // Each store the dataset holds, so one that holds only an archive is
+    // reported too; with neither, the state's absence is the refusal.
+    let archive = match dolos::storage::open_existing_archive(config, Access::Observe) {
+        Err(OpenError::Missing { .. }) => None,
+        archive => Some(archive?),
+    };
+
+    let state = match dolos::storage::open_existing_state(config, Access::Observe) {
+        Err(OpenError::Missing { .. })
+            if matches!(archive, Some(ArchiveStoreBackend::Fjall(_))) =>
+        {
+            None
+        }
+        state => Some(state?),
+    };
 
     let mut report = Report {
         state: None,
@@ -145,26 +159,29 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // disk footprints — LSM trees have no leaf-fill analogue and faking one
     // would mislead. Stores on neither engine are left out rather than
     // aborting the command.
-    match &stores.state {
-        StateStoreBackend::Redb(state) => {
+    match &state {
+        None | Some(StateStoreBackend::Memory(_)) => (),
+        Some(StateStoreBackend::Redb(state)) => {
             let stats = state.utxoset_stats().into_diagnostic()?;
 
             report.state = Some(redb_section(stats));
         }
-        StateStoreBackend::Fjall(state) => {
+        Some(StateStoreBackend::Fjall(state)) => {
             report.state = Some(fjall_section(state.disk_usage(), &state.tuning()));
         }
-        StateStoreBackend::Memory(_) => (),
     }
 
-    match &stores.archive {
-        ArchiveStoreBackend::Fjall(archive) => {
+    match &archive {
+        Some(ArchiveStoreBackend::Fjall(archive)) => {
             report.archive = Some(fjall_section(archive.disk_usage(), &archive.tuning()));
         }
-        ArchiveStoreBackend::Memory(_)
-        | ArchiveStoreBackend::LogsOnly(_)
-        | ArchiveStoreBackend::EntityReads(_)
-        | ArchiveStoreBackend::NoOp(_) => (),
+        None
+        | Some(
+            ArchiveStoreBackend::Memory(_)
+            | ArchiveStoreBackend::LogsOnly(_)
+            | ArchiveStoreBackend::EntityReads(_)
+            | ArchiveStoreBackend::NoOp(_),
+        ) => (),
     }
 
     if report.state.is_none() && report.archive.is_none() {

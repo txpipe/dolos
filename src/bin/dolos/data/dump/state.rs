@@ -521,7 +521,7 @@ fn dump_state<T: TableRow>(
         .into_diagnostic()
         .context("iterating entities")?;
 
-    let entities = bounds.apply(entities);
+    let entities = bounds.apply_fallible(entities);
 
     if format == Format::Json {
         for entity in entities {
@@ -558,11 +558,11 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         return Err(super::unknown_namespace("state", &args.namespace, &NAMESPACES).into());
     }
 
-    let stores = super::observe(config)?;
+    let state = super::observe_state(config)?;
     let genesis = crate::common::open_genesis(config)?;
     let network = network_from_genesis(&genesis);
 
-    let state = &stores.state;
+    let state = &state;
     let bounds = &args.bounds;
     let (format, layout) = (output.format.format, output.layout);
 

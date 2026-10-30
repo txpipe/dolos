@@ -775,7 +775,7 @@ fn dump_logs<T: TableRow>(
         .wrap_err("iterating logs")?
         .filter(|log| log.as_ref().map_or(true, |(slot, _, _)| within(*slot)));
 
-    let logs = bounds.apply(logs);
+    let logs = bounds.apply_fallible(logs);
 
     if format == Format::Json {
         for log in logs {
@@ -811,7 +811,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         return Err(super::unknown_namespace("log", &args.namespace, &NAMESPACES).into());
     }
 
-    let stores = super::observe(config)?;
+    let archive = super::observe_archive(config)?;
     let genesis = crate::common::open_genesis(config)?;
     let network = dolos_cardano::network_from_genesis(&genesis);
 
@@ -832,10 +832,9 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
                 | "account-epochs/rewards"
         );
     let summary = if need_summary {
-        Some(
-            load_chain_summary_from_state(&stores.state)
-                .map_err(|err| miette::miette!("{err:?}"))?,
-        )
+        let state = super::observe_state(config)?;
+
+        Some(load_chain_summary_from_state(&state).map_err(|err| miette::miette!("{err:?}"))?)
     } else {
         None
     };
@@ -860,7 +859,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         (None, None, None)
     };
 
-    let archive = &stores.archive;
+    let archive = &archive;
     let (bounds, format) = (&args.bounds, output.format.format);
 
     match args.namespace.as_str() {

@@ -1052,9 +1052,49 @@ fn read_import_metrics(path: &Path) -> io::Result<Option<Value>> {
     Ok(Some(metrics))
 }
 
+/// `data rebuild --target STATE` to epoch 1, or `doctor rebuild-state` for
+/// a binary that predates v2 configuration, and with it the v2 CLI.
+fn seed_args(bin: &Bin, state: &Path) -> Vec<std::ffi::OsString> {
+    let command: &[&str] = if bin.legacy_config {
+        &["doctor", "rebuild-state"]
+    } else {
+        &["data", "rebuild"]
+    };
+
+    let mut args: Vec<std::ffi::OsString> = command.iter().map(Into::into).collect();
+    args.push("--target".into());
+    args.push(state.into());
+    args.extend(["--stop-epoch", "1", "--chunk", "500"].map(Into::into));
+    args
+}
+
+/// `data dump blocks` over `first..=last`, every block, or `data
+/// dump-blocks` for a binary that predates v2 configuration.
+fn scan_args(bin: &Bin, first: u64, last: u64) -> Vec<String> {
+    let (first, last) = (first.to_string(), last.to_string());
+
+    let args: Vec<&str> = if bin.legacy_config {
+        vec!["data", "dump-blocks", "--from", &first, "--to", &last]
+    } else {
+        vec![
+            "data",
+            "dump",
+            "blocks",
+            "--limit",
+            "0",
+            "--from-slot",
+            &first,
+            "--to-slot",
+            &last,
+        ]
+    };
+
+    args.into_iter().map(String::from).collect()
+}
+
 impl Instance {
     /// Seed the state store with the era summary the block mappers need:
-    /// `data rebuild` into the instance's own state path, stopping
+    /// [`seed_args`] into the instance's own state path, stopping
     /// at epoch 1, so it replays exactly the first Byron epoch. Unmeasured.
     fn seed_state(&self, bin: &Bin) -> io::Result<()> {
         let state = self.dir.join("data").join("state");
@@ -1062,12 +1102,7 @@ impl Instance {
             std::fs::remove_dir_all(&state)?;
         }
         let mut cmd = self.command(bin);
-        cmd.args(["data", "rebuild", "--target"]).arg(&state).args([
-            "--stop-epoch",
-            "1",
-            "--chunk",
-            "500",
-        ]);
+        cmd.args(seed_args(bin, &state));
         let mut child = cmd.spawn()?;
         let usage = wait_child(&mut child)?;
         if usage.status != 0 {
@@ -1086,10 +1121,7 @@ impl Instance {
         let first = tail[0].slot;
         let last = tail[tail.len() - 1].slot;
         let mut cmd = self.command(bin);
-        cmd.args(["data", "dump", "blocks", "--limit", "0", "--from-slot"])
-            .arg(first.to_string())
-            .arg("--to-slot")
-            .arg(last.to_string());
+        cmd.args(scan_args(bin, first, last));
         let started = Instant::now();
         let mut child = cmd.spawn()?;
         let usage = wait_child(&mut child)?;
@@ -1452,6 +1484,47 @@ mod tests {
         assert!(!b.legacy_config);
         assert!(Bin::parse("nolabel").is_err());
         assert!(Bin::parse("=path").is_err());
+    }
+
+    #[test]
+    fn a_binary_before_v2_takes_the_commands_it_knows() {
+        let legacy = Bin::parse("baseline=/tmp/dolos-old:v4").unwrap();
+        let current = Bin::parse("candidate=target/release/dolos").unwrap();
+        let state = Path::new("/w/data/state");
+
+        assert_eq!(
+            seed_args(&legacy, state),
+            [
+                "doctor",
+                "rebuild-state",
+                "--target",
+                "/w/data/state",
+                "--stop-epoch",
+                "1",
+                "--chunk",
+                "500"
+            ]
+        );
+        assert_eq!(seed_args(&current, state)[..2], ["data", "rebuild"]);
+
+        assert_eq!(
+            scan_args(&legacy, 3, 9),
+            ["data", "dump-blocks", "--from", "3", "--to", "9"]
+        );
+        assert_eq!(
+            scan_args(&current, 3, 9),
+            [
+                "data",
+                "dump",
+                "blocks",
+                "--limit",
+                "0",
+                "--from-slot",
+                "3",
+                "--to-slot",
+                "9"
+            ]
+        );
     }
 
     #[test]

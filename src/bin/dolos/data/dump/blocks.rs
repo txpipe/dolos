@@ -54,13 +54,12 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         Format::Json => crate::common::setup_tracing_error_only()?,
     }
 
-    let stores = super::observe(config)?;
+    let archive = super::observe_archive(config)?;
 
     // `get_range` ends before its `to`.
     let to = args.to_slot.map(|slot| slot.saturating_add(1));
 
-    let blocks = stores
-        .archive
+    let blocks = archive
         .get_range(args.from_slot, to)
         .into_diagnostic()
         .context("iterating blocks")?;

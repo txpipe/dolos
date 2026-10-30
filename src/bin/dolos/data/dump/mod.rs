@@ -4,8 +4,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dolos_core::config::RootConfig;
 
-use crate::common::Stores;
 use crate::output::{Format, FormatArgs, Usage};
+use dolos::storage::{Access, ArchiveStoreBackend, StateStoreBackend};
 
 mod blocks;
 mod logs;
@@ -35,11 +35,20 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     }
 }
 
-/// The dataset as it is on disk, opened without writing to it.
-fn observe(config: &RootConfig) -> miette::Result<Stores> {
-    Ok(crate::common::open_existing_stores(
+/// The state as it is on disk, opened without writing to it.
+fn observe_state(config: &RootConfig) -> miette::Result<StateStoreBackend> {
+    Ok(dolos::storage::open_existing_state(
         config,
-        dolos::storage::Access::Observe,
+        Access::Observe,
+    )?)
+}
+
+/// The archive as it is on disk, opened without writing to it: a dataset
+/// that holds only an archive dumps its blocks and logs.
+fn observe_archive(config: &RootConfig) -> miette::Result<ArchiveStoreBackend> {
+    Ok(dolos::storage::open_existing_archive(
+        config,
+        Access::Observe,
     )?)
 }
 
@@ -66,13 +75,35 @@ pub struct Bounds {
 }
 
 impl Bounds {
-    pub fn apply<I: Iterator>(&self, records: I) -> std::iter::Take<std::iter::Skip<I>> {
-        let limit = match self.limit {
+    fn limit(&self) -> usize {
+        match self.limit {
             0 => usize::MAX,
             limit => limit,
-        };
+        }
+    }
 
-        records.skip(self.offset).take(limit)
+    pub fn apply<I: Iterator>(&self, records: I) -> std::iter::Take<std::iter::Skip<I>> {
+        records.skip(self.offset).take(self.limit())
+    }
+
+    /// [`Bounds::apply`] over records that can fail to read: `--offset`
+    /// skips only records read, so a failure inside it still reaches the
+    /// caller.
+    pub fn apply_fallible<T, E>(
+        &self,
+        records: impl Iterator<Item = Result<T, E>>,
+    ) -> impl Iterator<Item = Result<T, E>> {
+        let mut skipping = self.offset;
+
+        records
+            .filter(move |record| match record {
+                Ok(_) if skipping > 0 => {
+                    skipping -= 1;
+                    false
+                }
+                _ => true,
+            })
+            .take(self.limit())
     }
 }
 
@@ -115,4 +146,25 @@ fn unknown_namespace(kind: &str, name: &str, known: &[&str]) -> Usage {
         format!("no {kind} namespace {name}"),
         Some(format!("one of: {}", known.join(", "))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_offset_skips_records_but_not_failures() {
+        let bounds = Bounds {
+            limit: 2,
+            offset: 3,
+        };
+
+        let records = [Ok(0), Err("torn"), Ok(1), Ok(2), Ok(3), Ok(4)];
+        let bounded: Vec<_> = bounds.apply_fallible(records.into_iter()).collect();
+        assert_eq!(bounded, [Err("torn"), Ok(3)]);
+
+        let records = [Ok(0), Ok(1), Ok(2), Ok(3), Ok(4), Ok::<_, &str>(5)];
+        let bounded: Vec<_> = bounds.apply_fallible(records.into_iter()).collect();
+        assert_eq!(bounded, [Ok(3), Ok(4)]);
+    }
 }

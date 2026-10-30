@@ -35,24 +35,17 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     Ok(())
 }
 
-/// The stores under the storage root that exist, after the checks that keep
-/// removing them complete and bounded: every store sits under the root and
-/// none is, or holds, a symbolic link, so nothing outside the root is
-/// reached and nothing the configuration places elsewhere is left behind.
+/// Where a ranged `bootstrap snapshot` download stages its chunks.
+const SNAPSHOT_STAGING_DIR: &str = ".dolos-snapshot-tmp";
+
+/// The stores under the storage root that exist, in the order they are
+/// removed, after the checks that keep removing them complete and bounded:
+/// every store sits strictly inside the root, reached through no symbolic
+/// link, holds none, and no live read-only view of a fjall store is open, so
+/// nothing outside the root is reached and nothing the configuration places
+/// elsewhere is left behind.
 fn managed_paths(config: &RootConfig) -> miette::Result<Vec<PathBuf>> {
     let root = &config.storage.path;
-    let outside = stores_outside_root(config).into_diagnostic()?;
-
-    if !outside.is_empty() {
-        let listed = format_paths(&outside);
-
-        miette::bail!(
-            "the configuration keeps stores outside the storage root {}, so a reset would \
-             leave them behind:\n{listed}\nRemove the storage root's stores and each of \
-             those directories by hand, then run `dolos bootstrap`",
-            root.display(),
-        );
-    }
 
     if std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         miette::bail!(
@@ -62,24 +55,61 @@ fn managed_paths(config: &RootConfig) -> miette::Result<Vec<PathBuf>> {
         );
     }
 
-    let managed: Vec<PathBuf> = store_paths(config)
+    let outside = stores_outside_root(config).into_diagnostic()?;
+
+    if !outside.is_empty() {
+        let listed = format_paths(&outside);
+
+        miette::bail!(
+            "the configuration keeps stores outside the storage root {}, or at the root itself, \
+             so a reset would leave them behind or take the root with them:\n{listed}\nRemove \
+             the storage root's stores and each of those directories by hand, then run \
+             `dolos bootstrap`",
+            root.display(),
+        );
+    }
+
+    let candidates = store_paths(config);
+
+    let mut links = Vec::new();
+
+    for path in &candidates {
+        links.extend(links_on_the_way(root, path).into_diagnostic()?);
+    }
+
+    let managed: Vec<PathBuf> = candidates
         .into_iter()
         .filter(|path| std::fs::symlink_metadata(path).is_ok())
         .collect();
-
-    let mut links = Vec::new();
 
     for path in &managed {
         links.extend(symlinks_under(path).into_diagnostic()?);
     }
 
     if !links.is_empty() {
+        links.sort();
+        links.dedup();
         let listed = format_paths(&links);
 
         miette::bail!(
-            "the stores under {} hold symbolic links, and a reset would not reach what they \
-             point at:\n{listed}\nRemove the stores and the linked directories by hand, then \
-             run `dolos bootstrap`",
+            "the stores under {} are, hold or are reached through symbolic links, and a reset \
+             would not reach what they point at:\n{listed}\nRemove the stores and the linked \
+             directories by hand, then run `dolos bootstrap`",
+            root.display(),
+        );
+    }
+
+    let live: Vec<PathBuf> = fjall_stores(config)
+        .iter()
+        .flat_map(|store| dolos_fjall::view::live_views(store))
+        .collect();
+
+    if !live.is_empty() {
+        let listed = format_paths(&live);
+
+        miette::bail!(
+            help = "dataset in use by another dolos process (stop it, then run the reset again)",
+            "a dolos command is reading the stores under {} through:\n{listed}",
             root.display(),
         );
     }
@@ -87,38 +117,49 @@ fn managed_paths(config: &RootConfig) -> miette::Result<Vec<PathBuf>> {
     Ok(managed)
 }
 
-/// Every path under the storage root the node writes: its stores, wherever
-/// the configuration puts them under the root, the cache and mempool even
-/// while they are off, a stele transfer's scratch, a restore's progress
-/// file, and the read-only views an interrupted observer left beside the
-/// fjall stores.
+/// Every path under the storage root the node writes, the WAL and the state
+/// first, so a reset that stops part-way leaves no state over a fresh
+/// archive: its stores, wherever the configuration puts them under the
+/// root, the cache and mempool even while they are off, a stele transfer's
+/// scratch, a snapshot download's staging, a restore's progress and a
+/// publish's resumption record, and the read-only views of the fjall stores
+/// an interrupted observer left.
 fn store_paths(config: &RootConfig) -> Vec<PathBuf> {
     let storage = &config.storage;
     let root = &storage.path;
 
-    let mut paths: Vec<PathBuf> = [
-        config.wal_path(),
-        storage.state_path(),
+    let first: Vec<PathBuf> = [config.wal_path(), storage.state_path()]
+        .into_iter()
+        .flatten()
+        .collect();
+
+    let mut rest: Vec<PathBuf> = [
         storage.archive_path(),
         storage.blocks_path(),
         Some(storage.resolve(config.mempool.path.as_ref(), "mempool")),
         Some(storage.resolve(storage.cache.path.as_ref(), "cache")),
         Some(root.join(dolos_snapshot::node::STELE_SCRATCH_DIR)),
+        Some(root.join(SNAPSHOT_STAGING_DIR)),
         Some(dolos_snapshot::restore::progress_path_in(root)),
+        Some(dolos_snapshot::registry::record_path_in(root)),
     ]
     .into_iter()
     .flatten()
     .collect();
 
-    for store in [storage.state_path(), storage.archive_path()]
-        .into_iter()
-        .flatten()
-    {
-        paths.extend(views_beside(&store));
+    for store in fjall_stores(config) {
+        rest.extend(views_beside(&store));
     }
 
-    paths.sort();
-    paths.dedup();
+    rest.sort();
+
+    let mut paths = first;
+
+    for path in rest {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
 
     // A store nested in another goes with it.
     let nested: Vec<PathBuf> = paths
@@ -134,6 +175,13 @@ fn store_paths(config: &RootConfig) -> Vec<PathBuf> {
     paths.retain(|path| !nested.contains(path));
 
     paths
+}
+
+fn fjall_stores(config: &RootConfig) -> Vec<PathBuf> {
+    [config.storage.state_path(), config.storage.archive_path()]
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// The views of the fjall store at `store`, folders named `.{store}.view-*`
@@ -176,19 +224,55 @@ fn format_paths(paths: &[PathBuf]) -> String {
         .join("\n")
 }
 
+/// The store paths a reset would not reach inside the root: outside it, or
+/// the root itself. Paths are compared with `..` resolved lexically;
+/// [`links_on_the_way`] makes that the path the filesystem resolves.
 fn stores_outside_root(config: &RootConfig) -> std::io::Result<Vec<PathBuf>> {
     let storage = &config.storage;
+    let root = dolos::storage::normalize(&storage.path)?;
 
-    dolos::storage::outside_storage_root(
-        config,
-        [
-            config.wal_path(),
-            storage.state_path(),
-            storage.archive_path(),
-            storage.blocks_path(),
-            config.mempool_path(),
-        ],
-    )
+    let paths = [
+        config.wal_path(),
+        storage.state_path(),
+        storage.archive_path(),
+        storage.blocks_path(),
+        Some(storage.resolve(config.mempool.path.as_ref(), "mempool")),
+        Some(storage.resolve(storage.cache.path.as_ref(), "cache")),
+    ];
+
+    let mut outside = Vec::new();
+
+    for path in paths.into_iter().flatten() {
+        let normalized = dolos::storage::normalize(&path)?;
+
+        if normalized == root || !normalized.starts_with(&root) {
+            outside.push(path);
+        }
+    }
+
+    Ok(outside)
+}
+
+/// The symbolic links among the directories `path` passes through below
+/// `root`, itself included: through any of them, removing `path` reaches
+/// outside the root, or `..` resolves elsewhere than it reads.
+fn links_on_the_way(root: &Path, path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let root = dolos::storage::normalize(root)?;
+    let mut found = Vec::new();
+
+    for ancestor in path.ancestors() {
+        let normalized = dolos::storage::normalize(ancestor)?;
+
+        if normalized == root || !normalized.starts_with(&root) {
+            continue;
+        }
+
+        if std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.is_symlink()) {
+            found.push(ancestor.to_path_buf());
+        }
+    }
+
+    Ok(found)
 }
 
 fn symlinks_under(root: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -247,7 +331,9 @@ mod tests {
             root.join(".state.view-a1b2").join("db").join("journal"),
             root.join("scratch").join("layer"),
             root.join("cache").join("cache.redb"),
+            root.join(SNAPSHOT_STAGING_DIR).join("chunk-0"),
             dolos_snapshot::restore::progress_path_in(root),
+            dolos_snapshot::registry::record_path_in(root),
         ];
 
         for file in &files {
@@ -448,5 +534,117 @@ mod tests {
         );
         assert!(files.iter().all(|file| file.is_file()));
         assert!(linked_root.is_symlink());
+    }
+
+    /// Removes `root`'s stores, refusing first, and checks nothing outside
+    /// `root` and none of `kept` was touched.
+    fn assert_refused(config: &RootConfig, kept: &[PathBuf], fragment: &str) {
+        let error = reset(config).expect_err("the reset is refused");
+        let message = error.to_string();
+
+        assert!(message.contains(fragment), "{message}");
+        assert!(kept.iter().all(|file| file.is_file()), "{message}");
+    }
+
+    fn operators_files(dir: &Path) -> Vec<PathBuf> {
+        let files = vec![
+            dir.join("data").join("dolos.toml"),
+            dir.join("outside").join("ssd").join("state").join("theirs"),
+            dir.join("outside").join("state").join("theirs"),
+            dir.join("outside").join("cache").join("theirs"),
+        ];
+
+        for file in &files {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"the operator's").unwrap();
+        }
+
+        files
+    }
+
+    #[test]
+    fn refuses_a_cache_or_mempool_outside_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        let mut kept = old_store_under(&root);
+        kept.extend(operators_files(dir.path()));
+        let outside = dir.path().join("outside").join("cache");
+
+        let mut config = config_over(&root);
+        config.storage.cache.path = Some(outside.clone());
+        assert_refused(&config, &kept, &outside.display().to_string());
+
+        let mut config = config_over(&root);
+        config.mempool.persistent = false;
+        config.mempool.path = Some(outside.clone());
+        assert_refused(&config, &kept, &outside.display().to_string());
+    }
+
+    #[test]
+    fn refuses_a_store_at_the_root_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        let mut kept = old_store_under(&root);
+        kept.extend(operators_files(dir.path()));
+
+        let at_root: [fn(&mut RootConfig); 4] = [
+            |config| config.storage.cache.path = Some(PathBuf::from("")),
+            |config| config.storage.cache.path = Some(PathBuf::from(".")),
+            |config| config.mempool.path = Some(PathBuf::from(".")),
+            |config| config.storage.state.path = Some(PathBuf::from("x/..")),
+        ];
+
+        for set in at_root {
+            let mut config = config_over(&root);
+            set(&mut config);
+            assert_refused(&config, &kept, "outside the storage root");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_store_reached_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        let mut kept = old_store_under(&root);
+        kept.extend(operators_files(dir.path()));
+        std::os::unix::fs::symlink(dir.path().join("outside").join("ssd"), root.join("ssd"))
+            .unwrap();
+
+        for state in ["ssd/state", "ssd/../state"] {
+            let mut config = config_over(&root);
+            config.storage.state.path = Some(PathBuf::from(state));
+            assert_refused(&config, &kept, &root.join("ssd").display().to_string());
+        }
+    }
+
+    #[test]
+    fn refuses_while_a_view_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        let kept = old_store_under(&root);
+
+        let live = root.join(".state.view-live1");
+        std::fs::create_dir_all(&live).unwrap();
+        let lock = std::fs::File::create(live.join("view.lock")).unwrap();
+        lock.lock().unwrap();
+
+        assert_refused(&config_over(&root), &kept, "reading the stores");
+        assert!(live.join("view.lock").is_file());
+
+        drop(lock);
+        reset(&config_over(&root)).unwrap();
+        assert!(!live.exists());
+    }
+
+    #[test]
+    fn removes_the_wal_and_the_state_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        old_store_under(&root);
+
+        let managed = managed_paths(&config_over(&root)).unwrap();
+
+        assert_eq!(managed[..2], [root.join("wal"), root.join("state")]);
     }
 }

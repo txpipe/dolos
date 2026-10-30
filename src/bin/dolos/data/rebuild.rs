@@ -47,7 +47,6 @@
 //! in a sealed epoch through them alone; the same `--rewrite-logs` rebuild
 //! writes them.
 
-use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -64,6 +63,7 @@ use dolos::storage::{
 };
 
 use crate::feedback::Feedback;
+use crate::output::{ConfirmArgs, Usage};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -94,10 +94,8 @@ pub struct Args {
     #[arg(long, default_value_t = 500)]
     chunk: usize,
 
-    /// Skip the interactive confirmation of the in-place wipe (required when
-    /// no terminal is attached)
-    #[arg(long)]
-    force: bool,
+    #[command(flatten)]
+    confirm: ConfirmArgs,
 }
 
 enum Mode {
@@ -153,36 +151,6 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
                 state_path.display(),
             );
         }
-    }
-
-    Ok(())
-}
-
-fn confirm_wipe(state_path: &std::path::Path, force: bool) -> miette::Result<()> {
-    if force {
-        return Ok(());
-    }
-
-    if !std::io::stdin().is_terminal() {
-        bail!(
-            "in-place rebuild wipes {} and no terminal is attached to confirm it; pass --force",
-            state_path.display(),
-        );
-    }
-
-    eprint!(
-        "about to wipe {} and rebuild it from the local archive; continue? [y/N] ",
-        state_path.display(),
-    );
-
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .into_diagnostic()
-        .context("reading confirmation")?;
-
-    if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
-        bail!("aborted");
     }
 
     Ok(())
@@ -409,14 +377,16 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     };
 
     if args.stop_epoch.is_some() && matches!(mode, Mode::InPlace) {
-        bail!(
+        return Err(Usage::new(
             "--stop-epoch needs --target or --ephemeral: a partial in-place state cannot be \
-             reconciled with the live stores"
-        );
+             reconciled with the live stores",
+            None,
+        )
+        .into());
     }
 
     if args.chunk == 0 {
-        bail!("--chunk must be at least 1");
+        return Err(Usage::new("--chunk must be at least 1", None).into());
     }
 
     // Held for the run, so no node starts on the dataset meanwhile; the
@@ -448,7 +418,10 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
             };
 
             check_wipe_scope(config, &state_path)?;
-            confirm_wipe(&state_path, args.force)?;
+            args.confirm.require(&format!(
+                "the state store, to rebuild it from the local archive:\n  {}",
+                state_path.display()
+            ))?;
 
             let wal = open_store("wal", crate::common::open_wal_store(config))?;
 

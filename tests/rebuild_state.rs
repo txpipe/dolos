@@ -165,7 +165,7 @@ fn an_in_place_rebuild_reproduces_the_synced_state() {
     let before = InstanceContents::read(&node);
     assert!(before.state.cursor.is_some(), "fixture did not sync");
 
-    let stdout = assert_ok(&rebuild(&node, &["--force"]));
+    let stdout = assert_ok(&rebuild(&node, &["--yes"]));
     assert!(stdout.contains("rebuilt in place"), "{stdout}");
 
     let after = InstanceContents::read(&node);
@@ -187,7 +187,7 @@ fn rewrite_logs_reproduces_the_log_rows_and_leaves_blocks_alone() {
 
     let before = InstanceContents::read(&node);
 
-    assert_ok(&rebuild(&node, &["--force", "--rewrite-logs"]));
+    assert_ok(&rebuild(&node, &["--yes", "--rewrite-logs"]));
 
     let after = InstanceContents::read(&node);
 
@@ -252,7 +252,7 @@ fn rewrite_logs_fills_in_index_entries_an_older_archive_lacks() {
         assert_eq!(tagged(&stores.archive), 0);
     }
 
-    assert_ok(&rebuild(&node, &["--force", "--rewrite-logs"]));
+    assert_ok(&rebuild(&node, &["--yes", "--rewrite-logs"]));
 
     let after = InstanceContents::read(&node);
     assert_eq!(after.tags, before.tags);
@@ -500,21 +500,22 @@ fn a_target_holding_an_unmarked_store_is_refused() {
     assert_eq!(unmarked.read_cursor().unwrap(), Some(ChainPoint::Origin));
 }
 
-/// The in-place wipe asks first. With no terminal attached there is nobody to
-/// ask, so the command refuses before touching anything — `--force` is the
-/// non-interactive spelling of yes.
+/// The in-place wipe never prompts: without `--yes` the command names the
+/// store it would wipe and exits 2 before touching anything.
 #[test]
-fn without_force_a_non_interactive_rebuild_refuses_before_touching_anything() {
+fn without_yes_an_in_place_rebuild_refuses_before_touching_anything() {
     let node = Node::new();
     node.sync();
 
     let before = InstanceContents::read(&node);
 
     let output = rebuild(&node, &[]);
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--force"), "{stderr}");
+    assert!(stderr.contains("--yes"), "{stderr}");
+    let state = node.config.storage.state_path().unwrap();
+    assert!(stderr.contains(&state.display().to_string()), "{stderr}");
 
     assert_eq!(InstanceContents::read(&node), before);
 }
@@ -529,8 +530,8 @@ fn a_zero_chunk_is_refused_before_touching_anything() {
 
     let before = InstanceContents::read(&node);
 
-    let output = rebuild(&node, &["--force", "--chunk", "0"]);
-    assert!(!output.status.success());
+    let output = rebuild(&node, &["--yes", "--chunk", "0"]);
+    assert_eq!(output.status.code(), Some(2));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--chunk"), "{stderr}");
@@ -545,9 +546,53 @@ fn stop_epoch_requires_an_isolated_output() {
     let node = Node::new();
     node.sync();
 
-    let output = rebuild(&node, &["--force", "--stop-epoch", "1"]);
-    assert!(!output.status.success());
+    let output = rebuild(&node, &["--yes", "--stop-epoch", "1"]);
+    assert_eq!(output.status.code(), Some(2));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--target"), "{stderr}");
+}
+
+/// A rebuild replays the archive, so without one it refuses, naming it, and
+/// creates no archive and wipes no state.
+#[test]
+fn a_rebuild_without_an_archive_is_refused() {
+    let node = Node::new();
+    node.sync();
+
+    let archive = node.config.storage.archive_path().unwrap();
+    std::fs::remove_dir_all(&archive).unwrap();
+
+    let state = node.config.storage.state_path().unwrap();
+    let before = read_dir_bytes(&state);
+
+    let output = rebuild(&node, &["--yes"]);
+    assert_eq!(output.status.code(), Some(1));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no store at"), "{stderr}");
+    assert!(stderr.contains("archive"), "{stderr}");
+
+    assert!(!archive.exists());
+    assert_eq!(read_dir_bytes(&state), before);
+}
+
+/// Every file under `dir`, with its bytes.
+fn read_dir_bytes(dir: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut found = BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                found.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+
+    found
 }

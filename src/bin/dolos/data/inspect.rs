@@ -64,8 +64,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .into());
     }
 
-    let stores = crate::common::open_existing_stores(config, dolos::storage::Access::Observe)?;
-    let state = &stores.state;
+    let state = &dolos::storage::open_existing_state(config, dolos::storage::Access::Observe)?;
 
     match args.namespace.as_str() {
         "epochs" => run_typed::<EpochState, _>(state, args),
