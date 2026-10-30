@@ -92,9 +92,13 @@ pub struct StateStore {
 }
 
 impl StateStore {
-    /// Open or create a state store at the given path, tuned by `preset`.
+    /// Open or create a state store at the given path, tuned by `preset`,
+    /// removing the views beside it that killed observers left.
     pub fn open(path: impl AsRef<Path>, preset: Preset) -> Result<Self, Error> {
-        Self::open_at(path.as_ref(), preset, None)
+        let store = Self::open_at(path.as_ref(), preset, None)?;
+        crate::view::remove_views(path.as_ref());
+
+        Ok(store)
     }
 
     /// Open the state store at `path` without writing to it, over a
@@ -160,10 +164,19 @@ impl StateStore {
 
     /// Record the compatibility identity, synced to disk before it returns.
     pub fn record_identity(&self, identity: &str) -> Result<(), Error> {
+        self.writable()?;
         self.cursor.insert(IDENTITY_KEY, identity.as_bytes())?;
         self.db.persist(PersistMode::SyncAll)?;
 
         Ok(())
+    }
+
+    /// Refuse a write on a store opened read-only.
+    fn writable(&self) -> Result<(), Error> {
+        match self.view {
+            Some(_) => Err(Error::ReadOnly),
+            None => Ok(()),
+        }
     }
 
     /// Whether the store holds a cursor or any row.
@@ -351,9 +364,7 @@ impl CoreStateStore for StateStore {
     }
 
     fn start_writer(&self) -> Result<Self::Writer, StateError> {
-        if self.view.is_some() {
-            return Err(Error::ReadOnly.into());
-        }
+        self.writable()?;
 
         let batch = self.db.batch();
         Ok(StateWriter {
@@ -455,18 +466,32 @@ mod tests {
 
     const NS: Namespace = "accounts";
 
-    /// A store holding `rows` entities in a table, shut down by its writer.
+    /// A store holding `rows` entities and `rows` UTxOs, each in a table,
+    /// shut down by its writer.
     fn written(path: &Path, rows: u32) {
         let store = StateStore::open(path, Preset::Standard).unwrap();
         let writer = store.start_writer().unwrap();
 
+        let mut delta = UtxoSetDelta::default();
+
         for row in 0..rows {
             let key = EntityKey::from_raw(&row.to_be_bytes());
             writer.write_entity(NS, &key, &vec![1; 8]).unwrap();
+
+            let utxo = dolos_core::UtxoValue {
+                output: dolos_core::EraCbor(1, vec![1; 8]),
+                position: None,
+            };
+            delta.produced_utxo.insert(
+                TxoRef(pallas::crypto::hash::Hash::new([0; 32]), row),
+                Arc::new(utxo),
+            );
         }
 
+        writer.apply_utxoset(&delta).unwrap();
         writer.commit().unwrap();
         store.entities.rotate_memtable_and_wait().unwrap();
+        store.utxos.rotate_memtable_and_wait().unwrap();
         store.shutdown().unwrap();
     }
 
@@ -499,6 +524,9 @@ mod tests {
             let store = StateStore::open_view(&path, Preset::Standard).unwrap();
             let error = store.start_writer().err().unwrap();
             assert!(error.to_string().contains("read-only"), "{error}");
+
+            let error = store.record_identity("other").unwrap_err();
+            assert!(matches!(error, Error::ReadOnly), "{error:?}");
         }
 
         assert!(
@@ -517,17 +545,50 @@ mod tests {
 
         let store = StateStore::open_view(&path, Preset::Standard).unwrap();
         let entities = store.iter_entities(NS, KeyRange::all()).unwrap();
-        let utxos = store.iter_utxos().unwrap();
         drop(store);
+        assert_eq!(
+            left(dir.path()).len(),
+            2,
+            "the view went before its iterator"
+        );
 
         let rows = entities.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(rows.len(), 20_000);
-        assert_eq!(utxos.count(), 0);
+        assert_eq!(left(dir.path()), ["state"]);
 
-        let left: Vec<_> = std::fs::read_dir(dir.path())
+        let store = StateStore::open_view(&path, Preset::Standard).unwrap();
+        let utxos = store.iter_utxos().unwrap();
+        drop(store);
+        assert_eq!(
+            left(dir.path()).len(),
+            2,
+            "the view went before its iterator"
+        );
+
+        let rows = utxos.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows.len(), 20_000);
+        assert_eq!(left(dir.path()), ["state"]);
+    }
+
+    fn left(dir: &Path) -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
-            .collect();
-        assert_eq!(left, ["state"]);
+            .collect()
+    }
+
+    /// A writable open removes the view a killed observer left, which would
+    /// otherwise keep the tables the writer compacts away on disk.
+    #[test]
+    fn a_writable_open_removes_a_killed_observers_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        written(&path, 1);
+
+        crate::view::left_by_a_kill(&path, &path);
+        assert_eq!(left(dir.path()).len(), 2);
+
+        let _store = StateStore::open(&path, Preset::Standard).unwrap();
+        assert_eq!(left(dir.path()), ["state"]);
     }
 }

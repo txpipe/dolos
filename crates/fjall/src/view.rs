@@ -48,27 +48,25 @@ impl View {
     /// store directory the database belongs to, first removing the mirrors
     /// there that no live view holds.
     pub fn of(database: &Path, store: &Path) -> Result<Self, Error> {
-        let database = std::path::absolute(database).map_err(io_error)?;
-        let store = std::path::absolute(store).map_err(io_error)?;
+        let database = std::path::absolute(database).map_err(|error| io_error(database, error))?;
+        let (parent, prefix) = beside(store)?;
 
-        let database_lock = File::open(database.join(LOCK_FILE)).map_err(io_error)?;
+        let lock_path = database.join(LOCK_FILE);
+        let database_lock = File::open(&lock_path).map_err(|error| io_error(&lock_path, error))?;
 
         database_lock
             .try_lock_shared()
             .map_err(|error| match error {
                 TryLockError::WouldBlock => Error::Fjall(fjall::Error::Locked),
-                TryLockError::Error(error) => io_error(error),
+                TryLockError::Error(error) => io_error(&lock_path, error),
             })?;
 
-        let parent = store.parent().unwrap_or(&store);
-        let prefix = prefix(&store);
-
-        sweep(parent, &prefix);
+        sweep(&parent, &prefix);
 
         let dir = tempfile::Builder::new()
             .prefix(&prefix)
-            .tempdir_in(parent)
-            .map_err(|error| view_error(parent, error))?
+            .tempdir_in(&parent)
+            .map_err(|error| view_error(&parent, error))?
             .keep();
 
         // Built before the mirror, so a failure part-way removes the folder.
@@ -82,8 +80,8 @@ impl View {
         let lock_path = view.dir.join(VIEW_LOCK_FILE);
         let lock = File::create(&lock_path).map_err(|error| view_error(&lock_path, error))?;
 
-        lock.try_lock()
-            .map_err(|error| view_error(&lock_path, io::Error::other(error.to_string())))?;
+        // Never waits: a sweep locks only a folder that holds a mirror.
+        lock.lock().map_err(|error| view_error(&lock_path, error))?;
         view.lock = Some(lock);
 
         mirror(&database, &view.mirror, false)?;
@@ -102,44 +100,97 @@ impl View {
 
 impl Drop for View {
     fn drop(&mut self) {
-        // Windows removes no file a handle holds open, the lock's included.
-        drop(self.lock.take());
-
-        if let Err(error) = fs::remove_dir_all(&self.dir) {
+        if let Err(error) = remove(&self.dir, self.lock.take()) {
             tracing::warn!(path = %self.dir.display(), %error, "could not remove a read-only view");
         }
     }
 }
 
-/// The name every view of `store` starts with, beside it.
-fn prefix(store: &Path) -> String {
+/// Remove every view beside `store`, stale or not. Only a writer holding the
+/// store's database may call it: a live view holds the database's lock
+/// shared, so none exists then, and no new one starts.
+///
+/// A killed observer's view hard-links the tables it saw, and a writer
+/// compacts them away: left, the view would keep them on disk.
+pub fn remove_views(store: &Path) {
+    let Ok((parent, prefix)) = beside(store) else {
+        return;
+    };
+
+    for dir in views_in(&parent, &prefix) {
+        if let Err(error) = remove(&dir, None) {
+            tracing::warn!(path = %dir.display(), %error, "could not remove a read-only view");
+        }
+    }
+}
+
+/// The folder views of `store` live in, and the name each starts with.
+fn beside(store: &Path) -> Result<(PathBuf, String), Error> {
+    let store = std::path::absolute(store).map_err(|error| io_error(store, error))?;
+
     let name = store
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    format!(".{name}.view-")
+    let parent = store.parent().unwrap_or(&store).to_path_buf();
+
+    Ok((parent, format!(".{name}.view-")))
 }
 
-/// Remove the views in `parent` named with `prefix` whose lock no live view
-/// holds, as a killed process leaves them. A folder with no lock file yet is
-/// one a view is still creating.
-fn sweep(parent: &Path, prefix: &str) {
+fn views_in(parent: &Path, prefix: &str) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(parent) else {
-        return;
+        return Vec::new();
     };
 
-    for entry in entries.flatten() {
-        let stale = entry.file_name().to_string_lossy().starts_with(prefix)
-            && File::open(entry.path().join(VIEW_LOCK_FILE))
-                .is_ok_and(|lock| lock.try_lock().is_ok());
+    entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+        .map(|entry| entry.path())
+        .collect()
+}
 
-        if stale {
-            if let Err(error) = fs::remove_dir_all(entry.path()) {
-                tracing::warn!(path = %entry.path().display(), %error, "could not remove a stale read-only view");
-            }
+/// Remove the views in `parent` named with `prefix` that no live view holds,
+/// as a killed process leaves them.
+///
+/// A view locks its folder before it mirrors, and removes its mirror before
+/// its lock file. So a mirror whose lock is free, or gone, is stale, while a
+/// folder with no mirror may be one a view is still creating, and stays.
+fn sweep(parent: &Path, prefix: &str) {
+    for dir in views_in(parent, prefix) {
+        if !dir.join(MIRROR).exists() {
+            continue;
+        }
+
+        let lock = match File::open(dir.join(VIEW_LOCK_FILE)) {
+            Ok(lock) if lock.try_lock().is_ok() => Some(lock),
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(_) => continue,
+        };
+
+        if let Err(error) = remove(&dir, lock) {
+            tracing::warn!(path = %dir.display(), %error, "could not remove a stale read-only view");
         }
     }
+}
+
+/// Remove a view's folder: its mirror first, under `lock` when it holds one,
+/// then the rest. A removal that stops part-way leaves the lock file, so a
+/// later sweep still finds the mirror stale. What another sweep removed
+/// first is not an error.
+fn remove(dir: &Path, lock: Option<File>) -> io::Result<()> {
+    let gone = |removed: io::Result<()>| match removed {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        removed => removed,
+    };
+
+    gone(fs::remove_dir_all(dir.join(MIRROR)))?;
+
+    // Windows removes no file a handle holds open, the lock's included.
+    drop(lock);
+
+    gone(fs::remove_dir_all(dir))
 }
 
 fn mirror(from: &Path, to: &Path, immutable: bool) -> Result<(), Error> {
@@ -189,8 +240,8 @@ fn link(source: &Path, target: &Path) -> Result<(), Error> {
         .map_err(|error| view_error(source, error))
 }
 
-fn io_error(error: io::Error) -> Error {
-    Error::Io(error.to_string())
+fn io_error(path: &Path, error: io::Error) -> Error {
+    Error::Io(format!("{}: {error}", path.display()))
 }
 
 fn view_error(path: &Path, error: io::Error) -> Error {
@@ -242,6 +293,20 @@ impl<I: dolos_core::archive::Skippable> dolos_core::archive::Skippable for Viewe
     fn skip_backward(&mut self, n: usize) {
         self.inner.skip_backward(n)
     }
+}
+
+/// The view a killed observer of `store` leaves beside it, its lock free:
+/// the folder, its lock file and a mirror of `database`.
+#[cfg(test)]
+pub(crate) fn left_by_a_kill(database: &Path, store: &Path) -> PathBuf {
+    let (parent, prefix) = beside(store).unwrap();
+    let dir = parent.join(format!("{prefix}killed"));
+
+    fs::create_dir_all(&dir).unwrap();
+    File::create(dir.join(VIEW_LOCK_FILE)).unwrap();
+    mirror(database, &dir.join(MIRROR), false).unwrap();
+
+    dir
 }
 
 #[cfg(test)]
@@ -355,10 +420,7 @@ mod tests {
         let path = dir.path().join("db");
         written(&path);
 
-        let stale = dir.path().join(".db.view-stale");
-        fs::create_dir_all(stale.join(MIRROR)).unwrap();
-        File::create(stale.join(VIEW_LOCK_FILE)).unwrap();
-        File::create(stale.join(MIRROR).join("0.jnl")).unwrap();
+        left_by_a_kill(&path, &path);
 
         let live = View::of(&path, &path).unwrap();
         assert_eq!(views(dir.path()), vec![live.path().parent().unwrap()]);
@@ -369,6 +431,83 @@ mod tests {
 
         drop(live);
         drop(other);
+        assert!(views(dir.path()).is_empty());
+    }
+
+    /// A view whose lock file went before its mirror, as a removal stopped
+    /// part-way could once leave it, is stale too.
+    #[test]
+    fn a_mirror_without_its_lock_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+
+        let leftover = left_by_a_kill(&path, &path);
+        fs::remove_file(leftover.join(VIEW_LOCK_FILE)).unwrap();
+
+        drop(View::of(&path, &path).unwrap());
+        assert!(views(dir.path()).is_empty());
+    }
+
+    /// A view still being made, its folder alone or with its lock file not
+    /// yet locked, has no mirror: a sweep leaves it to its maker.
+    #[test]
+    fn a_view_being_made_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+
+        let bare = dir.path().join(".db.view-bare");
+        fs::create_dir_all(&bare).unwrap();
+
+        let unlocked = dir.path().join(".db.view-unlocked");
+        fs::create_dir_all(&unlocked).unwrap();
+        File::create(unlocked.join(VIEW_LOCK_FILE)).unwrap();
+
+        drop(View::of(&path, &path).unwrap());
+
+        let mut left = views(dir.path());
+        left.sort();
+        assert_eq!(left, [bare, unlocked]);
+    }
+
+    /// Observers opening together, each sweeping, never remove one another's
+    /// view: every open succeeds and reads, and none is left.
+    #[test]
+    fn concurrent_views_keep_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+        left_by_a_kill(&path, &path);
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..25 {
+                        assert_reads(&View::of(&path, &path).unwrap());
+                    }
+                });
+            }
+        });
+
+        assert!(views(dir.path()).is_empty());
+    }
+
+    /// A writer's open removes every view beside the store, a killed
+    /// observer's and one still being made: none can be live while it holds
+    /// the database.
+    #[test]
+    fn a_writer_removes_every_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        written(&path);
+
+        left_by_a_kill(&path, &path);
+        fs::create_dir_all(dir.path().join(".db.view-bare")).unwrap();
+
+        let _held = database(&path);
+        remove_views(&path);
+
         assert!(views(dir.path()).is_empty());
     }
 

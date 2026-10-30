@@ -316,6 +316,11 @@ fn mutating_an_empty_wal_file_it_cannot_write_fails_as_it_is() {
     permissions.set_readonly(true);
     std::fs::set_permissions(&wal, permissions).unwrap();
 
+    // root writes it regardless
+    if std::fs::OpenOptions::new().write(true).open(&wal).is_ok() {
+        return;
+    }
+
     let error = open(&node, Access::Mutate).err().unwrap();
     assert!(matches!(error, OpenError::Storage(_)), "{error:?}");
     assert!(
@@ -339,6 +344,15 @@ fn observing_a_dataset_it_cannot_mirror_is_unviewable() {
     let mode = |mode| std::fs::set_permissions(&storage, std::fs::Permissions::from_mode(mode));
 
     mode(0o555).unwrap();
+
+    // root writes it regardless
+    let probe = storage.join("probe");
+    if std::fs::File::create(&probe).is_ok() {
+        std::fs::remove_file(&probe).unwrap();
+        mode(0o755).unwrap();
+        return;
+    }
+
     let opened = open(&node, Access::Observe);
     mode(0o755).unwrap();
 
