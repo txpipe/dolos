@@ -6,14 +6,7 @@ use dolos_core::config::{
 };
 use inquire::{Confirm, MultiSelect, Select, Text};
 use miette::{Context as _, IntoDiagnostic};
-use std::{fmt::Display, path::Path};
-
-use crate::feedback::Feedback;
-
-/// Parses `--known-network` / `--network` against the catalog.
-pub fn parse_known_network(name: &str) -> Result<&'static KnownNetwork, String> {
-    KnownNetwork::by_name(name).ok_or_else(|| format!("unknown network {name}"))
-}
+use std::{fmt::Display, io::IsTerminal as _, path::Path};
 
 fn chain_config(network: &KnownNetwork) -> ChainConfig {
     ChainConfig::known(network.name)
@@ -60,15 +53,6 @@ impl From<HistoryPrunningOptions> for HistoryConfig {
         };
 
         HistoryConfig::rolling(HistoryWindow::slots(slots))
-    }
-}
-
-impl From<Option<u64>> for HistoryPrunningOptions {
-    fn from(value: Option<u64>) -> Self {
-        match value {
-            None => Self::KeepEverything,
-            Some(x) => Self::Custom(x),
-        }
     }
 }
 
@@ -131,7 +115,7 @@ impl Display for RemotePeerChoice {
 #[derive(Debug, Parser)]
 pub struct Args {
     /// Use one of the well-known networks
-    #[arg(long, value_parser = parse_known_network)]
+    #[arg(long, value_parser = crate::common::parse_known_network)]
     known_network: Option<&'static KnownNetwork>,
 
     /// Remote peer to use as source
@@ -221,6 +205,14 @@ impl ConfigEditor {
         self.0.history = value.into();
 
         self
+    }
+
+    /// Only a given window replaces the file's history; without one it is kept.
+    fn apply_max_chain_history(self, value: Option<u64>) -> Self {
+        match value {
+            Some(slots) => self.apply_history_pruning(HistoryPrunningOptions::Custom(slots)),
+            None => self,
+        }
     }
 
     fn apply_serve_grpc(mut self, value: Option<bool>) -> Self {
@@ -313,7 +305,7 @@ impl ConfigEditor {
     fn fill_values_from_args(self, args: &Args) -> Self {
         self.apply_known_network(args.known_network)
             .apply_remote_peer(args.remote_peer.as_ref())
-            .apply_history_pruning(args.max_chain_history.into())
+            .apply_max_chain_history(args.max_chain_history)
             .apply_serve_grpc(args.serve_grpc)
             .apply_serve_minibf(args.serve_minibf)
             .apply_serve_minikupo(args.serve_minikupo)
@@ -528,35 +520,66 @@ fn write_config(
         .context("loading configuration")
 }
 
-/// The command that starts the node on `config_file`.
-fn daemon_command(config_file: &Path) -> String {
+/// `dolos <command>` on `config_file`.
+fn command_on(config_file: &Path, command: &str) -> String {
     if config_file == crate::common::config_file(None) {
-        "dolos daemon".into()
+        format!("dolos {command}")
     } else {
-        format!("dolos --config {} daemon", config_file.display())
+        format!("dolos --config {} {command}", config_file.display())
     }
 }
 
+/// No terminal to prompt on and no network to write: a usage error, which
+/// names the flags that make `init` unattended.
+fn refuse_unattended() -> ! {
+    clap::Error::raw(
+        clap::error::ErrorKind::MissingRequiredArgument,
+        "no terminal to prompt on; pass --known-network <NAME> to write the configuration \
+         unattended, with --remote-peer, --max-chain-history, --serve-* and --enable-relay \
+         as needed (see `dolos init --help`)\n",
+    )
+    .exit()
+}
+
+/// Writes the configuration and nothing else: on a terminal it prompts with
+/// `args` as defaults, and without one `args` are the whole answer.
 pub fn run(
     config: miette::Result<RootConfig>,
     config_file: &Path,
     args: &Args,
-    feedback: &Feedback,
 ) -> miette::Result<()> {
     crate::banner::print_init_banner();
 
-    let config = write_config(config, config_file, args, ConfigEditor::confirm_values)?;
+    let interactive = std::io::stdin().is_terminal();
 
-    if !config
+    let config = write_config(config, config_file, args, |editor| {
+        if interactive {
+            editor.confirm_values()
+        } else if args.known_network.is_some() {
+            Ok(editor)
+        } else {
+            refuse_unattended()
+        }
+    })?;
+
+    let emulated = config
         .upstream
         .as_ref()
-        .is_some_and(UpstreamConfig::is_emulator)
-    {
-        super::bootstrap::run(&config, &super::bootstrap::Args::default(), feedback)?;
+        .is_some_and(UpstreamConfig::is_emulator);
+
+    println!("\nnext:");
+
+    if !emulated {
+        println!(
+            "- run `{}` to load the chain data (see `dolos bootstrap --help`)",
+            command_on(config_file, "bootstrap")
+        );
     }
 
-    println!("\nDolos is ready!");
-    println!("- run `{}` to start the node", daemon_command(config_file));
+    println!(
+        "- run `{}` to start the node",
+        command_on(config_file, "daemon")
+    );
 
     Ok(())
 }
@@ -762,13 +785,16 @@ mod tests {
         assert!(!written.contains("max_concurrent_queries = 7"), "{written}");
     }
 
-    /// The hint names the file init wrote.
+    /// The hints name the file init wrote.
     #[test]
-    fn the_daemon_hint_names_a_selected_file() {
-        assert_eq!(daemon_command(Path::new("dolos.toml")), "dolos daemon");
+    fn the_hints_name_a_selected_file() {
         assert_eq!(
-            daemon_command(Path::new("conf/other.toml")),
-            "dolos --config conf/other.toml daemon"
+            command_on(Path::new("dolos.toml"), "daemon"),
+            "dolos daemon"
+        );
+        assert_eq!(
+            command_on(Path::new("conf/other.toml"), "bootstrap"),
+            "dolos --config conf/other.toml bootstrap"
         );
     }
 

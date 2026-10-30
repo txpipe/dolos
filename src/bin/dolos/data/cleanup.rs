@@ -36,7 +36,7 @@ pub fn clear(config: &RootConfig) -> miette::Result<()> {
         miette::bail!(
             "the configuration keeps stores outside the storage root {}, so clearing the \
              root would leave them behind:\n{listed}\nRemove the storage root and each of \
-             those directories by hand, then run `dolos init` again",
+             those directories by hand, then run `dolos bootstrap`",
             root.display(),
         );
     }
@@ -49,7 +49,7 @@ pub fn clear(config: &RootConfig) -> miette::Result<()> {
         miette::bail!(
             "the storage root {} holds symbolic links, and clearing it would not reach \
              what they point at:\n{listed}\nRemove the storage root and the linked \
-             directories by hand, then run `dolos init` again",
+             directories by hand, then run `dolos bootstrap`",
             root.display(),
         );
     }
