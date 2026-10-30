@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(network_magic(db.path()).unwrap(), 2);
 
         std::fs::write(db.path().join(PROTOCOL_MAGIC_ID), "preview").unwrap();
-        let message = format!("{:?}", network_magic(db.path()).unwrap_err());
+        let message = network_magic(db.path()).unwrap_err().to_string();
         assert!(message.contains("holds no network magic"), "{message}");
     }
 
@@ -139,7 +139,7 @@ mod tests {
     fn a_database_without_its_magic_is_refused() {
         let db = tempfile::tempdir().unwrap();
 
-        let message = format!("{:?}", network_magic(db.path()).unwrap_err());
+        let message = network_magic(db.path()).unwrap_err().to_string();
         assert!(message.contains(PROTOCOL_MAGIC_ID), "{message}");
     }
 }
