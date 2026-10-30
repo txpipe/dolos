@@ -708,31 +708,64 @@ fn force_refuses_a_source_it_would_lose_the_node_over() {
     }
 
     // A download from a later immutable file replays from the origin only
-    // over the files before it, which an empty download directory lacks.
+    // over the files before it, whole, which an empty download directory
+    // lacks. The download reads them, and writes the rest, through the links
+    // already in its directory, so one whose ImmutableDB, or a file in it,
+    // links into the root goes with the clear too.
     #[cfg(feature = "mithril")]
     {
-        let snapshot = node.root.path().join("snapshot").display().to_string();
-        let output = node.run(&[
-            "bootstrap",
-            "--force",
-            "mithril",
-            "--download-dir",
-            &snapshot,
-            "--download-start",
-            "1",
-            "--aggregator",
-            "https://aggregator.invalid",
-            "--genesis-vkey",
-            "5b31",
-        ]);
+        let cut = tempfile::tempdir().unwrap();
+        chunked_without(&fixture, cut.path(), &[]);
+        let chunk = cut.path().join("immutable").join("00000.chunk");
+        let bytes = std::fs::read(&chunk).unwrap();
+        std::fs::write(&chunk, &bytes[..bytes.len() - 1]).unwrap();
 
-        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-        assert!(
-            said(&output).contains("immutable file 0 in"),
-            "{}",
-            stderr(&output)
-        );
-        assert_eq!(contents(&node), before, "--force cleared the node");
+        #[allow(unused_mut)]
+        let mut dirs = vec![
+            (node.root.path().join("snapshot"), "immutable file 0 in"),
+            (cut.path().to_path_buf(), "fails its checksum"),
+        ];
+
+        #[cfg(unix)]
+        {
+            dirs.push((
+                node.root.path().join("split-db"),
+                "leads into the storage root",
+            ));
+
+            let each = node.root.path().join("each-file-db");
+            std::fs::create_dir_all(each.join("immutable")).unwrap();
+            for entry in std::fs::read_dir(inside.join("immutable")).unwrap() {
+                let file = entry.unwrap().path();
+                std::os::unix::fs::symlink(
+                    &file,
+                    each.join("immutable").join(file.file_name().unwrap()),
+                )
+                .unwrap();
+            }
+            dirs.push((each, "leads into the storage root"));
+        }
+
+        for (dir, named) in &dirs {
+            let dir = dir.display().to_string();
+            let output = node.run(&[
+                "bootstrap",
+                "--force",
+                "mithril",
+                "--download-dir",
+                &dir,
+                "--download-start",
+                "1",
+                "--aggregator",
+                "https://aggregator.invalid",
+                "--genesis-vkey",
+                "5b31",
+            ]);
+
+            assert_eq!(output.status.code(), Some(1), "{dir}: {}", stderr(&output));
+            assert!(said(&output).contains(named), "{dir}: {}", stderr(&output));
+            assert_eq!(contents(&node), before, "{dir}: --force cleared the node");
+        }
     }
 
     assert!(inside.join("immutable").is_dir(), "the source was cleared");
@@ -740,38 +773,51 @@ fn force_refuses_a_source_it_would_lose_the_node_over() {
 }
 
 /// A database the bootstrap would write under is refused before anything
-/// is written, whatever the flags: one a store is configured inside, and one
-/// holding the storage root, which Mithril would delete with the node at the
-/// end.
+/// is written, whatever the flags: one a store is configured inside, by its
+/// own name or through a directory not made yet and back out of it, as the
+/// OS makes the store, and one holding the storage root, which Mithril would
+/// delete with the node at the end.
 #[test]
 fn a_source_the_bootstrap_would_write_under_is_refused() {
     let fixture = Fixture::new();
-
-    let archive = fixture.db().join("archive");
-    let mut node = Node::with_tables(&format!(
-        "[storage.archive]\npath = {}\n",
-        node::toml_string(&archive)
-    ));
-    node.config.chain = node.custom_chain(MAGIC, fixture.utxos.clone());
-    node.write_chain(&node.config.chain);
-
     let before = files(&fixture.db());
+    let missing = fixture.dir.path().join("missing");
 
-    #[allow(unused_mut)]
-    let mut runs = vec![immutabledb(&node, &fixture.source(), &[])];
-    #[cfg(feature = "mithril")]
-    runs.push(mithril(&node, &fixture.source(), &[]));
+    let stores = [
+        ("archive", "the archive at", fixture.db().join("archive")),
+        (
+            "state",
+            "the state store at",
+            missing.join("..").join("db").join("state"),
+        ),
+    ];
 
-    for output in runs {
-        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-        assert!(
-            said(&output).contains("the archive at"),
-            "{}",
-            stderr(&output)
-        );
+    for (table, named, path) in stores {
+        let mut node = Node::with_tables(&format!(
+            "[storage.{table}]\npath = {}\n",
+            node::toml_string(&path)
+        ));
+        node.config.chain = node.custom_chain(MAGIC, fixture.utxos.clone());
+        node.write_chain(&node.config.chain);
+
+        #[allow(unused_mut)]
+        let mut runs = vec![immutabledb(&node, &fixture.source(), &[])];
+        #[cfg(feature = "mithril")]
+        runs.push(mithril(&node, &fixture.source(), &[]));
+
+        for output in runs {
+            assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+            assert!(
+                said(&output).contains(named) && said(&output).contains("lies in the database"),
+                "{}",
+                stderr(&output)
+            );
+        }
+
+        assert_eq!(files(&fixture.db()), before, "the source was written");
     }
 
-    assert_eq!(files(&fixture.db()), before, "the source was written");
+    assert!(!missing.exists(), "the refusal made the store's way");
 
     let node = fixture.node();
     let home = node.root.path().to_path_buf();
@@ -1040,8 +1086,9 @@ fn continue_past_the_source_tip_keeps_the_wal_window() {
 }
 
 /// A stele directory is resolved before `--force` clears anything: one
-/// holding no stele, and one inside the storage root, are refused with the
-/// node, and the stele, as they were.
+/// holding no stele, one inside the storage root or a relative link to it,
+/// and one whose blobs link there, are refused with the node, and the stele,
+/// as they were. One beside the root, named through it, is restored.
 #[test]
 fn force_refuses_a_stele_it_would_lose_the_node_over() {
     let synced = Node::new();
@@ -1057,10 +1104,41 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
     synced.write_stele(&stele);
     let stele_before = files(&stele);
 
-    for (source, named) in [
+    #[allow(unused_mut)]
+    let mut sources = vec![
         (node.root.path().join("no-such-stele"), "holds no stele"),
         (stele.clone(), "which `--force` clears"),
-    ] {
+    ];
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        // As `ln -s ../data/stele srv/stele` leaves it: the target is read
+        // from the link's directory.
+        let srv = node.root.path().join("srv");
+        std::fs::create_dir_all(&srv).unwrap();
+        let relative = Path::new("..").join(stele.strip_prefix(node.root.path()).unwrap());
+        symlink(relative, srv.join("stele")).unwrap();
+        sources.push((srv.join("stele"), "which `--force` clears"));
+
+        // A stele of its own whose blob directories are the root's stele's.
+        let view = node.root.path().join("stele-view");
+        std::fs::create_dir_all(view.join("blobs")).unwrap();
+        for entry in std::fs::read_dir(&stele).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                std::fs::copy(&path, view.join(path.file_name().unwrap())).unwrap();
+            }
+        }
+        for entry in std::fs::read_dir(stele.join("blobs")).unwrap() {
+            let path = entry.unwrap().path();
+            symlink(&path, view.join("blobs").join(path.file_name().unwrap())).unwrap();
+        }
+        sources.push((view, "leads into the storage root"));
+    }
+
+    for (source, named) in sources {
         let source = format!("file://{}", source.display());
         let output = node.run(&["bootstrap", "--force", "stelae", "--source", &source]);
 
@@ -1083,6 +1161,87 @@ fn force_refuses_a_stele_it_would_lose_the_node_over() {
     }
 
     assert_eq!(files(&stele), stele_before, "the stele changed");
+
+    let beside = node.root.path().join("stele-beside");
+    synced.write_stele(&beside);
+    let through = node.config.storage.path.join("..").join("stele-beside");
+
+    assert_ok(&node.run(&[
+        "bootstrap",
+        "--force",
+        "stelae",
+        "--source",
+        &format!("file://{}", through.display()),
+    ]));
+    assert_eq!(contents(&node).cursor, contents(&synced).cursor);
+}
+
+/// Without a clear, a stele may lie in the storage root beside the stores,
+/// whether or not `--force` is given over an empty node.
+#[test]
+fn a_stele_beside_the_stores_restores_without_a_clear() {
+    let synced = Node::new();
+    synced.sync();
+    synced.stand_at_boundary();
+
+    for flags in [&[][..], &["--force"][..]] {
+        let node = Node::new();
+        let stele = node.config.storage.path.join("stele");
+        synced.write_stele(&stele);
+
+        let mut args = vec!["bootstrap"];
+        args.extend_from_slice(flags);
+        let source = format!("file://{}", stele.display());
+        args.extend_from_slice(&["stelae", "--source", &source]);
+
+        assert_ok(&node.run(&args));
+        assert_eq!(
+            contents(&node).cursor,
+            contents(&synced).cursor,
+            "{flags:?}"
+        );
+        assert!(
+            stele.join("blobs").is_dir(),
+            "{flags:?}: the stele was taken"
+        );
+    }
+}
+
+/// A directory in the source that can't be listed, as a volume root's
+/// `lost+found` is to whoever isn't root, is passed over: the replay never
+/// reads it, so it refuses no run.
+#[cfg(unix)]
+#[test]
+fn a_directory_in_the_source_that_cant_be_listed_is_passed_over() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let locked = fixture.db().join("lost+found");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let listed = std::fs::read_dir(&locked).is_ok();
+
+    let node = fixture.node();
+    let replayed = immutabledb(&node, &fixture.source(), &[]);
+
+    #[cfg(feature = "mithril")]
+    let kept = {
+        let node = fixture.node();
+        mithril(&node, &fixture.source(), &["--retain-snapshot"])
+    };
+
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    if listed {
+        return;
+    }
+
+    assert_ok(&replayed);
+    assert_eq!(contents(&node).cursor, Some(fixture.tip()));
+
+    #[cfg(feature = "mithril")]
+    assert_ok(&kept);
 }
 
 /// An empty download directory names no directory, and is a usage error.

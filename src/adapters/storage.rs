@@ -109,7 +109,20 @@ pub struct Removal {
 const MAX_LINKS: usize = 40;
 
 impl Removal {
+    /// What removing `dir` takes, every directory under it read: one that
+    /// can't be listed is an error that names it, as it stops the removal.
     pub fn of(dir: &Path) -> std::io::Result<Self> {
+        Self::walk(dir, false)
+    }
+
+    /// [`Removal::of`] as far as `dir` can be read: a directory under it that
+    /// can't be listed is taken without what it holds, which the OS reaches
+    /// only through it.
+    pub fn of_readable(dir: &Path) -> std::io::Result<Self> {
+        Self::walk(dir, true)
+    }
+
+    fn walk(dir: &Path, skip_unlisted: bool) -> std::io::Result<Self> {
         let mut taken = std::collections::HashSet::new();
 
         let meta = match std::fs::symlink_metadata(dir) {
@@ -120,10 +133,10 @@ impl Removal {
                     pending: Some(settled(dir)?),
                 });
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(at(dir, error)),
         };
 
-        collect(dir, &meta, &mut taken)?;
+        collect(dir, &meta, &mut taken, skip_unlisted)?;
 
         Ok(Self {
             taken,
@@ -146,7 +159,22 @@ impl Removal {
     fn takes_on_the_way(&self, path: &Path, links: usize) -> std::io::Result<bool> {
         let mut reached = PathBuf::new();
 
+        // The components past the last one that exists, which the OS makes
+        // as new directories: none of them is taken, and a `..` among them
+        // steps back out of one.
+        let mut made = 0usize;
+
         for component in std::path::absolute(path)?.components() {
+            if made > 0 {
+                match component {
+                    Component::ParentDir => made -= 1,
+                    Component::CurDir => {}
+                    _ => made += 1,
+                }
+
+                continue;
+            }
+
             reached.push(component);
 
             if let Component::Prefix(_) = component {
@@ -155,11 +183,18 @@ impl Removal {
 
             let meta = match std::fs::symlink_metadata(&reached) {
                 Ok(meta) => meta,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-                Err(error) => return Err(error),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    reached.pop();
+                    made = 1;
+                    continue;
+                }
+                Err(error) => return Err(at(&reached, error)),
             };
 
-            if self.taken.contains(&file_id(&reached, &meta)?) {
+            if self
+                .taken
+                .contains(&file_id(&reached, &meta).map_err(|error| at(&reached, error))?)
+            {
                 return Ok(true);
             }
 
@@ -171,7 +206,7 @@ impl Removal {
                     ))
                 })?;
 
-                let target = std::fs::read_link(&reached)?;
+                let target = std::fs::read_link(&reached).map_err(|error| at(&reached, error))?;
                 let target = reached.parent().unwrap_or(&reached).join(target);
 
                 if self.takes_on_the_way(&target, links)? {
@@ -190,29 +225,50 @@ pub fn reaches_into(path: &Path, dir: &Path) -> std::io::Result<bool> {
 }
 
 /// Add `path`, whose metadata is `meta`, to `taken`, with what is under it
-/// when it is a directory and not a link.
+/// when it is a directory and not a link. What is gone by the time it is
+/// read is not there to take, and, when `skip_unlisted`, nor is what is in a
+/// directory that can't be listed.
 fn collect(
     path: &Path,
     meta: &std::fs::Metadata,
     taken: &mut std::collections::HashSet<FileId>,
+    skip_unlisted: bool,
 ) -> std::io::Result<()> {
-    taken.insert(file_id(path, meta)?);
+    use std::io::ErrorKind;
+
+    taken.insert(file_id(path, meta).map_err(|error| at(path, error))?);
 
     if !meta.is_dir() {
         return Ok(());
     }
 
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) if skip_unlisted && error.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        Err(error) => return Err(at(path, error)),
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|error| at(path, error))?;
+        let path = entry.path();
+        let kind = entry.file_type().map_err(|error| at(&path, error))?;
 
         if kind.is_dir() || kind.is_symlink() {
-            let path = entry.path();
-            collect(&path, &std::fs::symlink_metadata(&path)?, taken)?;
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) => collect(&path, &meta, taken, skip_unlisted)?,
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(at(&path, error)),
+            }
         }
     }
 
     Ok(())
+}
+
+/// `error`, naming the path it happened at.
+fn at(path: &Path, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
 }
 
 #[cfg(unix)]
@@ -2993,6 +3049,84 @@ mod tests {
                 assert!(reaches_into(&alias.join("node-db"), &root).unwrap());
             }
         }
+    }
+
+    /// A link's relative target is read from the link's own directory, as
+    /// the OS reads it, not from the working directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_link_is_followed_from_its_own_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        std::fs::create_dir_all(root.join("stele")).unwrap();
+        std::fs::create_dir_all(temp.path().join("srv")).unwrap();
+
+        let link = temp.path().join("srv").join("stele");
+        std::os::unix::fs::symlink(Path::new("..").join("data").join("stele"), &link).unwrap();
+
+        assert!(reaches_into(&link, &root).unwrap());
+        assert!(reaches_into(&link.join("blobs"), &root).unwrap());
+    }
+
+    /// A path through a directory not made yet and back out of it with `..`
+    /// lands where the OS makes it, past the `..`, as `create_dir_all` takes
+    /// it.
+    #[test]
+    fn a_path_through_a_directory_not_made_yet_lands_past_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("db");
+        std::fs::create_dir_all(&db).unwrap();
+
+        let missing = temp.path().join("missing");
+
+        for (path, reaches) in [
+            (missing.join("..").join("db").join("state"), true),
+            (
+                missing.join("deeper").join("..").join("..").join("db"),
+                true,
+            ),
+            (missing.join("..").join("elsewhere").join("state"), false),
+            (missing.join("db").join(".."), false),
+        ] {
+            assert_eq!(
+                reaches_into(&path, &db).unwrap(),
+                reaches,
+                "{}",
+                path.display()
+            );
+        }
+
+        std::fs::create_dir_all(missing.join("..").join("db").join("state")).unwrap();
+        assert!(db.join("state").is_dir());
+    }
+
+    /// A directory that can't be listed stops the whole removal of what
+    /// holds it, which names it, and is passed over by a removal read as far
+    /// as it can be.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_cant_be_listed_is_named_or_passed_over() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("db");
+        let locked = db.join("lost+found");
+        std::fs::create_dir_all(locked.join("inner")).unwrap();
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let listed = std::fs::read_dir(&locked).is_ok();
+        let whole = Removal::of(&db).err().map(|error| error.to_string());
+        let readable = Removal::of_readable(&db).and_then(|removal| removal.takes(&locked));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Whoever lists it anyway, as root does, has nothing to pass over.
+        if listed {
+            return;
+        }
+
+        let message = whole.expect("the directory was listed");
+        assert!(message.contains(&locked.display().to_string()), "{message}");
+        assert!(readable.unwrap());
     }
 
     /// Beside a refused store, a directory outside the root that holds no

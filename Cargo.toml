@@ -15,6 +15,7 @@ base64.workspace = true
 bech32.workspace = true
 bincode.workspace = true
 chrono.workspace = true
+crc32fast.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 hex.workspace = true
@@ -257,6 +258,7 @@ reqwest = { version = "0.12.7", default-features = false, features = [
     "rustls-tls",
 ] }
 rayon = "1.11.0"
+crc32fast = "1.4.2"
 xxhash-rust = { version = "0.8.15", features = ["xxh3", "const_xxh3"] }
 num-rational = "0.4.2"
 num-bigint = "0.4.6"

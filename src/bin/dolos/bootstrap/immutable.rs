@@ -87,18 +87,25 @@ fn written_stores(config: &RootConfig) -> Vec<(&'static str, PathBuf)> {
 }
 
 /// The storage root, or the first store the bootstrap writes, that removing
-/// `dir` would take, with what it is called.
+/// `dir` would take, with what it is called. What under `dir` can't be
+/// listed is passed over: the OS reaches it only through what is.
 pub(super) fn store_in(
     config: &RootConfig,
     dir: &Path,
 ) -> miette::Result<Option<(&'static str, PathBuf)>> {
-    let removal = Removal::of(dir).into_diagnostic()?;
+    let removal = Removal::of_readable(dir)
+        .into_diagnostic()
+        .with_context(|| format!("reading {}", dir.display()))?;
 
     let stores = std::iter::once(("storage root", config.storage.path.clone()))
         .chain(written_stores(config));
 
     for (name, store) in stores {
-        if removal.takes(&store).into_diagnostic()? {
+        if removal
+            .takes(&store)
+            .into_diagnostic()
+            .with_context(|| format!("reading the {name} at {}", store.display()))?
+        {
             return Ok(Some((name, store)));
         }
     }
@@ -106,39 +113,92 @@ pub(super) fn store_in(
     Ok(None)
 }
 
-/// Refuse a Cardano node database at any of `dbs` that the bootstrap would
-/// write under: one the storage root or a store lies in, whether removing it
-/// would take them or a link leads into it, and one inside a store. Without
-/// a clear, a database may lie in the storage root beside the stores, as a
-/// Mithril download into it does.
+/// What the directories [`check_placement`] compares are to the run, as its
+/// refusals name them.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Placed {
+    /// A Cardano node database the replay reads.
+    Database,
+    /// The directory a Mithril download writes into, and the run deletes at
+    /// its end.
+    #[cfg(feature = "mithril")]
+    Download,
+}
+
+impl Placed {
+    /// The refusal of `dir`, which the store `name` at `store` lies in.
+    fn holding(self, dir: &Path, name: &str, store: &Path) -> miette::Report {
+        match self {
+            Placed::Database => miette::miette!(
+                "the {name} at {} lies in the database at {}, and the bootstrap writes there",
+                store.display(),
+                dir.display()
+            ),
+            #[cfg(feature = "mithril")]
+            Placed::Download => miette::miette!(
+                "the {name} at {} lies in the download directory {}, which the download writes \
+                 into and, without --retain-snapshot, the run deletes at its end: pass a \
+                 --download-dir apart from the storage",
+                store.display(),
+                dir.display()
+            ),
+        }
+    }
+
+    /// The refusal of `dir`, which lies in the store `name` at `store`.
+    fn inside(self, dir: &Path, name: &str, store: &Path) -> miette::Report {
+        match self {
+            Placed::Database => miette::miette!(
+                "the database at {} lies in the {name} at {}, which the replay writes",
+                dir.display(),
+                store.display()
+            ),
+            #[cfg(feature = "mithril")]
+            Placed::Download => miette::miette!(
+                "the download directory {} lies in the {name} at {}, which the replay writes: \
+                 pass a --download-dir apart from the storage",
+                dir.display(),
+                store.display()
+            ),
+        }
+    }
+}
+
+/// Refuse a directory at any of `dirs`, each one `placed`, that the
+/// bootstrap would write under: one the storage root or a store lies in,
+/// whether removing it would take them or a link leads into it, and one
+/// inside a store. Without a clear, a directory may lie in the storage root
+/// beside the stores, as a Mithril download into it does.
 ///
 /// Checked before `--force` clears anything and before a Mithril download
 /// writes, so that a source the run would take costs the operator nothing.
-pub(super) fn check_placement(config: &RootConfig, dbs: &[&Path]) -> miette::Result<()> {
-    for db in dbs {
-        let real = std::fs::canonicalize(db).ok();
+pub(super) fn check_placement(
+    config: &RootConfig,
+    dirs: &[&Path],
+    placed: Placed,
+) -> miette::Result<()> {
+    for dir in dirs {
+        let real = std::fs::canonicalize(dir).ok();
 
-        for dir in std::iter::once(*db).chain(real.as_deref()) {
-            if let Some((name, store)) = store_in(config, dir)? {
-                miette::bail!(
-                    "the {name} at {} lies in the database at {}, and the bootstrap writes there",
-                    store.display(),
-                    db.display()
-                );
+        for name in std::iter::once(*dir).chain(real.as_deref()) {
+            if let Some((store_name, store)) = store_in(config, name)? {
+                return Err(placed.holding(dir, store_name, &store));
             }
         }
     }
 
     for (name, store) in written_stores(config) {
-        let removal = Removal::of(&store).into_diagnostic()?;
+        let removal = Removal::of_readable(&store)
+            .into_diagnostic()
+            .with_context(|| format!("reading the {name} at {}", store.display()))?;
 
-        for db in dbs {
-            if removal.takes(db).into_diagnostic()? {
-                miette::bail!(
-                    "the database at {} lies in the {name} at {}, which the replay writes",
-                    db.display(),
-                    store.display()
-                );
+        for dir in dirs {
+            if removal
+                .takes(dir)
+                .into_diagnostic()
+                .with_context(|| format!("reading {}", dir.display()))?
+            {
+                return Err(placed.inside(dir, name, &store));
             }
         }
     }
@@ -149,7 +209,8 @@ pub(super) fn check_placement(config: &RootConfig, dbs: &[&Path]) -> miette::Res
 /// The ImmutableDB of the Cardano node database `db`, once it is known that
 /// a replay can read it: placed apart from the storage the replay fills,
 /// holding blocks, and, for a replay from the origin, starting there; and,
-/// when `clears`, out of the reach of the clear.
+/// when `clears`, out of the reach of the clear, with every chunk from the
+/// origin to the tip there and whole.
 ///
 /// Checked before `--force` clears anything, so that a source the clear
 /// would take, or one that isn't a whole database, costs the operator
@@ -170,15 +231,10 @@ pub(super) fn check_database(
         );
     }
 
-    check_placement(config, &[db, &path])?;
+    check_placement(config, &[db, &path], Placed::Database)?;
 
-    if clears && super::the_clear_takes(config, &path)? {
-        miette::bail!(
-            "the ImmutableDB at {} lies in the storage root {}, or is reached through it, \
-             which `--force` clears before the replay",
-            path.display(),
-            config.storage.path.display()
-        );
+    if clears {
+        super::refuse_what_the_clear_takes(config, &path, "the ImmutableDB", "the replay")?;
     }
 
     read_tip(&path)?;
@@ -187,7 +243,119 @@ pub(super) fn check_database(
         check_origin(&path)?;
     }
 
+    if clears {
+        check_chunks(&path)?;
+    }
+
     Ok(path)
+}
+
+/// Refuse an ImmutableDB at `path` that a replay from the origin would stop
+/// short in: one with a chunk missing on the way to its tip, or a chunk that
+/// doesn't read whole.
+fn check_chunks(path: &Path) -> miette::Result<()> {
+    for (number, name) in chunks(path).iter().enumerate() {
+        if *name != format!("{number:05}") {
+            miette::bail!(
+                "chunk {number:05} of the ImmutableDB at {} is missing",
+                path.display()
+            );
+        }
+
+        check_whole(path, name).with_context(|| {
+            format!(
+                "chunk {name} of the ImmutableDB at {} doesn't read whole",
+                path.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+/// The bytes of an entry of a secondary index.
+const SECONDARY_ENTRY: u64 = 56;
+
+/// Refuse immutable file `name` at `path` unless it reads whole: its primary
+/// index ends where its secondary index does, and its chunk holds the last
+/// block that index names, from where it starts to an end that matches its
+/// checksum.
+///
+/// pallas reads an immutable file lazily, so one cut short opens, and fails
+/// only when the replay reaches the cut. This reads the ends alone, which
+/// are what a cut takes.
+pub(super) fn check_whole(path: &Path, name: &str) -> miette::Result<()> {
+    let [primary, secondary, chunk] =
+        ["primary", "secondary", "chunk"].map(|extension| path.join(format!("{name}.{extension}")));
+
+    let read = |file: &Path, start: &dyn Fn(u64) -> Option<u64>| {
+        read_from(file, start)
+            .into_diagnostic()
+            .with_context(|| format!("reading {}", file.display()))
+    };
+
+    let (length, end) = read(&primary, &|length| length.checked_sub(4))?;
+
+    let indexed = match end {
+        Some(end) if length > 4 && (length - 1) % 4 == 0 => {
+            u64::from(u32::from_be_bytes(end[..].try_into().expect("four bytes")))
+        }
+        _ => miette::bail!("{} is cut short", primary.display()),
+    };
+
+    let (length, last) = read(&secondary, &|length| length.checked_sub(SECONDARY_ENTRY))?;
+
+    if length != indexed || length % SECONDARY_ENTRY != 0 {
+        miette::bail!(
+            "{} holds {length} bytes, and its primary index ends at {indexed}",
+            secondary.display()
+        );
+    }
+
+    let Some(last) = last else {
+        return Ok(());
+    };
+
+    let offset = u64::from_be_bytes(last[..8].try_into().expect("eight bytes"));
+    let checksum = u32::from_be_bytes(last[12..16].try_into().expect("four bytes"));
+
+    let (length, block) = read(&chunk, &|length| (length > offset).then_some(offset))?;
+
+    match block {
+        Some(block) if crc32fast::hash(&block) == checksum => Ok(()),
+        Some(_) => miette::bail!(
+            "the last block of {}, from byte {offset}, fails its checksum: the file is cut short \
+             or damaged",
+            chunk.display()
+        ),
+        None => miette::bail!(
+            "{} ends at byte {length}, before its last block at byte {offset}",
+            chunk.display()
+        ),
+    }
+}
+
+/// The length of `file`, and its bytes from the offset `start` gives for
+/// that length to its end; none when it gives none.
+fn read_from(
+    file: &Path,
+    start: &dyn Fn(u64) -> Option<u64>,
+) -> std::io::Result<(u64, Option<Vec<u8>>)> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(file)?;
+    let length = file.metadata()?.len();
+
+    let Some(start) = start(length) else {
+        return Ok((length, None));
+    };
+
+    file.seek(SeekFrom::Start(start))?;
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+
+    Ok((length, Some(bytes)))
 }
 
 /// Refuse an ImmutableDB at `path` whose first block can't be read from the
@@ -777,7 +945,7 @@ mod tests {
         let db = temp.path().join("db");
 
         let refusal = |config: &RootConfig, db: &Path| {
-            check_placement(config, &[db])
+            check_placement(config, &[db], Placed::Database)
                 .err()
                 .map(|error| error.to_string())
         };
@@ -850,8 +1018,165 @@ mod tests {
         let mut config = config_over(temp.path());
         config.storage.archive.path = Some(real.join("archive"));
 
-        let message = check_placement(&config, &[&link]).unwrap_err().to_string();
+        let message = check_placement(&config, &[&link], Placed::Database)
+            .unwrap_err()
+            .to_string();
         assert!(message.contains("the archive at"), "{message}");
+    }
+
+    /// A database whose ImmutableDB is a link is placed by what the link
+    /// names too: a store configured there lies in the database the replay
+    /// reads.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_immutable_directory_is_placed_by_what_it_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let elsewhere = temp.path().join("chain").join("imm");
+        database(&elsewhere, &[&chain(4)]);
+        let db = temp.path().join("db");
+        std::fs::create_dir_all(&db).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("immutable"), db.join("immutable")).unwrap();
+
+        let mut config = config_over(temp.path());
+        config.storage.archive.blocks_path = Some(elsewhere.join("immutable").join("blocks"));
+
+        let message = check_database(&config, &db, false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("the block segments at") && message.contains("lies in the database"),
+            "{message}"
+        );
+    }
+
+    /// A download directory is refused in its own words, naming the flag
+    /// that moves it.
+    #[cfg(feature = "mithril")]
+    #[test]
+    fn a_download_directory_is_refused_as_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(temp.path());
+
+        let message = check_placement(&config, &[temp.path()], Placed::Download)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("the storage root at")
+                && message.contains("lies in the download directory")
+                && message.contains("deletes at its end")
+                && message.contains("--download-dir"),
+            "{message}"
+        );
+
+        let inside = config.storage.path.join("state").join("snapshot");
+        let message = check_placement(&config, &[&inside], Placed::Download)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("the download directory")
+                && message.contains("lies in the state store")
+                && message.contains("--download-dir"),
+            "{message}"
+        );
+    }
+
+    /// The report of `result`, with its causes.
+    fn chain_of(result: miette::Result<()>) -> String {
+        let report = result.expect_err("it was accepted");
+        report.chain().map(ToString::to_string).join(": ")
+    }
+
+    /// An immutable file reads whole when its ends do: the primary index
+    /// ending where the secondary does, and the chunk holding the last block
+    /// the secondary names, to its checksum. A cut anywhere in them, or a
+    /// file gone, is named.
+    #[test]
+    fn an_immutable_file_reads_whole_to_its_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let immutable = dir.path();
+        let blocks = chain(4);
+        let write = || write_immutable_chunks(immutable, &[&blocks[..2], &blocks[2..], &[]]);
+        write();
+
+        for name in ["00000", "00001", "00002"] {
+            assert!(check_whole(immutable, name).is_ok(), "{name}");
+        }
+
+        let file = |extension: &str| immutable.join(format!("00001.{extension}"));
+        let cut = |extension: &str, by: usize| {
+            let bytes = std::fs::read(file(extension)).unwrap();
+            std::fs::write(file(extension), &bytes[..bytes.len() - by]).unwrap();
+        };
+
+        cut("chunk", blocks[3].len() + 1);
+        let message = chain_of(check_whole(immutable, "00001"));
+        assert!(message.contains("before its last block"), "{message}");
+        write();
+
+        cut("chunk", 1);
+        let message = chain_of(check_whole(immutable, "00001"));
+        assert!(message.contains("fails its checksum"), "{message}");
+        write();
+
+        cut("secondary", 4);
+        let message = chain_of(check_whole(immutable, "00001"));
+        assert!(
+            message.contains("00001.secondary holds 108 bytes") && message.contains("ends at 112"),
+            "{message}"
+        );
+        write();
+
+        cut("primary", 2);
+        let message = chain_of(check_whole(immutable, "00001"));
+        assert!(message.contains("00001.primary is cut short"), "{message}");
+        write();
+
+        std::fs::remove_file(file("secondary")).unwrap();
+        let message = chain_of(check_whole(immutable, "00001"));
+        assert!(
+            message.contains("reading") && message.contains("00001.secondary"),
+            "{message}"
+        );
+    }
+
+    /// Under `--force`, every chunk from the origin to the tip must be there
+    /// and read whole, or the clear would leave the node to a replay that
+    /// stops at the first that doesn't. Without it, the replay finds out.
+    #[test]
+    fn under_a_clear_every_chunk_reads_whole() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(temp.path());
+        let blocks = chain(6);
+        let db = temp.path().join("db");
+        let immutable = db.join("immutable");
+        let write = || database(&db, &[&blocks[..2], &blocks[2..4], &blocks[4..]]);
+        write();
+
+        assert!(check_database(&config, &db, false, true).is_ok());
+
+        let chunk = immutable.join("00001.chunk");
+        let bytes = std::fs::read(&chunk).unwrap();
+        std::fs::write(&chunk, &bytes[..blocks[2].len() / 2]).unwrap();
+
+        let message = chain_of(check_database(&config, &db, false, true).map(drop));
+        assert!(
+            message.contains("chunk 00001 of the ImmutableDB")
+                && message.contains("doesn't read whole")
+                && message.contains("before its last block"),
+            "{message}"
+        );
+        assert!(check_database(&config, &db, false, false).is_ok());
+
+        write();
+        for extension in ["chunk", "primary", "secondary"] {
+            std::fs::remove_file(immutable.join(format!("00001.{extension}"))).unwrap();
+        }
+
+        let message = chain_of(check_database(&config, &db, false, true).map(drop));
+        assert!(
+            message.contains("chunk 00001 of the ImmutableDB") && message.contains("is missing"),
+            "{message}"
+        );
     }
 
     /// Under `--force`, an ImmutableDB the clear would take is refused,
@@ -904,7 +1229,12 @@ mod tests {
         let chunk = chunked.join("immutable").join("00000.chunk");
         std::fs::rename(&chunk, root.join("00000.chunk")).unwrap();
         symlink(root.join("00000.chunk"), &chunk).unwrap();
-        assert!(check(&chunked).is_some_and(|m| m.contains("which `--force` clears")));
+        let message = check(&chunked).unwrap();
+        assert!(
+            message.contains(&format!("the link {}", chunk.display()))
+                && message.contains("which `--force` clears"),
+            "{message}"
+        );
 
         let around = dolos::storage::resolve_parent_dirs(&root.join("..").join("db")).unwrap();
         assert_eq!(check(&around), None);

@@ -6,19 +6,17 @@
 //! arguments, the runtime the async fetch is driven on and the progress bars
 //! it reports through.
 
-use dolos::storage::Removal;
 use dolos_cardano::networks::KnownNetwork;
 use dolos_core::config::RootConfig;
 use dolos_mithril::{fetch_snapshot, Fetch, MithrilSource};
 use miette::{Context, IntoDiagnostic};
-use pallas::interop::hardano::storage::immutable;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tracing::{info, warn};
 
-use super::immutable::{ReplayOptions, Replayed};
+use super::immutable::{Placed, ReplayOptions, Replayed};
 use crate::feedback::{Feedback, MithrilFeedback};
 
 #[derive(Debug, clap::Args, Clone)]
@@ -89,7 +87,7 @@ impl Default for Args {
 /// Under `--skip-download` the database already there must be one the
 /// replay reads, as `bootstrap immutabledb` checks its source; a replay from
 /// the origin over a download that starts at a later immutable file must
-/// find the files before it there.
+/// find the files before it there, whole.
 pub(crate) fn resolve(
     config: &RootConfig,
     args: &Args,
@@ -107,54 +105,76 @@ pub(crate) fn resolve(
     if args.skip_download {
         super::immutable::check_database(config, &download_dir, args.replay.resume, clears)?;
     } else {
-        check_download_dir(config, &download_dir, clears)?;
         check_download_start(args, &download_dir)?;
+        check_download_dir(config, &download_dir, clears)?;
     }
 
     Ok((source, download_dir))
 }
 
 /// Refuse a directory to download into that the bootstrap would write under
-/// or, when `clears`, that clearing the storage root takes.
+/// or, when `clears`, that clearing the storage root takes, with what is
+/// already in it: the download reads and writes through the links there.
 ///
 /// The directory and the storage root are made before the second look, so
 /// that a second name for one of them, another case on a case-insensitive
 /// volume, which only their file identity tells, is refused before the
-/// download rather than found at the delete that ends the run.
+/// download rather than found at the delete that ends the run. What a
+/// refused run made is removed again.
 fn check_download_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::Result<()> {
-    let root = &config.storage.path;
+    let check = || {
+        super::immutable::check_placement(config, &[dir], Placed::Download)?;
 
-    super::immutable::check_placement(config, &[dir])?;
+        if clears {
+            super::refuse_what_the_clear_takes(
+                config,
+                dir,
+                "the download directory",
+                "the download",
+            )?;
+        }
 
-    if clears
-        && Removal::of(root)
-            .into_diagnostic()?
-            .takes(dir)
-            .into_diagnostic()?
-    {
-        miette::bail!(
-            "the download directory {} lies in the storage root {}, or is reached through it, \
-             which `--force` clears before the download: download outside the storage root",
-            dir.display(),
-            root.display()
-        );
+        miette::Result::Ok(())
+    };
+
+    check()?;
+
+    let made = make_dirs(&[dir, &config.storage.path])?;
+
+    check().inspect_err(|_| {
+        for dir in made.iter().rev() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    })
+}
+
+/// Create the directories at `dirs`, and return those made that weren't
+/// there, each before the ones made inside it.
+fn make_dirs(dirs: &[&Path]) -> miette::Result<Vec<PathBuf>> {
+    let mut made = Vec::new();
+
+    for dir in dirs {
+        let missing: Vec<_> = dir
+            .ancestors()
+            .filter(|ancestor| !ancestor.as_os_str().is_empty())
+            .take_while(|ancestor| std::fs::symlink_metadata(ancestor).is_err())
+            .map(Path::to_path_buf)
+            .collect();
+
+        std::fs::create_dir_all(dir)
+            .into_diagnostic()
+            .with_context(|| format!("creating {}", dir.display()))?;
+
+        made.extend(missing.into_iter().rev());
     }
 
-    std::fs::create_dir_all(dir)
-        .into_diagnostic()
-        .with_context(|| format!("creating the download directory {}", dir.display()))?;
-
-    crate::common::ensure_storage_path(config)
-        .into_diagnostic()
-        .context("creating the storage directory")?;
-
-    super::immutable::check_placement(config, &[dir])
+    Ok(made)
 }
 
 /// Refuse a download that starts at a later immutable file for a replay from
 /// the origin, unless the download directory already holds every file before
-/// it: the download skips them, and the replay reads from the first. A
-/// download given no range starts at the highest file already there.
+/// it, whole: the download skips them, and the replay reads from the first.
+/// A download given no range starts at the highest file already there.
 fn check_download_start(args: &Args, download_dir: &Path) -> miette::Result<()> {
     if args.replay.resume {
         return Ok(());
@@ -178,17 +198,15 @@ fn check_download_start(args: &Args, download_dir: &Path) -> miette::Result<()> 
     };
 
     for number in 0..start {
-        let name = format!("{number:05}");
-
-        if let Err(error) = immutable::chunk::read_blocks(&immutable, &name) {
-            miette::bail!(
+        super::immutable::check_whole(&immutable, &format!("{number:05}")).with_context(|| {
+            format!(
                 "{why} the immutable files before {start}, and immutable file {number} in {} \
-                 fails to open ({error}), which a replay from the origin reads: pass \
+                 doesn't read whole, which a replay from the origin reads: pass \
                  --download-start 0 to download them, or --continue to resume a node that holds \
                  them",
                 immutable.display()
-            );
-        }
+            )
+        })?;
     }
 
     Ok(())
@@ -379,9 +397,10 @@ mod tests {
 
     /// A download directory that holds the storage root, which the run would
     /// delete the node with at the end, is refused before the download
-    /// whatever is to be cleared. One beside the stores in the root is
-    /// refused only when `--force` is to clear the root, so that the resume
-    /// over it a stop recommends is accepted as the download was.
+    /// whatever is to be cleared, and before anything is made. One beside the
+    /// stores in the root is refused only when `--force` is to clear the
+    /// root, so that the resume over it a stop recommends is accepted as the
+    /// download was.
     #[test]
     fn the_download_directory_is_checked_before_the_download() {
         let temp = tempfile::tempdir().unwrap();
@@ -393,7 +412,12 @@ mod tests {
                 let message = resolve(&config, &downloading(&dir), None, clears)
                     .unwrap_err()
                     .to_string();
-                assert!(message.contains("lies in the database"), "{message}");
+                assert!(
+                    message.contains("lies in the download directory")
+                        && message.contains("--download-dir"),
+                    "{message}"
+                );
+                assert!(!root.exists(), "the refusal made the storage root");
             }
         }
 
@@ -413,7 +437,8 @@ mod tests {
 
     /// The download directory and the storage root are made before they are
     /// compared, so that another case of the root's name on a
-    /// case-insensitive volume is refused before the download.
+    /// case-insensitive volume is refused before the download. The refusal
+    /// removes what it made.
     #[test]
     fn a_second_name_for_the_root_is_refused_before_the_download() {
         let temp = tempfile::tempdir().unwrap();
@@ -435,7 +460,79 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(message.contains("lies in the database"), "{message}");
+        assert!(
+            message.contains("lies in the download directory"),
+            "{message}"
+        );
+        assert!(
+            !temp.path().join("cardano").exists(),
+            "the refusal left what it made"
+        );
+    }
+
+    /// A download directory named through `..` out of the storage root is
+    /// the directory beside it, which `--force` doesn't take.
+    #[test]
+    fn a_download_directory_named_through_the_root_lies_beside_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(temp.path());
+        std::fs::create_dir_all(&config.storage.path).unwrap();
+
+        let through = config.storage.path.join("..").join("snapshot");
+        let (_, resolved) = resolve(&config, &downloading(&through), None, true).unwrap();
+
+        assert_eq!(
+            std::fs::canonicalize(resolved).unwrap(),
+            std::fs::canonicalize(temp.path().join("snapshot")).unwrap()
+        );
+    }
+
+    /// Under `--force`, the download directory is read through the links
+    /// already in it, which the download reads and writes through: one whose
+    /// `immutable` directory, or a file in it, links into the storage root is
+    /// refused before the clear, naming the link. Without a clear, it lies
+    /// beside the stores.
+    #[cfg(unix)]
+    #[test]
+    fn under_a_clear_the_download_directory_is_read_through_its_links() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(temp.path());
+        let kept = config.storage.path.join("snapshot").join("immutable");
+        immutable_files(&kept, [0, 1]);
+
+        let linked = temp.path().join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        symlink(&kept, linked.join("immutable")).unwrap();
+
+        let each = temp.path().join("each");
+        std::fs::create_dir_all(each.join("immutable")).unwrap();
+        for entry in std::fs::read_dir(&kept).unwrap() {
+            let file = entry.unwrap().path();
+            symlink(
+                &file,
+                each.join("immutable").join(file.file_name().unwrap()),
+            )
+            .unwrap();
+        }
+
+        for (dir, link) in [
+            (&linked, linked.join("immutable")),
+            (&each, each.join("immutable")),
+        ] {
+            let mut args = downloading(dir);
+            args.download_start = Some(2);
+
+            let message = resolve(&config, &args, None, true).unwrap_err().to_string();
+            assert!(
+                message.contains(&format!("the link {}", link.display()))
+                    && message.contains("which `--force` clears"),
+                "{message}"
+            );
+
+            assert!(resolve(&config, &args, None, false).is_ok());
+        }
     }
 
     /// Write immutable files `numbers`, each holding no blocks.
@@ -456,7 +553,8 @@ mod tests {
     /// A download from a later immutable file leaves the files before it to
     /// the download directory, so a replay from the origin is refused until
     /// each of them opens there, as a download given no range resumes at the
-    /// highest file there. A resume reads on from its committed position.
+    /// highest file there, and before anything is made. A resume reads on
+    /// from its committed position.
     #[test]
     fn a_later_download_start_needs_the_files_before_it() {
         let temp = tempfile::tempdir().unwrap();
@@ -473,8 +571,12 @@ mod tests {
         assert!(
             message.contains("--download-start 2 skips")
                 && message.contains("immutable file 0 in")
-                && message.contains("fails to open"),
+                && message.contains("doesn't read whole"),
             "{message}"
+        );
+        assert!(
+            !dir.exists() && !config.storage.path.exists(),
+            "the refusal made directories"
         );
 
         std::fs::create_dir_all(&immutable).unwrap();
@@ -498,6 +600,15 @@ mod tests {
             "{message}"
         );
 
+        std::fs::remove_dir_all(&dir).unwrap();
+        immutable_files(&immutable, [0, 2]);
+        let message = refused(&args);
+        assert!(
+            message.contains("resumes at immutable file 2")
+                && message.contains("immutable file 1 in"),
+            "{message}"
+        );
+
         args.download_end = Some(4);
         assert!(resolve(&config, &args, None, false).is_ok());
 
@@ -508,6 +619,75 @@ mod tests {
         args.replay.resume = false;
         args.download_start = Some(0);
         assert!(resolve(&config, &args, None, false).is_ok());
+    }
+
+    /// The files a later download start skips are read to their ends, so
+    /// that one cut short, as an overwritten or interrupted file leaves it,
+    /// is refused before `--force` clears anything rather than found by the
+    /// replay after it: a chunk cut with its index files intact, and a cut
+    /// secondary index, through either way of starting later.
+    #[test]
+    fn the_files_before_a_later_start_read_whole() {
+        use dolos_testing::{
+            blocks::write_immutable_chunks,
+            synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = config_over(temp.path());
+        let dir = temp.path().join("snapshot");
+        let immutable = dir.join("immutable");
+        std::fs::create_dir_all(&immutable).unwrap();
+
+        let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 4,
+            slot: 0,
+            start_block: 0,
+            ..Default::default()
+        });
+        let write = || write_immutable_chunks(&immutable, &[&blocks[..2], &blocks[2..]]);
+
+        let refused = |args: &Args| {
+            let report = resolve(&config, args, None, true).unwrap_err();
+            report
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(": ")
+        };
+
+        let cut = |file: &str, to: usize| {
+            let path = immutable.join(file);
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::write(&path, &bytes[..to]).unwrap();
+        };
+
+        let mut later = downloading(&dir);
+        later.download_start = Some(2);
+        let resumed = downloading(&dir);
+
+        for args in [&later, &resumed] {
+            write();
+            assert!(resolve(&config, args, None, true).is_ok());
+
+            cut("00001.chunk", blocks[2].len() / 2);
+            let message = refused(args);
+            assert!(
+                message.contains("immutable file 1 in")
+                    && message.contains("doesn't read whole")
+                    && message.contains("before its last block"),
+                "{message}"
+            );
+
+            write();
+            cut("00001.secondary", 60);
+            let message = refused(args);
+            assert!(
+                message.contains("immutable file 1 in")
+                    && message.contains("00001.secondary holds 60 bytes"),
+                "{message}"
+            );
+        }
     }
 
     /// The end of a run deletes the snapshot, unless the storage root or a

@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use miette::{bail, IntoDiagnostic};
+use miette::{bail, Context, IntoDiagnostic};
 use tracing::info;
 
 use crate::feedback::Feedback;
@@ -243,34 +243,92 @@ fn dispatch(
     }
 }
 
-/// Whether clearing the storage root, as `--force` does before a run, would
-/// take the source at `dir`: `dir` lies there, the way to it passes a
-/// directory or link there, or so does the way a link under it leads.
-pub(super) fn the_clear_takes(config: &RootConfig, dir: &Path) -> miette::Result<bool> {
-    let clear = Removal::of(&config.storage.path).into_diagnostic()?;
+/// What clearing the storage root, as `--force` does before a run, would
+/// take of the source at `dir`: `dir` itself, when it lies there or the way
+/// to it passes a directory or link there, or else the first link under it
+/// whose way does. A directory under `dir` that can't be listed, or one gone
+/// by the time it is read, holds no link the run reads through.
+pub(super) fn the_clear_takes(config: &RootConfig, dir: &Path) -> miette::Result<Option<PathBuf>> {
+    use std::io::ErrorKind;
 
-    if clear.takes(dir).into_diagnostic()? {
-        return Ok(true);
+    let root = &config.storage.path;
+    let clear = Removal::of(root)
+        .into_diagnostic()
+        .with_context(|| format!("reading the storage root {}", root.display()))?;
+
+    let reading = |path: &Path| format!("reading {}", path.display());
+    let takes = |path: &Path| {
+        clear
+            .takes(path)
+            .into_diagnostic()
+            .with_context(|| reading(path))
+    };
+
+    if takes(dir)? {
+        return Ok(Some(dir.to_path_buf()));
     }
 
     let mut pending = vec![dir.to_path_buf()];
 
     while let Some(next) = pending.pop() {
-        for entry in std::fs::read_dir(&next).into_diagnostic()? {
-            let entry = entry.into_diagnostic()?;
-            let kind = entry.file_type().into_diagnostic()?;
+        let entries = match std::fs::read_dir(&next) {
+            Ok(entries) => entries,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::NotFound | ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue
+            }
+            Err(error) => return Err(error).into_diagnostic().with_context(|| reading(&next)),
+        };
 
-            if kind.is_symlink() && clear.takes(&entry.path()).into_diagnostic()? {
-                return Ok(true);
+        for entry in entries {
+            let entry = entry.into_diagnostic().with_context(|| reading(&next))?;
+            let path = entry.path();
+            let kind = entry
+                .file_type()
+                .into_diagnostic()
+                .with_context(|| reading(&path))?;
+
+            if kind.is_symlink() && takes(&path)? {
+                return Ok(Some(path));
             }
 
             if kind.is_dir() {
-                pending.push(entry.path());
+                pending.push(path);
             }
         }
     }
 
-    Ok(false)
+    Ok(None)
+}
+
+/// Refuse `what`, the source at `dir`, when the clear `--force` runs before
+/// `before` would take it, or a link under it.
+pub(super) fn refuse_what_the_clear_takes(
+    config: &RootConfig,
+    dir: &Path,
+    what: &str,
+    before: &str,
+) -> miette::Result<()> {
+    let root = config.storage.path.display();
+
+    match the_clear_takes(config, dir)? {
+        None => Ok(()),
+        Some(taken) if taken == dir => bail!(
+            "{what} at {} lies in the storage root {root}, or is reached through it, which \
+             `--force` clears before {before}",
+            dir.display()
+        ),
+        Some(link) => bail!(
+            "the link {} in {what} at {} leads into the storage root {root}, which `--force` \
+             clears before {before}",
+            link.display(),
+            dir.display()
+        ),
+    }
 }
 
 /// Seed the WAL from the state cursor so that `find_intersect` works after

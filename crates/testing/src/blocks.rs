@@ -21,7 +21,8 @@ pub fn write_immutable_fixture(dir: &std::path::Path, blocks: &[RawBlock]) {
 }
 
 /// [`write_immutable_fixture`] over several chunks, numbered from `00000` in
-/// order, each holding its blocks.
+/// order, each holding its blocks. Each secondary entry records its block's
+/// offset and checksum, as cardano-node writes them.
 pub fn write_immutable_chunks(dir: &std::path::Path, chunks: &[&[RawBlock]]) {
     for (number, blocks) in chunks.iter().enumerate() {
         let mut primary = vec![1u8];
@@ -30,7 +31,9 @@ pub fn write_immutable_chunks(dir: &std::path::Path, chunks: &[&[RawBlock]]) {
         for (index, body) in blocks.iter().enumerate() {
             primary.extend_from_slice(&((index * 56) as u32).to_be_bytes());
             secondary.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
-            secondary.extend_from_slice(&[0u8; 48]);
+            secondary.extend_from_slice(&[0u8; 4]);
+            secondary.extend_from_slice(&crc32fast::hash(body).to_be_bytes());
+            secondary.extend_from_slice(&[0u8; 40]);
             chunk.extend_from_slice(body);
         }
         primary.extend_from_slice(&((blocks.len() * 56) as u32).to_be_bytes());

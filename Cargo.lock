@@ -1406,6 +1406,7 @@ dependencies = [
  "comfy-table",
  "config",
  "console-subscriber",
+ "crc32fast",
  "csv",
  "csv-diff",
  "divan",
@@ -1674,6 +1675,7 @@ name = "dolos-testing"
 version = "2.0.0-alpha.0"
 dependencies = [
  "bech32 0.9.1",
+ "crc32fast",
  "dolos-cardano",
  "dolos-core",
  "dolos-fjall",

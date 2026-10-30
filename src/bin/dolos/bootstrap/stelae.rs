@@ -154,13 +154,8 @@ fn check_dir(config: &RootConfig, dir: &Path, clears: bool) -> miette::Result<Pa
         .into_diagnostic()
         .with_context(|| format!("{} holds no stele", dir.display()))?;
 
-    if clears && super::the_clear_takes(config, &dir)? {
-        miette::bail!(
-            "the stele at {} lies in the storage root {}, or is reached through it, which \
-             `--force` clears before the restore",
-            dir.display(),
-            config.storage.path.display()
-        );
+    if clears {
+        super::refuse_what_the_clear_takes(config, &dir, "the stele", "the restore")?;
     }
 
     Ok(dir)
