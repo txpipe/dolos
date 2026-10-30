@@ -12,9 +12,6 @@ mod rollback;
 mod update_entity;
 mod wal_integrity;
 
-#[cfg(feature = "utils")]
-mod reset_genesis;
-
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// validates configuration and data by loading the domain
@@ -35,10 +32,6 @@ pub enum Command {
     /// checks the integrity of the WAL records
     WalIntegrity(wal_integrity::Args),
 
-    #[cfg(feature = "utils")]
-    /// resets the genesis files with well-known values
-    ResetGenesis(reset_genesis::Args),
-
     /// rolls back the node to a specific slot and hash
     Rollback(rollback::Args),
 
@@ -52,17 +45,6 @@ pub struct Args {
     command: Command,
 }
 
-impl Args {
-    pub fn writes_genesis(&self) -> bool {
-        #[cfg(feature = "utils")]
-        if let Command::ResetGenesis(_) = self.command {
-            return true;
-        }
-
-        false
-    }
-}
-
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     match &args.command {
         Command::Check(x) => check::run(config, x)?,
@@ -73,9 +55,6 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         Command::WalIntegrity(x) => wal_integrity::run(config, x)?,
         Command::Rollback(x) => rollback::run(config, x)?,
         Command::UpdateEntity(x) => update_entity::run(config, x)?,
-
-        #[cfg(feature = "utils")]
-        Command::ResetGenesis(x) => reset_genesis::run(config, x)?,
     }
 
     Ok(())

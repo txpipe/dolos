@@ -1,4 +1,4 @@
-use dolos_cardano::networks::ResolvedNetwork;
+use dolos_cardano::networks::{KnownNetwork, ResolvedNetwork};
 use dolos_core::config::{
     ConfigError, LoggingConfig, RootConfig, TelemetryConfig, DEFAULT_CONFIG_FILE,
 };
@@ -76,6 +76,24 @@ pub fn load_config(explicit_file: Option<&Path>) -> Result<RootConfig, ConfigErr
 
         log_filter(&config.logging).map(|_| ())
     })
+}
+
+/// Parses `--known-network` / `--network` against the catalog.
+pub fn parse_known_network(name: &str) -> Result<&'static KnownNetwork, String> {
+    KnownNetwork::by_name(name).ok_or_else(|| format!("unknown network {name}"))
+}
+
+/// The configuration a command runs on. A custom network's genesis is checked
+/// before any command that could touch a store, since several of them clear
+/// data before they need it.
+pub fn load_and_check_config(config_file: &Path) -> miette::Result<RootConfig> {
+    load_config(Some(config_file))
+        .map_err(miette::Report::from_err)
+        .and_then(|config| {
+            check_network(&config)?;
+            Ok(config)
+        })
+        .context("loading configuration")
 }
 
 pub fn resolve_network(config: &RootConfig) -> miette::Result<ResolvedNetwork<'_>> {
