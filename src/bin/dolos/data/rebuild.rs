@@ -821,7 +821,7 @@ mod tests {
     }
 
     /// A state written through a folder that is gone is wiped where the OS
-    /// reaches it, and what a stopped wipe moved aside goes with it.
+    /// reaches it, and on Unix what a stopped wipe moved aside goes with it.
     #[test]
     fn an_in_place_rebuild_wipes_a_state_written_through_a_gone_folder() {
         let dir = tempfile::tempdir().unwrap();
@@ -833,8 +833,11 @@ mod tests {
         drop(dolos_fjall::StateStore::open(&state, Default::default()).unwrap());
 
         let left = config.storage.path.join(".state.reset").join("keyspaces");
-        std::fs::create_dir_all(&left).unwrap();
-        std::fs::write(left.join("000001.sst"), b"a table").unwrap();
+
+        if cfg!(unix) {
+            std::fs::create_dir_all(&left).unwrap();
+            std::fs::write(left.join("000001.sst"), b"a table").unwrap();
+        }
 
         let in_place = InPlace::prepare(&config, &args(false)).unwrap();
         drop(in_place.wipe(&config).unwrap());
